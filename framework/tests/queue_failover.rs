@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use suprnova::queue::driver::Settled;
 use suprnova::queue::events::QueueFailedOver;
@@ -23,20 +23,43 @@ use suprnova::queue::{
 use suprnova::{EventFacade, FrameworkError, Job, async_trait};
 use uuid::Uuid;
 
-/// A driver whose `push` fails while `broken` is true; every other method
-/// delegates to a real inner [`MemoryQueueDriver`], so the decorator's
-/// read-side delegation is observed against a driver that actually answers
-/// counters and listings rather than the trait's `Err` defaults.
+/// A driver whose `push` fails while `broken` is true, or once its accept
+/// budget runs out; every other method delegates to a real inner
+/// [`MemoryQueueDriver`], so the decorator's read-side delegation is observed
+/// against a driver that actually answers counters and listings rather than
+/// the trait's `Err` defaults.
 struct FlakyDriver {
     inner: MemoryQueueDriver,
     broken: AtomicBool,
+    /// How many more pushes this driver accepts before it starts refusing.
+    /// [`NEVER_TRIPS`] means "budget is irrelevant, only `broken` decides".
+    ///
+    /// A budget is what makes a batch fail *partway*, which is the only shape
+    /// of failure that can tell per-envelope fall-through apart from wholesale
+    /// forwarding: a driver that refuses from the first envelope onwards
+    /// accepts nothing either way.
+    accepts_remaining: AtomicUsize,
 }
+
+/// Sentinel accept budget meaning "never run out".
+const NEVER_TRIPS: usize = usize::MAX;
 
 impl FlakyDriver {
     fn new(broken: bool) -> Self {
         Self {
             inner: MemoryQueueDriver::new(),
             broken: AtomicBool::new(broken),
+            accepts_remaining: AtomicUsize::new(NEVER_TRIPS),
+        }
+    }
+
+    /// A healthy driver that accepts exactly `accepts` pushes and refuses
+    /// every push after that.
+    fn accepting_only(accepts: usize) -> Self {
+        Self {
+            inner: MemoryQueueDriver::new(),
+            broken: AtomicBool::new(false),
+            accepts_remaining: AtomicUsize::new(accepts),
         }
     }
 }
@@ -47,7 +70,39 @@ impl QueueDriver for FlakyDriver {
         if self.broken.load(Ordering::SeqCst) {
             return Err(FrameworkError::internal("flaky: push refused"));
         }
+        let budget = self.accepts_remaining.load(Ordering::SeqCst);
+        if budget == 0 {
+            return Err(FrameworkError::internal(
+                "flaky: push refused (budget spent)",
+            ));
+        }
+        if budget != NEVER_TRIPS {
+            self.accepts_remaining.fetch_sub(1, Ordering::SeqCst);
+        }
         self.inner.push(env).await
+    }
+
+    /// Overridden rather than inherited so this driver's batch semantics are
+    /// stated here instead of borrowed from the trait default. The decorator
+    /// must never reach it - `FailoverQueueDriver::bulk_push` loops `push` -
+    /// and the mid-batch tests below are what prove that.
+    async fn bulk_push(&self, envs: Vec<Envelope>) -> Result<(), FrameworkError> {
+        for env in envs {
+            self.push(env).await?;
+        }
+        Ok(())
+    }
+
+    /// A sentinel answer, not a delegation. The memory driver has no
+    /// transactional settlement, so delegating would return the same
+    /// `Unsupported` the trait default gives and the settle test would pass
+    /// whether or not the decorator forwards at all.
+    async fn settle(
+        &self,
+        _token: &ReservationToken,
+        _follow_ups: &[Envelope],
+    ) -> Result<Settled, FrameworkError> {
+        Ok(Settled::Stale)
     }
     async fn pop(&self, vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
         self.inner.pop(vt).await
@@ -426,13 +481,19 @@ async fn lifecycle_calls_reach_the_primary_that_issued_the_token() {
 #[serial]
 async fn settle_reports_the_primary_answer() {
     let (_p, _f, failover) = build(false);
-    // The memory driver has no transactional settlement, so the decorator
-    // must report the primary's `Unsupported` rather than inventing one.
+    // `FlakyDriver::settle` answers `Stale`, which neither the trait default
+    // nor the fallback memory driver ever produces. Asserting on it is what
+    // makes this test fail if the decorator stops forwarding and lets the
+    // trait's own `Unsupported` default answer instead.
     let settled = failover
         .settle(&ReservationToken(Uuid::new_v4()), &[])
         .await
         .expect("settle");
-    assert_eq!(settled, Settled::Unsupported);
+    assert_eq!(
+        settled,
+        Settled::Stale,
+        "settle must report the primary's answer, not the decorator's default"
+    );
 }
 
 #[tokio::test]
@@ -441,7 +502,24 @@ async fn bulk_push_preserves_each_envelopes_own_delay() {
     // Laravel #60950: `FailoverQueue::bulk` looped the batch wholesale and
     // lost each job's delay. Suprnova resolves the delay onto the envelope
     // before the driver sees it, so the per-envelope loop is what keeps it.
-    let (_p, fallback, failover) = build(true);
+    //
+    // The primary accepts one envelope and then refuses, so the batch fails
+    // partway. A wholesale-forwarding decorator would re-push the accepted
+    // envelope onto the fallback too and land `fallback.pending_size() == 2`.
+    let primary = Arc::new(FlakyDriver::accepting_only(1));
+    let fallback = Arc::new(MemoryQueueDriver::new());
+    let failover = FailoverQueueDriver::new(vec![
+        (
+            "primary".to_string(),
+            primary.clone() as Arc<dyn QueueDriver>,
+        ),
+        (
+            "fallback".to_string(),
+            fallback.clone() as Arc<dyn QueueDriver>,
+        ),
+    ])
+    .expect("build");
+
     let now = Utc::now();
     let envs = vec![
         env_at(now),
@@ -451,23 +529,37 @@ async fn bulk_push_preserves_each_envelopes_own_delay() {
     failover.bulk_push(envs).await.expect("bulk push");
 
     assert_eq!(
-        fallback.pending_size().await.expect("pending"),
-        2,
-        "the two immediately-available envelopes must stay immediately available"
+        primary.pending_size().await.expect("primary pending"),
+        1,
+        "the primary accepted exactly one envelope before its budget ran out"
     );
     assert_eq!(
-        fallback.delayed_size().await.expect("delayed"),
+        fallback.pending_size().await.expect("fallback pending"),
+        1,
+        "only the refused immediate envelope falls through; re-pushing the \
+         accepted one would make this 2"
+    );
+    assert_eq!(
+        fallback.delayed_size().await.expect("fallback delayed"),
         1,
         "the delayed envelope must keep its own available_at, not the batch's"
+    );
+    assert_eq!(
+        primary.size().await.expect("primary") + fallback.size().await.expect("fallback"),
+        3,
+        "three envelopes in, three envelopes out - no duplicates"
     );
 }
 
 #[tokio::test]
 #[serial]
-async fn bulk_push_falls_through_per_envelope() {
-    // A batch that half-lands on A before A dies must not be re-pushed
-    // wholesale onto B. Each envelope falls through on its own.
-    let primary = Arc::new(FlakyDriver::new(false));
+async fn bulk_push_does_not_re_push_what_the_primary_accepted() {
+    // The load-bearing case: one batch, and the primary dies *inside* it.
+    // Per-envelope fall-through leaves two envelopes, one on each connection.
+    // A decorator that forwarded the whole batch to the fallback after the
+    // primary's `bulk_push` returned `Err` would leave three, because the
+    // envelope the primary already wrote would be pushed again.
+    let primary = Arc::new(FlakyDriver::accepting_only(1));
     let fallback = Arc::new(MemoryQueueDriver::new());
     let failover = FailoverQueueDriver::new(vec![
         (
@@ -483,24 +575,25 @@ async fn bulk_push_falls_through_per_envelope() {
 
     let now = Utc::now();
     failover
-        .bulk_push(vec![env_at(now)])
-        .await
-        .expect("first batch lands on the primary");
-    primary.broken.store(true, Ordering::SeqCst);
-    failover
         .bulk_push(vec![env_at(now), env_at(now)])
         .await
-        .expect("second batch falls through");
+        .expect("the batch fails partway and finishes on the fallback");
 
     assert_eq!(
         primary.size().await.expect("primary size"),
         1,
-        "the envelope the primary accepted is not re-pushed anywhere"
+        "the primary keeps the one envelope it accepted"
     );
     assert_eq!(
         fallback.size().await.expect("fallback size"),
+        1,
+        "only the refused envelope reaches the fallback; wholesale forwarding \
+         would put both there"
+    );
+    assert_eq!(
+        primary.size().await.expect("primary") + fallback.size().await.expect("fallback"),
         2,
-        "only the envelopes the primary refused reach the fallback"
+        "two envelopes in, two envelopes out - wholesale forwarding yields 3"
     );
 }
 

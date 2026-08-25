@@ -207,6 +207,13 @@ QUEUE_DRIVER=database ./app queue:work
 
 Laravel's documentation carries the same warning for the same reason.
 
+This reaches chains. A worker pushes the next link of a
+[queued chain](#queued-chains) through the bound driver, so a follow-up
+link dispatched while the primary is down falls over to the fallback like
+any other push. The rest of that chain then waits for a worker on the
+fallback connection. Without one, the chain stalls - the link is durable
+and nothing is lost, but nothing runs it either.
+
 ### The `QueueFailedOver` event
 
 Each connection that refuses a push dispatches
@@ -223,7 +230,18 @@ When every connection refuses a push, the push returns the last
 connection's error. `bulk_push` pushes each envelope separately, so each
 one falls through on its own: a batch the primary half-accepted is never
 re-pushed wholesale onto the fallback, and each envelope keeps the
-`available_at` it was built with.
+`available_at` it was built with. A batch is not atomic. If one envelope
+is refused by every connection, `bulk_push` returns that envelope's error
+with the earlier envelopes already enqueued.
+
+Falling over is not deduplication. The decorator never re-attempts an
+envelope a connection accepted, but a connection that writes the envelope
+and *then* reports failure produces a duplicate on the next connection,
+because "wrote it and lost the acknowledgement" is indistinguishable from
+"never took it". Both copies carry the same job id. That is the
+framework's at-least-once delivery contract, the same one that makes
+handler idempotency a requirement everywhere else - see
+[Idempotency is the worker's contract with you](#idempotency-is-the-workers-contract-with-you).
 
 ### Why Suprnova diverges
 

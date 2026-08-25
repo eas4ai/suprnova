@@ -1047,17 +1047,18 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     let requested = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
     let driver = match requested.as_str() {
         "failover" => build_failover_from_env().await?,
-        // The name list here must stay in step with `build_driver_from_env`'s
-        // match. It exists because the two failure modes are different and only
-        // one of them may fall back: an unrecognized *name* is a typo we absorb
-        // (today's behaviour, preserved), while a name we do recognize whose
-        // backend will not come up is a real boot failure and must propagate.
-        // Sniffing that difference out of the error text would be worse.
-        name @ ("memory" | "redis" | "database") => build_driver_from_env(name).await?,
-        other => {
-            tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-            Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
-        }
+        // `None` is an unrecognized *name*, a typo this call absorbs exactly as
+        // it always has. An `Err` is a name it does recognize whose backend will
+        // not come up, which is a real boot failure and propagates. Keeping the
+        // two apart in the type is what stops the recognized-name list from
+        // existing in two places.
+        other => match build_driver_from_env(other).await? {
+            Some(driver) => driver,
+            None => {
+                tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
+                Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
+            }
+        },
     };
     Queue::set_driver(driver);
     Ok(())
@@ -1069,14 +1070,20 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
 /// build several of these from one boot, and every inner connection must be
 /// configured exactly the way it would be if it were `QUEUE_DRIVER` on its own.
 ///
-/// An unrecognized `name` is an error here rather than a warn-and-memory
-/// fallback: inside `QUEUE_FAILOVER_CONNECTIONS` a typo would otherwise
-/// silently insert an ephemeral in-memory connection into a durable failover
-/// chain, which is the one place a memory queue must never appear by accident.
-/// The warn-fallback stays where it always was, on `QUEUE_DRIVER` itself.
-async fn build_driver_from_env(name: &str) -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+/// Returns `Ok(None)` for a name this build does not recognize, leaving each
+/// caller to decide what an unrecognized name means: `bootstrap_from_env` warns
+/// and falls back to memory, exactly as it always has, while
+/// `build_failover_from_env` rejects it. That distinction has to exist -
+/// inside `QUEUE_FAILOVER_CONNECTIONS` a typo that quietly became an in-memory
+/// connection would splice an ephemeral backend into a durable chain - and
+/// carrying it in the return type keeps the list of recognized names in exactly
+/// one place, here.
+///
+/// An `Err`, by contrast, always means a recognized backend that would not come
+/// up. Every caller propagates that.
+async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>>, FrameworkError> {
     match name {
-        "memory" => Ok(Arc::new(memory::MemoryQueueDriver::new())),
+        "memory" => Ok(Some(Arc::new(memory::MemoryQueueDriver::new()))),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -1093,7 +1100,7 @@ async fn build_driver_from_env(name: &str) -> Result<Arc<dyn QueueDriver>, Frame
             );
             let d = redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
                 .await?;
-            Ok(Arc::new(d))
+            Ok(Some(Arc::new(d)))
         }
         "database" => {
             let table = std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
@@ -1138,11 +1145,9 @@ async fn build_driver_from_env(name: &str) -> Result<Arc<dyn QueueDriver>, Frame
                     );
                 }
             }
-            Ok(Arc::new(driver))
+            Ok(Some(Arc::new(driver)))
         }
-        other => Err(FrameworkError::internal(format!(
-            "unknown queue connection `{other}`; expected one of memory, redis, database"
-        ))),
+        _ => Ok(None),
     }
 }
 
@@ -1175,7 +1180,13 @@ async fn build_failover_from_env() -> Result<Arc<dyn QueueDriver>, FrameworkErro
                 "QUEUE_FAILOVER_CONNECTIONS must not contain `failover` (no nesting)",
             ));
         }
-        drivers.push((name.to_string(), build_driver_from_env(name).await?));
+        let driver = build_driver_from_env(name).await?.ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "QUEUE_FAILOVER_CONNECTIONS names unknown queue connection `{name}`; \
+                 expected one of memory, redis, database"
+            ))
+        })?;
+        drivers.push((name.to_string(), driver));
     }
     Ok(Arc::new(FailoverQueueDriver::new(drivers)?))
 }

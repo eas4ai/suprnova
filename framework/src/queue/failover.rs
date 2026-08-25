@@ -43,12 +43,19 @@ use std::time::Duration;
 /// - Each envelope already carries its own `available_at`, resolved before
 ///   the driver ever sees it. Pushing them one at a time is what preserves
 ///   that; a wholesale re-push would be free to flatten it (Laravel #60950).
-/// - A batch that half-lands on connection A before A dies would be
-///   double-pushed on B if the remainder were retried wholesale. Per-envelope
-///   fall-through gives at-most-once *per envelope* across backends, which is
-///   the strongest claim available here - the framework cannot promise
-///   at-most-once for the batch, because an envelope A accepted and then
-///   failed to acknowledge is indistinguishable from one it never took.
+/// - The decorator never re-attempts an envelope a connection **accepted**.
+///   A batch that half-landed on connection A is not re-pushed onto B when A
+///   then dies mid-batch; only the envelopes A actually refused fall through.
+///   Forwarding the batch wholesale would re-push the accepted ones too.
+///
+/// That second point is a bound on *re-attempts*, not a delivery guarantee,
+/// and the difference matters: a connection that writes the envelope and
+/// *then* reports failure still yields a duplicate on the next connection,
+/// because "wrote it and lost the acknowledgement" and "never took it" are
+/// indistinguishable from here. The envelope keeps its id, so both copies are
+/// the same job. That is the framework's at-least-once delivery contract, not
+/// a gap in this decorator - see the [worker module docs](crate::queue::worker):
+/// every production handler must be idempotent.
 ///
 /// A `bulk_push` where one envelope is refused by every connection returns
 /// that envelope's error with the earlier envelopes already enqueued, exactly
@@ -88,14 +95,18 @@ pub struct FailoverQueueDriver {
     /// a `Vec` whose non-emptiness is only a constructor invariant. Cheap:
     /// an `Arc` clone taken once, at construction.
     primary: Arc<dyn QueueDriver>,
-    /// Indices into `drivers` that were failing as of the last push attempt.
-    /// Replaced wholesale after each attempt so a success clears it and
-    /// re-arms the event.
+    /// Indices into `drivers` currently believed to be failing.
     ///
-    /// This gates event emission only - it never gates routing, so two
-    /// concurrent pushes that both observe the same pre-transition snapshot
-    /// can at worst emit one duplicate `QueueFailedOver`. No job is ever
-    /// routed differently because of what this set says.
+    /// Written twice per push attempt, and the two writes do different jobs.
+    /// An index is inserted the instant that connection refuses, as one
+    /// check-and-set under the lock: the insert's own "was it absent?" answer
+    /// is what decides whether the event fires, so two concurrent pushes
+    /// cannot both find the connection healthy and both announce it. Then the
+    /// whole set is replaced with the attempt's own failures when the attempt
+    /// ends, which is what lets a success clear it and re-arm the event.
+    ///
+    /// This gates event emission only - it never gates routing. No job is ever
+    /// placed differently because of what this set says.
     failing: Mutex<HashSet<usize>>,
 }
 
@@ -127,16 +138,21 @@ impl FailoverQueueDriver {
         })
     }
 
-    /// Snapshot of the connections that were failing as of the last attempt.
+    /// Mark `idx` as failing, reporting whether that was a *transition* into
+    /// failure rather than a connection already known to be down.
+    ///
+    /// The check and the set are one locked operation on purpose: a snapshot
+    /// read up front would let two concurrent pushes both see a healthy
+    /// connection and both announce the same outage.
     ///
     /// A poisoned mutex is recovered rather than propagated: this set decides
     /// whether an event fires, and losing the queue because event bookkeeping
     /// panicked somewhere would be a strictly worse trade.
-    fn previously_failing(&self) -> HashSet<usize> {
+    fn mark_failing(&self, idx: usize) -> bool {
         self.failing
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .insert(idx)
     }
 
     /// Replace the failing set wholesale, per Laravel's `finally` block.
@@ -153,7 +169,6 @@ impl FailoverQueueDriver {
     /// set, edge-triggered events against the previous one, wholesale
     /// replacement afterwards, last error on total failure.
     async fn push_attempting_all(&self, env: Envelope) -> Result<(), FrameworkError> {
-        let previously_failing = self.previously_failing();
         let mut failed = HashSet::new();
         let mut last_err = None;
 
@@ -167,7 +182,19 @@ impl FailoverQueueDriver {
                     return Ok(());
                 }
                 Err(e) => {
-                    if !previously_failing.contains(&idx) {
+                    let transitioned = self.mark_failing(idx);
+                    // `remaining_connections` rather than "falling over to the
+                    // next connection", because on the last entry there is no
+                    // next one and the push is about to fail outright.
+                    let remaining = self.drivers.len() - idx - 1;
+                    if transitioned {
+                        tracing::warn!(
+                            connection = %label,
+                            job = %env.job_name,
+                            error = %e,
+                            remaining_connections = remaining,
+                            "queue connection refused a push"
+                        );
                         // Best-effort, like every other queue event site: a
                         // listener that fails must not fail the push that is
                         // still trying to find a home for this job.
@@ -179,17 +206,18 @@ impl FailoverQueueDriver {
                             },
                         )
                         .await;
+                    } else {
+                        // Already-known outage: DEBUG, so the log is as
+                        // edge-triggered as the event and a long outage does
+                        // not bury everything else at WARN.
+                        tracing::debug!(
+                            connection = %label,
+                            job = %env.job_name,
+                            error = %e,
+                            remaining_connections = remaining,
+                            "queue connection still refusing pushes"
+                        );
                     }
-                    // `remaining_connections` rather than "falling over to the
-                    // next connection", because on the last entry there is no
-                    // next one and the push is about to fail outright.
-                    tracing::warn!(
-                        connection = %label,
-                        job = %env.job_name,
-                        error = %e,
-                        remaining_connections = self.drivers.len() - idx - 1,
-                        "queue connection refused a push"
-                    );
                     failed.insert(idx);
                     last_err = Some(e);
                 }
