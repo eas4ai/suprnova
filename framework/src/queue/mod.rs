@@ -8,6 +8,7 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod failed;
+pub mod inspect;
 pub mod job;
 pub mod memory;
 pub mod middleware;
@@ -33,6 +34,7 @@ pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
 pub use failed::{
     DatabaseFailedJobStore, FailedJob, FailedJobStore, MemoryFailedJobStore, NullFailedJobStore,
 };
+pub use inspect::InspectedJob;
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
 pub use middleware::{
@@ -679,6 +681,30 @@ impl Queue {
     /// Envelopes currently held by an unfinished reservation.
     pub async fn reserved_size() -> Result<u64, FrameworkError> {
         current_driver()?.reserved_size().await
+    }
+
+    /// Every envelope whose `available_at <= now` and which is not
+    /// currently reserved, optionally filtered to one `queue`. Mirrors
+    /// Laravel's `Queue::pendingJobs($queue)`; `queue: None` collapses that
+    /// with the separate `allPendingJobs()` into one call. See
+    /// [`QueueDriver::pending_jobs`] for the trait's error-default
+    /// contract.
+    pub async fn pending_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.pending_jobs(queue).await
+    }
+
+    /// Every envelope whose `available_at > now`, optionally filtered to
+    /// one `queue`. Mirrors Laravel's `Queue::delayedJobs($queue)` /
+    /// `allDelayedJobs()`.
+    pub async fn delayed_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.delayed_jobs(queue).await
+    }
+
+    /// Every envelope currently held by an unfinished reservation,
+    /// optionally filtered to one `queue`. Mirrors Laravel's
+    /// `Queue::reservedJobs($queue)` / `allReservedJobs()`.
+    pub async fn reserved_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.reserved_jobs(queue).await
     }
 
     /// Drop every envelope on the configured driver. Returns the number

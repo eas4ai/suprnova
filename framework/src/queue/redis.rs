@@ -116,7 +116,8 @@
 use crate::error::FrameworkError;
 use crate::lock;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
-use crate::queue::envelope::Envelope;
+use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
+use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use chrono::Utc;
 use redis::AsyncCommands;
@@ -554,6 +555,130 @@ impl QueueDriver for RedisQueueDriver {
     /// List - i.e. delivered to some consumer but not yet `XACK`'d.
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
         self.xpending_count().await
+    }
+
+    /// Envelopes on the stream not yet claimed by this consumer, scanned via
+    /// `XRANGE` in batches of `PROMOTE_DUE_BATCH`.
+    ///
+    /// O(stream length): Redis Streams keeps every entry (acked or not)
+    /// until trimmed, so this walks the whole stream rather than a bounded
+    /// "ready" index - acceptable for an admin/inspection call, not a hot
+    /// path. Entries already in this consumer's `pending` map are skipped so
+    /// a popped-but-unacked envelope shows up in `reserved_jobs`, not here.
+    async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let reserved_ids: std::collections::HashSet<Uuid> = {
+            let g = lock::lock(&self.pending, "redis queue pending map")?;
+            g.keys().copied().collect()
+        };
+
+        let mut conn = self.conn.clone();
+        let mut out = Vec::new();
+        let mut start = "-".to_string();
+
+        loop {
+            let reply: redis::streams::StreamRangeReply = conn
+                .xrange_count(
+                    self.stream_key.name(),
+                    start.as_str(),
+                    "+",
+                    PROMOTE_DUE_BATCH,
+                )
+                .await
+                .map_err(|e| FrameworkError::internal(format!("redis XRANGE: {e}")))?;
+
+            let batch_len = reply.ids.len();
+            if batch_len == 0 {
+                break;
+            }
+
+            for entry in &reply.ids {
+                let payload: Option<String> = entry
+                    .map
+                    .get("msg")
+                    .and_then(|v| redis::FromRedisValue::from_redis_value(v.clone()).ok());
+                let Some(payload) = payload else {
+                    tracing::warn!(
+                        entry_id = %entry.id,
+                        "redis pending_jobs: stream entry missing a `msg` field; skipping"
+                    );
+                    continue;
+                };
+                let env = match Envelope::from_json(&payload) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        tracing::warn!(
+                            entry_id = %entry.id,
+                            error = %e,
+                            "redis pending_jobs: unparseable stream entry; skipping"
+                        );
+                        continue;
+                    }
+                };
+                if reserved_ids.contains(&env.id) || !queue_matches(env.queue.as_deref(), &filter) {
+                    continue;
+                }
+                out.push(InspectedJob::from_envelope(&env));
+            }
+
+            if batch_len < PROMOTE_DUE_BATCH {
+                break;
+            }
+            // Exclusive-start form: "(" + the last id seen, so the next page
+            // picks up immediately after it instead of re-reading it.
+            start = format!("({}", reply.ids.last().expect("batch_len > 0").id);
+        }
+
+        Ok(out)
+    }
+
+    /// Envelopes parked on the `<stream>:delayed` ZSET because their
+    /// `available_at` is still in the future. `ZRANGE` returns members
+    /// without their scores - fine here, since a listing carries no
+    /// ordering contract the way promotion's due-order processing does.
+    async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let mut conn = self.conn.clone();
+        let members: Vec<String> = conn
+            .zrange(&self.delayed_key, 0, -1)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis ZRANGE delayed: {e}")))?;
+        Ok(members
+            .iter()
+            .filter_map(|json| match Envelope::from_json(json) {
+                Ok(env) => Some(env),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "redis delayed_jobs: unparseable ZSET member; skipping"
+                    );
+                    None
+                }
+            })
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(|env| InspectedJob::from_envelope(&env))
+            .collect())
+    }
+
+    /// Envelopes this consumer has popped but not yet acked, nacked, or
+    /// released - this process's slice of the consumer group's Pending
+    /// Entries List.
+    ///
+    /// **Per-consumer, not per-group**: another process's in-flight
+    /// reservations are not visible here, only through Redis's own
+    /// `XPENDING` - see the module doc's "Connection topology" note. Use
+    /// [`reserved_size`](Self::reserved_size) for the group-wide count.
+    async fn reserved_jobs(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.pending, "redis queue pending map")?;
+        Ok(g.values()
+            .map(|(env, _msg)| env)
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect())
     }
 
     /// Delete every envelope the driver tracks: the stream itself, the

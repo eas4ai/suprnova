@@ -33,6 +33,20 @@ pub fn queue_matches(envelope_queue: Option<&str>, queues: &[String]) -> bool {
     queues.iter().any(|wanted| wanted == name)
 }
 
+/// One-element slice for [`queue_matches`] when `queue` names a filter, or
+/// empty ("any queue") when it doesn't.
+///
+/// Shared by every driver's `pending_jobs`/`delayed_jobs`/`reserved_jobs`
+/// listing so a single-queue filter reuses exactly the semantics
+/// [`queue_matches`] already established for `pop_from`, rather than a
+/// second implementation that can drift from it.
+pub(crate) fn queue_filter(queue: Option<&str>) -> Vec<String> {
+    match queue {
+        Some(q) => vec![q.to_string()],
+        None => Vec::new(),
+    }
+}
+
 /// Wire-format envelope every queue driver round-trips on push and pop.
 ///
 /// Bumping fields requires a `schema_version` increment and a dual-read

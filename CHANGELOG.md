@@ -8,6 +8,29 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Queue inspection API.** `Queue::pending_jobs(queue)` / `delayed_jobs` /
+  `reserved_jobs` list the actual envelopes behind the existing
+  `pending_size`/`delayed_size`/`reserved_size` counters, as `InspectedJob`
+  DTOs (`id`, `queue`, `name`, `attempts`, `payload`, `created_at`) - mirrors
+  Laravel's `InspectedJob`. A single `Option<&str>` queue filter collapses
+  Laravel's `pendingJobs($queue)` / `allPendingJobs()` pair (and the
+  `delayedJobs`/`reservedJobs` equivalents) into one call each. The
+  `QueueDriver` trait default is an honest `Err` - not Laravel's
+  Beanstalkd/SQS empty-collection default, which reads as "nothing queued"
+  even when there plainly is - so a driver that has not implemented
+  inspection says so; `sync`/`null` override with `Ok(vec![])` because for
+  them that really is the truth. The memory, database, and Redis drivers all
+  implement the full listing: the memory driver's delayed storage moved from
+  a bare `DelayQueue<Envelope>` (which cannot be iterated) to a
+  `DelayQueue<Uuid>` plus an id-keyed map; the database driver reuses the
+  size counters' exact predicates plus `ORDER BY available_at`, and a row
+  whose `envelope_json` fails to decode is still listed (`id: None`,
+  `payload: {"unparseable": true}`) rather than dropped, so one poison row
+  can't blind an operator to the rest of the queue; Redis's `reserved_jobs`
+  is scoped to this consumer's in-process reservations (documented), and
+  `pending_jobs` scans the stream via `XRANGE` in batches. `Queue::fake()`
+  gained matching `pending_jobs()`/`delayed_jobs()` helpers, projecting
+  recorded pushes with `attempts` always `0` and `created_at` always `None`.
 - **After-commit dispatch.** `Job::after_commit()` holds a push until the
   surrounding `DB::transaction` commits, so a worker on another process can
   never pop an envelope that describes rows the transaction has not made

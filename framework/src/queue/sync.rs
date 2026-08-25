@@ -15,6 +15,7 @@
 use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use crate::queue::envelope::Envelope;
+use crate::queue::inspect::InspectedJob;
 use crate::queue::worker::run_through_middleware;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -68,6 +69,38 @@ impl QueueDriver for SyncQueueDriver {
 
     async fn clear(&self) -> Result<u64, FrameworkError> {
         Ok(0)
+    }
+
+    /// Always empty: the sync driver runs every job inline on `push`, so
+    /// nothing is ever left pending. `Ok(vec![])` is the honest answer here
+    /// - not a lie of omission the way Laravel's Beanstalkd/SQS stubs are -
+    /// because for this driver "nothing to list" is the literal truth, not
+    /// an unimplemented method. See the trait default's doc comment on
+    /// [`QueueDriver::pending_jobs`].
+    async fn pending_jobs(
+        &self,
+        _queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        Ok(Vec::new())
+    }
+
+    /// Always empty: the sync driver has no delayed-job support at all -
+    /// `push` runs immediately even for an envelope with a future
+    /// `available_at`. See [`pending_jobs`](Self::pending_jobs).
+    async fn delayed_jobs(
+        &self,
+        _queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        Ok(Vec::new())
+    }
+
+    /// Always empty: there is no background worker to hold a reservation.
+    /// See [`pending_jobs`](Self::pending_jobs).
+    async fn reserved_jobs(
+        &self,
+        _queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        Ok(Vec::new())
     }
 
     fn name(&self) -> &'static str {

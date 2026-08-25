@@ -1062,6 +1062,58 @@ The `QueueDriver` trait declares defaults for `size` / `pending_size` /
 returns an "unsupported" error for `size` / `clear` - use the admin
 redis-cli for those.
 
+### Inspecting queues
+
+Counts tell you how much is queued; sometimes you need to see the actual
+envelopes - an admin dashboard, a debugging session, a "what exactly is
+stuck" question. `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs`
+return the same information the size counters count, as a listing of
+`InspectedJob` DTOs:
+
+```rust
+use suprnova::queue::{InspectedJob, Queue};
+
+let pending: Vec<InspectedJob> = Queue::pending_jobs(None).await?;
+let billing_only: Vec<InspectedJob> = Queue::pending_jobs(Some("billing")).await?;
+let delayed = Queue::delayed_jobs(None).await?;
+let reserved = Queue::reserved_jobs(None).await?;
+
+for job in &pending {
+    println!(
+        "{} attempts={} queue={:?} payload={}",
+        job.name, job.attempts, job.queue, job.payload
+    );
+}
+```
+
+`InspectedJob` carries `id`, `queue`, `name`, `attempts`, `payload`, and
+`created_at`. `id` and `created_at` are `Option`: the database driver's
+listings still report a row whose `envelope_json` failed to decode - as
+`id: None` and `payload: {"unparseable": true}` - rather than dropping it
+and hiding a poison job from whoever is looking; `Queue::fake()`'s
+projection never records a dispatch timestamp separate from
+`available_at`, so `created_at` is always `None` there.
+
+#### Why Suprnova diverges
+
+- **One method with `Option<&str>`, not a pair per listing.** Laravel ships
+  `pendingJobs($queue)` alongside a separate `allPendingJobs()`; here
+  `queue: None` collapses the two into one call. Same shape for
+  `delayedJobs`/`allDelayedJobs` and `reservedJobs`/`allReservedJobs`.
+- **The trait default is an honest `Err`, not an empty collection.**
+  Laravel's Beanstalkd and SQS drivers return `[]` from these methods even
+  for a queue that plainly has jobs - a lie of omission a third-party
+  driver author could copy without noticing. A Suprnova driver that has
+  not implemented inspection says so; `sync` and `null` override with
+  `Ok(vec![])` because for them "there is never anything to list" is the
+  literal truth, not an unimplemented method.
+- **Redis's `reserved_jobs` is per-consumer.** The driver only knows the
+  reservations it has personally handed out in-process; another
+  consumer's in-flight entries are visible only through Redis's own
+  `XPENDING`, not through this call. `pending_jobs` scans the whole stream
+  via `XRANGE` in batches (O(stream length)) rather than a bounded "ready"
+  index - fine for an admin/inspection call, not a hot path.
+
 ## Worker restart signal
 
 `php artisan queue:restart` translates to:

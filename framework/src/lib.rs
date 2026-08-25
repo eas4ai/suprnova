@@ -327,12 +327,12 @@ pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
     DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
     DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, EnvelopeError, EnvelopeOverrides,
-    FailOnException, FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome,
-    ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore,
-    MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue,
-    QueueDriver, QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Settled,
-    Skip, SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded,
-    UpdatedBatchJobCounts, WithoutOverlapping,
+    FailOnException, FailedJob, FailedJobStore, InspectedJob, Job, JobMiddleware,
+    JobMiddlewareNext, JobOutcome, ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository,
+    MemoryFailedJobStore, MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch,
+    PendingChain, Queue, QueueDriver, QueueRoute, RateLimited, RedisQueueDriver, Reservation,
+    ReservationToken, Settled, Skip, SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions,
+    TimeoutExceeded, UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,

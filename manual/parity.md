@@ -114,7 +114,7 @@ gaps as of the shipped framework.
 | After-commit dispatch (`afterCommit()`) | `fn after_commit() -> bool` on `Job`, `EnvelopeOverrides::after_commit` per push, `Queue::push_after_commit` | shipped | The whole push waits for the commit, events included, and a rollback discards it; a deferred `push_unique` still takes its lock immediately so dedupe works inside the transaction. Manual `DB::begin_transaction` never defers. [Queues](queues.md) |
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
 | `ShouldBeUniqueUntilProcessing` | `fn unique_until_processing() -> bool` on `Job`, released after the middleware pass and before the handler | shipped | Owner-scoped release, so a redelivered attempt never releases a newer dispatch's lock. A job a middleware releases back onto the queue keeps its lock. [Queues](queues.md) |
-| Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
+| Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`, `Option<&str>` collapsing Laravel's `all*Jobs()` twin into one call | shipped | `InspectedJob` DTO (`id`/`queue`/`name`/`attempts`/`payload`/`created_at`); the trait default is an honest `Err` rather than an empty collection; `sync`/`null` override with `Ok(vec![])`; Redis's `reserved_jobs` is per-consumer. [Queues](queues.md) |
 | Schedule per-task timezone | `.timezone(chrono_tz::Tz)` / `.try_timezone("name")` per task, `Schedule::timezone` default, `schedule:list --timezone` | shipped | Typed `chrono_tz::Tz` instead of Laravel's string; the schedule-wide default is `Schedule::timezone` in `schedule::register` rather than an `app.schedule_timezone` config key, and an unpinned task keeps the process-local zone. [Scheduling](scheduling.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
 | Search (Scout) | No first-party full-text search adapter | not yet | Vector search ships today via [Vector](vector.md); keyword-search Scout-equivalent is planned |
@@ -409,7 +409,6 @@ shape of the gap in one place:
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
-| Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
 
 ## What we won't ship (and why)
 
