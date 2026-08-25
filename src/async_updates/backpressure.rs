@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::identity::{BrowserOperationName, ContentDigest};
 use crate::resource::{
-    Permit, PermitPool, ResourceError, ResourceOwner, Retirement, TailAdmission,
+    Permit, PermitPool, ResourceError, ResourceOwner, ResourceQueue, Retirement, TailAdmission,
     TailAdmissionOutcome,
 };
 
@@ -446,7 +446,9 @@ impl Error for AsyncBackpressureError {}
 /// One dequeued envelope holding exactly one shared active-delivery permit.
 pub(crate) struct AsyncDeliveryLease {
     entries: Vec<AsyncBufferEntry>,
-    _permit: Permit,
+    permit: Option<Permit>,
+    queue: ResourceQueue<AsyncBufferEntry>,
+    permits: PermitPool,
     cancellation: crate::resource::CancellationFlag,
     pressure: PressureTracker,
     membership: PressureMembership,
@@ -597,6 +599,21 @@ impl Drop for AsyncDeliveryLease {
                 self.high_water,
             );
         }
+        // Release the in-flight reservation before evaluating the aggregate
+        // idle boundary. A dequeued sibling is still retained work until its
+        // delivery lease resolves or is abandoned.
+        drop(self.permit.take());
+        commit_recoveries_if_idle(&self.queue, &self.permits, &self.pressure);
+    }
+}
+
+fn commit_recoveries_if_idle(
+    queue: &ResourceQueue<AsyncBufferEntry>,
+    permits: &PermitPool,
+    pressure: &PressureTracker,
+) {
+    if queue.is_empty() && permits.active() == 0 {
+        pressure.commit_recoveries();
     }
 }
 
@@ -904,9 +921,7 @@ impl AsyncBackpressure {
     }
 
     pub(crate) fn commit_recoveries_if_drained(&self) {
-        if self.owner.queue().is_empty() {
-            self.pressure.commit_recoveries();
-        }
+        commit_recoveries_if_idle(self.owner.queue(), &self.permits, &self.pressure);
     }
 
     /// Returns one bounded low-cardinality telemetry snapshot.
@@ -943,7 +958,9 @@ impl AsyncBackpressure {
             .expect("a dequeued resource batch is never empty");
         Some(AsyncDeliveryLease {
             entries,
-            _permit: permit,
+            permit: Some(permit),
+            queue: self.owner.queue().clone(),
+            permits: self.permits.clone(),
             cancellation: self.owner.cancellation(),
             pressure: self.pressure.clone(),
             membership,
@@ -979,6 +996,7 @@ impl AsyncBackpressure {
             self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
         }
         self.pressure.retire_membership(subscription, binding);
+        self.commit_recoveries_if_drained();
         removed
     }
 
@@ -1008,6 +1026,7 @@ impl AsyncBackpressure {
             }
             self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
         }
+        self.commit_recoveries_if_drained();
         removed
     }
 

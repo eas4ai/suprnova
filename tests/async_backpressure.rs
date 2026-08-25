@@ -1723,6 +1723,147 @@ async fn ordinary_replaceable_tail_cannot_split_an_admitted_replay_group() {
 }
 
 #[tokio::test]
+async fn authenticated_sibling_removal_commits_a_proven_deferred_recovery_when_queue_empties() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let first = fixture.request(subscription(0xa3), origin.clone());
+    let (mut bounded, first) = bounded_document_with_script(
+        &fixture,
+        0xa3,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(first.context(), 7, 3))],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("first gap admission");
+    let mut dispatcher = RecordingDispatcher::default();
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        )))
+    ));
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &first,
+                vec![
+                    heartbeat_at(first.context(), 7, 1),
+                    heartbeat_at(first.context(), 7, 2),
+                    heartbeat_at(first.context(), 7, 3),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("first recovery admission"),
+        BufferDisposition::Queued
+    );
+
+    let second = fixture.request(subscription(0xa4), origin);
+    let second_source = ScriptedSource::new(vec![vec![ScriptItem::RawEnvelope(heartbeat_at(
+        second.context(),
+        7,
+        1,
+    ))]]);
+    try_add_membership(&mut bounded, second.clone(), &second_source)
+        .await
+        .expect("commit second membership");
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(bounded.retained_events(), 4);
+
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Replay(_)))
+    ));
+    assert_eq!(bounded.retained_events(), 1);
+    assert_eq!(bounded.sequence_state(&first), None);
+    assert!(bounded.is_degraded());
+    assert_eq!(bounded.unresolved_pressure_cause_count(), 1);
+
+    let remove = bounded
+        .prepare_remove(&second)
+        .expect("prepare sibling removal");
+    let ready = remove.authorize().await.expect("authorize sibling removal");
+    assert_eq!(bounded.commit_remove(ready), Ok(CloseDisposition::Closed));
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.unresolved_pressure_cause_count(), 0);
+    assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn provider_failure_purge_commits_only_a_proven_siblings_deferred_recovery() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let first = fixture.request(subscription(0xa5), origin.clone());
+    let (mut bounded, first) = bounded_document_with_script(
+        &fixture,
+        0xa5,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(first.context(), 7, 3))],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("first gap admission");
+    let mut dispatcher = RecordingDispatcher::default();
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("first gap classification");
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &first,
+                vec![
+                    heartbeat_at(first.context(), 7, 1),
+                    heartbeat_at(first.context(), 7, 2),
+                    heartbeat_at(first.context(), 7, 3),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("first recovery admission"),
+        BufferDisposition::Queued
+    );
+
+    let second = fixture.request(subscription(0xa6), origin);
+    let second_source = ScriptedSource::new(vec![vec![
+        ScriptItem::RawEnvelope(heartbeat_at(second.context(), 7, 1)),
+        ScriptItem::Error(suprnova_live::async_updates::AsyncTransportErrorKind::SourceFailed),
+    ]]);
+    try_add_membership(&mut bounded, second, &second_source)
+        .await
+        .expect("commit failing sibling membership");
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Replay(_)))
+    ));
+    assert_eq!(bounded.retained_events(), 1);
+    assert_eq!(bounded.unresolved_pressure_cause_count(), 1);
+
+    let error = bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect_err("failing sibling provider must be purged");
+    assert_eq!(
+        error.kind(),
+        suprnova_live::async_updates::AsyncTransportErrorKind::SourceFailed
+    );
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(
+        bounded.unresolved_pressure_cause_count(),
+        1,
+        "the proven sibling recovery commits while the failed membership remains degraded"
+    );
+    assert!(bounded.is_degraded());
+}
+
+#[tokio::test]
 async fn partial_replay_dispatch_failure_keeps_truthful_prefix_and_degraded_continuity() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let provisional = fixture.request(
