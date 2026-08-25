@@ -207,12 +207,18 @@ QUEUE_DRIVER=database ./app queue:work
 
 Laravel's documentation carries the same warning for the same reason.
 
-This reaches chains. A worker pushes the next link of a
-[queued chain](#queued-chains) through the bound driver, so a follow-up
-link dispatched while the primary is down falls over to the fallback like
-any other push. The rest of that chain then waits for a worker on the
-fallback connection. Without one, the chain stalls - the link is durable
-and nothing is lost, but nothing runs it either.
+This reaches chains, but only through one door. A worker settles a job and
+enqueues the next link of a [queued chain](#queued-chains) in one call,
+`settle`, and the decorator delegates that call to the primary alone. So
+with a transactional primary such as the database driver, a primary that is
+down fails the settle and nothing falls over: the worker leaves the
+reservation intact and visibility expiry redelivers the job. The
+fall-through happens when the primary answers `Settled::Unsupported`, which
+the memory and Redis drivers do, because the worker then pushes the next
+link through the bound driver like any other push - and that push falls
+over. The rest of that chain then waits for a worker on the fallback
+connection. Without one, the chain stalls - the link is durable and nothing
+is lost, but nothing runs it either.
 
 ### The `QueueFailedOver` event
 
@@ -506,6 +512,13 @@ Three rules cover every case:
   the opt-in safe to declare on the job type: a dispatch site does not have to
   know whether the code path it sits on is transactional.
 
+A [savepoint](database.md#savepoints) rollback counts as a rollback for
+everything registered inside it. `tx.rollback_to("name")` discards the pushes
+deferred since `tx.savepoint("name")` and releases the locks they took, right
+then, so a re-dispatch inside the same transaction wins the key again. Pushes
+made before the savepoint are untouched, and a savepoint you never roll back
+keeps everything registered inside it.
+
 Per dispatch rather than per job type, use `EnvelopeOverrides::after_commit`.
 `Some(true)` is Laravel's `afterCommit()` and has the shorthand
 `Queue::push_after_commit(job)`; `Some(false)` is Laravel's `beforeCommit()`,
@@ -543,7 +556,10 @@ never happened - and so does any other ending where the commit does not land,
 including a refused `COMMIT`. The one bound on that guarantee is the TTL
 itself: a transaction that stays open longer than `unique_for` can have its
 lock expire and be re-taken by another dispatch mid-flight, so give
-`unique_for` room above your longest transaction if the dedupe matters.
+`unique_for` room above your longest transaction if the dedupe matters. The
+`push_unique*` family takes no `EnvelopeOverrides`, so `Job::after_commit()` is
+the only thing that decides whether a unique push defers - there is no per-push
+override for it.
 
 Batches and chains do not defer, the same way they do not consult
 `Job::delay()`: `Queue::batch()` and `Queue::chain()` build and push their
@@ -551,7 +567,8 @@ envelopes directly. Wrap the `.dispatch()` call so it runs after the
 transaction returns if a batch has to wait for a commit.
 
 Queued [mail](mail.md#queueing) and [notifications](notifications.md) do not
-defer either. Both ride one shared job type, and there is no
+defer either. Each rides a single shared job type (`SendMailJob` /
+`SendNotificationJob`), and there is no
 `ShouldQueueAfterCommit` equivalent on `Mailable` or `Notification` yet, so a
 `Mail::queue` or `Notify::queue` call inside a transaction reaches the driver
 immediately. Send those after the transaction returns.
@@ -1243,6 +1260,11 @@ between a job coming due and the background reaper's next 50ms tick,
 `delayed_size()` can still count a job that `delayed_jobs()` has already
 promoted into `pending_jobs()` - the listings are the more current view;
 a mismatch there is expected, not a bug.
+
+A reservation whose visibility timeout has lapsed keeps appearing in
+`reserved_jobs()` until a `pop` or the background reaper reclaims it. Only
+those two reclaim, and reclaiming is what spends an attempt, so a listing call
+never changes a job's attempt count however often you call it.
 
 #### Why Suprnova diverges
 

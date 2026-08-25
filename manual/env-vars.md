@@ -303,7 +303,7 @@ limit of zero would reject every image in the application. An unknown
 | `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Cap on the width and height of a decoded image, checked against the input's own header before anything is allocated. Also caps resize targets. Minimum `1`. |
 | `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | `u64` | Cap on the decoded RGBA footprint (`width * height * 4`). Also caps the size of the source file itself, whether it arrives from a path, a disk, or `Image::from_stream` (which checks while collecting). Minimum `4`. |
 | `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
-| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation, passed as `-limit time`. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation. It is both ImageMagick's own `-limit time` argument and the Rust-side deadline that kills the child's whole process group two seconds later, because `-limit time` is enforced by a monitor that a child wedged inside a delegate never engages. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
 
 See [Images](images.md) for the two-tier limit enforcement and how to
 choose between the drivers.

@@ -79,14 +79,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `DB::begin_transaction` never defers - it installs no ambient transaction, so
   there is no commit to hang a callback on. Every ending that leaves the commit
   unlanded compensates identically, including a `COMMIT` the database refuses
-  and a leaked `TxHandle` that blocks one. Queued mail, notifications, batches
-  and chains do not defer yet.
-- **`DB::transaction` can now return `Err` after a successful commit**, when an
-  after-commit callback fails: the message reads `after-commit callback failed
-  (the transaction itself committed): …`, the closure's return value is lost and
-  its writes are not. `DB::transaction_with_attempts` never retries that error,
-  however deadlock-shaped the callback's own message reads - re-running a closure
-  whose writes are already durable would apply them twice.
+  and a leaked `TxHandle` that blocks one, and `Transaction::rollback_to` counts
+  as one for the scope it unwinds: a push deferred inside a savepoint is
+  discarded when that savepoint rolls back and its lock is released right then,
+  while anything registered before the savepoint is untouched. Queued mail,
+  notifications, batches and chains do not defer yet.
 - **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
   uniqueness lock when processing begins - after the job's middleware pass,
   immediately before the handler runs - instead of holding it for the full
@@ -194,6 +191,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- **`DB::transaction` can now return `Err` after a successful commit**, when an
+  after-commit callback fails: the message reads `after-commit callback failed
+  (the transaction itself committed): …`, the closure's return value is lost and
+  its writes are not. `DB::transaction_with_attempts` never retries that error,
+  however deadlock-shaped the callback's own message reads - re-running a closure
+  whose writes are already durable would apply them twice.
+- **New validation catalog key: `validation-password-unverifiable`.** A custom
+  `UncompromisedVerifier` that returns `Err` no longer puts its own error text
+  in the 422 body verbatim. That text is logged at `error` instead, and the
+  response carries this key, rendering as "The { $field } could not be checked
+  against known data leaks. Please try again." - the check did not run, which is
+  not the same as the password being bad, and infrastructure detail does not
+  belong in a client response. An app shipping its own validation catalog has to
+  add the key, or its users see the built-in English fallback.
 - **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
   new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
   and the magic-byte upload rule takes the name Laravel gives the same rule
@@ -214,6 +225,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`Image` is a different type now; the upload validator is `ImageFile`.**
+  Source-breaking for anyone using the magic-byte upload rule. Rename it at
+  every use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. `suprnova::Image` still resolves, but
+  it is now the image-manipulation pipeline type, so a missed rename fails to
+  compile rather than changing behaviour silently.
 - **`EnvelopeOverrides` gained a public `after_commit: Option<bool>` field.**
   Every construction in this repo and in the scaffolded templates uses
   `..Default::default()`, which needs no change. Code that builds an

@@ -354,6 +354,20 @@ DB::transaction(|tx| {
 All three first-class backends support `SAVEPOINT` / `ROLLBACK TO
 SAVEPOINT` - SQLite included.
 
+A savepoint rollback also unwinds the
+[after-commit registry](queues.md#after-commit-dispatch). A queue push deferred
+to the commit inside the savepoint is discarded along with the rows it
+described, and the compensation registered with it runs immediately, so a
+deferred `push_unique`'s dedupe lock goes back and a re-dispatch inside the same
+transaction can win it. Anything registered before the savepoint is untouched,
+and a savepoint you release or simply never roll back keeps everything
+registered inside it.
+
+Repeating a savepoint name is allowed, and the registry follows the database:
+`ROLLBACK TO SAVEPOINT x` unwinds to the most recent `x` and destroys the
+savepoints established after it. Manual transactions have no after-commit
+registry, so their savepoints roll back rows and nothing else.
+
 ## Observability
 
 Laravel 13's `DB::listen` / `QueryExecuted` / query log surface, ported

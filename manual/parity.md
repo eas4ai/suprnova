@@ -407,7 +407,6 @@ shape of the gap in one place:
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
-| Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
 
 ## What we won't ship (and why)
 
