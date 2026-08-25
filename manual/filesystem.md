@@ -83,20 +83,6 @@ Re-registering the same name replaces the previous operator and emits a
 accidental duplicate could swap a production disk for a memory one. The
 replacement still happens; the warning just makes the swap audible.
 
-### Versioned and conditional reads
-
-A read that carries a version or an `If-Match`, `If-None-Match`,
-`If-Modified-Since`, or `If-Unmodified-Since` condition is passed on with that
-condition intact, so the answer means what you asked it to mean. Such a read
-is served but never promoted: writing an old version or a validator-matched
-body to the primary would publish it as the live object, and every later
-plain read would get it.
-
-The primary decides which of these a read-through disk accepts at all,
-because the primary's reader is opened first. A versioned read against a
-read-through disk whose primary is a local directory is rejected before it
-reaches the fallback, since a local directory has no versions.
-
 ### Why Suprnova diverges
 
 Laravel's `config/filesystems.php` lists every disk driver and you pick one
@@ -331,6 +317,25 @@ Registration rejects a configuration that cannot work: an empty `primary` or
 or a name that is not registered. Each returns a `FrameworkError` naming the
 problem, and no disk is registered.
 
+### Versioned and conditional reads
+
+A read that carries a version or an `If-Match`, `If-None-Match`,
+`If-Modified-Since`, or `If-Unmodified-Since` condition is passed on with that
+condition intact, so the answer means what you asked it to mean. Such a read
+is served but never promoted: writing an old version or a validator-matched
+body to the primary would publish it as the live object, and every later
+plain read would get it.
+
+Which disk answers one is decided the usual way. The first probe is an
+ordinary existence check, so a read-through disk delegates a versioned or
+conditional read to the primary whenever the primary holds the path at all;
+it reaches the fallback only when the primary does not.
+
+The primary also decides which of these a read-through disk accepts at all,
+because the primary's reader is opened first. A versioned read against a
+read-through disk whose primary is a local directory is rejected before it
+reaches the fallback, since a local directory has no versions.
+
 ### Why Suprnova diverges
 
 Laravel builds a read-through disk from a `config/filesystems.php` entry whose
@@ -348,10 +353,21 @@ for the length of the write, and a read-through disk routes readers by
 exactly that existence check. On a primary without a rename - in-memory, S3,
 Azure Blob, GCS - a write is already a single indivisible publish, so the
 promotion writes the target directly, conditional on the object not already
-existing so two concurrent readers do not both promote. The staging object is
-a real entry on the primary while it lasts, so a listing taken mid-promotion
-can show a `.suprnova-promote-<id>.tmp` sibling; it is renamed or removed
-before the read that created it returns.
+existing so two concurrent readers do not both promote.
+
+That condition is the part a staged promotion cannot have: the staging path is
+unique, so a no-clobber condition on it would be vacuous, and the target is
+published by a rename that overwrites. A read-through disk on a
+local-filesystem primary therefore trades it away - a write that lands on the
+primary in the moment between the promotion's last existence check and its
+rename is overwritten by the promoted copy. On a primary without a rename the
+condition holds and no such window exists.
+
+The staging object is a real entry on the primary while it lasts, so a listing
+taken mid-promotion can show a `.suprnova-promote-<id>.tmp` sibling. A read
+that completes, fails, or gives up removes its own sibling, but nothing sweeps
+one left by a process that crashed or a read future that was cancelled
+mid-promotion: those have to be removed by hand.
 
 A read that resolves from the fallback holds the object in memory until the
 promotion write completes, because promotion needs the whole object. That

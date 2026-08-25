@@ -620,10 +620,11 @@ async fn a_promotion_is_never_visible_on_the_primary_at_a_partial_length() {
         promoted as u64, full_len,
         "the promoter read the whole object"
     );
-    assert!(
-        samples >= 8,
-        "the promotion finished too quickly to sample; the test would prove nothing"
-    );
+    // How many looks this gets is a property of the host, not of the code under
+    // test, so it is reported rather than asserted: a faster disk would turn a
+    // correct implementation red. The mechanism itself is pinned deterministically
+    // by `read_through`'s own `a_promotion_on_a_rename_capable_primary_is_staged_and_renamed`.
+    eprintln!("sampled the primary {samples} times during the promotion");
     assert!(
         partial.is_empty(),
         "the promoted object was visible at a partial length: {:?}",

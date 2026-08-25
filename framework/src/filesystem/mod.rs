@@ -208,6 +208,13 @@ impl std::fmt::Debug for GcsConfig {
 /// conditional on the object not already existing. A backend offering neither
 /// guarantee would leave that window open; no driver Suprnova ships is one.
 ///
+/// That condition is what a staged promotion gives up. Its path is unique, so
+/// a no-clobber condition on it would be vacuous, and the target is published
+/// by a rename that overwrites: a write landing on the primary between the
+/// promotion's last existence check and its rename is overwritten by the
+/// promoted copy. On a primary without a rename the condition holds and there
+/// is no such window.
+///
 /// # Versioned and conditional reads
 ///
 /// A read carrying a version or an `If-Match` / `If-None-Match` /

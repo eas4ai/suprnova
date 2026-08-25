@@ -340,12 +340,7 @@ impl ReadThroughReader {
         }
 
         if self.is_promotable() {
-            // The fallback's own metadata rides along with the bytes. Without
-            // it an S3-to-S3 read-through would silently drop `Content-Type`
-            // the first time each object crossed over, and nothing would ever
-            // restore it.
-            let metadata = self.fallback.stat(&self.path).await?;
-            self.promote(&full, &metadata).await?;
+            self.promote(&full).await?;
         }
 
         let slice = range.to_content_range(full.len())?;
@@ -360,8 +355,8 @@ impl ReadThroughReader {
     /// fallback every time" instead of taking the application down. Losing a
     /// conditional write is not a failure at all - the object that won came
     /// from the same fallback and holds the same bytes.
-    async fn promote(&self, contents: &Buffer, metadata: &Metadata) -> Result<()> {
-        match self.publish(contents, metadata).await {
+    async fn promote(&self, contents: &Buffer) -> Result<()> {
+        match self.publish(contents).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Ok(()),
             Err(e) if self.throw_on_promotion_failure => Err(Error::new(
@@ -395,11 +390,22 @@ impl ReadThroughReader {
     ///
     /// The staged form cannot use that condition: its path is unique, so the
     /// condition would be vacuous. It re-checks the primary immediately before
-    /// the rename instead, which leaves the same best-effort window Laravel's
-    /// own re-check leaves and no larger one.
-    async fn publish(&self, contents: &Buffer, metadata: &Metadata) -> Result<()> {
+    /// the rename instead, so a write that lands on the primary inside that
+    /// window is overwritten rather than winning.
+    ///
+    /// Every step here belongs to the promotion, the fallback `stat` included.
+    /// The caller's bytes are already in hand by the time this runs, so a
+    /// fallback that has just pruned the object or is briefly unreachable has
+    /// to degrade the promotion through [`ReadThroughReader::promote`] rather
+    /// than fail a read that already succeeded.
+    async fn publish(&self, contents: &Buffer) -> Result<()> {
+        // The fallback's own metadata rides along with the bytes. Without it an
+        // S3-to-S3 read-through would silently drop `Content-Type` the first
+        // time each object crossed over, and nothing would ever restore it.
+        let metadata = self.fallback.stat(&self.path).await?;
+
         if !self.promote_atomically {
-            let options = self.promotion_options(metadata, self.promote_conditionally);
+            let options = self.promotion_options(&metadata, self.promote_conditionally);
             self.primary
                 .write_options(&self.path, contents.clone(), options)
                 .await?;
@@ -407,10 +413,20 @@ impl ReadThroughReader {
         }
 
         let staged = staging_path(&self.path);
-        let options = self.promotion_options(metadata, false);
-        self.primary
+        let options = self.promotion_options(&metadata, false);
+        if let Err(e) = self
+            .primary
             .write_options(&staged, contents.clone(), options)
-            .await?;
+            .await
+        {
+            // A backend that creates the target before filling it - the local
+            // filesystem does - leaves a partial staging object behind when the
+            // write fails part-way, and nothing else ever sweeps it. Deleting a
+            // path that was never created is a no-op, so this is safe either
+            // way.
+            self.discard(&staged).await;
+            return Err(e);
+        }
 
         match self.primary.exists(&self.path).await {
             // Somebody published while we were staging. Their object wins.
@@ -518,6 +534,7 @@ impl oio::Delete for ReadThroughDeleter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opendal::raw::Timestamp;
     use opendal::{EntryMode, services};
     use std::sync::Mutex;
 
@@ -525,23 +542,64 @@ mod tests {
     #[derive(Debug, Default)]
     struct Journal {
         reads: Mutex<Vec<OpRead>>,
-        writes: Mutex<Vec<String>>,
+        writes: Mutex<Vec<(String, OpWrite)>>,
+        renames: Mutex<Vec<(String, String)>>,
+        deletes: Mutex<Vec<String>>,
+    }
+
+    /// Take a lock without caring whether a failing test poisoned it first.
+    fn locked<T>(cell: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     impl Journal {
         fn reads(&self) -> Vec<OpRead> {
-            self.reads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
+            locked(&self.reads).clone()
         }
 
-        fn writes(&self) -> Vec<String> {
-            self.writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
+        fn writes(&self) -> Vec<(String, OpWrite)> {
+            locked(&self.writes).clone()
         }
+
+        fn write_paths(&self) -> Vec<String> {
+            locked(&self.writes)
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect()
+        }
+
+        fn renames(&self) -> Vec<(String, String)> {
+            locked(&self.renames).clone()
+        }
+
+        fn deletes(&self) -> Vec<String> {
+            locked(&self.deletes).clone()
+        }
+    }
+
+    /// How a [`StubDisk`] behaves when it is written to.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum WriteBehaviour {
+        /// Refuse to open a writer at all.
+        #[default]
+        Refuse,
+        /// Open a writer and then fail part-way, the way a local filesystem
+        /// does when it runs out of room after creating the file.
+        FailAfterOpen,
+        /// Accept the write.
+        Accept,
+    }
+
+    /// What a [`StubDisk`] holds and how it behaves.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct StubSpec {
+        contents: Option<&'static str>,
+        content_type: Option<&'static str>,
+        /// Whether `stat` fails rather than answering.
+        stat_fails: bool,
+        /// Whether the disk advertises and implements a rename.
+        renames: bool,
+        writes: WriteBehaviour,
     }
 
     /// A disk that answers from a fixed body and records what it is asked for.
@@ -551,24 +609,29 @@ mod tests {
     /// neither the in-memory nor the local-filesystem service does. So whether
     /// this layer replays the caller's read arguments onto the fallback is only
     /// observable against a disk that accepts them - which in production means
-    /// an object store, and here means this. Reaching it through
-    /// [`Operator::from_parts`] also keeps opendal's correctness check out of
-    /// the stack, so the arguments arrive exactly as the layer sent them.
+    /// an object store, and here means this. It is also the only way to observe
+    /// *how* a promotion is published: the staged-and-renamed shape is a
+    /// property of the calls the layer makes, not of what a reader can see
+    /// afterwards. Reaching it through [`Operator::from_parts`] keeps opendal's
+    /// correctness check out of the stack, so every argument arrives exactly as
+    /// the layer sent it.
     #[derive(Debug)]
     struct StubDisk {
         info: ServiceInfo,
+        spec: StubSpec,
         contents: Option<Buffer>,
         journal: Arc<Journal>,
     }
 
     impl StubDisk {
-        fn operator(contents: Option<&'static str>) -> (Operator, Arc<Journal>) {
+        fn operator(spec: StubSpec) -> (Operator, Arc<Journal>) {
             let journal = Arc::new(Journal::default());
             let stub = StubDisk {
                 // Borrowing an in-memory disk's identity avoids inventing a
                 // scheme; nothing under test reads it.
                 info: memory().service().info(),
-                contents: contents.map(Buffer::from),
+                spec,
+                contents: spec.contents.map(Buffer::from),
                 journal: Arc::clone(&journal),
             };
             (
@@ -599,15 +662,65 @@ mod tests {
         }
     }
 
+    struct StubWriter {
+        fails: bool,
+    }
+
+    impl StubWriter {
+        fn failure() -> Error {
+            Error::new(
+                ErrorKind::Unexpected,
+                "the stub disk ran out of room part-way through the write",
+            )
+        }
+    }
+
+    impl oio::Write for StubWriter {
+        async fn write(&mut self, _buffer: Buffer) -> Result<()> {
+            if self.fails {
+                return Err(Self::failure());
+            }
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<Metadata> {
+            if self.fails {
+                return Err(Self::failure());
+            }
+            Ok(Metadata::new(EntryMode::FILE))
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            // A local filesystem without an atomic write directory removes
+            // nothing on abort, which is the case this stub stands in for.
+            Ok(())
+        }
+    }
+
+    struct StubDeleter {
+        journal: Arc<Journal>,
+    }
+
+    impl oio::Delete for StubDeleter {
+        async fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
+            locked(&self.journal.deletes).push(path.to_owned());
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn unsupported() -> Error {
         Error::new(ErrorKind::Unsupported, "the stub disk does not do this")
     }
 
     impl Service for StubDisk {
         type Reader = StubReader;
-        type Writer = oio::Writer;
+        type Writer = StubWriter;
         type Lister = oio::Lister;
-        type Deleter = oio::Deleter;
+        type Deleter = StubDeleter;
         type Copier = oio::Copier;
 
         fn info(&self) -> ServiceInfo {
@@ -619,11 +732,18 @@ mod tests {
                 read: true,
                 stat: true,
                 write: true,
+                delete: true,
+                rename: self.spec.renames,
                 read_with_version: true,
                 read_with_if_match: true,
                 read_with_if_none_match: true,
                 read_with_if_modified_since: true,
                 read_with_if_unmodified_since: true,
+                write_with_if_not_exists: true,
+                write_with_content_type: true,
+                write_with_cache_control: true,
+                write_with_content_disposition: true,
+                write_with_content_encoding: true,
                 ..Default::default()
             }
         }
@@ -643,20 +763,27 @@ mod tests {
             _path: &str,
             _args: OpStat,
         ) -> Result<RpStat> {
+            if self.spec.stat_fails {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "the stub disk cannot answer a stat right now",
+                ));
+            }
             match &self.contents {
-                Some(contents) => Ok(RpStat::new(
-                    Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64),
-                )),
+                Some(contents) => {
+                    let mut metadata =
+                        Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64);
+                    if let Some(content_type) = self.spec.content_type {
+                        metadata.set_content_type(content_type);
+                    }
+                    Ok(RpStat::new(metadata))
+                }
                 None => Err(self.missing()),
             }
         }
 
         fn read(&self, _ctx: &OperationContext, _path: &str, args: OpRead) -> Result<Self::Reader> {
-            self.journal
-                .reads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(args);
+            locked(&self.journal.reads).push(args);
             // Real backends hand back a lazy reader and only fail once a range
             // is asked for, which is what lets the layer build the primary's
             // reader before it knows whether the primary holds the object.
@@ -667,18 +794,20 @@ mod tests {
             &self,
             _ctx: &OperationContext,
             path: &str,
-            _args: OpWrite,
+            args: OpWrite,
         ) -> Result<Self::Writer> {
-            self.journal
-                .writes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(path.to_owned());
-            Err(unsupported())
+            locked(&self.journal.writes).push((path.to_owned(), args));
+            match self.spec.writes {
+                WriteBehaviour::Refuse => Err(unsupported()),
+                WriteBehaviour::FailAfterOpen => Ok(StubWriter { fails: true }),
+                WriteBehaviour::Accept => Ok(StubWriter { fails: false }),
+            }
         }
 
         fn delete(&self, _ctx: &OperationContext) -> Result<Self::Deleter> {
-            Err(unsupported())
+            Ok(StubDeleter {
+                journal: Arc::clone(&self.journal),
+            })
         }
 
         fn list(
@@ -704,11 +833,12 @@ mod tests {
         async fn rename(
             &self,
             _ctx: &OperationContext,
-            _from: &str,
-            _to: &str,
+            from: &str,
+            to: &str,
             _args: OpRename,
         ) -> Result<RpRename> {
-            Err(unsupported())
+            locked(&self.journal.renames).push((from.to_owned(), to.to_owned()));
+            Ok(RpRename::default())
         }
 
         async fn presign(
@@ -725,17 +855,34 @@ mod tests {
         Operator::new(services::Memory::default()).expect("memory service is infallible")
     }
 
-    /// A read-through disk whose primary holds nothing and whose fallback holds
-    /// `cold bytes`. Returns the composite and the two journals.
-    fn stub_read_through() -> (Operator, Arc<Journal>, Arc<Journal>) {
-        let (primary, primary_journal) = StubDisk::operator(None);
-        let (fallback, fallback_journal) = StubDisk::operator(Some("cold bytes"));
+    /// Compose a read-through disk over two stubs. Returns the composite and
+    /// the primary's and fallback's journals.
+    fn read_through(
+        primary_spec: StubSpec,
+        fallback_spec: StubSpec,
+        throw_on_promotion_failure: bool,
+    ) -> (Operator, Arc<Journal>, Arc<Journal>) {
+        let (primary, primary_journal) = StubDisk::operator(primary_spec);
+        let (fallback, fallback_journal) = StubDisk::operator(fallback_spec);
         let assets = primary.clone().layer(ReadThroughLayer {
             primary,
             fallback,
-            throw_on_promotion_failure: false,
+            throw_on_promotion_failure,
         });
         (assets, primary_journal, fallback_journal)
+    }
+
+    /// The fallback holds `cold bytes` under `cold.txt`; the primary holds
+    /// nothing and refuses writes.
+    fn stub_read_through() -> (Operator, Arc<Journal>, Arc<Journal>) {
+        read_through(
+            StubSpec::default(),
+            StubSpec {
+                contents: Some("cold bytes"),
+                ..Default::default()
+            },
+            false,
+        )
     }
 
     #[tokio::test]
@@ -755,10 +902,16 @@ mod tests {
                 && reads[0].if_unmodified_since().is_none(),
             "a plain read must not invent a version or a condition"
         );
+
+        let writes = primary.writes();
         assert_eq!(
-            primary.writes(),
+            primary.write_paths(),
             vec!["cold.txt".to_string()],
             "a plain fallback hit is promoted to the requested path"
+        );
+        assert!(
+            writes[0].1.if_not_exists(),
+            "a primary without a rename publishes with the no-clobber condition"
         );
     }
 
@@ -782,7 +935,7 @@ mod tests {
              whatever is current there"
         );
         assert!(
-            primary.writes().is_empty(),
+            primary.write_paths().is_empty(),
             "a versioned read asks for one historical object; publishing it as \
              the primary's live copy would answer later plain reads with it"
         );
@@ -792,10 +945,17 @@ mod tests {
     async fn a_conditional_read_reaches_the_fallback_and_is_not_promoted() {
         let (assets, primary, fallback) = stub_read_through();
 
+        // Two distinct instants, so transposing the two fields fails here.
+        let floor = Timestamp::MIN;
+        let now = Timestamp::now();
+        assert_ne!(floor, now, "the fixture needs two distinct instants");
+
         assets
             .read_with("cold.txt")
             .if_match("\"etag-live\"")
             .if_none_match("\"etag-cached\"")
+            .if_modified_since(floor)
+            .if_unmodified_since(now)
             .await
             .expect("the stub disk ignores conditions, so this resolves");
 
@@ -812,9 +972,135 @@ mod tests {
             Some("\"etag-cached\""),
             "if_none_match must reach the fallback"
         );
+        assert_eq!(
+            reads[0].if_modified_since(),
+            Some(floor),
+            "if_modified_since must reach the fallback unswapped"
+        );
+        assert_eq!(
+            reads[0].if_unmodified_since(),
+            Some(now),
+            "if_unmodified_since must reach the fallback unswapped"
+        );
         assert!(
-            primary.writes().is_empty(),
+            primary.write_paths().is_empty(),
             "a conditional hit is served from the fallback but never promoted"
+        );
+    }
+
+    /// A primary that renames, over a fallback holding a typed object.
+    fn rename_capable_read_through(
+        writes: WriteBehaviour,
+        fallback_stat_fails: bool,
+        throw_on_promotion_failure: bool,
+    ) -> (Operator, Arc<Journal>, Arc<Journal>) {
+        read_through(
+            StubSpec {
+                renames: true,
+                writes,
+                ..Default::default()
+            },
+            StubSpec {
+                contents: Some("cold bytes"),
+                content_type: Some("image/png"),
+                stat_fails: fallback_stat_fails,
+                ..Default::default()
+            },
+            throw_on_promotion_failure,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_promotion_on_a_rename_capable_primary_is_staged_and_renamed() {
+        let (assets, primary, _fallback) =
+            rename_capable_read_through(WriteBehaviour::Accept, false, false);
+
+        let bytes = assets.read("cold.txt").await.expect("read resolves");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+
+        let writes = primary.writes();
+        assert_eq!(writes.len(), 1, "a promotion writes exactly once");
+        let (staged, args) = &writes[0];
+        assert!(
+            staged.starts_with("cold.txt.suprnova-promote-") && staged.ends_with(".tmp"),
+            "the bytes must be staged at a sibling of the target, got: {staged}"
+        );
+        assert_ne!(
+            staged, "cold.txt",
+            "the target must never be written in place on a backend that fills \
+             a file after creating it"
+        );
+        assert_eq!(
+            args.content_type(),
+            Some("image/png"),
+            "the staged write carries the fallback object's content metadata"
+        );
+        assert!(
+            !args.if_not_exists(),
+            "a staging path is unique, so a no-clobber condition on it would be \
+             vacuous"
+        );
+        assert_eq!(
+            primary.renames(),
+            vec![(staged.clone(), "cold.txt".to_string())],
+            "the staged object is published by renaming it onto the target"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_staged_write_removes_the_staging_object() {
+        let (assets, primary, _fallback) =
+            rename_capable_read_through(WriteBehaviour::FailAfterOpen, false, false);
+
+        let bytes = assets
+            .read("cold.txt")
+            .await
+            .expect("a failed promotion must not fail the read");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+
+        let staged = primary.write_paths();
+        assert_eq!(staged.len(), 1, "the promotion attempted one staged write");
+        assert_eq!(
+            primary.deletes(),
+            staged,
+            "a staging object left behind by a failed write must be removed; \
+             nothing else ever sweeps it and a listing shows it forever"
+        );
+        assert!(
+            primary.renames().is_empty(),
+            "nothing was published, so nothing was renamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_stat_failure_leaves_a_resolved_read_intact() {
+        let (assets, primary, _fallback) =
+            rename_capable_read_through(WriteBehaviour::Accept, true, false);
+
+        let bytes = assets
+            .read("cold.txt")
+            .await
+            .expect("the bytes were already in hand when the promotion failed");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+        assert!(
+            primary.write_paths().is_empty(),
+            "the promotion never got as far as a write"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_stat_failure_surfaces_when_promotion_failures_are_fatal() {
+        let (assets, _primary, _fallback) =
+            rename_capable_read_through(WriteBehaviour::Accept, true, true);
+
+        let err = assets
+            .read("cold.txt")
+            .await
+            .expect_err("throw_on_promotion_failure surfaces the failure");
+        let message = err.to_string();
+        assert!(
+            message.contains("promotion") && message.contains("cold.txt"),
+            "the error must name the failure and the path, got: {message}"
         );
     }
 }
