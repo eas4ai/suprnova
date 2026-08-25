@@ -784,19 +784,64 @@ fn get_package_name() -> Result<String, String> {
         .ok_or_else(|| "Could not find package name in Cargo.toml".to_string())
 }
 
-fn validate_suprnova_project(backend_only: bool, frontend_only: bool) -> Result<(), String> {
+fn validate_suprnova_project(frontend_only: bool) -> Result<(), String> {
     let cargo_toml = Path::new("Cargo.toml");
-    let frontend_dir = Path::new("frontend");
 
     if !frontend_only && !cargo_toml.exists() {
         return Err("No Cargo.toml found. Are you in a Suprnova project directory?".into());
     }
 
-    if !backend_only && !frontend_dir.exists() {
-        return Err("No frontend directory found. Are you in a Suprnova project directory?".into());
+    Ok(())
+}
+
+/// Whether this project has a frontend for `serve` to run.
+///
+/// Laravel registers its Vite pane only when `base_path('package.json')`
+/// exists, and the same question applies here: did the scaffolder write a
+/// frontend? `suprnova new --api` writes none at all. The `package.json`
+/// half of the check earns its keep because type generation creates
+/// `frontend/src/types/` on its own, so a bare `frontend/` directory can
+/// exist without ever having been an npm project.
+fn frontend_present() -> bool {
+    let frontend_dir = Path::new("frontend");
+    frontend_dir.is_dir() && frontend_dir.join("package.json").is_file()
+}
+
+/// Which dev panes this invocation runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DevPanes {
+    /// Run `cargo watch` on the app binary.
+    backend: bool,
+    /// Run `npm run dev` in `frontend/`, and install its dependencies
+    /// first.
+    frontend: bool,
+}
+
+/// Decide which panes to run from the two flags and whether the project
+/// actually has a frontend.
+///
+/// A frontend-less project used to be rejected as "not a Suprnova project"
+/// unless the user remembered `--backend-only`. It is a valid project; it
+/// simply has no frontend pane. `--frontend-only` stays an error there,
+/// because it asks for the one pane that does not exist.
+fn decide_panes(
+    backend_only: bool,
+    frontend_only: bool,
+    frontend_present: bool,
+) -> Result<DevPanes, String> {
+    if frontend_only && !frontend_present {
+        return Err(
+            "`--frontend-only` needs a `frontend/` directory with a package.json, and \
+                    this project has none. A JSON:API-only project (`suprnova new --api`) has \
+                    no frontend: run `suprnova serve` without the flag to serve the backend."
+                .into(),
+        );
     }
 
-    Ok(())
+    Ok(DevPanes {
+        backend: !frontend_only,
+        frontend: !backend_only && frontend_present,
+    })
 }
 
 /// Version requirement for the `cargo-watch` we install on demand.
@@ -949,9 +994,21 @@ pub fn run(
     }
 
     // Validate project
-    if let Err(e) = validate_suprnova_project(backend_only, frontend_only) {
+    if let Err(e) = validate_suprnova_project(frontend_only) {
         ui::error(&e);
         std::process::exit(1);
+    }
+
+    let has_frontend = frontend_present();
+    let panes = match decide_panes(backend_only, frontend_only, has_frontend) {
+        Ok(panes) => panes,
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    };
+    if !backend_only && !has_frontend && !json {
+        ui::hint("No frontend/package.json found - serving the backend only.");
     }
 
     // Extra dev processes from the project's Suprnova.toml (Laravel's
@@ -966,7 +1023,7 @@ pub fn run(
     };
 
     // Generate TypeScript types on startup (unless skipped or frontend-only)
-    if !skip_types && !frontend_only {
+    if !skip_types && !frontend_only && has_frontend {
         let project_path = Path::new(".");
         let output_path = project_path.join("frontend/src/types/inertia-props.ts");
 
@@ -1020,13 +1077,17 @@ pub fn run(
     }
 
     // Ensure cargo-watch is installed (only if running backend)
-    if !frontend_only && let Err(e) = ensure_cargo_watch(json) {
+    if panes.backend
+        && let Err(e) = ensure_cargo_watch(json)
+    {
         ui::error(&e);
         std::process::exit(1);
     }
 
     // Ensure npm dependencies are installed (only if running frontend)
-    if !backend_only && let Err(e) = ensure_npm_dependencies(json) {
+    if panes.frontend
+        && let Err(e) = ensure_npm_dependencies(json)
+    {
         ui::error(&e);
         std::process::exit(1);
     }
@@ -1055,7 +1116,7 @@ pub fn run(
     .expect("Error setting Ctrl-C handler");
 
     // Start backend with cargo-watch
-    if !frontend_only {
+    if panes.backend {
         let package_name = match get_package_name() {
             Ok(name) => name,
             Err(e) => {
@@ -1091,7 +1152,7 @@ pub fn run(
     }
 
     // Start frontend with npm/vite
-    if !backend_only {
+    if panes.frontend {
         if !json {
             ui::label_value("Frontend", &format!("http://127.0.0.1:{}", vite_port));
         }
@@ -1135,7 +1196,7 @@ pub fn run(
     }
 
     // Start file watcher for TypeScript type regeneration
-    if !skip_types && !frontend_only {
+    if !skip_types && !frontend_only && has_frontend {
         let shutdown_watcher = manager.shutdown.clone();
         thread::spawn(move || {
             start_type_watcher(shutdown_watcher, mode);
@@ -1445,6 +1506,56 @@ mod tests {
         // Indirection through a real (unset) env var name keeps this
         // hermetic - no global env mutation.
         assert_eq!(env_port("SUPRNOVA_DEFINITELY_UNSET_PORT_VAR"), None);
+    }
+
+    #[test]
+    fn an_api_project_runs_the_backend_pane_only() {
+        let panes = decide_panes(false, false, false).expect("an api project is servable");
+        assert!(panes.backend);
+        assert!(!panes.frontend, "there is no frontend to run");
+    }
+
+    #[test]
+    fn a_fullstack_project_runs_both_panes() {
+        let panes = decide_panes(false, false, true).expect("a fullstack project is servable");
+        assert!(panes.backend);
+        assert!(panes.frontend);
+    }
+
+    #[test]
+    fn the_flags_still_win_over_a_present_frontend() {
+        assert_eq!(
+            decide_panes(true, false, true).expect("backend-only"),
+            DevPanes {
+                backend: true,
+                frontend: false,
+            }
+        );
+        assert_eq!(
+            decide_panes(false, true, true).expect("frontend-only"),
+            DevPanes {
+                backend: false,
+                frontend: true,
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_only_without_a_frontend_is_an_error_that_names_the_api_case() {
+        let err = decide_panes(false, true, false).expect_err("nothing to run");
+        assert!(err.contains("--frontend-only"), "{err}");
+        assert!(err.contains("--api"), "{err}");
+        assert!(
+            !err.contains("Are you in a Suprnova project directory?"),
+            "the old misdiagnosis must not survive: {err}"
+        );
+    }
+
+    #[test]
+    fn a_backend_only_project_still_validates_without_a_frontend() {
+        // The Cargo.toml half of the check is all that is left, and it
+        // does not care about the frontend at all.
+        assert!(validate_suprnova_project(true).is_ok());
     }
 }
 

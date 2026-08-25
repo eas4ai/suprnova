@@ -294,7 +294,7 @@ gaps as of the shipped framework.
 |---|---|---|---|
 | `php artisan` | Per-app `console` binary built from `#[command]` macros | shipped | [Console](console.md), [CLI overview](cli.md) |
 | `make:controller` / `make:model` / etc. | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task` | shipped | [Generators](cli-generators.md) |
-| `serve` | `suprnova serve` (backend + Vite dev server together) | shipped | [Serve](cli-serve.md) |
+| `serve` | `suprnova serve` (backend + Vite dev server together) | shipped | [Serve](cli-serve.md). Skips the Vite pane on a `--api` project instead of refusing to start. |
 | `migrate` family | `suprnova migrate / migrate:rollback / migrate:status / migrate:fresh` | shipped | [Migrations CLI](cli-migrations.md) |
 | `db:seed` | `cargo run --bin console db:seed` (via per-app console) | shipped | Seeders registered via `Seeder` trait; a targeted run prints RUNNING / DONE with elapsed milliseconds |
 | `schedule:run` / `schedule:work` / `schedule:list` | Same names via per-app console binary | shipped | [Scheduling CLI](cli-scheduling.md) |

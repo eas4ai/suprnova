@@ -88,6 +88,20 @@ suprnova serve --frontend-only
 Good for working on UI without paying the cost of a Rust rebuild on every
 save, or when the backend is running in another shell (or in Docker).
 
+### API-only project
+
+A project scaffolded with `suprnova new --api` has no `frontend/`
+directory. Run `serve` exactly as you would anywhere else:
+
+```bash
+suprnova serve
+```
+
+`serve` sees no `frontend/package.json`, skips the Vite pane and the
+TypeScript generation that feeds it, and runs the backend.
+`--frontend-only` is still an error on such a project: it asks for the one
+pane that does not exist.
+
 ### Skip type generation
 
 ```bash
@@ -105,10 +119,12 @@ When you run `suprnova serve`, the CLI:
 1. Loads `.env` from the current directory.
 2. Resolves backend and frontend ports (CLI flag → env var → default).
 3. Verifies you're in a Suprnova project - `Cargo.toml` must exist (unless
-   `--frontend-only`) and a `frontend/` directory must exist (unless
-   `--backend-only`).
+   `--frontend-only`), and `--frontend-only` needs a `frontend/` directory
+   with a `package.json`. A project without one is served backend-only
+   rather than rejected.
 4. Regenerates TypeScript types from any `#[derive(InertiaProps)]` structs
    it finds in `src/`, writing them to `frontend/src/types/inertia-props.ts`.
+   Skipped when the project has no frontend.
 5. Installs `cargo-watch` via `cargo install --locked --version "^8.5"
    cargo-watch` if it isn't on the PATH yet (one-time, with an
    "Installing..." notice). Skipped under `--frontend-only`.
@@ -118,11 +134,12 @@ When you run `suprnova serve`, the CLI:
    install time. A command that installs software as a side effect of
    starting a dev server should not also be choosing versions for you.
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
-   Skipped under `--backend-only`.
+   Skipped under `--backend-only`, and when the project has no frontend.
 7. Spawns `cargo watch -x 'run --bin <package-name>'` for the backend.
    `cargo-watch` re-runs the binary whenever a `.rs` file changes.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
-   Svelte/React/Vue components and Tailwind classes.
+   Svelte/React/Vue components and Tailwind classes. Skipped under
+   `--backend-only`, and when the project has no frontend.
 9. Spawns every extra process declared in the project's `Suprnova.toml`
    (see [Extra dev processes](#extra-dev-processes) below), each with its
    own `[name]` prefix - queue workers, log tailers, anything else you'd
