@@ -5,6 +5,7 @@
 
 mod assertions;
 mod context;
+mod direct_provider;
 mod file_quarantine_store;
 mod harness;
 mod host;
@@ -13,6 +14,7 @@ mod upload;
 
 pub use assertions::HarnessAssertions;
 pub use context::SyntheticLiveRequestContextBuilder;
+pub use direct_provider::DirectProviderConformanceAdapter;
 pub use file_quarantine_store::{FileStoreFault, TokioFileQuarantineStore};
 pub use harness::{
     ComponentHarness, ComponentHarnessConfig, HarnessError, HarnessErrorKind, HarnessMount,

@@ -12,8 +12,9 @@ use crate::limits::UploadLimits;
 use crate::resource::{CancellationFlag, PermitPool, ResourceBounds, ResourceOwner, Retirement};
 
 use super::{
-    QuarantineBytes, QuarantineObject, QuarantineStore, UploadChecksum, UploadError,
-    UploadErrorKind, UploadFuture, UploadHandle,
+    DirectTransferInstruction, QuarantineBytes, QuarantineObject, QuarantineStore,
+    ReportDirectPart, TransferInstruction, UploadChecksum, UploadError, UploadErrorKind,
+    UploadFuture, UploadHandle, UploadPart,
 };
 
 const MAX_CLIENT_NAME_BYTES: usize = 1_024;
@@ -54,6 +55,30 @@ impl<'a> PrepareTransfer<'a> {
             created_at,
         }
     }
+
+    /// Returns the temporary upload identity.
+    #[must_use]
+    pub const fn handle(&self) -> &UploadHandle {
+        self.handle
+    }
+
+    /// Returns the untrusted declared byte count subject to provider enforcement.
+    #[must_use]
+    pub const fn expected_bytes(&self) -> u64 {
+        self.expected_bytes
+    }
+
+    /// Returns the untrusted display name, never a storage identity.
+    #[must_use]
+    pub const fn client_name(&self) -> &str {
+        self.client_name
+    }
+
+    /// Returns the authoritative preparation instant.
+    #[must_use]
+    pub const fn created_at(&self) -> UnixMillis {
+        self.created_at
+    }
 }
 
 impl fmt::Debug for PrepareTransfer<'_> {
@@ -71,15 +96,56 @@ pub enum TransferDisposition {
     ExistingOutcome,
 }
 
-/// Safe transfer instructions for the reverse-proxy provider.
+/// Safe provider-neutral transfer instructions for one temporary upload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransferPlan {
     handle: UploadHandle,
     maximum_chunk_bytes: usize,
     disposition: TransferDisposition,
+    instructions: Vec<TransferInstruction>,
 }
 
 impl TransferPlan {
+    pub(crate) fn reverse_proxy(
+        handle: UploadHandle,
+        maximum_chunk_bytes: usize,
+        disposition: TransferDisposition,
+    ) -> Self {
+        Self {
+            handle,
+            maximum_chunk_bytes,
+            disposition,
+            instructions: vec![TransferInstruction::reverse_proxy(maximum_chunk_bytes)],
+        }
+    }
+
+    /// Creates a bounded direct-provider plan from already checked instructions.
+    pub fn direct(
+        handle: UploadHandle,
+        maximum_chunk_bytes: usize,
+        disposition: TransferDisposition,
+        instructions: Vec<DirectTransferInstruction>,
+        maximum_instructions: usize,
+    ) -> Result<Self, UploadError> {
+        if maximum_chunk_bytes == 0
+            || instructions.len() > maximum_instructions
+            || instructions.iter().any(|instruction| {
+                !instruction.is_constrained() || instruction.maximum_bytes() > maximum_chunk_bytes
+            })
+        {
+            return Err(UploadError::new(UploadErrorKind::InvalidField));
+        }
+        Ok(Self {
+            handle,
+            maximum_chunk_bytes,
+            disposition,
+            instructions: instructions
+                .into_iter()
+                .map(TransferInstruction::Direct)
+                .collect(),
+        })
+    }
+
     /// Returns the non-authoritative upload identity.
     #[must_use]
     pub const fn handle(&self) -> &UploadHandle {
@@ -96,6 +162,11 @@ impl TransferPlan {
     #[must_use]
     pub const fn disposition(&self) -> TransferDisposition {
         self.disposition
+    }
+
+    /// Iterates the bounded capabilities emitted by this preparation.
+    pub fn instructions(&self) -> impl ExactSizeIterator<Item = &TransferInstruction> {
+        self.instructions.iter()
     }
 }
 
@@ -151,9 +222,26 @@ pub struct ChunkReceipt {
     offset: u64,
     bytes: u64,
     disposition: ChunkDisposition,
+    next_instruction: Option<TransferInstruction>,
 }
 
 impl ChunkReceipt {
+    /// Creates a direct-provider part receipt and optional next bounded instruction.
+    #[must_use]
+    pub fn for_direct_part(
+        part: &UploadPart,
+        disposition: ChunkDisposition,
+        next_instruction: Option<DirectTransferInstruction>,
+    ) -> Self {
+        Self {
+            index: part.index(),
+            offset: part.offset(),
+            bytes: part.bytes(),
+            disposition,
+            next_instruction: next_instruction.map(TransferInstruction::Direct),
+        }
+    }
+
     /// Returns the accepted zero-based chunk index.
     #[must_use]
     pub const fn index(&self) -> u32 {
@@ -177,6 +265,12 @@ impl ChunkReceipt {
     pub const fn disposition(&self) -> ChunkDisposition {
         self.disposition
     }
+
+    /// Returns the next bounded provider instruction when sequential issuance continues.
+    #[must_use]
+    pub const fn next_instruction(&self) -> Option<&TransferInstruction> {
+        self.next_instruction.as_ref()
+    }
 }
 
 /// Trusted request to verify the complete authoritative byte range.
@@ -191,6 +285,18 @@ impl<'a> VerifyTransfer<'a> {
     #[must_use]
     pub const fn new(handle: &'a UploadHandle, checksum: &'a UploadChecksum) -> Self {
         Self { handle, checksum }
+    }
+
+    /// Returns the upload whose authoritative bytes must be verified.
+    #[must_use]
+    pub const fn handle(&self) -> &UploadHandle {
+        self.handle
+    }
+
+    /// Returns the expected whole-object checksum.
+    #[must_use]
+    pub const fn checksum(&self) -> &UploadChecksum {
+        self.checksum
     }
 }
 
@@ -208,6 +314,12 @@ pub struct IntegrityEvidence {
 }
 
 impl IntegrityEvidence {
+    /// Imports integrity evidence produced by a trusted provider adapter.
+    #[must_use]
+    pub const fn from_provider(bytes: u64, checksum: UploadChecksum) -> Self {
+        Self { bytes, checksum }
+    }
+
     /// Returns the verified authoritative byte count.
     #[must_use]
     pub const fn bytes(&self) -> u64 {
@@ -221,20 +333,13 @@ impl IntegrityEvidence {
     }
 }
 
-/// Provider-neutral streaming transfer boundary.
+/// Provider-neutral authority, verification, and lifecycle boundary.
 pub trait UploadProvider: Send + Sync {
     /// Creates or exactly replays one quarantined transfer.
     fn prepare<'a>(
         &'a self,
         request: PrepareTransfer<'a>,
     ) -> UploadFuture<'a, Result<TransferPlan, UploadError>>;
-
-    /// Streams and verifies one bounded sequential chunk.
-    fn write_chunk<'a>(
-        &'a self,
-        request: WriteChunk<'a>,
-        body: &'a mut dyn ChunkBody,
-    ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
 
     /// Re-reads, hashes, and synchronizes the complete authoritative file.
     fn verify<'a>(
@@ -245,9 +350,33 @@ pub trait UploadProvider: Send + Sync {
     /// Cancels and removes one pending upload idempotently.
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
 
+    /// Expires one pending upload with the same idempotent reclamation contract as cancellation.
+    fn expire<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
+        self.cancel(handle)
+    }
+
     /// Reclaims one quarantine object idempotently.
     fn cleanup<'a>(&'a self, handle: &'a UploadHandle)
     -> UploadFuture<'a, Result<(), UploadError>>;
+}
+
+/// Reverse-proxy capability for streaming authenticated request bodies into quarantine.
+pub trait ReverseProxyUploadProvider: UploadProvider {
+    /// Streams and verifies one bounded sequential chunk.
+    fn write_chunk<'a>(
+        &'a self,
+        request: WriteChunk<'a>,
+        body: &'a mut dyn ChunkBody,
+    ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
+}
+
+/// Direct-storage capability for importing trusted provider part outcomes.
+pub trait DirectUploadProvider: UploadProvider {
+    /// Imports one provider part without trusting a browser completion claim.
+    fn report_part<'a>(
+        &'a self,
+        request: ReportDirectPart<'a>,
+    ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -349,6 +478,7 @@ impl ChunkShape {
             offset: self.offset,
             bytes: self.size,
             disposition,
+            next_instruction: None,
         }
     }
 }
@@ -624,11 +754,11 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             && !existing.cancellation.is_canceled()
             && existing.expected_bytes == request.expected_bytes
         {
-            Ok(Some(TransferPlan {
-                handle: request.handle.clone(),
-                maximum_chunk_bytes: self.limits.max_chunk_bytes(),
-                disposition: TransferDisposition::ExistingOutcome,
-            }))
+            Ok(Some(TransferPlan::reverse_proxy(
+                request.handle.clone(),
+                self.limits.max_chunk_bytes(),
+                TransferDisposition::ExistingOutcome,
+            )))
         } else {
             Err(UploadError::new(UploadErrorKind::UploadConflict))
         }
@@ -745,7 +875,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     }
 }
 
-impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
+impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     fn prepare<'a>(
         &'a self,
         request: PrepareTransfer<'a>,
@@ -772,11 +902,11 @@ impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
                     .await?;
                 return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
-            Ok(TransferPlan {
-                handle: request.handle.clone(),
-                maximum_chunk_bytes: self.limits.max_chunk_bytes(),
-                disposition: TransferDisposition::Prepared,
-            })
+            Ok(TransferPlan::reverse_proxy(
+                request.handle.clone(),
+                self.limits.max_chunk_bytes(),
+                TransferDisposition::Prepared,
+            ))
         })
     }
 
@@ -1011,6 +1141,43 @@ impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
         handle: &'a UploadHandle,
     ) -> UploadFuture<'a, Result<(), UploadError>> {
         Box::pin(async move { self.remove_entry(handle).await })
+    }
+}
+
+impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
+    fn prepare<'a>(
+        &'a self,
+        request: PrepareTransfer<'a>,
+    ) -> UploadFuture<'a, Result<TransferPlan, UploadError>> {
+        QuarantinedFileProvider::prepare(self, request)
+    }
+
+    fn verify<'a>(
+        &'a self,
+        request: VerifyTransfer<'a>,
+    ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
+        QuarantinedFileProvider::verify(self, request)
+    }
+
+    fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
+        QuarantinedFileProvider::cancel(self, handle)
+    }
+
+    fn cleanup<'a>(
+        &'a self,
+        handle: &'a UploadHandle,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        QuarantinedFileProvider::cleanup(self, handle)
+    }
+}
+
+impl<S: QuarantineStore> ReverseProxyUploadProvider for QuarantinedFileProvider<S> {
+    fn write_chunk<'a>(
+        &'a self,
+        request: WriteChunk<'a>,
+        body: &'a mut dyn ChunkBody,
+    ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>> {
+        QuarantinedFileProvider::write_chunk(self, request, body)
     }
 }
 

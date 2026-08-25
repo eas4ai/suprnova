@@ -11,8 +11,9 @@ use suprnova_live::identity::UnixMillis;
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::upload::{
     ChunkBody, ChunkDisposition, PrepareTransfer, QuarantineBytes, QuarantineObject,
-    QuarantinedFileProvider, TransferCheckpoint, TransferDisposition, UploadChecksum, UploadError,
-    UploadErrorKind, UploadHandle, UploadProvider, VerifyTransfer, WriteChunk,
+    QuarantinedFileProvider, ReverseProxyUploadProvider, TransferCheckpoint, TransferDisposition,
+    UploadChecksum, UploadError, UploadErrorKind, UploadHandle, UploadProvider, VerifyTransfer,
+    WriteChunk,
 };
 use suprnova_live_test_support::{FileStoreFault, TokioFileQuarantineStore};
 

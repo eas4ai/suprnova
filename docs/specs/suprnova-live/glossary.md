@@ -297,6 +297,20 @@ sequential accepted chunks, byte count, and transfer identity so a host can
 persist and reconstruct interrupted work without trusting browser metadata.
 _Avoid_: local file path, component snapshot, transfer grant, ambient browser resume
 
+**Direct transfer instruction**:
+A short-lived provider-origin-, method-, part-, header-, and byte-bound
+capability that permits the browser to send one part directly to configured
+storage while Live retains handle and lifecycle authority. It may contain
+provider credentials and is therefore redacted from diagnostics.
+_Avoid_: transfer grant, vendor upload API, public upload URL, storage authority
+
+**Direct part reference**:
+An opaque non-authoritative identity binding a provider part report to one
+temporary upload and exact byte range. The adapter verifies provider state for
+that binding; the browser reference itself is never completion or integrity
+evidence.
+_Avoid_: provider receipt as authority, checksum claim, upload handle, transfer grant
+
 **Subscription descriptor**:
 A signed, expiring server-issued declaration of one permitted asynchronous
 subscription, including registered stream identity, capabilities, topics, typed

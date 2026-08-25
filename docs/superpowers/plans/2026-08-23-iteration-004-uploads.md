@@ -327,11 +327,19 @@ provider tests and test-support fixtures
 
     pub trait UploadProvider: Send + Sync {
         fn prepare<'a>(&'a self, request: PrepareTransfer<'a>) -> UploadFuture<'a, Result<TransferPlan, UploadError>>;
-      fn write_chunk<'a>(&'a self, request: WriteChunk<'a>, body: &'a mut dyn ChunkBody)
-          -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
-      fn verify<'a>(&'a self, request: VerifyTransfer<'a>) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>>;
-      fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
-      fn cleanup<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn verify<'a>(&'a self, request: VerifyTransfer<'a>) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>>;
+        fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn cleanup<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
+    }
+
+    pub trait ReverseProxyUploadProvider: UploadProvider {
+        fn write_chunk<'a>(&'a self, request: WriteChunk<'a>, body: &'a mut dyn ChunkBody)
+            -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
+    }
+
+    pub trait DirectUploadProvider: UploadProvider {
+        fn report_part<'a>(&'a self, request: ReportDirectPart<'a>)
+            -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
     }
     ```
 
@@ -386,6 +394,15 @@ provider tests and test-support fixtures
   ```
 
   The server retains handle/state authority; instructions are short-lived, part-bound, method-bound, byte-bound, and provider-origin-bound. Completion imports provider integrity evidence, then performs the same verification/state transitions as the file provider. Name the adapter `DirectProviderConformanceAdapter`; do not call it S3 or vendor-ready.
+
+  The conformance adapter issues at most one part instruction at a time and
+  returns the next only after importing the preceding provider outcome. An
+  opaque direct-part reference binds that report to the upload and range but is
+  explicitly non-authoritative; endpoint and header credentials remain
+  redacted and expired instructions are renewed only inside the temporary
+  upload's independent lifetime. Provider-mode operations are separate typed
+  extension traits, so a direct adapter cannot accidentally accept a
+  reverse-proxy request (or vice versa) through a runtime mode switch.
 
 - [ ] Run shared provider conformance, malformed instruction tests, and grant/URL leak tests.
 - [ ] Commit: `feat(upload): prove direct provider conformance`.
