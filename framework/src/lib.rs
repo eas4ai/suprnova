@@ -86,6 +86,7 @@ pub mod prelude;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
+pub(crate) mod redis_retry;
 pub mod resources;
 pub mod routing;
 pub mod schedule;

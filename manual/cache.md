@@ -365,6 +365,35 @@ That avoids two pitfalls:
 - `Duration::ZERO` is clamped to 1 ms before the call, so neither
   rejection path is reachable from user code.
 
+### Transient command retries
+
+A dropped socket used to fail whatever `Cache::get` happened to be in flight.
+The Redis connection manager reconnects on its own, but the command that hit
+the dead socket still returns its error to you.
+
+Read-shaped commands now retry once after a 50 ms pause, which is long enough
+for the reconnect to land: `GET`, `EXISTS`, and the `SCAN` / `SSCAN` pages
+behind `Cache::flush` and `Cache::flush_tags`. The queue driver's `XLEN`,
+`ZCARD`, and `XPENDING` reads and the rate limiter's `Retry-After` computation
+retry the same way. Set `REDIS_COMMAND_RETRIES` to add further retries on top
+of the built-in one.
+
+Writes never retry, at any setting. A transient error means the connection
+failed, not that the server declined the command - the server may already have
+run it - so retrying a `SET`, an `INCR`, a lock acquisition, a rate-limit hit,
+or a queue pop risks a second execution. Those commands surface the failure to
+you, and your retry decision is the informed one.
+
+### Why Suprnova diverges
+
+Laravel's `command_retries` config raises the retry budget for every Redis
+command, because its `command()` method is a single choke point that knows
+which command it is running and consults a 60-entry read-only allowlist.
+Suprnova's drivers call typed commands directly, so the allowlist becomes a
+per-call-site decision, and `REDIS_COMMAND_RETRIES` can only deepen the retries
+for commands that are already safe to repeat. There is no setting that makes a
+queue pop retry.
+
 ## Testing
 
 Bind an `InMemoryCache` into the `TestContainer` and the facade

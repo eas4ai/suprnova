@@ -62,6 +62,9 @@ impl RateLimiterDriver for RedisRateLimiter {
             end
         ",
         );
+        // Deliberately not retried: the script `ZADD`s a fresh UUID member, so
+        // a retry after a socket drop whose command the server did execute
+        // consumes two slots from the window and throttles a caller early.
         let mut conn = self.conn.clone();
         let ok: i64 = script
             .key(&zkey)
@@ -116,15 +119,32 @@ impl RateLimiterDriver for RedisRateLimiter {
             return remaining
             ",
         );
-        let mut conn = self.conn.clone();
-        let remaining_ms: i64 = script
-            .key(&zkey)
-            .arg(now_ms)
-            .arg(window_ms)
-            .arg(config.max_requests as i64)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("rl retry_after script: {e}")))?;
+        // Retried on a transient failure, unlike `try_acquire` above it. This
+        // script's only write is `ZREMRANGEBYSCORE ... -inf now-window`, which
+        // removes members already outside the window - running it twice has
+        // the same effect as running it once, and it adds nothing. A dropped
+        // connection here would otherwise cost the response its `Retry-After`
+        // header for no reason. `now_ms` is captured before the first attempt,
+        // so a retried computation is up to one backoff interval stale; that
+        // is under-reporting the wait by 50 ms on a header measured in
+        // seconds.
+        let max_requests = config.max_requests as i64;
+        let remaining_ms: i64 = crate::redis_retry::retry_read("rl retry_after script", || {
+            let mut conn = self.conn.clone();
+            let script = &script;
+            let zkey = &zkey;
+            async move {
+                script
+                    .key(zkey)
+                    .arg(now_ms)
+                    .arg(window_ms)
+                    .arg(max_requests)
+                    .invoke_async(&mut conn)
+                    .await
+            }
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("rl retry_after script: {e}")))?;
         if remaining_ms < 0 {
             return Ok(None);
         }

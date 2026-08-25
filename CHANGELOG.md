@@ -8,6 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Read-shaped Redis commands retry a transient failure instead of surfacing it.**
+  The connection manager already reconnected in the background, but the command
+  that hit the dead socket still failed your call. `GET`, `EXISTS`, the `SCAN`
+  and `SSCAN` pages behind `Cache::flush` / `Cache::flush_tags`, the queue
+  driver's `XLEN` / `ZCARD` / `XPENDING` reads, and the rate limiter's
+  `Retry-After` computation now retry once after a 50 ms pause - long enough for
+  the reconnect to land. `REDIS_COMMAND_RETRIES` adds further retries on top.
+  Writes never retry at any setting: a transient error means the connection
+  failed, not that the server refused the command, so repeating a `SET`, an
+  `INCR`, a lock acquisition, a rate-limit hit, or a queue pop could run it
+  twice. Error messages are unchanged, so anything matching on them keeps working.
 - **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
 - **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.

@@ -180,6 +180,7 @@ boots with the framework's embedded English validation catalog.
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis connection URL (consulted only when `CACHE_DRIVER=redis`). |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Key prefix for cache entries (collision-avoidance for shared Redis). |
 | `CACHE_DEFAULT_TTL` | `3600` (seconds) | `u64` | Default TTL in seconds. `0` means "no expiration". Applied to `Cache::put(None)` / `Cache::tags_put(None)`; `Cache::forever` and `Cache::remember_forever` always bypass. |
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Extra retries for read-shaped Redis commands, on top of the one every read already gets. Applies to the cache, queue, and rate-limit drivers. Clamped to `10`; an unparseable value falls back to `0`. Writes never retry at any value. |
 
 ## Queue
 
