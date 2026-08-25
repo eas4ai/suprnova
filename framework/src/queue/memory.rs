@@ -61,6 +61,16 @@ struct DelayedStore {
 
 impl DelayedStore {
     /// Park `env` for `delay`, recorded under its own id in both halves.
+    ///
+    /// Re-inserting an id is last-writer-wins: `by_id` keeps the newest
+    /// envelope, and the timer key from the earlier insert is left in `queue`
+    /// rather than cancelled. That costs one extra wake and nothing else -
+    /// whichever key fires first promotes the surviving envelope and takes it
+    /// out of `by_id`, and [`drain_delayed`] skips the other as a stale echo.
+    /// The visible effect is that the envelope becomes visible at the *earlier*
+    /// of the two delays. Deliberately unasserted: tests legitimately park the
+    /// same id twice, and a driver that panicked on it would be the wrong
+    /// trade for an in-process test double.
     fn insert(&mut self, env: Envelope, delay: Duration) {
         self.queue.insert(env.id, delay);
         self.by_id.insert(env.id, env);

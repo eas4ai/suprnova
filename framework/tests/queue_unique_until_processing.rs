@@ -20,7 +20,8 @@ use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::queue::{
-    Envelope, JobMiddleware, JobMiddlewareNext, JobOutcome, MemoryFailedJobStore, Queue,
+    BackoffSchedule, Envelope, JobMiddleware, JobMiddlewareNext, JobOutcome, MemoryFailedJobStore,
+    Queue,
 };
 use suprnova::{FrameworkError, Job, async_trait};
 use tokio_util::sync::CancellationToken;
@@ -493,4 +494,176 @@ async fn a_job_completed_by_middleware_gives_up_its_lock() {
     // the handler never ran, so nothing released it at processing start, and
     // the job is settled and gone.
     assert_sweep_releases_lock(|| CompletedByMiddlewareJob, "completed").await;
+}
+
+// ---------------------------------------------------------------------------
+// The timeout is not exempt from the sweep.
+//
+// `tokio::time::timeout` wraps the whole middleware pipeline, not just its
+// core, so a middleware that stalls times the job out with the core never run
+// and the release at processing start never issued. When the attempt was also
+// the last one, the envelope is dead-lettered and never comes back - so the
+// lock has to go with it, exactly as for the other short-circuits above.
+// ---------------------------------------------------------------------------
+
+/// Stalls past the job's per-attempt timeout without ever calling `next`.
+struct StallingMiddleware;
+
+#[async_trait]
+impl JobMiddleware for StallingMiddleware {
+    async fn handle(
+        &self,
+        _env: Envelope,
+        _next: JobMiddlewareNext,
+    ) -> Result<JobOutcome, FrameworkError> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(JobOutcome::Completed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StalledUniqueJob;
+
+#[async_trait]
+impl Job for StalledUniqueJob {
+    fn job_name() -> &'static str {
+        "wave5-sweep-timeout"
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some("sweep-timeout".into())
+    }
+    fn unique_until_processing() -> bool {
+        true
+    }
+    fn unique_for() -> Duration {
+        Duration::from_secs(300)
+    }
+    /// One attempt, so the first timeout is also the last and the worker takes
+    /// the dead-letter sub-arm rather than the retry one.
+    fn max_tries() -> u32 {
+        1
+    }
+    fn timeout() -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+    fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
+        vec![Arc::new(StallingMiddleware)]
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        SHORT_CIRCUIT_HANDLED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_job_timed_out_in_middleware_with_no_attempts_left_gives_up_its_lock() {
+    install_cache();
+    // A dead-letter with no store bound logs the whole envelope at ERROR; bind
+    // one so the settlement takes its normal path.
+    let failed = Arc::new(MemoryFailedJobStore::new());
+    Queue::set_failed_store(failed.clone());
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    register_job::<StalledUniqueJob>();
+    SHORT_CIRCUIT_HANDLED.store(0, Ordering::SeqCst);
+
+    assert!(
+        Queue::push_unique(StalledUniqueJob).await.expect("push"),
+        "the first push must win the lock"
+    );
+    work_one(driver.clone()).await;
+    assert_eq!(
+        SHORT_CIRCUIT_HANDLED.load(Ordering::SeqCst),
+        0,
+        "the middleware never called next, so the handler never ran and the \
+         release at processing start never happened"
+    );
+
+    assert!(
+        Queue::push_unique(StalledUniqueJob).await.expect("re-push"),
+        "a job dead-lettered on timeout is never going to process, so its \
+         uniqueness lock must not outlive it for the rest of unique_for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The documented trade.
+//
+// `manual/queues.md` promises that a job which fails releases its lock and is
+// still retried, and that the window between attempts is exactly when a
+// duplicate can enqueue. Both halves are pinned here, because dropping either
+// one silently would look like an improvement: keeping the lock through the
+// retry reads as tighter dedupe, and not retrying reads as stricter
+// uniqueness.
+// ---------------------------------------------------------------------------
+
+static FAILING_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FailsOnceJob;
+
+#[async_trait]
+impl Job for FailsOnceJob {
+    fn job_name() -> &'static str {
+        "wave5-until-processing-fails"
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some("fails-once".into())
+    }
+    fn unique_until_processing() -> bool {
+        true
+    }
+    fn unique_for() -> Duration {
+        Duration::from_secs(300)
+    }
+    /// No backoff, so the retry is visible to the next `pop` and the test does
+    /// not have to wait one out.
+    fn backoff() -> BackoffSchedule {
+        BackoffSchedule::Fixed { secs: 0 }
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        FAILING_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+        Err(FrameworkError::internal("first attempt fails"))
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failing_job_releases_its_lock_and_is_still_retried() {
+    install_cache();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    register_job::<FailsOnceJob>();
+    FAILING_ATTEMPTS.store(0, Ordering::SeqCst);
+
+    assert!(
+        Queue::push_unique(FailsOnceJob).await.expect("push"),
+        "the first push must win the lock"
+    );
+    work_one(driver.clone()).await;
+    assert_eq!(
+        FAILING_ATTEMPTS.load(Ordering::SeqCst),
+        1,
+        "the handler ran and failed"
+    );
+
+    assert_eq!(
+        driver.size().await.expect("size"),
+        1,
+        "a failure short of max_tries goes back on the queue: the release at \
+         processing start does not cancel the retry"
+    );
+
+    assert!(
+        Queue::push_unique(FailsOnceJob).await.expect("re-push"),
+        "the lock went the moment processing began, so a duplicate can enqueue \
+         while the failed attempt waits out its backoff"
+    );
+    assert_eq!(
+        driver.size().await.expect("size"),
+        2,
+        "two envelopes for one unique id - the trade `unique_until_processing` \
+         makes, and the reason `unique_for` alone is the other option"
+    );
 }

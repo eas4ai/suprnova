@@ -1,11 +1,21 @@
 //! Transaction-scoped after-commit and rollback callbacks.
 //!
 //! Laravel's `DatabaseTransactionsManager`, minus everything Suprnova's
-//! no-nesting rule makes unreachable. There are no savepoint levels and no
-//! parent chains here, so there is nothing to stage and nothing to partition
-//! per connection: the registry is two `Vec`s hanging off the current
-//! transaction's `TxState`, drained exactly once by
+//! no-nesting rule makes unreachable. There are no parent chains here and
+//! nothing to partition per connection: the registry is two `Vec`s hanging off
+//! the current transaction's `TxState`, drained exactly once by
 //! [`DB::transaction`](crate::DB::transaction)'s commit or rollback path.
+//!
+//! Nesting does reach this module in one shape. Laravel's
+//! `DatabaseTransactionsManager::rollback($connection, $level)` discards every
+//! callback staged above the level being unwound, and Suprnova's nested block is
+//! a savepoint, so [`Transaction::rollback_to`](crate::Transaction::rollback_to)
+//! is the same event: the rows a deferred dispatch was waiting on are gone, so
+//! the dispatch has to go with them. [`SavepointMark`] records where both `Vec`s
+//! stood when the savepoint was issued, and [`rollback_to_savepoint`] drops the
+//! after-commit callbacks above that mark while running the rollback callbacks
+//! that compensate for them. A savepoint that is never rolled back keeps
+//! everything registered inside it.
 //!
 //! Manual transactions ([`DB::begin_transaction`](crate::DB::begin_transaction))
 //! deliberately do not participate. They install no `CURRENT_TX`, so there is no
@@ -104,6 +114,94 @@ fn queue_on_current_transaction(
         }
     });
     slot
+}
+
+/// Where both callback registries stood when a `SAVEPOINT` was issued.
+///
+/// Laravel keys the same bookkeeping by integer nesting level, because its
+/// manager owns the counter. Suprnova's caller names the point instead
+/// ([`Transaction::savepoint`](crate::Transaction::savepoint)), and SQL lets a
+/// name repeat - SQLite, Postgres and MySQL all resolve
+/// `ROLLBACK TO SAVEPOINT x` to the most recent `x` and destroy every savepoint
+/// established after it. So the marks are a stack that carries the name and is
+/// searched from the top: whichever savepoint the database rolls back to is the
+/// one whose mark is used, and the registry can never disagree with the rows.
+pub(crate) struct SavepointMark {
+    /// The name the caller passed to `savepoint`, already validated as a SQL
+    /// identifier by the time it reaches here.
+    name: String,
+    /// Length of the after-commit registry at the savepoint.
+    after_commit_len: usize,
+    /// Length of the rollback registry at the savepoint.
+    on_rollback_len: usize,
+}
+
+/// Record where both registries stand, so a later `rollback_to` on `name` can
+/// tell what was registered above this point.
+///
+/// Called only after the `SAVEPOINT` statement itself succeeded: a mark for a
+/// savepoint the database never established would discard callbacks the rows
+/// still back.
+pub(crate) fn mark_savepoint(state: &super::transaction::TxState, name: &str) {
+    let after_commit_len = registry_len(&state.after_commit);
+    let on_rollback_len = registry_len(&state.on_rollback);
+    let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
+    marks.push(SavepointMark {
+        name: name.to_owned(),
+        after_commit_len,
+        on_rollback_len,
+    });
+}
+
+/// Unwind both registries to `name`'s mark and hand back the rollback callbacks
+/// that compensate for what was discarded.
+///
+/// Returns `None` when no mark carries `name`, which means the savepoint was
+/// established out of band (raw `SAVEPOINT` SQL rather than
+/// [`Transaction::savepoint`](crate::Transaction::savepoint)). Discarding
+/// callbacks on a guess would be worse than leaving them: the caller warns and
+/// leaves the registries alone.
+///
+/// The mark itself stays on the stack, because every backend keeps the named
+/// savepoint usable after a `ROLLBACK TO` - the same name can be rolled back to
+/// again, and the recorded lengths are still the right floor. Marks above it go,
+/// because the database destroyed those savepoints.
+pub(crate) fn rollback_to_savepoint(
+    state: &super::transaction::TxState,
+    name: &str,
+) -> Option<Vec<AfterCommitCallback>> {
+    let (after_commit_len, on_rollback_len) = {
+        let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
+        // From the top: a repeated name means the innermost savepoint shadows
+        // the outer one, which is exactly how the database resolves it.
+        let idx = marks.iter().rposition(|m| m.name == name)?;
+        let mark = (marks[idx].after_commit_len, marks[idx].on_rollback_len);
+        marks.truncate(idx + 1);
+        mark
+    };
+
+    // Both guards are taken and released without an `.await` between them: the
+    // compensations run in the caller, after every lock is back.
+    {
+        let mut after_commit = state.after_commit.lock().unwrap_or_else(|e| e.into_inner());
+        // `truncate` is a no-op when the list is already shorter, which is the
+        // case for a `rollback_to` that follows another one on the same name.
+        after_commit.truncate(after_commit_len);
+    }
+    let mut on_rollback = state.on_rollback.lock().unwrap_or_else(|e| e.into_inner());
+    if on_rollback_len >= on_rollback.len() {
+        return Some(Vec::new());
+    }
+    Some(on_rollback.split_off(on_rollback_len))
+}
+
+/// Current length of one registry.
+///
+/// Split out so the two reads in [`mark_savepoint`] share one poisoning policy
+/// with the rest of the module: recover in place, because the critical section
+/// holds no user code and dropping a registry would be worse than reusing it.
+fn registry_len(vec: &std::sync::Mutex<Vec<AfterCommitCallback>>) -> usize {
+    vec.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 /// Take both registries off `state`, leaving them empty.

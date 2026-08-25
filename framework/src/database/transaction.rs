@@ -33,6 +33,10 @@
 //! only if everything succeeded; otherwise restore the snapshot") is
 //! the same across all three backends.
 //!
+//! A savepoint rollback unwinds the after-commit registry with the rows: a
+//! deferred queue push registered inside the savepoint is discarded and its
+//! compensation runs. See [`Transaction::rollback_to`].
+//!
 //! ## After-commit callbacks
 //!
 //! [`DB::transaction`](crate::DB::transaction) drains two callback registries
@@ -90,6 +94,14 @@ pub(crate) struct TxState {
     /// run when the transaction rolls back. The after-commit list is discarded
     /// in that case.
     pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
+    /// Where both registries stood at each [`Transaction::savepoint`] still in
+    /// scope, innermost last.
+    ///
+    /// A savepoint rollback undoes the rows a deferred dispatch was waiting on,
+    /// so it has to undo the dispatch too - and without a recorded length there
+    /// is nothing to measure "registered above the savepoint" against. See
+    /// [`after_commit::SavepointMark`](super::after_commit::SavepointMark).
+    pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
 }
 
 /// Why a `DB::transaction` call failed, kept out of the flat `FrameworkError`
@@ -158,6 +170,19 @@ tokio::task_local! {
 pub struct Transaction {
     pub(crate) inner: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
+    /// The callback registry this handle's savepoints answer to, or `None` for
+    /// the manual [`DB::begin_transaction`] form, which registers nothing.
+    ///
+    /// Held on the handle rather than read from `CURRENT_TX`, because a manual
+    /// transaction opened *inside* a [`DB::transaction`] closure would find the
+    /// ambient task-local and unwind the enclosing closure's deferred pushes on
+    /// its own `rollback_to` - the wrong registry, silently.
+    ///
+    /// This is a second path from a live `Transaction` to the
+    /// `Arc<DatabaseTransaction>` (`TxState` holds one too), so `DB::transaction`
+    /// has to drop the handle before `Arc::try_unwrap` can reach the transaction
+    /// to commit it. It already does; the drop is now load-bearing twice over.
+    pub(crate) registry: Option<Arc<TxState>>,
 }
 
 /// Cheap shareable view of a [`Transaction`] used to scope a single
@@ -837,14 +862,27 @@ impl Transaction {
     /// that splices untrusted input gets a
     /// [`FrameworkError::bad_request`] instead of an injected
     /// statement. [`Self::rollback_to`] applies the same guard.
+    ///
+    /// Inside [`DB::transaction`] the call also marks the after-commit
+    /// registry, so a later [`Self::rollback_to`] can discard the deferred
+    /// dispatches this savepoint's rows were paying for. Repeating a name is
+    /// allowed: the inner savepoint shadows the outer one until it is rolled
+    /// back, which is how every backend resolves it.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
-        let name = super::identifier::validate_savepoint_name(name)?;
-        let sql = format!("SAVEPOINT {name}");
+        let validated = super::identifier::validate_savepoint_name(name)?;
+        let sql = format!("SAVEPOINT {validated}");
         self.inner
             .execute_unprepared(&sql)
             .await
             .map(|_| ())
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // Marked only once the statement landed: a mark for a savepoint the
+        // database never established would discard callbacks whose rows are
+        // still there.
+        if let Some(state) = self.registry.as_deref() {
+            super::after_commit::mark_savepoint(state, validated);
+        }
+        Ok(())
     }
 
     /// Issue `ROLLBACK TO SAVEPOINT <name>` against the active
@@ -854,14 +892,48 @@ impl Transaction {
     /// The savepoint name is validated the same way as
     /// [`Self::savepoint`] before interpolation - see that method
     /// for the accepted shape.
+    ///
+    /// Inside [`DB::transaction`] this also unwinds the after-commit registry
+    /// to the savepoint: a [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// push registered above it is discarded, and the compensating callbacks
+    /// registered with it run now, so a deferred `push_unique`'s dedupe lock
+    /// goes back immediately and a re-dispatch inside the same transaction can
+    /// win it. Callbacks registered *before* the savepoint are untouched, and a
+    /// savepoint that is never rolled back keeps everything registered inside
+    /// it. Manual transactions have no registry and so unwind nothing.
+    ///
+    /// The compensations run with the transaction still open and `CURRENT_TX`
+    /// still installed - unlike the end-of-transaction drain, there is no way to
+    /// step out of a task-local scope from inside it. That costs nothing for the
+    /// one compensation the framework registers
+    /// ([`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned),
+    /// which goes to the cache store, never to the database), but a caller
+    /// writing its own must not assume it is running outside the transaction.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
-        let name = super::identifier::validate_savepoint_name(name)?;
-        let sql = format!("ROLLBACK TO SAVEPOINT {name}");
+        let validated = super::identifier::validate_savepoint_name(name)?;
+        let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
         self.inner
             .execute_unprepared(&sql)
             .await
             .map(|_| ())
-            .map_err(|e| FrameworkError::database(e.to_string()))
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
+        // rows in place, and callbacks discarded for it could not be recovered.
+        if let Some(state) = self.registry.as_deref() {
+            match super::after_commit::rollback_to_savepoint(state, validated) {
+                Some(compensations) => {
+                    super::after_commit::run_rollback(compensations).await;
+                }
+                None => tracing::warn!(
+                    target: "suprnova::database",
+                    savepoint = validated,
+                    "rolled back to a savepoint this transaction never issued through \
+                     Transaction::savepoint; after-commit callbacks registered inside it \
+                     are kept, because there is no recorded mark to unwind to",
+                ),
+            }
+        }
+        Ok(())
     }
 
     /// Commit the manual transaction returned by
@@ -1034,18 +1106,23 @@ impl DB {
         .await;
         let tx_arc = Arc::new(tx);
 
-        let transaction = Transaction {
-            inner: tx_arc.clone(),
-            connection_name: conn_name.clone(),
-        };
-
         let tx_state = Arc::new(TxState {
             tx: tx_arc.clone(),
             connection_name: conn_name.clone(),
             after_commit: std::sync::Mutex::new(Vec::new()),
             on_rollback: std::sync::Mutex::new(Vec::new()),
+            savepoints: std::sync::Mutex::new(Vec::new()),
         });
         let registry = tx_state.clone();
+
+        // The handle carries the registry so `tx.savepoint(...)` /
+        // `tx.rollback_to(...)` act on *this* transaction's deferred dispatches
+        // rather than on whatever the ambient task-local happens to hold.
+        let transaction = Transaction {
+            inner: tx_arc.clone(),
+            connection_name: conn_name.clone(),
+            registry: Some(tx_state.clone()),
+        };
 
         let result = CURRENT_TX.scope(Some(tx_state), f(&transaction)).await;
 
@@ -1064,7 +1141,9 @@ impl DB {
         // first is `tx_arc`); without this explicit drop the unwrap
         // always fails with refcount==2 and we'd never commit. The
         // task-local clone is released automatically when
-        // `CURRENT_TX::scope` returns.
+        // `CURRENT_TX::scope` returns. It also holds the last `TxState`
+        // clone once `registry` above is gone, and `TxState` holds a third
+        // `Arc<DatabaseTransaction>`, so this drop has to come after that one.
         drop(transaction);
 
         match result {
@@ -1215,6 +1294,10 @@ impl DB {
         Ok(Transaction {
             inner: Arc::new(tx),
             connection_name: conn_name,
+            // No `CURRENT_TX` and no drain point, so nothing ever registers
+            // against this transaction and its savepoints have nothing to
+            // unwind. See the module doc on manual transactions.
+            registry: None,
         })
     }
 

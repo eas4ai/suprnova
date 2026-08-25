@@ -18,7 +18,7 @@ use suprnova::cache::{CacheStore, InMemoryCache};
 use suprnova::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use suprnova::queue::testing::{install_fake, pushed};
 use suprnova::queue::worker::register_job;
-use suprnova::queue::{Envelope, SyncQueueDriver};
+use suprnova::queue::{Envelope, FailoverQueueDriver, SyncQueueDriver};
 use suprnova::testing::{TestContainer, TestDatabase};
 use suprnova::{
     DB, DatabaseConfig, DbConnection, EnvelopeOverrides, FrameworkError, Job, Queue, TxHandle,
@@ -485,10 +485,17 @@ async fn push_unique_locks_now_but_defers_the_envelope() {
     .await
     .expect("commit");
 
+    let env = driver.only();
     assert_eq!(
-        driver.count(),
-        1,
-        "exactly one envelope lands, and only after the commit"
+        env.idempotency_key.as_deref(),
+        Some("defer-1"),
+        "the deferred envelope carries the dedupe id the lock was taken under"
+    );
+    assert!(
+        env.unique_lock_owner.is_some(),
+        "the owner token of the lock taken at push time has to reach the envelope: \
+         for a unique_until_processing job the worker is what releases it, and an \
+         owner-scoped release is the only kind the framework has"
     );
 }
 
@@ -898,5 +905,392 @@ async fn two_concurrent_transactions_keep_separate_registries() {
             "wave5-after-commit-other".to_string()
         ],
         "each transaction publishes its own job at its own commit"
+    );
+}
+
+// --- Savepoints -------------------------------------------------------------
+//
+// Laravel evidence: `Database/DatabaseTransactionsManager.php` `rollback($connection,
+// $level)` discards every callback staged above the level being rolled back, so a
+// dispatch registered inside a nested block that was undone never fires. Suprnova's
+// nested block is a savepoint, so `Transaction::rollback_to` is the same event.
+
+#[tokio::test]
+#[serial]
+async fn a_savepoint_rollback_discards_a_push_registered_above_it() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("sp_discard").await?;
+            Queue::push(AfterCommitJob).await?;
+            tx.rollback_to("sp_discard").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.count(),
+        0,
+        "the rows the push described were rolled back with the savepoint, so the \
+         push must never reach the driver"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_savepoint_rollback_releases_the_unique_lock_taken_above_it() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("sp_unique").await?;
+            let taken = Queue::push_unique(UniqueAfterCommitJob {
+                key: "savepoint-unique".into(),
+            })
+            .await?;
+            assert!(taken, "the lock is taken at push time");
+            tx.rollback_to("sp_unique").await?;
+
+            // The compensation runs at `rollback_to`, not at the commit, so the
+            // key is free again inside the very transaction that rolled it back.
+            let again = Queue::push_unique(UniqueAfterCommitJob {
+                key: "savepoint-unique".into(),
+            })
+            .await?;
+            assert!(
+                again,
+                "a savepoint rollback must hand the dedupe lock back immediately, or a \
+                 retry inside the same transaction is blocked for the whole unique_for window"
+            );
+            tx.rollback_to("sp_unique").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.count(),
+        0,
+        "both attempts were rolled back with the savepoint"
+    );
+
+    let after = Queue::push_unique(UniqueAfterCommitJob {
+        key: "savepoint-unique".into(),
+    })
+    .await
+    .expect("re-push");
+    assert!(
+        after,
+        "nothing was ever dispatched, so the lock must not outlive the transaction"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_savepoint_that_is_never_rolled_back_keeps_its_push() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("sp_kept").await?;
+            Queue::push(AfterCommitJob).await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.count(),
+        1,
+        "the savepoint's rows committed with the transaction, so its deferred push \
+         must dispatch exactly as an unmarked one does"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_push_registered_before_the_savepoint_survives_a_rollback_to() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            Queue::push(AfterCommitJob).await?;
+            tx.savepoint("sp_below").await?;
+            Queue::push(OtherAfterCommitJob).await?;
+            tx.rollback_to("sp_below").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let names: Vec<String> = driver.envelopes().into_iter().map(|e| e.job_name).collect();
+    assert_eq!(
+        names,
+        vec!["wave5-after-commit".to_string()],
+        "only what was registered above the mark is discarded; the rows below it \
+         still committed"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn nested_savepoints_roll_back_only_the_inner_one() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("sp_outer").await?;
+            Queue::push(AfterCommitJob).await?;
+            tx.savepoint("sp_inner").await?;
+            Queue::push(OtherAfterCommitJob).await?;
+            tx.rollback_to("sp_inner").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let names: Vec<String> = driver.envelopes().into_iter().map(|e| e.job_name).collect();
+    assert_eq!(
+        names,
+        vec!["wave5-after-commit".to_string()],
+        "rolling back the inner savepoint leaves the outer one's push alone"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn rolling_back_to_the_outer_savepoint_discards_the_inner_one_too() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("sp_outer").await?;
+            Queue::push(AfterCommitJob).await?;
+            tx.savepoint("sp_inner").await?;
+            Queue::push(OtherAfterCommitJob).await?;
+            // Every backend destroys `sp_inner` here, so the marks above
+            // `sp_outer` have to go with it.
+            tx.rollback_to("sp_outer").await?;
+            Queue::push(AfterCommitJob).await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let names: Vec<String> = driver.envelopes().into_iter().map(|e| e.job_name).collect();
+    assert_eq!(
+        names,
+        vec!["wave5-after-commit".to_string()],
+        "both inner pushes are discarded, and the one registered after the rollback \
+         still dispatches"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_manual_transaction_savepoint_leaves_the_enclosing_registry_alone() {
+    let driver = install_driver();
+
+    // Two transactions open at once needs two connections, so this borrows the
+    // pool `two_concurrent_transactions_keep_separate_registries` uses. Each
+    // `sqlite::memory:` connection is an independent database, which costs
+    // nothing here: the test issues no SQL beyond the savepoint statements.
+    let config = DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .max_connections(4)
+        .min_connections(2)
+        .logging(false)
+        .build();
+    let conn = DbConnection::connect(&config).await.expect("pool");
+
+    // A manual transaction opened inside the closure finds `CURRENT_TX` set. Its
+    // savepoints must not reach that registry: they belong to a different
+    // physical transaction, and unwinding the closure's deferred pushes on its
+    // `rollback_to` would discard dispatches whose rows are still there.
+    TestContainer::scope(async move {
+        TestContainer::singleton(conn);
+        DB::transaction(|_tx| {
+            Box::pin(async move {
+                Queue::push(AfterCommitJob).await?;
+                let manual = DB::begin_transaction().await?;
+                manual.savepoint("sp_manual").await?;
+                manual.rollback_to("sp_manual").await?;
+                manual.rollback().await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect("commit");
+    })
+    .await;
+
+    assert_eq!(
+        driver.count(),
+        1,
+        "the enclosing transaction's deferred push is not a manual transaction's to \
+         unwind"
+    );
+}
+
+// --- Deferral through the failover decorator --------------------------------
+//
+// The two halves compose or they do not: the deferral has to survive a
+// fall-through to a second connection, and the compensation has to survive it
+// too. A rollback that only knew how to undo a push the primary accepted would
+// strand every lock taken while the primary was down.
+
+/// A driver whose `push` always fails, standing in for a primary connection
+/// that is down.
+struct DownDriver;
+
+#[async_trait]
+impl QueueDriver for DownDriver {
+    async fn push(&self, _env: Envelope) -> Result<(), FrameworkError> {
+        Err(FrameworkError::internal("primary connection is down"))
+    }
+
+    async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        Ok(None)
+    }
+
+    async fn ack(&self, _t: &ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn nack(&self, _t: &ReservationToken, _delay: Duration) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    async fn size(&self) -> Result<u64, FrameworkError> {
+        Ok(0)
+    }
+
+    fn name(&self) -> &'static str {
+        "down"
+    }
+}
+
+/// Bind a failover connection whose primary refuses every push, so a successful
+/// push can only be one that fell through to `fallback`.
+fn install_failover_onto(fallback: Arc<RecordingDriver>) {
+    let failover = FailoverQueueDriver::new(vec![
+        (
+            "primary".to_string(),
+            Arc::new(DownDriver) as Arc<dyn QueueDriver>,
+        ),
+        ("fallback".to_string(), fallback as Arc<dyn QueueDriver>),
+    ])
+    .expect("two drivers");
+    Queue::set_driver(Arc::new(failover));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_deferred_push_falls_over_with_its_available_at_and_overrides_intact() {
+    let fallback = Arc::new(RecordingDriver::default());
+    install_failover_onto(fallback.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    let before = Utc::now();
+    let seen_mid_transaction = fallback.clone();
+    DB::transaction(move |_tx| {
+        let fallback = seen_mid_transaction.clone();
+        Box::pin(async move {
+            Queue::later_with(
+                Duration::from_secs(LONG_DELAY_SECS as u64),
+                PlainJob,
+                EnvelopeOverrides {
+                    after_commit: Some(true),
+                    queue: Some("failover-lane".into()),
+                    max_tries: Some(7),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(
+                fallback.count(),
+                0,
+                "the deferral runs before the fall-through, so nothing reaches any \
+                 connection until the commit"
+            );
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let env = fallback.only();
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("failover-lane"),
+        "the per-push queue override has to survive both the deferral and the \
+         fall-through"
+    );
+    assert_eq!(env.max_tries, 7, "so does max_tries");
+    let floor =
+        before + chrono::Duration::seconds(LONG_DELAY_SECS) - chrono::Duration::milliseconds(100);
+    assert!(
+        env.available_at >= floor,
+        "the caller's explicit timestamp is not the fallback's to recompute: \
+         available_at {} is earlier than {floor}",
+        env.available_at
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_rolled_back_deferred_push_releases_its_lock_even_when_the_primary_is_down() {
+    let fallback = Arc::new(RecordingDriver::default());
+    install_failover_onto(fallback.clone());
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    let result: Result<(), FrameworkError> = DB::transaction(|_tx| {
+        Box::pin(async {
+            let taken = Queue::push_unique(UniqueAfterCommitJob {
+                key: "failover-rollback".into(),
+            })
+            .await?;
+            assert!(
+                taken,
+                "the lock is taken at push time, before any driver runs"
+            );
+            Err(FrameworkError::internal("force rollback"))
+        })
+    })
+    .await;
+
+    assert!(result.is_err(), "the transaction rolled back");
+    assert_eq!(fallback.count(), 0, "nothing reached any connection");
+
+    let retried = Queue::push_unique(UniqueAfterCommitJob {
+        key: "failover-rollback".into(),
+    })
+    .await
+    .expect("re-push");
+    assert!(
+        retried,
+        "the compensation is registered against the transaction, not against a \
+         connection, so a down primary must not strand the lock"
+    );
+    assert_eq!(
+        fallback.count(),
+        1,
+        "and the re-dispatch itself still falls over to the fallback"
     );
 }

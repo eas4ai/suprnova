@@ -597,18 +597,34 @@ impl QueueDriver for RedisQueueDriver {
     /// it yet returns an empty group list. Both fold to "no cursor, scan
     /// everything from the start" (`-`), matching `xpending_count`'s
     /// established "unknown group reads as empty" convention.
+    ///
+    /// Only those two. Every other `XINFO GROUPS` failure - a dropped
+    /// connection, an auth error, a wrong-type key - propagates, because
+    /// folding it into "no cursor" turns an outage into a silent full-stream
+    /// scan that reports every acked job in the stream's history as pending.
+    ///
+    /// # Read-ahead
+    ///
+    /// Redis `XREADGROUP` claims a batch of entries at once, so the cursor can
+    /// sit well past the entry a worker is actually running: entries already
+    /// read into a consumer's buffer are below the cursor and do not appear
+    /// here, even though no handler has touched them yet. The listing is the
+    /// never-delivered backlog, not "everything not yet started".
     async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
         let filter = queue_filter(queue);
         let mut conn = self.conn.clone();
 
-        let groups: redis::streams::StreamInfoGroupsReply = conn
-            .xinfo_groups(self.stream_key.name())
-            .await
-            // No stream yet surfaces as a Redis error; fold it into "no
-            // cursor" the same way `xpending_count` folds "no group" into
-            // "0 reserved" - both are the honest reading of "nothing has
-            // happened here yet".
-            .unwrap_or_default();
+        let groups: redis::streams::StreamInfoGroupsReply =
+            match conn.xinfo_groups(self.stream_key.name()).await {
+                Ok(groups) => groups,
+                // "Nothing has happened here yet" reads as no cursor, the same way
+                // `xpending_count` folds "no group" into "0 reserved". Anything
+                // else is an error the caller has to see.
+                Err(e) if is_missing_stream_or_group(&e) => Default::default(),
+                Err(e) => {
+                    return Err(FrameworkError::internal(format!("redis XINFO GROUPS: {e}")));
+                }
+            };
         let mut start = groups
             .groups
             .iter()
@@ -931,4 +947,35 @@ impl RedisQueueDriver {
         };
         Ok(count)
     }
+}
+
+/// True for the two Redis errors that mean "this stream or group has not been
+/// created yet", and false for every other failure.
+///
+/// The distinction matters because the caller's fallback for these is a
+/// full-stream scan from `-`. That is right when there is genuinely nothing to
+/// scan past, and wrong for a dropped connection or an auth failure, where it
+/// would turn an outage into a listing of every acked entry in the stream's
+/// history.
+///
+/// What the `redis` crate hands back (1.2):
+///
+/// - Missing stream key: the server replies `ERR no such key`, which the crate
+///   models as `ErrorKind::Server(ServerErrorKind::ResponseError)` with
+///   `detail()` carrying the text. `ERR` is the generic server code, so the
+///   detail is the only thing that separates this from any other `ERR`.
+/// - Missing group: the server replies `NOGROUP ...`. `NOGROUP` is not one of
+///   the crate's known `ServerErrorKind`s, so it arrives as
+///   `ErrorKind::Extension` with `code() == Some("NOGROUP")` - matched on the
+///   code, which needs no string search.
+fn is_missing_stream_or_group(e: &redis::RedisError) -> bool {
+    if e.code() == Some("NOGROUP") {
+        return true;
+    }
+    matches!(
+        e.kind(),
+        redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+    ) && e
+        .detail()
+        .is_some_and(|d| d.to_ascii_lowercase().contains("no such key"))
 }

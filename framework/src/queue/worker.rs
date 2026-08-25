@@ -616,9 +616,13 @@ pub async fn run_worker(
         // The guard is Laravel's, and it is about the job's state, not the
         // outcome's severity: sweep everything except `Released`, because a job
         // put back on the queue has not started processing
-        // (`! $job->isReleased()`). `TimedOut` is likewise left alone - it can
-        // only be reached with the core already started, so the release already
-        // happened at dispatch time.
+        // (`! $job->isReleased()`). `TimedOut` splits on that same rule rather
+        // than being exempt from it. The timeout above wraps
+        // `run_through_middleware`, which is the whole pipeline and not just its
+        // core, so a middleware that stalls reaches `TimedOut` with the core
+        // never run and the release at dispatch time never issued: the
+        // dead-letter sub-arm sweeps, and the retry sub-arm does not, because
+        // the envelope is going back on the queue unstarted.
         //
         // Arms reachable with the core already run sweep too. That second
         // release finds no lock this envelope owns and reports `false`, which
@@ -742,6 +746,16 @@ pub async fn run_worker(
                 .await;
                 let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
                 if exhausted {
+                    // A stalled middleware times out the whole pipeline, so the
+                    // core may never have run and the release at processing
+                    // start may never have happened. This envelope is
+                    // dead-lettered and will not come back, so a held lock would
+                    // block re-dispatch for the rest of `unique_for` on a job
+                    // that no longer exists. Owner-scoped, so it costs one
+                    // no-op release when the core did run and already released.
+                    if sweep_unique_lock {
+                        release_unique_lock_if_held(&env).await;
+                    }
                     let reason = format!(
                         "job exceeded per-attempt timeout of {} seconds",
                         t.as_secs()
@@ -1152,11 +1166,19 @@ async fn handle_dead_letter(
             //
             // The job still has to leave the queue: it is out of attempts,
             // and putting it back is how a poison job becomes immortal. So
-            // the envelope goes to the log at ERROR, in full, because a
-            // serialised envelope is what `queue:retry` re-pushes - this
-            // line is the difference between work that can be recovered by
-            // hand and work that silently ceased to exist.
-            let payload = env
+            // the envelope goes to the log at ERROR, because a serialised
+            // envelope is what `queue:retry` re-pushes - this line is the
+            // difference between work that can be recovered by hand and work
+            // that silently ceased to exist.
+            //
+            // `unique_lock_owner` is cleared first. It is the bearer token for
+            // an owner-scoped lock release, and a log is readable by a wider
+            // audience than the queue store - anyone holding the token can free
+            // a dedupe lock a newer dispatch already owns. Re-pushing does not
+            // need it: a fresh push takes a fresh lock.
+            let mut redacted = env.clone();
+            redacted.unique_lock_owner = None;
+            let payload = redacted
                 .to_json()
                 .unwrap_or_else(|e| format!("<envelope could not be serialised: {e}>"));
             tracing::error!(
