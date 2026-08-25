@@ -34,6 +34,7 @@ others degrade into - each driver is a peer.
 | `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible    | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
+| `Storage::register_read_through(name, cfg)` | Read-through composite | `filesystem` |
 
 `filesystem` is on by default; the Azure and GCS features are not. Turn one
 on in your `Cargo.toml`:
@@ -236,6 +237,105 @@ let bytes = copy_between_disks("local", "uploads/big.bin", "scratch", "big.bin")
 If any step fails mid-copy, the partial destination object is aborted and
 deleted before the original error propagates - a failed copy is never
 observable as a truncated destination.
+
+## Read-through disks
+
+A read-through disk pairs a fast *primary* with a slower *fallback* and moves
+objects from the second to the first as they are read. Point the primary at
+the store you are migrating to and the fallback at the one you are migrating
+from, and the working set crosses over under real traffic - no maintenance
+window, no bulk copy of objects nobody asks for.
+
+```rust,ignore
+use suprnova::{ReadThroughConfig, S3Config, Storage};
+
+Storage::register_s3("new-store", S3Config { bucket: "assets-2".into(), ..Default::default() })?;
+Storage::register_s3("legacy-store", S3Config { bucket: "assets-1".into(), ..Default::default() })?;
+
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        ..Default::default()
+    },
+)?;
+
+let assets = Storage::disk("assets")?;
+// Reads `logo.png` from `legacy-store` and writes it to `new-store` on the way
+// out. Every later read is served by `new-store`.
+let bytes = assets.read("logo.png").await?;
+```
+
+`Storage::disk("assets")` returns an ordinary `Operator`, so every method on
+it and every `DiskExt` convenience works unchanged.
+
+### Which disk answers which operation
+
+| Operation | Disk |
+|---|---|
+| `read` | Primary if it holds the object, otherwise the fallback - and the fallback hit is promoted |
+| `exists`, `size`, `last_modified`, `mime_type`, `stat` | Primary if it holds the object, otherwise the fallback |
+| `write`, `make_directory` | Primary only |
+| `files`, `directories`, `list` | Primary only - fallback entries are invisible to a listing |
+| `delete` | Both, fallback first |
+| `temporary_url` | Primary if it holds the object, otherwise the fallback |
+| `temporary_upload_url` | Primary only - an upload has to land where writes land |
+
+Listing is primary-only by design. A union listing would have to reconcile
+paging and ordering across two backends, and it would report objects that a
+later listing no longer returns once they are promoted. Use
+`Storage::disk("legacy-store")` directly when you need to enumerate what is
+left on the fallback.
+
+Delete removes the object from both disks. If it only removed the primary
+copy, the next read would promote the fallback copy straight back. The
+consequence is that a read-through disk over a read-only fallback cannot
+delete: the fallback delete fails and the error reaches you.
+
+### When a promotion fails
+
+By default a promotion failure is logged at `warn` and swallowed. You still
+receive the bytes you asked for; the disk simply degrades to reading the
+fallback every time until the primary is writable again. Set
+`throw_on_promotion_failure: true` when a silent loss of promotion would hide
+a fault you need to see - a migration you are trying to finish, for instance:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        throw_on_promotion_failure: true,
+    },
+)?;
+```
+
+Registration rejects a configuration that cannot work: an empty `primary` or
+`fallback`, a pair that names the same disk twice, a disk that names itself,
+or a name that is not registered. Each returns a `FrameworkError` naming the
+problem, and no disk is registered.
+
+### Why Suprnova diverges
+
+Laravel builds a read-through disk from a `config/filesystems.php` entry whose
+`primary` and `fallback` keys accept either a disk name or an inline driver
+config. Suprnova takes disk names only, because disks here are registered by
+typed constructors rather than described by arrays - register the inner disk
+first, then name it.
+
+Laravel's promotion re-checks the primary after reading the fallback, which
+makes a concurrent writer win. Suprnova keeps that check and adds a
+conditional write on backends that support one, so two concurrent readers
+cannot both issue the promotion either. The observable result is the same;
+the write amplification is not.
+
+A read that resolves from the fallback holds the object in memory until the
+promotion write completes, because promotion needs the whole object. That
+suits the tiering case a read-through disk is for. For very large cold
+objects, read the fallback disk directly or use
+[`copy_between_disks`](#cross-disk-streaming-copy) instead.
 
 ## Registry hygiene
 
