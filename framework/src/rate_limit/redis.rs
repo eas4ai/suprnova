@@ -125,9 +125,10 @@ impl RateLimiterDriver for RedisRateLimiter {
         // the same effect as running it once, and it adds nothing. A dropped
         // connection here would otherwise cost the response its `Retry-After`
         // header for no reason. `now_ms` is captured before the first attempt,
-        // so a retried computation is up to one backoff interval stale; that
-        // is under-reporting the wait by 50 ms on a header measured in
-        // seconds.
+        // so a retried computation is stale by however long the reconnect
+        // took - up to this driver's reconnect budget, about a second and a
+        // half with the defaults; that under-reports the wait by at most that
+        // much on a header measured in whole seconds.
         let max_requests = config.max_requests as i64;
         let remaining_ms: i64 = crate::redis_retry::retry_read("rl retry_after script", || {
             let mut conn = self.conn.clone();
