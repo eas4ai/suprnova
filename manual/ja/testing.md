@@ -303,7 +303,7 @@ assert!(installed, "first install wins");
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 
 [dev-dependencies]
 # `testing` は上の依存を介して推移的に有効です - 追加は何も要りません。
@@ -315,10 +315,10 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", features = ["testing", "..."] }
 ```
 
 これは修正ではなく引き締めです - どちらの姿勢を選ぼうと、実際の攻撃口を塞ぐのは起動時の検証です。

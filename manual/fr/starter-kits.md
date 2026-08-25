@@ -78,7 +78,7 @@ scaffold et [Démarrage rapide](quickstart.md) pour la présentation des cinq
 premières minutes.
 
 Pour les services API uniquement, `suprnova new my-api --api` initialise Magnetar,
-installe le middleware bearer-session, et crée un échafaudage pour l'enregistrement et la
+installe le middleware bearer-session, et crée un scaffold pour l'enregistrement et la
 connexion par mot de passe contre la table canonique `app_users` sans frontend.
 
 ## Contribuer un kit de démarrage

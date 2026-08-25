@@ -33,33 +33,33 @@ pub(crate) async fn users<C: ConnectionTrait + ?Sized>(
     ) = match shape {
         SourceShape::Torii => (
             "users",
-            text(backend, "id"),
+            text(backend, "id")?,
             "email".to_owned(),
             "name".to_owned(),
             "password_hash".to_owned(),
-            text(backend, "email_verified_at"),
-            text(backend, "locked_at"),
-            text(backend, "created_at"),
-            text(backend, "updated_at"),
+            text(backend, "email_verified_at")?,
+            text(backend, "locked_at")?,
+            text(backend, "created_at")?,
+            text(backend, "updated_at")?,
             "NULL".to_owned(),
             "NULL".to_owned(),
         ),
         SourceShape::SuprnovaWeb => (
             "users",
-            text(backend, "id"),
+            text(backend, "id")?,
             "email".to_owned(),
             "name".to_owned(),
             "password".to_owned(),
-            text(backend, "email_verified_at"),
+            text(backend, "email_verified_at")?,
             "NULL".to_owned(),
-            text(backend, "created_at"),
-            text(backend, "updated_at"),
+            text(backend, "created_at")?,
+            text(backend, "updated_at")?,
             "NULL".to_owned(),
             "NULL".to_owned(),
         ),
         SourceShape::SuprnovaApi => (
             "app_users",
-            text(backend, "id"),
+            text(backend, "id")?,
             "email".to_owned(),
             optional_text(database, "app_users", "name").await?,
             optional_text(database, "app_users", "password_hash").await?,
@@ -76,7 +76,7 @@ pub(crate) async fn users<C: ConnectionTrait + ?Sized>(
         "SELECT {id}, {email}, {name}, {password}, {verified}, {locked}, {created}, {updated}, {auth_epoch}, {session_version} FROM {table} ORDER BY {id}"
     );
     database
-        .query_all(Statement::from_string(backend, query))
+        .query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("reading durable source users", error))?
         .into_iter()
@@ -356,7 +356,7 @@ async fn read_linked_accounts<C: ConnectionTrait + ?Sized>(
     let backend = database.get_database_backend();
     let query = format!(
         "SELECT {}, provider, subject, {}, {} FROM oauth_accounts ORDER BY id",
-        text(backend, "user_id"),
+        text(backend, "user_id")?,
         optional_text(database, "oauth_accounts", "created_at").await?,
         optional_text(database, "oauth_accounts", "updated_at").await?,
     );
@@ -397,11 +397,11 @@ async fn read_secure_tokens<C: ConnectionTrait + ?Sized>(
     let backend = database.get_database_backend();
     let query = format!(
         "SELECT {}, token, purpose, {}, {}, {}, {} FROM secure_tokens ORDER BY id",
-        text(backend, "user_id"),
+        text(backend, "user_id")?,
         optional_text(database, "secure_tokens", "used_at").await?,
-        text(backend, "expires_at"),
-        text(backend, "created_at"),
-        text(backend, "updated_at"),
+        text(backend, "expires_at")?,
+        text(backend, "created_at")?,
+        text(backend, "updated_at")?,
     );
     for row in query_all(database, query, "reading source secure tokens").await? {
         records.push(PendingAuthRecord::SecureToken {
@@ -433,9 +433,9 @@ async fn read_failed_attempts<C: ConnectionTrait + ?Sized>(
     let backend = database.get_database_backend();
     let query = format!(
         "SELECT {}, email, {}, {} FROM failed_login_attempts ORDER BY id",
-        text(backend, "id"),
+        text(backend, "id")?,
         optional_text(database, "failed_login_attempts", "ip_address").await?,
-        text(backend, "attempted_at"),
+        text(backend, "attempted_at")?,
     );
     for row in query_all(database, query, "reading failed-login history").await? {
         records.push(PendingAuthRecord::FailedLoginAttempt(
@@ -474,13 +474,13 @@ async fn read_two_factor<C: ConnectionTrait + ?Sized>(
     let backend = database.get_database_backend();
     let query = format!(
         "SELECT {}, secret, {}, {}, {}, {}, {} FROM two_factor_credentials ORDER BY {}",
-        text(backend, "user_id"),
+        text(backend, "user_id")?,
         optional_text(database, "two_factor_credentials", "confirmed_at").await?,
         optional_text(database, "two_factor_credentials", "recovery_codes").await?,
         optional_integer(database, "two_factor_credentials", "last_used_timestep").await?,
-        text(backend, "created_at"),
-        text(backend, "updated_at"),
-        text(backend, "user_id"),
+        text(backend, "created_at")?,
+        text(backend, "updated_at")?,
+        text(backend, "user_id")?,
     );
     for row in query_all(database, query, "reading source two-factor credentials").await? {
         records.push(PendingAuthRecord::TwoFactorCredential {
@@ -542,7 +542,7 @@ async fn optional_text<C: ConnectionTrait + ?Sized>(
     column: &str,
 ) -> Result<String> {
     if has_column(database, None, table, column).await? {
-        Ok(text(database.get_database_backend(), column))
+        text(database.get_database_backend(), column)
     } else {
         Ok("NULL".to_owned())
     }
@@ -560,11 +560,11 @@ async fn optional_integer<C: ConnectionTrait + ?Sized>(
     }
 }
 
-fn text(backend: DbBackend, expression: &str) -> String {
-    if backend == DbBackend::MySql {
-        format!("CAST({expression} AS CHAR)")
-    } else {
-        format!("CAST({expression} AS TEXT)")
+fn text(backend: DbBackend, expression: &str) -> Result<String> {
+    match backend {
+        DbBackend::MySql => Ok(format!("CAST({expression} AS CHAR)")),
+        DbBackend::Postgres | DbBackend::Sqlite => Ok(format!("CAST({expression} AS TEXT)")),
+        _ => Err(super::unsupported_backend_error(backend)),
     }
 }
 
@@ -574,7 +574,7 @@ async fn query_all<C: ConnectionTrait + ?Sized>(
     context: &str,
 ) -> Result<Vec<QueryResult>> {
     database
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             database.get_database_backend(),
             query,
         ))

@@ -6,56 +6,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## Unreleased
 
-### Security
-
-- **Magnetar now fences credential and session mutations to the authenticated
-  actor and account auth epoch.** Password, passkey, linked-account,
-  two-factor, opaque-session, JWT, remember, OAuth, and device-authorization
-  writes reject stale or revoked actors. The first successful password-reset,
-  magic-link, or OAuth verified-email proof on an unverified account advances
-  the epoch and atomically removes provisional credentials, sessions, remember
-  state, and squatter TOTP enrollment. Verified accounts preserve legitimate
-  credentials during password reset. Email verification requires the
-  authenticated token owner, and OAuth never auto-links an unverified existing
-  account from email alone.
-
-- **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
-  `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
-  persists a protocol-relative current URL: the write goes through the identical sanitizer
-  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
-  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
-  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
-  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
-  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
-  from a release before this fix - already carrying a raw, unsanitized value no write in the
-  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
-  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
-  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
-  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
-  previous URL is never clobbered.
-- **The Inertia validation-redirect bridge's `Referer` check closed two more same-origin bypasses.**
-  `InertiaValidationRedirectMiddleware`'s `303` target only rejected a `Referer` starting with the
-  literal `//` or `/\` prefix - a value like `Referer: /<TAB>/evil.test` slipped through, because
-  the WHATWG URL parser strips ASCII tab and newline from the whole string before comparing
-  origins, so a browser reads that as `//evil.test` and follows the `303` off-origin. The check now
-  rejects any ASCII control byte (C0 or DEL) anywhere in the candidate, not only within the two
-  named prefixes. Separately, the last-resort fallback - the failing request's own path, used when
-  neither `Referer` nor the session's previous URL is usable - was never sanitized: an origin-form
-  HTTP request-target is syntactically free to start with `//`, so a raw client or a
-  non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
-  legs now share one root-relative check, falling back to `/` if even the request's own path fails
-  it.
-- **Cookie ciphertext is now bound to its logical cookie name with contexted v2 AAD.** `Cookie::encrypted` /
-  `Cookie::read_encrypted_for` stop a value minted for one cookie slot from decrypting in another slot,
-  while the logical-name binding keeps a later `__Host-` / `__Secure-` wire-prefix flip safe. The
-  version-less compatibility window tries v2 across the whole key ring, then v1 across the whole ring,
-  so existing cookies survive the rollout; the v1 fallback preserves the old replay weakness until its
-  scheduled 1.4.0 removal.
-- **Session and remember-me cookie prefixes are validated at boot and enforced at render time.**
-  `SESSION_COOKIE_PREFIX=__Host-` requires `Secure`, `Path=/`, and no `Domain`; `__Secure-` requires
-  `Secure`. Invalid boot combinations fail before serving, and the renderer rewrites invalid prefixed
-  headers instead of letting browsers discard them silently.
-
 ### Added
 
 - **`Gate::default_denial_response` customizes the default shape of a bare denial.** Mirrors
@@ -145,6 +95,118 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   gate that enough filler chunks could step around. No `IMAGE_MAX_*` variable
   affects it and the error says as much. A 300-frame animation is unaffected;
   a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
+
+### Changed
+
+- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
+  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
+  and the magic-byte upload rule takes the name Laravel gives the same rule
+  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
+  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
+  git-tag distribution model.
+
+### Removed
+
+- **The unused direct `image` dependency is gone.** It had been a base
+  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
+  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
+  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
+  appears transitively, with only its `png` feature, behind `totp-rs`'s
+  QR-code rendering. The new image subsystem is built on the OxideAV crates
+  behind the `media` feature instead.
+
+## 1.3.2 - 2026-08-25
+
+### Added
+
+- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+
+- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+
+### Fixed
+
+- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+
+- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+
+### Upgrading
+
+- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+
+- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+
+## 1.3.1 - 2026-08-24
+
+### Fixed
+
+- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
+- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
+- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+
+### Security
+
+- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+
+### Upgrading
+
+- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+
+
+## 1.3.0 - 2026-08-24
+
+### Security
+
+- **Magnetar now fences credential and session mutations to the authenticated
+  actor and account auth epoch.** Password, passkey, linked-account,
+  two-factor, opaque-session, JWT, remember, OAuth, and device-authorization
+  writes reject stale or revoked actors. The first successful password-reset,
+  magic-link, or OAuth verified-email proof on an unverified account advances
+  the epoch and atomically removes provisional credentials, sessions, remember
+  state, and squatter TOTP enrollment. Verified accounts preserve legitimate
+  credentials during password reset. Email verification requires the
+  authenticated token owner, and OAuth never auto-links an unverified existing
+  account from email alone.
+
+- **A protocol-relative `_previous.url` can no longer produce an off-origin open redirect through
+  `Redirect::back()`, on either the write side or the read side.** `SessionMiddleware` no longer
+  persists a protocol-relative current URL: the write goes through the identical sanitizer
+  `InertiaValidationRedirectMiddleware` uses for its `Referer` check, and a request path shaped
+  like `//host` (or carrying an ASCII control byte) is never recorded - without this, an app's
+  `fallback!` route (the standard Inertia/SPA app-shell pattern, where any unmatched path answers
+  `200`) could have `GET //evil.test/anything` persist that path verbatim. `SessionData::previous_url()`
+  now applies the same check on every **read**, too, so a session cookie that survived an upgrade
+  from a release before this fix - already carrying a raw, unsanitized value no write in the
+  current process ever produced - self-heals to "nothing recorded" instead of being trusted.
+  Together, neither an old poisoned cookie nor a new malicious request can hand `Redirect::back()`,
+  `Redirect::refresh()`, or `url::previous()` an off-origin `Location`. When a value fails either
+  check it's treated as absent rather than replaced with a synthesized one, so a genuinely good
+  previous URL is never clobbered.
+- **The Inertia validation-redirect bridge's `Referer` check closed two more same-origin bypasses.**
+  `InertiaValidationRedirectMiddleware`'s `303` target only rejected a `Referer` starting with the
+  literal `//` or `/\` prefix - a value like `Referer: /<TAB>/evil.test` slipped through, because
+  the WHATWG URL parser strips ASCII tab and newline from the whole string before comparing
+  origins, so a browser reads that as `//evil.test` and follows the `303` off-origin. The check now
+  rejects any ASCII control byte (C0 or DEL) anywhere in the candidate, not only within the two
+  named prefixes. Separately, the last-resort fallback - the failing request's own path, used when
+  neither `Referer` nor the session's previous URL is usable - was never sanitized: an origin-form
+  HTTP request-target is syntactically free to start with `//`, so a raw client or a
+  non-normalizing proxy could turn the "safe last resort" into an off-origin redirect too. Both
+  legs now share one root-relative check, falling back to `/` if even the request's own path fails
+  it.
+- **Cookie ciphertext is now bound to its logical cookie name with contexted v2 AAD.** `Cookie::encrypted` /
+  `Cookie::read_encrypted_for` stop a value minted for one cookie slot from decrypting in another slot,
+  while the logical-name binding keeps a later `__Host-` / `__Secure-` wire-prefix flip safe. The
+  version-less compatibility window tries v2 across the whole key ring, then v1 across the whole ring,
+  so existing cookies survive the rollout; the v1 fallback preserves the old replay weakness until its
+  scheduled 1.4.0 removal.
+- **Session and remember-me cookie prefixes are validated at boot and enforced at render time.**
+  `SESSION_COOKIE_PREFIX=__Host-` requires `Secure`, `Path=/`, and no `Domain`; `__Secure-` requires
+  `Secure`. Invalid boot combinations fail before serving, and the renderer rewrites invalid prefixed
+  headers instead of letting browsers discard them silently.
+
+### Added
+
 - **Suprnova authentication now runs on the internal Magnetar engine.** The
   framework-owned `Auth` facade preserves existing password, magic-link,
   passkey, OAuth, bearer, lockout, session, and two-factor call sites while
@@ -390,6 +452,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **PostgreSQL soft deletes now use backend-aware placeholders, and generated timestamp writes
+  honor declared casts.** `delete()` and `restore()` render PostgreSQL ordinal placeholders instead
+  of MySQL and SQLite `?` placeholders. Generated create, update, save, touch, and soft-delete
+  writes also convert timestamps through each field's declared `Cast` storage type, so native
+  `TIMESTAMPTZ` columns no longer receive text values. Thanks to
+  [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) for reporting both defects and
+  submitting a fix in [PR #3](https://github.com/eas4ai/suprnova/pull/3).
+- **Default workspace and Magnetar gate runs no longer require live PostgreSQL or MySQL services.**
+  Backend-specific behavior suites are explicit, ignored qualification tests that still fail when
+  deliberately invoked without their configured database. Reachability-only tests and permanent
+  gate environment requirements were removed, so unrelated changes don't pay for external database
+  setup on every verification run.
+
 - **`PartialFilter::narrow` is now `pub`.** Its four sibling predicates (`should_include`,
   `should_include_eager`, `should_include_optional`, and the type itself) were already public, but the
   narrowing pass that makes `should_include_eager`'s `true` answer correct - trimming a resolved value
@@ -474,13 +549,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
-- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
-  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
-  and the magic-byte upload rule takes the name Laravel gives the same rule
-  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
-  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
-  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
-  git-tag distribution model.
+- **The current development branch uses SeaORM 2.0 and requires Rust 1.94.0.** Suprnova preserves
+  its Eloquent, `#[model]`, migration, and database-facade source shapes. Applications that call
+  SeaORM directly must import `ExprTrait` for SeaQuery expression methods and use explicit
+  `*_raw` connection methods for prebuilt `Statement` values. SeaQuery is now 1.0, and the direct
+  MariaDB vector driver uses SQLx 0.9. Existing databases require no application data migration;
+  fresh PostgreSQL schemas retain serial-backed primary keys.
 - **Three more unused dependencies removed.** `pretty_assertions` and `qrcode` leave the framework
   crate (`totp-rs` already carries the `qr` feature, so QR provisioning for two-factor enrolment is
   unaffected), and `notify-debouncer-mini` leaves the CLI (`notify` itself stays - the `serve` and
@@ -527,16 +601,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `.version(...)` / `.version_with(...)` still wins. With no manifest on disk - local development -
   the version falls back to `"1.0"`, which is what every app saw before, so nothing changes until
   you build. New `VersionResolver::from_manifest(path)` exposes the resolver directly.
-
-### Removed
-
-- **The unused direct `image` dependency is gone.** It had been a base
-  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
-  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
-  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
-  appears transitively, with only its `png` feature, behind `totp-rs`'s
-  QR-code rendering. The new image subsystem is built on the OxideAV crates
-  behind the `media` feature instead.
 
 ### Deprecated
 
@@ -746,8 +810,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   follow-up full-page GET.
 
 - **Three Inertia response fixes.** `InertiaResponse::location_for(&req, url)`
-  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302`
-  + `Location` for a hard navigation, so an OAuth or SSO bounce entered
+  returns `409` + `X-Inertia-Location` for an Inertia XHR and a plain `302` + `Location` for a hard navigation, so an OAuth or SSO bounce entered
   outside the SPA no longer dead-ends on a body-less `409`. The existing
   `location(url)` keeps its always-`409` shape. New `App::clear_history()`
   flashes the history-clear flag into the session so it survives the logout

@@ -222,8 +222,6 @@ async fn welcome_email_is_sent() {
 | `fake.assert_queued_on(name, "…")`         | ein eingereihtes Mailable dieses Namens, das an eine Warteschlange geroutet wurde |
 | `fake.queued_on_connection("…")`           | eingereihte Mailables, die an eine Connection geroutet wurden |
 | `fake.assert_queued_on_connection(name, "…")` | ein eingereihtes Mailable dieses Namens, das an eine Connection geroutet wurde |
-
-
 | `fake.assert_nothing_queued()`             | nichts wurde eingereiht                             |
 | `fake.assert_outgoing_count(n)`            | gesendet + eingereiht ergibt insgesamt `n`          |
 | `fake.assert_nothing_outgoing()`           | nichts wurde gesendet und nichts wurde eingereiht   |

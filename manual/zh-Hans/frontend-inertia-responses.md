@@ -64,7 +64,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-大多数应用会在启动时通过 [`Inertia::install`](#bootstrap-inertiainstall) 注册一份配置，然后就再也不碰这个参数了 - 那份被安装的配置本来就是每一个响应的起点。只有当您想为某一个页面覆盖这份已安装的配置时，才在这里传一份进来。
+大多数应用会在启动时通过 [`Inertia::install`](#启动-inertia-install) 注册一份配置，然后就再也不碰这个参数了 - 那份被安装的配置本来就是每一个响应的起点。只有当您想为某一个页面覆盖这份已安装的配置时，才在这里传一份进来。
 
 ## `#[derive(InertiaProps)]`
 
@@ -217,7 +217,7 @@ InertiaResponse::new("Feed/Index")
 
 `match_on` 点名的是客户端据以去重的字段（会以 `matchPropsOn` 的形式发到页面对象里） - 一个字段或多个字段，与下方 `Prop::match_on` 相同 - 所以一次与当前窗口重叠的重新获取，会就地替换匹配上的行，而不是追加一堆副本。`Prepend` 和 `Deep` 接受同样的 `match_on`。
 
-`MergeStrategy` 是单次调用形式。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)` 是同样设置的独立标志，适用于 prop 同时还需要可见性或缓存标志的情况 - 参见[在一个 prop 上组合标志](#composing-flags-on-one-prop)。
+`MergeStrategy` 是单次调用形式。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)` 是同样设置的独立标志，适用于 prop 同时还需要可见性或缓存标志的情况 - 参见[在一个 prop 上组合标志](#在一个-prop-上组合标志)。
 
 `.match_on` 一次可接收一个字段或多个字段 - `.match_on(["id", "slug"])` 和 `.match_on("id").match_on("slug")` 会发出相同的 `matchPropsOn`。
 
@@ -300,7 +300,7 @@ impl ProvidesScrollMetadata for MyCursorPage {
 InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
 ```
 
-`LengthAwarePaginator`、`Paginator` 和 `CursorPaginator` 也实现它 - 参见[分页](pagination.md#inertia-integration---infinite-scroll-props)。
+`LengthAwarePaginator`、`Paginator` 和 `CursorPaginator` 也实现它 - 参见[分页](pagination.md#inertia-integration-infinite-scroll-props)。
 
 ### 点记法嵌套
 
@@ -336,8 +336,7 @@ Inertia 3 客户端可以请求一个页面 props 的子集（或者通过带上
 - `.always()` prop 无论如何都发送。
 - `.optional()` 和 `.defer()` prop 永不会在标准访问中发送，只会出现在显式列出该键的匹配部分重新加载中。
 
-merge 和 scroll 标志不会参与：它们决定客户端如何折叠已接收的值，而非是否接收它，因此 `.defer().merge()` prop 的过滤与普通 `.defer()` 完全相同。`.once()` 也不参与，尽管它不只是折叠指令 - 在客户端报告该值已缓存的完整访问上，服务器跳过解析器且不发送值，如下方注释所述。三者改变的是随行的元数据块 - 见[在一个 prop 上组合标志](#composing-flags-on-one-prop)。
-处理程序不需要做任何特别的事 - 通过构建器把每一个 prop 注册好，框架在序列化页面对象时就会去查这些请求头。
+merge 和 scroll 标志不会参与：它们决定客户端如何折叠已接收的值，而非是否接收它，因此 `.defer().merge()` prop 的过滤与普通 `.defer()` 完全相同。`.once()` 也不参与，尽管它不只是折叠指令 - 在客户端报告该值已缓存的完整访问上，服务器跳过解析器且不发送值，如下方注释所述。三者改变的是随行的元数据块 - 见[在一个 prop 上组合标志](#在一个-prop-上组合标志)。处理程序不需要做任何特别的事 - 通过构建器把每一个 prop 注册好，框架在序列化页面对象时就会去查这些请求头。
 
 一个 `once` prop 在客户端的缓存，只在一次**完整的** Inertia 访问上才会被尊重。在一次点名了这个键的部分重新加载上（`router.reload({ only: ['stats'] })`），解析器会运行，值也会被发送 - 客户端之所以来问，恰恰是因为它想要一份新的；在那里去尊重它那份过期缓存的说法，只会让它要的那个键什么都拿不到。
 
@@ -403,7 +402,7 @@ assert_eq!(App::inertia_shared("user.name"), None);
 
 `inertia_shared` 仅读取静态注册表 - 对通过 `inertia_share_lazy` / `inertia_share_once` 注册的键会返回 `None`（没有请求可据以解析它，与 Laravel 的 `getShared` 相同，后者返回原始 closure 而不调用它），对逐请求 trait-provider share 也是如此。`flush_inertia_shared` 同样只清除静态注册表；通过 `register_inertia_shared` 注册的 provider 没有逐请求状态可清除。
 
-对于逐请求的共享数据（已认证用户、请求作用域的标志），实现 [`InertiaSharedData`](#per-request-shared-data) 并注册单例 - 框架会在每一个 Inertia 响应中调用 `share(&req, component)` 并合并结果。`component` 是正在渲染的页面，因此 provider 可以按页面改变输出 - 如下所示。
+对于逐请求的共享数据（已认证用户、请求作用域的标志），实现 [`InertiaSharedData`](#逐请求的共享数据) 并注册单例 - 框架会在每一个 Inertia 响应中调用 `share(&req, component)` 并合并结果。`component` 是正在渲染的页面，因此 provider 可以按页面改变输出 - 如下所示。
 
 ### 键冲突时的优先级
 
@@ -504,6 +503,10 @@ Redirect::to("/posts/42").preserve_fragment()    // 跨访问保留 #frag
 
 处理程序在 Inertia 访问中验证失败时，框架会带着 flash 的错误，以 `303 See Other` 回到表单页，而不是返回 REST 客户端获得的 `422` JSON。这并非表面差异：Inertia 客户端会将任何没有 `X-Inertia` 响应头的响应视为非 Inertia，并在全屏错误模态框中渲染它，因此 `422` 永远到不了 `form.errors`。处理程序不需要改变 - 此桥接是 `Inertia::install` 注册的中间件之一。
 
+所有四个分支共享**同一个**动作：删除原有的 `errors` flash，写入新错误，然后把原来的响应替换成一个 `303` 重定向。不会保留原有响应体、它的响应头或其中任何 `Set-Cookie` - 若一个自定义中间件在生成 `422` 后排队 cookie，它必须在验证桥接前运行，或者在 `303` 之后自己重新排队。框架不自动移动这些 cookie，正如 Laravel 的 `HandleInertiaRequests` 不会移走 controller 的 `422` 头。
+
+标准错误对象仍显示为 `page.props.errors`：框架在下一次 Inertia 渲染时从 session flash 水合它。将验证器指向的每个 named bag（`validator.error_bag = Some("createUser")`）也会发为 `page.props.errors.createUser`，与 Laravel 的 `X-Inertia-Error-Bag` 行为对齐。没有 bag 的错误保留在顶层。一个消费 session flash 的非 Inertia 请求仍会消费同一份数据；不要假设它只会由 Inertia 使用。
+
 目标依次是同源请求 `Referer`、会话记录的 previous URL，最后是失败请求自身的 URL。跨源 `Referer` 会被忽略；仅看似同源的也会被忽略：前导 `//` 或 `/\`（浏览器会在把反斜杠折叠为斜杠后将两者解析为 protocol-relative）以及值中任意位置的 ASCII 控制字节（URL 解析器会在比较源前从整个字符串剥离 tab 和换行，因此控制字节可将看似安全的路径在浏览器导航时变成另一源）均以相同方式回退。相同检查也用于最终 URL 回退，因此异常请求路径同样不能变成异源重定向。
 
 字段值是其**第一条**消息，即普通字符串 - Inertia 自己的 `ErrorValue` 类型所描述的形状，也是 `$page.props.errors.email` 绑定的内容。设置 `InertiaConfig::with_all_errors(true)` 可改为以数组取得所有消息；客户端类型随后需要相应扩展：
@@ -584,13 +587,9 @@ let cfg = InertiaConfig::new().version(version);
 use suprnova::{Inertia, InertiaConfig};
 
 pub fn register_http_stack() {
-    let cfg = InertiaConfig::new()
-        .version(env!("CARGO_PKG_VERSION"))
-        .default_title("My App");
-
-    Inertia::install(&cfg)
-        .expect("Inertia install failed (production needs a built frontend manifest)");
-    // ……按您希望的顺序添加全局中间件
+    Inertia::install(&InertiaConfig::new())
+        .expect("Inertia install failed");
+    // add global middleware in the order you want it to wrap requests
 }
 ```
 
@@ -609,13 +608,13 @@ Application::new()
 2. 注册 `InertiaHeadersMiddleware` - 在每个响应设置 `Vary: X-Inertia`，并将 Inertia 访问的空 `200` 转为回跳 `303`。
 3. 注册 `InertiaVersionMiddleware` - 客户端和服务器资产版本不一致时，发送 `409` + `X-Inertia-Location`。
 4. 注册 `Inertia303Middleware` - 在非 GET Inertia 重定向上将 `302` 升级为 `303`。
-5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#validation-failures)。
+5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#验证失败)。
 
 顺序很重要：headers middleware 最先注册，所以最外层且能看到每一个响应，包括版本 middleware 在处理程序尚未运行前返回的 `409`。验证重定向 middleware 最后注册，因此最内层、最接近处理程序，在另外三个 middleware 有机会触及它之前先看到 `422`。
 
 `install` 还会**保留配置**。之后构建的每个 `InertiaResponse` 均以它为起点，因此 `.frontend(...)`、`.version(...)`、`.default_title(...)`、`.ssr(...)` 和 `.encrypt_history(...)` 到达每一个页面，无需处理程序传递它。使用 `.with_config(...)` 仍可为单个页面覆盖；从不调用 `Inertia::install` 的应用获得 `InertiaConfig::default()`；再次调用 `install` 会替换保留配置。
 
-`.with_config(...)` 会整体替换配置，包含 `version`。`InertiaVersionMiddleware` 仍解析最初交给 `Inertia::install` 的版本；没有使用相同 `.version(...)` 的覆盖配置会使页面对象声明一个 middleware 将弹回的版本，客户端访问该页后会多做一次完整加载。请在覆盖配置中保持 `.version(...)` 一致。
+`Inertia::install` 只能调用一次；第二次调用失败，不会替换保留配置或叠加中间件。使用同一 `InertiaConfig` 的单一安装调用来设置配置。单页的 `.with_config(...)` 覆盖仍有效，但不能更改已安装版本中间件所使用的版本。
 
 若使用 flash 数据，请在 `Inertia::install` **之前**注册 `SessionMiddleware`。版本 middleware 会在客户端弹回前重新 flash 会话，使 flash 错误经受后续完整页面 GET；它只能在会话作用域内完成此事。
 

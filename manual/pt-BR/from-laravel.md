@@ -223,14 +223,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` valida credenciais pelo guard stateful padrão e seu
-`UserProvider` configurado; este é o caminho usado pelo scaffold full-stack
-gerado. `Auth::password()`, redefinição de senha, `BruteForce`, passkeys, magic
-links, OAuth, sessões bearer e o gerenciamento de sessões do Magnetar exigem o
-engine Magnetar instalado. A verificação de email e a facade de compatibilidade
-`TwoFactor` continuam pertencendo ao framework. Veja
-[Autenticação](authentication.md), [Fluxos de autenticação](auth-flows.md) e
-[OAuth e login sem senha](oauth.md).
+`Auth::attempt` valida credenciais pelo guard stateful padrão e seu `UserProvider` configurado; este é o caminho usado pelo scaffold full-stack gerado. A redefinição de senha é compatível com usuários já verificados por meio de um provedor explicitamente habilitado para redefinição, como `EloquentUserProvider`. Instale o Magnetar quando a redefinição precisar funcionar como primeira comprovação atômica da caixa de e-mail. `Auth::password()`, `BruteForce`, chaves de acesso, links mágicos, OAuth, sessões com token ao portador e o gerenciamento de sessões do Magnetar requerem o mecanismo Magnetar instalado. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
 
 ### Migrações
 
@@ -422,7 +415,7 @@ Mesma superfície, nenhum alias global necessário.
 ### Tempos de compilação são reais
 
 Tempos de compilação do Rust não são PHP. Uma compilação limpa de um app
-Suprnova novo leva 1–2 minutos; compilações incrementais durante o desenvolvimento
+Suprnova novo leva 1-2 minutos; compilações incrementais durante o desenvolvimento
 são alguns segundos. O fluxo de trabalho do dev é o mesmo - `suprnova serve`
 observa mudanças e recompila - mas você sentirá na primeira vez que você mudar
 uma macro e recompilar um crate downstream. Cache se paga rapidamente.

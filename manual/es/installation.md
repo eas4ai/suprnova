@@ -5,8 +5,7 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 
 ## Requisitos
 
-- **Rust 1.91.1+** (el espacio de trabajo utiliza la edición 2024). Instala a través de
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para la rama `main` actual (el workspace usa la edición 2024). La versión etiquetada v1.3.2 tiene el mismo requisito mínimo de Rust 1.94.0. Instálelo mediante [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -22,6 +21,9 @@ proyecto con andamiaje. Si ya estás allí, salta a [Inicio rápido](quickstart.
 No tienes que elegir una base de datos ahora. El generador de andamiaje por defecto elige
 SQLite para que una aplicación nueva se ejecute sin configuración.
 
+
+La rama `main` actual usa SeaORM 2.0, SeaQuery 1.0 y SQLx 0.9. Las aplicaciones que llaman directamente a SeaORM deben importar `ExprTrait` para los métodos de expresión de SeaQuery y usar métodos de conexión `*_raw` explícitos para valores `Statement` preconstruidos. La actualización de dependencias no requiere ninguna migración de datos de la aplicación.
+
 ## Instalar la CLI
 
 Suprnova se distribuye como un proyecto de Cargo, y el instalador de la
@@ -29,7 +31,7 @@ CLI trae el framework desde git (no desde crates.io - consulta la [Nota
 previa al lanzamiento](#pre-launch-note) más abajo):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 Esto compila el binario `suprnova` y lo deja en `~/.cargo/bin`. Confirma
@@ -50,8 +52,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Crear un proyecto
 
-`suprnova new` crea un proyecto completo con andamiaje - backend + frontend
-elegido + configuración Vite + migraciones de autenticación + rutas de ejemplo.
+`suprnova new` crea un proyecto completo con andamiaje - backend + frontend + configuración Vite + migraciones de autenticación + rutas de ejemplo.
 Es interactivo por defecto:
 
 ```bash
@@ -162,7 +163,7 @@ El recorrido completo por los directorios está en [Estructura de directorios](s
 La CLI vive en tu `~/.cargo/bin`. Para actualizar a la última versión:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 `--force` hace que Cargo sobrescriba el binario existente.
@@ -173,7 +174,7 @@ Una aplicación con andamiaje depende del crate del framework `suprnova` a
 través de una dependencia de git en `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Para traer los últimos cambios del framework:
@@ -195,7 +196,7 @@ Suprnova se distribuye a través de git, no de crates.io - tanto el
 framework como la CLI se instalan desde GitHub. Cada versión se publica
 como una Release etiquetada de GitHub (p. ej. `v1.2.4`), y la etiqueta es
 aquello de lo que depende tu aplicación: un `Cargo.toml` con andamiaje
-fija `tag = "v1.2.4"`, y `Cargo.lock` registra el commit exacto al que
+fija `tag = "v1.3.2"`, y `Cargo.lock` registra el commit exacto al que
 resolvió esa etiqueta, por lo que las compilaciones son reproducibles
 hasta que decidas avanzar. Actualizar es deliberado, nunca accidental -
 sube la etiqueta y ejecuta `cargo update -p suprnova`; la sección sobre

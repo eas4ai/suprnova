@@ -1,13 +1,14 @@
 # Docker
 
 Suprnova livre deux commandes CLI qui génèrent des artefacts Docker
-que vous pouvez adopter tels quels ou modifier. `docker:init` écrit
-un `Dockerfile` multi-étapes + un `.dockerignore` pour la production.
-`docker:compose` écrit un `docker-compose.yml` pour les services de
+que vous pouvez adopter tels quels ou modifier. `docker:init` écrit + un `Dockerfile` multi-étapes + un `.dockerignore` pour la production. `docker:compose` écrit un
+`docker-compose.yml` pour les services de
 développement local (base de données, cache, et optionnellement
 Mailpit + MinIO). Les deux commandes écrivent dans la racine du
 projet courant ; aucune n'essaie de piloter votre runtime de
 conteneurs.
+
+
 
 ## docker:init
 
@@ -37,8 +38,7 @@ requises :
 1. **`frontend-builder`** - `node:20-alpine`. Installe les
    dépendances npm et exécute `npm run build`, produisant
    `frontend/dist`.
-2. **`backend-builder`** - `rust:1.91.1-slim-bookworm`. Met en cache
-   `Cargo.toml` + `Cargo.lock` comme couche de dépendances, puis
+2. **`backend-builder`** - `rust:1.94.0-slim-bookworm`. Met en cache `Cargo.toml` + `Cargo.lock` comme couche de dépendances, puis
    copie vos `cmd/`, `src/`, et le `frontend/dist` construit (en tant
    que `public/assets`) et exécute `cargo build --release`.
 3. **`runtime`** - `debian:bookworm-slim` avec `ca-certificates` et
@@ -71,19 +71,18 @@ commité - il est déjà couvert par le `.dockerignore`.
 
 ### Bump de la chaîne d'outils Rust
 
-Le Dockerfile épingle `rust:1.91.1-slim-bookworm` pour l'étape de
-build afin qu'une image fraîchement générée soit reproductible et
-corresponde au MSRV déclaré de Suprnova 0.6. Les Dockerfiles
-personnalisés devraient utiliser la même chaîne d'outils ou une plus
-récente :
+Le Dockerfile fixe `rust:1.94.0-slim-bookworm` pour l’étape de build afin qu’une image nouvellement générée soit reproductible et corresponde à la branche `main` actuelle. Les Dockerfiles personnalisés doivent utiliser la même chaîne d’outils ou une version plus récente.
 
 ```dockerfile
-FROM rust:1.91.1-slim-bookworm AS backend-builder
+FROM rust:1.94.0-slim-bookworm AS backend-builder
 ```
 
 Épinglez la version de chaîne d'outils qui correspond à ce que
 `rust-toolchain.toml` (si vous en avez un) ou votre `rustc --version`
 local rapporte.
+
+
+La branche `main` actuelle utilise SeaORM 2.0, SeaQuery 1.0 et SQLx 0.9. Les applications qui appellent directement SeaORM doivent importer `ExprTrait` pour les méthodes d’expression SeaQuery et utiliser des méthodes de connexion `*_raw` explicites pour les valeurs `Statement` préconstruites. La mise à niveau des dépendances ne nécessite aucune migration des données de l’application.
 
 ### Pourquoi Suprnova diverge
 

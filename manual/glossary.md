@@ -597,8 +597,7 @@ should still return `Result`. See [Request Lifecycle - Panic boundary](lifecycle
 
 ### Payment provider
 
-A type implementing the `PaymentProvider` super-trait (= `Checkout`
-+ `Subscription` + `CustomerStore` + `WebhookHandler`). Reference
+A type implementing the `PaymentProvider` super-trait (= `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`). Reference
 adapters: `suprnova-payments-stripe` (gateway, full `Payment` impl)
 and `suprnova-payments-paddle` (merchant-of-record, no `Payment`).
 See [Payments](payments.md), [Provider Guide](payments-provider-guide.md).

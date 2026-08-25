@@ -2,13 +2,174 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
-## 未发布
+## 1.3.2 - 2026-08-25
+
+> The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.
 
 ### 新增
 
-- **Suprnova 身份验证现在运行在内部 Magnetar 引擎上。** 框架拥有的 `Auth` 门面在移除 Torii 依赖的同时，保留现有的密码、魔法链接、passkey、OAuth、bearer、锁定、会话和双因素调用点。默认引擎以原子方式安装密码/会话和 passkey 适配器，将生命周期交付租约存储在应用程序数据库中，并共享应用程序的规范 `i64` `app_users` 身份。
+- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+
+- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+
+### 修复
+
+- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+
+- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+
+### 升级
+
+- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+
+- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+
+## 1.3.1 - 2026-08-24
+
+> The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.
+
+### 修复
+
+- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
+- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
+- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+
+### 安全
+
+- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+
+### 升级
+
+- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+
+## 1.3.0 - 2026-08-24
+
+### 安全
+
+- **Magnetar 现在会将凭据和会话变更限制在已认证 actor 及账户 auth epoch 之内。** 密码、passkey、关联账户、双因素、opaque-session、JWT、remember、OAuth 和设备授权写入都会拒绝陈旧或已撤销的 actor。未验证账户首次成功的密码重置、magic-link 或 OAuth 已验证邮箱证明会推进 epoch，并以原子方式移除临时凭据、会话、remember 状态及抢占者 TOTP 注册。已验证账户会在密码重置期间保留合法凭据。邮箱验证要求已认证的 token 所有者，且 OAuth 绝不会仅根据邮箱自动关联未验证的现有账户。
+
+- **协议相对的 `_previous.url` 现在无法在写入侧或读取侧通过 `Redirect::back()` 产生跨源开放重定向。** `SessionMiddleware` 不再持久化协议相对的当前 URL：写入会经过 `InertiaValidationRedirectMiddleware` 对 `Referer` 检查所用的同一个清理器，形如 `//host`（或携带 ASCII 控制字节）的请求路径永远不会被记录 - 否则应用的 `fallback!` 路由（标准的 Inertia/SPA 应用外壳模式，任何未匹配路径都回答 `200`）可能会让 `GET //evil.test/anything` 原样持久化这个路径。`SessionData::previous_url()` 现在也会在每次**读取**时应用相同的检查，所以一个从此修复之前的版本升级而来的会话 cookie - 已经携带了当前进程不会写出的原始、未经清理的值 - 会自愈为“没有记录任何内容”，而不是被信任。这样，无论是旧的中毒 cookie 还是新的恶意请求，都不能把一个跨源 `Location` 交给 `Redirect::back()`、`Redirect::refresh()` 或 `url::previous()`。值未通过任一检查时会被视为不存在，而不是被替换成合成值，因此一个真正良好的 previous URL 永远不会被覆盖。
+- **Inertia 验证重定向桥接的 `Referer` 检查又关闭了两个同源绕过。** `InertiaValidationRedirectMiddleware` 的 `303` 目标此前只拒绝以字面 `//` 或 `/\` 前缀开头的 `Referer` - 类似 `Referer: /<TAB>/evil.test` 的值会漏过去，因为 WHATWG URL 解析器会在比较 origin 之前从整个字符串中剥除 ASCII tab 和换行，所以浏览器会把它读成 `//evil.test` 并跟随 `303` 跨源跳转。现在检查会拒绝候选值中任何位置的 ASCII 控制字节（C0 或 DEL），而不仅是两个列出的前缀内部。另一方面，最后的后备路径 - 当 `Referer` 和会话的 previous URL 都不可用时使用的失败请求自身路径 - 此前从未清理：origin-form HTTP request-target 在语法上可以以 `//` 开头，因此原始客户端或不做规范化的代理也能把这个“安全的最后手段”变成跨源重定向。两条路径现在共享同一个根相对检查；即使请求自身路径也未通过检查，也会回退到 `/`。
+- **Cookie 密文现在通过带上下文的 v2 AAD 绑定到其逻辑 cookie 名称。** `Cookie::encrypted` / `Cookie::read_encrypted_for` 会阻止为一个 cookie 槽铸造的值在另一个槽中解密，而逻辑名称绑定也会让之后的 `__Host-` / `__Secure-` 线缆前缀切换保持安全。无版本兼容窗口会先在整个密钥环上尝试 v2，再在整个密钥环上尝试 v1，因此现有 cookie 能熬过这次推出；v1 回退会保留旧的重放弱点，直到计划中的 1.4.0 移除。
+- **会话和 remember-me cookie 前缀现在会在启动时验证，并在渲染时强制执行。** `SESSION_COOKIE_PREFIX=__Host-` 要求 `Secure`、`Path=/` 且没有 `Domain`；`__Secure-` 要求 `Secure`。无效的启动组合会在开始提供服务前失败，渲染器会重写无效的带前缀请求头，而不是让浏览器静默丢弃它们。
+
+### 新增
+
+- **Suprnova 身份验证现在运行在内部 Magnetar 引擎上。** 框架拥有的 `Auth` 门面在移除 Torii 依赖的同时，保留现有的密码、magic-link、passkey、OAuth、bearer、锁定、会话和双因素调用点。默认引擎以原子方式安装密码/会话和 passkey 适配器，将生命周期交付租约存储在应用程序数据库中，并共享应用程序的规范 `i64` `app_users` 身份。
 - **一个感知形状的身份验证迁移运行器现在覆盖 Torii、Suprnova web 和 Suprnova API 来源。** 试运行会将稳定的计划 ID 绑定到持久的行和架构指纹，以及目标身份决策。应用执行使用事务性导入、重试账本、形状拥有的清理和冲突拒绝。MySQL 使用受写入屏障保护的影子交换，并配有预复制日志、行和架构一致性、可恢复重命名，以及保留清理的还原。
-- **Magnetar 现在会将凭据和会话变更限制在已认证 actor 及账户 auth epoch 之内。** 密码、passkey、关联账户、双因素、opaque session、JWT、remember、OAuth 和设备授权写入都会拒绝陈旧或已撤销的 actor。未验证账户首次成功的密码重置、magic-link 或 OAuth 已验证邮箱证明会推进 epoch，并以原子方式移除临时凭据、会话、remember 状态及抢占者 TOTP 注册。已验证账户会在密码重置期间保留合法凭据。邮箱验证要求已认证的 token 所有者，且 OAuth 绝不会仅根据邮箱自动关联未验证的现有账户。
+- **`MAIL_DRIVER=file` 现在会为每条消息向 `MAIL_FILE_PATH` 写入一个 RFC 5322 `.eml` 文件**（默认值为 `storage_path("mail")`；相对值锚定在应用程序基目录，而不是进程 CWD），这样本地邮件可以在邮件客户端中打开，而不必从日志行中读取。该文件携带 SMTP 发出的同一组完整请求头，包括 `X-Priority`、`Importance`、`X-Tag`、`X-Metadata-*` 和 `Return-Path`。和 `log`、`memory` 一样，它不会投递：除非设置 `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`，生产启动会拒绝它。
+- **`FrameworkError::External` 现在携带它所包装的错误。** `FrameworkError::from_external(e)` 和 `FrameworkError::from_external_with("saving user", e)` 会让原始错误作为 `std::error::Error` source 保持可访问，而不是将其熔化成字符串。`FrameworkError::external_source()` 会为 downcast 返回它 - 请使用它，而不是会产生共享 `Arc` 句柄的 `source()`。两个构造器都映射到 HTTP 500。
+- **5xx 日志现在会渲染完整的错误 source 链。** `render_error_chain` 会遍历 `source()`，并接入框架错误日志行、`ErrorOccurred` 事件载荷，以及在 `APP_DEBUG=true` 下发出的 `debug_message` 字段。面向客户端的响应体保持不变，5xx 响应体仍会被清理。
+- **`InertiaResponse::scroll_wrapped` / `scroll_with_wrapped` / `try_scroll_wrapped`。** 对于自身就是 envelope（`{ data: [...], meta: {...} }`）的值，将 scroll prop 的合并指令嵌套在 `<key>.<wrap_key>` 下，而不是裸键下 - 使用 `mergeProps: ["users.data"]` 而不是 `["users"]`。Laravel 的 `ScrollProp` 无条件地在 `"data"` 下包装；Suprnova 的内置分页器返回裸行数组，所以这是选择启用，而不是每个调用方都要绕开的默认行为。新的 `ProvidesScrollMetadata` trait（`page_name` / `previous_page` / `next_page` / `current_page`，带默认的 `scroll_metadata()`）为这个 crate 不知道的分页器复刻 Laravel 的同名接口；`LengthAwarePaginator`、`Paginator` 和 `CursorPaginator` 现在实现它，而不是手工构建 `ScrollMetadata`。scroll prop 的 `.match_on(...)` 字段现在也会输出到 `matchPropsOn`，与 Laravel 的 `resolveMergeMatchingKeys`（`Response.php:641-652`）一致；它会像其他 merge prop 一样合并 `ScrollProp` 的 `matchesOn()`，匹配项以 prop 实际合并的位置为键，即未包装的 `<key>`，或者 `.scroll_wrap(...)` 下的 `<key>.<wrap_key>`。
+- **`Prop::merge_with_path`、多字段 `match_on` 以及基于 resolver 的 merge prop。** `Prop::merge_with_path(path)` 会合并 prop 值内部的嵌套字段，而不是整个 prop - `Prop::eager(v).merge().merge_with_path("data")` 会输出 `mergeProps: ["<key>.data"]`，带路径的合并 prop 永远不会同时合并根；`.deep_merge()` 会忽略它，因为 deep merge 本来就会递归遍历每个字段。`Prop::match_on` 现在可以在一次调用中接收一个或多个字段（`match_on(["id", "slug"])`），并在已有的 `match_on("id").match_on("slug")` 链式 `Prop` 组合之上提供它。`InertiaResponse::merge_lazy` / `merge_lazy_with` 增加 `.merge` / `.merge_with` 的 resolver 兄弟方法，与 Laravel 的 `Inertia::merge(fn () => ...)` 对应。
+- **部分重新加载的 `only`/`except` 现在理解点号记法。** `X-Inertia-Partial-Data: user.name` 会把 `user` prop 缩小为 `{ name: ... }`，而不是要求整个值或什么都不要求；`X-Inertia-Partial-Except: user.email` 只会删除该字段，保留 `user` 的其余部分。如果两个请求头都列出一条路径，`except` 获胜；裸条目仍然表示整个 prop；未知或类型不匹配的嵌套路径会静默丢弃，不会影响它的兄弟项。`Always` prop 不受影响 - 它们总是完整发送。
+- **点号键 prop 嵌套。** `.with("user.name", value)`（以及任何其他 prop 附加方法，无论 eager 还是 resolved）现在会嵌入 `props.user`，而不是发送字面量 `"user.name"` 键，符合 Laravel 基于 `Arr::set` 的 `resolveArrayableProperties` 解包。共享前缀的两次调用 - 先 `.with("user.name", …)` 再 `.with("user.age", …)` - 会累积到一个对象中；没有点号的键不受影响。`App::inertia_share*` 共享注册表键在 wire 上也以同样方式嵌套。解包只会处理顶层 prop *键* - 永远不会递归进入 prop 的值，所以验证 `errors` 包会保留它内部携带的点号字段名。
+- **`App::inertia_shared(key)` / `App::flush_inertia_shared()`。** 这是 Laravel 的 `Inertia::getShared` / `Inertia::flushShared`，用于读取和清空静态 share 注册表（`App::inertia_share` / `_lazy` / `_once`）。`inertia_shared` 在读取侧支持与 `inertia_share` 相同的点号记法；对于 lazy 或 once share（没有可供解析的请求）以及未注册的键，它都会返回 `None`。`flush_inertia_shared` 只会清空静态注册表 - 通过 `App::register_inertia_shared` 注册的 trait provider 不受影响，与 Laravel 一致（那里没有需要清空的每请求状态）。
+- **`InertiaResponse::always_with(key, resolver)`。** 这是 `.always(key, value)` 的异步 resolver 兄弟方法，用于一个始终包含、且昂贵到值得惰性解析的 prop - 对应 Laravel 的 `Inertia::always(fn () => …)`（`AlwaysProp` 接受任何值，包括闭包）。
+- **`InertiaSharedData::share` 现在会收到页面组件名称**，因此 provider 可以按页面改变其输出 - 对应 Laravel 的 `RenderContext`。参见升级。
+- **Inertia prop 组合。** `Prop` 现在携带正交标志，而不是九种封闭变体中的一种，因此一个 prop 可以同时 deferred *和* mergeable、mergeable *和* cached，或者 optional *和* cached - 这些是 Inertia 3 协议预期、而封闭 enum 无法表达的组合。使用 `Prop::eager` / `Prop::lazy` / `Prop::from_resolver` / `Prop::absent` 构建，链式调用 `.always()`、`.optional()`、`.defer()`、`.group()`、`.rescue()`、`.merge()`、`.prepend()`、`.deep_merge()`、`.match_on()`、`.once()`、`.as_key()`、`.until()`、`.fresh()`、`.scroll()`，并用新的 `InertiaResponse::prop(key, prop)` 附加。一个 `defer().merge()` prop 会在首次渲染中以 `deferredProps` 公告，并在后续请求中以 `mergeProps` 到达。新的 `MergeMode` 和 `Visibility` 类型描述这些标志；现有每一个构建器快捷方式（`.with`、`.always`、`.lazy`、`.optional`、`.defer`、`.merge*`、`.once*`）都不变。
+- **队列暂停/恢复。** `Queue::pause(connection, queue)` / `resume` / `pause_all()` / `resume_all()` / `is_paused(connection, queue)` / `paused_queues(connection, &queues)`，像重启信号一样由 `Cache` 支撑 - `resume_all` 不会清除逐队列暂停，与 Laravel 的行为一致。worker 的 claim gate 紧挨着每次 pop 之前，因此正在处理的作业总会完成；全局暂停会像 Laravel 的 `pausedQueues` 一样短路 `--queue=...` 过滤，而逐队列暂停只对使用显式 `--queue=...` 列表启动的 worker 生效。新增 CLI 命令 `queue:pause [queue] [--all]` / `queue:resume [queue] [--all]`（别名 `queue:continue`），以及供运维人员禁用功能的 `QUEUE_PAUSABLE=false` - 不可暂停的 worker 会忽略暂停信号，而 `queue:pause` 自身会拒绝运行。新增事件：`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed`。
+- **`suprnova::testing::TestResponse`** - 一个流畅的、按 Laravel `TestResponse` 形状包装 `(status, headers, body)` 三元组的封装器，这是每个 HTTP 测试 harness 已经产生的结果：`assert_status`、`assert_ok`、`assert_redirect`、`assert_json`、`assert_json_path`、`assert_json_count`、`assert_see`、`assert_header`、`assert_cookie`，以及（给定 `.with_session_store(...)` 时的）`assert_session_has`。每个断言都返回 `&Self`，失败时 panic，与 `expect!` 契约相同。测试驱动请求的方式无需任何改变。
+- **`suprnova new` 现在会脚手架出 SSR 入口。** 每个起始套件（Svelte、React、Vue）现在都提供 `frontend/src/ssr.{ts,tsx}` 和 `build:ssr` npm 脚本（`vite build --ssr`），并接入自己的输出目录（`frontend/bootstrap/ssr/`），因此 SSR bundle 永远不会与 `public/assets/` 中的客户端构建冲突。
+- **`InertiaConfig::ssr_bundle_path(path)` / `.ssr_ensure_bundle_exists(bool)`。** SSR gateway 现在可以在派发渲染之前检查磁盘上是否存在已构建的 bundle，对应 Laravel 的 `ensure_bundle_exists` 配置 - 从未启动的 worker 或从未构建的 bundle 会快速失败，而不是为一个注定无法成功的连接支付 `ssr_timeout`。用 `.ssr_bundle_path(...)` 选择启用；与 Laravel 的 `BundleDetector` 不同，该路径永远不会自动检测，因此未设置路径的既有 SSR 配置（以及测试）不受影响。
+- **Inertia 访问上的验证失败现在会重定向返回，而不是返回 `422` JSON。** `Inertia::install` 会注册第四个中间件 `InertiaValidationRedirectMiddleware`，将 `X-Inertia` 请求上的验证 `422` 转换成带 flash 错误、指向表单页的 `303` - 因此 `useForm().errors` 无需处理程序代码就会填充。Inertia 客户端会把缺少 `X-Inertia` 请求头的响应视为非 Inertia，并显示错误模态框，所以旧的 `422` 永远无法到达 `form.errors`。非 Inertia 请求保留 `422` envelope，Precognition 试运行不受影响，`X-Inertia-Error-Bag` 会限定 flash 的 bag。重定向目标依次是同源 `Referer`、会话的 previous URL、经过同一清理器的请求自身路径；如果连它也失败就回退到 `/`，绝不会原样信任。
+- **`InertiaConfig::with_all_errors(bool)`** - 保留每个字段的全部验证消息，而不是折叠成第一条。对应 Laravel 的 `Inertia\Middleware::$withAllErrors`。
+- **`suprnova::testing::AssertableInertia`** - 在 Inertia 页面对象之上提供、形状类似 Laravel `AssertableInertia` 的流畅断言；页面对象既可以从 `X-Inertia` JSON 响应解析，也可以从硬导航 HTML 外壳内嵌的 `<script data-page="app">` 元素解析：`component`、`url`、`version`、`prop`、`has`、`missing`、`where_`、`count`、`has_flash`。使用 `AssertableInertia::from_response` 从 `HttpResponse` 构建，或者使用新的 `TestResponse::assert_inertia()` 从 `TestResponse` 构建。`reload_only`、`reload_except` 和 `load_deferred_props` 会针对调用方提供的 `with_reload(...)` 闭包重放部分重新加载 - Suprnova HTTP 测试会跨越真实 socket，所以没有可硬编码的单一进程内测试客户端。
+- **`Cookie::queue`/`queued`/`unqueue`/`expire`。** 一个任务本地的 cookie jar - Laravel 的 `CookieJar` - 允许任何代码为下一次出站响应排队一个 cookie，而不必持有可以附加它的 `HttpResponse`：事件监听器、容器绑定服务、处理程序之前的中间件都可以使用。它由 `Auth::login_remember` 已经使用的同一个每请求槽支撑，以便把 remember-me cookie 带过处理程序边界；`SessionMiddleware` 会把它和 session cookie 一起排到响应上。`Cookie::expire(name, path, domain)` 会排队一个用 `Cookie::forget_with` 构建的删除 cookie。路由的 middleware 链必须有 `SessionMiddleware` - 在其之外四个调用都是静默 no-op，与在 flash scope 外使用 `App::flash` 的行为一致。
+- **`HttpResponse::event_stream(stream, end)` 和 `HttpResponse::stream_json(stream)`。** 这是 Laravel 的 `ResponseFactory::eventStream` / `streamJson`，以及 `@laravel/stream-{react,vue,svelte}` 的 `useEventStream` / `useJsonStream` 所期望的精确 wire 形状。`event_stream` 默认将 `Stream<Item = sse::StreamedEvent>` 的每个 item 帧化为 `event: update`，除非 item 自己命名了事件；它会对任何非字符串载荷做 JSON 编码，并附加可配置的终止帧（`EndSignal::default()` 是 `data: </stream>`；`EndSignal::None` 会省略它）。`stream_json` 会将每个 `Stream<Item = impl Serialize>` 作为一个增量刷新的 JSON 数组流出。两者都构建在既有的 `sse`/`stream_bytes` body pipeline 之上，因此与框架其余部分共享它的取消和 panic 隔离行为。
+- **`suprnova serve` 现在会重新生成崩溃的开发进程，而不是拆掉整个会话。** 尝试之间使用指数退避 - 200ms，每次连续崩溃都翻倍，上限 5s；进程持续运行 30s 后重置到下限。`--no-restart` 选择退出并恢复之前的行为。`--restart-tries <N>`（默认 `5`，与 Laravel 的 `--restart-tries=5` 一致）会在进程连续崩溃达到该次数后放弃重试，而不是无限尝试；它会打印一条可操作消息，同时让其他进程和会话本身继续运行。`--timestamps` 会在每一行转发文本前加上 `HH:MM:SS`。新的 `Suprnova.toml` `[[serve.process]]` 数组允许项目声明自己的开发进程（Laravel 的 `DevCommands::register`），与后端和前端一起运行；每个进程都有自己的 `[name]` 前缀和可选颜色。现在条目中的未知键或空白 `name`/`command` 会是硬解析错误，而不是静默忽略或稍后才发生不透明的 spawn 失败。`--json` 会改为在 stdout 上每行输出一个 JSON 对象（NDJSON） - 进程启动、输出、退出、计划重启、重启成功、放弃、类型重新生成和关闭事件都会输出；文件 watcher 自身的重新生成通知及 `Ctrl+C` 处理程序的关闭通知在 `--json` 下也不会出现在 stdout - 以便脚本和日志管道使用。将它与 `--timestamps` 组合是安全的但重复，因为每个事件已经携带自己的时间戳。
+- **`RequestBuilder::retry_when(predicate)`。** 在内置策略（`.retry(...)` / `.retry_non_idempotent(...)`）本来会执行每次重试之前咨询一个谓词，并接收 `RetryContext { attempt, method, url, outcome: RetryOutcome::TransportError | Status(u16) }`。它与策略组合而不是替换策略：`false` 会否决策略本来会执行的重试；它永远不能强制超过 `max_attempts` 的重试，或强制执行策略本来不会尝试的重试（4xx 状态，或没有 `retry_non_idempotent` 的非幂等方法）。
+- **`#[model(touches = [...])]` 现在确实会执行 touch。** 子级被创建、保存、更新或删除后，列表中点名的每个 `BelongsTo` owner 都会在触发写入的同一个 executor 上获得一次 `UPDATE <owner> SET updated_at = ? WHERE <key> = ?` - 因此在 `DB::transaction` 内，touch 会加入该事务并随之回滚。其模型设置了 `timestamps = false` 的 owner 会被跳过，不会写入，也不会报错（Laravel 13.25 关闭了同一个缺口）。通过 `NULL` foreign key 找到的 owner 和软删除的 owner 也会被跳过。没有指名已声明 `BelongsTo` 关系的 `touches` 条目现在是编译错误；多态 owner 目前还不支持。
+- **`without_touching_on::<M, _, _>(fut)`** - Laravel 的 `Model::withoutTouchingOn([M::class], $cb)`。它会抑制 `m.touch()` 以及任何指向 `M` 的 owner 级联，但其他类型的 owner 仍会递增。scope 可以嵌套，现有的 `without_touching` 现在除了直接的 `touch()` 调用外，也会抑制 owner 级联。
+- **`Model::touch_owners()` / `touch_owners_with_tx(tx)`** - Laravel 的 `touchOwners()`，用于您通过框架不拥有的路径写入 child 行的情况。
+- **值形状的验证规则：`ArrayKeys` 和 `Distinct`。** 新的 `ValueRule` trait（`passes(&self, value: &serde_json::Value)`）与 `Rule` 并列，共享同一个带键消息的契约。`rules::ArrayKeys(&[...])` 会拒绝携带允许列表之外任何键的 JSON 对象（Laravel 的 `array:keys`，#60918）；`rules::Distinct { ignore_case, strict }` 会拒绝含有重复元素的 JSON 数组（Laravel 的 `distinct`）。`validate!` 行可以在同一字段列表中接受任一类型的规则 - 分发是自动的，根据规则实现了哪个 trait 选择，而不是通过新的行语法选择。
+- **`Job::delay()`** - 作业可以声明默认延迟（`fn delay() -> Option<Duration>`，默认 `None`），由 `Queue::push` 和 `Queue::bulk` 遵循：`available_at` 变为 `now + delay`，而不是 `now`。调用点上的显式延迟仍然优先 - `Queue::push_later(job, at)` 和 `Queue::later(delay, job)` 使用调用方的时间戳原样执行，永远不会咨询 `Job::delay()`。
+- **`Notification::{queue, timeout, fail_on_timeout, max_tries, backoff}`。** 排队的 notification（`Notify::queue`）现在会通过 `Mail::on_queue` 使用的 `EnvelopeOverrides` 原语，把自己的队列调优默认值带到每次逐通道 `SendNotificationJob` 推送中。`fail_on_timeout(&self) == true` 会在第一次超时时将其转入死信而不是重试，与 Laravel 的 `#[FailOnTimeout]` notification 属性一致（#61072）。这五项默认值都与 `SendNotificationJob` 现有的 `Job` 默认值相同，因此不覆盖任何值的 notification 不受影响。
+- **`Mail::on_queue` / `Mail::on_connection` + `Queue::push_with`/`later_with`。** 排队的 mailable 现在可以用 `Mail::to(..).on_queue("emails").queue(mailable)` 路由自己，也可以通过 `Mailable::queue(&self)` 提供默认值。两者都优先于为该作业注册的任何 `Queue::route` 以及作业自身的 `Job::queue()`/`Job::connection()` - 它们背后的新 `EnvelopeOverrides` 原语（`Queue::push_with(job, overrides)` / `Queue::later_with(delay, job, overrides)`）也会覆盖一次推送的 timeout、fail-on-timeout、max-tries 和 backoff。`MailFake` 的排队快照现在携带解析后的 `queue`，并提供 `queued_on(...)` / `assert_queued_on(name, queue)` 进行断言。
+- **`Application::http_bootstrap(f)`** - 仅 HTTP 的启动钩子。它在 `bootstrap` 之后运行，并且只在 `serve` / `web:run` 路径上运行，因此 queue、schedule、workflow worker 以及 console binary 永远不会运行它。worker 和 console 容器镜像不再需要已构建的前端 manifest 才能启动：生产环境缺少 manifest 时 `Inertia::install` 会失败关闭，并且该检查现在只会在真正提供 HTTP 的进程上运行。
+- **`Router::inertia(path, component, props)`** - Laravel 的 `Route::inertia`，用于其 handler 本来只有一行的静态页面。它注册 `GET`（HEAD 会落到它上面）并返回一个 `RouteBuilder`，因此路由可以命名并赋予 middleware。`Router::view` 保留为别名。
+- **SES v2 发送选项。** SES transport 现在会在 `SendEmail` 上输出 `TenantName`、`ConfigurationSetName` 和 `ListManagementOptions`。每一项都有 transport 层默认值（`SesMailTransport::tenant_name` / `configuration_set_name` / `list_management`）以及逐消息请求头覆盖（`X-SES-TENANT-NAME`、`X-SES-CONFIGURATION-SET`、`X-SES-LIST-MANAGEMENT-OPTIONS`），请求头优先。请求构建时会消费这些请求头，永远不会把它们渲染进消息中。
+- **每一个响应构建器现在都有 `without_cookies`。** `HttpResponse`、`Response`（通过 `ResponseExt`）、`Redirect` 和 `RedirectRouteBuilder` 都可以在一次调用中让一列 cookie 过期；`Redirect` / `RedirectRouteBuilder` 还补上了原本缺失的单名称 `without_cookie`。新的 `Cookie::forget_with(name, path, domain)` 会构建一个限定到原 cookie 设置所用 path 和 domain 的删除 cookie - 普通 `forget` 永远不会清除在 `/` 之外设置的 cookie。
+- **`Queue::fake()` 会给每一次捕获的 push 加盖 envelope id。** `pushed_with_id::<J>()` 返回 `(job, id)` 对，fake 现在也会分发真实 driver push 所分发的同一对 `JobQueueing` / `JobQueued` 事件（携带该 id），这样测试可以将捕获的 push 与监听器看到的 push 对上。现有 fake 辅助函数不变。
+- **`UniqueJobSkipped` queue event。** `Queue::push_unique` 抑制重复项时现在会分发 `queue::events::UniqueJobSkipped { job_name, unique_id, connection }`，因此去重从静默变为可观察。调用返回值保持不变（`Ok(false)`）。
+- **查询构建器和集合上的 `model_keys()`。** `User::query().model_keys().await?` 会返回每一行匹配记录的主键，而不 hydrate 单个模型，并投影带表限定的键（`users.id`），所以查询经过 join 仍然有效。`Collection::model_keys()` 是已 hydrate 集合的对应方法。`#[suprnova::model]` 现在也会将键的 Rust 类型声明为 `EloquentModel::Key`，因此两者返回 `key_type` 命名的类型，而不是调用方选择的 turbofish。
+
+### 修复
+
+- **PostgreSQL 软删除现在使用后端感知的占位符，生成的时间戳写入也会遵循声明的转换。** `delete()` 和 `restore()` 会呈现 PostgreSQL 序号占位符，而不是 MySQL 和 SQLite 的 `?` 占位符。生成的创建、更新、保存、touch 和软删除写入也会通过每个字段声明的 `Cast` 存储类型转换时间戳，因此原生 `TIMESTAMPTZ` 列不再接收文本值。感谢 [@i-am-v-alexander-v](https://github.com/i-am-v-alexander-v) 报告这两个缺陷，并在 [PR #3](https://github.com/eas4ai/suprnova/pull/3) 中提交修复。
+- **默认 workspace 和 Magnetar gate 运行不再需要实时 PostgreSQL 或 MySQL 服务。** 后端特定行为套件是显式且被忽略的资格测试；如果故意在没有其已配置数据库的情况下调用，这些测试仍会失败。仅测试可达性的测试和永久性 gate 环境要求已被移除，因此无关更改不必在每次验证运行时承担外部数据库设置成本。
+
+- **`PartialFilter::narrow` 现在是 `pub`。** 它的四个同级谓词（`should_include`、`should_include_eager`、`should_include_optional` 以及该类型本身）此前已经公开，但使 `should_include_eager` 的 `true` 回答正确的 narrowing pass - 将 resolved value 缩小到 `only`/`except` 条目实际请求的点号路径 - 仍然是 `pub(crate)`。基于 `PartialFilter` 构建自定义部分重新加载处理的调用方没有公开方式复现这次 narrowing，因此即使 `should_include_eager` 报告键已包含，也会在点号 `only` 条目下完整发送该值。
+- **`MailFake` 的 `QueuedSnapshot` 现在可以断言 `.on_connection(...)`。** `Queue::fake()` 在 Wave 3 中随 `assert_pushed_on_queue` 增加了 `assert_pushed_on_connection`；`Mail::fake()` 只获得了 queue 部分，所以用 connection override 排队的 mailable 虽然已被解析并应用于真实 dispatch，却无法通过 fake 断言。新增 `QueuedSnapshot::connection`、`MailFake::queued_on_connection` 和 `MailFake::assert_queued_on_connection` 来补上缺口，形状与 `assert_queued_on` 对应。
+- **裸 `only` 条目无法访问点号 shared prop。** `App::inertia_share("auth.user", …)` 后跟 `router.reload({ only: ['auth'] })` 时会直接返回 `props: {"errors":{}}` - share 会彻底消失。注册表将 `auth.user` 存成一个字面键，而 `Arr::set` 解包 pass 只有在每个 prop 都解析之后才会嵌套它，所以 partial-reload gate 既不将仍然扁平的键匹配到 `auth`，也不匹配到其他任何项。现在 `only`/`except` 条目是对称的：条目可以精确指名 prop 的键、指名其内部的路径（`user.name`，会进行 narrowing），或者指名其祖先（对键 `auth.user` 使用 `auth`，因为调用方请求整个根，所以会完整发送 prop）。对一个裸 `except: ['auth']` 来说，它会像 Laravel 已经嵌套的 bag 中的 `Arr::forget` 一样，丢弃其下的每个 prop 键。前缀必须在 segment 边界结束，因此不相关的 `authAgent.user` prop 不会被任一列表触碰。Laravel 不会遇到这点，因为 `Inertia::share` 在 share 时就运行 `Arr::set`；Suprnova 的注册表做不到，因为 lazy share 在请求解析之前没有要嵌套的值。
+- **`#[data(lazy(deferred))]` 字段绕过了 `?include=` allowlist。** `resolve_props` 中带 owner 标签的解析路径选择了 `Prop::is_lazy()` 的 prop，而带任何标志的值都不是 lazy，deferred 字段是 `Visibility::Deferred`。因此该字段会在普通 prop 路径之外解析，而那里没有 include-set 检查；任何发送 deferred follow-up 的客户端都会收到它，不论请求是否选择加入。现在 `Prop::resolve_with_owner` 会对所有带 resolver 的 owner-tagged prop 做 gate，而 `resolve_props` 会在其他 block 之前运行这个 gate：`?include=` 之外的字段会整体丢弃（没有值，也不公告 `deferredProps`），而被 `?include=` 点名但不在 DTO allowlist 中的字段会在 `X-Inertia-Partial-Data` 吸收它之前引发 `400`。这不是回归 - Wave 4 之前的代码按 `Prop::Lazy` enum 变体做 gate，而 `Prop::Defer` 也会失败 - 但不管怎样都是一个真实缺口。
+- **匹配的 partial reload 会重新公告 `deferredProps`。** 只点名一个 deferred 键的 partial 仍会把每一个其他 deferred 键公告回客户端，客户端随后会再次获取它们，并在下一个 partial 上再次获取。Laravel 的 `resolveDeferredProps` 在请求为 partial 时会立即返回 `[]`，甚至不会检查单个 prop（`Response.php:661-663`）；现在这整个 block 会在任何匹配的 partial 上被丢弃。针对不同 component 的 partial reload 对这个 gate 来说是一次标准 visit，就像其他 visit 一样，因此其公告不受影响。
+- **`errors` 包会根据错误来源不同而采取不同过滤。** session-flashed 包在 resolve loop 之前植入，任何 partial-reload filter 都无法触达；而处理程序自己的 `.with("errors", …)` 则经过普通 gate - 所以 `only: ['errors.email']` 会发送完整的 seeded bag，却只发送一个字段的 handler bag；`only: ['users']` 还会用 seeded bag 替换 handler 的 bag，而不是留下该键。两条路径现在都把 `errors` 视为始终可见，与 Laravel 的 middleware 一致；Laravel 将其作为 `Inertia::always(...)` share，并在 `only`/`except` 重建之后通过 `resolveAlways` 重新注入原始值。这是客户端所需的形状：它用 `{...current.props, ...response.props}` 把 partial 响应折叠进去，因此未过滤的空 `errors` 对象会擦除屏幕上已有的消息，而不加过滤的响应会保持正确。键上的显式 visibility flag 仍然优先，所以 `.prop("errors", Prop::eager(…).optional())` 仍按 optional 行为。
+- **`Queue::fake()` 现在可以观察每次 push 的 `EnvelopeOverrides`。** 通过 `Queue::push_with`/`Queue::later_with` 推送的作业在 fake 下此前无法与普通 `Queue::push` 区分 - `FakePush` 只携带 payload 和 `available_at`，因此 override 从未离开门面，也没有任何方式断言测试调度到了正确的 queue 或 connection。新的 `queue::testing::pushed_with_overrides::<J>() -> Vec<(J, EnvelopeOverrides)>` 会返回每次捕获的 push 及其声明的值；`assert_pushed_on_queue::<J>(queue)` 和 `assert_pushed_on_connection::<J>(connection)` 覆盖常见的单字段情况，对应 `MailFake::assert_queued_on`。每个其他入口（`push`、`push_later`、`bulk`、`push_unique`、chain/batch dispatcher）仍然不带 override，并记录 `EnvelopeOverrides::default()`，因此普通 push 在 fake 下读取起来仍然等于“没有声明 override”。
+- **中途停在响应体的 SSR worker 可能让一次渲染永久挂起。** `SsrConfig::timeout` 只限制等待响应头；响应头到达之后，读取响应体本身没有超时，因此一个接受连接、发送头部、随后停止发送数据的 worker，会让请求超过配置的 timeout 仍然挂起，而不是回退到 CSR（或在 `ssr_throw_on_error` 下报错）。现在两个阶段共享一个 deadline，因此配置的 timeout 会限制整个 SSR 调用，正如其自身文档已经承诺的那样。
+- **排队的 cookie - 包括 `Auth::login_remember` 设置的 remember-me cookie - 会在 `SessionMiddleware` 的三条内部 fail-closed 路径上被静默丢弃。** session read 失败、session write 失败和 session-cookie 加密失败都会直接返回合成的 `500`，绕过 `handle` 结尾运行的 pending-cookie drain。该请求通过 `Cookie::queue` 排队的任何内容 - 包括已经提交到数据库的 remember-me token 行 - 都不会以 `Set-Cookie` 请求头到达客户端。三条路径现在都会在返回前 drain pending cookies，与 handler 返回错误或重定向的行为相同。这不覆盖未捕获的 panic，符合 Laravel 自身排队 cookie 会因 panic 丢失的行为。
+- **`Queue::push_unique` 现在会遵循 `Job::delay()`，与 `Queue::push`、`Queue::push_with` 和 `Queue::bulk` 一致。** 它此前直接从 `Utc::now()` 计算 `available_at`，所以声明默认延迟（`fn delay() -> Option<Duration>`）的作业通过 `push_unique` 推送时会立即执行，而不是等待该延迟。`Queue::push_unique_later` 和 `Queue::later_unique` 不受影响 - 它们已经接收调用方的显式 timestamp 或 delay，永远不会咨询 `Job::delay()`，与 `push_later`/`later` 遵循相同规则。
+
+### 变更
+
+- **当前开发分支使用 SeaORM 2.0，并要求 Rust 1.94.0。** Suprnova 保留其 Eloquent、`#[model]`、迁移和数据库门面的源代码结构。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。SeaQuery 现为 1.0，直接 MariaDB 向量驱动程序使用 SQLx 0.9。现有数据库不需要迁移应用程序数据；全新的 PostgreSQL schema 保留基于 serial 的主键。
+- **又移除了三个未使用的依赖。** `pretty_assertions` 和 `qrcode` 离开 framework crate（`totp-rs` 已经携带 `qr` feature，因此双因素注册的二维码 provisioning 不受影响），`notify-debouncer-mini` 离开 CLI（`notify` 自身保留 - `serve` 和 `generate-types` watcher 直接使用它）。三者都由 `cargo-udeps` 加上覆盖 doc tests 的全源搜索确认未使用。
+- **`suprnova-macros` 不再依赖 `serde` 或 `serde_derive_internals`。** 两者都没有被使用：宏输出的 `::serde::Serialize` 路径会在下游 crate 中解析，而不是在宏 crate 自身中解析。对生成的代码没有影响。
+- **`MergeStrategy` 的 `match_on` 现在可以携带多个字段名。** `Append`、`Prepend` 和 `Deep` 都从 `match_on: Option<String>` 扩展为 `match_on: Option<Vec<String>>`，因此 `InertiaResponse::merge_with` / `merge_lazy_with` 可以像 `.prop(key, Prop::eager(v).match_on([...]))` 一样按多个字段去重 - 在此之前，response-builder 快捷方式严格不如直接构建 `Prop` 灵活。参见升级。
+- **Scroll prop 现在发出与 Laravel 相同的 `reset` 和 merge 语义。** `scrollProps[key].reset` 只有在客户端通过 `X-Inertia-Reset` 点名 `key` 时才是 `true`，与 Laravel 的 `resolveScrollProps` 一致 - 而不是像以前那样，在没有 `X-Inertia-Infinite-Scroll-Merge-Intent` 请求头的每次 visit 上都为 `true`。scroll prop 现在也会无条件携带 merge metadata，默认为 append：一次全新 visit（完全没有请求头）会输出 `reset: false` 加 `mergeProps` 条目，而以前会输出 `reset: true` 且不带 merge metadata。`X-Inertia-Reset` 中的键会从该响应的 `mergeProps` / `prependProps` 中排除，与普通 merge prop 的既有排除规则相同。
+- **`ssr:check` 现在会验证 SSR worker 的 `GET /health` 路由回答 2xx**，而不只是确认某个东西接受了 TCP 连接。每个 `@inertiajs/{vue3,react,svelte}/server` worker 都会开箱回答 `/health`，因此 worker 侧不需要改动 - 与 Laravel 的 `Inertia\Ssr\HttpGateway::isHealthy()` 一致。
+- **Inertia `errors` prop 现在每个字段携带一个字符串，而不是数组。** session-flashed validation bag 会渲染为 `{ email: "The email field is required." }`，而不是 `{ email: ["The email field is required."] }`，与 Laravel 默认值和 Inertia 自身的 `ErrorValue = string` 一致。`InertiaConfig::with_all_errors(true)` 会恢复数组形状。处理程序自己设置的 `errors` prop 会原样传递，session flash（`Redirect::with_errors`、`session.pull_errors_flash()`）仍存储数组 - 只有渲染的页面 prop 改变。
+- **`Model::TOUCHES` 从 inherent const 移到了 `EloquentModel`。** parent-touch cascade 位于 `Model` trait default 上，而 trait default 无法读取 inherent const。`Comment::TOUCHES` 仍然可解析 - 现在需要在作用域中 `use suprnova::EloquentModel;`。没有 `touches` 属性的模型会获得 trait 的空默认值。
+- **`RelationEntry` 增加了 `related_updated_at_column`。** 手工构造 `RelationEntry` 的任何代码都需要这个额外字段；树内没有这样的代码，宏会生成全部字段。
+- **`Router::view` 现在拒绝不是 JSON object 的 props。** 它此前会静默忽略这些值，注册一个渲染空 prop bag 且没有诊断的路由。`null` 仍被接受为“没有 props”；`Router::try_inertia` 是可失败的形式。
+- **Inertia asset version 现在默认为 Vite build manifest 的 hash**，而不是字面量 `"1.0"`，因此部署会让长期连接的客户端失效，而无需有人记得递增字符串。`InertiaConfig::manifest_path(...)` 会用它重新指向 resolver；显式 `.version(...)` / `.version_with(...)` 仍然优先。磁盘上没有 manifest 时（本地开发），版本会回退到 `"1.0"`，也就是此前每个应用看到的值，所以在构建之前一切不变。新的 `VersionResolver::from_manifest(path)` 会直接暴露该 resolver。
+
+### 已弃用
+
+- **`Cookie::read_encrypted` 现在是仅 v1 的遗留 reader。** 使用 `Cookie::encrypted` 铸造并用 `read_encrypted` 读取的代码，会在本版本写入第一个值后于运行时失败；请切换到 `read_encrypted_for(name, wire)`。无上下文的 `CryptPurpose::Cookie` 入口也被取代。两者都计划在 1.4.0 移除。
+
+### 升级
+
+- **Cookie 解密警告现在有两个独立维度。** `KeyOrigin::Previous(index)` 警告表示应在当前 `APP_KEY` 下重新加密该值，并且只有在 rotation tail 消失后才移除该 previous key；`AadVersion::Legacy` 警告表示应在 1.4.0 回退移除之前，通过名称绑定 API 重新签发 cookie。一个值可能同时报告两者。
+- **`SESSION_COOKIE_PREFIX` 是选择启用的。** 只有在 HTTPS、`SESSION_SECURE=true`、`SESSION_PATH=/` 且没有 `SESSION_DOMAIN` 时才部署 `__Host-`；本地 HTTP 脚手架让它为空。`CsrfMiddleware` 的 `with_session_config` 保留字面量 `XSRF-TOKEN` 名称；当客户端使用那个独立名称配置时，请使用 `.xsrf_cookie_name("__Host-XSRF-TOKEN")`。
+- **`DecryptOrigin` 现在是一个双轴 `#[non_exhaustive]` 结构体。** 独立读取其 `key` 和 `aad` 字段，并为 `KeyOrigin` / `AadVersion` enum 保留兼容 wildcard 的匹配策略。
+- **`SessionConfig` 和 `CookieOptions` 现在是 `#[non_exhaustive]`。** 应用代码中的结构体字面量和函数式 record 更新必须改为 `Type::default()`，再进行公开字段赋值或调用 builder 方法。
+
+- **`FrameworkError` 现在是 `#[non_exhaustive]`。** 您自己代码中对它的 `match` 需要 wildcard arm。这是加入变体仍会构成 breaking change 的最后一个版本。
+- **`MergeStrategy::Append`/`Prepend`/`Deep` 的 `match_on` 字段现在是 `Option<Vec<String>>`，不再是 `Option<String>`。** 直接构造结构体字面量形式的调用点 - `MergeStrategy::Append { match_on: Some("id".into()) }` - 将不再编译；请将字段名包进一个 `Vec`：`Some(vec!["id".into()])`。`match_on: None` 不受影响，无需修改。
+- **匹配的 partial reload 不再输出 `deferredProps`。** 从 partial-reload 响应读取 `page.deferredProps` 的代码 - 自定义 deferred-loading component、测试快照或端到端断言 - 现在会发现该键不存在，而不再列出请求未点名的 deferred prop。请从初始的（非 partial）visit 中读取公告；Laravel 将公告放在那里，官方客户端也在那里读取。
+- **裸 `except` 条目现在会丢弃其下的点号 prop 键。** `X-Inertia-Partial-Except: auth` 以前会留下注册在 `auth.user` 下的 prop，因为 gate 比较的是完整键；现在它会被丢弃。如果页面依赖裸 `except` 只裁剪精确键，请改为指名精确键（`except: ['auth.user']`），或改用点号路径 narrowing。
+- **`errors` 忽略 `only`/`except`。** 过滤掉处理程序提供的 `.with("errors", …)` prop，或用点号条目缩小它的 partial reload，现在会完整发送它。需要在 partial reload 中有意排除这个包的测试，应更新为显式标志它 - 使用 `.prop("errors", Prop::eager(…).optional())`，而不是依赖 partial-reload 列表。
+- **`Prop::resolve_with_owner` 也会 gate 带标志的 prop。** 它此前会解析任何不是 `Prop::is_lazy()` 的 prop - eager value 或携带 flag 的 resolver - 而不咨询 include set。现在它会 gate 每一个带 resolver 的 prop，只有已经 materialized 的值才不经过 gate。因此 `#[data(lazy(deferred))]` 字段需要请求中的 `?include=<field>` 才会解析或公告，与其他每种 lazy 形态相同。将字段加入请求的 `?include=` 列表，或者如果它本来就不应选择启用，则删除 `lazy(...)` 属性。
+- **Scroll prop 的 `reset` 不再跟随 merge-intent 请求头。** 直接读取 `page.scrollProps[key].reset` 的代码 - 自定义 infinite-scroll component 或测试快照 - 在普通 revisit 上会看到 `reset: false`（以及 `mergeProps` 条目），而此前会看到 `reset: true` 且没有 merge metadata。官方 `<InfiniteScroll>` component 只在普通 revisit 上表现不同：它会在每个 `router` `success` 事件上监听 `reset`，而不仅是显式 `router.reload()`，所以普通 revisit 不会再清除已累积状态，除非 server 真正通过 `X-Inertia-Reset` 点名该键，与 Laravel 一致。在依赖旧的“任何非 append/prepend visit 都会 reset”行为的地方，请显式发送 `X-Inertia-Reset: <key>`。
+- **`Prop::match_on` 接收 `impl MatchOnFields`，不再接收 `impl Into<String>`。** 新 bound 使一次调用可以命名多个字段（`match_on(["id", "slug"])`），其 impl 列表刻意保持封闭 - 只包含 `&str`、`String`、`[T; N]` 和 `Vec<T>`。没有覆盖 `IntoIterator` 的 blanket impl：coherence 会拒绝它与 `&str` 和 `String` 的实现，因为没有任何东西阻止这些类型以后获得 `IntoIterator` 实现。以前能编译的三个参数类型现在不行：`&String`、`Cow<'_, str>` 和 `Box<str>`。请在调用点传入 `&str` - 对 `&String` 使用 `match_on(name.as_str())`，对 `Cow<'_, str>` 使用 `match_on(name.as_ref())`，对 `Box<str>` 使用 `match_on(&*name)`。
+- **点号 `only`/`except` 条目现在会缩小顶层 prop，而不是完全排除它。** 在此修复之前，`X-Inertia-Partial-Data: user.name` 会让 `should_include_eager` 查找精确匹配的 `"user"` 条目，找不到后静默丢弃整个 `user` prop - 请求一个字段的客户端什么也得不到。现在任何碰巧依赖这个缺口（把带点号的 `router.reload({ only: [...] })` 当成省略该键）的前端页面组件都会收到 `{ user: { name: ... } }`。无需修改代码 - 这是 Inertia v3 协议已经规定的请求/响应契约。相同修复也应用于 `should_include_optional`，并且其运行影响更大：一个点号 `only` 条目（`permissions.read`）现在算作对 `Optional` 或 `Defer` prop 顶层键的显式请求，而此前必须使用裸条目（`permissions`）才会触发。过去完全跳过该 prop resolver 的请求现在会运行它 - 如果 resolver 命中数据库或外部服务，已经发送点号 partial-reload 请求的客户端会开始在以前不做这项工作的请求上执行它。若应用有带点号 partial-reload 流量的 `Optional`/`Defer` prop，请在升级后关注 resolver 调用量。
+- **`InertiaSharedData::share` 现在接收页面组件名称。** 在 `req` 后增加一个 `component: &str` 参数：
+  ```diff
+  -async fn share(&self, req: &dyn InertiaRequestExt) -> Result<IndexMap<String, Prop>, FrameworkError>
+  +async fn share(&self, req: &dyn InertiaRequestExt, component: &str) -> Result<IndexMap<String, Prop>, FrameworkError>
+  ```
+
+  如果 provider 不需要按页面变化，请忽略它（`_component`） - Laravel 的 `RenderContext` 会为 `ProvidesInertiaProperties::toInertiaProperties` 携带同样的 `(component, request)` 配对。
+- **`Prop` 是结构体，不是 enum。** 它的变体已移除；通过方法构建和读取 prop：
+  - `Prop::Eager(v)` -> `Prop::eager(v)`
+  - `Prop::EagerNone` -> `Prop::absent()`
+  - `Prop::Always(v)` -> `Prop::eager(v).always()`
+  - `Prop::Lazy(r)` -> `Prop::from_resolver(r)`（`Prop::lazy(closure)` 不变）
+  - `Prop::Optional(r)` -> `Prop::from_resolver(r).optional()`
+  - `match prop { Prop::Eager(v) => … }` -> `prop.as_value()`
+  - `matches!(prop, Prop::Lazy(_))` -> `prop.is_lazy()`；`matches!(prop, Prop::EagerNone)` -> `prop.is_absent()`
+  `DeferConfig`、`MergeConfig`、`OnceConfig` 和 `ScrollConfig` payload 结构体已移除；它们的字段现在是 `Prop` 上的标志。`Prop::is_deferred()` 改名为 `Prop::has_resolver()`，这才是它一直代表的含义。`DeferOptions`、`OnceOptions`、`MergeStrategy`、`ScrollMetadata` 以及每一个 `InertiaResponse` 构建器方法都不变，因此只使用 response builder 的应用无需编辑。手工构建 prop 的应用 - 通常是 `InertiaSharedData` 实现 - 需要上述重命名。
+
+- **这次修复保护已有的会话，而不仅是此后的请求。** 只升级就足够：早期版本写出的 session cookie 可能携带从未清理的 `_previous.url`，而 `SessionData::previous_url()` 现在会在该 session 升级后第一次使用时丢弃它，不会因为它已被存储就信任它。无需使现有 session 失效、迁移 session 表或强制重新登录。路径形如协议相对（`//host`）的请求以后也不会更新记录的 previous URL - 如果应用的 `fallback!` 路由（或一条能在异常路径上回答 200 的其他路由）曾经合法依赖这个路径成为 `Redirect::back()` 目标，那么它不再会如此。无论怎样，session 中原本安全的值会保留（或者如果从未记录过安全值，则 `Redirect::back(fallback)` 自己的 fallback 获胜）。除非您依赖这个修复已经关闭的精确边界情况，否则无需更改代码；而那本来就是一次开放重定向风险。
+- **从页面中每一个 `errors.<field>` 绑定移除 `[0]`。** 新的默认形状中，`errors.email` 是字符串，因此 `errors.email[0]` 会渲染它的第一个字符，而不是消息。同时将 TypeScript 类型从 `string[]` 改为 `string`。如果不想修改页面，请在传给 `Inertia::install` 的配置上设置 `InertiaConfig::with_all_errors(true)`，并为 `@inertiajs/core` 添加 `errorValueType: string[]` 模块扩展。起始前端已经提供新形状。
+- **手工编写验证失败返回重定向的处理程序现在可能删除它。** 现在桥接是自动的；仍然自行重定向的处理程序继续工作，因为中间件只会处理携带非空 `errors` 对象的 `422`。
+- **崩溃的 `suprnova serve` 子进程现在会重新生成，而不是结束会话。** 如果依赖崩溃直接停止 `suprnova serve`（CI smoke check，或把退出视为“出错了”的脚本），请传递 `--no-restart` 以精确恢复该行为。默认也会限制重试：连续崩溃 5 次的进程不再重试（用 `--restart-tries` 提高上限，或用 `--no-restart` 恢复原本一次崩溃即结束的行为）。
+- **`Model::TOUCHES` 不再是 inherent const。** 直接读取 `Comment::TOUCHES` 的代码需要让 `use suprnova::EloquentModel;`（或 `suprnova::eloquent::EloquentModel`）进入作用域 - const 被移到那里，以便 parent-touch cascade（一个 `Model` trait default）能够读取它。对应用做 `grep -rn TOUCHES` 就能找到每个调用点；多数应用没有，因为该 const 以前在运行时什么也不做。
+- **`RelationEntry` 增加了一个字段。** 只有手工构造 `RelationEntry` 的代码需要修改 - 向字面量增加 `related_updated_at_column`。框架提供的宏生成 relation registration 时已经发出它，因此普通应用只通过 `#[suprnova::model]` 声明关系不会受影响。
+- **带非对象 props 的 `Router::view` 现在会在启动时 panic。** 它此前会静默注册一个空 prop bag；`view` 委托给 `Router::inertia`，后者要求 object（或 `null`），否则会 panic。如果 `view` 调用可能携带非对象 props，请切换到 `Router::try_inertia` 并处理 `Err`；除此之外无需改变。
+- **Inertia version manifest 默认值现在会在 build 存在的瞬间改变版本字符串。** 将 `X-Inertia-Version: 1.0` 硬编码的应用或测试，只能一直工作到磁盘上出现 Vite manifest；一旦出现，版本会变成 manifest hash。如果需要旧的常量，请自己从 `VersionResolver::from_manifest(path)` 读取，或显式固定 `.version(...)`。预期升级后的第一次部署会迫使已连接客户端经历一次完整页面 reload cycle - 只发生一次，这正是改动的目的。无 manifest 回退值导出为 `suprnova::MANIFEST_VERSION_FALLBACK`，因此无需再次硬编码 `"1.0"`。
+- **将 `Inertia::install` 和 `global_middleware!` 注册移出 `bootstrap::register`。** 将它们放进一个新函数，并改为把该函数传给 `.http_bootstrap(...)` - scaffold 的新形状是一个同步的 `register_http_stack()`，以 `.http_bootstrap(|| async { bootstrap::register_http_stack() })` 调用。跳过这一步的应用保留今天的行为，包括缺少前端 manifest 时 worker 启动失败。
 
 ## 1.2.4 - 2026-08-18
 
@@ -26,6 +187,7 @@
 
 ### 修复
 
+
 - **嵌套的验证失败现在会到达 422 响应体。** 嵌套结构体上的、或者被验证的 `Vec<T>` 中某个元素上的 `#[validate(nested)]` 失败，此前会在验证器和响应之间丢失：请求确实被正确地以 422 拒绝了，但 `errors` 映射回来是空的，所以没有任何消息被渲染出来，客户端也没法分辨是哪个字段出了问题。嵌套的失败现在会和顶层的那些一起，被展平成 Laravel 的点分记法 - `address.street`、`items.1.name`、`order.items.2.sku`。
 
 - **Inertia 页面对象的 `url` 现在保留查询字符串。** `page.url` 此前只有请求路径，所以对 `/users?page=2&sort=name` 的一次访问，客户端记录下来的是 `/users`。此后每一次前进/后退导航、每一次 `router.reload()`，都会在丢掉分页游标、排序和过滤条件的情况下重放这个页面。它现在是路径加查询 - 和 `InertiaVersionMiddleware` 早已用于 `X-Inertia-Location` 的推导方式相同，所以默认情况下两者逐字节一致。新的 `InertiaConfig::url_resolver(...)` 可以覆盖*页面对象*怎样给这个页面命名（Laravel 的 `Inertia::resolveUrlUsing`）；版本弹回仍然点名那个到达的 URL，因为那才是浏览器必须去获取的 URL。
@@ -38,7 +200,7 @@
 
 ### 变更
 
-- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](manual/parity.md) 里有一行标着 `not yet` 或 `by design no`。
+- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](../parity.md) 里有一行标着 `not yet` 或 `by design no`。
 
 ### 升级
 

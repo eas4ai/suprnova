@@ -11,10 +11,7 @@ Cinq surfaces sont livrées sous cet espace de noms :
 - `EmailVerification` produit et consomme les `auth_flow_tokens` du framework,
   envoie le courrier via la façade [`Mail`](mail.md), et marque comme vérifié
   le propriétaire authentifié du token via le `UserProvider` configuré.
-- `PasswordReset` délègue l'émission du token, la preuve, la mutation du mot de
-  passe, la rotation d'ère d'auth, et la révocation des sessions à l'engine
-  Magnetar installé. Le framework garde la main sur le courrier et les
-  événements de cycle de vie.
+- `PasswordReset` utilise le moteur Magnetar installé lorsqu’il est disponible. Sans Magnetar, les comptes vérifiés peuvent réinitialiser leur mot de passe via le `UserProvider` configuré et les `auth_flow_tokens` du framework. Les comptes non vérifiés sont refusés de manière sécurisée, car un fournisseur générique ne peut pas appliquer la stratégie atomique de Magnetar pour la première preuve d’adresse e-mail.
 - `BruteForce` et `LoginThrottleMiddleware` délèguent l'état de verrouillage de
   compte à l'engine Magnetar installé.
 - `TwoFactor` est la façade TOTP possédée par le framework au-dessus de
@@ -76,11 +73,7 @@ mutation.
 - `EmailVerification::verify` exige le propriétaire authentifié du token,
   consomme le token, et marque l'utilisateur vérifié avant de déclencher
   `EmailVerified`.
-- `PasswordReset::complete` commite d'abord la transaction de réinitialisation
-  Magnetar. La transaction consomme le token, applique la politique de première
-  preuve ou de compte vérifié, fait avancer l'ère d'auth, et révoque les
-  sessions et credentials remember. Le mail et les événements du framework
-  s'exécutent ensuite.
+- `PasswordReset::complete` valide l’opération via le moteur Magnetar installé lorsqu’il est disponible, y compris la stratégie de première preuve, l’avancement de l’époque d’authentification et la révocation atomique. Le fournisseur de repli est réservé aux comptes vérifiés : il consomme le jeton du framework, renouvelle le mot de passe du fournisseur, puis indique les résultats de révocation des sessions et de l’option Se souvenir de moi du framework. Les e-mails et les événements sont traités ensuite.
 - `BruteForce::unlock_account` commite le déverrouillage avant de déclencher
   `AccountUnlocked`.
 - `TwoFactor::confirm` estampille `confirmed_at` avant de déclencher
@@ -155,12 +148,7 @@ sans être consommé.
 
 ### Configuration de la réinitialisation de mot de passe et du verrouillage
 
-La réinitialisation de mot de passe et `BruteForce` nécessitent le moteur de
-mot de passe Magnetar installé. `MagnetarConfig::lockout_config` accepte
-`magnetar::password::lockout::LockoutConfig`. La politique par défaut active le
-verrouillage après cinq échecs pour 15 minutes, conserve les lignes d'audit
-pendant sept jours, et échoue de manière fermée quand le backend de verrouillage
-est indisponible.
+`BruteForce` nécessite le moteur de mots de passe Magnetar installé. La réinitialisation du mot de passe privilégie ce moteur, mais `EloquentUserProvider<M>` prend en charge la réinitialisation pour les utilisateurs déjà vérifiés lorsque `M` implémente `MustVerifyEmail + CanResetPassword`. Les utilisateurs non vérifiés ne reçoivent aucun lien de réinitialisation fourni par le fournisseur. Installez Magnetar pour utiliser la réinitialisation comme première preuve atomique de la boîte aux lettres.
 
 La réinitialisation de mot de passe normalise une adresse inconnue en `Ok(())` seulement après réussite des vérifications de limiteur d'abus, de configuration mail, de moteur et de stockage. Les chemins compte connu/inconnu peuvent encore différer dans les échecs et dans le temps d'exécution.
 
@@ -233,7 +221,6 @@ couvrent le cycle de vie :
 |---|---|---|
 | `send_link` | `send_link<U: MustVerifyEmail>(user: &U, base_url: &str) -> Result<()>` | Produit + envoie, à partir d'un utilisateur déjà en main. |
 | `resend` | `resend(email: &str, base_url: &str) -> Result<()>` | Normalise un résultat de fournisseur inconnu en `Ok(())`; les échecs de stockage et de mail renvoient toujours `Err`, et le temps d'exécution n'est pas égalisé. |
-
 | `check` | `check(token: &str) -> Result<bool>` | Non consommant - sûr à appeler sur une page d'atterrissage. |
 | `verify` | `verify(token: &str) -> Result<String>` | Lié à l'acteur et à usage unique : l'utilisateur authentifié doit posséder le token ; en cas de succès, il est consommé, l'utilisateur est marqué vérifié, et son ID est retourné. |
 
@@ -383,7 +370,7 @@ if let Some(user) = Auth::user_as::<User>().await? {
 
 | Méthode | Signature | Notes |
 |---|---|---|
-| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Émission Magnetar anti-énumération ; une adresse inconnue est un `Ok(())` silencieux. |
+| `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Retourne `Ok(())` pour une adresse inconnue après que les vérifications du limiteur d'abus, de la configuration mail, du moteur et du stockage ont réussi ; les autres échecs retournent toujours `Err`. |
 | `check` | `check(token: &str) -> Result<bool>` | Validation non consommatrice via le moteur Magnetar installé. |
 | `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Consomme atomiquement le token, applique la politique de première preuve, fait tourner les credentials, révoque les sessions et l'état remember, et retourne l'ID utilisateur. |
 | `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Exécute la même transaction et retourne les comptes de révocation committés. |
@@ -640,7 +627,7 @@ le framework. Les secrets et les codes de récupération sont chiffrés
 au repos avec `crate::crypto::Crypt::encrypt_string`, qui exige une
 `EncryptionKey` globale au processus. Les applications adhèrent au
 schéma en listant les deux migrations dans leur
-`Migrator::migrations()` - voir [Amorçage](#bootstrapping).
+`Migrator::migrations()` - voir [Amorçage](#amorçage).
 
 ### Inscrire, confirmer, vérifier
 
@@ -1104,7 +1091,7 @@ seule fois pour tout le binaire.
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check`, et `verify` lié à l'acteur ; `verify` retourne l'ID utilisateur. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` pour 403 JSON et `redirect_to(path)` pour les redirections navigateur ou Inertia. |
-| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete`, et `complete_with_outcome` adossés à Magnetar. |
+| `suprnova::auth_flows::PasswordReset` | Réinitialisation prioritaire via Magnetar avec repli sur un `UserProvider` pour comptes vérifiés au moyen des `auth_flow_tokens` du framework. |
 | `suprnova::MustVerifyEmail` | Contrat de l'utilisateur applicatif pour la façade de vérification du framework. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | Définition de table SeaORM pour les tokens de vérification du framework. |
 | `suprnova::auth_flows::BruteForce` | Façade de verrouillage de compte adossée à Magnetar. |

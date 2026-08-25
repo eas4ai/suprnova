@@ -46,7 +46,7 @@ async fn record_tick(task_name: &str) -> Result<(), FrameworkError> {
     );
 
     conn.inner()
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             backend,
             sql,
             [

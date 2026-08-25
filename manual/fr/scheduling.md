@@ -25,7 +25,7 @@ Cette commande va :
 5. Câbler `.schedule(<crate>::schedule::register)` dans le builder de votre
    application dans `cmd/main.rs` (ou `src/main.rs` pour le starter API)
 
-Les étapes 2–5 sont idempotentes, si bien que réexécuter `make:task`
+Les étapes 2-5 sont idempotentes, si bien que réexécuter `make:task`
 répare le câblage qui a été retiré à la main. Le planificateur s'exécute à
 l'intérieur du binaire de votre application - il n'y a pas d'exécutable de
 planificateur séparé à construire ou déployer.
@@ -528,9 +528,9 @@ invocation serrée de `schedule:run` pourrait exécuter une tâche
 Cette barrière in-process est **toujours active**, indépendamment de
 `without_overlapping`. Elle ne s'étend PAS entre processus (chaque
 processus a son propre état par tâche). Si vous avez besoin d'une
-coordination inter-processus à la même minute, superposez
-`without_overlapping` + un backend Cache configuré - ensemble, ils
+coordination inter-processus à la même minute, superposez + `without_overlapping` + un backend Cache configuré - ensemble, ils
 couvrent les deux directions.
+
 
 ## Exécuter le planificateur
 

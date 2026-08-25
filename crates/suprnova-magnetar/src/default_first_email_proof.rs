@@ -7,14 +7,16 @@ use chrono::Utc;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
-    DatabaseTransaction, DbBackend, DbErr, EntityTrait, QueryFilter, QuerySelect, TransactionTrait,
+    DatabaseTransaction, DbBackend, DbErr, EntityTrait, ExprTrait, QueryFilter, QuerySelect,
+    TransactionTrait,
 };
 use secrecy::ExposeSecret;
 
 use crate::crypto::Encryptor;
+#[cfg(feature = "oauth")]
+use crate::default_schema::ceremonies;
 use crate::default_schema::{
-    DefaultAuthSchema, accounts, ceremonies, methods, provider_tokens, remembers, sessions,
-    two_factor, users,
+    DefaultAuthSchema, accounts, methods, provider_tokens, remembers, sessions, two_factor, users,
 };
 use crate::first_email_proof::{
     FirstEmailProofCommit, FirstEmailProofKind, FirstEmailProofMutation, FirstEmailProofOutcome,
@@ -42,6 +44,7 @@ enum FirstProofEpoch {
 #[derive(Clone)]
 pub struct SqlFirstEmailProofStore {
     database: DatabaseConnection,
+    #[cfg(feature = "oauth")]
     encryptor: Arc<dyn Encryptor>,
 }
 
@@ -49,8 +52,11 @@ impl SqlFirstEmailProofStore {
     /// Bind the store to one default-schema database and purpose-bound crypto.
     #[must_use]
     pub fn new(database: DatabaseConnection, encryptor: Arc<dyn Encryptor>) -> Self {
+        #[cfg(not(feature = "oauth"))]
+        drop(encryptor);
         Self {
             database,
+            #[cfg(feature = "oauth")]
             encryptor,
         }
     }

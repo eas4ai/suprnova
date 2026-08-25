@@ -11,16 +11,18 @@
 //! of the three first-class backends, so every hand-written statement routes
 //! its placeholders through here rather than embedding a literal.
 
+use crate::error::FrameworkError;
 use sea_orm::DatabaseBackend;
 
 /// Render the `n`-th (1-based) positional placeholder for `backend`.
 ///
 /// `n` is ignored outside Postgres because `?` carries no ordinal — callers
 /// still pass it so the same numbering logic reads identically at every site.
-pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> String {
+pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> Result<String, FrameworkError> {
     match backend {
-        DatabaseBackend::Postgres => format!("${n}"),
-        _ => "?".to_string(),
+        DatabaseBackend::Postgres => Ok(format!("${n}")),
+        DatabaseBackend::MySql | DatabaseBackend::Sqlite => Ok("?".to_string()),
+        _ => Err(super::unsupported_database_backend(backend)),
     }
 }
 
@@ -32,11 +34,15 @@ pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> String {
 /// binds (the queue filter's `IN` list sits behind two timestamp binds) must
 /// continue the statement's numbering or Postgres silently reads the wrong
 /// parameter.
-pub(crate) fn placeholder_list(backend: DatabaseBackend, start: usize, count: usize) -> String {
+pub(crate) fn placeholder_list(
+    backend: DatabaseBackend,
+    start: usize,
+    count: usize,
+) -> Result<String, FrameworkError> {
     (start..start + count)
         .map(|n| placeholder(backend, n))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| values.join(", "))
 }
 
 #[cfg(test)]
@@ -45,23 +51,29 @@ mod tests {
 
     #[test]
     fn postgres_numbers_ordinals_and_others_stay_positional() {
-        assert_eq!(placeholder(DatabaseBackend::Postgres, 3), "$3");
-        assert_eq!(placeholder(DatabaseBackend::Sqlite, 3), "?");
-        assert_eq!(placeholder(DatabaseBackend::MySql, 3), "?");
+        assert_eq!(placeholder(DatabaseBackend::Postgres, 3).unwrap(), "$3");
+        assert_eq!(placeholder(DatabaseBackend::Sqlite, 3).unwrap(), "?");
+        assert_eq!(placeholder(DatabaseBackend::MySql, 3).unwrap(), "?");
     }
 
     #[test]
     fn lists_continue_the_statement_numbering() {
         assert_eq!(
-            placeholder_list(DatabaseBackend::Postgres, 3, 3),
+            placeholder_list(DatabaseBackend::Postgres, 3, 3).unwrap(),
             "$3, $4, $5"
         );
-        assert_eq!(placeholder_list(DatabaseBackend::Sqlite, 3, 3), "?, ?, ?");
+        assert_eq!(
+            placeholder_list(DatabaseBackend::Sqlite, 3, 3).unwrap(),
+            "?, ?, ?"
+        );
     }
 
     #[test]
     fn an_empty_list_renders_nothing() {
-        assert_eq!(placeholder_list(DatabaseBackend::Postgres, 1, 0), "");
-        assert_eq!(placeholder_list(DatabaseBackend::Sqlite, 1, 0), "");
+        assert_eq!(
+            placeholder_list(DatabaseBackend::Postgres, 1, 0).unwrap(),
+            ""
+        );
+        assert_eq!(placeholder_list(DatabaseBackend::Sqlite, 1, 0).unwrap(), "");
     }
 }

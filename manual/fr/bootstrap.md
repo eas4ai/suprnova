@@ -79,11 +79,11 @@ Les signatures des deux fonctions sont fixées par `Application::bootstrap` et
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // base de données, liaisons, observateurs, écouteurs, superviseurs, enregistrement des jobs de worker
+    // base de données, bindings, observers, écouteurs, supervisors, enregistrement des jobs worker
 }
 
 pub fn register_http_stack() {
-    // middleware global, Inertia::install
+    // global middleware, Inertia::install
 }
 ```
 
@@ -185,16 +185,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → singleton (encapsule dans un Arc) :
+    // Trait → singleton (wraps in Arc):
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Singleton concret :
+    // Concrete singleton:
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Fabrique (construite à chaque résolution) :
+    // Factory (constructed per resolve):
     factory!(|| RequestLogger::new());
 
-    // Ou appelez directement la façade pour un contrôle plus fin :
+    // Or call the facade directly for finer control:
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -312,7 +312,7 @@ Cette composition est représentative et n'est pas un extrait mot pour mot de l'
 
 
 ```rust
-//! Amorçage de l'application  -  enregistre les services, les écouteurs, le
+//! Bootstrap de l’application - enregistre les services, les écouteurs, le
 //! middleware global et la couche Inertia.
 
 use std::sync::Arc;
@@ -322,36 +322,26 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    MagnetarConfig, PasskeyConfig, SessionConfig, SessionMiddleware, Storage,
-    SupervisorRegistry, UserProvider, bind, global_middleware, init_magnetar,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, Inertia,
+    InertiaConfig, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::ChatChannel;
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 pub async fn register() {
-    // ── Base de données
+    // ── Database
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Fournisseur d'authentification
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    // ── Auth provider
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
-    // ── Moteur d'authentification Magnetar
-    let database = DB::connection().expect("DB not initialized");
-    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
-        .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
-    init_magnetar(magnetar)
-        .await
-        .expect("Failed to initialize Magnetar");
 
-    // ── Hub de diffusion + registre de canaux
+    // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -359,43 +349,43 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── Écouteurs d'événements + ponts
+    // ── Écouteurs d’événements + ponts
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Disques de stockage (S3 conditionné par l'environnement en production)
+    // ── Storage disks (env-gated S3 in production)
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Enregistrement des jobs de worker
+    // ── Worker job registration
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observateurs + superviseurs
+    // ── Observers + supervisors
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Flags de fonctionnalité
+    // ── Feature flags
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Middleware global (de l'extérieur vers l'intérieur, dans l'ordre d'enregistrement)
+    // ── Global middleware (outside-in in registration order)
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Couche de protocole Inertia (pas de version épinglée : la valeur par défaut hache le
-    // manifeste de build Vite, de sorte qu'un build frontend incrémente lui-même la version
-    // des assets  -  voir « Détection de version » dans frontend-inertia-responses.md)
+    // ── Inertia protocol layer (no version pin: the default hashes the
+    // Vite build manifest, so a frontend build bumps the asset version
+    // on its own - see "Version detection" in frontend-inertia-responses.md)
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

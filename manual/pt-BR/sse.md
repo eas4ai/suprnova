@@ -190,7 +190,7 @@ CDN que fecha conexões ociosas para liberar recursos:
 * Padrão do AWS ALB: 60 segundos
 * Padrão do Cloudflare: 100 segundos
 
-Um comment `keep_alive()` a cada 15–30 segundos mantém a conexão viva
+Um comment `keep_alive()` a cada 15-30 segundos mantém a conexão viva
 através de todos esses sem despachar um evento `message` para o
 navegador. A forma de bytes mínimos (`:\n\n`) é suficiente para fazer
 flush dos buffers de escrita do proxy sem enviar nenhum payload.
@@ -422,7 +422,7 @@ let preamble = SseEvent::data("ready").with_retry(Duration::from_secs(5));
 
 `Duration::ZERO` é válido pela especificação ("reconectar
 imediatamente") e é emitido ao pé da letra - sem coerção. Para streams
-de produção, um retry de 5–15 segundos equilibra recuperação rápida
+de produção, um retry de 5-15 segundos equilibra recuperação rápida
 com não sobrecarregar o servidor durante uma queda regional.
 
 ### Por que Suprnova diverge

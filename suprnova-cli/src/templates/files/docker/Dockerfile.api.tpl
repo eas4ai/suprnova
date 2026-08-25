@@ -12,7 +12,7 @@
 # every project shape. On an API project its first instruction —
 # `COPY frontend/package.json` — failed outright, so `suprnova new --api`
 # followed by `docker:init` followed by `docker build` could not succeed.
-FROM rust:1.91.1-slim-bookworm AS backend-builder
+FROM rust:1.94.0-slim-bookworm AS backend-builder
 
 WORKDIR /app
 

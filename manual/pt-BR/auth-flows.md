@@ -10,10 +10,7 @@ Cinco superfícies são distribuídas no namespace:
 - `EmailVerification` cria e consome `auth_flow_tokens` do framework,
   envia email pela facade [`Mail`](mail.md) e marca como verificado o
   dono autenticado do token pelo `UserProvider` configurado.
-- `PasswordReset` delega a emissão e prova do token, mutação de senha,
-  rotação de época de autenticação e revogação de sessão ao engine
-  Magnetar instalado. O framework é dono do email e dos eventos de ciclo
-  de vida.
+- `PasswordReset` usa o mecanismo Magnetar instalado quando disponível. Sem o Magnetar, contas verificadas podem redefinir a senha por meio do `UserProvider` configurado e dos `auth_flow_tokens` do framework. Contas não verificadas são recusadas de forma segura, pois um provedor genérico não consegue aplicar a política atômica do Magnetar para a primeira comprovação de e-mail.
 - `BruteForce` e `LoginThrottleMiddleware` delegam o estado de bloqueio
   de conta ao engine Magnetar instalado.
 - `TwoFactor` é a facade TOTP pertencente ao framework sobre
@@ -72,11 +69,7 @@ erro de dispatcher depois da mutação não pode revertê-la.
 - `EmailVerification::verify` exige o dono autenticado do token, consome
   o token e marca o usuário verificado antes de disparar
   `EmailVerified`.
-- `PasswordReset::complete` primeiro confirma a transação de redefinição
-  de senha do Magnetar. A transação consome o token, aplica a política de
-  primeira prova ou de conta verificada, avança a época de autenticação e
-  revoga sessões e credenciais de remember. O email e os eventos do
-  framework executam depois.
+- `PasswordReset::complete` confirma a operação por meio do mecanismo Magnetar instalado quando disponível, incluindo a política de primeira comprovação, o avanço da época de autenticação e a revogação atômica. O fallback do provedor é exclusivo para contas verificadas: ele consome o token do framework, rotaciona a senha do provedor e depois informa os resultados da revogação de sessões e da opção Lembrar-me do framework. E-mails e eventos são processados em seguida.
 - `BruteForce::unlock_account` confirma o desbloqueio antes de disparar
   `AccountUnlocked`.
 - `TwoFactor::confirm` grava `confirmed_at` antes de disparar
@@ -152,12 +145,7 @@ consumido.
 
 ### Redefinição de senha e lockout
 
-A redefinição de senha e `BruteForce` exigem o engine de senha Magnetar
-instalado. `MagnetarConfig::lockout_config` aceita
-`magnetar::password::lockout::LockoutConfig`. A política padrão habilita
-lockout depois de cinco tentativas falhas por 15 minutos, retém linhas de
-auditoria por sete dias e falha fechada quando o backend de lockout está
-indisponível.
+`BruteForce` requer o mecanismo de senhas Magnetar instalado. A redefinição de senha prioriza esse mecanismo, mas `EloquentUserProvider<M>` permite redefini-la para usuários já verificados quando `M` implementa `MustVerifyEmail + CanResetPassword`. Usuários não verificados não recebem links de redefinição fornecidos pelo provedor. Instale o Magnetar para usar a redefinição como primeira comprovação atômica da caixa de e-mail.
 
 Uma redefinição de senha normaliza um endereço desconhecido para `Ok(())`
 somente depois que as verificações do limitador de abuso, da configuração de
@@ -1081,7 +1069,7 @@ para todo o binário.
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check` e `verify` vinculado ao ator; `verify` retorna o ID do usuário. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` para 403 JSON e `redirect_to(path)` para redirecionamentos de navegador ou Inertia. |
-| `suprnova::auth_flows::PasswordReset` | `send_link`, `check`, `complete` e `complete_with_outcome` apoiados no Magnetar. |
+| `suprnova::auth_flows::PasswordReset` | Redefinição prioritária pelo Magnetar com fallback para um `UserProvider` de contas verificadas por meio dos `auth_flow_tokens` do framework. |
 | `suprnova::MustVerifyEmail` | Contrato de usuário da aplicação para a facade de verificação do framework. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | Definição de tabela SeaORM para tokens de verificação do framework. |
 | `suprnova::auth_flows::BruteForce` | Facade de lockout de conta apoiada no Magnetar. |

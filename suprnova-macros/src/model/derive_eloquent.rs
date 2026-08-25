@@ -434,6 +434,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let updated_at_col = &input.updated_at;
     let created_col_ident = quote::format_ident!("{}", input.created_at);
     let updated_col_ident = quote::format_ident!("{}", input.updated_at);
+    let created_at_cast = input
+        .cast_for_field(&input.created_at)
+        .cloned()
+        .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsDateTime));
+    let updated_at_cast = input
+        .cast_for_field(&input.updated_at)
+        .cloned()
+        .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsDateTime));
 
     // ---- unique_id PK generation (HasUuids / HasUlids analogue) -------
     //
@@ -486,7 +494,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // update(attrs) in one place.
             let __suprnova_now = ::suprnova::chrono::Utc::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
                 )?,
             );
@@ -498,7 +506,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::suprnova::sea_orm::ActiveValue::NotSet
             ) {
                 am.#created_col_ident = ::suprnova::sea_orm::Set(
-                    <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                    <#created_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                         &__suprnova_now,
                     )?,
                 );
@@ -516,7 +524,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // the caller didn't touch it.
             let __suprnova_now = ::suprnova::chrono::Utc::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                     &__suprnova_now,
                 )?,
             );
@@ -548,7 +556,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         as ::core::default::Default>::default();
                     am.#pk_ident = ::suprnova::sea_orm::ActiveValue::Unchanged(self.#pk_ident.clone());
                     am.#updated_col_ident = ::suprnova::sea_orm::Set(
-                        <::suprnova::AsDateTime as ::suprnova::eloquent::casts::Cast>::to_storage(
+                        <#updated_at_cast as ::suprnova::eloquent::casts::Cast>::to_storage(
                             &now,
                         )?,
                     );
@@ -603,6 +611,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let soft_deletes_enabled = input.soft_deletes;
     let soft_delete_col = &input.soft_deletes_column;
     let soft_delete_col_ident = quote::format_ident!("{}", soft_delete_col);
+    let soft_delete_cast = input
+        .cast_for_field(soft_delete_col)
+        .cloned()
+        .unwrap_or_else(|| syn::parse_quote!(::suprnova::AsOptionalDateTime));
     let key_type = &input.key_type;
 
     let query_override = if soft_deletes_enabled {
@@ -704,13 +716,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 pub async fn delete(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_deleting(&self, false).await?;
 
-                    let now = ::suprnova::chrono::Utc::now().to_rfc3339();
+                    let now = ::core::option::Option::Some(::suprnova::chrono::Utc::now());
+                    let deleted_at =
+                        <#soft_delete_cast as ::suprnova::eloquent::casts::Cast>::to_storage(&now)?;
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = ? WHERE {pk_name} = ?",
-                        #soft_delete_col,
-                    );
                     // Route through `resolve_write` so the tombstone
                     // UPDATE honours the full write-side precedence chain
                     // — tx override → ambient CURRENT_TX → per-model
@@ -724,14 +734,20 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await?;
                     let backend = exec.backend();
+                    let deleted_at_placeholder =
+                        ::suprnova::database::__macro_support::placeholder(backend, 1)?;
+                    let pk_placeholder =
+                        ::suprnova::database::__macro_support::placeholder(backend, 2)?;
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = {deleted_at_placeholder} WHERE {pk_name} = {pk_placeholder}",
+                        #soft_delete_col,
+                    );
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,
                             &sql,
                             ::std::vec![
-                                ::suprnova::sea_orm::Value::String(
-                                    ::core::option::Option::Some(::std::boxed::Box::new(now)),
-                                ),
+                                ::suprnova::sea_orm::Value::from(deleted_at),
                                 ::suprnova::eloquent::model::json_value_to_sea_value(
                                     &<Self as ::suprnova::eloquent::Model>::primary_key_value_json(&self),
                                 ),
@@ -764,10 +780,6 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
-                    let sql = ::std::format!(
-                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = ?",
-                        #soft_delete_col,
-                    );
                     // Route through `resolve_write` (not `resolve`) so
                     // restores honour the full write-side precedence
                     // chain — tx override → ambient CURRENT_TX → builder
@@ -782,6 +794,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     )
                     .await?;
                     let backend = exec.backend();
+                    let pk_placeholder =
+                        ::suprnova::database::__macro_support::placeholder(backend, 1)?;
+                    let sql = ::std::format!(
+                        "UPDATE {table} SET {} = NULL WHERE {pk_name} = {pk_placeholder}",
+                        #soft_delete_col,
+                    );
                     exec.run(
                         ::suprnova::sea_orm::Statement::from_sql_and_values(
                             backend,

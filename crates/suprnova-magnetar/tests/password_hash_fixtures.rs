@@ -6,7 +6,10 @@
 //! deterministic non-secret inputs are the ASCII byte `p` repeated to each
 //! recorded length, as documented in `tests/fixtures/README.md`.
 
-mod fixtures;
+mod fixtures {
+    pub mod path;
+    pub use path::repository_path;
+}
 
 use std::sync::Arc;
 

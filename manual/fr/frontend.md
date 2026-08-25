@@ -216,7 +216,7 @@ Inertia en un `303` de retour vers la page du formulaire avec les erreurs
 flashées). `InertiaVersionMiddleware` et `Inertia303Middleware` exigeaient
 autrefois un enregistrement distinct ; `Inertia::install` rend les quatre
 actifs par défaut. Voir [Réponses
-Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall) pour l'ordre
+Inertia](frontend-inertia-responses.md#bootstrap-inertia-install) pour l'ordre
 d'enregistrement complet et les modes d'échec que chacun ferme.
 
 ## Développement vs production

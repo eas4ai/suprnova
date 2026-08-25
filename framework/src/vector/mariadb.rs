@@ -418,15 +418,14 @@ impl MariaDbVectorDriver {
         }
 
         let sql = format!("SHOW CREATE TABLE `{store}`");
-        let row: (String, String) =
-            sqlx::query_as(&sql)
-                .fetch_one(&*self.pool)
-                .await
-                .map_err(|e| {
-                    FrameworkError::internal(format!(
-                        "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
-                    ))
-                })?;
+        let row: (String, String) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(|e| {
+                FrameworkError::internal(format!(
+                    "mariadb: SHOW CREATE TABLE for store '{store}' failed: {e}"
+                ))
+            })?;
         let ddl = &row.1;
 
         let table_distance = match extract_vector_index_distance(ddl) {
@@ -574,7 +573,7 @@ impl VectorDriver for MariaDbVectorDriver {
                 values = upsert_values_clause(row_count)
             );
 
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
             for item in chunk {
                 let vec_text = MariaDbVectorDriver::embedding_to_vec_text(&item.embedding)?;
                 let metadata = match item.metadata {
@@ -624,7 +623,7 @@ impl VectorDriver for MariaDbVectorDriver {
             fn_name = self.distance.fn_name()
         );
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&vec_text)
             .bind(k as u64)
             .fetch_all(&*self.pool)
@@ -682,7 +681,7 @@ impl VectorDriver for MariaDbVectorDriver {
         for chunk in ids.chunks(DELETE_BATCH_SIZE) {
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!("DELETE FROM `{table}` WHERE id IN ({placeholders})");
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
             for id in chunk {
                 q = q.bind(id);
             }
@@ -701,7 +700,7 @@ impl VectorDriver for MariaDbVectorDriver {
         let table = MariaDbVectorDriver::validate_store_name(store)?;
         self.ensure_version().await?;
         let sql = format!("SELECT COUNT(*) AS n FROM `{table}`");
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
             .fetch_one(&*self.pool)
             .await
             .map_err(|e| {

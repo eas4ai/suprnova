@@ -79,9 +79,9 @@ Para endpoints PATCH donde "ausente del payload" debe distinguirse de
 use suprnova::data::Field;
 
 match dto.bio {
-    Field::Absent  => { /* no toques esta columna */ },
-    Field::Null    => { /* limpia la columna */ },
-    Field::Value(text) => { /* establece a text */ },
+    Field::Absent  => { /* don't touch this column */ },
+    Field::Null    => { /* clear the column */ },
+    Field::Value(text) => { /* set to text */ },
 }
 ```
 
@@ -143,9 +143,9 @@ let set = RequestIncludeSet::default()
     .only(["id", "name"])
     .except(["secret"]);
 
-assert!(set.is_visible("name"));   // en `only`, no en `except`
-assert!(!set.is_visible("secret"));// `except` siempre gana
-assert!(set.includes("author"));   // solicitud de la relación `author`
+assert!(set.is_visible("name"));   // on `only`, not in `except`
+assert!(!set.is_visible("secret"));// `except` always wins
+assert!(set.includes("author"));   // request for the `author` relation
 ```
 
 | Método | Efecto | Equivalente en Laravel |
@@ -192,8 +192,8 @@ async fn show_album(req: Request, user: User) -> Response {
             .include_when(user.is_admin(), ["audit_log"])
             .exclude_when(!user.is_admin(), ["price_cost"]),
         async move {
-            // Dentro de este alcance, el resolver de props perezosas y el resolver
-            // de include de JSON:API ven el conjunto fusionado.
+            // Inside this scope, the lazy-prop resolver and JSON:API
+            // include resolver see the merged set.
             Inertia::data("Album/Show", album_dto).into_response()
         },
     ).await
@@ -300,8 +300,8 @@ use suprnova::inertia::Prop;
 #[data(auto_lazy)]
 pub struct AlbumDto {
     pub id: i64,
-    pub songs: Prop,    // auto-registrado como ?include=songs
-    pub artist: Prop,   // auto-registrado como ?include=artist
+    pub songs: Prop,    // auto-registered as ?include=songs
+    pub artist: Prop,   // auto-registered as ?include=artist
 }
 ```
 
@@ -363,6 +363,8 @@ impl From<&AlbumEntity> for AlbumDto {
             songs: when_loaded!(album, "songs", || async {
                 serde_json::json!(album.songs_relation()
                     .iter()
+                    .map(SongDto::from)
+                    .collect::<Vec<_>>())
             }),
             artist: Prop::eager(serde_json::json!(album.artist_name())),
             lyrics: Prop::lazy(|| async { /* ... */ }),

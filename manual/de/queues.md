@@ -138,7 +138,6 @@ Handler läuft.
 | `Queue::later(delay, job)` | verfügbar nach `delay` ab jetzt |
 | `Queue::push_with(job, overrides)` | sofort einreihen mit Per-Push-`EnvelopeOverrides` |
 | `Queue::later_with(delay, job, overrides)` | nach `delay` ab jetzt verfügbar, mit Per-Push-`EnvelopeOverrides` |
-
 | `Queue::push_unique(job)` | dedupliziert nach `J::unique_id` innerhalb von `J::unique_for`; liefert `Ok(true)`, wenn die Envelope gepusht wurde, und `Ok(false)`, wenn ein lebender Dedupe-Key sie unterdrückt hat |
 | `Queue::push_unique_later(job, at)` | unique + geplant |
 | `Queue::later_unique(delay, job)` | unique + verzögert |
@@ -208,7 +207,7 @@ eigenen `Job::*`-Deklaration des Jobs für dieses Feld:
 `EnvelopeOverrides` ist die Primitive, auf der sowohl
 `Mail::on_queue`/`.on_connection()` als auch die
 Warteschlangenabstimmung pro Benachrichtigung von `Notify::queue`
-aufbauen - siehe [Mail](mail.md#einreihung) und
+aufbauen - siehe [Mail](mail.md#queueing) und
 [Benachrichtigungen](notifications.md).
 
 ### Job-deklarierte Verzögerung
@@ -577,7 +576,6 @@ JSON-Payloads. Fehler reisen als `String`, da `FrameworkError` kein
 | `JobQueueing` | bevor die Envelope den Treiber erreicht |
 | `JobQueued` | nachdem der Treiber sie akzeptiert hat |
 | `UniqueJobSkipped` | `push_unique` unterdrückte ein Duplikat innerhalb des `unique_for`-Fensters |
-
 | `JobProcessing` | Worker hat entnommen, kurz vor dem Dispatch |
 | `JobProcessed` | Handler hat `Ok` zurückgegeben |
 | `JobAttempted` | jeder endgültige Abschluss (Erfolg, Fehlschlag, Timeout) |
@@ -1089,7 +1087,7 @@ Der Fake-Guard serialisiert parallele Tests über einen prozessweiten
 Mutex; er erfasst `(payload, available_at, overrides)` pro Push und
 räumt beim Drop auf. Das Feld `overrides` ist für jeden Einstiegspunkt
 außer `push_with`/`later_with` `EnvelopeOverrides::default()` - siehe
-[Mocking](mocking.md#warteschlange---queuetestinginstall_fake) für
+[Mocking](mocking.md#queue---queuetestinginstall_fake) für
 `assert_pushed_on_queue`/`assert_pushed_on_connection` und
 `pushed_with_overrides`, die zugehörigen Assertions. Im Fake-Modus
 verzeichnet `push_unique` den Push immer als neu - Dedupe ist irrelevant,

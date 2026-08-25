@@ -31,7 +31,7 @@ suprnova serve [OPTIONS]
 | `--no-restart` | `false` | Einen abgestürzten Dev-Prozess nicht neu starten, sondern stattdessen die gesamte Sitzung beenden (das frühere Verhalten) |
 | `--restart-tries <N>` | `5` | Nach so vielen aufeinanderfolgenden Abstürzen eines Prozesses keine weiteren Neustartversuche unternehmen. Bei `--no-restart` ignoriert, da dies die Sitzung bereits beim ersten Absturz beendet. |
 | `--timestamps` | `false` | Jeder Ausgabezeile eine Uhrzeit im Format `HH:MM:SS` voranstellen |
-| `--json` | `false` | Auf stdout ein JSON-Objekt pro Zeile (NDJSON) statt Text mit Präfix ausgeben – siehe [JSON-Ausgabe](#json-output). Die Kombination mit `--timestamps` ist kein Fehler; `--timestamps` hat keine zusätzliche Wirkung, weil jedes Ereignis bereits seinen eigenen Zeitstempel trägt. |
+| `--json` | `false` | Auf stdout ein JSON-Objekt pro Zeile (NDJSON) statt Text mit Präfix ausgeben - siehe [JSON-Ausgabe](#json-ausgabe). Die Kombination mit `--timestamps` ist kein Fehler; `--timestamps` hat keine zusätzliche Wirkung, weil jedes Ereignis bereits seinen eigenen Zeitstempel trägt. |
 
 CLI-Flags haben Vorrang vor Umgebungsvariablen, die wiederum Vorrang
 vor den eingebauten Standardwerten haben. Eine gescaffoldete `.env`
@@ -135,13 +135,13 @@ Wenn Sie `suprnova serve` ausführen, macht die CLI Folgendes:
    `.rs`-Datei erneut aus.
 8. Startet `npm run dev` in `frontend/` für Vite, was Ihnen HMR für
    Svelte-/React-/Vue-Komponenten und Tailwind-Klassen gibt.
-9. Startet jeden zusätzlichen Prozess, der in der `Suprnova.toml` des Projekts deklariert ist (siehe [Zusätzliche Entwicklungsprozesse](#extra-dev-processes) unten), jeweils mit eigenem `[name]`-Präfix – Queue-Worker, Log-Tailer oder alles andere, das Sie sonst in einem anderen Terminal verwalten würden.
-10. Startet einen Dateiwächter auf `src/`, der den Typgenerator nach jeder Änderung einer `.rs`-Datei erneut ausführt, sobald die Folge von Speicherungen 500 ms lang ruhig war. Der Debounce erfolgt am Ende der Ruhephase; eine Folge – `cargo fmt`, Format-on-save über mehrere Dateien hinweg, ein Branch-Wechsel – wird so zu genau einer Regenerierung zusammengefasst, die *nach* dem letzten Schreibvorgang läuft, statt bei der ersten Datei auszulösen und den Rest zu verpassen.
-11. Leitet stdout/stderr jedes Kindprozesses mit einem `[name]`-Präfix (`[backend]`, `[frontend]` oder dem konfigurierten Prozessnamen) an Ihr Terminal weiter, optional mit Zeitstempel über `--timestamps` – oder mit `--json` stattdessen als NDJSON-Ereignisse (siehe [JSON-Ausgabe](#json-output) unten).
+9. Startet jeden zusätzlichen Prozess, der in der `Suprnova.toml` des Projekts deklariert ist (siehe [Zusätzliche Entwicklungsprozesse](#zusätzliche-entwicklungsprozesse) unten), jeweils mit eigenem `[name]`-Präfix - Queue-Worker, Log-Tailer oder alles andere, das Sie sonst in einem anderen Terminal verwalten würden.
+10. Startet einen Dateiwächter auf `src/`, der den Typgenerator nach jeder Änderung einer `.rs`-Datei erneut ausführt, sobald die Folge von Speicherungen 500 ms lang ruhig war. Der Debounce erfolgt am Ende der Ruhephase; eine Folge - `cargo fmt`, Format-on-save über mehrere Dateien hinweg, ein Branch-Wechsel - wird so zu genau einer Regenerierung zusammengefasst, die *nach* dem letzten Schreibvorgang läuft, statt bei der ersten Datei auszulösen und den Rest zu verpassen.
+11. Leitet stdout/stderr jedes Kindprozesses mit einem `[name]`-Präfix (`[backend]`, `[frontend]` oder dem konfigurierten Prozessnamen) an Ihr Terminal weiter, optional mit Zeitstempel über `--timestamps` - oder mit `--json` stattdessen als NDJSON-Ereignisse (siehe [JSON-Ausgabe](#json-ausgabe) unten).
 
-`Ctrl+C` signalisiert dem Manager, sein Shutdown-Flag zu setzen, alle Kindprozesse zu beenden und selbst zu beenden. Endet ein Kindprozess von selbst – ein Rust-Kompilierungsfehler, von dem sich `cargo watch` nicht erholen kann, ein abgestürzter Vite-Prozess, ein fehlgeschlagener `Suprnova.toml`-Prozess –, wird er nach einem kurzen Backoff neu gestartet (200 ms, bei jedem aufeinanderfolgenden Absturz verdoppelt, auf 5 s begrenzt; ein Prozess, der 30 s lief, setzt die Steigerung zurück), statt die Sitzung abzubauen. Übergeben Sie `--no-restart`, um das frühere Verhalten wiederherzustellen: Endet ein Kindprozess, wird die gesamte Sitzung sofort beendet.
+`Ctrl+C` signalisiert dem Manager, sein Shutdown-Flag zu setzen, alle Kindprozesse zu beenden und selbst zu beenden. Endet ein Kindprozess von selbst - ein Rust-Kompilierungsfehler, von dem sich `cargo watch` nicht erholen kann, ein abgestürzter Vite-Prozess, ein fehlgeschlagener `Suprnova.toml`-Prozess -, wird er nach einem kurzen Backoff neu gestartet (200 ms, bei jedem aufeinanderfolgenden Absturz verdoppelt, auf 5 s begrenzt; ein Prozess, der 30 s lief, setzt die Steigerung zurück), statt die Sitzung abzubauen. Übergeben Sie `--no-restart`, um das frühere Verhalten wiederherzustellen: Endet ein Kindprozess, wird die gesamte Sitzung sofort beendet.
 
-Ein Prozess, der weiterhin abstürzt, wird nicht endlos erneut versucht: `--restart-tries` (standardmäßig `5`) begrenzt, wie viele aufeinanderfolgende Abstürze `serve` erneut versucht, bevor es für diesen einen Prozess aufgibt – weitere 30 s Laufzeit setzen die Anzahl zurück, ebenso wie die Backoff-Verzögerung. Beim Aufgeben wird eine konkrete Meldung ausgegeben und *nur* dieser Prozess nicht weiter neu gestartet; die übrigen Prozesse (und die Sitzung selbst) laufen weiter. Das entspricht Laravels eigenem Standardwert `concurrently --restart-tries=5`. Siehe [Fehlerbehebung](#a-process-keeps-crash-looping).
+Ein Prozess, der weiterhin abstürzt, wird nicht endlos erneut versucht: `--restart-tries` (standardmäßig `5`) begrenzt, wie viele aufeinanderfolgende Abstürze `serve` erneut versucht, bevor es für diesen einen Prozess aufgibt - weitere 30 s Laufzeit setzen die Anzahl zurück, ebenso wie die Backoff-Verzögerung. Beim Aufgeben wird eine konkrete Meldung ausgegeben und *nur* dieser Prozess nicht weiter neu gestartet; die übrigen Prozesse (und die Sitzung selbst) laufen weiter. Das entspricht Laravels eigenem Standardwert `concurrently --restart-tries=5`. Siehe [Fehlerbehebung](#ein-prozess-gerät-in-eine-absturzschleife).
 
 ### Warum Suprnova abweicht
 
@@ -156,7 +156,7 @@ die `frontend/src/types/inertia-props.ts` laufend regeneriert, sodass
 Ihre Svelte-/React-/Vue-Komponenten immer die aktuelle Prop-Form ohne
 manuellen Typ-Sync sehen.
 
-Laravels Befehl `dev` bietet außerdem die Modi `--tabs` und `--stream`, die beide die Ausgabe durch ein kleines Node-TUI (`@laravel/multiplex`) rendern. Suprnova liefert dieses TUI nicht aus: Ausgabe mit Präfixen in einem einzelnen Terminal ist im Rust-Ökosystem für Entwicklungstools (`cargo watch`, `bacon`, `just`) die Norm, und ein Prozessregister mit farbigen Präfixen gibt bereits das Signal „welcher Prozess hat das gesagt?“, das ein TUI liefert. Die zugrunde liegende Aufgabe von `--stream` – ein skriptbarer Echtzeit-Ereignisstrom – wird als `--json` ausgeliefert (siehe [JSON-Ausgabe](#json-output)); das Mehrbereichs-TUI von `--tabs` ist die bewusste Absage, keine Lücke – ein zweites Interaktionsmodell und eine zweite Bibliothek, die über Terminals hinweg funktionieren muss, für ein Problem, das diese Seite bereits löst. Siehe die entsprechende Zeile in [Parität](parity.md#what-we-wont-ship-and-why).
+Laravels Befehl `dev` bietet außerdem die Modi `--tabs` und `--stream`, die beide die Ausgabe durch ein kleines Node-TUI (`@laravel/multiplex`) rendern. Suprnova liefert dieses TUI nicht aus: Ausgabe mit Präfixen in einem einzelnen Terminal ist im Rust-Ökosystem für Entwicklungstools (`cargo watch`, `bacon`, `just`) die Norm, und ein Prozessregister mit farbigen Präfixen gibt bereits das Signal „welcher Prozess hat das gesagt?“, das ein TUI liefert. Die zugrunde liegende Aufgabe von `--stream` - ein skriptbarer Echtzeit-Ereignisstrom - wird als `--json` ausgeliefert (siehe [JSON-Ausgabe](#json-ausgabe)); das Mehrbereichs-TUI von `--tabs` ist die bewusste Absage, keine Lücke - ein zweites Interaktionsmodell und eine zweite Bibliothek, die über Terminals hinweg funktionieren muss, für ein Problem, das diese Seite bereits löst. Siehe die entsprechende Zeile in [Parität](parity.md#what-we-won-t-ship-and-why).
 
 ## Hot Reload
 
@@ -181,7 +181,7 @@ aus, die es importiert.
 
 ## Zusätzliche Entwicklungsprozesse
 
-`suprnova serve` führt immer Backend und Vite aus, aber die meisten Projekte haben mehr als zwei Dinge, die weiterlaufen müssen – einen Queue-Worker, einen Log-Tailer, einen Mail-Catcher. Deklarieren Sie sie in einer `Suprnova.toml` im Projektwurzelverzeichnis; `serve` startet sie, versieht ihre Ausgabe mit Präfixen und startet sie automatisch neu, direkt neben Backend und Frontend:
+`suprnova serve` führt immer Backend und Vite aus, aber die meisten Projekte haben mehr als zwei Dinge, die weiterlaufen müssen - einen Queue-Worker, einen Log-Tailer, einen Mail-Catcher. Deklarieren Sie sie in einer `Suprnova.toml` im Projektwurzelverzeichnis; `serve` startet sie, versieht ihre Ausgabe mit Präfixen und startet sie automatisch neu, direkt neben Backend und Frontend:
 
 ```toml
 [[serve.process]]
@@ -200,11 +200,11 @@ Jeder Eintrag benötigt `name` und `command`; `args` hat standardmäßig keine E
 
 ### Warum Suprnova abweicht
 
-Laravel registriert zusätzliche `dev`-Prozesse aus PHP heraus – `DevCommands::register($command, $name)`, typischerweise in `boot()` eines Service-Providers –, weil `php artisan dev` einen Multiplexer aus demselben Prozess heraus startet, der die Anwendung bereits gebootet hat. `suprnova serve` ist ein von Ihrer Anwendung getrenntes Binary; es linkt oder startet niemals Ihren Rust-Code und ruft nur `cargo watch` und `npm` als Kindprozesse auf. Es gibt keinen Anwendungs-Bootstrapping-Hook, an den man sich hängen könnte; die Registrierung muss daher Daten sein, die die CLI liest, statt eines Aufrufs aus Ihrem Code – daher `Suprnova.toml` statt einer API `DevProcesses::register()`.
+Laravel registriert zusätzliche `dev`-Prozesse aus PHP heraus - `DevCommands::register($command, $name)`, typischerweise in `boot()` eines Service-Providers -, weil `php artisan dev` einen Multiplexer aus demselben Prozess heraus startet, der die Anwendung bereits gebootet hat. `suprnova serve` ist ein von Ihrer Anwendung getrenntes Binary; es linkt oder startet niemals Ihren Rust-Code und ruft nur `cargo watch` und `npm` als Kindprozesse auf. Es gibt keinen Anwendungs-Bootstrapping-Hook, an den man sich hängen könnte; die Registrierung muss daher Daten sein, die die CLI liest, statt eines Aufrufs aus Ihrem Code - daher `Suprnova.toml` statt einer API `DevProcesses::register()`.
 
 ## JSON-Ausgabe
 
-Übergeben Sie `--json`; dann schreibt `suprnova serve` ein JSON-Objekt pro Zeile (NDJSON) auf stdout statt farbigem Text mit `[name]`-Präfix – während es aktiv ist, geht nichts anderes auf stdout, sodass Sie die Ausgabe direkt an `jq` oder einen anderen zeilenorientierten JSON-Consumer weiterleiten können. Jede Zeile besitzt ein Feld `type`:
+Übergeben Sie `--json`; dann schreibt `suprnova serve` ein JSON-Objekt pro Zeile (NDJSON) auf stdout statt farbigem Text mit `[name]`-Präfix - während es aktiv ist, geht nichts anderes auf stdout, sodass Sie die Ausgabe direkt an `jq` oder einen anderen zeilenorientierten JSON-Consumer weiterleiten können. Jede Zeile besitzt ein Feld `type`:
 
 | `type` | Felder | Bedeutung |
 |---|---|---|
@@ -227,7 +227,7 @@ Beispielsweise sehen ein Vite-Absturz und sein Neustart so aus:
 
 `--json` lässt sich mit `--timestamps` kombinieren, statt damit zu kollidieren: Die Kombination ist kein Fehler, aber `--timestamps` hat keine zusätzliche Wirkung, weil jedes Ereignis bereits ein eigenes Feld `ts` enthält.
 
-Dies ist maschinenlesbare Ausgabe, die andere Tools parsen – Feldnamen und Werte von `type` werden nicht ohne einen Hinweis im Changelog umbenannt oder entfernt. Behandeln Sie einen unbekannten `type` oder ein unerwartetes zusätzliches Feld als etwas, das zu ignorieren ist, nicht als Fehler, damit eine künftige Veröffentlichung das Schema erweitern kann, ohne Ihren Consumer zu beschädigen.
+Dies ist maschinenlesbare Ausgabe, die andere Tools parsen - Feldnamen und Werte von `type` werden nicht ohne einen Hinweis im Changelog umbenannt oder entfernt. Behandeln Sie einen unbekannten `type` oder ein unerwartetes zusätzliches Feld als etwas, das zu ignorieren ist, nicht als Fehler, damit eine künftige Veröffentlichung das Schema erweitern kann, ohne Ihren Consumer zu beschädigen.
 
 ## Fehlerbehebung
 
@@ -294,7 +294,7 @@ einmal alle 500 ms. Zeigt sich eine Änderung nicht:
 
 ### Ein Prozess gerät in eine Absturzschleife
 
-Kann ein Kindprozess – Backend, Frontend oder ein `Suprnova.toml`-Eintrag – nicht starten (fehlerhafter Code, fehlendes Binary, Portkonflikt), wird er nach dem oben beschriebenen Backoff-Zeitplan neu gestartet, statt die Sitzung zu beenden. Prüfen Sie die `[name]`-Zeilen unmittelbar vor jedem Hinweis „respawning in …ms“ auf den tatsächlichen Fehler (ein rustc-`error[E…]`, ein ENOENT oder was immer der Kindprozess ausgegeben hat). Beheben Sie die Ursache; der nächste Neustartversuch übernimmt sie automatisch. Um die Wiederholungsversuche anzuhalten und den Fehler nur einmal zu sehen, führen Sie den Befehl erneut mit `--no-restart` aus – dann wird die Sitzung beim ersten Absturz beendet, wie sich `suprnova serve` verhielt, bevor es diese Funktion gab.
+Kann ein Kindprozess - Backend, Frontend oder ein `Suprnova.toml`-Eintrag - nicht starten (fehlerhafter Code, fehlendes Binary, Portkonflikt), wird er nach dem oben beschriebenen Backoff-Zeitplan neu gestartet, statt die Sitzung zu beenden. Prüfen Sie die `[name]`-Zeilen unmittelbar vor jedem Hinweis „respawning in …ms“ auf den tatsächlichen Fehler (ein rustc-`error[E…]`, ein ENOENT oder was immer der Kindprozess ausgegeben hat). Beheben Sie die Ursache; der nächste Neustartversuch übernimmt sie automatisch. Um die Wiederholungsversuche anzuhalten und den Fehler nur einmal zu sehen, führen Sie den Befehl erneut mit `--no-restart` aus - dann wird die Sitzung beim ersten Absturz beendet, wie sich `suprnova serve` verhielt, bevor es diese Funktion gab.
 
 Nach `--restart-tries` (standardmäßig `5`) aufeinanderfolgenden Abstürzen beendet `serve` die Neustartversuche für diesen Prozess selbstständig und gibt eine Meldung mit seinem Namen aus:
 
@@ -302,7 +302,7 @@ Nach `--restart-tries` (standardmäßig `5`) aufeinanderfolgenden Abstürzen bee
 gave up restarting `backend` after 5 attempts; fix the error and run `suprnova serve` again
 ```
 
-Die übrigen Prozesse und die Sitzung selbst laufen weiter – beheben Sie die Ursache und führen Sie `suprnova serve` erneut aus, um den aufgegebenen Prozess wieder zu starten; Sie müssen nicht die gesamte Sitzung neu starten.
+Die übrigen Prozesse und die Sitzung selbst laufen weiter - beheben Sie die Ursache und führen Sie `suprnova serve` erneut aus, um den aufgegebenen Prozess wieder zu starten; Sie müssen nicht die gesamte Sitzung neu starten.
 
 ## Nächste Schritte
 

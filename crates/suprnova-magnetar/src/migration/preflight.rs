@@ -133,9 +133,10 @@ async fn has_magnetar_marker<C: ConnectionTrait + ?Sized>(database: &C) -> Resul
         DbBackend::Sqlite => {
             "SELECT \"value\" FROM \"magnetar_migration_state\" WHERE \"key\" = ? LIMIT 1"
         }
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     let row = database
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             backend,
             query,
             vec!["schema_version".into()],
@@ -278,9 +279,10 @@ pub(crate) async fn source_row_counts<C: ConnectionTrait + ?Sized>(
         DbBackend::MySql => {
             "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name"
         }
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     let tables = database
-        .query_all(Statement::from_string(backend, list_tables))
+        .query_all_raw(Statement::from_string(backend, list_tables))
         .await
         .map_err(|error| database_error("listing source tables for dry run", error))?;
     let mut counts = Vec::with_capacity(tables.len());
@@ -290,7 +292,7 @@ pub(crate) async fn source_row_counts<C: ConnectionTrait + ?Sized>(
             .map_err(|error| database_error("reading source table name", error))?;
         let quoted = quote_identifier(backend, &table)?;
         let count_row = database
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 backend,
                 format!("SELECT COUNT(*) FROM {quoted}"),
             ))
@@ -325,10 +327,11 @@ pub(crate) async fn source_users<C: ConnectionTrait + ?Sized>(
     let cast_id = match backend {
         DbBackend::MySql => "CAST(id AS CHAR)",
         DbBackend::Postgres | DbBackend::Sqlite => "CAST(id AS TEXT)",
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     let query = format!("SELECT {cast_id}, email FROM {table} ORDER BY {cast_id}");
     database
-        .query_all(Statement::from_string(backend, query))
+        .query_all_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("reading source users", error))?
         .into_iter()
@@ -374,9 +377,10 @@ pub(crate) async fn source_passkeys<C: ConnectionTrait + ?Sized>(
     let owner = match backend {
         DbBackend::MySql => "CAST(user_id AS CHAR)",
         DbBackend::Postgres | DbBackend::Sqlite => "CAST(user_id AS TEXT)",
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     database
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             format!("SELECT {owner}, credential_id, data_json FROM passkeys ORDER BY id"),
         ))
@@ -451,7 +455,7 @@ fn source_user_table(shape: SourceShape) -> &'static str {
 async fn execute<C: ConnectionTrait + ?Sized>(database: &C, query: &str) -> Result<()> {
     let backend = database.get_database_backend();
     database
-        .execute(Statement::from_string(backend, query))
+        .execute_raw(Statement::from_string(backend, query))
         .await
         .map_err(|error| database_error("invalidating sacrificeable migration state", error))?;
     Ok(())

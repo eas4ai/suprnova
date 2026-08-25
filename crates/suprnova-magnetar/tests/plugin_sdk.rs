@@ -1,3 +1,5 @@
+#![cfg(feature = "seaorm-sqlite")]
+
 //! Contract tests for registry, wire dispatch, effects, and feature absence.
 
 use std::sync::{
@@ -146,10 +148,10 @@ impl LinkGenerator for Allow {
 async fn context() -> PluginContext<StorageSchema> {
     let database = fixture::database().await;
     database
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Sqlite,
             "INSERT INTO storage_users (id, email, auth_epoch)
-             VALUES (2, 'web@example.test', 0)"
+     VALUES (2, 'web@example.test', 0)"
                 .to_owned(),
         ))
         .await

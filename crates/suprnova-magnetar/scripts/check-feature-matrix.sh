@@ -51,8 +51,8 @@ readonly DISABLED_PROVIDER_NAMES=(
 
 validate_tree() {
   local tree_output="$1"
-  local tree_package_names
-  tree_package_names="$(
+  local tree_packages
+  tree_packages="$(
     awk '
       {
         if ($0 ~ /^[^[:alnum:]]*\[(build|dev)-dependencies\][[:space:]]*$/) {
@@ -69,26 +69,49 @@ validate_tree() {
           printf "Unable to extract a package name from cargo tree line: %s\n", $0 > "/dev/stderr"
           exit 1
         }
-        print fields[1]
+        print fields[1], fields[2]
       }
     ' <<<"$tree_output"
   )" || {
     printf 'Could not parse cargo tree package names; refusing to skip dependency validation.\n' >&2
     return 1
   }
-  if [[ -z "$tree_package_names" ]]; then
-    printf 'Cargo tree did not contain any package names; refusing to skip dependency validation.\n' >&2
+  if [[ -z "$tree_packages" ]]; then
+    printf 'Cargo tree did not contain any packages; refusing to skip dependency validation.\n' >&2
     return 1
   fi
 
-  local root_seen=false
-  local package_name provider
-  mapfile -t tree_packages <<<"$tree_package_names"
-  for package_name in "${tree_packages[@]}"; do
+  local root_seen=false sea_orm_seen=false sea_query_seen=false
+  local package_record package_name package_version provider
+  mapfile -t tree_package_records <<<"$tree_packages"
+  for package_record in "${tree_package_records[@]}"; do
+    read -r package_name package_version <<<"$package_record"
     if [[ "$package_name" == "suprnova-magnetar" ]]; then
       root_seen=true
       continue
     fi
+    case "$package_name" in
+      sea-orm)
+        if [[ "$package_version" != v2.* ]]; then
+          printf 'unsupported database dependency: %s %s\n' "$package_name" "$package_version" >&2
+          return 1
+        fi
+        sea_orm_seen=true
+        ;;
+      sea-query)
+        if [[ "$package_version" != v1.* ]]; then
+          printf 'unsupported database dependency: %s %s\n' "$package_name" "$package_version" >&2
+          return 1
+        fi
+        sea_query_seen=true
+        ;;
+      sqlx|sqlx-*)
+        if [[ "$package_version" != v0.9.* ]]; then
+          printf 'unsupported database dependency: %s %s\n' "$package_name" "$package_version" >&2
+          return 1
+        fi
+        ;;
+    esac
     for provider in "${DISABLED_PROVIDER_NAMES[@]}"; do
       case "$package_name" in
         "$provider"|"$provider"-*)
@@ -98,6 +121,14 @@ validate_tree() {
       esac
     done
   done
+  if [[ "$sea_orm_seen" != true ]]; then
+    printf 'unsupported database dependency: expected sea-orm v2.*\n' >&2
+    return 1
+  fi
+  if [[ "$sea_query_seen" != true ]]; then
+    printf 'unsupported database dependency: expected sea-query v1.*\n' >&2
+    return 1
+  fi
   if [[ "$root_seen" != true ]]; then
     printf 'Cargo tree did not contain the suprnova-magnetar root package.\n' >&2
     return 1

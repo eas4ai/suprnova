@@ -355,8 +355,7 @@ impl DbTableBuilder {
             DbBackend::Postgres | DbBackend::Sqlite => {
                 let sql = format!("{base} RETURNING id");
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
-                let row = exec
-                    .query_one(stmt)
+                let row = exec.query_one(stmt)
                     .await
                     .map_err(|e| FrameworkError::database(e.to_string()))?
                     .ok_or_else(|| {
@@ -404,6 +403,7 @@ impl DbTableBuilder {
                 }
                 Ok(raw as i64)
             }
+            _ => Err(super::unsupported_database_backend(backend)),
         }
     }
 
@@ -1119,6 +1119,7 @@ impl DB {
         let sql = match backend {
             DbBackend::Postgres | DbBackend::MySql => "SELECT VERSION() AS v",
             DbBackend::Sqlite => "SELECT sqlite_version() AS v",
+            _ => return Err(super::unsupported_database_backend(backend)),
         };
         let stmt = Statement::from_sql_and_values(backend, sql, Vec::<SeaValue>::new());
         let row = exec

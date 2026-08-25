@@ -62,43 +62,43 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         .await
         .expect("connect in-memory SQLite");
     database
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Sqlite,
             "CREATE TABLE app_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
-                name TEXT NULL,
-                password_hash TEXT NULL,
-                remember_token TEXT NULL,
-                email_verified_at TEXT NULL,
-                locked_at TEXT NULL,
-                auth_epoch BIGINT NOT NULL DEFAULT 0,
-                created_at TEXT NULL,
-                updated_at TEXT NULL
-            )"
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NULL,
+        password_hash TEXT NULL,
+        remember_token TEXT NULL,
+        email_verified_at TEXT NULL,
+        locked_at TEXT NULL,
+        auth_epoch BIGINT NOT NULL DEFAULT 0,
+        created_at TEXT NULL,
+        updated_at TEXT NULL
+    )"
             .to_owned(),
         ))
         .await
         .expect("create current user table");
     database
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Sqlite,
             "CREATE TABLE auth_sessions (
-                id TEXT PRIMARY KEY NOT NULL,
-                user_id BIGINT NOT NULL,
-                token_digest TEXT NOT NULL,
-                token_hash TEXT NULL,
-                user_agent TEXT NULL,
-                ip_address TEXT NULL,
-                expires_at TEXT NOT NULL,
-                revoked_at TEXT NULL
-            )"
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id BIGINT NOT NULL,
+        token_digest TEXT NOT NULL,
+        token_hash TEXT NULL,
+        user_agent TEXT NULL,
+        ip_address TEXT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT NULL
+    )"
             .to_owned(),
         ))
         .await
         .expect("create legacy session table");
     database
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO app_users (id, email, auth_epoch) VALUES (?, ?, ?)",
             [1_i64.into(), "legacy@example.test".into(), 0_i64.into()],
@@ -113,11 +113,11 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     database
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO auth_sessions (
-                id, user_id, token_digest, token_hash, expires_at
-             ) VALUES (?, ?, ?, ?, ?)",
+        id, user_id, token_digest, token_hash, expires_at
+     ) VALUES (?, ?, ?, ?, ?)",
             [
                 "legacy-session".into(),
                 1_i64.into(),
@@ -134,7 +134,7 @@ async fn sqlite_legacy_sessions_are_invalidated_before_any_follow_up_migration_s
         .expect("upgrade legacy default schema");
 
     let migrated = database
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT auth_epoch FROM auth_sessions WHERE id = 'legacy-session'".to_owned(),
         ))
@@ -213,6 +213,7 @@ async fn negative_legacy_remember_epoch_is_neutral_not_found() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn postgres_default_schema_is_replay_safe() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL is required");
@@ -221,6 +222,7 @@ async fn postgres_default_schema_is_replay_safe() {
 
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn postgres_api_import_advances_the_default_user_sequence() {
     let server_url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
         .expect("MAGNETAR_POSTGRES_TEST_URL is required");
@@ -229,7 +231,7 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .expect("connect PostgreSQL admin database");
     let database_name = format!("magnetar_sequence_{}", rand::random::<u64>());
     admin
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             format!("CREATE DATABASE \"{database_name}\""),
         ))
@@ -244,21 +246,21 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .await
         .expect("connect isolated PostgreSQL database");
     database
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             "CREATE TABLE app_users (
-                id BIGSERIAL PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE
-            )"
+        id BIGSERIAL PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE
+    )"
             .to_owned(),
         ))
         .await
         .expect("create API source users table");
     database
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             "INSERT INTO app_users (id, email)
-             VALUES (4242, 'imported@example.test')"
+     VALUES (4242, 'imported@example.test')"
                 .to_owned(),
         ))
         .await
@@ -279,7 +281,7 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
         .expect("plan API migration");
     runner.apply(&plan).await.expect("apply API migration");
     let imported_max = database
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT MAX(id) AS max_id FROM app_users".to_owned(),
         ))
@@ -292,11 +294,11 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
     );
 
     let created = database
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "INSERT INTO app_users (email)
-             VALUES ('after-import@example.test')
-             RETURNING id"
+     VALUES ('after-import@example.test')
+     RETURNING id"
                 .to_owned(),
         ))
         .await
@@ -307,16 +309,16 @@ async fn postgres_api_import_advances_the_default_user_sequence() {
     drop(runner);
     drop(database);
     admin
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             format!("DROP DATABASE \"{database_name}\""),
         ))
         .await
         .expect("drop isolated PostgreSQL database");
 }
-
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 async fn mysql_default_schema_is_replay_safe() {
     let url =
         std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");

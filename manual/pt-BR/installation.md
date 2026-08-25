@@ -6,8 +6,7 @@ scaffold rodando. Se você já chegou lá, pule para o
 
 ## Requisitos
 
-- **Rust 1.91.1+** (o workspace usa a edição 2024). Instale via
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** para a `main` atual (o workspace usa a edição 2024). A versão v1.3.2 marcada tem o mesmo requisito mínimo de Rust 1.94.0. Instale por meio do [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -23,6 +22,9 @@ scaffold rodando. Se você já chegou lá, pule para o
 Você não precisa escolher um banco de dados agora. O scaffolder padrão
 escolhe SQLite para que um app novo rode sem configuração.
 
+
+A `main` atual usa SeaORM 2.0, SeaQuery 1.0 e SQLx 0.9. Aplicações que chamam SeaORM diretamente devem importar `ExprTrait` para os métodos de expressão do SeaQuery e usar métodos de conexão `*_raw` explícitos para valores `Statement` pré-construídos. A atualização das dependências não exige nenhuma migração de dados da aplicação.
+
 ## Instale a CLI
 
 O Suprnova é distribuído como um projeto Cargo, e o instalador da CLI
@@ -30,7 +32,7 @@ puxa o framework do git (não do crates.io - veja a [nota de
 pré-lançamento](#pre-launch-note) abaixo):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 Isso compila o binário `suprnova` e o coloca em `~/.cargo/bin`.
@@ -51,9 +53,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Crie um projeto
 
-`suprnova new` cria com scaffold um projeto completo - backend + frontend
-escolhido + configuração Vite + migrações de auth + rotas de exemplo.
-É interativo por padrão:
+`suprnova new` cria com scaffold um projeto completo - backend + frontend escolhido + configuração Vite + migrações de auth + rotas de exemplo. É interativo por padrão:
 
 ```bash
 suprnova new my-app
@@ -162,7 +162,7 @@ O tour completo do diretório está em [Estrutura de diretórios](structure.md).
 A CLI vive no seu `~/.cargo/bin`. Para atualizar para a mais recente:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 `--force` faz o Cargo sobrescrever o binário existente.
@@ -173,7 +173,7 @@ Um app com scaffold depende do crate do framework `suprnova` via uma
 dependência git no `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Para puxar as mudanças mais recentes do framework:
@@ -193,7 +193,7 @@ fixar manualmente um `rev` no `Cargo.toml`.
 O Suprnova é distribuído via git, não crates.io - tanto o framework
 quanto a CLI instalam a partir do GitHub. Cada versão é publicada como um
 GitHub Release com tag (por exemplo, `v1.2.4`), e é da tag que o seu app
-depende: um `Cargo.toml` criado com scaffold fixa `tag = "v1.2.4"`, e o
+depende: um `Cargo.toml` criado com scaffold fixa `tag = "v1.3.2"`, e o
 `Cargo.lock` registra o commit exato que aquela tag resolveu, então os
 builds são reproduzíveis até que você escolha mudar. Atualizar é
 deliberado, nunca incidental - incremente a tag e execute

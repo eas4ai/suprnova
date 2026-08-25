@@ -155,7 +155,7 @@ async fn mysql_relation_pivots_accept_null_non_text_extras_and_typed_timestamps(
              UNIQUE KEY uq_suprnova_mysql_taggable (tag_ref_id, subject_id, subject_type)\
          )",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_owned()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await
             .unwrap_or_else(|error| panic!("fixture setup failed on {sql:?}: {error}"));
     }
@@ -256,7 +256,7 @@ async fn mysql_relation_pivots_accept_null_non_text_extras_and_typed_timestamps(
         "DROP TABLE suprnova_mysql_pivot_roles",
         "DROP TABLE suprnova_mysql_pivot_owners",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_owned()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await
             .unwrap_or_else(|error| panic!("fixture cleanup failed on {sql:?}: {error}"));
     }
@@ -281,7 +281,7 @@ async fn assert_mysql_pivot_values(
          FROM {table} WHERE {id_column} = ?"
     );
     let row = conn
-        .query_one(Statement::from_sql_and_values(backend, sql, [id.into()]))
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, [id.into()]))
         .await
         .expect("query MySQL pivot values")
         .expect("MySQL pivot row must exist");

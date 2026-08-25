@@ -57,7 +57,7 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
         let (sql, values) = self.insert_statement(&env)?;
         self.db
-            .execute(Statement::from_sql_and_values(self.backend(), sql, values))
+            .execute_raw(Statement::from_sql_and_values(self.backend(), sql, values))
             .await
             .map_err(|e| FrameworkError::internal(format!("queue push: {e}")))?;
         Ok(())
@@ -83,12 +83,12 @@ impl QueueDriver for DatabaseQueueDriver {
             format!(
                 "DELETE FROM {} WHERE reserved_token = {}",
                 self.table,
-                placeholder(self.backend(), 1)
+                placeholder(self.backend(), 1)?
             ),
             vec![sea_orm::Value::from(token.0.to_string())],
         );
         self.db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("queue ack: {e}")))?;
         Ok(())
@@ -132,12 +132,12 @@ impl QueueDriver for DatabaseQueueDriver {
         // deleting first, it reads zero rows and reports `Stale`, which is what
         // actually happened.
         let deleted = txn
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "DELETE FROM {} WHERE reserved_token = {}",
                     self.table,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(token.0.to_string())],
             ))
@@ -155,7 +155,7 @@ impl QueueDriver for DatabaseQueueDriver {
 
         for env in follow_ups {
             let (sql, values) = self.insert_statement(env)?;
-            txn.execute(Statement::from_sql_and_values(self.backend(), sql, values))
+            txn.execute_raw(Statement::from_sql_and_values(self.backend(), sql, values))
                 .await
                 .map_err(|e| FrameworkError::internal(format!("queue settle push: {e}")))?;
         }
@@ -182,7 +182,7 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn size(&self) -> Result<u64, FrameworkError> {
         let row = self
             .db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 self.backend(),
                 format!("SELECT COUNT(*) FROM {}", self.table),
             ))
@@ -201,15 +201,15 @@ impl QueueDriver for DatabaseQueueDriver {
         let now = Utc::now().timestamp();
         let row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT COUNT(*) FROM {} \
-                     WHERE available_at <= {} \
-                       AND (reserved_until IS NULL OR reserved_until <= {})",
+             WHERE available_at <= {} \
+               AND (reserved_until IS NULL OR reserved_until <= {})",
                     self.table,
-                    placeholder(self.backend(), 1),
-                    placeholder(self.backend(), 2)
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
                 ),
                 vec![sea_orm::Value::from(now), sea_orm::Value::from(now)],
             ))
@@ -228,12 +228,12 @@ impl QueueDriver for DatabaseQueueDriver {
         let now = Utc::now().timestamp();
         let row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT COUNT(*) FROM {} WHERE available_at > {}",
                     self.table,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(now)],
             ))
@@ -252,13 +252,13 @@ impl QueueDriver for DatabaseQueueDriver {
         let now = Utc::now().timestamp();
         let row = self
             .db
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT COUNT(*) FROM {} \
-                     WHERE reserved_until IS NOT NULL AND reserved_until > {}",
+             WHERE reserved_until IS NOT NULL AND reserved_until > {}",
                     self.table,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(now)],
             ))
@@ -276,7 +276,7 @@ impl QueueDriver for DatabaseQueueDriver {
     async fn clear(&self) -> Result<u64, FrameworkError> {
         let r = self
             .db
-            .execute(Statement::from_string(
+            .execute_raw(Statement::from_string(
                 self.backend(),
                 format!("DELETE FROM {}", self.table),
             ))
@@ -324,7 +324,7 @@ impl DatabaseQueueDriver {
              (id, job_name, queue, envelope_json, available_at, attempts, created_at) \
              VALUES ({})",
             self.table,
-            placeholder_list(self.backend(), 1, 7)
+            placeholder_list(self.backend(), 1, 7)?
         );
         Ok((
             sql,
@@ -370,10 +370,10 @@ impl DatabaseQueueDriver {
         let select_sql = format!(
             "SELECT envelope_json FROM {} WHERE reserved_token = {}",
             self.table,
-            placeholder(self.backend(), 1)
+            placeholder(self.backend(), 1)?
         );
         let row = txn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 self.backend(),
                 &select_sql,
                 vec![sea_orm::Value::from(token.0.to_string())],
@@ -421,10 +421,10 @@ impl DatabaseQueueDriver {
                      available_at = {}, {}envelope_json = {} \
                  WHERE reserved_token = {}",
                 self.table,
-                placeholder(self.backend(), 1),
+                placeholder(self.backend(), 1)?,
                 attempts_clause,
-                placeholder(self.backend(), 2),
-                placeholder(self.backend(), 3)
+                placeholder(self.backend(), 2)?,
+                placeholder(self.backend(), 3)?
             ),
             vec![
                 sea_orm::Value::from(new_available),
@@ -432,7 +432,7 @@ impl DatabaseQueueDriver {
                 sea_orm::Value::from(token.0.to_string()),
             ],
         );
-        txn.execute(stmt)
+        txn.execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("queue {op}: {e}")))?;
         txn.commit()
@@ -459,6 +459,9 @@ impl DatabaseQueueDriver {
         let lock_clause = match self.backend() {
             DatabaseBackend::Postgres | DatabaseBackend::MySql => "FOR UPDATE SKIP LOCKED",
             DatabaseBackend::Sqlite => "",
+            backend => {
+                return Err(crate::database::unsupported_database_backend(backend));
+            }
         };
 
         let txn = self
@@ -477,7 +480,7 @@ impl DatabaseQueueDriver {
             // Ordinal 3 onwards: the two timestamp binds above already claimed
             // $1 and $2, and Postgres reads the wrong parameter (or errors on a
             // missing one) if the list restarts its own numbering.
-            let placeholders = placeholder_list(self.backend(), 3, queues.len());
+            let placeholders = placeholder_list(self.backend(), 3, queues.len())?;
             // An envelope written before routing has NULL here and belongs to
             // the default queue, so a worker draining "default" must still see it.
             let null_clause = if queues.iter().any(|q| q == DEFAULT_QUEUE) {
@@ -498,13 +501,13 @@ impl DatabaseQueueDriver {
              ORDER BY available_at ASC \
              LIMIT 1 {}",
             self.table,
-            placeholder(self.backend(), 1),
-            placeholder(self.backend(), 2),
+            placeholder(self.backend(), 1)?,
+            placeholder(self.backend(), 2)?,
             queue_clause,
             lock_clause
         );
         let row = txn
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 self.backend(),
                 &select_sql,
                 params,
@@ -572,8 +575,8 @@ impl DatabaseQueueDriver {
         // each one would be a wasted column write per job.
         let mut set_clause = format!(
             "reserved_until = {}, reserved_token = {}",
-            placeholder(self.backend(), 1),
-            placeholder(self.backend(), 2)
+            placeholder(self.backend(), 1)?,
+            placeholder(self.backend(), 2)?
         );
         let mut update_params = vec![
             sea_orm::Value::from(reserved_until),
@@ -591,7 +594,7 @@ impl DatabaseQueueDriver {
                 .map_err(|e| FrameworkError::internal(format!("envelope encode: {e}")))?;
             set_clause.push_str(&format!(
                 ", attempts = attempts + 1, envelope_json = {}",
-                placeholder(self.backend(), next_ordinal)
+                placeholder(self.backend(), next_ordinal)?
             ));
             update_params.push(sea_orm::Value::from(new_json));
             next_ordinal += 1;
@@ -602,14 +605,14 @@ impl DatabaseQueueDriver {
                AND (reserved_until IS NULL OR reserved_until <= {})",
             self.table,
             set_clause,
-            placeholder(self.backend(), next_ordinal),
-            placeholder(self.backend(), next_ordinal + 1)
+            placeholder(self.backend(), next_ordinal)?,
+            placeholder(self.backend(), next_ordinal + 1)?
         );
         update_params.push(sea_orm::Value::from(id));
         update_params.push(sea_orm::Value::from(now));
 
         let exec = txn
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 self.backend(),
                 update_sql,
                 update_params,

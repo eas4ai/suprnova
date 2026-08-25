@@ -19,12 +19,12 @@ irmão quando precisar da forma longa.
 | `#[suprnova_test]` | Açúcar de attribute macro - executa `App::init()` + `App::boot_services()` e constrói um `TestDatabase` para você |
 | `describe!` + `test!` | Macros de agrupamento no formato do Jest, pareadas com `expect!` para saída de falha nomeada |
 | `expect!` | Macro de asserção fluente com matchers tipados (igualdade, option, result, string, vec, ordenação) |
-| `TestResponse` | Asserções fluentes sobre a tripla `(status, headers, body)` de um teste HTTP - veja [Testes HTTP](http-tests.md#asserções-fluentes-de-resposta-com-testresponse) |
-| `AssertableInertia` | Asserções fluentes sobre um objeto de página Inertia - veja [Testes HTTP](http-tests.md#testando-respostas-inertia) |
 | `TestDatabase::fresh` / `sqlite_memory` | SQLite em memória + registro no contêiner, com ou sem seu migrator |
 | `TestContainer::fake` / `scope` / `spawn` | Overrides de DI thread-local ou task-local, herméticos entre testes paralelos |
 | `install_test_encryption_key[ring]` | `APP_KEY` determinística para testes que tocam casts criptografados ou payloads assinados |
 | Helpers `fake()` por superfície | Mail, Notify, Queue, Bus, Events, Storage, HTTP - veja [Mocking](mocking.md) |
+| `TestResponse` | Asserções fluentes sobre a tripla `(status, headers, body)` de um teste HTTP - veja [Testes HTTP](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Asserções fluentes sobre um objeto de página Inertia - veja [Testes HTTP](http-tests.md#testing-inertia-responses) |
 
 Você não vai usar tudo em um único teste. Um teste de action típico
 usa os três primeiros; um teste pesado em DI acrescenta
@@ -392,7 +392,7 @@ recebem de graça:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 
 [dev-dependencies]
 # `testing` vem ligada transitivamente pela dependência acima - nada extra.
@@ -414,10 +414,10 @@ você publica:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", features = ["testing", "..."] }
 ```
 
 Isto é um aperto, não uma correção - a validação no boot fecha o

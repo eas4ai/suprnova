@@ -156,9 +156,9 @@ de `connect_timeout` no builder; o cliente reqwest subjacente usa um
 ## Redirecionamentos
 
 O cliente compartilhado segue redirecionamentos por padrão (até o
-limite do reqwest de 10) - o comportamento certo quando você está
-chamando um endpoint confiável que responde `http → https` ou te
-entrega uma URL de CDN.
+limite do reqwest de
+10) - o comportamento certo quando você está chamando um endpoint
+confiável que responde `http → https` ou te entrega uma URL de CDN.
 
 Quando a URL da solicitação é influenciada por input não confiável,
 esse padrão se torna um vetor de server-side request forgery (SSRF):
@@ -262,8 +262,8 @@ let resp = Http::get("https://flaky.example.com/health")
 
 `retry_when` registra um predicado consultado antes de cada retentativa que a
 política acima faria de outro modo. Ele pode vetar uma retentativa que de outra
-forma seria elegível, mas não pode criar uma. Em particular, ele não pode
-transformar uma resposta 2xx, 3xx ou 4xx em uma retentativa, e não pode tornar uma
+forma seria elegível, mas não pode criar uma. Em particular, ele não pode transformar uma resposta
+2xx, 3xx ou 4xx em uma retentativa, e não pode tornar uma
 resposta 5xx recebida repetível para `POST` ou `PATCH` sem
 `.retry_non_idempotent(...)`. Ele é consultado antes das retentativas de erros de
 transporte para todos os métodos, incluindo `POST` e `PATCH` configurados com

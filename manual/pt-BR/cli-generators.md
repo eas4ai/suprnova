@@ -6,8 +6,7 @@ comando de console, um erro de domínio, uma tarefa agendada, uma
 página Inertia ou struct de props, uma migração de banco de dados - e
 conecta o novo módulo ao seu `mod.rs` pai (e, onde necessário,
 `src/lib.rs` e `cmd/main.rs`). Recorra a eles quando você do contrário
-estaria redigitando o mesmo boilerplate + a linha de import
-`pub mod x;`, o que é a maior parte do tempo.
+estaria redigitando o mesmo boilerplate + a linha de import `pub mod x;`, o que é a maior parte do tempo.
 
 ## make:controller
 

@@ -5,9 +5,8 @@ chaque pièce d'un projet - un contrôleur, une action, un middleware,
 une commande console, une erreur de domaine, une tâche planifiée,
 une page Inertia ou une struct de props, une migration de base de
 données - et câble le nouveau module dans son `mod.rs` parent (et là
-où c'est nécessaire, `src/lib.rs` et `cmd/main.rs`). Faites-y appel
-quand vous devriez sinon retaper le même boilerplate + la ligne
-d'import `pub mod x;`, ce qui est le cas la plupart du temps.
+Faites-y appel quand vous devriez sinon retaper le même boilerplate + la ligne d'import `pub mod x;`, ce qui est le cas la plupart du temps.
+
 
 ## make:controller
 

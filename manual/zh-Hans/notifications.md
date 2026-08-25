@@ -367,8 +367,7 @@ Notify::queue(&user, OrderShipped { tracking }).await?;
 
 ### 队列调优
 
-另外五个 `Notification` 方法会把逐通知的队列策略带到 `Notify::queue` 的分发中，
-对应 `Job` 自身的调优方法：
+另外五个 `Notification` 方法会把逐通知的队列策略带到 `Notify::queue` 的分发中，对应 `Job` 自身的调优方法：
 
 | 方法 | 默认值 | 对应 |
 |---|---|---|

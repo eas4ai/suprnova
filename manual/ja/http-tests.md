@@ -219,7 +219,7 @@ TestResponse::new(parts.status.as_u16(), headers, bytes)
 
 ### `assert_session_has` にはセッションストアが必要
 
-他のすべてのアサーションはワイヤーレベルのレスポンスだけを読みます。`assert_session_has` はそうできません。サーバー側のセッション状態はレスポンスではなく `SessionStore` に存在し、ループバックソケットからレスポンスが返る時点では、読み取れるプロセス内セッションはもうありません。テストの `SessionMiddleware` を構築したときと同じストアを、そのCookie名とともに取り付けてください。するとアサーションがレスポンスのセッションCookieを復号して、行自体を見つけます:
+他のすべてのアサーションはレスポンスレベルのレスポンスだけを読みます。`assert_session_has` はそうできません。サーバー側のセッション状態はレスポンスではなく `SessionStore` に存在し、ループバックソケットからレスポンスが返る時点では、読み取れるプロセス内セッションはもうありません。テストの `SessionMiddleware` を構築したときと同じストアを、そのCookie名とともに取り付けてください。するとアサーションがレスポンスのセッションCookieを復号して、行自体を見つけます:
 
 ```rust
 let response = TestResponse::new(status, headers, body)
@@ -234,7 +234,7 @@ response
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelの `TestResponse` はテスト対象と同じPHPプロセスに存在するため、`assertSessionHas` は `$this->session()` を直接読みます - 越えるべきワイヤー境界がありません。Suprnovaのテストは実際のhyper接続を駆動するため、セッションは実際のブラウザーと同様に、テストにとって不透明なCookieです。`assert_session_has` は、プロセス内のショートカットが存在するふりをする代わりに、明示的なストアハンドルでその正直さを取り戻します。
+Laravelの `TestResponse` はテスト対象と同じPHPプロセスに存在するため、`assertSessionHas` は `$this->session()` を直接読みます - 越えるべきレスポンス境界がありません。Suprnovaのテストは実際のhyper接続を駆動するため、セッションは実際のブラウザーと同様に、テストにとって不透明なCookieです。`assert_session_has` は、プロセス内のショートカットが存在するふりをする代わりに、明示的なストアハンドルでその正直さを取り戻します。
 
 ## Inertiaレスポンスのテスト
 

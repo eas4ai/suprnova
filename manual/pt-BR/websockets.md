@@ -433,7 +433,7 @@ elevarem os limites explicitamente.
 Overrides recomendados por caso de uso:
 
 - **Chat / notificações / posições de cursor** - os padrões estão
-  bons. Reduza `ping_interval` para 5–10s se seu LB tiver um timeout
+  bons. Reduza `ping_interval` para 5-10s se seu LB tiver um timeout
   de idle agressivo.
 - **Feeds internos confiáveis** (fan-out servidor-para-servidor,
   exportação em massa, transferências binárias grandes) - comece a

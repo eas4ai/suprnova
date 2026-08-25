@@ -83,7 +83,7 @@ Event` en lugar de estar horneada dentro de un tipo de guarda. El
 costo es un import adicional.
 
 Cada push capturado lleva el id de envelope que le asignó el fake, por lo que un test
-puede vincular lo que capturó con lo que vio un listener:
+puede vincular lo que capturó con lo que vio un oyente:
 
 ```rust,ignore
 use suprnova::events::{EventFacade, dispatched};

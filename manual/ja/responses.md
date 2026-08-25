@@ -36,7 +36,7 @@ pub async fn examples() -> Response {
 - `HttpResponse::stream_bytes(stream)` - 汎用のチャンク転送レスポンスです。`Stream<Item = Result<Bytes, Infallible>>` を受け取ります。エラー型が `Infallible` なのは意図的な設計です: レスポンスの途中でトランスポートレベルのエラーをクライアントへ伝える手段はないため、フレームワーク内のどの生成側も、ストリームが終わる前に自分のエラーをストリームの終端メッセージへと変換します。
 
 - `HttpResponse::event_stream(stream, end)` - Laravelの `ResponseFactory::eventStream` です。`sse::StreamedEvent` の `Stream` を包み、各イベントを `event: update`（または独自の名前）と、構成可能な終端フレームとしてフレーム化します。[Server-Sent イベント](sse.md)を参照してください。
-- `HttpResponse::stream_json(stream)` - Laravelの `ResponseFactory::streamJson` です。任意の `Serialize` 値の `Stream` を包み、コレクション全体を先にバッファリングする代わりに、増分構築される1つのJSON配列としてフラッシュします。[Server-Sent イベント](sse.md#event_stream-and-stream_json)を参照してください。
+- `HttpResponse::stream_json(stream)` - Laravelの `ResponseFactory::streamJson` です。任意の `Serialize` 値の `Stream` を包み、コレクション全体を先にバッファリングする代わりに、増分構築される1つのJSON配列としてフラッシュします。[Server-Sent イベント](sse.md#event-stream-and-stream-json)を参照してください。
 
 ### ステータス、ヘッダー、クッキー
 

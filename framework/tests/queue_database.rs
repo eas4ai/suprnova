@@ -123,7 +123,7 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     // UPDATE" by stamping a fresh reservation onto the row directly.
     let now = chrono::Utc::now().timestamp();
     let future = now + 600;
-    db.execute(sea_orm::Statement::from_sql_and_values(
+    db.execute_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DatabaseBackend::Sqlite,
         "UPDATE jobs SET reserved_until = ?, reserved_token = ?",
         vec![
@@ -148,7 +148,7 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     // The originally-injected reservation must still be intact (we did not
     // overwrite it with our own token).
     let row = db
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "SELECT reserved_token FROM jobs",
         ))
@@ -601,7 +601,7 @@ async fn a_reclaim_advances_the_stored_column_and_the_envelope_together() {
         .expect("reclaim");
 
     let row = db
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             db.get_database_backend(),
             "SELECT attempts FROM jobs".to_string(),
         ))
@@ -635,7 +635,7 @@ async fn a_first_claim_does_not_consume_an_attempt() {
     assert_eq!(claimed.envelope.attempts, 0);
 
     let row = db
-        .query_one(sea_orm::Statement::from_string(
+        .query_one_raw(sea_orm::Statement::from_string(
             db.get_database_backend(),
             "SELECT attempts FROM jobs".to_string(),
         ))

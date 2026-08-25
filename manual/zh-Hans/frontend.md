@@ -176,7 +176,7 @@ Inertia::install(&InertiaConfig::new().version(env!("CARGO_PKG_VERSION")))
 `install` 返回 `Result` - 如果 `InertiaConfig` 解析为生产模式（`APP_ENV=production`
 下的默认值）但找不到 Vite manifest，它会故障关闭，而不是悄悄地回退到传统的资产路径。见下面的 [开发与生产](#开发与生产)。
 
-这会按顺序注册：`InertiaHeadersMiddleware`（在每个响应上设置 `Vary: X-Inertia`，并把 Inertia 访问中的空 `200` 转回 `303`）、`InertiaVersionMiddleware`（在资产版本不匹配时发出 409 + `X-Inertia-Location`，以便陈旧客户端重新加载）、`Inertia303Middleware`（在非 GET Inertia 访问时将 302 重写为 303，以确保后续请求明确是 GET），以及 `InertiaValidationRedirectMiddleware`（将 Inertia 访问上的 `422` 转为回到表单页的 `303`，并将错误 flash）。`InertiaVersionMiddleware` 和 `Inertia303Middleware` 曾需单独注册；`Inertia::install` 现在默认安装全部四个。完整的注册顺序以及每个中间件闭合的情形见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertiainstall)。
+这会按顺序注册：`InertiaHeadersMiddleware`（在每个响应上设置 `Vary: X-Inertia`，并把 Inertia 访问中的空 `200` 转回 `303`）、`InertiaVersionMiddleware`（在资产版本不匹配时发出 409 + `X-Inertia-Location`，以便陈旧客户端重新加载）、`Inertia303Middleware`（在非 GET Inertia 访问时将 302 重写为 303，以确保后续请求明确是 GET），以及 `InertiaValidationRedirectMiddleware`（将 Inertia 访问上的 `422` 转为回到表单页的 `303`，并将错误 flash）。`InertiaVersionMiddleware` 和 `Inertia303Middleware` 曾需单独注册；`Inertia::install` 现在默认安装全部四个。完整的注册顺序以及每个中间件闭合的情形见 [Inertia 响应](frontend-inertia-responses.md#bootstrap-inertia-install)。
 
 ## 开发与生产
 

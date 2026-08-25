@@ -113,7 +113,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 | `data(&self)` | Payload serializable a JSON que los canales entregan / persisten. Típicamente `serde_json::to_value(self)` del subconjunto de campos que los canales necesitan. |
 | `should_send(&self, channel)` | Veto por canal consultado en ambas rutas, la síncrona y la encolada. Devolver `false` omite ese canal para este despacho. Por defecto: siempre envía. |
 | `after_sending(&self, channel)` | Hook posterior al éxito invocado una vez por cada canal que se completó, en ambas rutas, la síncrona y la encolada. Devolver `Err` se propaga de la misma forma que lo haría un error de canal. Por defecto: no-op. |
-| `queue(&self)` | Cola a la que resuelve el despacho `Notify::queue` de esta notificación. Por defecto: `None` (el predeterminado del driver, o un `Queue::route` si se registró uno). Consulta [Ajuste de cola](#queue-tuning). |
+| `queue(&self)` | Cola a la que resuelve el despacho `Notify::queue` de esta notificación. Por defecto: `None` (el predeterminado del driver, o un `Queue::route` si se registró uno). Consulta [Ajuste de cola](#política-de-cola-por-notificación). |
 | `timeout(&self)` | Tiempo de espera por intento para los jobs encolados de esta notificación. Por defecto: `None` (sin timeout). |
 | `fail_on_timeout(&self)` | Si es `true`, un timeout es un fallo permanente (dead-letter, sin reintento). Por defecto: `false`. |
 | `max_tries(&self)` | Máximo de intentos para los jobs encolados de esta notificación. Por defecto: `3`. |

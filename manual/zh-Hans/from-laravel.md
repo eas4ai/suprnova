@@ -180,7 +180,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` 会通过默认的有状态守卫及其配置好的 `UserProvider` 校验凭据；生成的全栈脚手架使用的就是这条路径。`Auth::password()`、密码重置、`BruteForce`、passkey、魔法链接、OAuth、Bearer 会话和 Magnetar 会话管理都要求已安装 Magnetar 引擎。电子邮件验证和兼容性的 `TwoFactor` 门面仍由框架拥有。参见[认证](authentication.md)、[认证流程](auth-flows.md)和[OAuth 与无密码登录](oauth.md)。
+`Auth::attempt` 会通过默认的有状态守卫及其配置好的 `UserProvider` 校验凭据；生成的全栈脚手架使用的就是这条路径。 密码重置通过明确支持重置的提供程序（例如 `EloquentUserProvider`）支持已验证用户。当重置必须用作首次邮箱原子化证明时，请安装 Magnetar。`Auth::password()`、`BruteForce`、通行密钥、魔法链接、OAuth、不记名会话和 Magnetar 会话管理需要已安装的 Magnetar 引擎。 See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
 
 ### 迁移
 

@@ -49,9 +49,7 @@ schedule_welcome_email(user_id).await?;
 assert_pushed::<WelcomeJob>(|j| j.user_id == user_id);
 ```
 
-这是最常见的形态，因为它能干净地跨类型泛化 - 每一个断言都对 `J: Job` / `C: Command` / `E: Event` 是通用的，而不是被烤进一个 守卫 类型里。代价是多一次导入。
-每一次被捕获的推送都携带伪造实现分配的信封 id，因此测试可以把它捕获的内容
-与监听器看到的内容连接起来：
+这是最常见的形态，因为它能干净地跨类型泛化 - 每一个断言都对 `J: Job` / `C: Command` / `E: Event` 是通用的，而不是被烤进一个 守卫 类型里。代价是多一次导入。每一次被捕获的推送都携带伪造实现分配的信封 id，因此测试可以把它捕获的内容与监听器看到的内容连接起来：
 
 ```rust,ignore
 use suprnova::events::{EventFacade, dispatched};
@@ -231,9 +229,7 @@ async fn order_placed_enqueues_charge() {
 在伪造实现下，普通的 `Queue::push` 读取起来就像“没有声明覆盖值”，这与断言
 `entries[0].1 == EnvelopeOverrides::default()` 相同。`assert_pushed_on_queue` /
 `assert_pushed_on_connection` 检查的是声明的覆盖值，而不是解析后的队列或连接名称：
-`Queue::route` 和 `Job::queue` / `Job::connection` 的解析不会在伪造实现下运行
-（没有驱动器推送来触发解析），因此在生产环境中会落到某个路由或作业级默认值的作业，
-在这里完全不会显示覆盖值。若要断言覆盖值携带的其他内容 - `timeout`、
+`Queue::route` 和 `Job::queue` / `Job::connection` 的解析不会在伪造实现下运行（没有驱动器推送来触发解析），因此在生产环境中会落到某个路由或作业级默认值的作业，在这里完全不会显示覆盖值。若要断言覆盖值携带的其他内容 - `timeout`、
 `fail_on_timeout`、`max_tries`、`backoff` - 请直接使用 `pushed_with_overrides`。
 
 每一个 `Queue::push`、`Queue::push_later`、`Queue::later`、`Queue::push_unique*`，以及链式/批处理分发器，都会汇聚进同一个记录器。伪造实现下 `push_unique` 的语义（它总是会记录并报告“已推送”），请参见[队列](queues.md)。

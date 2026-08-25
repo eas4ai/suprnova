@@ -537,6 +537,7 @@ async fn restore_retry_skips_durably_restored_renames() {
     assert!(!backend.contains("users_backup"));
 }
 #[cfg(all(feature = "seaorm-mysql", feature = "seaorm-sqlite"))]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_barrier() {
     let admin_url =
@@ -545,7 +546,7 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
     let database_name = format!("magnetar_coordinator_{}", rand::random::<u64>());
     let admin = Database::connect(&admin_url).await.unwrap();
     admin
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::MySql,
             format!("CREATE DATABASE `{database_name}`"),
         ))
@@ -566,7 +567,7 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
         "CREATE VIEW user_emails AS SELECT id, email FROM users",
     ] {
         source
-            .execute(Statement::from_string(DbBackend::MySql, statement))
+            .execute_raw(Statement::from_string(DbBackend::MySql, statement))
             .await
             .unwrap();
     }
@@ -628,7 +629,7 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
     assert_eq!(passkey.user_id, user.id);
     assert_eq!(
         source
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 DbBackend::MySql,
                 "SELECT COUNT(*) FROM sessions",
             ))
@@ -643,7 +644,7 @@ async fn plan_bound_coordinator_revalidates_imports_swaps_cleans_and_releases_ba
     drop(runner);
     drop(source);
     admin
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::MySql,
             format!("DROP DATABASE `{database_name}`"),
         ))

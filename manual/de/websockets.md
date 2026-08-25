@@ -241,10 +241,7 @@ ws!("/ws/private", PrivateHandler)
 ```
 
 Eine Non-2xx-Response aus irgendeiner Middleware unterbricht das
-Upgrade per Short-Circuit. Der Peer erhält die Ablehnung (z. B. 401,
-403) mit gesetztem `X-Request-Id`, das nie aufgewachte
-WebSocket-Future wird sauber verworfen, und der Handler wird nie
-aufgerufen. Das ist die richtige Schicht für Prüfungen auf
+Upgrade per Short-Circuit. Der Peer erhält die Ablehnung (z. B. 401, 403) mit gesetztem `X-Request-Id`, das nie aufgewachte WebSocket-Future wird sauber verworfen, und der Handler wird nie aufgerufen. Das ist die richtige Schicht für Prüfungen auf
 Transportebene: wer überhaupt die Verbindung öffnen darf, woher die
 Verbindung kommt, wie viele gleichzeitige Verbindungen pro Identität
 erlaubt sind.

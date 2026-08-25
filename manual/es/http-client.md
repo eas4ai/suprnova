@@ -158,9 +158,9 @@ subyacente usa un único timeout combinado.
 ## Redirecciones
 
 El cliente compartido sigue las redirecciones por defecto (hasta el
-tope de reqwest, 10) - el comportamiento correcto cuando llamas a un
-endpoint de confianza que responde `http → https` o te entrega una
-URL de CDN.
+tope de reqwest,
+10) - el comportamiento correcto cuando llamas a un endpoint de
+confianza que responde `http → https` o te entrega una URL de CDN.
 
 Cuando la URL de la solicitud está influida por una entrada no
 confiable, ese valor por defecto se convierte en un vector de

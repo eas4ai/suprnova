@@ -893,11 +893,11 @@ async fn attach_one<C: ConnectionTrait>(
         let now = chrono::Utc::now();
         if !columns.iter().any(|c| c == "created_at") {
             columns.push("created_at".to_string());
-            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(now)))));
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(now))));
         }
         if !columns.iter().any(|c| c == "updated_at") {
             columns.push("updated_at".to_string());
-            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(Box::new(now)))));
+            values.push(Some(sea_orm::Value::ChronoDateTimeUtc(Some(now))));
         }
     }
 
@@ -928,7 +928,7 @@ async fn attach_one<C: ConnectionTrait>(
         phs = value_expressions.join(", "),
     );
     let stmt = Statement::from_sql_and_values(backend, &sql, bound_values);
-    conn.execute(stmt)
+    conn.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
     Ok(())
@@ -965,7 +965,7 @@ async fn detach_one<C: ConnectionTrait>(
             json_value_to_sea_value(related_id),
         ],
     );
-    conn.execute(stmt)
+    conn.execute_raw(stmt)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
     Ok(())

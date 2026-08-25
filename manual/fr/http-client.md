@@ -154,8 +154,8 @@ sous-jacent utilise un délai combiné unique.
 
 ## Redirections
 
-Le client partagé suit les redirections par défaut (jusqu'au plafond
-de 10 de reqwest) - le bon comportement quand vous appelez un point de
+Le client partagé suit les redirections par défaut (jusqu'au plafond de `reqwest`,
+10) - le bon comportement quand vous appelez un point de
 terminaison de confiance qui répond `http → https` ou vous transmet
 une URL de CDN.
 

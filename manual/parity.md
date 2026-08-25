@@ -148,7 +148,7 @@ gaps as of the shipped framework.
 | Multiple guards | `Guard` registered by name (`web`, `api`, …) via `AuthManager` | shipped | `SessionGuard`, `TokenGuard`, custom impls |
 | User providers | `EloquentUserProvider<U>`, `DatabaseUserProvider`, custom via `UserProvider` trait | shipped | [Auth Flows](auth-flows.md) |
 | Email Verification | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`; `MustVerifyEmail` contract | shipped | Provider-backed and actor-bound - [Auth flows](auth-flows.md) |
-| Password Reset | `PasswordReset` + Magnetar first-email-proof transaction + reset/change mail | shipped | Advances auth epoch and revokes sessions/remember state - [Auth flows](auth-flows.md) |
+| Password Reset | `PasswordReset` + Magnetar first-email-proof transaction or verified `UserProvider` fallback + reset/change mail | shipped | Magnetar handles atomic first proof; provider-backed apps can reset already verified users - [Auth flows](auth-flows.md) |
 | Brute-force throttling | Magnetar lockout engine + `BruteForce` + `LoginThrottleMiddleware` | shipped | Account lockout plus framework IP/route limiting |
 | Two-Factor (TOTP) | Framework `TwoFactor` compatibility facade plus Magnetar factor engine | shipped | Recovery codes, replay protection, and factor-gated integrated sign-in |
 | Remember-me | Magnetar purpose-bound rotating credential behind the framework cookie | shipped | Auth-epoch checks, rotation, anomaly handling, and legacy fallback |

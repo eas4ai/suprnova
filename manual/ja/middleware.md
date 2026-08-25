@@ -189,7 +189,7 @@ impl Middleware for RequireApiKey {
 | `AuthMiddleware` / `GuestMiddleware` / `BearerTokenMiddleware` | 認証ガードの所属チェック。[認証](authentication.md)を参照 |
 | `LoginThrottleMiddleware` / `EnsureEmailVerifiedMiddleware` / `TwoFactorChallengeMiddleware` | 認証フローのゲート。[認証フロー](auth-flows.md)を参照 |
 | `MaintenanceMiddleware` | キャッシュまたはファイルシステムのメンテナンスフラグが設定されているとき、503を返す |
-| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Inertiaプロトコル。すべてのレスポンスへの `Vary: X-Inertia` と空の200のredirect back、アセットバージョンの409バウンス、非GETリダイレクトの302→303、Inertia訪問での422をエラーflash付きの303 backに変換、履歴暗号化です。`Inertia::install` は最初の4つを登録します。`EncryptHistoryMiddleware` は別途オプトインです。[Inertiaレスポンス](frontend-inertia-responses.md#bootstrap-inertiainstall)を参照してください。 |
+| `InertiaHeadersMiddleware` / `InertiaVersionMiddleware` / `Inertia303Middleware` / `InertiaValidationRedirectMiddleware` / `EncryptHistoryMiddleware` | Inertiaプロトコル。すべてのレスポンスへの `Vary: X-Inertia` と空の200のredirect back、アセットバージョンの409バウンス、非GETリダイレクトの302→303、Inertia訪問での422をエラーflash付きの303 backに変換、履歴暗号化です。`Inertia::install` は最初の4つを登録します。`EncryptHistoryMiddleware` は別途オプトインです。[Inertiaレスポンス](frontend-inertia-responses.md#bootstrap-inertia-install)を参照してください。 |
 | `IncludeMiddleware` | `#[derive(Data)]` の部分的なリロードのための、フィールドごとのincludeの集合 |
 
 ### リクエストのタイムアウト

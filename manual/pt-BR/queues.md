@@ -196,7 +196,7 @@ do job para aquele campo:
 
 `EnvelopeOverrides` é a primitiva sobre a qual `Mail::on_queue` /
 `.on_connection()` e o ajuste de fila por notificação de `Notify::queue` são
-construídos - veja [Correio](mail.md#enfileiramento) e
+construídos - veja [Correio](mail.md#queueing) e
 [Notificações](notifications.md).
 
 ### Atraso declarado pelo job
@@ -235,7 +235,7 @@ cadeia mesmo que um `Queue::push(job)` simples do mesmo job esperasse. Dê ao
 job um atraso explícito de outra forma - um campo no próprio job, aplicado em
 `handle()` - se uma etapa em lote ou encadeada precisar de um.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `$job->delay` do Laravel é uma propriedade de instância, definida por
 despacho (`SendDigest::dispatch($user)->delay(60)`), de modo que dois
@@ -961,7 +961,7 @@ valor diferente de zero, portanto um operador que desabilitou a pausa descobre
 isso imediatamente em vez de emitir uma pausa que silenciosamente não faz nada.
 Espelha `Worker::$pausable` do Laravel.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 Um cache inacessível falha **aberto**: um worker que não consegue ler as chaves
 de pausa se comporta como \"não pausado\" e continua drenando - o mesmo contrato
@@ -1035,7 +1035,7 @@ A guarda fake serializa testes paralelos por um mutex de todo o processo; ela
 captura `(payload, available_at, overrides)` por push e limpa no `Drop`. O
 campo `overrides` é `EnvelopeOverrides::default()` para todo ponto de entrada
 exceto `push_with`/`later_with` - veja
-[Mocking](mocking.md#fila---queuetestinginstall_fake) para
+[Mocking](mocking.md#queue---queuetestinginstall_fake) para
 `assert_pushed_on_queue`/`assert_pushed_on_connection` e
 `pushed_with_overrides`, as assertions sobre ele. No modo fake,
 `push_unique` sempre registra o push como novo - dedupe é irrelevante quando

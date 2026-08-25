@@ -289,9 +289,9 @@ TestResponse::new(parts.status.as_u16(), headers, bytes)
     .assert_json(serde_json::json!({ "message": "ok" }));
 ```
 
-`new()` akzeptiert jedes Iterable aus Header-Paaren `(String, String)` – eine `HashMap<String, String>` (in die mehrere bestehende Harnesses bereits sammeln), ein `Vec<(String, String)>` oder `HeaderMap::iter()`, das auf eigene Strings abgebildet ist. Kein Harness muss daher ändern, wie er einen Request ausführt.
+`new()` akzeptiert jedes Iterable aus Header-Paaren `(String, String)` - eine `HashMap<String, String>` (in die mehrere bestehende Harnesses bereits sammeln), ein `Vec<(String, String)>` oder `HeaderMap::iter()`, das auf eigene Strings abgebildet ist. Kein Harness muss daher ändern, wie er einen Request ausführt.
 
-Jede Assertion gibt `&Self` zurück und lässt sich deshalb verketten: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (Teilmenge wird abgeglichen – zusätzliche Schlüssel im Body sind in Ordnung), `assert_json_path` (Punktnotation; ein numerisches Segment indexiert ein Array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Fehler bei Assertions lösen mit einem Ausschnitt von Erwartetem und Tatsächlichem einen Panic aus – derselbe Vertrag wie bei `expect!` ([Testen](testing.md)). Das ist eine Testoberfläche, kein Bibliothekscode; die No-Panic-Hausregel gilt daher nicht.
+Jede Assertion gibt `&Self` zurück und lässt sich deshalb verketten: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (Teilmenge wird abgeglichen - zusätzliche Schlüssel im Body sind in Ordnung), `assert_json_path` (Punktnotation; ein numerisches Segment indexiert ein Array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Fehler bei Assertions lösen mit einem Ausschnitt von Erwartetem und Tatsächlichem einen Panic aus - derselbe Vertrag wie bei `expect!` ([Testen](testing.md)). Das ist eine Testoberfläche, kein Bibliothekscode; die No-Panic-Hausregel gilt daher nicht.
 
 ### `assert_session_has` benötigt einen Session-Store
 
@@ -310,11 +310,11 @@ Dies ist die einzige `async`-Assertion, weil sie als einzige I/O ausführt; sie 
 
 ### Warum Suprnova abweicht
 
-Laravels `TestResponse` lebt im selben PHP-Prozess wie die getestete Anwendung; `assertSessionHas` liest daher `$this->session()` direkt – keine Wire-Grenze muss überschritten werden. Suprnovas Tests steuern eine echte Hyper-Verbindung an, sodass die Session für den Test ebenso opak ist wie für einen echten Browser: ein Cookie. `assert_session_has` gewinnt diese Ehrlichkeit mit einem expliziten Store-Handle zurück, statt vorzutäuschen, dass die In-Process-Abkürzung existiert.
+Laravels `TestResponse` lebt im selben PHP-Prozess wie die getestete Anwendung; `assertSessionHas` liest daher `$this->session()` direkt - keine Wire-Grenze muss überschritten werden. Suprnovas Tests steuern eine echte Hyper-Verbindung an, sodass die Session für den Test ebenso opak ist wie für einen echten Browser: ein Cookie. `assert_session_has` gewinnt diese Ehrlichkeit mit einem expliziten Store-Handle zurück, statt vorzutäuschen, dass die In-Process-Abkürzung existiert.
 
 ## Inertia-Responses testen
 
-`suprnova::testing::AssertableInertia` kapselt ein Inertia-Seitenobjekt – unabhängig davon, ob es als JSON-Body mit `X-Inertia` zurückkam oder in einer HTML-Shell für Hard-Navigation eingebettet ist – im selben flüssigen Stil mit Panic bei Fehlschlag wie `TestResponse`. Es ist das Gegenstück zu Laravels `Inertia\Testing\AssertableInertia`.
+`suprnova::testing::AssertableInertia` kapselt ein Inertia-Seitenobjekt - unabhängig davon, ob es als JSON-Body mit `X-Inertia` zurückkam oder in einer HTML-Shell für Hard-Navigation eingebettet ist - im selben flüssigen Stil mit Panic bei Fehlschlag wie `TestResponse`. Es ist das Gegenstück zu Laravels `Inertia\Testing\AssertableInertia`.
 
 Es gibt zwei Wege, eines zu erhalten. Der erste führt über eine `TestResponse`, die bereits einen echten Besuch mit `X-Inertia: true` durchlaufen hat:
 
@@ -332,7 +332,7 @@ response
     .missing("admin_only_field");
 ```
 
-Oder direkt über eine `HttpResponse` – den Rückgabewert von `InertiaResponse::resolve` – für einen Test, der die Response-Pipeline ohne Socket ausführt. Diese Form verarbeitet beide Darstellungen: einen JSON-Body mit `X-Inertia` oder das eingebettete Element `<script data-page="app">` der HTML-Shell:
+Oder direkt über eine `HttpResponse` - den Rückgabewert von `InertiaResponse::resolve` - für einen Test, der die Response-Pipeline ohne Socket ausführt. Diese Form verarbeitet beide Darstellungen: einen JSON-Body mit `X-Inertia` oder das eingebettete Element `<script data-page="app">` der HTML-Shell:
 
 ```rust
 use suprnova::testing::AssertableInertia;
@@ -364,7 +364,7 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 
 ### Für Assertions zu Partial Reloads und Deferred Props neu laden
 
-`reload_only`, `reload_except` und `load_deferred_props` bilden ab, was der Inertia-Client nach dem ersten Besuch macht: dieselbe Seite als Partial Reload erneut anfordern und prüfen, was zurückkam. Da Suprnovas HTTP-Tests einen echten Socket passieren und jede Testdatei ihr eigenes Harness besitzt (siehe [Wo die einzelnen Teile liegen](#where-each-piece-lives) unten), enthalten diese Methoden keinen eingebauten Transport. Hängen Sie einen mit `with_reload` an: eine Closure, die aus einem `ReloadRequest` (URL, Komponente, Version und die zu sendenden Partial-Reload-Schlüssel) ein Future erzeugt, das das neu geladene `AssertableInertia` liefert:
+`reload_only`, `reload_except` und `load_deferred_props` bilden ab, was der Inertia-Client nach dem ersten Besuch macht: dieselbe Seite als Partial Reload erneut anfordern und prüfen, was zurückkam. Da Suprnovas HTTP-Tests einen echten Socket passieren und jede Testdatei ihr eigenes Harness besitzt (siehe [Wo die einzelnen Teile liegen](#wo-jedes-teil-lebt) unten), enthalten diese Methoden keinen eingebauten Transport. Hängen Sie einen mit `with_reload` an: eine Closure, die aus einem `ReloadRequest` (URL, Komponente, Version und die zu sendenden Partial-Reload-Schlüssel) ein Future erzeugt, das das neu geladene `AssertableInertia` liefert:
 
 ```rust
 use suprnova::testing::TestResponse;
@@ -399,7 +399,7 @@ Wird eine der drei Methoden ohne vorheriges `with_reload` aufgerufen, löst sie 
 
 ### Warum Suprnova abweicht
 
-Laravels `ReloadRequest` sendet die Anfrage über denselben In-Process-PHP-Kernel erneut, den der ursprüngliche Test verwendete – ein immer verfügbarer Test-Client. Suprnovas HTTP-Tests steuern einen echten Hyper/TCP-Loopback an und jede Testdatei definiert ihr eigenes Paar aus `spawn_server` / `request` (siehe [Wo die einzelnen Teile liegen](#where-each-piece-lives) unten). Es gibt daher keinen einzelnen Client, den `AssertableInertia` verwenden könnte; `with_reload` macht dies explizit, statt ein Harness fest zu codieren, das eine anders geformte Testdatei nicht verwenden könnte. `component()` überspringt außerdem Laravels Prüfung auf die Existenz der Seitenkomponentendatei (`view-finder`) – eine über `Router::inertia` oder ein von Hand gebautes `InertiaResponse::new(name)` erreichbare Komponente ist ein Laufzeit-String ohne zu prüfende Datei. Suprnovas Kompilierzeit-Gegenstück ist das Makro `inertia_response!` (siehe [Inertia Responses](frontend-inertia-responses.md)). Auch seine Methodennamen weichen von denen von `TestResponse` ab: `component`, `has`, `missing`, `where_`, `count` und `has_flash` lassen das Präfix `assert_` vollständig weg, wie Laravels `Inertia\Testing\AssertableInertia`, dessen entsprechende Methoden ebenso ohne Präfix heißen – der Vertrag „Panic bei Fehlschlag“ ist derselbe, nur ohne den visuellen Hinweis `assert_`.
+Laravels `ReloadRequest` sendet die Anfrage über denselben In-Process-PHP-Kernel erneut, den der ursprüngliche Test verwendete - ein immer verfügbarer Test-Client. Suprnovas HTTP-Tests steuern einen echten Hyper/TCP-Loopback an und jede Testdatei definiert ihr eigenes Paar aus `spawn_server` / `request` (siehe [Wo die einzelnen Teile liegen](#wo-jedes-teil-lebt) unten). Es gibt daher keinen einzelnen Client, den `AssertableInertia` verwenden könnte; `with_reload` macht dies explizit, statt ein Harness fest zu codieren, das eine anders geformte Testdatei nicht verwenden könnte. `component()` überspringt außerdem Laravels Prüfung auf die Existenz der Seitenkomponentendatei (`view-finder`) - eine über `Router::inertia` oder ein von Hand gebautes `InertiaResponse::new(name)` erreichbare Komponente ist ein Laufzeit-String ohne zu prüfende Datei. Suprnovas Kompilierzeit-Gegenstück ist das Makro `inertia_response!` (siehe [Inertia Responses](frontend-inertia-responses.md)). Auch seine Methodennamen weichen von denen von `TestResponse` ab: `component`, `has`, `missing`, `where_`, `count` und `has_flash` lassen das Präfix `assert_` vollständig weg, wie Laravels `Inertia\Testing\AssertableInertia`, dessen entsprechende Methoden ebenso ohne Präfix heißen - der Vertrag „Panic bei Fehlschlag“ ist derselbe, nur ohne den visuellen Hinweis `assert_`.
 
 ## Middleware testen
 

@@ -221,14 +221,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` validiert Anmeldedaten über den zustandsbehafteten
-Standard-Guard und dessen konfigurierten `UserProvider`; dies ist der Pfad, den
-das generierte Full-Stack-Scaffold verwendet. `Auth::password()`,
-Passwort-Reset, `BruteForce`, Passkeys, Magic Links, OAuth, Bearer-Sessions und
-Magnetar-Session-Management benötigen die installierte Magnetar-Engine. Die
-E-Mail-Verifizierung und die Kompatibilitäts-Facade `TwoFactor` bleiben
-frameworkeigen. Siehe [Authentifizierung](authentication.md),
-[Auth-Flows](auth-flows.md) und [OAuth und passwortloses Login](oauth.md).
+`Auth::attempt` validiert Anmeldedaten über den zustandsbehafteten Standard-Guard und dessen konfigurierten `UserProvider`; dies ist der Pfad, den das generierte Full-Stack-Scaffold verwendet. Die Passwortzurücksetzung unterstützt bereits verifizierte Benutzer über einen explizit zum Zurücksetzen befähigten Provider wie `EloquentUserProvider`. Installieren Sie Magnetar, wenn das Zurücksetzen als atomarer erstmaliger Postfachnachweis dienen muss. `Auth::password()`, `BruteForce`, Passkeys, Magic Links, OAuth, Bearer-Sitzungen und die Magnetar-Sitzungsverwaltung erfordern die installierte Magnetar-Engine. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
 
 ### Migrationen
 
@@ -419,7 +412,7 @@ Gleiche Oberfläche, kein globales Aliasing erforderlich.
 ### Compile-Zeiten sind real
 
 Rust-Compile-Zeiten sind nicht PHP. Ein sauberer Build einer frischen Suprnova-App
-dauert 1–2 Minuten; inkrementelle Builds während der Entwicklung sind ein paar
+dauert 1-2 Minuten; inkrementelle Builds während der Entwicklung sind ein paar
 Sekunden. Der Dev-Workflow ist derselbe - `suprnova serve` überwacht
 Änderungen und recompiliert - aber Sie werden es spüren, wenn Sie zum ersten Mal ein
 Makro ändern und eine Downstream-Crate recompilieren. Caching zahlt sich schnell aus.
@@ -506,7 +499,7 @@ Dinge, die Laravel hat, Suprnova aber (noch) nicht:
 - Telescope-/Pulse-Dashboards. Grundlegende [Beobachtbarkeit](observability.md) wird ausgeliefert.
 - Sanctum-/Passport-Paket-APIs. Magnetar-Bearer-Sessions und `BearerTokenMiddleware` stellen Token-Authentifizierung bereit, aber nicht Laravels Oberfläche zur Tokenverwaltung.
 - Horizons Dashboard. Queue-Inspektion ist in das Framework eingebaut.
-- Blade – absichtlich; Inertia ist die Frontend-Architektur.
+- Blade - absichtlich; Inertia ist die Frontend-Architektur.
 - `trans_choice` - [Lokalisierung](localization.md) wird ausgeliefert, aber Plurale werden
   innerhalb der Nachricht nach CLDR-Kategorie ausgewählt, statt nach
   `[1,19]`-Stil Integer-Bereiche, die `trans_choice` akzeptiert

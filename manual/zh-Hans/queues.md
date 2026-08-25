@@ -129,7 +129,7 @@ Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
 Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
 ```
 
-每个字段默认都是 `None`，并交由 `Queue::push` 已运行的普通解析处理；此次推送中 `Some` 字段胜过其他所有值，优先于通过 [`Queue::route`](#queue-routing) 注册的路由和作业在该字段上自身的 `Job::*` 声明：
+每个字段默认都是 `None`，并交由 `Queue::push` 已运行的普通解析处理；此次推送中 `Some` 字段胜过其他所有值，优先于通过 [`Queue::route`](#队列路由) 注册的路由和作业在该字段上自身的 `Job::*` 声明：
 
 | 字段 | 优先于 |
 | --- | --- |
@@ -224,7 +224,7 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 解析按优先级从高到低运行：
 
 1. 传给 `Queue::push_with` / `Queue::later_with` 的逐次推送覆盖（参见
-   [使用 `EnvelopeOverrides` 的逐次推送覆盖](#per-push-overrides-with-envelopeoverrides)）
+   [使用 `EnvelopeOverrides` 的逐次推送覆盖](#使用-envelopeoverrides-的逐次推送覆盖)）
 2. 一条通过 `Queue::route` 注册的路由
 3. 这个作业自己的 `Job::queue` / `Job::connection`
 4. 驱动程序 / 全局默认值

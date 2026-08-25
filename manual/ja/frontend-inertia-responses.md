@@ -1,6 +1,6 @@
 # Inertia レスポンス
 
-Inertiaレスポンスは、Suprnovaのハンドラが状態をSvelte / React / Vueのページコンポーネントへ届ける方法です。Inertiaページをレンダリングするすべてのハンドラは、[`inertia_response!`](#the-inertia_response-macro)マクロ（型付きで、コンパイル時に検査されるeagerなプロップ向け）か、[`InertiaResponse`](#the-inertiaresponse-builder)ビルダー（それ以外のすべて - レイジープロップ、ディファードプロップ、マージ、once、スクロール、フラッシュ）のいずれかを通じて構築したレスポンスを1つ返します。この章ではレスポンスの表面をエンドツーエンドで扱います: マクロ、ビルダー、v3プロトコルの機能（部分的なリロード、履歴の暗号化、バージョン検出）、`App::inertia_share*`による共有データ、そしてリダイレクトをまたいで運ばれるフラッシュバッグです。
+Inertiaレスポンスは、Suprnovaのハンドラが状態をSvelte / React / Vueのページコンポーネントへ届ける方法です。Inertiaページをレンダリングするすべてのハンドラは、[`inertia_response!`](#the-inertia_response-macro)マクロ（型付きで、コンパイル時に検査されるeagerなプロップ向け）か、[`InertiaResponse`](#inertiaresponse-のビルダー)ビルダー（それ以外のすべて - レイジープロップ、ディファードプロップ、マージ、once、スクロール、フラッシュ）のいずれかを通じて構築したレスポンスを1つ返します。この章ではレスポンスの表面をエンドツーエンドで扱います: マクロ、ビルダー、v3プロトコルの機能（部分的なリロード、履歴の暗号化、バージョン検出）、`App::inertia_share*`による共有データ、そしてリダイレクトをまたいで運ばれるフラッシュバッグです。
 
 まだフロントエンドを選んでいない場合は、[Frontend Overview](frontend.md)と[Page Components](frontend-pages.md)を先に読んでください。この章はSPAブリッジが配線済みであることを前提とし、ハンドラが何を返すかに焦点を当てます。
 
@@ -64,7 +64,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-ほとんどのアプリは起動時に[`Inertia::install`](#bootstrap-inertiainstall)経由で単一の設定を登録し、この引数に触れることはありません - インストールされた設定がすでにすべてのレスポンスの出発点だからです。ここで渡すのは、1ページだけインストール済み設定を上書きしたいときに限ります。
+ほとんどのアプリは起動時に[`Inertia::install`](#ブートストラップ-inertia-install)経由で単一の設定を登録し、この引数に触れることはありません - インストールされた設定がすでにすべてのレスポンスの出発点だからです。ここで渡すのは、1ページだけインストール済み設定を上書きしたいときに限ります。
 
 ## `#[derive(InertiaProps)]`
 
@@ -217,7 +217,7 @@ InertiaResponse::new("Feed/Index")
 
 `match_on`は、クライアントが重複排除するフィールド名を指定します（ページオブジェクトには`matchPropsOn`として出力されます）。`Prop::match_on`（下記）と同じく、1つでも複数でもかまいません。そのため、現在のウィンドウと重なる再取得はコピーを追加せず、一致する行をその場で置換します。`Prepend`と`Deep`も同じ`match_on`を受け取ります。
 
-`MergeStrategy`は1回の呼び出しで指定する形です。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)`は、別々のフラグとして同じ設定を表します。プロップに可視性やキャッシュフラグも必要な場合に使います - [1つのプロップへのフラグ合成](#composing-flags-on-one-prop)を参照してください。
+`MergeStrategy`は1回の呼び出しで指定する形です。`Prop::merge()` / `.prepend()` / `.deep_merge()` / `.match_on(field)`は、別々のフラグとして同じ設定を表します。プロップに可視性やキャッシュフラグも必要な場合に使います - [1つのプロップへのフラグ合成](#1つのプロップへのフラグ合成)を参照してください。
 
 `.match_on`は1回の呼び出しで1つまたは複数のフィールドを取ります - `.match_on(["id", "slug"])`と`.match_on("id").match_on("slug")`は同じ`matchPropsOn`を出力します。
 
@@ -300,7 +300,7 @@ impl ProvidesScrollMetadata for MyCursorPage {
 InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
 ```
 
-`LengthAwarePaginator`、`Paginator`、`CursorPaginator`もこれを実装します。[Pagination](pagination.md#inertia-integration---infinite-scroll-props)を参照してください。
+`LengthAwarePaginator`、`Paginator`、`CursorPaginator`もこれを実装します。[Pagination](pagination.md#inertia-integration-infinite-scroll-props)を参照してください。
 
 ### ドット記法のネスト
 
@@ -336,7 +336,7 @@ Inertia 3クライアントは、ページのプロップの部分集合（ま�
 - `.always()`のプロップは常に送られます。
 - `.optional()`と`.defer()`のプロップは標準訪問では決して送られず、キーを明示的に列挙する一致した部分リロードにだけ現れます。
 
-マージとScrollのフラグは関与しません。受信した値をクライアントがどう折り込むかを決めるもので、値を受信するかどうかを決めるものではないからです。そのため`.defer().merge()`プロップは、通常の`.defer()`とまったく同じようにフィルタされます。`.once()`も同様に関与しませんが、これは純粋な折り込み命令ではありません。クライアントがすでに値をキャッシュしていると報告した完全訪問では、下記の注記のとおり、サーバーはリゾルバをスキップして値を送りません。3つすべてが変えるのは、どのメタデータブロックを伴わせるかです - [1つのプロップへのフラグ合成](#composing-flags-on-one-prop)を参照してください。
+マージとScrollのフラグは関与しません。受信した値をクライアントがどう折り込むかを決めるもので、値を受信するかどうかを決めるものではないからです。そのため`.defer().merge()`プロップは、通常の`.defer()`とまったく同じようにフィルタされます。`.once()`も同様に関与しませんが、これは純粋な折り込み命令ではありません。クライアントがすでに値をキャッシュしていると報告した完全訪問では、下記の注記のとおり、サーバーはリゾルバをスキップして値を送りません。3つすべてが変えるのは、どのメタデータブロックを伴わせるかです - [1つのプロップへのフラグ合成](#1つのプロップへのフラグ合成)を参照してください。
 
 ハンドラは何も特別なことをする必要がありません。すべてのプロップをビルダー経由で登録すれば、フレームワークがページオブジェクトをシリアライズするときにヘッダーを参照します。
 
@@ -406,7 +406,7 @@ assert_eq!(App::inertia_shared("user.name"), None);
 
 `inertia_shared`が読むのは静的レジストリだけです。`inertia_share_lazy` / `inertia_share_once`で登録されたキー（解決するリクエストがないため。呼び出さずに生のクロージャを返すLaravelの`getShared`と同じ）や、リクエスト単位のトレイトプロバイダー共有については`None`を返します。`flush_inertia_shared`も静的レジストリだけを消去します。`register_inertia_shared`で登録されたプロバイダーには、消去すべきリクエスト単位の状態がありません。
 
-リクエスト単位の共有データ（認証済みユーザー、リクエストスコープのフラグ）については、[`InertiaSharedData`](#per-request-shared-data)を実装してシングルトンを登録してください。フレームワークはすべてのInertiaレスポンスで`share(&req, component)`を呼び、その結果をマージします。`component`はレンダリング中のページなので、プロバイダーはページごとに出力を変えられます - 下記を参照してください。
+リクエスト単位の共有データ（認証済みユーザー、リクエストスコープのフラグ）については、[`InertiaSharedData`](#リクエスト単位の共有データ)を実装してシングルトンを登録してください。フレームワークはすべてのInertiaレスポンスで`share(&req, component)`を呼び、その結果をマージします。`component`はレンダリング中のページなので、プロバイダーはページごとに出力を変えられます - 下記を参照してください。
 
 ### キー衝突時の優先順位
 
@@ -501,7 +501,7 @@ Redirect::to("/posts/42").preserve_fragment()    // keep #frag across visit
 
 すべての`Redirect`変種は`.with(k, v)`、`.with_input(map)`、`.with_errors(map)`、`.with_errors_bag(name, map)`、`.cookie(c)`、`.header(k, v)`、`.permanent()`、`.status(303)`などを受け付けます。完全なチェーンはLaravelの`RedirectResponse`を反映します。
 
-GET以外のInertia訪問では、[`Inertia303Middleware`](#bootstrap-inertiainstall)がインストールされていると、フレームワークがレスポンスを`303 See Other`へ自動変換します。ブラウザは元のPUT/PATCH/DELETEをリダイレクト先へ再送信せず、きれいな追いかけのGETを発行します。
+GET以外のInertia訪問では、[`Inertia303Middleware`](#ブートストラップ-inertia-install)がインストールされていると、フレームワークがレスポンスを`303 See Other`へ自動変換します。ブラウザは元のPUT/PATCH/DELETEをリダイレクト先へ再送信せず、きれいな追いかけのGETを発行します。
 
 ### バリデーション失敗
 
@@ -542,7 +542,7 @@ Inertia XHRは`409` + `X-Inertia-Location`を受け取り（クライアント�
 
 ## バージョン検出
 
-Inertiaはアセットマニフェストにバージョンを付けるため、長生きするクライアントが昨日のバンドルのページを今日のサーバーに対してマウントしようとすることはありません。クライアントの`X-Inertia-Version`ヘッダーがサーバーの設定済みバージョンと一致しないとき、[`InertiaVersionMiddleware`](#bootstrap-inertiainstall)は`409 Conflict`と新しいURLを名指しする`X-Inertia-Location`ヘッダーで応答します。Inertiaクライアントはそれを受け取り、ページ全体をリロードして新しいバンドルを取得します。
+Inertiaはアセットマニフェストにバージョンを付けるため、長生きするクライアントが昨日のバンドルのページを今日のサーバーに対してマウントしようとすることはありません。クライアントの`X-Inertia-Version`ヘッダーがサーバーの設定済みバージョンと一致しないとき、[`InertiaVersionMiddleware`](#ブートストラップ-inertia-install)は`409 Conflict`と新しいURLを名指しする`X-Inertia-Location`ヘッダーで応答します。Inertiaクライアントはそれを受け取り、ページ全体をリロードして新しいバンドルを取得します。
 
 この跳ね返しの前に、セッションが再フラッシュされます。クライアントは409に対してページ全体のGETで応答し、そのGETは新しいリクエストです。再フラッシュがなければ、前のリクエストがフラッシュしたバリデーションエラーや成功メッセージは、行き先ページが読み取る前に歳を取って消えます。デプロイが送信中に着地しただけで、ユーザーはエラーメッセージを失うことになります。これには`SessionMiddleware`をバージョンミドルウェアより前に登録する必要があります。
 
@@ -612,7 +612,7 @@ Application::new()
 2. `InertiaHeadersMiddleware`を登録します - すべてのレスポンスに`Vary: X-Inertia`を設定し、Inertia訪問で空の`200`を`303`の戻りへ変えます。
 3. `InertiaVersionMiddleware`を登録します - クライアントとサーバーがアセットバージョンで一致しない場合、`409` + `X-Inertia-Location`を出力します。
 4. `Inertia303Middleware`を登録します - GET以外のInertiaリダイレクトで`302`を`303`へ格上げします。
-5. `InertiaValidationRedirectMiddleware`を登録します - Inertia訪問の`422`を、エラーをフラッシュしたフォームページへの`303`へ変換します。[バリデーション失敗](#validation-failures)を参照してください。
+5. `InertiaValidationRedirectMiddleware`を登録します - Inertia訪問の`422`を、エラーをフラッシュしたフォームページへの`303`へ変換します。[バリデーション失敗](#バリデーション失敗)を参照してください。
 
 順序が重要です。ヘッダーミドルウェアが最初に登録されるため最も外側になり、ハンドラが実行される前にバージョンミドルウェアが返す`409`も含め、すべてのレスポンスを見ます。バリデーションリダイレクトミドルウェアは最後に登録されるため最も内側、つまりハンドラに最も近くなり、他の3つが触れる前の`422`を見ます。
 
@@ -659,7 +659,7 @@ createInertiaApp({
 
 ## SSR
 
-Suprnovaはプロセス外のSSR worker - 通常はNode / Bun / Denoの下で動く`@inertiajs/{svelte,react,vue}/server`の`createServer()`バンドル - とHTTPループバック経由で通信します。[`Inertia::install`](#bootstrap-inertiainstall)に渡す設定で有効にしてください。その設定がすべてのレスポンスの出発点なので、ハンドラを通して配管するものはありません:
+Suprnovaはプロセス外のSSR worker - 通常はNode / Bun / Denoの下で動く`@inertiajs/{svelte,react,vue}/server`の`createServer()`バンドル - とHTTPループバック経由で通信します。[`Inertia::install`](#ブートストラップ-inertia-install)に渡す設定で有効にしてください。その設定がすべてのレスポンスの出発点なので、ハンドラを通して配管するものはありません:
 
 ```rust
 Inertia::install(
@@ -697,7 +697,7 @@ suprnova ssr:start
 
 ## 設定
 
-Inertiaの動作は`InertiaConfig`でプログラム的に設定され、[`Inertia::install`](#bootstrap-inertiainstall)に渡した設定がすべてのレスポンスの出発点になります。フレームワークが直接読む環境変数は`SUPRNOVA_FRONTEND`（`svelte` / `react` / `vue`）だけです。設定に指定がない場合に限り、デフォルトのエントリポイントファイル名とページコンポーネント拡張子を供給します。インストール済み設定で明示した`.frontend(Frontend::React)`が勝ち、`suprnova new --frontend react`がscaffoldする内容になります。それ以外はすべてビルダー形状です:
+Inertiaの動作は`InertiaConfig`でプログラム的に設定され、[`Inertia::install`](#ブートストラップ-inertia-install)に渡した設定がすべてのレスポンスの出発点になります。フレームワークが直接読む環境変数は`SUPRNOVA_FRONTEND`（`svelte` / `react` / `vue`）だけです。設定に指定がない場合に限り、デフォルトのエントリポイントファイル名とページコンポーネント拡張子を供給します。インストール済み設定で明示した`.frontend(Frontend::React)`が勝ち、`suprnova new --frontend react`がscaffoldする内容になります。それ以外はすべてビルダー形状です:
 
 ```rust
 use suprnova::{InertiaConfig, Frontend};
@@ -737,7 +737,7 @@ let cfg = InertiaConfig::new()
     .url_resolver(|req| req.path_and_query().replacen("/en", "", 1));
 ```
 
-リゾルバは`InertiaRequestExt`を通じてリクエストを読み取り、[`Inertia::install`](#bootstrap-inertiainstall)へ渡す設定から構築されたすべてのレスポンスに適用されます。これはアプリ全体に適用するリゾルバの通常の場所です。1つのレスポンスでは`InertiaResponse::with_config(cfg)`で上書きします。リゾルバが変えるのは`page.url`だけです。409の跳ね返しは実際に到着したURLを名指しし続けます。それがブラウザが取得しなければならないURLだからです。そのためリゾルバがある場合、2つは意図的に異なります。
+リゾルバは`InertiaRequestExt`を通じてリクエストを読み取り、[`Inertia::install`](#ブートストラップ-inertia-install)へ渡す設定から構築されたすべてのレスポンスに適用されます。これはアプリ全体に適用するリゾルバの通常の場所です。1つのレスポンスでは`InertiaResponse::with_config(cfg)`で上書きします。リゾルバが変えるのは`page.url`だけです。409の跳ね返しは実際に到着したURLを名指しし続けます。それがブラウザが取得しなければならないURLだからです。そのためリゾルバがある場合、2つは意図的に異なります。
 
 `manifest_path`のViteマニフェストは最初のリクエストで遅延ロードされ、プロセスの寿命の間キャッシュされます。インストールされた設定から構築されたすべてのレスポンスがそのキャッシュを共有するため、ファイルは一度だけ読み取られ、パースされます。欠けている場合、本番のアセットタグはハードコードされたレガシーパスへフォールバックし、`tracing::warn!`が発火して欠落がログに現れます。
 

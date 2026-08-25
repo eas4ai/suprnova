@@ -666,9 +666,8 @@ Sicherheitsnetz, kein Vertrag - öffentliche APIs sollten weiterhin
 ### Zahlungs-Provider
 
 Ein Typ, der den `PaymentProvider`-Supertrait implementiert
-(= `Checkout` + `Subscription` + `CustomerStore` +
-`WebhookHandler`). Referenzadapter: `suprnova-payments-stripe`
-(Gateway, vollständige `Payment`-Impl) und
+(= `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`). Referenzadapter:
+`suprnova-payments-stripe` (Gateway, vollständige `Payment`-Impl) und
 `suprnova-payments-paddle` (Merchant-of-Record, kein `Payment`).
 Siehe [Zahlungen](payments.md),
 [Zahlungen - Provider-Leitfaden](payments-provider-guide.md).

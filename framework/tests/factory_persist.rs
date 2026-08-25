@@ -73,9 +73,7 @@ async fn fresh_db() -> (
     // Build the toy_users table from the SeaORM entity definition.
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy_user::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
-        .await
-        .unwrap();
+    conn.execute(&stmt).await.unwrap();
 
     // Bind the connection so `DB::connection()` (and therefore the
     // blanket `Persistable` impl on every SeaORM model) finds it.
@@ -177,9 +175,7 @@ async fn persist_via_seaorm_helper_persists_against_explicit_connection() {
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     let schema = Schema::new(DbBackend::Sqlite);
     let stmt = schema.create_table_from_entity(toy_user::Entity);
-    conn.execute(conn.get_database_backend().build(&stmt))
-        .await
-        .unwrap();
+    conn.execute(&stmt).await.unwrap();
 
     let m = UserFactory::new().make();
     let inserted = persist_via_seaorm(m, &conn).await.unwrap();

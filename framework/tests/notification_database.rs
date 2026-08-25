@@ -90,7 +90,7 @@ async fn database_channel_inserts_notifications_row() {
         .unwrap();
 
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "SELECT type, notifiable_type, notifiable_id, data FROM notifications".to_string(),
         ))

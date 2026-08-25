@@ -23,8 +23,8 @@ forme longue.
 | `TestContainer::fake` / `scope` / `spawn` | Substitutions DI thread-local ou task-local, hermétiques entre les tests parallèles |
 | `install_test_encryption_key[ring]` | `APP_KEY` déterministe pour les tests qui touchent des casts chiffrés ou des charges utiles signées |
 | Helpers `fake()` par surface | Mail, Notify, Queue, Bus, Events, Storage, HTTP - voir [Mocking](mocking.md) |
-| `TestResponse` | Assertions fluides sur le triplet `(status, headers, body)` d'un test HTTP - voir [Tests HTTP](http-tests.md#assertions-de-réponse-fluides-avec-testresponse) |
-| `AssertableInertia` | Assertions fluides sur un objet de page Inertia - voir [Tests HTTP](http-tests.md#tester-les-réponses-inertia) |
+| `TestResponse` | Assertions fluides sur le triplet `(status, headers, body)` d'un test HTTP - voir [Tests HTTP](http-tests.md#fluent-response-assertions-with-testresponse) |
+| `AssertableInertia` | Assertions fluides sur un objet de page Inertia - voir [Tests HTTP](http-tests.md#testing-inertia-responses) |
 
 Vous n'irez pas chercher tout ça dans un seul test. Un test d'action
 typique utilise les trois premiers ; un test riche en DI ajoute
@@ -397,7 +397,7 @@ obtiennent gratuitement :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 
 [dev-dependencies]
 # `testing` est activée transitivement par la dépendance ci-dessus - rien de plus.
@@ -420,10 +420,10 @@ que ce que vous livrez :
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2", features = ["testing", "..."] }
 ```
 
 C'est un resserrage, pas un correctif - la validation au démarrage

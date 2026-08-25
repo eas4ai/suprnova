@@ -182,8 +182,8 @@ unread-messages =
     }
 ```
 
-O CLDR atribui `1`, `21`, `31` a `one`; `2`–`4`, `22`–`24` a `few`;
-`0`, `5`–`20`, `25`–`30` a `many`; e frações a `other`. A mesma
+O CLDR atribui `1`, `21`, `31` a `one`; `2`-`4`, `22`-`24` a `few`;
+`0`, `5`-`20`, `25`-`30` a `many`; e frações a `other`. A mesma
 chamada `__!("unread-messages", count: 22)` renderiza corretamente
 em inglês, russo, polonês e árabe, porque a seleção de categoria é
 dado, não código.
@@ -1137,8 +1137,8 @@ files =
     }
 ```
 
-`one` é 1; `few` é 2–4, 22–24, 32–34, 102–104; `many` é 0, 5–21,
-25–31; `other` pega as frações (`1,5 pliku`) e carrega o marcador
+`one` é 1; `few` é 2-4, 22-24, 32-34, 102-104; `many` é 0, 5-21,
+25-31; `other` pega as frações (`1,5 pliku`) e carrega o marcador
 padrão, pela regra acima.
 
 A forma sem range do Laravel (`plik|pliki|plików`) sai melhor - ela

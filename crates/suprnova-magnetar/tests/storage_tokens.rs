@@ -42,7 +42,7 @@ async fn wrong_purpose_rolls_back_and_sibling_invalidation_is_atomic() {
          WHEN OLD.id = {} BEGIN SELECT RAISE(ABORT, 'blocked sibling'); END",
         sibling.token_id
     );
-    db.execute(Statement::from_string(DbBackend::Sqlite, trigger))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite, trigger))
         .await
         .unwrap();
     assert!(
@@ -54,7 +54,7 @@ async fn wrong_purpose_rolls_back_and_sibling_invalidation_is_atomic() {
             .await
             .is_err()
     );
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "DROP TRIGGER fail_sibling",
     ))
@@ -195,6 +195,7 @@ async fn password_reset_wrong_user_rolls_back_token_and_epoch() {
 }
 
 #[cfg(feature = "seaorm-postgres")]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn configured_postgres_target_is_required() {
     let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
@@ -205,6 +206,7 @@ async fn configured_postgres_target_is_required() {
 }
 
 #[cfg(feature = "seaorm-mysql")]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn configured_mysql_target_is_required() {
     let url = std::env::var("MAGNETAR_MYSQL_TEST_URL")
@@ -265,10 +267,8 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
         })
         .await
         .unwrap();
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "CREATE TRIGGER fail_session BEFORE UPDATE OF revoked_at ON storage_sessions BEGIN SELECT RAISE(ABORT, 'blocked session'); END",
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TRIGGER fail_session BEFORE UPDATE OF revoked_at ON storage_sessions BEGIN SELECT RAISE(ABORT, 'blocked session'); END",))
     .await
     .unwrap();
     let token = issued.plaintext.expose_secret().to_owned();
@@ -281,7 +281,7 @@ async fn password_reset_session_failure_rolls_back_epoch_credential_and_token() 
             .await
             .is_err()
     );
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "DROP TRIGGER fail_session",
     ))

@@ -72,3 +72,25 @@ checksum. To inspect the generated source shapes without running a project
 suite, use `sqlite3 tests/fixtures/databases/torii.sqlite '.tables'`,
 `sqlite3 tests/fixtures/databases/suprnova-web.sqlite '.tables'`, and
 `sqlite3 tests/fixtures/databases/suprnova-api.sqlite '.tables'`.
+
+## SeaORM 1.1 compatibility baselines
+
+`seaorm_1_1/sqlite.sql`, `seaorm_1_1/postgres.sql`, and
+`seaorm_1_1/mysql.sql` are immutable pre-upgrade compatibility evidence
+captured from Suprnova commit `11af547c` with SeaORM `1.1.20`, SeaQuery
+`0.32.7`, and SQLx `0.8.6`. They are test evidence only, not migration inputs
+for production.
+
+Each fixture contains the complete backend schema, including native column
+types, defaults, indexes, constraints, and sequence or auto-increment state.
+It also contains deterministic rows for user `6100`, epoch-bound session
+`seaorm11-session`, and password-reset token `6102`. The capture program
+applied `magnetar::default_schema::migrate` twice before seeding through the
+real SeaORM 1.1 entities.
+
+The manifest owns the fixture SHA-256 and a separate canonical catalog
+SHA-256 for each backend. The canonical catalogs and exact ignored capture
+program live under `.planning/iteration-006/` in the implementation
+worktree. Regeneration must begin at source commit `11af547c`, use the
+manifest-recorded service URLs and commands, and update the fixture,
+catalog digest, and manifest record together.

@@ -166,7 +166,7 @@ em geral, um campo de solicitação extraído diretamente do corpo JSON. Linhas 
 executa é resolvido pelo que o tipo da regra implementa, não por algo que você
 escreve na linha.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `distinct:strict` do Laravel apoia-se no `==` coercitivo do PHP. Valores JSON
 já são tipados, portanto o `strict` do Suprnova só altera se dois *números* com
@@ -394,7 +394,7 @@ sessão, porque o cliente Inertia mostra um modal de erro para qualquer resposta
 que não reconheça como resposta Inertia - um `422` nunca preencheria
 `form.errors`.
 
-Nada muda no manipulador. Na página de destino, cada campo carrega sua primeira
+Nada muda no handler. Na página de destino, cada campo carrega sua primeira
 mensagem como uma string:
 
 ```svelte
@@ -403,7 +403,7 @@ mensagem como uma string:
 {/if}
 ```
 
-Veja [Respostas Inertia](frontend-inertia-responses.md#falhas-de-validação)
+Veja [Respostas Inertia](frontend-inertia-responses.md#validation-failures)
 para sacos de erros, `with_all_errors` e para onde o redirecionamento aponta.
 
 ## Notas de design

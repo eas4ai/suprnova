@@ -142,7 +142,7 @@
 | 多个认证守卫 | 通过 `AuthManager` 按名字（`web`、`api`、……）注册的 `Guard` | 已实现 | `SessionGuard`、`TokenGuard`、自定义实现 |
 | 用户提供者 | `EloquentUserProvider<U>`、`DatabaseUserProvider`，或通过 `UserProvider` trait 自定义 | 已实现 | [认证流程](auth-flows.md) |
 | 邮箱验证 | `EmailVerification` + `EnsureEmailVerifiedMiddleware` + `EmailVerificationMail`；`MustVerifyEmail` 契约 | 已实现 | 由提供者支撑且绑定 actor - [认证流程](auth-flows.md) |
-| 密码重置 | `PasswordReset` + Magnetar 的首次邮箱证明事务 + 重置/变更邮件 | 已实现 | 推进 auth epoch 并撤销会话/remember 状态 - [认证流程](auth-flows.md) |
+| 密码重置 | `PasswordReset` + Magnetar 首次电子邮件证明事务或已验证 `UserProvider` 回退 + 重置或更改邮件 | 已实现 | Magnetar 处理原子化首次证明。由提供程序支持的应用可以为已验证用户重置密码。 - [Auth flows](auth-flows.md) |
 | 暴力破解节流 | Magnetar 锁定引擎 + `BruteForce` + `LoginThrottleMiddleware` | 已实现 | 账户锁定加框架 IP/路由限流 |
 | 双因素认证（TOTP） | 框架 `TwoFactor` 兼容外观加 Magnetar factor 引擎 | 已实现 | 恢复码、重放防护和 factor 门控的集成登录 |
 | 记住我 | 框架 cookie 背后的 Magnetar 目的绑定轮换凭据 | 已实现 | Auth-epoch 检查、轮换、异常处理和旧版回退 |

@@ -66,6 +66,7 @@ fn configured_backend_url_is_accepted() {
 }
 
 #[cfg(feature = "seaorm-postgres")]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn postgres_backend_is_reachable() {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -75,12 +76,13 @@ async fn postgres_backend_is_reachable() {
         .await
         .unwrap_or_else(|error| panic!("Postgres foundation backend cannot connect: {error}"));
     database
-        .execute(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
+        .execute_raw(Statement::from_string(DbBackend::Postgres, "SELECT 1"))
         .await
         .unwrap_or_else(|error| panic!("Postgres foundation backend rejected SELECT 1: {error}"));
 }
 
 #[cfg(feature = "seaorm-mysql")]
+#[ignore = "requires T2 live Postgres/MySQL database"]
 #[tokio::test]
 async fn mysql_backend_is_reachable() {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -90,7 +92,7 @@ async fn mysql_backend_is_reachable() {
         .await
         .unwrap_or_else(|error| panic!("MySQL foundation backend cannot connect: {error}"));
     database
-        .execute(Statement::from_string(DbBackend::MySql, "SELECT 1"))
+        .execute_raw(Statement::from_string(DbBackend::MySql, "SELECT 1"))
         .await
         .unwrap_or_else(|error| panic!("MySQL foundation backend rejected SELECT 1: {error}"));
 }

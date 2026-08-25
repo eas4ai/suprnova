@@ -4,7 +4,7 @@
 
 ## 要件
 
-- **Rust 1.91.1 以上**（ワークスペースは 2024 エディションを使用します）。[rustup](https://rustup.rs/) 経由でインストールします：
+- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.3.2 リリースでも、最低要件は同じく Rust 1.94.0 です。[rustup](https://rustup.rs/) でインストールしてください：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -16,12 +16,15 @@
 
 データベースを今選ぶ必要はありません。デフォルトスキャフォルダーは SQLite を選択するため、新しいアプリはセットアップなしで実行できます。
 
+
+現在の `main` は SeaORM 2.0、SeaQuery 1.0、SQLx 0.9 を使用します。SeaORM を直接呼び出すアプリケーションでは、SeaQuery の式メソッド用に `ExprTrait` をインポートし、事前構築済みの `Statement` 値には明示的な `*_raw` 接続メソッドを使用する必要があります。この依存関係のアップグレードに伴うアプリケーションデータの移行は不要です。
+
 ## CLI をインストールする
 
 Suprnova は Cargo プロジェクトとして配布されており、CLI のインストーラーはフレームワークを git から取得します（crates.io からではありません - 下記の[プレローンチの注記](#pre-launch-note)を参照してください）：
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 これは `suprnova` バイナリをコンパイルし、`~/.cargo/bin` に配置します。うまくいったか確認してください：
@@ -40,7 +43,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## プロジェクトを作成する
 
-`suprnova new` は完全なプロジェクト（バックエンド + 選択したフロントエンド + Vite 設定 + 認証マイグレーション + サンプルルート）をスキャフォルドします。デフォルトではインタラクティブです：
+`suprnova new` は完全なプロジェクト - バックエンド + 選択したフロントエンド + Vite 設定 + 認証マイグレーション + サンプルルート - をスキャフォルドします。デフォルトではインタラクティブです：
 
 ```bash
 suprnova new my-app
@@ -137,7 +140,7 @@ my-app/
 CLI はあなたの `~/.cargo/bin` にあります。最新版に更新するには：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 `--force` は Cargo に既存のバイナリを上書きさせます。
@@ -147,7 +150,7 @@ cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 
 スキャフォルドされたアプリは、`Cargo.toml` の git 依存性を経由して `suprnova` フレームワーククレートに依存します：
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 最新のフレームワークの変更を取り込むには：
@@ -160,7 +163,7 @@ git 依存性は、名前を指定されたリリースタグを追跡します�
 
 ## 配布モデル
 
-Suprnova は crates.io ではなく git を通じて配布されます - フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはタグ付きの GitHub Release（例えば `v1.2.4`）として公開されており、あなたのアプリが依存するのはそのタグです：スキャフォルドされた `Cargo.toml` は `tag = "v1.2.4"` をピン留めし、`Cargo.lock` はそのタグが解決した正確なコミットを記録するため、あなたが移ると決めるまで、ビルドは再現可能なままです。更新は意図的な操作であり、偶発的に起こることは決してありません - タグを上げて `cargo update -p suprnova` を実行してください。アプリのフレームワークバージョンを更新するセクションが、その手順を説明しています。
+Suprnova は crates.io ではなく git を通じて配布されます - フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはタグ付きの GitHub Release（例えば `v1.2.4`）として公開されており、あなたのアプリが依存するのはそのタグです：スキャフォルドされた `Cargo.toml` は `tag = "v1.3.2"` をピン留めし、`Cargo.lock` はそのタグが解決した正確なコミットを記録するため、あなたが移ると決めるまで、ビルドは再現可能なままです。更新は意図的な操作であり、偶発的に起こることは決してありません - タグを上げて `cargo update -p suprnova` を実行してください。アプリのフレームワークバージョンを更新するセクションが、その手順を説明しています。
 
 ## エディタセットアップ
 

@@ -6,8 +6,7 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 
 ## Anforderungen
 
-- **Rust 1.91.1+** (der Workspace verwendet die 2024-Edition). Installieren Sie über
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** für den aktuellen `main`-Branch (der Workspace verwendet die Edition 2024). Das getaggte Release v1.3.2 hat dieselbe Mindestversion Rust 1.94.0. Installation über [rustup](https://rustup.rs/):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -22,6 +21,9 @@ generierten Projekt. Wenn Sie bereits soweit sind, springen Sie zum
 Sie müssen sich jetzt noch nicht für eine Datenbank entscheiden. Der Standard-Scaffolder wählt
 SQLite, sodass eine neue App ohne Konfiguration läuft.
 
+
+Der aktuelle `main`-Branch verwendet SeaORM 2.0, SeaQuery 1.0 und SQLx 0.9. Anwendungen, die SeaORM direkt aufrufen, müssen `ExprTrait` für SeaQuery-Ausdrucksmethoden importieren und explizite `*_raw`-Verbindungsmethoden für vorab erstellte `Statement`-Werte verwenden. Das Abhängigkeits-Upgrade erfordert keine Migration der Anwendungsdaten.
+
 ## Die CLI installieren
 
 Suprnova wird als Cargo-Projekt verteilt, und der CLI-Installer holt das
@@ -29,7 +31,7 @@ Framework aus Git (nicht von crates.io - siehe den
 [Pre-Launch-Hinweis](#pre-launch-note) weiter unten):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 Das kompiliert das `suprnova`-Binary und legt es in `~/.cargo/bin` ab.
@@ -50,8 +52,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Erstellen Sie ein Projekt
 
-`suprnova new` setzt ein komplettes Projekt auf - Backend + gewählte Frontend
-+ Schnelle Konfiguration + Auth-Migrationen + Stichprobenrouten. Es ist standardmäßig interaktiv:
+`suprnova new` setzt ein komplettes Projekt auf - Backend + gewählte Frontend + Schnelle Konfiguration + Auth-Migrationen + Stichprobenrouten. Es ist standardmäßig interaktiv:
 
 ```bash
 suprnova new my-app
@@ -70,7 +71,7 @@ Wenn Sie die Anfragen (CI, scripted setup) überspringen möchten, passieren Sie
 suprnova new my-app --frontend svelte --no-interaction
 ```
 
-`--no-interaction` akzeptiert die Standardbeschreibungen ("Eine Webanwendung, die mit Suprnova erstellt wurde") und den Autor (leer). Um diese einzusetzen, bearbeiten Sie die generierte `Cargo.toml` nach dem Gerüst.
+`--no-interaction` akzeptiert die Standardbeschreibungen ("Eine Webanwendung, die mit Suprnova erstellt wurde") und den Autor (leer). Um diese einzusetzen, bearbeiten Sie die generierte `Cargo.toml` nach dem Scaffold.
 
 Die drei Frontend-Optionen versenden jeweils ihre eigenen Runen-on/Svelte-5, React-19 oder Vue-3.5 Starter. Alle drei verwenden Inertia v3 + Vite 8 + Tailwind v4 und vorwirbeln einen Login/Register/Dashboard-Fluss mit sessbasierter Auth.
 
@@ -154,7 +155,7 @@ Die CLI liegt in Ihrem `~/.cargo/bin`. Um auf die neueste Version zu
 aktualisieren:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 `--force` lässt Cargo das bestehende Binary überschreiben.
@@ -165,7 +166,7 @@ Eine per Scaffold erzeugte App hängt über eine Git-Abhängigkeit in
 `Cargo.toml` vom `suprnova`-Framework-Crate ab:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Um die neuesten Framework-Änderungen zu holen:
@@ -186,7 +187,7 @@ Suprnova wird über Git verteilt, nicht über crates.io - sowohl das
 Framework als auch die CLI installieren von GitHub. Jede Version wird als
 getaggtes GitHub Release veröffentlicht (z. B. `v1.2.4`), und der Tag ist
 das, wovon Ihre App abhängt: Eine per Scaffold erzeugte `Cargo.toml` pinnt
-`tag = "v1.2.4"`, und `Cargo.lock` verzeichnet den exakten Commit, auf den
+`tag = "v1.3.2"`, und `Cargo.lock` verzeichnet den exakten Commit, auf den
 dieser Tag aufgelöst hat, sodass Builds reproduzierbar sind, bis Sie sich
 entscheiden, weiterzugehen. Das Aktualisieren ist eine bewusste
 Entscheidung, nie ein Nebeneffekt - erhöhen Sie den Tag und führen Sie

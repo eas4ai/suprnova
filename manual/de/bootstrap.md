@@ -2,9 +2,9 @@
 
 `bootstrap.rs` ist der zentrale Ort, an dem Ihre Anwendung beim Start
 konfiguriert wird. Container-Bindungen, Event-Listener, Observer, Supervisoren
-und globale Middleware – alles, was vor der ersten Anfrage an den Server (oder
-vor dem ersten Job aus der Queue) existieren soll – wird hier registriert. Es
-gibt kein Gerüst aus Service-Providern, das zusammengesetzt werden müsste.
+und globale Middleware - alles, was vor der ersten Anfrage an den Server (oder
+vor dem ersten Job aus der Queue) existieren soll - wird hier registriert. Es
+gibt kein Scaffold aus Service-Providern, das zusammengesetzt werden müsste.
 
 Es gibt zwei Hooks, nicht nur einen. `register` gilt prozessweit: Jeder
 Unterbefehl führt ihn aus, einschließlich `queue:work`, `schedule:work`,
@@ -82,11 +82,11 @@ Die Signaturen beider Funktionen werden durch `Application::bootstrap` und
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // Datenbank, Bindings, Observer, Listener, Supervisoren, Worker-Job-Registrierung
+    // database, bindings, observers, listeners, supervisors, worker job registration
 }
 
 pub fn register_http_stack() {
-    // globale Middleware, Inertia::install
+    // global middleware, Inertia::install
 }
 ```
 
@@ -95,7 +95,7 @@ Beide werden am Aufrufort als asynchrone Closures eingebunden
 (`.http_bootstrap(|| async { bootstrap::register_http_stack() })`), weil ein
 normaler Funktionszeiger auch als Einstiegspunkt eines Test-Harness dienen kann,
 ohne `async` in den Test zu ziehen. Für fehlschlagende Einrichtung verwenden
-Sie `.expect("…")` mit einer Meldung, die die Abhilfe erklärt – der Boot ist der
+Sie `.expect("…")` mit einer Meldung, die die Abhilfe erklärt - der Boot ist der
 richtige Zeitpunkt, laut fehlzuschlagen. Die Beispielanwendung verwendet
 `DB::init().await.expect("Failed to connect to database");`; dadurch beendet
 ein fehlendes `DATABASE_URL` den Prozess beim Booten mit dem tatsächlichen
@@ -208,16 +208,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → Singleton (verpackt in Arc):
+    // Trait → singleton (wraps in Arc):
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Konkretes Singleton:
+    // Concrete singleton:
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Factory (wird bei jedem Resolve konstruiert):
+    // Factory (constructed per resolve):
     factory!(|| RequestLogger::new());
 
-    // Oder rufen Sie die Facade direkt auf, für feinere Kontrolle:
+    // Or call the facade directly for finer control:
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -341,8 +341,8 @@ oben separat dargestellt, weil ihr Anwendungsschema für Benutzer zum
 Framework-UserProvider passen muss.
 
 ```rust
-//! Anwendungs-Bootstrap – Services, Listener, globale Middleware
-//! und die Inertia-Schicht registrieren.
+//! Application bootstrap - register services, listeners, global
+//! middleware, and the Inertia layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -351,36 +351,26 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, DB, EventFacade, FrameworkError, Inertia, InertiaConfig,
-    MagnetarConfig, PasskeyConfig, SessionConfig, SessionMiddleware, Storage,
-    SupervisorRegistry, UserProvider, bind, global_middleware, init_magnetar,
+    App, DB, EloquentUserProvider, EventFacade, FrameworkError, Inertia,
+    InertiaConfig, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry,
+    UserProvider, bind, global_middleware,
 };
 
 use crate::broadcasting::ChatChannel;
 use crate::events::UserRegistered;
 use crate::listeners::SendWelcomeEmailListener;
 use crate::middleware;
-use crate::providers::DatabaseUserProvider;
+use crate::models::users::User;
 
 pub async fn register() {
-    // ── Datenbank
+    // ── Database
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Auth-Provider
-    bind!(dyn UserProvider, DatabaseUserProvider);
+    // ── Auth provider
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
-    // ── Magnetar-Auth-Engine
-    let database = DB::connection().expect("DB not initialized");
-    let magnetar = MagnetarConfig::from_sea_orm(database.inner().clone())
-        .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
-    init_magnetar(magnetar)
-        .await
-        .expect("Failed to initialize Magnetar");
 
-    // ── Broadcasting-Hub + Channel-Registry
+    // ── Broadcasting hub + channel registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -388,43 +378,43 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── Event-Listener + Bridges
+    // ── Event listeners + bridges
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Storage-Disks (S3 in Produktion per Env aktiviert)
+    // ── Storage disks (env-gated S3 in production)
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Worker-Job-Registrierung
+    // ── Worker job registration
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observer + Supervisoren
+    // ── Observers + supervisors
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Feature Flags
+    // ── Feature flags
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Globale Middleware (außen nach innen in Registrierungsreihenfolge)
+    // ── Global middleware (outside-in in registration order)
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia-Protokollschicht (kein Versions-Pin: Standardmäßig wird das
-    // Vite-Build-Manifest gehasht, sodass ein Frontend-Build die Asset-Version
-    // selbst erhöht – siehe „Versionserkennung“ in frontend-inertia-responses.md)
+    // ── Inertia protocol layer (no version pin: the default hashes the
+    // Vite build manifest, so a frontend build bumps the asset version
+    // on its own - see "Version detection" in frontend-inertia-responses.md)
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());
@@ -495,9 +485,9 @@ Hintergrundarbeiter (`queue:work`) `workflow:work` `schedule:work`) und die Kons
 
 ### Warum Suprnova abweicht
 
-Laravel führt die `register()` und `boot()` von jedem Dienstleister für `artisan`-Befehle und Warteschlangen auch, nicht nur für HTTP-Anfragen - und kommt damit durch, weil seine Vite-Integration Assets-URLs faul, zu Render-Zeiten löst, von allem, was die `@vite`-Blade-Richtlinie verlangt. Ein Arbeiter, der nie eine Aussicht darstellt, berührt das Manifest nie, so dass ein fehlender Bau einfach nie auftaucht.
+Laravel führt die `register()` und `boot()` von jedem Dienstleister für `artisan`-Befehle und Warteschlangen auch, nicht nur für HTTP-Anfragen - und kommt damit durch, weil seine Vite-Integration Assets-URLs faul, zu Render-Zeiten löst, von allem, was die `@vite`-Blade-Richtlinie verlangt. Ein Worker, der nie eine Aussicht darstellt, berührt das Manifest nie, so dass ein fehlender Bau einfach nie auftaucht.
 
-Suprnova's `Inertia::install` löst das Manifest einmal beim Booten und schließt sich nicht in der Produktion, wenn es fehlt - nach Design, so dass eine falsch konfigurierte Bereitstellung nicht die URLs für Assets anzeigen kann, die auf einen Vite-Dev-Server zeigen, den niemand ausführt. Diese Auswahl des Designs ist genau das, was ein Arbeiter- oder Konsolbild, das (richtig) keine `public/assets` versendet, bricht: Wenn Laravel die Zeit nicht verlangt, würde Suprnova sonst bei Prozessstart auf jedem Unterbefehl getroffen. Die Aufteilung der Boot-Oberfläche in `bootstrap` und `http_bootstrap` hält die Fehler-Schließung, aber nur dort, wo sie hingehört - den Serverweg, der tatsächlich eine Inertia-Seite darstellt.
+Suprnova's `Inertia::install` löst das Manifest einmal beim Booten und schließt sich nicht in der Produktion, wenn es fehlt - nach Design, so dass eine falsch konfigurierte Bereitstellung nicht die URLs für Assets anzeigen kann, die auf einen Vite-Dev-Server zeigen, den niemand ausführt. Diese Auswahl des Designs ist genau das, was ein Worker- oder Konsolbild, das (richtig) keine `public/assets` versendet, bricht: Wenn Laravel die Zeit nicht verlangt, würde Suprnova sonst bei Prozessstart auf jedem Unterbefehl getroffen. Die Aufteilung der Boot-Oberfläche in `bootstrap` und `http_bootstrap` hält die Fehler-Schließung, aber nur dort, wo sie hingehört - den Serverweg, der tatsächlich eine Inertia-Seite darstellt.
 
 Laravel spaltet sich auch auf mehrere Dienstleister: Jeder Dienstleister implementiert `register()` und `boot()`, sie werden in `config/app.php` gesammelt, und Laravel führt sie in zwei Passes (alle `register`, dann alle `boot`) so dass ein Dienst auf die Bindungen eines anderen Anbieters angewiesen sein kann, ohne eine Bestellzeremonie im Benutzercode zu bestellen. Die Provider-Klasse gibt Ihnen eine Organisationseinheit, wenn eine App Dutzende verschiedener Teilsysteme ansammelt.
 

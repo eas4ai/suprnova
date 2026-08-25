@@ -185,8 +185,8 @@ unread-messages =
     }
 ```
 
-CLDR asigna `1`, `21`, `31` a `one`; `2`–`4`, `22`–`24` a `few`;
-`0`, `5`–`20`, `25`–`30` a `many`; y las fracciones a `other`. La misma
+CLDR asigna `1`, `21`, `31` a `one`; `2`-`4`, `22`-`24` a `few`;
+`0`, `5`-`20`, `25`-`30` a `many`; y las fracciones a `other`. La misma
 llamada `__!("unread-messages", count: 22)` se renderiza correctamente
 en inglés, ruso, polaco y árabe, porque la selección de categoría es
 dato, no código.
@@ -1144,8 +1144,8 @@ files =
     }
 ```
 
-`one` es 1; `few` es 2–4, 22–24, 32–34, 102–104; `many` es 0, 5–21,
-25–31; `other` atrapa las fracciones (`1,5 pliku`) y lleva la marca
+`one` es 1; `few` es 2-4, 22-24, 32-34, 102-104; `many` es 0, 5-21,
+25-31; `other` atrapa las fracciones (`1,5 pliku`) y lleva la marca
 por defecto, según la regla de arriba.
 
 La forma sin rangos de Laravel (`plik|pliki|plików`) lo hace mejor -

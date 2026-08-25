@@ -445,7 +445,7 @@ HNSW-Graphen, während Zeilen hereinkommen, aber die Index-Arbeit
 konzentriert sich auf den Commit. Ein `upsert` über 1 Mio. Zeilen
 hält die Transaktion für die volle Dauer des Index-Baus offen, was
 Minuten dauern kann. Zerlegen Sie bei sehr großen initialen
-Ladevorgängen den Korpus in Batches von 10k–100k Zeilen und rufen
+Ladevorgängen den Korpus in Batches von 10k-100k Zeilen und rufen
 Sie `upsert` wiederholt auf, sodass jeder Batch committet und das
 Lock zwischen den Runden freigibt. (Kleinere `upsert`-Aufrufe sind
 pro Zeile nicht langsamer - sie verteilen die Index-Arbeit nur auf

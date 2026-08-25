@@ -24,11 +24,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-suprnova-macros = { path = "../suprnova-macros", version = "1.2.4" }
+suprnova-macros = { path = "../suprnova-macros", version = "1.3.2" }
 dotenvy = "0.15"
 inventory = "0.3"
-sea-orm = { version = "1.1", features = ["runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "macros", "postgres-use-serial-pk", "with-rust_decimal", "with-bigdecimal"] }
+sea-orm-migration = { version = "2.0", features = ["runtime-tokio-rustls"] }
 thiserror = "2"
 redis = { version = "1.2.1", features = ["tokio-comp", "connection-manager"] }
 validator = { version = "0.20", features = ["derive"] }
@@ -50,10 +50,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.2.4", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.3.2", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
 secrecy = "0.10"
 
-# Pinned to versions sea-orm 1.1.x exposes via `with-rust_decimal` / `with-bigdecimal`.
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
 # `Value::BigDecimal` boundaries in cursor payloads.
 rust_decimal = { version = "1", features = ["serde"] }
@@ -147,7 +146,7 @@ url = "2"
 # single upload exceeds the in-memory spill threshold so the framework never
 # materialises an arbitrarily large body in RAM.
 tempfile = "3"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "multipart"] }
 getrandom = "0.4.2"
 tokio-util = { version = "0.7.18", features = ["time"] }
 sea-streamer = { version = "0.5.0", features = ["redis", "stdio", "runtime-tokio", "socket", "json"], default-features = false }
@@ -155,11 +154,8 @@ sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "1.2.4", path = "../crates/suprnova-web-push", optional = true }
+suprnova-web-push = { version = "1.3.2", path = "../crates/suprnova-web-push", optional = true }
 aws-credential-types = "1.2.14"
-# Compatibility pin for fresh downstream resolutions: time 0.3.48 currently
-# triggers coherence conflicts in sea-query/aws-smithy-types on Rust 1.96.
-time = { version = "=0.3.47", default-features = false }
 fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
 envy = "0.4.2"
 hyper-tungstenite = "0.20.0"
@@ -169,7 +165,7 @@ totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
 async-stream = "0.3.6"
 qdrant-client = "1.18.0"
-sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio-rustls", "json"] }
+sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
 httpdate = "1.0.3"
@@ -230,7 +226,14 @@ default = [
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.
 testing = []
-magnetar-oauth = ["suprnova-magnetar/oauth"]
+magnetar-oauth = [
+    "suprnova-magnetar/oauth",
+    "suprnova-magnetar/oauth-apple",
+    "suprnova-magnetar/oauth-facebook",
+    "suprnova-magnetar/oauth-google",
+    "suprnova-magnetar/oauth-tiktok",
+    "suprnova-magnetar/oauth-x",
+]
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
 filesystem = ["dep:opendal"]
@@ -242,11 +245,10 @@ filesystem = ["dep:opendal"]
 # optional behind exactly that feature. `reqsign-azure-storage` also
 # depends on `rsa` directly.
 #
-# What this buys, precisely: `rsa` becomes *avoidable*, which it was not
-# before. It is still in a stock `--features default` build, because
-# `database-mysql` is a default feature and `sqlx-mysql 0.8.6` depends on
-# `rsa` non-optionally. But an app that does not use MySQL can now build
-# with no `rsa` at all and still have the filesystem subsystem:
+# What this buys, precisely: `rsa` is present only when the Azure or GCS
+# filesystem adapters request it. SQLx 0.9's MySQL driver does not pull it
+# independently. An app that does not use those adapters can build with no
+# `rsa` at all and still have the filesystem subsystem:
 #
 #     --no-default-features --features filesystem,database-postgres
 #

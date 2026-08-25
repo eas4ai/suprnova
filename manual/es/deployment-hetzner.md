@@ -96,8 +96,7 @@ scp ./app-linux root@your-server:/opt/myapp/app
 
 ### Opción B: Construir en el servidor
 
-Instala Rust 1.91.1+ (Suprnova usa la edición 2024) y construye
-directamente en el servidor:
+Instale Rust 1.94.0+ para la rama `main` actual (Suprnova usa la edición 2024) y compile directamente en el servidor:
 
 ```bash
 # Instala Rust
@@ -110,6 +109,8 @@ git clone https://github.com/your-username/your-repo.git .
 cargo build --release
 cp target/release/myapp ./app   # renómbralo para que ExecStart=/opt/myapp/app de systemd lo encuentre
 ```
+
+La rama `main` actual usa SeaORM 2.0, SeaQuery 1.0 y SQLx 0.9. Las aplicaciones que llaman directamente a SeaORM deben importar `ExprTrait` para los métodos de expresión de SeaQuery y usar métodos de conexión `*_raw` explícitos para valores `Statement` preconstruidos. La actualización de dependencias no requiere ninguna migración de datos de la aplicación.
 
 ### Opción C: Usar Docker
 
@@ -585,7 +586,7 @@ dimensionamiento no:
 |---|---|
 | Sitio pequeño, tráfico bajo, SQLite o BD compartida | La instancia vCPU compartida más pequeña (1 vCPU / 2 GB) |
 | Tráfico moderado con Postgres + Redis en la misma máquina | 2 vCPU / 4 GB |
-| API más pesada + planificador + workers de cola + Postgres | 2–4 vCPU / 8 GB |
+| API más pesada + planificador + workers de cola + Postgres | 2-4 vCPU / 8 GB |
 | Producción a escala | Instancia de CPU dedicada, o BD separada en su propio nodo |
 
 Consulta los [precios actuales](https://www.hetzner.com/cloud) de

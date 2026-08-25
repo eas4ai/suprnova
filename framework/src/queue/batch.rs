@@ -437,7 +437,6 @@ impl DatabaseBatchRepository {
     }
 
     fn backend(&self) -> sea_orm::DatabaseBackend {
-        use sea_orm::ConnectionTrait;
         self.db.get_database_backend()
     }
 
@@ -447,14 +446,14 @@ impl DatabaseBatchRepository {
     /// this way rather than catching a unique-violation error keeps the
     /// duplicate on the normal path instead of the exceptional one, and avoids
     /// having to classify driver error strings per backend.
-    fn insert_settlement_sql(&self) -> String {
+    fn insert_settlement_sql(&self) -> Result<String, FrameworkError> {
         use crate::database::placeholder::placeholder_list;
         let cols = format!(
             "({}) VALUES ({})",
             "batch_id, job_id, failed, settled_at",
-            placeholder_list(self.backend(), 1, 4)
+            placeholder_list(self.backend(), 1, 4)?
         );
-        match self.backend() {
+        Ok(match self.backend() {
             sea_orm::DatabaseBackend::Sqlite => {
                 format!("INSERT OR IGNORE INTO {} {}", self.settlements, cols)
             }
@@ -467,7 +466,12 @@ impl DatabaseBatchRepository {
                     self.settlements, cols
                 )
             }
-        }
+            _ => {
+                return Err(crate::database::unsupported_database_backend(
+                    self.backend(),
+                ));
+            }
+        })
     }
 
     /// One query for the whole derived snapshot: the stored total plus the two
@@ -489,10 +493,10 @@ impl DatabaseBatchRepository {
              FROM {b} b WHERE b.id = {p}",
             s = self.settlements,
             b = self.batches,
-            p = placeholder(self.backend(), 1)
+            p = placeholder(self.backend(), 1)?
         );
         let row = conn
-            .query_one(sea_orm::Statement::from_sql_and_values(
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 sql,
                 vec![sea_orm::Value::from(id.to_string())],
@@ -535,9 +539,9 @@ impl DatabaseBatchRepository {
 
         {
             use sea_orm::ConnectionTrait;
-            txn.execute(sea_orm::Statement::from_sql_and_values(
+            txn.execute_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
-                self.insert_settlement_sql(),
+                self.insert_settlement_sql()?,
                 vec![
                     sea_orm::Value::from(id.to_string()),
                     sea_orm::Value::from(job_id.to_string()),
@@ -576,14 +580,14 @@ impl DatabaseBatchRepository {
         use crate::database::placeholder::placeholder;
         use sea_orm::ConnectionTrait;
         self.db
-            .execute(sea_orm::Statement::from_sql_and_values(
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "UPDATE {} SET {} = {} WHERE id = {}",
                     self.batches,
                     column,
-                    placeholder(self.backend(), 1),
-                    placeholder(self.backend(), 2)
+                    placeholder(self.backend(), 1)?,
+                    placeholder(self.backend(), 2)?
                 ),
                 vec![
                     sea_orm::Value::from(Utc::now().timestamp()),
@@ -608,14 +612,14 @@ impl BatchRepository for DatabaseBatchRepository {
         let options_json = serde_json::to_string(&batch.options)
             .map_err(|e| FrameworkError::internal(format!("encode batch options: {e}")))?;
         self.db
-            .execute(sea_orm::Statement::from_sql_and_values(
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "INSERT INTO {} \
-                     (id, name, total_jobs, options_json, created_at, cancelled_at, finished_at) \
-                     VALUES ({})",
+             (id, name, total_jobs, options_json, created_at, cancelled_at, finished_at) \
+             VALUES ({})",
                     self.batches,
-                    placeholder_list(self.backend(), 1, 7)
+                    placeholder_list(self.backend(), 1, 7)?
                 ),
                 vec![
                     sea_orm::Value::from(batch.id.clone()),
@@ -637,13 +641,13 @@ impl BatchRepository for DatabaseBatchRepository {
         use sea_orm::ConnectionTrait;
         let row = self
             .db
-            .query_one(sea_orm::Statement::from_sql_and_values(
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT name, total_jobs, options_json, created_at, cancelled_at, finished_at \
-                     FROM {} WHERE id = {}",
+             FROM {} WHERE id = {}",
                     self.batches,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(id.to_string())],
             ))
@@ -701,13 +705,13 @@ impl BatchRepository for DatabaseBatchRepository {
             .begin()
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
-        txn.execute(sea_orm::Statement::from_sql_and_values(
+        txn.execute_raw(sea_orm::Statement::from_sql_and_values(
             self.backend(),
             format!(
                 "UPDATE {} SET total_jobs = total_jobs + {} WHERE id = {}",
                 self.batches,
-                placeholder(self.backend(), 1),
-                placeholder(self.backend(), 2)
+                placeholder(self.backend(), 1)?,
+                placeholder(self.backend(), 2)?
             ),
             vec![
                 sea_orm::Value::from(delta as i64),
@@ -759,12 +763,12 @@ impl BatchRepository for DatabaseBatchRepository {
         use sea_orm::ConnectionTrait;
         let row = self
             .db
-            .query_one(sea_orm::Statement::from_sql_and_values(
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT cancelled_at FROM {} WHERE id = {}",
                     self.batches,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(id.to_string())],
             ))
@@ -793,24 +797,24 @@ impl BatchRepository for DatabaseBatchRepository {
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches txn: {e}")))?;
 
-        let delete = |table: &str, key: &str| {
-            sea_orm::Statement::from_sql_and_values(
+        let delete = |table: &str, key: &str| -> Result<sea_orm::Statement, FrameworkError> {
+            Ok(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "DELETE FROM {} WHERE {} = {}",
                     table,
                     key,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(id.to_string())],
-            )
+            ))
         };
 
-        txn.execute(delete(&self.settlements, "batch_id"))
+        txn.execute_raw(delete(&self.settlements, "batch_id")?)
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batch_settlements delete: {e}")))?;
         let removed = txn
-            .execute(delete(&self.batches, "id"))
+            .execute_raw(delete(&self.batches, "id")?)
             .await
             .map_err(|e| FrameworkError::internal(format!("job_batches delete: {e}")))?
             .rows_affected()
@@ -830,13 +834,13 @@ impl DatabaseBatchRepository {
         use sea_orm::ConnectionTrait;
         let rows = self
             .db
-            .query_all(sea_orm::Statement::from_sql_and_values(
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
                 self.backend(),
                 format!(
                     "SELECT job_id FROM {} WHERE batch_id = {} AND failed = 1 \
-                     ORDER BY settled_at, job_id",
+             ORDER BY settled_at, job_id",
                     self.settlements,
-                    placeholder(self.backend(), 1)
+                    placeholder(self.backend(), 1)?
                 ),
                 vec![sea_orm::Value::from(id.to_string())],
             ))

@@ -225,10 +225,12 @@ Auth::logout().await?;
 
 `Auth::attempt` validates credentials through the default stateful guard and
 its configured `UserProvider`; this is the path used by the generated
-full-stack scaffold. `Auth::password()`, password reset, `BruteForce`,
-passkeys, magic links, OAuth, bearer sessions, and Magnetar session management
-require the installed Magnetar engine. Email verification and the compatibility
-`TwoFactor` facade remain framework-owned. See
+full-stack scaffold. Password reset also supports already verified users through
+an explicitly reset-capable provider such as `EloquentUserProvider`; install
+Magnetar when reset must serve as atomic first mailbox proof. `Auth::password()`,
+`BruteForce`, passkeys, magic links, OAuth, bearer sessions, and Magnetar
+session management require the installed Magnetar engine. Email verification
+and the compatibility `TwoFactor` facade remain framework-owned. See
 [Authentication](authentication.md), [Auth flows](auth-flows.md), and
 [OAuth and passwordless login](oauth.md).
 

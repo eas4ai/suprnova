@@ -588,7 +588,7 @@ impl OpaqueSessionStore for FrameworkSessionStore {
             framework_magnetar_engine_user::Entity::update_many()
                 .col_expr(
                     framework_magnetar_engine_user::Column::SessionVersion,
-                    Expr::col(framework_magnetar_engine_user::Column::SessionVersion).into(),
+                    Expr::col(framework_magnetar_engine_user::Column::SessionVersion),
                 )
                 .filter(framework_magnetar_engine_user::Column::Id.eq(user_id))
                 .filter(framework_magnetar_engine_user::Column::SessionVersion.eq(auth_epoch))
@@ -886,7 +886,7 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
         now: suprnova::chrono::DateTime<suprnova::chrono::Utc>,
         lease_until: suprnova::chrono::DateTime<suprnova::chrono::Utc>,
     ) -> MagnetarResult<LifecycleDeliveryClaim> {
-        let inserted = self.database.execute(sqlite_statement(
+        let inserted = self.database.execute_raw(sqlite_statement(
             "INSERT INTO framework_magnetar_lifecycle_delivery (mutation_id, state, lease_id, lease_until) VALUES (?, 'in_flight', ?, ?) ON CONFLICT(mutation_id) DO NOTHING",
             vec![mutation_id, lease_id, &lease_until.to_rfc3339()],
         )).await.map_err(database_error)?;
@@ -896,7 +896,7 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
 
         let row = self
             .database
-            .query_one(sqlite_statement(
+            .query_one_raw(sqlite_statement(
                 "SELECT state FROM framework_magnetar_lifecycle_delivery WHERE mutation_id = ?",
                 vec![mutation_id],
             ))
@@ -910,7 +910,7 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
             return Ok(LifecycleDeliveryClaim::AlreadyDelivered);
         }
 
-        let reclaimed = self.database.execute(sqlite_statement(
+        let reclaimed = self.database.execute_raw(sqlite_statement(
             "UPDATE framework_magnetar_lifecycle_delivery SET lease_id = ?, lease_until = ? WHERE mutation_id = ? AND state = 'in_flight' AND lease_until <= ?",
             vec![lease_id, &lease_until.to_rfc3339(), mutation_id, &now.to_rfc3339()],
         )).await.map_err(database_error)?;
@@ -922,7 +922,7 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
     }
 
     async fn mark_delivered(&self, mutation_id: &str, lease_id: &str) -> MagnetarResult<()> {
-        let updated = self.database.execute(sqlite_statement(
+        let updated = self.database.execute_raw(sqlite_statement(
             "UPDATE framework_magnetar_lifecycle_delivery SET state = 'delivered', lease_id = NULL, lease_until = NULL WHERE mutation_id = ? AND state = 'in_flight' AND lease_id = ?",
             vec![mutation_id, lease_id],
         )).await.map_err(database_error)?;
@@ -937,7 +937,7 @@ impl HostLifecycleDeduplication for SqliteLifecycleDeduplication {
     }
 
     async fn release(&self, mutation_id: &str, lease_id: &str) -> MagnetarResult<()> {
-        self.database.execute(sqlite_statement(
+        self.database.execute_raw(sqlite_statement(
             "DELETE FROM framework_magnetar_lifecycle_delivery WHERE mutation_id = ? AND state = 'in_flight' AND lease_id = ?",
             vec![mutation_id, lease_id],
         )).await.map_err(database_error)?;
@@ -1613,6 +1613,13 @@ impl magnetar::oauth::provider::OAuthProvider for OfflineOAuthProvider {
         Some("https://offline.example.test/userinfo".to_owned())
     }
 
+    fn userinfo_headers(&self) -> Vec<(String, String)> {
+        vec![(
+            "User-Agent".to_owned(),
+            "suprnova-offline-provider".to_owned(),
+        )]
+    }
+
     fn refresh_policy(&self) -> magnetar::oauth::provider::RefreshPolicy {
         magnetar::oauth::provider::RefreshPolicy {
             supported: false,
@@ -1747,6 +1754,10 @@ impl OfflineOAuthTransport {
 
     fn request_count(&self) -> usize {
         self.requests.lock().expect("transport lock").len()
+    }
+
+    fn requests(&self) -> Vec<magnetar::plugin::HttpRequest> {
+        self.requests.lock().expect("transport lock").clone()
     }
 }
 
@@ -2042,6 +2053,23 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         suprnova::magnetar_integration::engine::MagnetarOAuthCompletion::EmailCompletionRequired { .. }
     ));
     assert_eq!(direct_transport.request_count(), 2);
+    let direct_requests = direct_transport.requests();
+    assert_eq!(
+        direct_requests[1].url,
+        "https://offline.example.test/userinfo"
+    );
+    assert!(
+        direct_requests[1]
+            .headers
+            .iter()
+            .any(|(name, value)| { name == "User-Agent" && value == "suprnova-offline-provider" })
+    );
+    assert!(
+        direct_requests[1]
+            .headers
+            .iter()
+            .any(|(name, value)| { name == "Authorization" && value == "Bearer offline-token" })
+    );
 
     let public_transport = Arc::new(OfflineOAuthTransport::new(vec![
         offline_token(),

@@ -247,7 +247,7 @@ Background-Worker (`queue:work`, `workflow:work`, `schedule:run`)
 durchlaufen:
 
 1. Derselbe Boot-Pfad (`Config::init`, `bootstrap_runtime_drivers`, Ihre
-   `bootstrap()`-Funktion) – **nicht** `http_bootstrap()`; dieser Hook gilt
+   `bootstrap()`-Funktion) - **nicht** `http_bootstrap()`; dieser Hook gilt
    nur für den Server, sodass ein Worker-Image ohne gebautes Frontend-Manifest
    booten kann
 2. Ihre eigene Schleife, die sich Arbeit holt und Handler mit derselben

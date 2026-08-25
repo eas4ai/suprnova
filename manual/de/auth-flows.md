@@ -12,10 +12,7 @@ Der Namespace umfasst fünf Oberflächen:
   versendet E-Mails über die [`Mail`](mail.md)-Facade und markiert den
   authentifizierten Besitzer des Tokens über den konfigurierten `UserProvider`
   als verifiziert.
-- `PasswordReset` delegiert die Token-Ausstellung, den Nachweis, die
-  Passwortänderung, die Rotation der Auth-Epoche und den Session-Widerruf an
-  die installierte Magnetar-Engine. Das Framework verantwortet E-Mails und
-  Lifecycle-Events.
+- `PasswordReset` verwendet die installierte Magnetar-Engine, sofern sie verfügbar ist. Ohne Magnetar können verifizierte Konten das Passwort über den konfigurierten `UserProvider` und die Framework-`auth_flow_tokens` zurücksetzen. Nicht verifizierte Konten werden sicher abgewiesen, da ein generischer Provider Magnetars atomare Richtlinie für den erstmaligen E-Mail-Nachweis nicht umsetzen kann.
 - `BruteForce` und `LoginThrottleMiddleware` delegieren den Status der
   Kontosperrung an die installierte Magnetar-Engine.
 - `TwoFactor` ist die Framework-eigene TOTP-Facade über
@@ -74,11 +71,7 @@ nicht zurückrollen.
 - `EmailVerification::verify` verlangt den authentifizierten Token-Besitzer,
   verbraucht den Token und markiert den Benutzer als verifiziert, bevor
   `EmailVerified` ausgelöst wird.
-- `PasswordReset::complete` schreibt zuerst Magnetars
-  Passwort-Reset-Transaktion fest. Diese verbraucht den Token, wendet die
-  Richtlinie für den ersten Nachweis oder für verifizierte Konten an, erhöht
-  die Auth-Epoche und widerruft Sessions sowie Remember-Anmeldedaten.
-  Framework-E-Mails und -Events folgen danach.
+- `PasswordReset::complete` führt den Commit über die installierte Magnetar-Engine aus, sofern sie verfügbar ist, einschließlich Richtlinie für den erstmaligen Nachweis, Fortschreibung der Auth-Epoche und atomarem Widerruf. Der Provider-Fallback gilt nur für verifizierte Konten: Er verbraucht das Framework-Token, rotiert das Provider-Passwort und meldet anschließend die Ergebnisse des Widerrufs von Framework-Sitzungen und Remember-Anmeldungen. E-Mails und Ereignisse werden danach verarbeitet.
 - `BruteForce::unlock_account` schreibt die Entsperrung fest, bevor
   `AccountUnlocked` ausgelöst wird.
 - `TwoFactor::confirm` setzt `confirmed_at`, bevor `TwoFactorEnrolled`
@@ -154,12 +147,7 @@ abgelehnt, ohne verbraucht zu werden.
 
 ### Passwort-Reset und Sperrung
 
-Passwort-Reset und `BruteForce` benötigen die installierte
-Magnetar-Passwort-Engine. `MagnetarConfig::lockout_config` akzeptiert
-`magnetar::password::lockout::LockoutConfig`. Die Standardrichtlinie sperrt
-nach fünf fehlgeschlagenen Versuchen für 15 Minuten, bewahrt Audit-Zeilen
-sieben Tage auf und verweigert den Zugriff, wenn das Sperr-Backend nicht
-verfügbar ist.
+`BruteForce` erfordert die installierte Magnetar-Passwort-Engine. Die Passwortzurücksetzung bevorzugt diese Engine, aber `EloquentUserProvider<M>` unterstützt das Zurücksetzen für bereits verifizierte Benutzer, wenn `M` die Schnittstellen `MustVerifyEmail + CanResetPassword` implementiert. Nicht verifizierte Benutzer erhalten keinen Provider-gestützten Link zum Zurücksetzen. Installieren Sie Magnetar, um das Zurücksetzen als atomaren erstmaligen Postfachnachweis zu verwenden.
 
 Der Passwort-Reset normalisiert eine unbekannte Adresse nur dann zu `Ok(())`,
 wenn Abuse-Limiter, Mail-Konfiguration, Engine und Speicherprüfungen erfolgreich
@@ -247,7 +235,7 @@ use suprnova::auth_flows::EmailVerification;
 // Nach einer neuen Registrierung, wenn der frisch angelegte Benutzer vorliegt:
 EmailVerification::send_link(&user, "https://app.example.com/verify-email").await?;
 
-// Optionale Prüfung auf der Landingpage – nicht verbrauchend, sodass ein
+// Optionale Prüfung auf der Landingpage - nicht verbrauchend, sodass ein
 // Neuladen der Seite den Token nicht verbraucht.
 let valid: bool = EmailVerification::check(&token_str).await?;
 
@@ -532,7 +520,7 @@ denselben `POST /login`-Endpunkt, der auch eine E-Mail-lose
 Bei Sperrung liefert die Middleware:
 
 - Status `429 Too Many Requests`.
-- `Retry-After` Header – Sekunden, berechnet aus dem
+- `Retry-After` Header - Sekunden, berechnet aus dem
   `locked_until` des Lockouts via `LockoutStatus::retry_after_seconds`. Fällt auf
   `900` zurück (15 Minuten, die Standard-Sperrzeit von Magnetar), falls der
   Zeitstempel fehlt.
@@ -1096,7 +1084,7 @@ das gesamte Binary.
 |---|---|
 | `suprnova::auth_flows::EmailVerification` | `send_link`, `resend`, `check` und akteurgebundenes `verify`; `verify` gibt die Benutzer-ID zurück. |
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` für 403-JSON und `redirect_to(path)` für Browser- oder Inertia-Redirects. |
-| `suprnova::auth_flows::PasswordReset` | von Magnetar gestütztes `send_link`, `check`, `complete` und `complete_with_outcome`. |
+| `suprnova::auth_flows::PasswordReset` | Magnetar-zentrierte Zurücksetzung mit einem `UserProvider`-Fallback für verifizierte Konten über Framework-`auth_flow_tokens`. |
 | `suprnova::MustVerifyEmail` | Anwendungsnutzer-Contract für die Framework-Verifizierungs-Facade. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM-Tabellendefinition für Framework-Verifizierungs-Token. |
 | `suprnova::auth_flows::BruteForce` | Auf Magnetar basierende Account-Lockout-Facade. |

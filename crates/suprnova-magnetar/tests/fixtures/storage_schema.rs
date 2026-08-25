@@ -751,7 +751,7 @@ pub mod sql_stores {
                 users::Entity::update_many()
                     .col_expr(
                         users::Column::AuthEpoch,
-                        Expr::col(users::Column::AuthEpoch).into(),
+                        Expr::col(users::Column::AuthEpoch),
                     )
                     .filter(users::Column::Id.eq(user_id))
                     .filter(users::Column::AuthEpoch.eq(auth_epoch))
@@ -1474,14 +1474,14 @@ pub async fn database() -> DatabaseConnection {
             .if_not_exists()
             .to_string(SqliteQueryBuilder),
     ] {
-        db.execute(Statement::from_string(DbBackend::Sqlite, sql))
+        db.execute_raw(Statement::from_string(DbBackend::Sqlite, sql))
             .await
             .unwrap();
     }
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "CREATE UNIQUE INDEX IF NOT EXISTS storage_accounts_provider_subject \
-         ON storage_accounts (provider, provider_account_id)"
+     ON storage_accounts (provider, provider_account_id)"
             .to_owned(),
     ))
     .await

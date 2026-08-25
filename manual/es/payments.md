@@ -40,8 +40,8 @@ de por crates.io:
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Registra el proveedor y el router de webhooks en el arranque. El router
@@ -137,7 +137,7 @@ consulta [Pagos - Integración de Frontend](payments-frontend.md).
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Variables de entorno requeridas:
@@ -171,7 +171,7 @@ Stripe implementa todos los traits, incluidos los opcionales `Payment`
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Variables de entorno requeridas:

@@ -621,8 +621,7 @@ contrato - las APIs públicas deben seguir devolviendo `Result`. Ver
 
 ### Proveedor de pago
 
-Un tipo que implementa el super-trait `PaymentProvider` (= `Checkout` +
-`Subscription` + `CustomerStore` + `WebhookHandler`). Adaptadores de
+Un tipo que implementa el super-trait `PaymentProvider` (= `Checkout` + `Subscription` + `CustomerStore` + `WebhookHandler`). Adaptadores de
 referencia: `suprnova-payments-stripe` (gateway, impl completo de
 `Payment`) y `suprnova-payments-paddle` (merchant-of-record, sin
 `Payment`).

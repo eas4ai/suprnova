@@ -232,6 +232,24 @@ where
         }))
     }
 
+    fn supports_password_reset(&self) -> bool {
+        true
+    }
+
+    async fn retrieve_verified_user_for_password_reset(
+        &self,
+        email: &str,
+    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        let user = M::query().filter("email", email).first().await?;
+        Ok(user
+            .filter(MustVerifyEmail::is_email_verified)
+            .map(|user| AuthFlowUser {
+                id: user.get_auth_identifier(),
+                email: user.email_for_reset().to_owned(),
+                name: user.name().map(str::to_owned),
+            }))
+    }
+
     async fn flow_user_by_id(&self, id: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = self.find_by_identifier(id).await?;
         // This path exists only to address the password-changed mail in the

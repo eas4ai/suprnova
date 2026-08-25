@@ -319,7 +319,7 @@ response
 É a única asserção `async`, pois é a única que faz E/S; ainda retorna `&Self`,
 portanto `.await` fica em linha e a cadeia continua depois dele.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `TestResponse` do Laravel vive no mesmo processo PHP que a aplicação sob
 teste, portanto `assertSessionHas` lê `$this->session()` diretamente - não há
@@ -396,7 +396,7 @@ response.assert_inertia().has_flash("toast", None::<serde_json::Value>);
 Inertia faz após a visita inicial: emitem novamente a mesma página como uma
 recarga parcial e verificam o que voltou. Como os testes HTTP do Suprnova
 atravessam um soquete loopback hyper real e cada arquivo de teste possui seu
-próprio harness (veja [Onde cada peça fica](#onde-cada-peça-fica) abaixo), estes
+próprio harness (veja [Onde cada peça fica](#onde-cada-peça-vive) abaixo), estes
 métodos não levam transporte embutido - anexe um com `with_reload`, uma closure
 de um `ReloadRequest` (a URL, componente, versão e chaves de recarga parcial a
 enviar) a um future que produz o `AssertableInertia` recarregado:
@@ -435,13 +435,13 @@ essa instrução. O resultado de uma recarga leva o mesmo recarregador adiante,
 portanto uma segunda `.reload_only(...).await` a partir dele funciona sem
 anexar novamente um.
 
-### Por que o Suprnova diverge
+### Por que Suprnova diverge
 
 O `ReloadRequest` do Laravel emite novamente a solicitação pelo mesmo kernel PHP
 em processo usado pelo teste original - um cliente de teste, sempre disponível.
 Os testes HTTP do Suprnova conduzem um loopback hyper/TCP real e cada arquivo de
 teste define seu próprio par `spawn_server` / `request` (veja
-[Onde cada peça fica](#onde-cada-peça-fica) abaixo), portanto não há um cliente
+[Onde cada peça fica](#onde-cada-peça-vive) abaixo), portanto não há um cliente
 único que `AssertableInertia` possa usar - `with_reload` torna isso explícito em
 vez de codificar um harness que um arquivo de teste com formato diferente não
 poderia usar. `component()` também pula a verificação de existência de arquivo
@@ -810,12 +810,11 @@ Uma lista curta de armadilhas que pegam autores de primeira viagem:
 | `Request::new`, `with_params`, `with_route_pattern`, `with_peer_addr` | `framework/src/http/request.rs` |
 | `MiddlewareRegistry::new`, `append`, `prepend` | `framework/src/middleware/registry.rs` |
 | Harness de teste loopback (canônico) | `framework/tests/cors_middleware.rs` |
+| `TestResponse` (asserções fluentes sobre a tripla acima) | `framework/src/testing/response.rs` |
+| `AssertableInertia`, `ReloadRequest` (asserções fluentes de objeto de página Inertia) | `framework/src/testing/inertia.rs` |
 | Harness de captura de `Request` em processo | `framework/tests/http_request_accessors.rs` |
 | Padrão de teste do limite de panic | `framework/tests/middleware_panic_safety.rs` |
 | Padrão de ponta a ponta de auth + middleware | `framework/tests/email_verified_middleware.rs` |
-
-| `TestResponse` (asserções fluentes sobre a tripla acima) | `framework/src/testing/response.rs` |
-| `AssertableInertia`, `ReloadRequest` (asserções fluentes de objeto de página Inertia) | `framework/src/testing/inertia.rs` |
 
 ## Próximos passos
 

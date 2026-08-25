@@ -64,8 +64,8 @@ impl Channel for DatabaseChannel {
             format!(
                 "INSERT INTO notifications (id, type, notifiable_type, notifiable_id, data, read_at, created_at, updated_at) \
                  VALUES ({}, NULL, {})",
-                placeholder_list(backend, 1, 5),
-                placeholder_list(backend, 6, 2)
+                placeholder_list(backend, 1, 5)?,
+                placeholder_list(backend, 6, 2)?
             ),
             [
                 id.into(),
@@ -78,7 +78,7 @@ impl Channel for DatabaseChannel {
             ],
         );
         self.db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| FrameworkError::internal(format!("DatabaseChannel insert: {e}")))?;
         Ok(())

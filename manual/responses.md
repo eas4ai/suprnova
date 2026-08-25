@@ -58,7 +58,7 @@ Two streaming constructors exist for long-lived responses:
   own name) plus a configurable terminal frame. See [Server-Sent Events](sse.md).
 - `HttpResponse::stream_json(stream)` - Laravel's `ResponseFactory::streamJson`. Wraps a
   `Stream` of any `Serialize` value and flushes it as one incrementally-built JSON array
-  instead of buffering the whole collection first. See [Server-Sent Events](sse.md#event_stream-and-stream_json).
+  instead of buffering the whole collection first. See [Server-Sent Events](sse.md#event-stream-and-stream-json).
 
 ### Status, headers, cookies
 

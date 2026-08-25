@@ -185,7 +185,7 @@ Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, ove
 Cada campo tiene como predeterminado `None` y difiere a la resolución normal
 que ya ejecuta `Queue::push`; un campo `Some` gana sobre todo ello para este
 único push, superando tanto una ruta registrada con
-[`Queue::route`](#queue-routing) como la declaración `Job::*` del propio job
+[`Queue::route`](#enrutamiento-de-colas) como la declaración `Job::*` del propio job
 para ese campo:
 
 | Campo | Supera a |
@@ -315,7 +315,7 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 La resolución se ejecuta en orden de mayor prioridad primero:
 
 1. una anulación por push pasada a `Queue::push_with` / `Queue::later_with`
-   (consulta [Anulaciones por push con `EnvelopeOverrides`](#per-push-overrides-with-envelopeoverrides))
+   (consulta [Anulaciones por push con `EnvelopeOverrides`](#anulaciones-por-push-con-envelopeoverrides))
 2. una ruta registrada con `Queue::route`
 3. el propio `Job::queue` / `Job::connection` del job
 4. el driver / el valor por defecto global

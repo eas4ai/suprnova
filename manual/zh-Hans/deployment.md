@@ -109,8 +109,10 @@ suprnova docker:init
 这会编写一个具有三个阶段的 `Dockerfile`:
 
 1. **前端构建** - `node:20-alpine`，对您的 `frontend/` Inertia 应用（根据脚手架选择为 Svelte 5、React 19 或 Vue 3.5）运行 `npm ci && npm run build`。
-2. **后端构建** - `rust:1.91.1-slim-bookworm`，以发布模式编译您的 crate，具有依赖项缓存。
+2. **后端构建** - `rust:1.94.0-slim-bookworm`，以发布模式编译您的 crate，具有依赖项缓存。
 3. **运行时** - `debian:bookworm-slim`，复制编译的二进制文件和 Vite 输出，以非 root `appuser` 身份运行，公开端口 8765，并运行 `CMD ["./app"]`（自动迁移的服务器）。
+
+当前 `main` 使用 SeaORM 2.0、SeaQuery 1.0 和 SQLx 0.9。直接调用 SeaORM 的应用程序必须导入 `ExprTrait` 以使用 SeaQuery 表达式方法，并对预构建的 `Statement` 值使用显式 `*_raw` 连接方法。此次依赖项升级不需要迁移应用程序数据。
 
 在推送前在本地构建和运行以验证：
 

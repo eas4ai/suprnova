@@ -3,7 +3,7 @@
 //! These helpers intentionally inspect the catalog before emitting DDL instead
 //! of using backend-specific `IF NOT EXISTS` clauses.
 
-use sea_orm::sea_query::{Alias, Index, IntoIden, TableRef};
+use sea_orm::sea_query::{Alias, Index, IntoTableRef, TableRef};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 use crate::{Error, Result};
@@ -37,9 +37,10 @@ pub async fn has_table<C: ConnectionTrait + ?Sized>(
             "SELECT 1 FROM information_schema.tables WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND table_type = 'BASE TABLE' LIMIT 1",
             vec![schema.map(str::to_owned).into(), table.to_owned().into()],
         ),
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     Ok(database
-        .query_one(Statement::from_sql_and_values(backend, sql, values))
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration table", error))?
         .is_some())
@@ -74,9 +75,10 @@ pub async fn has_column<C: ConnectionTrait + ?Sized>(
                 column.to_owned().into(),
             ],
         ),
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     Ok(database
-        .query_one(Statement::from_sql_and_values(backend, sql, values))
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration column", error))?
         .is_some())
@@ -126,9 +128,10 @@ pub async fn has_index<C: ConnectionTrait + ?Sized>(
                 index.to_owned().into(),
             ],
         ),
+        _ => return Err(super::unsupported_backend_error(backend)),
     };
     Ok(database
-        .query_one(Statement::from_sql_and_values(backend, sql, values))
+        .query_one_raw(Statement::from_sql_and_values(backend, sql, values))
         .await
         .map_err(|error| database_error("checking migration index", error))?
         .is_some())
@@ -166,7 +169,7 @@ pub async fn create_index_if_missing<C: ConnectionTrait + ?Sized>(
         create.col(Alias::new(*column));
     }
     database
-        .execute(backend.build(&create))
+        .execute(&create)
         .await
         .map_err(|error| database_error("creating guarded migration index", error))?;
     Ok(GuardReport { statements: 1 })
@@ -176,21 +179,21 @@ fn table_ref(backend: DbBackend, schema: Option<&str>, table: &str) -> Result<Ta
     match (backend, schema) {
         (DbBackend::Postgres, Some(schema)) => {
             validate_identifier(schema)?;
-            Ok(TableRef::SchemaTable(
-                Alias::new(schema).into_iden(),
-                Alias::new(table).into_iden(),
-            ))
+            Ok((Alias::new(schema), Alias::new(table)).into_table_ref())
         }
         (DbBackend::MySql, Some(_)) => Err(Error::InvalidInput {
             field: "mysql schema-qualified index".to_owned(),
             message: "MySQL guarded index emission requires an unqualified application binding"
                 .to_owned(),
         }),
-        (_, None) => Ok(TableRef::Table(Alias::new(table).into_iden())),
+        (DbBackend::Sqlite | DbBackend::Postgres | DbBackend::MySql, None) => {
+            Ok(Alias::new(table).into_table_ref())
+        }
         (DbBackend::Sqlite, Some(_)) => Err(Error::InvalidInput {
             field: "sqlite schema-qualified index".to_owned(),
             message: "SQLite guarded index emission requires an unqualified table".to_owned(),
         }),
+        _ => Err(super::unsupported_backend_error(backend)),
     }
 }
 

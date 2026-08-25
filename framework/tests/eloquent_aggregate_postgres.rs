@@ -40,7 +40,7 @@ async fn postgres_aggregates_decode_by_a_stable_alias() {
         "INSERT INTO suprnova_aggregate_probe (id, category, amount) VALUES \
              (1, 'kept', 10.0), (2, 'kept', 20.0), (3, 'other', 30.0)",
     ] {
-        conn.execute(Statement::from_string(backend, sql.to_string()))
+        conn.execute_raw(Statement::from_string(backend, sql.to_string()))
             .await
             .expect("create aggregate fixture");
     }
@@ -74,7 +74,7 @@ async fn postgres_aggregates_decode_by_a_stable_alias() {
     assert_eq!(empty.clone().min::<f64>("amount").await.unwrap(), None);
     assert_eq!(empty.max::<f64>("amount").await.unwrap(), None);
 
-    conn.execute(Statement::from_string(
+    conn.execute_raw(Statement::from_string(
         backend,
         "DROP TABLE suprnova_aggregate_probe".to_string(),
     ))

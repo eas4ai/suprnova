@@ -191,30 +191,21 @@ MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 ```
 
-每次发送都会在该目录中产生一个 `<millis>-<seq>.eml`。用任何邮件客户端打开它
-（Thunderbird、Apple Mail、`mutt -f`），就能看到收件人看到的消息 - 两种替代正文、
-每一个附件，以及完整的请求头集合，包括 `X-Priority`、`X-Tag`、
+每次发送都会在该目录中产生一个 `<millis>-<seq>.eml`。用任何邮件客户端打开它（Thunderbird、Apple Mail、`mutt -f`），就能看到收件人看到的消息 - 两种替代正文、每一个附件，以及完整的请求头集合，包括 `X-Priority`、`X-Tag`、
 `X-Metadata-*` 和 `Return-Path`。
 
 该目录会在第一次发送时创建。未设置 `MAIL_FILE_PATH` 时，邮件会落在
-`storage_path("mail")` 中 - 与其他 `storage/` 使用者相同的路径族，因此即使服务管理器
-从其他位置启动进程，目录也会留在应用基目录内。绝对路径的 `MAIL_FILE_PATH` 按原样使用；
-相对路径则以应用基目录（可用 `APP_BASE_PATH` 覆盖的 `base_path`）为锚点。
+`storage_path("mail")` 中 - 与其他 `storage/` 使用者相同的路径族，因此即使服务管理器从其他位置启动进程，目录也会留在应用基目录内。绝对路径的 `MAIL_FILE_PATH` 按原样使用；相对路径则以应用基目录（可用 `APP_BASE_PATH` 覆盖的 `base_path`）为锚点。
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 没有文件邮件程序；它的 `log` 邮件程序会把原始 MIME 写入日志通道，
-这意味着必须在日志文件里搜索 MIME 边界，才能重建附件。每条消息写入一个真实的 `.eml`
-会让产物可以直接打开，而不是需要重建。代价是邮件会在磁盘上累积 - 这个驱动程序永远不会清理，
-所以请把 `MAIL_FILE_PATH` 当作临时空间。
+Laravel 没有文件邮件程序；它的 `log` 邮件程序会把原始 MIME 写入日志通道，这意味着必须在日志文件里搜索 MIME 边界，才能重建附件。每条消息写入一个真实的 `.eml`
+会让产物可以直接打开，而不是需要重建。代价是邮件会在磁盘上累积 - 这个驱动程序永远不会清理，所以请把 `MAIL_FILE_PATH` 当作临时空间。
 
 ### 每个 `.eml` 文件都是一个可用凭据，本身不会过期
 
-密码重置和邮箱验证邮件携带一次性 bearer 链接，而 `file` 驱动程序会像 SMTP 一样准确地写出
-这些链接 - 任何能打开文件的人都可以读取。与 `log` 驱动程序的流不同，这是持久存储：
-`MAIL_FILE_PATH` 不会清理，因此第一天写入的令牌在第一百天仍会躺在那里，在过期之前仍然有效。
-请像对待包含重置链接的日志文件一样处理这个目录的访问权限 - 不要把它纳入版本控制，
-限制能够读取部署文件系统的人员，并且如果 `file` 在接近真实流量的地方运行，请按计划清理它。
+密码重置和邮箱验证邮件携带一次性 bearer 链接，而 `file` 驱动程序会像 SMTP 一样准确地写出这些链接 - 任何能打开文件的人都可以读取。与 `log` 驱动程序的流不同，这是持久存储：
+`MAIL_FILE_PATH` 不会清理，因此第一天写入的令牌在第一百天仍会躺在那里，在过期之前仍然有效。请像对待包含重置链接的日志文件一样处理这个目录的访问权限 - 不要把它纳入版本控制，限制能够读取部署文件系统的人员，并且如果 `file` 在接近真实流量的地方运行，请按计划清理它。
 
 ## `Mailable` trait
 
@@ -309,8 +300,7 @@ Mail::to("alice@example.org")
     .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
     .await?;
 ```
-把已入队的分发路由到特定队列或连接，可以使用 `.on_queue(...)` / `.on_connection(...)`，
-也可以通过 `Mailable::queue(&self)` 给 `Mailable` 本身提供默认值：
+把已入队的分发路由到特定队列或连接，可以使用 `.on_queue(...)` / `.on_connection(...)`，也可以通过 `Mailable::queue(&self)` 给 `Mailable` 本身提供默认值：
 
 ```rust
 Mail::to("alice@example.org")
@@ -320,8 +310,7 @@ Mail::to("alice@example.org")
 ```
 
 `.on_queue(...)` 的优先级高于 `Mailable::queue()` 和为邮件分发作业注册的任何
-`Queue::route` - 这与 `Queue::push_with` 在各处适用的“逐次推送覆盖优先”规则相同。
-参见[队列](queues.md#queue-routing)。
+`Queue::route` - 这与 `Queue::push_with` 在各处适用的“逐次推送覆盖优先”规则相同。参见[队列](queues.md#queue-routing)。
 
 同一道空正文防护，在队列路径上也会运行，所以一个配置错误的 Mailable，会在推送时就被拒绝，而不会等到任何信封被创建之后。
 
@@ -546,8 +535,7 @@ Mail::to(&user.email)
 五个优先级的常量位于 `suprnova::mail::{PRIORITY_HIGHEST, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_LOWEST}` - 和 Laravel 用的是同一套 `1..=5` 整数刻度。
 ### SES 发送选项
 
-Amazon SES v2 的 `SendEmail` 除消息本身之外还接受三个选项。可以在传输层上固定它们，
-也可以通过请求头逐条消息覆盖：
+Amazon SES v2 的 `SendEmail` 除消息本身之外还接受三个选项。可以在传输层上固定它们，也可以通过请求头逐条消息覆盖：
 
 ```rust
 use suprnova::mail::ses::SesMailTransport;
@@ -564,8 +552,7 @@ let transport = SesMailTransport::new(key, secret, "us-east-1")
 | `X-SES-CONFIGURATION-SET` | `ConfigurationSetName` | 配置集名称 |
 | `X-SES-LIST-MANAGEMENT-OPTIONS` | `ListManagementOptions` | `my-list`、`contactListName=my-list` 或 `my-list; topicName=weekly` |
 
-请求头总是优先于传输层默认值，因此一个多租户传输层配合逐消息请求头，
-即可覆盖常见场景：
+请求头总是优先于传输层默认值，因此一个多租户传输层配合逐消息请求头，即可覆盖常见场景：
 
 ```rust
 Mail::to(&user.email)
@@ -574,8 +561,7 @@ Mail::to(&user.email)
     .await?;
 ```
 
-这些请求头是传输层指令，而不是消息内容：构建请求时会消费它们，
-它们永远不会被渲染进发送给收件人的 MIME 中。
+这些请求头是传输层指令，而不是消息内容：构建请求时会消费它们，它们永远不会被渲染进发送给收件人的 MIME 中。
 
 ### 为什么 Suprnova 有所不同
 

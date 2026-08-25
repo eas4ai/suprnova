@@ -129,7 +129,7 @@ Quand vous exécutez `suprnova serve`, le CLI :
 8. Lance `npm run dev` dans `frontend/` pour Vite, ce qui donne le HMR pour les
    composants Svelte/React/Vue et les classes Tailwind.
 9. Lance chaque processus supplémentaire déclaré dans le `Suprnova.toml` du
-   projet (voir [Processus de dev supplémentaires](#extra-dev-processes)
+   projet (voir [Processus de dev supplémentaires](#processus-de-dev-supplémentaires)
    ci-dessous), chacun avec son préfixe `[name]` - workers de file d'attente,
    tailers de logs, tout autre processus que vous auriez autrement à jongler
    dans un autre terminal.
@@ -144,8 +144,8 @@ Quand vous exécutez `suprnova serve`, le CLI :
 11. Redirige le stdout/stderr de chaque processus enfant vers votre terminal
     avec un préfixe `[name]` (`[backend]`, `[frontend]`, ou le nom configuré du
     processus), éventuellement horodaté avec `--timestamps` - ou, avec
-    `--json`, sous forme d'événements NDJSON à la place (voir [Sortie JSON]
-    (#json-output) ci-dessous).
+    `--json`, sous forme d'événements NDJSON à la place (voir [Sortie JSON](#sortie-json)
+    ci-dessous).
 
 `Ctrl+C` signale au gestionnaire de processus de positionner son flag d'arrêt,
 de tuer chaque processus enfant, et de quitter. Si un processus enfant quitte
@@ -164,7 +164,7 @@ stabilité remet le compteur à zéro, comme le délai de backoff. L'abandon aff
 un message actionnable et cesse de réessayer *uniquement* ce processus ; les
 autres (et la session elle-même) continuent de tourner, ce qui correspond au
 comportement par défaut de `concurrently --restart-tries=5` côté Laravel. Voir
-[Dépannage](#a-process-keeps-crash-looping).
+[Dépannage](#un-processus-boucle-sur-les-crashs).
 
 
 ### Pourquoi Suprnova diverge
@@ -187,11 +187,11 @@ dans un seul terminal est la norme dans l'écosystème des outils de développem
 Rust (`cargo watch`, `bacon`, `just`), et un registre de processus doté de
 préfixes colorés fournit déjà le signal « quel processus a dit cela » qu'offre
 une TUI. Le travail sous-jacent de `--stream`  -  un flux d'événements temps réel
-scriptable  -  est fourni par `--json` (voir [Sortie JSON](#json-output)) ; la
+scriptable  -  est fourni par `--json` (voir [Sortie JSON](#sortie-json)) ; la
 TUI à plusieurs panneaux de `--tabs` est le refus délibéré, non une lacune  -
 un second modèle d'interaction et une seconde bibliothèque à maintenir sur tous
 les terminaux pour un problème que cette page résout déjà. Voir la ligne
-correspondante dans [Parité](parity.md#what-we-wont-ship-and-why).
+correspondante dans [Parité](parity.md#what-we-won-t-ship-and-why).
 
 ## Rechargement à chaud
 

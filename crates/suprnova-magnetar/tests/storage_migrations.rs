@@ -19,10 +19,8 @@ async fn guarded_lookup_indexes_are_replay_safe() {
 async fn missing_role_columns_skip_index_creation() {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
     let db = Database::connect("sqlite::memory:").await.unwrap();
-    db.execute(Statement::from_string(
-        DbBackend::Sqlite,
-        "CREATE TABLE storage_tokens (id INTEGER PRIMARY KEY, digest TEXT NOT NULL, purpose TEXT NOT NULL)",
-    ))
+    db.execute_raw(Statement::from_string(DbBackend::Sqlite,
+    "CREATE TABLE storage_tokens (id INTEGER PRIMARY KEY, digest TEXT NOT NULL, purpose TEXT NOT NULL)",))
     .await
     .unwrap();
     let report = sqlite::apply::<StorageSchema>(&db).await.unwrap();

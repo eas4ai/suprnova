@@ -24,7 +24,7 @@ suprnova serve [OPTIONS]
 | `--no-restart` | `false` | 不重新 spawn 崩溃的开发进程 - 而是拆掉整个会话（旧行为） |
 | `--restart-tries <N>` | `5` | 在连续崩溃达到此次数后放弃重试进程。与 `--no-restart` 一起使用时忽略，后者已会在第一次崩溃时结束会话。 |
 | `--timestamps` | `false` | 为每个输出行添加 `HH:MM:SS` 时钟时间前缀 |
-| `--json` | `false` | 在 stdout 上输出每行一个 JSON 对象（NDJSON），而不是带前缀的文本 - 参见[JSON 输出](#json-output)。与 `--timestamps` 组合不是错误；`--timestamps` 不会有额外效果，因为每个事件已携带自己的时间戳。 |
+| `--json` | `false` | 在 stdout 上输出每行一个 JSON 对象（NDJSON），而不是带前缀的文本 - 参见[JSON 输出](#json-输出)。与 `--timestamps` 组合不是错误；`--timestamps` 不会有额外效果，因为每个事件已携带自己的时间戳。 |
 
 CLI 标志优先于环境变量，环境变量又优先于内置的默认值。脚手架生成的 `.env` 自带 `SERVER_PORT=8765` 和 `VITE_PORT=5765`；除非您用 `--port` 覆盖，否则您会看到用的就是这些值。
 
@@ -96,19 +96,19 @@ suprnova serve --skip-types
 6. 如果 `node_modules` 还不存在，就在 `frontend/` 里运行 `npm install`。在 `--backend-only` 下会被跳过。
 7. 为后端 spawn 一个 `cargo watch -x 'run --bin <package-name>'`。每当一个 `.rs` 文件发生变化，`cargo-watch` 就会重新运行这个二进制文件。
 8. 为 Vite 在 `frontend/` 里 spawn 一个 `npm run dev`，这会给您 Svelte/React/Vue 组件和 Tailwind 类的 HMR。
-9. spawn 项目 `Suprnova.toml` 中声明的每个额外进程（见下方[额外开发进程](#extra-dev-processes)），每个都有自己的 `[name]` 前缀 - 队列工作进程、日志 tailer，或任何您否则要在另一个终端中调度的东西。
+9. spawn 项目 `Suprnova.toml` 中声明的每个额外进程（见下方[额外开发进程](#额外开发进程)），每个都有自己的 `[name]` 前缀 - 队列工作进程、日志 tailer，或任何您否则要在另一个终端中调度的东西。
 10. 在 `src/` 上启动一个文件监视器，每当一个 `.rs` 文件变化，并且这一连串保存已经安静了 500 毫秒之后，就重新运行这个类型生成器。这个防抖是后沿触发的，所以一连串的变更 - `cargo fmt`、跨多个文件的保存时格式化、一次分支切换 - 会合并成恰好一次再生成，在最后一次写入*之后*运行，而不是在第一个文件上就触发、错过剩下的文件。
-11. 把每个子进程的 stdout/stderr 都转发到您的终端，带着 `[name]` 前缀（`[backend]`、`[frontend]`，或进程的配置名称），可选择用 `--timestamps` 加上时间戳 - 或者使用 `--json` 时改为 NDJSON 事件（见下方[JSON 输出](#json-output)）。
+11. 把每个子进程的 stdout/stderr 都转发到您的终端，带着 `[name]` 前缀（`[backend]`、`[frontend]`，或进程的配置名称），可选择用 `--timestamps` 加上时间戳 - 或者使用 `--json` 时改为 NDJSON 事件（见下方[JSON 输出](#json-输出)）。
 
 `Ctrl+C` 会通知这个管理器去设置它的关闭标志、杀掉每个子进程，然后退出。如果一个子进程自己退出了 - 一次 `cargo watch` 无法恢复的严重 Rust 编译错误、崩溃的 Vite 进程、失败的 `Suprnova.toml` 进程 - 它会在短暂退避后重新 spawn（200ms，每次连续崩溃翻倍，上限为 5s；持续运行 30s 的进程会重置该爬升），而不是拆掉会话。传递 `--no-restart` 可恢复旧行为：任一子进程退出会立即关闭整个会话。
 
-持续崩溃的进程不会永远重试：`--restart-tries`（默认 `5`）会限制 `serve` 在放弃该一个进程之前重试的连续崩溃次数 - 持续运行 30 秒会重置计数，与退避延迟相同。放弃时会打印可操作的消息，并**只**停止重试该进程；其他进程（以及会话本身）继续运行，这与 Laravel 自己的 `concurrently --restart-tries=5` 默认值相匹配。参见[故障排查](#a-process-keeps-crash-looping)。
+持续崩溃的进程不会永远重试：`--restart-tries`（默认 `5`）会限制 `serve` 在放弃该一个进程之前重试的连续崩溃次数 - 持续运行 30 秒会重置计数，与退避延迟相同。放弃时会打印可操作的消息，并**只**停止重试该进程；其他进程（以及会话本身）继续运行，这与 Laravel 自己的 `concurrently --restart-tries=5` 默认值相匹配。参见[故障排查](#进程持续崩溃循环)。
 
 ### 为什么 Suprnova 有所不同
 
 Laravel 用户通常会用 `php artisan serve` 跑后端，在另一个终端里跑 `npm run dev`，大多数团队会用一个 `Procfile` 加 `foreman`/`overmind` 来掩盖这种两个终端的割裂。Suprnova 把这个多路复用器当作一个一等的 CLI 命令来发布。您得到的是一个终端、一次 `Ctrl+C`、自动的工具链引导（`cargo-watch`、`npm install`），以及一座类型化的 Inertia 桥，它会随时再生成 `frontend/src/types/inertia-props.ts`，这样您的 Svelte/React/Vue 组件永远能看到当前的 prop 形态，不需要手动同步类型。
 
-Laravel 的 `dev` 命令也提供 `--tabs` 和 `--stream` 模式，两者都通过一个小型 Node TUI（`@laravel/multiplex`）渲染输出。Suprnova 不提供该 TUI：带前缀的单终端输出是 Rust 开发工具生态（`cargo watch`、`bacon`、`just`）的常态，带彩色前缀的进程注册表已提供 TUI 所提供的“哪个进程说了这句话”信号。`--stream` 的底层工作 - 一个可脚本化的实时事件流 - 作为 `--json` 提供（见[JSON 输出](#json-output)）；`--tabs` 的多窗格 TUI 是刻意不做，不是缺口 - 对本页已经解决的问题，第二种交互模型以及第二个需要跨终端保持可用的库是不值得的。参见[兼容性](parity.md#what-we-wont-ship-and-why)中的相应行。
+Laravel 的 `dev` 命令也提供 `--tabs` 和 `--stream` 模式，两者都通过一个小型 Node TUI（`@laravel/multiplex`）渲染输出。Suprnova 不提供该 TUI：带前缀的单终端输出是 Rust 开发工具生态（`cargo watch`、`bacon`、`just`）的常态，带彩色前缀的进程注册表已提供 TUI 所提供的“哪个进程说了这句话”信号。`--stream` 的底层工作 - 一个可脚本化的实时事件流 - 作为 `--json` 提供（见[JSON 输出](#json-输出)）；`--tabs` 的多窗格 TUI 是刻意不做，不是缺口 - 对本页已经解决的问题，第二种交互模型以及第二个需要跨终端保持可用的库是不值得的。参见[兼容性](parity.md#what-we-won-t-ship-and-why)中的相应行。
 
 ## 热重载
 

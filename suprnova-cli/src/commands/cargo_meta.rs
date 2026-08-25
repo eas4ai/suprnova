@@ -81,7 +81,7 @@ mod tests {
 name = "nebula"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91.1"
+rust-version = "1.94.0"
 description = "A starter kit for Suprnova"
 authors = ["eas4ai <shawn@eas4ai.com>"]
 

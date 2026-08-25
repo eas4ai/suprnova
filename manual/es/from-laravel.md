@@ -222,15 +222,7 @@ Auth::attempt(&creds, false).await?;
 Auth::logout().await?;
 ```
 
-`Auth::attempt` valida las credenciales mediante el guard con estado
-predeterminado y su `UserProvider` configurado; este es el camino que usa el
-andamiaje generado de pila completa. `Auth::password()`, el restablecimiento
-de contraseña, `BruteForce`, las passkeys, los enlaces mágicos, OAuth, las
-sesiones bearer y la gestión de sesiones de Magnetar requieren el motor
-Magnetar instalado. La verificación de correo y la fachada de compatibilidad
-`TwoFactor` siguen siendo propiedad del framework. Consulta
-[Autenticación](authentication.md), [Flujos de autenticación](auth-flows.md)
-y [OAuth e inicio de sesión sin contraseña](oauth.md).
+`Auth::attempt` valida las credenciales mediante el guard con estado predeterminado y su `UserProvider` configurado; este es el camino que usa el andamiaje generado de pila completa. El restablecimiento de contraseña admite usuarios ya verificados mediante un proveedor con capacidad de restablecimiento explícita, como `EloquentUserProvider`. Instale Magnetar cuando el restablecimiento deba servir como primera prueba atómica del buzón. `Auth::password()`, `BruteForce`, las claves de acceso, los enlaces mágicos, OAuth, las sesiones con token de portador y la gestión de sesiones de Magnetar requieren el motor Magnetar instalado. See [Authentication](authentication.md), [Auth flows](auth-flows.md), and [OAuth and passwordless login](oauth.md).
 
 ### Migraciones
 

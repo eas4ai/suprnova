@@ -5,7 +5,7 @@ componente de página Svelte / React / Vue. Todo handler que renderiza
 uma página Inertia retorna uma, construída ou através da macro
 [`inertia_response!`](#the-inertia_response-macro) (para props eager
 tipadas, verificadas em tempo de compilação) ou do builder
-[`InertiaResponse`](#the-inertiaresponse-builder) (para todo o resto -
+[`InertiaResponse`](#o-builder-inertiaresponse) (para todo o resto -
 props lazy, props deferred, merge, once, scroll, flash). Este capítulo
 cobre a superfície de resposta de ponta a ponta: a macro, o builder, as
 features do protocolo v3 (reloads parciais, criptografia de histórico,
@@ -103,7 +103,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-A maioria dos apps registra uma única config no boot via [`Inertia::install`](#bootstrap-inertiainstall)
+A maioria dos apps registra uma única config no boot via [`Inertia::install`](#bootstrap-inertia-install)
 e nunca toca neste argumento - a config instalada já é o ponto de
 partida de toda resposta. Passe uma aqui somente para sobrescrever a
 config instalada para uma única página.
@@ -334,7 +334,7 @@ vez de anexar cópias. `Prepend` e `Deep` aceitam o mesmo `match_on`.
 `.prepend()` / `.deep_merge()` / `.match_on(field)` são as mesmas
 configurações como flags separadas, para quando a prop também precisar de uma
 flag de visibilidade ou de cache - veja
-[Compondo flags em uma prop](#composing-flags-on-one-prop).
+[Compondo flags em uma prop](#compondo-flags-em-uma-prop).
 
 `.match_on` aceita um campo ou vários em uma única chamada -
 `.match_on(["id", "slug"])` e `.match_on("id").match_on("slug")` emitem o
@@ -468,7 +468,7 @@ InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.
 ```
 
 `LengthAwarePaginator`, `Paginator` e `CursorPaginator` também implementam
-isso - veja [Paginação](pagination.md#inertia-integration---infinite-scroll-props).
+isso - veja [Paginação](pagination.md#inertia-integration-infinite-scroll-props).
 
 ### Aninhamento por notação de ponto
 
@@ -526,7 +526,7 @@ incorpora um valor que recebe, não se recebe um valor, então uma prop
 incorporação - numa visita completa em que o cliente informa que o valor já
 está em cache, o servidor pula o resolver e não envia valor, como descreve a
 nota abaixo. O que as três mudam é quais blocos de metadados vêm junto - veja
-[Compondo flags em uma prop](#composing-flags-on-one-prop).
+[Compondo flags em uma prop](#compondo-flags-em-uma-prop).
 
 O handler não precisa fazer nada de especial - registre toda prop através do
 builder, e o framework consulta os headers ao serializar o objeto de página.
@@ -654,7 +654,7 @@ somente o registro estático; um provider registrado via
 
 Para dados compartilhados por solicitação (o usuário autenticado, flags com
 escopo de solicitação), implemente
-[`InertiaSharedData`](#per-request-shared-data) e registre o
+[`InertiaSharedData`](#dados-compartilhados-por-solicitação) e registre o
 singleton - o framework chama `share(&req, component)` em toda resposta
 Inertia e mescla o resultado. `component` é a página que está sendo
 renderizada, então um provider pode variar sua saída por página - veja abaixo.
@@ -777,7 +777,7 @@ chain completa espelha o `RedirectResponse` do Laravel.
 
 Para visitas Inertia que não são GET, o framework converte a resposta
 automaticamente para `303 See Other` quando o
-[`Inertia303Middleware`](#bootstrap-inertiainstall) está instalado, para
+[`Inertia303Middleware`](#bootstrap-inertia-install) está instalado, para
 que o navegador emita um GET de acompanhamento limpo em vez de reenviar
 o PUT/PATCH/DELETE original para o alvo do redirect.
 
@@ -870,7 +870,7 @@ uma visita Inertia, porque um navegador que segue um `409` sem header
 O Inertia versiona o manifesto de assets para que um cliente de vida longa
 não tente montar uma página do bundle de ontem contra o servidor de hoje.
 Quando o header `X-Inertia-Version` do cliente não corresponde à versão
-configurada no servidor, [`InertiaVersionMiddleware`](#bootstrap-inertiainstall)
+configurada no servidor, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
 responde com `409 Conflict` e um header `X-Inertia-Location` nomeando a nova
 URL - o cliente Inertia o capta e faz um reload de página inteira, obtendo o
 novo bundle.
@@ -980,7 +980,7 @@ esses binários junto.
    Inertia que não são GET.
 5. Registra `InertiaValidationRedirectMiddleware` - transforma um `422` numa
    visita Inertia em um `303` de volta à página do formulário com os erros em
-   flash. Veja [Falhas de validação](#validation-failures).
+   flash. Veja [Falhas de validação](#falhas-de-validação).
 
 A ordem importa: o middleware de headers é registrado primeiro, então é o
 mais externo e vê toda resposta - incluindo o `409` que o middleware de
@@ -1065,7 +1065,7 @@ strings são injetadas como HTML, então as regras usuais se aplicam.
 O Suprnova conversa com um worker SSR fora do processo - tipicamente o bundle
 `createServer()` de `@inertiajs/{svelte,react,vue}/server` executado sob
 Node / Bun / Deno - por HTTP de loopback. Habilite-o na config que você
-entrega a [`Inertia::install`](#bootstrap-inertiainstall) - essa config é o
+entrega a [`Inertia::install`](#bootstrap-inertia-install) - essa config é o
 ponto de partida de toda resposta, então não há nada para encanar através dos
 seus handlers:
 
@@ -1127,7 +1127,7 @@ sem código adicional.
 
 O comportamento do Inertia é configurado programaticamente via
 `InertiaConfig`, e a config que você entrega a
-[`Inertia::install`](#bootstrap-inertiainstall) é a que serve de ponto
+[`Inertia::install`](#bootstrap-inertia-install) é a que serve de ponto
 de partida para toda resposta. A única variável de ambiente que o
 framework lê diretamente é `SUPRNOVA_FRONTEND` (`svelte` / `react` /
 `vue`), e ela só fornece o nome de arquivo padrão do ponto de entrada e
@@ -1185,7 +1185,7 @@ let cfg = InertiaConfig::new()
 
 O resolver lê a solicitação através de `InertiaRequestExt`, e se aplica
 a toda resposta construída a partir da config que você passa a
-[`Inertia::install`](#bootstrap-inertiainstall) - o lugar usual para um
+[`Inertia::install`](#bootstrap-inertia-install) - o lugar usual para um
 resolver que deve valer para o app inteiro. Sobrescreva-o para uma
 única resposta com `InertiaResponse::with_config(cfg)`. Um resolver
 muda apenas `page.url`. O bounce 409 continua nomeando a URL que de

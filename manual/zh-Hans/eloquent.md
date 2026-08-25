@@ -3132,7 +3132,7 @@ without_touching(async {
 ```
 
 这个作用域由 `tokio::task_local` 支撑，所以其他任务上的并发请求，仍然只遵从它们自己的作用域（或者它的缺席）。
-`without_touching` 也会抑制[父级 touch 级联](#parent-touching) - 在该作用域内保存的子项，不会 touch 其 `touches` 列表中命名的任何所有者。
+`without_touching` 也会抑制[父级 touch 级联](#父级-touch) - 在该作用域内保存的子项，不会 touch 其 `touches` 列表中命名的任何所有者。
 
 `without_touching_on::<Post, _, _>(fut)` 是按类型的形式 - Laravel 的 `Model::withoutTouchingOn([Post::class], $cb)`。在它里面，`post.touch()` 和任何原本会提升 `Post` 的级联都会静默，而其他每种类型的所有者仍会提升：
 

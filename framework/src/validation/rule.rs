@@ -1636,10 +1636,10 @@ pub trait AsyncRule: Send + Sync {
 /// Built-in asynchronous rules.
 pub mod async_rules {
     use super::AsyncRule;
-    use crate::DB;
     use crate::database::placeholder::placeholder;
     use crate::database::validate_identifier;
     use crate::validation::message::ValidationMessage;
+    use crate::{DB, FrameworkError};
     use sea_orm::{ConnectionTrait, Statement, Value};
 
     /// Laravel `unique:table,column` — issues a single parameterized
@@ -1769,15 +1769,16 @@ pub mod async_rules {
             // `values`, which is what keeps `$1`/`$2`/… aligned with the
             // binds across all three clause groups below.
             let mut next = 1usize;
-            let mut bind = |values: &mut Vec<Value>, v: Value| {
+            let mut bind = |values: &mut Vec<Value>, v: Value| -> Result<String, FrameworkError> {
                 values.push(v);
-                let rendered = placeholder(backend, next);
+                let rendered = placeholder(backend, next)?;
                 next += 1;
-                rendered
+                Ok(rendered)
             };
 
             // Target-column predicate.
-            let target = bind(&mut values, Value::from(value.to_string()));
+            let target =
+                bind(&mut values, Value::from(value.to_string())).map_err(|e| e.to_string())?;
             if self.case_insensitive {
                 clauses.push(format!("LOWER({column}) = LOWER({target})"));
             } else {
@@ -1787,14 +1788,14 @@ pub mod async_rules {
             // Exclude the row being edited.
             if let Some((id_column, id)) = &self.except {
                 let id_column = validate_identifier(id_column).map_err(|e| e.to_string())?;
-                let ph = bind(&mut values, id.clone());
+                let ph = bind(&mut values, id.clone()).map_err(|e| e.to_string())?;
                 clauses.push(format!("{id_column} <> {ph}"));
             }
 
             // Scoped uniqueness predicates (AND together).
             for (scope_col, scope_val) in &self.wheres {
                 let scope_col = validate_identifier(scope_col).map_err(|e| e.to_string())?;
-                let ph = bind(&mut values, scope_val.clone());
+                let ph = bind(&mut values, scope_val.clone()).map_err(|e| e.to_string())?;
                 clauses.push(format!("{scope_col} = {ph}"));
             }
 
@@ -1806,7 +1807,7 @@ pub mod async_rules {
             let stmt = Statement::from_sql_and_values(backend, &sql, values);
             let row = conn
                 .inner()
-                .query_one(stmt)
+                .query_one_raw(stmt)
                 .await
                 .map_err(|e| format!("unique query: {e}"))?
                 .ok_or_else(|| "unique query returned no rows".to_string())?;

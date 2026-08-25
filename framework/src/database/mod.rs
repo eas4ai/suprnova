@@ -56,6 +56,25 @@ pub mod model;
 // Internal: hand-written SQL in the queue / notification stores renders its
 // placeholders through here so Postgres gets `$1` instead of `?`.
 pub(crate) mod placeholder;
+
+/// Implementation details used by Suprnova's generated model code.
+///
+/// This is public because attribute macro expansions are compiled in the
+/// consuming crate, outside `suprnova`. Applications must not depend on it.
+#[doc(hidden)]
+pub mod __macro_support {
+    use sea_orm::DatabaseBackend;
+
+    use crate::error::FrameworkError;
+
+    /// Render a backend-aware positional placeholder for generated SQL.
+    pub fn placeholder(
+        backend: DatabaseBackend,
+        position: usize,
+    ) -> Result<String, FrameworkError> {
+        super::placeholder::placeholder(backend, position)
+    }
+}
 pub mod query_builder;
 pub mod route_binding;
 pub mod testing;
@@ -111,6 +130,10 @@ pub type Database = DbConnection;
 
 use crate::error::FrameworkError;
 use crate::{App, Config};
+
+pub(crate) fn unsupported_database_backend(backend: sea_orm::DatabaseBackend) -> FrameworkError {
+    FrameworkError::database(format!("unsupported database backend: {backend:?}"))
+}
 
 /// Database facade - main entry point for database operations
 ///

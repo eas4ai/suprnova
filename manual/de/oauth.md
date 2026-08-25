@@ -14,73 +14,83 @@ Suprnova installiert für diese Flows keine Routen. Anwendungen stellen kleine
 Start- und Callback-Handler bereit und entscheiden, wie sie Magic-Link-E-Mails
 zustellen.
 
-## Magnetar initialisieren
+## Magnetar mit OAuth initialisieren
 
-Initialisieren Sie die Standard-Engines für Passwort, Passkey, Session, Sperre
-und Zwei-Faktor-Authentifizierung nach `DB::init` und nachdem `APP_KEY` `Crypt`
-initialisiert hat:
+Konfigurieren Sie OAuth auf derselben `MagnetarConfig`, die Passwort-, Passkey-, Sitzungs-, Sperr- und Zwei-Faktor-Dienste initialisiert. Die Anbieterregistrierung wird atomar mit diesen Diensten veröffentlicht: Wenn ein Dienst nicht erstellt werden kann, wird keiner davon sichtbar.
 
-```rust
-use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+```rust,no_run
+use std::sync::Arc;
+
+use suprnova::{
+    AbuseLimiter, App, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    FrameworkAbuseLimiter, GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig, OAuthAuthorizationConfig,
+    OAuthHttpTransport, PasskeyConfig, RateLimiterDriver, ReqwestOAuthTransport,
+    RevocationTransport, SecretString, init_magnetar,
+};
+
+fn auth_config(
+    database: DatabaseConnection,
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> MagnetarConfig {
+    let provider = Arc::new(GoogleOAuthProvider::new(
+        GoogleProviderConfig {
+            client_id: "google-client".to_owned(),
+            client_secret: SecretString::from("google-secret".to_owned()),
+            redirect_uri: Some("https://app.example.com/auth/google/callback".to_owned()),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+            endpoints: EndpointOverrides::default(),
+        },
+        revocation,
+    ));
+    let oauth = MagnetarOAuthHostConfig::new(
+        vec![MagnetarOAuthProviderConfig {
+            provider,
+            redirect_uri: "https://app.example.com/auth/google/callback".to_owned(),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+        }],
+        transport,
+        limiter,
+        OAuthAuthorizationConfig::default(),
+        AutoLinkPolicy::default(),
+    )
+    .expect("valid OAuth host configuration");
+
+    MagnetarConfig::from_sea_orm(database)
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_owned(),
+            rp_origin: "https://app.example.com".to_owned(),
+        })
+        .oauth(oauth)
+}
 
 pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
     let database = DB::connection()?;
-    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
-        .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
-
-    init_magnetar(config).await
+    let transport = Arc::new(ReqwestOAuthTransport::try_default()?);
+    let limiter = Arc::new(FrameworkAbuseLimiter::new(
+        App::resolve_make::<dyn RateLimiterDriver>()?,
+    ));
+    init_magnetar(auth_config(
+        database.inner().clone(),
+        transport.clone(),
+        transport,
+        limiter,
+    ))
+    .await
 }
 ```
 
-`MagnetarConfig` verwendet die SeaORM-Verbindung der Anwendung. Die
-Standard-Engine erstellt ihr Schema, wenn `apply_migrations` aktiviert ist;
-dies ist die Standardeinstellung. Setzen Sie `.apply_migrations(false)` nur,
-wenn die Bereitstellung dieselbe Schemaeinrichtung separat ausführt.
+Das Framework re-exportiert den `OAuthProvider`-Contract, die fünf First-Party-Provider und Konfigurationstypen sowie jeden Typ, der zur Implementierung eines benutzerdefinierten Providers benötigt wird. `ReqwestOAuthTransport` stellt produktionsreife I/O für Token, Userinfo und Widerruf bereit. `FrameworkAbuseLimiter` verwendet den in der Anwendung konfigurierten `RateLimiterDriver`. Anwendungen benötigen weder eine direkte `suprnova-magnetar`-Abhängigkeit noch handgeschriebene Transport- und Limiter-Adapter.
 
-`init_magnetar` installiert Passwort-/Session- und Passkey-Adapter atomar. Eine
-zweite Installation gibt einen Fehler zurück, statt die Engine zu ersetzen und
-den Authentifizierungszustand aufzuteilen.
+`MagnetarConfig` erstellt sein Schema, wenn `apply_migrations` aktiviert ist, was der Standard ist. Verwenden Sie `.apply_migrations(false)` nur, wenn die Bereitstellung dasselbe Schema separat vorbereitet. Eine zweite Initialisierung gibt einen Fehler zurück, statt eine installierte Engine zu ersetzen.
 
-## OAuth-Engine installieren
+### GitHub-Provider-Anforderungen
 
-OAuth-Unterstützung wird durch das Standard-Feature `magnetar-oauth` des
-Frameworks kompiliert, aber die Provider-Registrierung ist immer ein expliziter
-Runtime-Schritt. Aktivieren Sie in einem Build mit `--no-default-features`
-`magnetar-oauth` explizit. `init_magnetar` gibt seine interne konkrete
-Host-Engine weder zurück noch legt es sie offen; das folgende Beispiel gilt
-daher nur für eine Anwendung, die ihre eigene `MagnetarHostEngine` konstruiert
-und vorhält. Es kann nicht an das vorherige Beispiel für die
-Standardinitialisierung angehängt werden. Die aktuelle öffentliche API hat
-keine Komfortmethode, um einer bereits durch `MagnetarConfig` installierten
-Engine ein OAuth-Register hinzuzufügen.
+Der REST-Benutzerendpunkt von GitHub erfordert einen `User-Agent`; ein Community-Provider fügt ihn, und jeden benötigten Media-Type-`Accept`-Wert, über `OAuthProvider::userinfo_headers` hinzu. Suprnova fügt den Bearer-`Authorization`-Header separat hinzu und weist Versuche von Providern zurück, ihn zu überschreiben.
 
-```rust,ignore
-use std::sync::Arc;
-use suprnova::magnetar_integration::install_magnetar_oauth_engine;
-
-
-// Diese Werte müssen im Scope liegen, der die eigene Host-Engine konstruiert hat.
-let oauth = host_engine.oauth_service(oauth_host_config)?;
-install_magnetar_oauth_engine(Arc::new(oauth))?;
-```
-
-`MagnetarOAuthHostConfig` akzeptiert eine explizite Liste von
-`MagnetarOAuthProviderConfig`-Werten, einen HTTP-Transport, einen
-Missbrauchsbegrenzer, eine Autorisierungsrichtlinie und eine Richtlinie für
-die automatische Verknüpfung. Nach der Installation ist das Provider-Register
-maßgeblich. Ein unbekannter Provider schlägt fehl, statt auf eine andere
-Authentifizierungsimplementierung zurückzufallen.
-
-Provider-Implementierungen und ihre Dossiers für die Client-Authentifizierung
-stammen aus der Crate `suprnova-magnetar`. Anwendungen, die die OAuth-Engine
-konstruieren, müssen diese Crate mit den verwendeten Provider-Features als
-direkte Abhängigkeit hinzufügen. Das Framework leitet OAuth-Client-IDs oder
--Geheimnisse nicht aus Umgebungsvariablen ab. Lesen Sie sie über die
-Anwendungskonfiguration oder einen Secret-Manager und erstellen Sie das
-Provider-Register beim Bootstrap.
+Die `/user`-Antwort von GitHub enthält nur dann eine E-Mail, wenn der Benutzer sie öffentlich gemacht hat. Die verifizierte primäre Adresse erfordert eine zweite `/user/emails`-Anfrage, während `resolve_identity` absichtlich keine I/O ausführt und eine Userinfo-Antwort erhält. Ein GitHub-Provider kann `email: None` zurückgeben und Suprnovas Zeremonie zur E-Mail-Vervollständigung verwenden oder `userinfo_endpoint` auf einen Host-Adapter verweisen lassen, der `/user` mit der verifizierten primären E-Mail kombiniert. Behandeln Sie eine unverifizierte oder lediglich öffentliche Adresse nicht als Kontoinhaberschaft.
 
 ## Session-Bindung
 
@@ -273,9 +283,7 @@ geändert hat.
 
 - Standard-Boot: `MagnetarConfig`, `PasskeyConfig` und `init_magnetar`.
 - Facades: `Auth::oauth(provider)` und `Auth::magic_link()`.
-- OAuth-Installation:
-  `suprnova::magnetar_integration::install_magnetar_oauth_engine` und die
-  Konfigurationstypen in `suprnova::magnetar_integration::engine`.
+- OAuth-Installation: `MagnetarConfig::oauth`, `ReqwestOAuthTransport` und `FrameworkAbuseLimiter`.
 - Migrationsbibliothek: `magnetar::migration` aus der Crate `suprnova-magnetar`.
 - Bearer-Authentifizierung: `BearerTokenMiddleware`.
 

@@ -9,46 +9,83 @@ Suprnova 通过框架自有的 `Auth` 门面，提供 OAuth、使用 Apple 登�
 
 Suprnova 不会为这些流程安装路由。应用提供简短的起始和回调处理程序，并决定如何投递魔法链接邮件。
 
-## 初始化 Magnetar
+## 使用 OAuth 初始化 Magnetar
 
-在 `DB::init` 之后，并且在 `APP_KEY` 初始化 `Crypt` 之后，初始化默认的密码、passkey、会话、锁定和双因素引擎：
+在同一个 `MagnetarConfig` 上配置 OAuth，该配置会初始化密码、通行密钥、会话、锁定和双因素服务。提供方注册表会与这些服务一起原子发布：如果任何服务无法构建，则它们都不会变为可见。
 
-```rust
-use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+```rust,no_run
+use std::sync::Arc;
+
+use suprnova::{
+    AbuseLimiter, App, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    FrameworkAbuseLimiter, GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig, OAuthAuthorizationConfig,
+    OAuthHttpTransport, PasskeyConfig, RateLimiterDriver, ReqwestOAuthTransport,
+    RevocationTransport, SecretString, init_magnetar,
+};
+
+fn auth_config(
+    database: DatabaseConnection,
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> MagnetarConfig {
+    let provider = Arc::new(GoogleOAuthProvider::new(
+        GoogleProviderConfig {
+            client_id: "google-client".to_owned(),
+            client_secret: SecretString::from("google-secret".to_owned()),
+            redirect_uri: Some("https://app.example.com/auth/google/callback".to_owned()),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+            endpoints: EndpointOverrides::default(),
+        },
+        revocation,
+    ));
+    let oauth = MagnetarOAuthHostConfig::new(
+        vec![MagnetarOAuthProviderConfig {
+            provider,
+            redirect_uri: "https://app.example.com/auth/google/callback".to_owned(),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+        }],
+        transport,
+        limiter,
+        OAuthAuthorizationConfig::default(),
+        AutoLinkPolicy::default(),
+    )
+    .expect("valid OAuth host configuration");
+
+    MagnetarConfig::from_sea_orm(database)
+        .passkey_config(PasskeyConfig {
+            rp_id: "app.example.com".to_owned(),
+            rp_origin: "https://app.example.com".to_owned(),
+        })
+        .oauth(oauth)
+}
 
 pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
     let database = DB::connection()?;
-    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
-        .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
-
-    init_magnetar(config).await
+    let transport = Arc::new(ReqwestOAuthTransport::try_default()?);
+    let limiter = Arc::new(FrameworkAbuseLimiter::new(
+        App::resolve_make::<dyn RateLimiterDriver>()?,
+    ));
+    init_magnetar(auth_config(
+        database.inner().clone(),
+        transport.clone(),
+        transport,
+        limiter,
+    ))
+    .await
 }
 ```
 
-`MagnetarConfig` 使用应用的 SeaORM 连接。默认引擎会在启用 `apply_migrations` 时创建其架构，而该选项默认启用。只有在部署会以其他方式运行相同的架构设置时，才设置 `.apply_migrations(false)`。
+该框架重新导出 `OAuthProvider` 契约、五个第一方提供方和配置类型，以及实现自定义提供方所需的所有类型。`ReqwestOAuthTransport` 提供生产用的令牌、userinfo 和撤销 I/O。`FrameworkAbuseLimiter` 使用应用程序配置的 `RateLimiterDriver`。应用程序既不需要直接依赖 `suprnova-magnetar`，也不需要手写传输和限制器适配器。
 
-`init_magnetar` 会原子地安装密码/会话和 passkey 适配器。第二次安装会返回错误，而不是替换引擎并拆分认证状态。
+当启用 `apply_migrations` 时，`MagnetarConfig` 会创建其架构，这是默认设置。仅当部署会单独准备相同架构时，才使用 `.apply_migrations(false)`。第二次初始化会返回错误，而不是替换任何已安装的引擎。
 
-## 安装 OAuth 引擎
+### GitHub 提供方要求
 
-OAuth 支持由框架默认的 `magnetar-oauth` feature 编译进来，但提供者注册始终是显式的运行时步骤。在 `--no-default-features` 构建中，请显式启用 `magnetar-oauth`。`init_magnetar` 不会返回或暴露其内部的具体主机引擎，因此下面的示例只适用于应用自行构造并保留 `MagnetarHostEngine` 的情况；不能把它追加到前面的默认初始化示例后面。当前公开 API 没有便捷方法向已经通过 `MagnetarConfig` 安装的引擎添加 OAuth 注册表。
+GitHub 的 REST 用户端点需要 `User-Agent`；社区提供方会通过 `OAuthProvider::userinfo_headers` 添加它，以及所需的任何媒体类型 `Accept` 值。Suprnova 会单独添加 bearer `Authorization` 标头，并拒绝提供方覆盖它的尝试。
 
-```rust,ignore
-use std::sync::Arc;
-use suprnova::magnetar_integration::install_magnetar_oauth_engine;
-
-
-// 这些值必须位于构造自定义主机引擎的那个作用域中。
-let oauth = host_engine.oauth_service(oauth_host_config)?;
-install_magnetar_oauth_engine(Arc::new(oauth))?;
-```
-
-`MagnetarOAuthHostConfig` 接受 `MagnetarOAuthProviderConfig` 值的显式列表、一个 HTTP 传输层、一个滥用限制器、授权策略和自动链接策略。安装后，提供者注册表成为权威来源。未知提供者会失败关闭，而不是回退到另一种认证实现。
-
-提供者实现及其客户端认证档案来自 `suprnova-magnetar` crate。构建 OAuth 引擎的应用必须把该 crate 作为直接依赖，并启用所使用的提供者 feature。框架不会从环境变量推断 OAuth client ID 或密钥。请通过应用配置或密钥管理器读取它们，并在启动期间构建提供者注册表。
+只有当用户将电子邮件公开时，GitHub 的 `/user` 响应才会包含电子邮件。已验证的主地址需要第二次 `/user/emails` 请求，而 `resolve_identity` 会刻意不执行 I/O，并接收一个 userinfo 响应。GitHub 提供方可以返回 `email: None` 并使用 Suprnova 的电子邮件补全仪式，或者将 `userinfo_endpoint` 指向一个主机适配器，由它把 `/user` 与已验证的主电子邮件结合起来。不要将未验证或仅仅公开的地址视为账户所有权。
 
 ## 绑定会话
 
@@ -187,9 +224,7 @@ cargo run -p suprnova-magnetar \
 
 - 默认启动：`MagnetarConfig`、`PasskeyConfig` 和 `init_magnetar`。
 - 门面：`Auth::oauth(provider)` 和 `Auth::magic_link()`。
-- OAuth 安装：
-  `suprnova::magnetar_integration::install_magnetar_oauth_engine` 和
-  `suprnova::magnetar_integration::engine` 中的配置类型。
+- OAuth 安装：`MagnetarConfig::oauth`、`ReqwestOAuthTransport` 和 `FrameworkAbuseLimiter`。
 - 迁移库：`suprnova-magnetar` crate 中的 `magnetar::migration`。
 - Bearer 认证：`BearerTokenMiddleware`。
 

@@ -6,8 +6,7 @@ scaffolé en fonctionnement. Si vous y êtes déjà, allez directement au
 
 ## Prérequis
 
-- **Rust 1.91.1+** (l'espace de travail utilise l'édition 2024). Installez via
-  [rustup](https://rustup.rs/):
+- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.3.2 exige également Rust 1.94.0 au minimum. Installez-le via [rustup](https://rustup.rs/) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -25,6 +24,9 @@ Vous n'avez pas besoin de choisir une base de données maintenant. Le scaffolder
 par défaut utilise SQLite pour qu'une application nouvelle fonctionne sans
 configuration.
 
+
+La branche `main` actuelle utilise SeaORM 2.0, SeaQuery 1.0 et SQLx 0.9. Les applications qui appellent directement SeaORM doivent importer `ExprTrait` pour les méthodes d’expression SeaQuery et utiliser des méthodes de connexion `*_raw` explicites pour les valeurs `Statement` préconstruites. La mise à niveau des dépendances ne nécessite aucune migration des données de l’application.
+
 ## Installer le CLI
 
 Suprnova est distribué comme un projet Cargo, et l'installateur du
@@ -32,7 +34,7 @@ CLI tire le framework depuis git (pas depuis crates.io - voir la
 [note de pré-lancement](#pre-launch-note) ci-dessous) :
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 Cela compile le binaire `suprnova` et le dépose dans `~/.cargo/bin`.
@@ -53,9 +55,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Créer un projet
 
-`suprnova new` crée un projet complet - backend + frontend choisi +
-configuration Vite + migrations d'authentification + routes d'exemple.
+`suprnova new` crée un projet complet - backend + frontend choisi + configuration Vite + migrations d'authentification + routes d'exemple.
 Il est interactif par défaut :
+
 
 ```bash
 suprnova new my-app
@@ -91,7 +93,7 @@ service sans SPA :
 suprnova new my-api --api
 ```
 
-Le starter API n'a pas de couche frontend ou Inertia. Il initialise Magnetar sur la base de données de l'application, installe `BearerTokenMiddleware` et crée un échafaudage pour l'enregistrement et la connexion par mot de passe contre `app_users`.
+Le starter API n'a pas de couche frontend ou Inertia. Il initialise Magnetar sur la base de données de l'application, installe `BearerTokenMiddleware` et crée un scaffold pour l'enregistrement et la connexion par mot de passe contre `app_users`.
 
 ## Premier lancement
 
@@ -163,7 +165,7 @@ Le CLI vit dans votre `~/.cargo/bin`. Pour passer à la dernière
 version :
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.2.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
 ```
 
 `--force` fait écraser le binaire existant par Cargo.
@@ -174,7 +176,7 @@ Une application scaffoldée dépend de la crate du framework
 `suprnova` via une dépendance git dans `Cargo.toml` :
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.2.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 Pour récupérer les dernières modifications du framework :
@@ -196,7 +198,7 @@ Suprnova est distribué par git, pas par crates.io - le framework comme le
 CLI s'installent depuis GitHub. Chaque version fait l'objet d'une
 publication GitHub étiquetée (p. ex. `v1.2.4`), et c'est de l'étiquette que
 dépend votre application : un `Cargo.toml` scaffoldé épingle
-`tag = "v1.2.4"`, et `Cargo.lock` enregistre le commit exact que cette
+`tag = "v1.3.2"`, et `Cargo.lock` enregistre le commit exact que cette
 étiquette a résolu, si bien que les builds sont reproductibles jusqu'à ce
 que vous décidiez d'en changer. La mise à jour est délibérée, jamais
 accidentelle - incrémentez l'étiquette et lancez

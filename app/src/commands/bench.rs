@@ -101,10 +101,10 @@ impl TypedCommand for VerifyRecords {
 
         let row = conn
             .inner()
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 backend,
                 "SELECT COUNT(*) AS total, COUNT(DISTINCT job_id) AS distinct_ids \
-                 FROM bench_job_runs"
+         FROM bench_job_runs"
                     .to_string(),
             ))
             .await
@@ -161,12 +161,12 @@ impl TypedCommand for VerifyTicks {
 
         let rows = conn
             .inner()
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 backend,
                 "SELECT task_name, tick_minute, COUNT(*) AS runs, \
-                        COUNT(DISTINCT instance_id) AS instances \
-                 FROM bench_scheduler_ticks \
-                 GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute"
+                COUNT(DISTINCT instance_id) AS instances \
+         FROM bench_scheduler_ticks \
+         GROUP BY task_name, tick_minute ORDER BY task_name, tick_minute"
                     .to_string(),
             ))
             .await

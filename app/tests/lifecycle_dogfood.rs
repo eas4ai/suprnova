@@ -133,7 +133,7 @@ async fn active_scope_filters_to_active_rows() {
         "UPDATE users SET active = ? WHERE name = ?",
         [
             suprnova::sea_orm::Value::Bool(Some(false)),
-            suprnova::sea_orm::Value::String(Some(Box::new("Bob".to_string()))),
+            suprnova::sea_orm::Value::String(Some("Bob".to_string())),
         ],
     )
     .await

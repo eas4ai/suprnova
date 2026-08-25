@@ -184,7 +184,7 @@ pub async fn claim_next_workflow(
 
     let row = db
         .inner()
-        .query_one(stmt)
+        .query_one_raw(stmt)
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
 

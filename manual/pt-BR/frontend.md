@@ -216,7 +216,7 @@ inequivocamente um GET) e `InertiaValidationRedirectMiddleware` (transforma
 um `422` em uma visita Inertia em um `303` de volta para a página do formulário,
 com os erros gravados em flash). `InertiaVersionMiddleware` e
 `Inertia303Middleware` antes exigiam registro separado; `Inertia::install`
-torna os quatro o padrão. Veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertiainstall)
+torna os quatro o padrão. Veja [Respostas Inertia](frontend-inertia-responses.md#bootstrap-inertia-install)
 para a ordem completa de registro e o que cada middleware encerra.
 
 ## Desenvolvimento vs produção

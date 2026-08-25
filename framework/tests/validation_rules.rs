@@ -137,7 +137,7 @@ fn required_unless_triggers_when_other_field_does_not_match() {
 
 async fn fresh_db() -> DbConnection {
     let raw = Database::connect("sqlite::memory:").await.unwrap();
-    raw.execute(Statement::from_string(
+    raw.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)"
             .to_string(),
@@ -154,7 +154,7 @@ async fn seed_user_with_email(db: &DbConnection, email: &str) -> i64 {
         "INSERT INTO users (email) VALUES (?)",
         vec![Value::from(email.to_string())],
     );
-    let result = db.inner().execute(stmt).await.unwrap();
+    let result = db.inner().execute_raw(stmt).await.unwrap();
     result.last_insert_id() as i64
 }
 
@@ -1070,7 +1070,7 @@ async fn async_rule_check_helper_leaves_empty_on_success() {
 
 async fn db_with_unique_email() -> DbConnection {
     let raw = Database::connect("sqlite::memory:").await.unwrap();
-    raw.execute(Statement::from_string(
+    raw.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE)"
             .to_string(),
@@ -1095,10 +1095,13 @@ async fn from_unique_violation_maps_duplicate_insert_to_422() {
     };
 
     // First insert succeeds; the second violates the UNIQUE constraint.
-    db.inner().execute(insert("dup@example.com")).await.unwrap();
+    db.inner()
+        .execute_raw(insert("dup@example.com"))
+        .await
+        .unwrap();
     let dup_err = db
         .inner()
-        .execute(insert("dup@example.com"))
+        .execute_raw(insert("dup@example.com"))
         .await
         .unwrap_err();
 
@@ -1126,7 +1129,7 @@ async fn from_unique_violation_passes_through_non_unique_errors() {
     // unique-constraint violation.
     let err = db
         .inner()
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             "INSERT INTO does_not_exist (x) VALUES (1)".to_string(),
         ))
@@ -1147,15 +1150,15 @@ async fn from_unique_violation_passes_through_non_unique_errors() {
 async fn unique_where_eq_scopes_the_check() {
     let _guard = TestContainer::fake();
     let raw = Database::connect("sqlite::memory:").await.unwrap();
-    raw.execute(Statement::from_string(
+    raw.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "CREATE TABLE members (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, \
-         tenant_id INTEGER NOT NULL)"
+     tenant_id INTEGER NOT NULL)"
             .to_string(),
     ))
     .await
     .unwrap();
-    raw.execute(Statement::from_sql_and_values(
+    raw.execute_raw(Statement::from_sql_and_values(
         DbBackend::Sqlite,
         "INSERT INTO members (email, tenant_id) VALUES (?, ?)",
         vec![Value::from("a@x.com".to_string()), Value::from(1i64)],
@@ -1211,7 +1214,7 @@ async fn unique_case_insensitive_folds_case() {
 async fn unique_ignore_with_column_excludes_by_custom_key() {
     let _guard = TestContainer::fake();
     let raw = Database::connect("sqlite::memory:").await.unwrap();
-    raw.execute(Statement::from_string(
+    raw.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         "CREATE TABLE widgets (widget_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)"
             .to_string(),
@@ -1219,7 +1222,7 @@ async fn unique_ignore_with_column_excludes_by_custom_key() {
     .await
     .unwrap();
     let res = raw
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "INSERT INTO widgets (name) VALUES (?)",
             vec![Value::from("gizmo".to_string())],

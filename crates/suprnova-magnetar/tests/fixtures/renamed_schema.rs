@@ -786,7 +786,7 @@ pub fn renamed_user(email: &str, password_hash: Option<&str>) -> renamed_users::
 pub async fn original_fixture_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.expect("sqlite");
     let schema = Schema::new(DbBackend::Sqlite);
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         schema
             .create_table_from_entity(original_users::Entity)
@@ -816,7 +816,7 @@ pub async fn original_fixture_db() -> DatabaseConnection {
 pub async fn renamed_fixture_db() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.expect("sqlite");
     let schema = Schema::new(DbBackend::Sqlite);
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
         schema
             .create_table_from_entity(renamed_users::Entity)
