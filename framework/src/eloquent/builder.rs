@@ -1,10 +1,10 @@
-//! `Builder<M>` — the chainable query type returned by `Model::query()`.
+//! `Builder<M>` - the chainable query type returned by `Model::query()`.
 //!
 //! ## Dual API
 //!
 //! Every where-shape method ships under TWO names:
-//! - `filter*` (Rust-idiomatic) — primary, the implementation lives here.
-//! - `db_where` / `where_*` (Laravel-faithful) — one-line aliases that
+//! - `filter*` (Rust-idiomatic) - primary, the implementation lives here.
+//! - `db_where` / `where_*` (Laravel-faithful) - one-line aliases that
 //!   delegate. Tagged with `#[doc(alias = "...")]` so rustdoc search
 //!   finds either.
 //!
@@ -13,9 +13,9 @@
 //!
 //! ## SQL identifier contract (security)
 //!
-//! Column names taken through [`IntoColumn`] — the trait that backs
+//! Column names taken through [`IntoColumn`] - the trait that backs
 //! every `filter*` / `where_*` / `order_by` / `group_by` / `having*`
-//! method — are interpolated **raw** into the rendered SQL. There is
+//! method - are interpolated **raw** into the rendered SQL. There is
 //! no quoting or escaping at this layer; matches Laravel's
 //! `DB::table()->where(...)` contract exactly.
 //!
@@ -23,7 +23,7 @@
 //! (URL params, request body, query strings). Hardcode the column or
 //! select it from a known allowlist before passing it to the builder.
 //! The right-hand-side of comparisons goes through [`IntoVal`] and
-//! becomes a parameterised SQL bind — those values ARE safe to take
+//! becomes a parameterised SQL bind - those values ARE safe to take
 //! from untrusted input.
 //!
 //! The raw-SQL escape hatches [`Builder::where_raw`],
@@ -44,7 +44,7 @@
 //!
 //! UNION arms thread the placeholder counter through
 //! `Builder::render_select_into` so Postgres `$N` numbering stays
-//! monotonic across the combined statement — see
+//! monotonic across the combined statement - see
 //! `union_postgres_placeholders_are_monotonic` in
 //! `framework/tests/eloquent_builder.rs` for the regression test.
 
@@ -78,7 +78,7 @@ const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
 /// # Security: column names are SQL identifiers, not parameters
 ///
 /// The string returned by `col_name()` is interpolated **raw** into the
-/// rendered SQL — there is no quoting or escaping at this layer (same
+/// rendered SQL - there is no quoting or escaping at this layer (same
 /// contract as Laravel's `DB::table()->where(...)`). Anywhere
 /// `IntoColumn` appears in the public surface, **never accept the value
 /// from untrusted input** (URL params, request body, query strings).
@@ -87,7 +87,7 @@ const AGGREGATE_RESULT_ALIAS: &str = "__suprnova_aggregate";
 ///
 /// Values (the right-hand side of comparisons, IN lists, BETWEEN
 /// bounds, etc.) go through [`IntoVal`] → `serde_json::Value` and
-/// become parameterised binds — those ARE safe to take from untrusted
+/// become parameterised binds - those ARE safe to take from untrusted
 /// input.
 pub trait IntoColumn {
     /// Return the snake-case column name as a `String`. Owned because
@@ -187,14 +187,14 @@ pub(crate) enum WhereTerm {
 /// existence variants. The boxed shape keeps `WhereTerm` small.
 #[derive(Debug, Clone)]
 pub(crate) struct ExistsSpec {
-    /// The parent's `EloquentModel::TABLE` — passed in so the renderer
+    /// The parent's `EloquentModel::TABLE` - passed in so the renderer
     /// can qualify the correlated `parent.pk = child.fk` clause.
     pub parent_table: String,
-    /// The parent's PK column on this side of the EXISTS — taken from
+    /// The parent's PK column on this side of the EXISTS - taken from
     /// [`RelationEntry::parent_key`].
     pub parent_key: String,
     /// Direct target table for has / has-one / has-many / morph-one /
-    /// morph-many. Empty when the join routes through a pivot — see
+    /// morph-many. Empty when the join routes through a pivot - see
     /// `pivot_table`.
     pub target_table: String,
     /// FK on the child / target side. Empty for pivot joins.
@@ -234,7 +234,7 @@ pub(crate) struct ExistsSpec {
     /// closure. The inner builder's `where_terms` are merged into the
     /// subquery body so users can refine the EXISTS arm.
     pub inner_terms: Vec<WhereTerm>,
-    /// Phase 10D — Laravel `whereRelation("posts", "col", "val")`
+    /// Phase 10D - Laravel `whereRelation("posts", "col", "val")`
     /// shortcut. Renders the same EXISTS shape but adds the col/op/val
     /// constraint inline; equivalent to `whereHas` with a tiny closure.
     pub relation_column: Option<String>,
@@ -267,12 +267,12 @@ pub(crate) enum OrderTerm {
 /// consumed by [`Builder::render_select_for`], which appends the
 /// backend-appropriate clause to the end of the compound statement.
 ///
-/// SQLite has no row-level locking — the methods compile but emit no
+/// SQLite has no row-level locking - the methods compile but emit no
 /// SQL on that backend (and log a `warn!` once per process so a
 /// misconfigured app surfaces the no-op).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LockMode {
-    /// No row lock — the default.
+    /// No row lock - the default.
     None,
     /// Exclusive write lock: `SELECT ... FOR UPDATE` on Postgres + MySQL.
     /// Other transactions trying to lock the same rows block until the
@@ -300,19 +300,19 @@ pub(crate) enum EagerSpec {
     /// `with(["posts"])` or `with(["posts.comments"])`. The dotted form
     /// drives nested-path recursion through `__recurse_eager_load`.
     With(String),
-    /// `with_count(["posts"])` — emits a server-side `COUNT(*)
+    /// `with_count(["posts"])` - emits a server-side `COUNT(*)
     /// GROUP BY` for the relation.
     WithCount(String),
-    /// `with_sum(("posts", "views"))` — server-side `SUM(col)
+    /// `with_sum(("posts", "views"))` - server-side `SUM(col)
     /// GROUP BY`.
     WithSum(String, String),
-    /// `with_avg(("posts", "views"))` — server-side `AVG(col)
+    /// `with_avg(("posts", "views"))` - server-side `AVG(col)
     /// GROUP BY`.
     WithAvg(String, String),
-    /// `with_min(("posts", "views"))` — server-side `MIN(col)
+    /// `with_min(("posts", "views"))` - server-side `MIN(col)
     /// GROUP BY`.
     WithMin(String, String),
-    /// `with_max(("posts", "views"))` — server-side `MAX(col)
+    /// `with_max(("posts", "views"))` - server-side `MAX(col)
     /// GROUP BY`.
     WithMax(String, String),
     /// `with_where(("posts", |q: Builder<Post>| q.filter(...)))`.
@@ -325,12 +325,12 @@ pub(crate) enum EagerSpec {
     /// fail on a well-typed program.
     ///
     /// `Arc`, not `Box`, and `Fn`, not `FnOnce`, specifically so the
-    /// whole plan is `Clone` — see the note on `impl Clone for Builder`.
+    /// whole plan is `Clone` - see the note on `impl Clone for Builder`.
     WithWhere(String, Arc<dyn Any + Send + Sync>),
 }
 
 /// Cloning a spec is cheap: the string variants clone a `String`, and
-/// `WithWhere` clones an `Arc` — the predicate itself is shared, never
+/// `WithWhere` clones an `Arc` - the predicate itself is shared, never
 /// duplicated. This is what lets `Builder::clone` carry the eager-load
 /// plan instead of silently dropping it.
 impl Clone for EagerSpec {
@@ -392,17 +392,17 @@ pub struct Builder<M> {
     pub(crate) runtime_casts:
         HashMap<&'static str, std::sync::Arc<dyn crate::eloquent::casts::DynCast>>,
     pub(crate) global_scopes_disabled: Vec<&'static str>,
-    /// Phase 10C T4 — typed global-scope opt-out mask. Each entry is
+    /// Phase 10C T4 - typed global-scope opt-out mask. Each entry is
     /// the `TypeId` of a scope struct registered via
     /// [`ScopeRegistry::register`]; the registry skips any scope whose
     /// id appears here.
     ///
     /// [`ScopeRegistry::register`]: crate::eloquent::ScopeRegistry::register
     pub(crate) excluded_scopes: Vec<std::any::TypeId>,
-    /// Phase 10C T4 — if true, the registered global scopes for this
+    /// Phase 10C T4 - if true, the registered global scopes for this
     /// model are bypassed entirely on this query.
     pub(crate) skip_all_scopes: bool,
-    /// Eager-load plan — populated by [`Builder::with`] /
+    /// Eager-load plan - populated by [`Builder::with`] /
     /// [`Builder::with_count`] / [`Builder::with_sum`] /
     /// [`Builder::with_avg`] / [`Builder::with_min`] /
     /// [`Builder::with_max`] / [`Builder::with_where`].
@@ -414,25 +414,25 @@ pub struct Builder<M> {
     /// `"posts.comments"` paths recurse through
     /// `__recurse_eager_load`.
     pub(crate) eager_specs: Vec<EagerSpec>,
-    /// Phase 10C T9 — row-locking hint applied at SQL emission time.
+    /// Phase 10C T9 - row-locking hint applied at SQL emission time.
     /// Set via [`Builder::lock_for_update`] / [`Builder::shared_lock`].
     /// The clause is appended at the very end of the compound
-    /// statement by [`Builder::render_select_for`] — after every
-    /// UNION arm — so multi-statement queries lock once at the outer
+    /// statement by [`Builder::render_select_for`] - after every
+    /// UNION arm - so multi-statement queries lock once at the outer
     /// scope, matching standard SQL grammar.
     pub(crate) lock_mode: LockMode,
-    /// Phase 10C T11 — per-builder transaction override. When set,
+    /// Phase 10C T11 - per-builder transaction override. When set,
     /// every terminal method routes through this transaction instead
     /// of consulting the [`CURRENT_TX`](crate::database::transaction::CURRENT_TX)
     /// task-local or falling back to [`DB::connection()`]. Installed
     /// by [`Builder::with_tx`].
     pub(crate) tx_override: Option<crate::database::TxHandle>,
-    /// Phase 10C T12 — per-builder connection override. When set,
+    /// Phase 10C T12 - per-builder connection override. When set,
     /// terminal methods route through the named connection in the
     /// [`ConnectionRegistry`](crate::database::ConnectionRegistry).
     /// Installed by [`Builder::on`] / [`Builder::on_write_connection`].
     /// Bypassed by an active transaction (closure form CURRENT_TX or
-    /// explicit `with_tx`) — transactions take precedence absolutely.
+    /// explicit `with_tx`) - transactions take precedence absolutely.
     pub(crate) connection_override: Option<String>,
     _phantom: PhantomData<M>,
 }
@@ -443,19 +443,19 @@ impl<M> Default for Builder<M> {
     }
 }
 
-/// Manual `Clone` for `Builder<M>` — `M` is only a type parameter, so
+/// Manual `Clone` for `Builder<M>` - `M` is only a type parameter, so
 /// `#[derive(Clone)]` would demand `M: Clone` that nothing needs.
 ///
 /// This used to set `eager_specs: Vec::new()`, dropping the entire
 /// eager-load plan on every clone, because `EagerSpec::WithWhere` held
 /// a non-`Clone` `Box<dyn Any>`. The drop was justified by the chunking
 /// entry points ([`Builder::chunk`], [`Builder::chunk_by_id`],
-/// [`Builder::lazy`]) each asserting `eager_specs.is_empty()` first —
+/// [`Builder::lazy`]) each asserting `eager_specs.is_empty()` first -
 /// which is true, and covers every path *the framework* clones on.
 ///
 /// It does not cover the user, and `Clone` is public. Anyone building a
-/// base query and cloning it to derive a count and a page —
-/// `let q = User::query().with("posts"); q.clone().get()` — got rows
+/// base query and cloning it to derive a count and a page -
+/// `let q = User::query().with("posts"); q.clone().get()` - got rows
 /// with no relations loaded and no error to say why. Silent wrong data
 /// is worse than the `FnOnce`→`Fn` tightening that was avoided, so the
 /// predicate is now an `Arc<dyn Fn>` and the plan clones intact. The
@@ -480,10 +480,10 @@ impl<M> Clone for Builder<M> {
             skip_all_scopes: self.skip_all_scopes,
             // Carried, not dropped. `WithWhere`'s predicate is an
             // `Arc<dyn Fn>`, so this shares the closure rather than
-            // duplicating it — every variant clones cheaply.
+            // duplicating it - every variant clones cheaply.
             eager_specs: self.eager_specs.clone(),
             lock_mode: self.lock_mode,
-            // T11: transaction override is a cheap `Arc` clone — every
+            // T11: transaction override is a cheap `Arc` clone - every
             // clone of the builder targets the same underlying tx.
             tx_override: self.tx_override.clone(),
             // T12: per-builder connection override carries through
@@ -827,14 +827,14 @@ impl<M> Builder<M> {
     /// rendered.
     ///
     /// Audit HIGH `eloquent` #1: `IntoColumn` accepts `&str` /
-    /// `String` as a passthrough — so even though the typed-column
+    /// `String` as a passthrough - so even though the typed-column
     /// path exists, every fluent method also accepts opaque strings.
     /// Without validation, user-controlled strings reach the SQL
     /// renderer verbatim. The validator runs once per terminal at the
     /// I/O boundary; the fluent builder methods stay infallible.
     ///
     /// `select_raw`, `WhereTerm::Raw`, and `OrderTerm::Raw` are
-    /// explicit raw-SQL escape hatches — their docs warn callers
+    /// explicit raw-SQL escape hatches - their docs warn callers
     /// about the trust boundary, and validation deliberately skips
     /// them (otherwise the escape hatch wouldn't exist).
     pub(crate) fn validate_inputs(&self) -> Result<(), FrameworkError> {
@@ -894,7 +894,7 @@ impl<M> Builder<M> {
         }
     }
 
-    /// Phase 10C T12 — route every terminal method on this builder
+    /// Phase 10C T12 - route every terminal method on this builder
     /// through the connection registered under `name` (via
     /// [`DB::register_named`](crate::DB::register_named) or
     /// [`ConnectionRegistry::register_existing`](crate::database::ConnectionRegistry::register_existing)).
@@ -903,7 +903,7 @@ impl<M> Builder<M> {
     /// `on(name)` > per-model `#[model(connection = "...")]` >
     /// `__read_replica__` auto-routing > default pool. Inside a
     /// [`DB::transaction`](crate::DB::transaction) closure the
-    /// transaction's connection wins — `on(name)` is silently ignored,
+    /// transaction's connection wins - `on(name)` is silently ignored,
     /// because every operation inside the closure must commit / roll
     /// back atomically through the same physical connection.
     ///
@@ -913,7 +913,7 @@ impl<M> Builder<M> {
     /// // Register an analytics replica at boot.
     /// DB::register_named("analytics_read", analytics_config).await?;
     ///
-    /// // Per-query routing — read sales totals from the analytics replica.
+    /// // Per-query routing - read sales totals from the analytics replica.
     /// let totals = Order::query()
     ///     .filter_op("created_at", ">=", start)
     ///     .on("analytics_read")
@@ -925,7 +925,7 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Phase 10C T12 — opt this builder back to the primary pool, even
+    /// Phase 10C T12 - opt this builder back to the primary pool, even
     /// when a `__read_replica__` is registered and would normally take
     /// reads. Use this for read-your-writes scenarios where the replica
     /// might not have caught up yet.
@@ -975,7 +975,7 @@ impl<M> Builder<M> {
     /// Append relation names to the eager-load plan.
     ///
     /// Flat names (`"posts"`) load the relation directly. Dotted
-    /// names (`"posts.comments"`) drive nested-path recursion — the
+    /// names (`"posts.comments"`) drive nested-path recursion - the
     /// loader runs `__eager_load("posts", ...)` then walks each
     /// loaded post with `__recurse_eager_load("posts", "comments",
     /// ...)`. Paths nest as deep as the user wants:
@@ -1004,7 +1004,7 @@ impl<M> Builder<M> {
     /// loaded alongside the parent rows. Reads from the cache via the
     /// macro-emitted `<rel>_count()` accessor.
     ///
-    /// One server-side `GROUP BY` query per relation — independent of
+    /// One server-side `GROUP BY` query per relation - independent of
     /// the parent row count.
     ///
     /// ## Example
@@ -1028,7 +1028,7 @@ impl<M> Builder<M> {
 
     /// Append a `SUM(col) GROUP BY parent_fk` aggregate over a
     /// relation's column. Reads back via the wide `<rel>_<kind>_<col>`
-    /// cache key — i.e.
+    /// cache key - i.e.
     /// `parent.__eager.get_aggregate::<f64>("posts_sum_views")` for
     /// `with_sum(("posts", "views"))`. Sum/Avg over zero rows lands
     /// as `0.0`, matching the framework's COALESCE behaviour
@@ -1037,7 +1037,7 @@ impl<M> Builder<M> {
     /// The ergonomic read is the macro-emitted accessor:
     /// `parent.posts_sum_of("views")` returning `Option<f64>` (`None`
     /// when `with_sum` was not called for that relation/column pair).
-    /// Multiple aggregates on the same relation compose cleanly —
+    /// Multiple aggregates on the same relation compose cleanly -
     /// `with_sum(("posts","views"))` and `with_avg(("posts","views"))`
     /// on the same query write distinct cells and both read back.
     pub fn with_sum<S1: Into<String>, S2: Into<String>>(mut self, (rel, col): (S1, S2)) -> Self {
@@ -1098,7 +1098,7 @@ impl<M> Builder<M> {
         S: Into<String>,
         // R only needs to be a static type for the type-erased Box,
         // not a full `Model`. The user-side closure is monomorphic in
-        // the relation's target type — the bound only requires that
+        // the relation's target type - the bound only requires that
         // the predicate is well-typed against `Builder<R>` at the
         // call site. The dispatcher arm match for the relation knows
         // R statically and downcasts safely.
@@ -1111,7 +1111,7 @@ impl<M> Builder<M> {
         F: Fn(Builder<R>) -> Builder<R> + Send + Sync + 'static,
     {
         // Erase the typed closure into the `Arc<dyn Any>` slot. The
-        // arc stores an `Arc<dyn Fn(Builder<R>) -> Builder<R>>` — a
+        // arc stores an `Arc<dyn Fn(Builder<R>) -> Builder<R>>` - a
         // fully-typed payload. The dispatcher arm match against the
         // relation name knows R statically and downcasts back to the
         // same shape.
@@ -1188,7 +1188,7 @@ impl<M> Builder<M> {
         self.filter_op(col, op, val)
     }
 
-    /// `WHERE (... OR col = val)` — folds into the previous WHERE
+    /// `WHERE (... OR col = val)` - folds into the previous WHERE
     /// clause to form a disjunction. If there is no previous clause,
     /// the new equality stands alone.
     #[doc(alias = "or_where")]
@@ -1205,7 +1205,7 @@ impl<M> Builder<M> {
                 self.where_terms.push(WhereTerm::Or(vec![last, new]));
             }
             None => {
-                // No prior clause — the disjunction reduces to the new
+                // No prior clause - the disjunction reduces to the new
                 // equality. Push as a plain Eq so the renderer doesn't
                 // emit a dangling `()` wrapper.
                 self.where_terms.push(new);
@@ -1369,7 +1369,7 @@ impl<M> Builder<M> {
 
     // ---- LIKE ------------------------------------------------------------
 
-    /// `WHERE col LIKE pattern`. Pattern is passed verbatim — escape
+    /// `WHERE col LIKE pattern`. Pattern is passed verbatim - escape
     /// `%` / `_` at call site if needed.
     #[doc(alias = "where_like")]
     pub fn filter_like(mut self, col: impl IntoColumn, pattern: impl Into<String>) -> Self {
@@ -1488,7 +1488,7 @@ impl<M> Builder<M> {
 
     // ---- JSON ------------------------------------------------------------
 
-    /// JSON containment — backend-specific: Postgres `col @> val`,
+    /// JSON containment - backend-specific: Postgres `col @> val`,
     /// MySQL `JSON_CONTAINS(col, val)`, SQLite falls back to substring
     /// search via `instr`.
     #[doc(alias = "where_json_contains")]
@@ -1504,7 +1504,7 @@ impl<M> Builder<M> {
         self.filter_json_contains(col, val)
     }
 
-    /// JSON array length comparison — `WHERE JSON_LENGTH(col) <op> len`
+    /// JSON array length comparison - `WHERE JSON_LENGTH(col) <op> len`
     /// (or backend equivalent).
     #[doc(alias = "where_json_length")]
     pub fn filter_json_length(mut self, col: impl IntoColumn, op: &str, len: i64) -> Self {
@@ -1521,7 +1521,7 @@ impl<M> Builder<M> {
 
     // ---- Column-to-column + raw -----------------------------------------
 
-    /// `WHERE a = b` — compare two columns directly (no bind values).
+    /// `WHERE a = b` - compare two columns directly (no bind values).
     #[doc(alias = "where_column")]
     pub fn filter_column(mut self, a: impl IntoColumn, b: impl IntoColumn) -> Self {
         self.where_terms
@@ -1535,7 +1535,7 @@ impl<M> Builder<M> {
         self.filter_column(a, b)
     }
 
-    /// `WHERE <sql>` — raw SQL fragment with positional bindings. Use
+    /// `WHERE <sql>` - raw SQL fragment with positional bindings. Use
     /// portable `?` bind markers on every backend; PostgreSQL rendering
     /// rebases them to the query's current `$N` position. Use `??` for a
     /// literal question-mark operator in a bound fragment. Existing
@@ -1546,7 +1546,7 @@ impl<M> Builder<M> {
     ///
     /// `sql` is interpolated verbatim into the query string; only the
     /// `bindings` Vec is parameterised. **Never pass user input as the
-    /// SQL fragment** — concatenating a request value into the fragment
+    /// SQL fragment** - concatenating a request value into the fragment
     /// is a SQL-injection vulnerability. Put user input in the
     /// `bindings` Vec and reference each bind by its placeholder.
     #[doc(alias = "where_raw")]
@@ -1579,13 +1579,13 @@ impl<M> Builder<M> {
         self.order_by(col, Direction::Asc)
     }
 
-    /// `ORDER BY <raw>` — pass through arbitrary expressions
+    /// `ORDER BY <raw>` - pass through arbitrary expressions
     /// (`age * -1`, `CASE WHEN ...`).
     ///
     /// # Security
     ///
     /// `sql` is interpolated verbatim into the query. **Never pass user
-    /// input here** — it is the same SQL-injection surface as
+    /// input here** - it is the same SQL-injection surface as
     /// [`filter_raw`](Self::filter_raw) without even the placeholder
     /// indirection. Hardcode the expression or build it from a known
     /// allowlist.
@@ -1594,7 +1594,7 @@ impl<M> Builder<M> {
         self
     }
 
-    /// `ORDER BY RANDOM()` — useful for sampling. Each backend emits
+    /// `ORDER BY RANDOM()` - useful for sampling. Each backend emits
     /// its own randomisation function via the internal `render_orders`
     /// helper.
     pub fn in_random_order(mut self) -> Self {
@@ -1602,20 +1602,20 @@ impl<M> Builder<M> {
         self
     }
 
-    /// `GROUP BY col` — append to the GROUP BY list.
+    /// `GROUP BY col` - append to the GROUP BY list.
     pub fn group_by(mut self, col: impl IntoColumn) -> Self {
         self.group_by.push(col.col_name());
         self
     }
 
-    /// `HAVING col = val` — equality filter on a grouped result.
+    /// `HAVING col = val` - equality filter on a grouped result.
     pub fn having(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         self.having_terms
             .push(WhereTerm::Eq(col.col_name(), val.into_val()));
         self
     }
 
-    /// `HAVING col <op> val` — arbitrary-operator filter on a grouped
+    /// `HAVING col <op> val` - arbitrary-operator filter on a grouped
     /// result.
     pub fn having_op(mut self, col: impl IntoColumn, op: &str, val: impl IntoVal) -> Self {
         self.having_terms.push(WhereTerm::Op(
@@ -1648,7 +1648,7 @@ impl<M> Builder<M> {
         self.offset(n)
     }
 
-    /// `SELECT DISTINCT` — applied at render time.
+    /// `SELECT DISTINCT` - applied at render time.
     pub fn distinct(mut self) -> Self {
         self.distinct = true;
         self
@@ -1680,7 +1680,7 @@ impl<M> Builder<M> {
     /// # Security
     ///
     /// `raw` is interpolated verbatim into the query. **Never pass
-    /// user input here** — same SQL-injection surface as
+    /// user input here** - same SQL-injection surface as
     /// [`filter_raw`](Self::filter_raw) and [`order_by_raw`](Self::order_by_raw).
     /// Hardcode the expression or build it from a known allowlist.
     pub fn select_raw(mut self, raw: impl Into<String>) -> Self {
@@ -1701,7 +1701,7 @@ impl<M> Builder<M> {
         self
     }
 
-    /// Emit `SELECT ... FOR UPDATE` — an exclusive row lock that
+    /// Emit `SELECT ... FOR UPDATE` - an exclusive row lock that
     /// blocks other transactions from reading-with-lock or writing
     /// the same rows until the holding transaction commits.
     ///
@@ -1712,7 +1712,7 @@ impl<M> Builder<M> {
     ///   a one-shot `warn!` lands on the
     ///   `suprnova::eloquent::lock` target the first time per process)
     ///
-    /// The lock is only meaningful **inside a transaction** — outside
+    /// The lock is only meaningful **inside a transaction** - outside
     /// one, the lock releases at statement end and the call is
     /// effectively a no-op semantically (the SQL still emits). Pair
     /// with `DB::transaction(|tx| ...)`:
@@ -1735,14 +1735,14 @@ impl<M> Builder<M> {
     }
 
     /// Emit `SELECT ... FOR SHARE` (Postgres) /
-    /// `SELECT ... LOCK IN SHARE MODE` (MySQL) — a shared read lock
+    /// `SELECT ... LOCK IN SHARE MODE` (MySQL) - a shared read lock
     /// that allows other shared readers but blocks concurrent
     /// `FOR UPDATE` writers.
     ///
     /// Use this when you need a consistent snapshot of a row (e.g. an
     /// inventory check) without preventing other readers. For most
     /// "lock then write" flows reach for [`Self::lock_for_update`]
-    /// instead — a shared lock would still let another reader-then-
+    /// instead - a shared lock would still let another reader-then-
     /// writer race you.
     ///
     /// SQLite emits no lock SQL (one-shot `warn!`); the call is a
@@ -1755,7 +1755,7 @@ impl<M> Builder<M> {
     /// Whether this builder will emit a locked SELECT (`FOR UPDATE` /
     /// `FOR SHARE`). Defense-in-depth signal for the read terminals:
     /// when set, the executor resolver must skip the `__read_replica__`
-    /// step — Postgres hot-standbys reject locked SELECTs outright,
+    /// step - Postgres hot-standbys reject locked SELECTs outright,
     /// and MySQL replicas accept them but the lock is local to the
     /// replica and useless.
     fn wants_primary_pool(&self) -> bool {
@@ -1801,7 +1801,7 @@ impl<M> Builder<M> {
     /// `Self::without_global_scope::<S>()` into user crates, and that
     /// helper needs to call this method to set the mask before the
     /// registry runs. The macro-emitted helper is the correct surface
-    /// for end users — it constructs a fresh `Builder`, sets the mask,
+    /// for end users - it constructs a fresh `Builder`, sets the mask,
     /// THEN runs the registry, so the opt-out actually lands.
     ///
     /// Chaining this method onto the builder returned by
@@ -1814,7 +1814,7 @@ impl<M> Builder<M> {
     /// Use the macro-emitted static helper instead:
     ///
     /// ```ignore
-    /// // Constructs the builder, sets the mask, runs the registry —
+    /// // Constructs the builder, sets the mask, runs the registry -
     /// // opt-out lands.
     /// let everything = User::without_global_scope::<TenantScope>()
     ///     .get()
@@ -1838,7 +1838,7 @@ impl<M> Builder<M> {
     /// `Self::without_global_scopes()`, which needs to call this
     /// method to set the bypass flag before the registry runs.
     /// Chaining onto a builder returned by `Model::query()` is
-    /// silently ineffective — scopes already ran.
+    /// silently ineffective - scopes already ran.
     ///
     /// Use the macro-emitted static helper instead:
     ///
@@ -1926,7 +1926,7 @@ fn render_date_part(
 ///
 /// Three join shapes, dispatched on which slots the spec carries:
 ///
-/// 1. **Pivot** (`pivot_table` populated) — m2m / morph-m2m / through:
+/// 1. **Pivot** (`pivot_table` populated) - m2m / morph-m2m / through:
 ///    ```sql
 ///    EXISTS (SELECT 1 FROM target
 ///             INNER JOIN pivot
@@ -1936,12 +1936,12 @@ fn render_date_part(
 ///               AND <inner where terms>)
 ///    ```
 /// 2. **BelongsTo** (`foreign_key` on parent table, `parent_key` is
-///    target's PK) — child.id = parent.fk:
+///    target's PK) - child.id = parent.fk:
 ///    ```sql
 ///    EXISTS (SELECT 1 FROM target WHERE target.<parent_key> = parent.<foreign_key>)
 ///    ```
 /// 3. **Has** (`foreign_key` on target table, `parent_key` is parent
-///    PK) — child.fk = parent.pk:
+///    PK) - child.fk = parent.pk:
 ///    ```sql
 ///    EXISTS (SELECT 1 FROM target WHERE target.<foreign_key> = parent.<parent_key>
 ///                                   AND <morph_type_column> = '<morph_type_value>'
@@ -1954,7 +1954,7 @@ fn render_date_part(
 /// `NOT (...)`.
 ///
 /// The renderer threads `values` + `n` through the placeholder
-/// counter — Postgres `$N` numbers stay monotonic across the parent's
+/// counter - Postgres `$N` numbers stay monotonic across the parent's
 /// WHERE clause and the subquery body, the same way UNION arms do.
 fn render_exists(
     backend: DbBackend,
@@ -1964,7 +1964,7 @@ fn render_exists(
 ) -> Result<String, FrameworkError> {
     let mut where_parts: Vec<String> = Vec::new();
 
-    // Three shapes — pivot, belongs-to, has — selected by which slots
+    // Three shapes - pivot, belongs-to, has - selected by which slots
     // the spec carries. The renderer is intentionally explicit rather
     // than data-driven: each shape has different correlation logic, and
     // a generic templater would obscure which join lands on which side.
@@ -1974,7 +1974,7 @@ fn render_exists(
         // back to the parent goes on `pivot.parent_key = parent.pk`.
         let join_clause = if spec.related_pk.is_empty() || spec.pivot_related_key.is_empty() {
             // Degenerate pivot (no target join column). Fall back to
-            // the parent-correlation alone — degrades gracefully when
+            // the parent-correlation alone - degrades gracefully when
             // the macro could only supply the parent side.
             spec.pivot_table.clone()
         } else {
@@ -2026,7 +2026,7 @@ fn render_exists(
         }
         spec.target_table.clone()
     } else {
-        // No target table and no pivot — there's no SQL we can render.
+        // No target table and no pivot - there's no SQL we can render.
         // This shouldn't be reachable from the builder API, but if
         // metadata is missing we render a clause that fails closed:
         // `EXISTS (SELECT 1 WHERE 1 = 0)` evaluates to FALSE, which
@@ -2054,7 +2054,7 @@ fn render_exists(
 
     // Inner constraint from `where_has`'s closure. Qualify bare
     // columns with the target table the same way `where_relation`
-    // does below — on a pivot/m2m relation the FROM is `pivot JOIN
+    // does below - on a pivot/m2m relation the FROM is `pivot JOIN
     // target`, so a shared column name (`id`, `created_at`) is
     // ambiguous without the qualifier and the database rejects the
     // statement. The qualifier is `None` only when there's no target
@@ -2081,7 +2081,7 @@ fn render_exists(
         let ph = placeholder(backend, *n)?;
         values.push(json_value_to_sea_value(val));
         // Qualify with the target table when present so the col reads
-        // unambiguously in the subquery's WHERE — Laravel's
+        // unambiguously in the subquery's WHERE - Laravel's
         // whereRelation always renders the qualified form.
         if !spec.target_table.is_empty() {
             where_parts.push(format!("{}.{} {} {}", spec.target_table, col, op, ph));
@@ -2099,7 +2099,7 @@ fn render_exists(
     let body = if let (Some(op), Some(count)) = (&spec.count_op, spec.count_value) {
         // Scalar-subquery form: `(SELECT COUNT(*) FROM ...) <op> <count>`.
         // The count value lands inline (not bound) because it's a
-        // typed `i64` we control — no injection surface. The operator
+        // typed `i64` we control - no injection surface. The operator
         // already passed `validate_sql_operator`.
         format!(
             "(SELECT COUNT(*) FROM {from}{where_sql}) {op} {count}",
@@ -2127,13 +2127,13 @@ fn render_exists(
 
 /// Render a single [`WhereTerm`] inside the EXISTS subquery body.
 /// Mirrors `Builder::render_where_term`'s arms but free-standing so the
-/// renderer doesn't require a `Builder<M>` receiver — the inner terms
+/// renderer doesn't require a `Builder<M>` receiver - the inner terms
 /// were copied off a typed `Builder<R>` at `where_has` time and the
 /// types `R` have already been discarded.
 ///
 /// `qualifier` is the table name to prefix bare columns with (e.g.
 /// `target` so `created_at` reads `target.created_at`). It is `Some`
-/// whenever the EXISTS subquery has a target table — required on
+/// whenever the EXISTS subquery has a target table - required on
 /// pivot/m2m relations whose FROM is `pivot JOIN target`, where an
 /// unqualified shared column (`id`, `created_at`) is ambiguous and the
 /// database rejects the statement. The `Raw` escape hatch is left
@@ -2148,7 +2148,7 @@ fn render_subquery_term(
 ) -> Result<String, FrameworkError> {
     // Prefix a bare column with the subquery's target table when one is
     // present, so it reads unambiguously across the JOIN. A column the
-    // caller already qualified (carries a `.`) is left as-is — both to
+    // caller already qualified (carries a `.`) is left as-is - both to
     // avoid a bogus three-segment `target.other.col` and to respect an
     // explicit table choice in the `where_has` closure.
     let q = |col: &str| -> String {
@@ -2295,7 +2295,7 @@ fn render_json_length(
     })
 }
 
-/// Phase 10C T9 — log a single `warn!` per process the first time a
+/// Phase 10C T9 - log a single `warn!` per process the first time a
 /// SQLite query reaches `lock_for_update` / `shared_lock`. SQLite has
 /// no row-level locking; the lock methods compile so cross-backend
 /// code stays portable, but emitting the warning once per process
@@ -2480,17 +2480,17 @@ impl<M> Builder<M> {
         // this builder must clear `validate_identifier` /
         // `validate_sql_operator` before reaching the SQL renderer.
         // Raw-SQL escape hatches (`select_raw`, `WhereTerm::Raw`,
-        // `OrderTerm::Raw`) are deliberately skipped — they exist
+        // `OrderTerm::Raw`) are deliberately skipped - they exist
         // precisely so power users can opt past the validator.
         self.validate_inputs()?;
         let mut values: Vec<SeaValue> = Vec::new();
         let mut n = 0;
         let mut sql = self.render_select_into(backend, table, column_expr, &mut values, &mut n)?;
-        // Phase 10C T9 — row-lock hint goes at the very end of the
+        // Phase 10C T9 - row-lock hint goes at the very end of the
         // compound statement, after every UNION arm and every
         // ORDER BY / LIMIT / OFFSET. The lock applies to the outer
         // SELECT, so emitting it inside `render_select_into` would
-        // place it mid-statement on union arms — wrong shape.
+        // place it mid-statement on union arms - wrong shape.
         let lock_clause: &str = match (backend, self.lock_mode) {
             (_, LockMode::None) => "",
             (DbBackend::Postgres, LockMode::ForUpdate) => " FOR UPDATE",
@@ -2511,15 +2511,15 @@ impl<M> Builder<M> {
     ///
     /// Two shapes depending on the builder's structure:
     ///
-    /// **Flat case** — no `GROUP BY`, no `UNION` arms:
+    /// **Flat case** - no `GROUP BY`, no `UNION` arms:
     /// ```sql
     /// SELECT COUNT(*) AS count FROM t WHERE ... HAVING ...
     /// ```
-    /// `ORDER BY` / `LIMIT` / `OFFSET` are stripped — they don't affect
+    /// `ORDER BY` / `LIMIT` / `OFFSET` are stripped - they don't affect
     /// the count and `ORDER BY` over a bare aggregate is a SQL error
     /// in some dialects.
     ///
-    /// **Grouped or union case** — `GROUP BY` non-empty OR unions present:
+    /// **Grouped or union case** - `GROUP BY` non-empty OR unions present:
     /// ```sql
     /// SELECT COUNT(*) AS count FROM (
     ///     SELECT 1 FROM t WHERE ... GROUP BY ... HAVING ...
@@ -2539,7 +2539,7 @@ impl<M> Builder<M> {
         backend: DbBackend,
         table: &str,
     ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
-        // Audit HIGH `eloquent` #1 — same identifier validation as
+        // Audit HIGH `eloquent` #1 - same identifier validation as
         // `render_select_for`. Count uses the same WHERE / GROUP BY /
         // HAVING clauses, so the attack surface is identical.
         self.validate_inputs()?;
@@ -2560,7 +2560,7 @@ impl<M> Builder<M> {
             sql.push_str(table);
             self.render_count_body(backend, &mut sql, &mut values, &mut n)?;
 
-            // Union arms — recurse with the same placeholder counter
+            // Union arms - recurse with the same placeholder counter
             // so Postgres `$N` stays monotonic. Each arm projects the
             // same `1 AS __paginate_marker` column.
             for (other, all) in &self.unions {
@@ -2584,7 +2584,7 @@ impl<M> Builder<M> {
     /// Append the WHERE / GROUP BY / HAVING clauses (without the
     /// leading SELECT or FROM) onto `sql`. Used by
     /// [`Self::render_count_select_for`] for both the flat and
-    /// subquery-wrapped shapes — DRY-ing the clause emission across
+    /// subquery-wrapped shapes - DRY-ing the clause emission across
     /// the two render paths.
     fn render_count_body(
         &self,
@@ -2612,7 +2612,7 @@ impl<M> Builder<M> {
         Ok(())
     }
 
-    /// Internal — render this Builder's SELECT body into a shared
+    /// Internal - render this Builder's SELECT body into a shared
     /// `values` + `n` counter. Used by [`Self::render_select_for`] (the
     /// top-level entry) and by union recursion: unions must share the
     /// placeholder counter so Postgres `$N` numbering stays monotonic
@@ -2668,7 +2668,7 @@ impl<M> Builder<M> {
             sql.push_str(&format!(" OFFSET {o}"));
         }
 
-        // Unions — recurse into the same `values` / `n` so placeholder
+        // Unions - recurse into the same `values` / `n` so placeholder
         // numbers stay monotonic across the combined statement.
         // Without this, Postgres `$N` placeholders would restart at $1
         // on the inner SELECT, colliding with the outer's bound
@@ -2777,7 +2777,7 @@ where
         }
     }
 
-    /// `WHERE EXISTS (SELECT 1 FROM related ...)` — restrict to rows
+    /// `WHERE EXISTS (SELECT 1 FROM related ...)` - restrict to rows
     /// whose `relation` returns at least one matching child.
     ///
     /// ```ignore
@@ -2791,7 +2791,7 @@ where
         self
     }
 
-    /// `WHERE (SELECT COUNT(*) FROM related ...) <op> <count>` — like
+    /// `WHERE (SELECT COUNT(*) FROM related ...) <op> <count>` - like
     /// [`Self::has`] but with a count comparator.
     ///
     /// ```ignore
@@ -2813,7 +2813,7 @@ where
         self
     }
 
-    /// `OR EXISTS (...)` — disjunction form of [`Self::has`].
+    /// `OR EXISTS (...)` - disjunction form of [`Self::has`].
     pub fn or_has(mut self, relation: &str) -> Self {
         let spec =
             self.build_exists_spec_for(relation, true, None, None, Vec::new(), None, None, None);
@@ -2822,7 +2822,7 @@ where
         self
     }
 
-    /// `WHERE NOT EXISTS (SELECT 1 FROM related ...)` — restrict to
+    /// `WHERE NOT EXISTS (SELECT 1 FROM related ...)` - restrict to
     /// rows whose `relation` returns no matching children.
     pub fn doesnt_have(mut self, relation: &str) -> Self {
         let spec =
@@ -2831,7 +2831,7 @@ where
         self
     }
 
-    /// `OR NOT EXISTS (...)` — disjunction form of [`Self::doesnt_have`].
+    /// `OR NOT EXISTS (...)` - disjunction form of [`Self::doesnt_have`].
     pub fn or_doesnt_have(mut self, relation: &str) -> Self {
         let spec =
             self.build_exists_spec_for(relation, false, None, None, Vec::new(), None, None, None);
@@ -2840,7 +2840,7 @@ where
         self
     }
 
-    /// `WHERE EXISTS (SELECT 1 FROM related WHERE <closure>)` — take a
+    /// `WHERE EXISTS (SELECT 1 FROM related WHERE <closure>)` - take a
     /// closure constraining the inner builder; the WHERE terms it
     /// produces land in the subquery's body.
     ///
@@ -2870,7 +2870,7 @@ where
         self
     }
 
-    /// `OR EXISTS (... <closure>)` — disjunction form of [`Self::where_has`].
+    /// `OR EXISTS (... <closure>)` - disjunction form of [`Self::where_has`].
     pub fn or_where_has<R, F>(mut self, relation: &str, predicate: F) -> Self
     where
         R: 'static,
@@ -2937,7 +2937,7 @@ where
 
     /// Laravel's `whereRelation` shortcut. Equivalent to
     /// `where_has::<R, _>(rel, |q| q.filter(col, val))` without the
-    /// typed closure — the column constraint renders inline in the
+    /// typed closure - the column constraint renders inline in the
     /// EXISTS subquery body.
     pub fn where_relation(
         mut self,
@@ -3004,7 +3004,7 @@ where
         self
     }
 
-    /// Laravel's `whereBelongsTo($parent, "rel")` — restrict to rows
+    /// Laravel's `whereBelongsTo($parent, "rel")` - restrict to rows
     /// whose `rel` belongs-to-relation matches the given parent row's
     /// PK. Renders a direct `WHERE child.<fk> = <parent_pk>` because
     /// the belongs-to FK lives on THIS table (no EXISTS needed).
@@ -3027,7 +3027,7 @@ where
 
     // ---- where_key / where_key_not / latest / oldest -------------------
 
-    /// Laravel-shape PK filter — `WHERE pk = id`. Sugar over
+    /// Laravel-shape PK filter - `WHERE pk = id`. Sugar over
     /// `filter(M::primary_key_name(), id)`.
     pub fn where_key(self, id: impl IntoVal) -> Self {
         let pk = M::primary_key_name();
@@ -3039,7 +3039,7 @@ where
         self.where_key(id)
     }
 
-    /// Laravel-shape PK exclusion — `WHERE pk <> id`. Sugar over
+    /// Laravel-shape PK exclusion - `WHERE pk <> id`. Sugar over
     /// `filter_op(M::primary_key_name(), "!=", id)`.
     pub fn where_key_not(self, id: impl IntoVal) -> Self {
         let pk = M::primary_key_name();
@@ -3051,7 +3051,7 @@ where
         self.where_key_not(id)
     }
 
-    /// Laravel-shape `latest()` — `ORDER BY <col> DESC`. Defaults to
+    /// Laravel-shape `latest()` - `ORDER BY <col> DESC`. Defaults to
     /// `"created_at"`; pass an explicit column to override.
     pub fn latest(self) -> Self {
         self.order_by("created_at", Direction::Desc)
@@ -3062,7 +3062,7 @@ where
         self.order_by(col, Direction::Desc)
     }
 
-    /// Laravel-shape `oldest()` — `ORDER BY <col> ASC`. Defaults to
+    /// Laravel-shape `oldest()` - `ORDER BY <col> ASC`. Defaults to
     /// `"created_at"`; pass an explicit column to override.
     pub fn oldest(self) -> Self {
         self.order_by("created_at", Direction::Asc)
@@ -3112,7 +3112,7 @@ where
 
     // ---- qualify_column / qualify_columns ---------------------------------
 
-    /// Return `M::TABLE.col` — the fully-qualified column name. Useful
+    /// Return `M::TABLE.col` - the fully-qualified column name. Useful
     /// for joins where bare `col` would be ambiguous. Mirrors
     /// Laravel's `Model::qualifyColumn`.
     pub fn qualify_column(col: &str) -> String {
@@ -3144,7 +3144,7 @@ where
     ///
     /// **Panics** when this builder contains an identifier or
     /// operator that fails [`crate::database::validate_identifier`] /
-    /// [`crate::database::validate_sql_operator`] — the same
+    /// [`crate::database::validate_sql_operator`] - the same
     /// validation the execution path applies. The debug-only API
     /// keeps an infallible signature; the execution path
     /// ([`Self::get`] / [`Self::count`] / ...) surfaces the same
@@ -3172,9 +3172,9 @@ where
             .expect("to_sql_with_bindings_for: builder contains invalid identifier/operator")
     }
 
-    /// Phase 10C T14 — log the rendered SQL via `tracing` and return
+    /// Phase 10C T14 - log the rendered SQL via `tracing` and return
     /// `self` so the call is chainable inside an existing builder
-    /// pipeline. Interactive debugging aid only — never bake into
+    /// pipeline. Interactive debugging aid only - never bake into
     /// production paths.
     ///
     /// Uses the live DB connection's backend if one is initialised
@@ -3207,7 +3207,7 @@ where
                 );
             }
             Err(e) => {
-                // Debug-only path — log the validation error instead
+                // Debug-only path - log the validation error instead
                 // of panicking so the user can keep chaining and see
                 // the structural issue. The execution path
                 // (`get`/`count`/...) surfaces the same error as
@@ -3222,9 +3222,9 @@ where
         self
     }
 
-    /// Phase 10C T14 — log the rendered SQL at `tracing::error!` and
+    /// Phase 10C T14 - log the rendered SQL at `tracing::error!` and
     /// then **panic** with the SQL embedded in the panic message.
-    /// Interactive debugging only — never bake into a production
+    /// Interactive debugging only - never bake into a production
     /// path.
     ///
     /// Mirrors Laravel's `Builder::dd()` ("dump-and-die").
@@ -3234,7 +3234,7 @@ where
     /// User::query().filter("active", true).dd();
     /// ```
     ///
-    /// Panics with `eloquent dd: <sql>` — the literal `eloquent dd`
+    /// Panics with `eloquent dd: <sql>` - the literal `eloquent dd`
     /// prefix is part of the contract so `#[should_panic(expected =
     /// "eloquent dd")]` test assertions stay stable.
     pub fn dd(self) -> ! {
@@ -3297,7 +3297,7 @@ where
 
 // ---- Terminals -----------------------------------------------------------
 
-// The `FromQueryResult` bound belongs on the entity's `Model` type —
+// The `FromQueryResult` bound belongs on the entity's `Model` type -
 // the SeaORM-generated `<M::Entity as EntityTrait>::Model` that
 // DeriveEntityModel auto-implements FromQueryResult on. The user's
 // struct `M` does NOT have FromQueryResult; we fetch into the entity's
@@ -3322,7 +3322,7 @@ where
     /// [`ExecutorChoice::resolve_read_avoid_replica`](crate::database::transaction::ExecutorChoice::resolve_read_avoid_replica)
     /// when the builder carries a lock mode and through the standard
     /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read)
-    /// otherwise — every read terminal that emits SQL routes through
+    /// otherwise - every read terminal that emits SQL routes through
     /// this single point so the lock-vs-replica policy stays in one
     /// place.
     async fn resolve_read_executor(
@@ -3349,20 +3349,20 @@ where
     ///
     /// ## Fast path vs slow path
     ///
-    /// When [`with_casts`] has NOT been called (`runtime_casts` empty)
-    /// — the common case — rows are materialised through the
+    /// When [`with_casts`] has NOT been called (`runtime_casts` empty) -
+    /// the common case - rows are materialised through the
     /// macro-emitted `From<inner::Model> for M` impl, which routes
     /// through any *static* casts declared via `#[model(casts =
     /// { ... })]`. This is one allocation per row.
     ///
     /// When `runtime_casts` has entries, the static cast pipeline is
-    /// bypassed entirely for this query — runtime casts are an
+    /// bypassed entirely for this query - runtime casts are an
     /// *override*, not an addition. For each row the framework
     /// serialises the storage-shape inner Model directly to JSON,
     /// routes each listed column through the runtime cast's
     /// `DynCast::from_storage_json`, and deserialises the result
     /// straight into `M`. Columns with no runtime cast entry land in
-    /// `M` in their raw storage shape — so a runtime override is
+    /// `M` in their raw storage shape - so a runtime override is
     /// expected to specify every column that needs coercion.
     ///
     /// ## Eager loading
@@ -3391,20 +3391,20 @@ where
     /// `group_by("col")`, `sort_by("col")`, `sum::<T>("col")`, ...)
     /// composes on top.
     pub async fn get(mut self) -> Result<Collection<M>, FrameworkError> {
-        // Phase 10C T1 — Retrieving fires ONCE per query (not per
+        // Phase 10C T1 - Retrieving fires ONCE per query (not per
         // row) before any SQL runs. Aligns with Laravel's
         // `retrieving` hook, which fires "just before a model is
         // hydrated from DB" once for the query as a whole.
         M::__dispatch_retrieving().await?;
 
-        // Phase 10C T11/T12 — resolve executor with five-step precedence:
+        // Phase 10C T11/T12 - resolve executor with five-step precedence:
         // explicit `with_tx` override > ambient `CURRENT_TX` >
         // builder `on(name)` > per-model default conn >
         // `__read_replica__` auto-routing > default pool.
         let exec = self.resolve_read_executor().await?;
         let backend = exec.backend();
         let runtime_casts = self.runtime_casts.clone();
-        // Move the eager plan out of `self` — `EagerSpec::WithWhere`
+        // Move the eager plan out of `self` - `EagerSpec::WithWhere`
         // owns a `Box<dyn Any>` (the type-erased predicate) which is
         // not `Clone`. The base SELECT consumes `self`'s WHERE / ORDER
         // / LIMIT terms; afterwards we hand the plan to the eager
@@ -3413,15 +3413,15 @@ where
         let (sql, vals) = self.render_select_for(backend, M::TABLE, "*")?;
         let stmt = Statement::from_sql_and_values(backend, &sql, vals);
 
-        // Fetch into the entity's `Model` — the SeaORM type that's
+        // Fetch into the entity's `Model` - the SeaORM type that's
         // auto-implementing `FromQueryResult`. This is the storage-shape
         // type, not the user's runtime struct.
         //
         // Route through the resolved executor's instrumented
         // `statement_all` terminal rather than calling
         // `find_by_statement(stmt).all(conn)` straight at the
-        // connection, so the base SELECT — and the eager-load IN-queries
-        // that recurse back through `Builder::get` — emit `QueryExecuted`
+        // connection, so the base SELECT - and the eager-load IN-queries
+        // that recurse back through `Builder::get` - emit `QueryExecuted`
         // to `DB::listen` / the query log. T11: tx-vs-pool routing is
         // handled inside the executor.
         let raw_rows = exec
@@ -3430,7 +3430,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
 
         let mut out: Vec<M> = if runtime_casts.is_empty() {
-            // Fast path — convert each row via the macro-emitted
+            // Fast path - convert each row via the macro-emitted
             // fallible `Model::try_from_storage`, so a cast that fails
             // to decode a stored value propagates as a `FrameworkError`
             // instead of panicking.
@@ -3439,7 +3439,7 @@ where
                 .map(M::try_from_storage)
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            // Slow path (override mode) — serialise the storage-shape
+            // Slow path (override mode) - serialise the storage-shape
             // row to JSON, apply each runtime cast in place, then
             // deserialise into M. Static casts on M are NOT applied;
             // the runtime cast map is treated as a full replacement
@@ -3465,7 +3465,7 @@ where
             buf
         };
 
-        // T9 — eager loading. After the base SELECT lands, the
+        // T9 - eager loading. After the base SELECT lands, the
         // orchestrator walks each recorded `EagerSpec` and dispatches
         // into the per-model `__eager_load` /
         // `__count_relation` / `__aggregate_relation` (via the
@@ -3476,7 +3476,7 @@ where
         //
         // T11: `EagerLoadDispatch` takes `&DatabaseConnection` (concrete,
         // emitted by the macro across every relation kind). The `db`
-        // parameter is retained for trait-signature stability — the
+        // parameter is retained for trait-signature stability - the
         // actual routing happens at each SQL leaf (`belongs_to_many.rs`
         // etc.) via `ExecutorChoice::resolve()`, which consults
         // `CURRENT_TX` and routes through the active transaction when
@@ -3497,7 +3497,7 @@ where
             .await?;
         }
 
-        // Phase 10C T1 — Retrieved fires ONCE per hydrated row, AFTER
+        // Phase 10C T1 - Retrieved fires ONCE per hydrated row, AFTER
         // eager loads land. Listeners observe the fully-populated
         // model (relations cache + all hydrated columns), not the
         // partial post-SELECT shape.
@@ -3514,11 +3514,11 @@ where
     /// `Retrieved` once for the returned row (no dispatch when the
     /// query matches zero rows). Internally delegates to
     /// [`Self::get`] with `limit = 1`, which is where the event
-    /// hooks fire — so `first` shares the same per-row dispatch
+    /// hooks fire - so `first` shares the same per-row dispatch
     /// contract.
     pub async fn first(mut self) -> Result<Option<M>, FrameworkError> {
         self.limit = Some(1);
-        // `Collection<M>` derefs to `&[M]` but offers no owning `pop` —
+        // `Collection<M>` derefs to `&[M]` but offers no owning `pop` -
         // unwrap to the inner `Vec` first.
         Ok(self.get().await?.into_vec().pop())
     }
@@ -3532,7 +3532,7 @@ where
             .ok_or_else(|| FrameworkError::not_found("no rows matched"))
     }
 
-    /// Laravel-shape `sole()` — succeed only when the query matches
+    /// Laravel-shape `sole()` - succeed only when the query matches
     /// EXACTLY one row.
     ///
     /// Returns `FrameworkError::not_found` when zero rows match and
@@ -3553,7 +3553,7 @@ where
         }
     }
 
-    /// Laravel-shape `soleValue($col)` — fetch a single value, succeed
+    /// Laravel-shape `soleValue($col)` - fetch a single value, succeed
     /// only when one row matches. Variant of [`Self::sole`] that
     /// projects a column.
     pub async fn sole_value<T: TryGetable>(
@@ -3584,7 +3584,7 @@ where
         }
     }
 
-    /// Laravel-shape `valueOrFail($col)` — fetch a single column from
+    /// Laravel-shape `valueOrFail($col)` - fetch a single column from
     /// the first matching row, error when no row matches.
     pub async fn value_or_fail<T: TryGetable>(
         self,
@@ -3615,16 +3615,16 @@ where
     }
 
     /// Length-aware paginate. Runs a `COUNT(*)` query alongside the
-    /// `LIMIT`/`OFFSET` SELECT — two queries per page.
+    /// `LIMIT`/`OFFSET` SELECT - two queries per page.
     ///
     /// Reads the current page number from the request's `?page=N`
     /// query parameter (via [`crate::context::Context::query_param`]).
-    /// Use [`Self::paginate_using`] to override the parameter name —
+    /// Use [`Self::paginate_using`] to override the parameter name -
     /// useful when a page has multiple paginators that each need their
     /// own query string.
     ///
     /// Returns a [`LengthAwarePaginator<M>`](crate::LengthAwarePaginator) whose JSON shape matches
-    /// Laravel's `LengthAwarePaginator::toArray()` — ready to ship to
+    /// Laravel's `LengthAwarePaginator::toArray()` - ready to ship to
     /// Inertia / JSON consumers without reshaping.
     ///
     /// ## Errors
@@ -3655,7 +3655,7 @@ where
     /// [`Self::paginate`] for the JSON shape and error semantics.
     ///
     /// `page_param` is the query-string key read for the current page
-    /// number — e.g. `paginate_using("p", 20)` reads `?p=2`. Useful
+    /// number - e.g. `paginate_using("p", 20)` reads `?p=2`. Useful
     /// when a single page renders multiple independent paginators, so
     /// each can take a different query parameter:
     ///
@@ -3674,7 +3674,7 @@ where
         let page = current_page_from_request(page_param);
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
-        // Count phase — borrows `self`, doesn't consume it.
+        // Count phase - borrows `self`, doesn't consume it.
         // T11/T12: route through ExecutorChoice (with tx override +
         // connection override) so the COUNT runs against the same
         // executor as the page query.
@@ -3691,7 +3691,7 @@ where
             .map(|n| n.max(0) as u64)
             .unwrap_or(0);
 
-        // Page phase — consumes `self` for the actual fetch.
+        // Page phase - consumes `self` for the actual fetch.
         let rows: Vec<M> = self.limit(per_page).offset(offset).get().await?.into_vec();
 
         let from = if rows.is_empty() {
@@ -3711,10 +3711,10 @@ where
         .with_page_name(page_param))
     }
 
-    /// Simple paginate — no COUNT query.
+    /// Simple paginate - no COUNT query.
     ///
     /// Fetches `per_page + 1` rows; if the extra row exists, `has_more`
-    /// is set and the row is trimmed from `data`. One query per page —
+    /// is set and the row is trimmed from `data`. One query per page -
     /// cheap to compute for large tables where a total row count would
     /// be too expensive.
     ///
@@ -3748,7 +3748,7 @@ where
         ))
     }
 
-    /// Cursor paginate — opaque-cursor keyset pagination over the
+    /// Cursor paginate - opaque-cursor keyset pagination over the
     /// model's primary key.
     ///
     /// Bidirectional, matching Laravel's `cursorPaginate()` and the
@@ -3760,7 +3760,7 @@ where
     /// a client can page in either direction. Cursors are encrypted+MACd
     /// via `CursorPaginator::encode_value` so they can't be forged.
     ///
-    /// Any existing `ORDER BY` on the builder is replaced — cursor
+    /// Any existing `ORDER BY` on the builder is replaced - cursor
     /// pagination requires a stable total order over the PK.
     ///
     /// ## Errors
@@ -3783,7 +3783,7 @@ where
         let plan = crate::pagination::cursor::plan_scan(decoded);
 
         // Replace any existing ORDER BY with a stable PK sort in the
-        // plan's direction — cursor pagination requires a total order
+        // plan's direction - cursor pagination requires a total order
         // over the keyset column.
         let mut q = self;
         q.orders.clear();
@@ -3839,7 +3839,7 @@ where
     /// Process rows in OFFSET-paginated batches of `n`.
     ///
     /// Each batch lands as a [`Collection<M>`] in the user's async
-    /// closure. Memory is bounded by the batch size — never the full
+    /// closure. Memory is bounded by the batch size - never the full
     /// result set. The closure runs to completion before the next
     /// batch fetches, so a slow consumer doesn't accumulate rows.
     ///
@@ -3850,7 +3850,7 @@ where
     /// batch's offset, it will be skipped; if a row is deleted before
     /// the next batch's offset, the row that took its place will be
     /// processed twice. Use [`Self::chunk_by_id`] for production-grade
-    /// bulk processing — it filters on `id > last_id` and is
+    /// bulk processing - it filters on `id > last_id` and is
     /// concurrent-safe by construction.
     ///
     /// `chunk()` exists as the simple form for read-only workloads
@@ -3860,7 +3860,7 @@ where
     /// ## Eager loads are not supported
     ///
     /// Pairing `.with(...)` with `.chunk(...)` returns
-    /// `FrameworkError::internal` — the cross-batch builder clone
+    /// `FrameworkError::internal` - the cross-batch builder clone
     /// drops the type-erased eager plan, so honouring the eager spec
     /// would be silently inconsistent. Re-apply `.with(...)` inside
     /// the per-chunk closure when needed (each batch's
@@ -3923,7 +3923,7 @@ where
     ///
     /// ## Requires an `i64` primary key
     ///
-    /// The cursor is read off [`Model::field_value`] as an `i64` —
+    /// The cursor is read off [`Model::field_value`] as an `i64` -
     /// models with `String` / `Uuid` PKs use [`Self::chunk`] with the
     /// OFFSET caveat (or wait for a follow-up that generalises the
     /// cursor shape). If [`Model::field_value`] returns a non-numeric
@@ -3932,7 +3932,7 @@ where
     ///
     /// ## Eager loads
     ///
-    /// Same restriction as [`Self::chunk`] — `.with(...)` is rejected
+    /// Same restriction as [`Self::chunk`] - `.with(...)` is rejected
     /// up front. Re-apply inside the per-chunk closure as needed.
     ///
     /// ## Errors
@@ -3979,7 +3979,7 @@ where
             // Read the highest PK in the batch (the rows came back
             // `ORDER BY pk ASC`, so `.last()` holds it). If the PK
             // can't be coerced to `i64` we bail rather than loop
-            // forever — non-`i64` PK models should use `chunk()`.
+            // forever - non-`i64` PK models should use `chunk()`.
             last_id = batch
                 .last()
                 .and_then(|m| m.field_value(pk))
@@ -3991,7 +3991,7 @@ where
             }
             if last_id.is_none() {
                 return Err(FrameworkError::internal(
-                    "Builder::chunk_by_id: primary key column did not yield an i64 value — \
+                    "Builder::chunk_by_id: primary key column did not yield an i64 value - \
                      models with non-i64 primary keys must use chunk() instead",
                 ));
             }
@@ -4006,7 +4006,7 @@ where
     /// `M` is in-flight at a time, while the accumulating
     /// `Collection<U>` retains every mapped item. Pick `U` smaller
     /// than `M` (a summary, an id, an aggregate) when the result is
-    /// supposed to stay bounded across very large tables — otherwise
+    /// supposed to stay bounded across very large tables - otherwise
     /// switch to [`Self::chunk`] + an external sink.
     ///
     /// ## Example
@@ -4034,7 +4034,7 @@ where
         // Same shape as `chunk`, but the per-iteration accumulator
         // lives in this scope so the mapped output can escape.
         // Delegating to `chunk` would force the accumulator into the
-        // closure capture — the borrow checker rejects the resulting
+        // closure capture - the borrow checker rejects the resulting
         // `&mut out` aliasing across the async iteration.
         if !self.eager_specs.is_empty() {
             return Err(FrameworkError::internal(
@@ -4062,7 +4062,7 @@ where
 
     /// Process every row through `f` one at a time.
     ///
-    /// Sugar for [`Self::chunk`]`(1, ...)` — issues N queries for N
+    /// Sugar for [`Self::chunk`]`(1, ...)` - issues N queries for N
     /// rows. For large datasets, switch to [`Self::lazy`] which
     /// internally batches via PK cursor (default 1000 rows per fetch)
     /// while still surfacing one row at a time.
@@ -4120,7 +4120,7 @@ where
     ///
     /// ## Requires an `i64` primary key
     ///
-    /// Same constraint as [`Self::chunk_by_id`] — the underlying
+    /// Same constraint as [`Self::chunk_by_id`] - the underlying
     /// batching uses an `id > last_id` filter. Models with `String` /
     /// `Uuid` PKs need [`Self::chunk`] until the cursor shape
     /// generalises.
@@ -4141,7 +4141,7 @@ where
     /// Stream rows one at a time, with a custom internal batch size.
     ///
     /// Use this when the default 1000-row internal batch in
-    /// [`Self::lazy`] isn't the right shape — e.g. very wide rows
+    /// [`Self::lazy`] isn't the right shape - e.g. very wide rows
     /// where 1000 in memory at once is too much, or very narrow rows
     /// where a larger batch reduces round trips.
     ///
@@ -4181,7 +4181,7 @@ where
                 }
                 if last_id.is_none() {
                     Err(FrameworkError::internal(
-                        "Builder::lazy_by_id: primary key column did not yield an i64 value — \
+                        "Builder::lazy_by_id: primary key column did not yield an i64 value - \
                          models with non-i64 primary keys cannot use lazy() / cursor()",
                     ))?;
                 }
@@ -4199,7 +4199,7 @@ where
         self.lazy()
     }
 
-    // Terminal/aggregate type bounds are `TryGetable` — that's the
+    // Terminal/aggregate type bounds are `TryGetable` - that's the
     // trait SeaORM's `QueryResult::try_get` uses to convert a column
     // value into a Rust type. `DeserializeOwned` (the serde bound) is
     // wrong here because the body reads from `try_get`, not from
@@ -4332,7 +4332,7 @@ where
     /// single model. Laravel's `Builder::modelKeys()`.
     ///
     /// The projection is the **qualified** key
-    /// ([`Model::qualified_key_name`]) — `users.id`, not `id` — so the
+    /// ([`Model::qualified_key_name`]) - `users.id`, not `id` - so the
     /// statement survives a query that joins another table carrying its
     /// own `id`. Any `select(...)` / `select_raw(...)` already on the
     /// builder is discarded: the caller asked for keys, and honouring a
@@ -4340,7 +4340,7 @@ where
     /// error.
     ///
     /// A key that fails to decode into [`EloquentModel::Key`] is an
-    /// error, not a silently skipped row — unlike [`Self::pluck`], whose
+    /// error, not a silently skipped row - unlike [`Self::pluck`], whose
     /// column is caller-chosen and may legitimately be sparse. A primary
     /// key that won't decode means the declared `key_type` disagrees
     /// with the column, which is a bug worth surfacing.
@@ -4416,7 +4416,7 @@ where
     // ---- Mass update / delete / upsert / increment_each / decrement_each --
     //
     // These methods compile to a single SQL statement that hits the
-    // database directly — no per-row Model lifecycle hooks fire. Use
+    // database directly - no per-row Model lifecycle hooks fire. Use
     // them when you have a WHERE-shape narrowing the scope and want to
     // mutate every matching row in one round-trip (the canonical
     // analogue of Laravel's `Model::query()->update([...])`).
@@ -4426,12 +4426,12 @@ where
     // on each row instead.
 
     /// `UPDATE table SET <attrs> WHERE <where_terms>`. Returns the
-    /// affected row count. Does NOT fire model events — for per-row
+    /// affected row count. Does NOT fire model events - for per-row
     /// hook dispatch iterate with `get()` and call `.update(attrs)`
     /// per row.
     ///
     /// Every column in `attrs` is interpolated as a SQL identifier
-    /// (not a parameter — SQL doesn't allow that), and validated
+    /// (not a parameter - SQL doesn't allow that), and validated
     /// through [`crate::database::validate_identifier`]. Non-null values are
     /// bound as parameters; explicit nulls are emitted as the constant SQL
     /// literal `NULL` so PostgreSQL can infer the target column type.
@@ -4488,7 +4488,7 @@ where
     }
 
     /// `DELETE FROM table WHERE <where_terms>`. Returns the affected
-    /// row count. Mass-delete — no per-row Model events fire. For
+    /// row count. Mass-delete - no per-row Model events fire. For
     /// soft-delete model behaviour iterate with `get()` and call
     /// `.delete()` per row.
     pub async fn delete_all(self) -> Result<u64, FrameworkError> {
@@ -4591,7 +4591,7 @@ where
     /// except the unique-by columns when `None`).
     ///
     /// Returns the affected row count. Does NOT fire per-row model
-    /// events — use [`Model::create`] / [`Model::update`] from a loop
+    /// events - use [`Model::create`] / [`Model::update`] from a loop
     /// for that.
     pub async fn upsert(
         self,

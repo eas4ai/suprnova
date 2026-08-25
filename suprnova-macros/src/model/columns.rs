@@ -43,7 +43,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     for f in fields {
         let ident = f.ident.as_ref().expect("named");
         let snake = ident.to_string();
-        // Phase 10B T1 — exclude the eager/pivot fields the relations
+        // Phase 10B T1 - exclude the eager/pivot fields the relations
         // emitter auto-injects. They're not database columns; emitting
         // them as `Column::Eager` / `Column::Pivot` would let users
         // accidentally filter on them via `filter(Column::Eager, ...)`.
@@ -81,7 +81,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         }
 
-        // IntoColumn impl — lets typed Column variants work alongside
+        // IntoColumn impl - lets typed Column variants work alongside
         // strings throughout the Builder API (filter, order_by, etc.).
         impl ::suprnova::eloquent::builder::IntoColumn for Column {
             fn col_name(self) -> String {

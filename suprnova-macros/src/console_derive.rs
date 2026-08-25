@@ -1,4 +1,4 @@
-//! `#[derive(Command)]` — register a `clap::Parser`-deriving struct as
+//! `#[derive(Command)]` - register a `clap::Parser`-deriving struct as
 //! a typed console command.
 //!
 //! Goes on top of `#[derive(clap::Parser)]`. Reads `#[console(name =
@@ -77,7 +77,7 @@ fn parse_attrs(input: &DeriveInput) -> syn::Result<ConsoleAttrs> {
                 "description" => out.description = Some(v),
                 other => {
                     return Err(nested.error(format!(
-                        "unknown key `{other}` in #[console(...)] — supported keys: name, description"
+                        "unknown key `{other}` in #[console(...)] - supported keys: name, description"
                     )));
                 }
             }

@@ -43,7 +43,7 @@ pub enum PaymentError {
     #[error("requested resource not found: {0}")]
     NotFound(String),
 
-    /// Inbound webhook signature failed verification — payload was either
+    /// Inbound webhook signature failed verification - payload was either
     /// forged or tampered with in transit.
     #[error("webhook signature verification failed: {0}")]
     WebhookSignature(String),
@@ -58,7 +58,7 @@ pub enum PaymentError {
     #[error("invalid country code: {0}")]
     InvalidCountryCode(String),
 
-    /// Internal framework error — surfacing a bug, not a recoverable
+    /// Internal framework error - surfacing a bug, not a recoverable
     /// caller mistake. Operators should treat this as a paging condition.
     #[error("internal payments error: {0}")]
     Internal(String),

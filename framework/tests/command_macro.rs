@@ -5,7 +5,7 @@
 //! pins the full path: macro expansion → fn-pointer adapter →
 //! inventory submission → registry lookup → handler invocation.
 //!
-//! Inventory entries from this file are scoped to this test binary —
+//! Inventory entries from this file are scoped to this test binary -
 //! they do not pollute other tests in the workspace.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

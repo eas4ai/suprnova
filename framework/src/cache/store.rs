@@ -16,7 +16,7 @@ use crate::error::FrameworkError;
 ///
 /// All write methods that take an `Option<Duration>` interpret `None`
 /// as **no expiration** (literal forever). Defaulting `None` to a
-/// configured TTL is the facade's responsibility, not the store's —
+/// configured TTL is the facade's responsibility, not the store's -
 /// otherwise `Cache::forever` would not be forever on backends that
 /// substitute a default. See `Cache::forever` for the call path that
 /// bypasses any facade-level default.
@@ -36,7 +36,7 @@ pub trait CacheStore: Send + Sync {
         ttl: Option<Duration>,
     ) -> Result<(), FrameworkError>;
 
-    /// Atomic "store if not present" — write `value` for `key` only when
+    /// Atomic "store if not present" - write `value` for `key` only when
     /// no value is currently present (or the existing value has
     /// expired). Returns `true` if the value was written, `false` if the
     /// key was already occupied.
@@ -88,7 +88,7 @@ pub trait CacheStore: Send + Sync {
     /// Returns the new value after decrementing.
     async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError>;
 
-    /// Store a tagged value. The tag index is updated on every write —
+    /// Store a tagged value. The tag index is updated on every write -
     /// flushing a tag deletes every key associated with that tag.
     ///
     /// `None` ttl means **no expiration**; the facade resolves any
@@ -107,7 +107,7 @@ pub trait CacheStore: Send + Sync {
     /// Tag membership is per-entry: each tagged write installs that
     /// write's tag set as the entry's source of truth, replacing any
     /// prior tags. An untagged `put_raw` over a previously tagged key
-    /// clears those tags — a subsequent `flush_tags` of the old tag
+    /// clears those tags - a subsequent `flush_tags` of the old tag
     /// will NOT delete the live untagged value. Likewise, overwriting
     /// `tagged_put_raw(["a"], ...)` with `tagged_put_raw(["b"], ...)`
     /// makes the entry only respond to `flush_tags(["b"])`.

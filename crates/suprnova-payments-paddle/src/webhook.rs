@@ -1,6 +1,6 @@
 //! Implementation of the `WebhookHandler` trait for `PaddleProvider`.
 //!
-//! Uses `Paddle::unmarshal` for signature verification — it handles the
+//! Uses `Paddle::unmarshal` for signature verification - it handles the
 //! `Paddle-Signature` header format (`ts=…,h1=…`) and HMAC validation with
 //! timestamp-skew tolerance. No manual HMAC code needed.
 
@@ -34,8 +34,8 @@ fn parse_minor(value: Option<&serde_json::Value>) -> i64 {
 /// pinned SDK, so this check is what keeps a malformed header a 401
 /// instead of an unwind.
 ///
-/// Deliberately permissive about everything else — key order, unknown
-/// keys, the timestamp — because the SDK owns that parsing and already
+/// Deliberately permissive about everything else - key order, unknown
+/// keys, the timestamp - because the SDK owns that parsing and already
 /// errors cleanly on it. This guards exactly the input that does not
 /// error cleanly.
 fn validate_signature_digests(signature: &str) -> PaymentResult<()> {
@@ -68,11 +68,11 @@ impl WebhookHandler for PaddleProvider {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
         // A blank notification secret is an empty-key HMAC, which any caller
         // can forge. `from_env` refuses to construct one, but `new` takes the
-        // key verbatim, so guard the boundary that actually decides trust —
+        // key verbatim, so guard the boundary that actually decides trust -
         // that covers every construction path, not just the documented one.
         if self.webhook_key().trim().is_empty() {
             return Err(PaymentError::WebhookSignature(
-                "paddle webhook key is empty — refusing to verify against an empty-key HMAC".into(),
+                "paddle webhook key is empty - refusing to verify against an empty-key HMAC".into(),
             ));
         }
 
@@ -86,14 +86,14 @@ impl WebhookHandler for PaddleProvider {
             .map_err(|_| PaymentError::WebhookSignature("non-ascii signature header".into()))?;
 
         // The pinned SDK panics on an odd-length hex digest rather than
-        // returning an error — verified by probe, not assumed:
+        // returning an error - verified by probe, not assumed:
         //
         //     paddle-signature: ts=1671552777;h1=abc   →  panic
         //     paddle-signature: ts=1671552777;h1=zzzz  →  Err (fine)
         //
         // The header is attacker-controlled and this endpoint is
-        // unauthenticated by definition — verifying the signature is what
-        // authenticates it — so anyone who knows the URL can reach the
+        // unauthenticated by definition - verifying the signature is what
+        // authenticates it - so anyone who knows the URL can reach the
         // panic. Check the digest before handing it over.
         validate_signature_digests(signature)?;
 
@@ -220,7 +220,7 @@ impl WebhookHandler for PaddleProvider {
     ///   `data.details.totals.{total,tax}` as decimal-string minor units;
     ///   currency is `data.currency_code`; settle time is `data.billed_at`.
     /// - **Adjustment** (`adjustment.*` → refunded / chargeback). `data.id`
-    ///   is the adjustment id (`adj_…`) — NOT a transaction — and the
+    ///   is the adjustment id (`adj_…`) - NOT a transaction - and the
     ///   transaction it adjusts is `data.transaction_id`. Totals live at
     ///   `data.totals.{total,tax}` (there is no `data.details`), currency is
     ///   `data.currency_code` at the top level. The mirror is keyed off
@@ -356,7 +356,7 @@ mod tests {
     use crate::{PaddleEnvironment, PaddleProvider};
 
     fn provider() -> PaddleProvider {
-        // Dummy keys are fine — extractor tests don't hit the Paddle HTTP API.
+        // Dummy keys are fine - extractor tests don't hit the Paddle HTTP API.
         PaddleProvider::new(
             "pdl_test_apikey",
             "pdl_test_whkey",
@@ -514,7 +514,7 @@ mod tests {
     /// adjustment id, the original transaction is in `data.transaction_id`,
     /// amounts live at `data.totals.*`, and currency is the top-level
     /// `data.currency_code`. The snapshot must key off `transaction_id` and
-    /// carry the real amount — not insert a phantom `adj_…` row with amount 0.
+    /// carry the real amount - not insert a phantom `adj_…` row with amount 0.
     #[test]
     fn extract_payment_snapshot_adjustment_keys_off_transaction_id_with_real_amount() {
         let p = provider();
@@ -557,12 +557,12 @@ mod tests {
             Some("sub_01h8x...")
         );
         assert_eq!(snap.provider_customer_id, "ctm_01h8x...");
-        // No settlement time on an adjustment — preserve the original txn's.
+        // No settlement time on an adjustment - preserve the original txn's.
         assert!(snap.paid_at.is_none());
     }
 
     /// `extract_payload_ids` for an adjustment must surface `transaction_id`
-    /// as the transaction pointer — the framework keys the mirror upsert off
+    /// as the transaction pointer - the framework keys the mirror upsert off
     /// `PayloadIds::transaction_id`, so reading `data.id` (the adjustment id)
     /// here would mis-route the refund.
     #[test]
@@ -592,8 +592,8 @@ mod tests {
         assert_eq!(ids.subscription_id.as_deref(), Some("sub_adj"));
     }
 
-    /// A transaction payload still reads `data.id` and `data.details.totals.*`
-    /// — the adjustment branch must not regress the transaction path.
+    /// A transaction payload still reads `data.id` and `data.details.totals.*` -
+    /// the adjustment branch must not regress the transaction path.
     #[test]
     fn extract_payload_ids_transaction_event_uses_data_id() {
         let p = provider();
@@ -645,7 +645,7 @@ mod tests {
         NeutralEventKind::CustomerUpdated,
     ];
 
-    /// CI-06 — a signature-valid event whose *body* is hostile must never
+    /// CI-06 - a signature-valid event whose *body* is hostile must never
     /// panic the endpoint.
     ///
     /// Signature verification only proves the sender holds the key. It says
@@ -653,7 +653,7 @@ mod tests {
     /// a payload shape without warning. Every extractor here reads through
     /// `and_then` / `unwrap_or` / `?` rather than indexing, so the intent is
     /// already right; nothing pinned it, so a later `[...]` or `.unwrap()`
-    /// would have turned a surprising payload into a 500 — or a panic that
+    /// would have turned a surprising payload into a 500 - or a panic that
     /// takes the worker down, since these run inside the webhook handler.
     ///
     /// `catch_unwind` rather than a plain call: the claim is specifically
@@ -666,13 +666,13 @@ mod tests {
         // Two tiers, and the second is the one that matters.
         //
         // Shallow payloads exercise the early `?` guards, but they bail out
-        // long before any parsing — a test built only from those passes
+        // long before any parsing - a test built only from those passes
         // even with a `.unwrap()` planted in `parse_minor`, which is
         // exactly what happened on the first draft of this test.
         //
-        // So the deep payloads below are shaped like REAL Paddle events —
+        // So the deep payloads below are shaped like REAL Paddle events -
         // they carry the `id` / `transaction_id` and the `/details/totals`
-        // and `/totals` paths each arm actually reads — and are hostile only
+        // and `/totals` paths each arm actually reads - and are hostile only
         // in the TYPE of a leaf field. That is the realistic attack and the
         // realistic provider-drift, and it is the only shape that reaches
         // the code that converts values.
@@ -745,7 +745,7 @@ mod tests {
 
 #[cfg(test)]
 mod signature_hex_tests {
-    //! P2-11 — a malformed signature digest must be a refusal, not a panic.
+    //! P2-11 - a malformed signature digest must be a refusal, not a panic.
 
     use super::*;
     use crate::{PaddleEnvironment, PaddleProvider};
@@ -792,7 +792,7 @@ mod signature_hex_tests {
 
             let result = outcome.unwrap_or_else(|_| {
                 panic!(
-                    "verifying `{signature}` unwound — an attacker-controlled \
+                    "verifying `{signature}` unwound - an attacker-controlled \
                      header must never panic the webhook endpoint"
                 )
             });
@@ -830,7 +830,7 @@ mod signature_hex_tests {
     }
 
     /// Malformed headers the SDK already handles cleanly must keep their
-    /// existing behaviour — the guard is additive, not a replacement.
+    /// existing behaviour - the guard is additive, not a replacement.
     #[test]
     fn structurally_invalid_headers_still_error_cleanly() {
         for signature in ["not-a-signature", "ts=1671552777", ""] {

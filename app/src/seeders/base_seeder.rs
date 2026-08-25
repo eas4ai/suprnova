@@ -1,4 +1,4 @@
-//! `BaseSeeder` — dogfood for the framework's Seeder trait.
+//! `BaseSeeder` - dogfood for the framework's Seeder trait.
 //!
 //! Creates 50 users via [`UserFactory`] and 200 posts via
 //! [`PostFactory`]. Order matters: posts reference user ids in
@@ -8,7 +8,7 @@
 //! its sub-steps in declared sequence), the dependency is satisfied.
 //!
 //! Combining both factories into a single seeder is the standard
-//! Laravel pattern — `DatabaseSeeder::run` orchestrates the per-
+//! Laravel pattern - `DatabaseSeeder::run` orchestrates the per-
 //! model seeds. We follow that here rather than expose two
 //! independent seeders that the bootstrap must order correctly.
 
@@ -27,7 +27,7 @@ impl Seeder for BaseSeeder {
     }
 
     async fn run() -> Result<(), FrameworkError> {
-        // 50 users first — the post factory generates author_id in
+        // 50 users first - the post factory generates author_id in
         // 1..=50, so the references resolve.
         UserFactory::new().count(50).create_many().await?;
 

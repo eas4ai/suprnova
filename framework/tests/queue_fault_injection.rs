@@ -1,4 +1,4 @@
-//! CI-04 — fault injection for the queue worker's settlement paths.
+//! CI-04 - fault injection for the queue worker's settlement paths.
 //!
 //! The worker's happy path is well covered. What was not covered is what
 //! happens when the *broker* misbehaves: an ack that fails after the job
@@ -42,7 +42,7 @@ use uuid::Uuid;
 /// The distinction matters enormously and is the whole reason this enum
 /// exists rather than a bare `bool`:
 ///
-/// - [`Fault::AfterEffect`] models the *uncertainty* case — the broker
+/// - [`Fault::AfterEffect`] models the *uncertainty* case - the broker
 ///   carried out the request and the acknowledgement was lost on the way
 ///   back. The state changed; the caller does not know it.
 /// - [`Fault::BeforeEffect`] models a request that never landed at all.
@@ -285,7 +285,7 @@ impl Job for AlwaysFailingJob {
     }
 }
 
-/// Build an envelope the same way the other queue tests do — by literal,
+/// Build an envelope the same way the other queue tests do - by literal,
 /// since `Envelope` has no constructor and the fields are the contract.
 fn env(name: &str, payload: serde_json::Value) -> Envelope {
     Envelope {
@@ -338,7 +338,7 @@ async fn run_until_done(driver: Arc<dyn QueueDriver>, max_jobs: u64) {
 ///
 /// The broker applied the ack; only the reply vanished. The worker cannot
 /// tell this apart from "the ack never landed", so the one thing it must
-/// not do is treat the job as failed and retry it as a *failure* — the job
+/// not do is treat the job as failed and retry it as a *failure* - the job
 /// succeeded. `settlement_failure("ack", "success")` documents the intent
 /// ("job may be re-delivered (at-least-once)"); this pins it.
 #[tokio::test]
@@ -368,7 +368,7 @@ async fn a_lost_ack_response_does_not_retry_a_job_that_succeeded() {
     assert_eq!(
         inner.size().await.unwrap(),
         0,
-        "the ack reached the inner driver, so nothing may remain queued — \
+        "the ack reached the inner driver, so nothing may remain queued - \
          if this fails, a lost ack response silently converts at-least-once \
          into an infinite redelivery loop"
     );
@@ -379,7 +379,7 @@ async fn a_lost_ack_response_does_not_retry_a_job_that_succeeded() {
 ///
 /// This is the genuinely at-least-once case: the job ran, the broker never
 /// learned it, so the message is still there and will be redelivered when
-/// the lease lapses. The invariant under test is narrower than "it works" —
+/// the lease lapses. The invariant under test is narrower than "it works" -
 /// it is that the worker does not *consume* the failure silently and leave
 /// the queue in a state it misreports.
 #[tokio::test]
@@ -406,7 +406,7 @@ async fn an_ack_that_never_landed_leaves_the_message_for_redelivery() {
     assert_eq!(
         inner.size().await.unwrap(),
         1,
-        "the message is still held by the broker — this is the at-least-once \
+        "the message is still held by the broker - this is the at-least-once \
          contract, and a worker that dropped it here would be at-most-once"
     );
 }
@@ -445,7 +445,7 @@ async fn a_failed_nack_keeps_the_job_rather_than_dropping_it() {
         "the nack never landed, so the broker still holds the message; \
          dropping it here would lose a job that has retries left"
     );
-    // `size()` alone cannot tell this apart from a *successful* nack — the
+    // `size()` alone cannot tell this apart from a *successful* nack - the
     // message counts either way. `reserved_size()` is what distinguishes
     // them: a nack that landed returns the message to the visible set,
     // while one that never landed leaves it reserved until the lease
@@ -454,7 +454,7 @@ async fn a_failed_nack_keeps_the_job_rather_than_dropping_it() {
     assert_eq!(
         inner.reserved_size().await.unwrap(),
         1,
-        "the message must still be RESERVED, not requeued — the worker must \
+        "the message must still be RESERVED, not requeued - the worker must \
          not act as though a nack it never confirmed had taken effect"
     );
     assert_eq!(
@@ -508,7 +508,7 @@ async fn a_successful_nack_returns_the_message_to_the_visible_set() {
 ///
 /// The default `bulk_push` pushes serially, so a mid-list failure leaves a
 /// partially-populated queue. The contract that matters to a caller is that
-/// the error is not swallowed — a caller that believes all ten landed when
+/// the error is not swallowed - a caller that believes all ten landed when
 /// three did has no way to recover.
 #[tokio::test]
 #[serial]
@@ -535,7 +535,7 @@ async fn a_partial_bulk_push_reports_the_failure_and_keeps_what_landed() {
     assert_eq!(
         inner.size().await.unwrap(),
         2,
-        "the two pushes that preceded the failure landed and must remain — \
+        "the two pushes that preceded the failure landed and must remain - \
          bulk_push is not transactional and must not pretend to roll back"
     );
 }
@@ -546,8 +546,8 @@ async fn a_partial_bulk_push_reports_the_failure_and_keeps_what_landed() {
 
 /// Settling the same token twice must be harmless.
 ///
-/// The trait requires it in so many words — "Drivers MUST be tolerant of
-/// unknown / already-acked tokens (idempotent)" — because a worker that
+/// The trait requires it in so many words - "Drivers MUST be tolerant of
+/// unknown / already-acked tokens (idempotent)" - because a worker that
 /// retries a lost ack will present the same token again. An implementation
 /// that errors on the second ack turns a recoverable blip into a stuck job.
 /// Nothing tested this on any driver.
@@ -604,7 +604,7 @@ async fn settling_a_token_twice_is_idempotent_on_every_path() {
 // ---------------------------------------------------------------------------
 
 /// When a lease expires while the job is still running, the message becomes
-/// available again and a second worker may take it — at-least-once in its
+/// available again and a second worker may take it - at-least-once in its
 /// rawest form.
 ///
 /// Driven by an expired visibility timeout rather than a sleep race, so it
@@ -637,7 +637,7 @@ async fn a_lapsed_lease_redelivers_the_same_envelope_identity() {
 
     assert_eq!(
         first.envelope.id, second.envelope.id,
-        "redelivery must preserve the envelope id — consumers dedupe on it, \
+        "redelivery must preserve the envelope id - consumers dedupe on it, \
          so a fresh id would make every idempotency check fail open"
     );
     assert_ne!(
@@ -656,7 +656,7 @@ async fn a_lapsed_lease_redelivers_the_same_envelope_identity() {
         driver.size().await.unwrap(),
         1,
         "a stale worker's ack must not delete a message that has since been \
-         re-reserved by someone else — that is how a job silently vanishes"
+         re-reserved by someone else - that is how a job silently vanishes"
     );
 
     driver.ack(&second.token).await.unwrap();

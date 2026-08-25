@@ -1,16 +1,16 @@
-//! [`CountryCode`] — ISO 3166-1 alpha-2 country code, validated on construction.
+//! [`CountryCode`] - ISO 3166-1 alpha-2 country code, validated on construction.
 
 use crate::payments::PaymentError;
 use serde::{Deserialize, Serialize};
 
-/// ISO 3166-1 alpha-2 country code — two uppercase ASCII letters.
+/// ISO 3166-1 alpha-2 country code - two uppercase ASCII letters.
 ///
 /// Used for routing decisions (which Mobile Money operator is valid in which
 /// country, EU-vs-US tax handling, accepted-by-provider checks).
 ///
 /// # Wire format
 ///
-/// Serializes as a single string — "ZM", "US", "KE", etc.
+/// Serializes as a single string - "ZM", "US", "KE", etc.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CountryCode(String);

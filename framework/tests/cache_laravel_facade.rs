@@ -137,7 +137,7 @@ async fn add_threads_ttl_through_to_put() {
 
 #[tokio::test]
 async fn add_raw_is_atomic_against_concurrent_writers_on_in_memory() {
-    // Direct CacheStore::add_raw exercise — the in-memory backend must
+    // Direct CacheStore::add_raw exercise - the in-memory backend must
     // hold its write lock across the existence check + insert. Two
     // racing add_raw calls for the same key must yield exactly one
     // winner.

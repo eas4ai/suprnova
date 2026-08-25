@@ -1,4 +1,4 @@
-//! Resource routing — Laravel `Route::resource(...)` parity.
+//! Resource routing - Laravel `Route::resource(...)` parity.
 //!
 //! Laravel's `ResourceRegistrar` (`Illuminate/Routing/ResourceRegistrar.php`)
 //! generates the standard 7-action REST surface from a controller class
@@ -50,9 +50,9 @@
 //!
 //! ## Dual-API
 //!
-//! - `only` (Laravel) + `keep` (Rust) — both alias.
-//! - `except` (Laravel) + `drop` (Rust) — both alias.
-//! - `names` (Laravel) + `rename` (Rust) — both alias.
+//! - `only` (Laravel) + `keep` (Rust) - both alias.
+//! - `except` (Laravel) + `drop` (Rust) - both alias.
+//! - `names` (Laravel) + `rename` (Rust) - both alias.
 
 use super::router::{BoxedHandler, Router};
 use crate::FrameworkError;
@@ -68,19 +68,19 @@ use std::sync::Arc;
 /// One action in the standard REST resource surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceAction {
-    /// `GET /<base>` — list resources.
+    /// `GET /<base>` - list resources.
     Index,
-    /// `GET /<base>/create` — show a creation form (web-only).
+    /// `GET /<base>/create` - show a creation form (web-only).
     Create,
-    /// `POST /<base>` — persist a new resource.
+    /// `POST /<base>` - persist a new resource.
     Store,
-    /// `GET /<base>/{id}` — show a single resource.
+    /// `GET /<base>/{id}` - show a single resource.
     Show,
-    /// `GET /<base>/{id}/edit` — show an edit form (web-only).
+    /// `GET /<base>/{id}/edit` - show an edit form (web-only).
     Edit,
-    /// `PUT|PATCH /<base>/{id}` — update.
+    /// `PUT|PATCH /<base>/{id}` - update.
     Update,
-    /// `DELETE /<base>/{id}` — destroy.
+    /// `DELETE /<base>/{id}` - destroy.
     Destroy,
 }
 
@@ -146,7 +146,7 @@ type ResourceHandlerFn =
 /// Factory that produces the authorization middleware for one resource
 /// action. Built by [`ResourceRoutes::authorize_resource`], invoked once
 /// per generated route at registration time. Returns `None` for actions
-/// that have no authorization mapping (none currently — every standard
+/// that have no authorization mapping (none currently - every standard
 /// action maps to an ability).
 type AuthorizeFactory = Box<dyn Fn(ResourceAction) -> Option<BoxedMiddleware> + Send + Sync>;
 
@@ -176,8 +176,8 @@ fn ability_for(action: ResourceAction) -> &'static str {
 ///
 /// Resolves the authenticated user as the concrete type `U` and runs the
 /// resource action's mapped ability through the [`Gate`] against a default
-/// instance of the resource marker `R`. A denial — or an unauthenticated
-/// request — short-circuits the chain before the resource handler runs,
+/// instance of the resource marker `R`. A denial - or an unauthenticated
+/// request - short-circuits the chain before the resource handler runs,
 /// closing the "forgotten `Gate::authorize` in the handler body" gap.
 ///
 /// The resource marker is a [`Default`] value of `R` (Laravel passes the
@@ -223,47 +223,47 @@ where
 /// which routes are actually registered.
 ///
 /// Methods take a [`Request`] and return a [`Response`]. They run inside
-/// the framework's normal middleware / handler pipeline — there is no
+/// the framework's normal middleware / handler pipeline - there is no
 /// magic dependency injection; pull form data via `request.form_data()`
 /// etc. just as you would in a function handler.
 pub trait ResourceController: Send + Sync + 'static {
-    /// `GET /<base>` — list resources.
+    /// `GET /<base>` - list resources.
     fn index(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("index") })
     }
 
-    /// `GET /<base>/create` — show a creation form.
+    /// `GET /<base>/create` - show a creation form.
     fn create(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("create") })
     }
 
-    /// `POST /<base>` — store a new resource.
+    /// `POST /<base>` - store a new resource.
     fn store(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("store") })
     }
 
-    /// `GET /<base>/{id}` — show a single resource.
+    /// `GET /<base>/{id}` - show a single resource.
     fn show(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("show") })
     }
 
-    /// `GET /<base>/{id}/edit` — show an edit form.
+    /// `GET /<base>/{id}/edit` - show an edit form.
     fn edit(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("edit") })
     }
 
-    /// `PUT|PATCH /<base>/{id}` — update an existing resource.
+    /// `PUT|PATCH /<base>/{id}` - update an existing resource.
     fn update(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("update") })
     }
 
-    /// `DELETE /<base>/{id}` — destroy a resource.
+    /// `DELETE /<base>/{id}` - destroy a resource.
     fn destroy(&self, request: Request) -> Pin<Box<dyn Future<Output = Response> + Send>> {
         let _ = request;
         Box::pin(async { not_implemented("destroy") })
@@ -354,7 +354,7 @@ impl ResourceRoutes {
     /// Mirrors Laravel's `names(['index' => 'posts.list'])`.
     ///
     /// Unknown action keys are silently ignored (matching Laravel's
-    /// permissiveness — typos surface as the default name still being
+    /// permissiveness - typos surface as the default name still being
     /// registered).
     pub fn names<'a, I>(mut self, overrides: I) -> Self
     where
@@ -378,7 +378,7 @@ impl ResourceRoutes {
     }
 
     /// Override the path-parameter name for `show`/`update`/`destroy`/
-    /// `edit` from the default (the singular of the resource name —
+    /// `edit` from the default (the singular of the resource name -
     /// e.g. `posts` → `{post}`) to a custom value. Mirrors a single-pair
     /// `parameters(['posts' => 'post_id'])` call.
     pub fn parameter(mut self, name: &str) -> Self {
@@ -401,7 +401,7 @@ impl ResourceRoutes {
     ///
     /// Without this, each generated `index`/`show`/`store`/`update`/`destroy`
     /// route is ungated unless the controller body remembers to call
-    /// [`Gate::authorize`] itself — and a single forgotten `destroy` ships an
+    /// [`Gate::authorize`] itself - and a single forgotten `destroy` ships an
     /// ungated delete. `authorize_resource` closes that gap by attaching an
     /// authorization middleware to every route, mapping each action to its
     /// ability:
@@ -419,7 +419,7 @@ impl ResourceRoutes {
     /// marker carries the same routing information for the policy that a model
     /// class would in Laravel). An unauthenticated request, a user that is not
     /// a `U`, or a denied ability short-circuits the chain with `403` (or the
-    /// gate's custom status) **before** the resource handler runs — fail-closed.
+    /// gate's custom status) **before** the resource handler runs - fail-closed.
     ///
     /// Define the abilities with [`Gate::define`] /
     /// [`Gate::define_with`] (or a `#[policy]`) keyed on `(ability, U, R)`.
@@ -489,7 +489,7 @@ impl ResourceRoutes {
             format!("/{name}")
         };
         // Default param name is the resource name itself, sans trailing 's'
-        // if present — keeps single-segment paths Laravel-shaped
+        // if present - keeps single-segment paths Laravel-shaped
         // (`posts` → `{post}`).
         let param = parameter.unwrap_or_else(|| default_param_name(&name));
 
@@ -533,12 +533,12 @@ impl ResourceRoutes {
             }
         }
 
-        // PUT and PATCH share the update action — Laravel registers both
+        // PUT and PATCH share the update action - Laravel registers both
         // by default. The action-loop above registers PUT (the verb
         // returned by `resource_route(Update)`); layer a parallel PATCH
         // entry on the same path against the same handler so callers
         // can use either verb. The route NAME has already been claimed
-        // by the PUT registration above — re-registering it would
+        // by the PUT registration above - re-registering it would
         // conflict, so we only insert the PATCH verb here. The PATCH verb
         // gets the same authorization middleware as the PUT verb so neither
         // verb is an ungated bypass of the other.
@@ -640,7 +640,7 @@ fn make_handler(
 
 /// Pluralise → singular for the default path parameter name.
 /// "posts" → "post", "categories" → "category", "people" → "people"
-/// (no rule covers irregular plurals — pass `parameter("person_id")`
+/// (no rule covers irregular plurals - pass `parameter("person_id")`
 /// at the call site for those).
 fn default_param_name(resource: &str) -> String {
     // Take the last path segment (we may have called with `admin/posts`).

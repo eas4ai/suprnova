@@ -6,13 +6,13 @@
 //! primary-key column only. Task 6 wires the macro-side
 //! `fillable = [...]` / `guarded = [...]` attributes through
 //! `fillable_filter()` so users can declare per-model allowlists /
-//! denylists, plus the [`unguarded`] escape hatch — a task-local scope
+//! denylists, plus the [`unguarded`] escape hatch - a task-local scope
 //! that bypasses the filter entirely for migrations and seeders.
 //!
 //! ## Strict mode
 //!
-//! By default `Fillable` silently drops attributes the guard rejects
-//! — the permissive Laravel default. Production APIs often prefer
+//! By default `Fillable` silently drops attributes the guard rejects -
+//! the permissive Laravel default. Production APIs often prefer
 //! the strict shape: a client overpost or a typo should reject the
 //! request, not create / update a row with database defaults. Flip
 //! the process-wide knob via [`prevent_silently_discarding_attributes`]
@@ -83,7 +83,7 @@ pub struct Fillable {
 #[derive(Debug, Clone)]
 enum FillableMode {
     /// Pass every attribute through unmodified. Used by Task 6 when
-    /// the model declares `fillable = ["*"]` or equivalent — Task 4
+    /// the model declares `fillable = ["*"]` or equivalent - Task 4
     /// itself never emits this.
     AllowAll,
     /// Pass only the listed column names through.
@@ -135,7 +135,7 @@ impl Fillable {
     /// the same insertion order as the input.
     ///
     /// When the calling task is inside an [`unguarded`] scope, the
-    /// filter is bypassed and the input is returned unmodified — the
+    /// filter is bypassed and the input is returned unmodified - the
     /// task-local check happens here so every code path through
     /// `Model::create` / `Model::update` honours the escape hatch.
     pub fn apply(&self, attrs: Attrs) -> Attrs {
@@ -153,7 +153,7 @@ impl Fillable {
     ///
     /// CRUD entry points on [`Model`](crate::eloquent::Model) call
     /// this path so the strict-discard knob flips behaviour without
-    /// per-call wiring. The [`unguarded`] task-local still wins —
+    /// per-call wiring. The [`unguarded`] task-local still wins -
     /// inside an `unguarded(|| ...)` scope the filter is bypassed
     /// entirely, strict or not.
     pub fn apply_checked(&self, attrs: Attrs) -> Result<Attrs, FrameworkError> {
@@ -175,7 +175,7 @@ impl Fillable {
         )))
     }
 
-    /// The core filter step — no task-local or strict-mode check. The
+    /// The core filter step - no task-local or strict-mode check. The
     /// `apply` and `apply_checked` entrypoints layer their respective
     /// policies on top.
     fn filter_only(&self, attrs: Attrs) -> Attrs {
@@ -202,7 +202,7 @@ impl Fillable {
         }
     }
 
-    /// Keys the guard would silently drop from `attrs`. Pure — no
+    /// Keys the guard would silently drop from `attrs`. Pure - no
     /// task-local check, no strict-mode read. Used by
     /// [`Self::apply_checked`] to assemble its error message.
     fn dropped_keys(&self, attrs: &Attrs) -> Vec<String> {
@@ -223,7 +223,7 @@ impl Fillable {
 
     /// Returns `true` if the current task is inside an [`unguarded`]
     /// scope. `try_with` returns `Err` outside the scope (the task-local
-    /// is uninitialised) — that's the off state.
+    /// is uninitialised) - that's the off state.
     fn is_unguarded() -> bool {
         UNGUARDED.try_with(|b| *b).unwrap_or(false)
     }
@@ -241,7 +241,7 @@ impl Fillable {
 /// # }
 /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// let user = unguarded(|| async {
-///     // Inside this scope, fillable/guarded are ignored —
+///     // Inside this scope, fillable/guarded are ignored -
 ///     // every attribute is passed through to the database.
 ///     User::create(attrs! {
 ///         name: "boot",
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn apply_checked_permissive_default_drops_silently() {
-        // Strict mode OFF (the default) — apply_checked silently
+        // Strict mode OFF (the default) - apply_checked silently
         // drops rejected keys, identical to apply.
         let _g = StrictGuard::set(false);
         let f = Fillable::guarded(vec!["secret"]);
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn apply_checked_strict_rejects_dropped_keys() {
-        // Strict mode ON — a payload carrying a rejected key errors.
+        // Strict mode ON - a payload carrying a rejected key errors.
         let _g = StrictGuard::set(true);
         let f = Fillable::guarded(vec!["secret"]);
         let err = f
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn apply_checked_strict_passes_when_payload_clean() {
-        // Strict mode ON — payload with no rejected keys passes.
+        // Strict mode ON - payload with no rejected keys passes.
         let _g = StrictGuard::set(true);
         let f = Fillable::guarded(vec!["secret"]);
         let out = f
@@ -404,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_checked_strict_honors_unguarded_scope() {
-        // Inside an unguarded scope, strict mode is bypassed too —
+        // Inside an unguarded scope, strict mode is bypassed too -
         // the escape hatch must remain absolute.
         let _g = StrictGuard::set(true);
         let f = Fillable::guarded(vec!["secret"]);

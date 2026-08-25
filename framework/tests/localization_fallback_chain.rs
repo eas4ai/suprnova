@@ -1,4 +1,4 @@
-//! Chain-flattened catalog loading — `FluentTranslator` builds each
+//! Chain-flattened catalog loading - `FluentTranslator` builds each
 //! locale's served catalog as a fold through `super::merge`'s AST-level
 //! merge, lowest priority first: the embedded `en` validation catalog
 //! for `en`/`en-*`, overridden by the locale's configured fallback
@@ -82,7 +82,7 @@ fn a_child_locale_inherits_and_overrides_its_parent() {
     );
 
     // The child's catalog is a distinct, larger document than the
-    // parent's own — not just an alias to it.
+    // parent's own - not just an alias to it.
     let parent_hash = t.catalog(&pt_br).unwrap().hash;
     assert_ne!(catalog.hash, parent_hash);
 }
@@ -145,7 +145,7 @@ fn a_three_level_chain_flattens_transitively() {
 /// child (`en-AU`) re-parsed the raw embedded catalog fresh and merged
 /// it *over* its parent's fold, so an app's override of an embedded id
 /// in `lang/en/*.ftl` translated correctly for `en` but silently
-/// reverted to the framework default for `en-AU` — the override was
+/// reverted to the framework default for `en-AU` - the override was
 /// masked by the child's own copy of the untouched embedded text.
 #[test]
 fn an_en_family_child_inherits_an_overridden_embedded_id_through_its_parent() {
@@ -156,7 +156,7 @@ fn an_en_family_child_inherits_an_overridden_embedded_id_through_its_parent() {
         "validation.ftl",
         "validation-required = CUSTOM\n",
     );
-    // No `en-AU` directory — it inherits purely through the parent chain.
+    // No `en-AU` directory - it inherits purely through the parent chain.
 
     let cfg = config().parent(locale("en-AU"), locale("en"));
     let t = FluentTranslator::from_dir(tmp.path(), &cfg).unwrap();
@@ -186,7 +186,7 @@ fn an_en_family_child_inherits_an_overridden_embedded_id_through_its_parent() {
 }
 
 /// Three `en`-family levels: the embedded-seeding guard's induction must
-/// hold beyond the two-level case — the middle locale inherits embedded
+/// hold beyond the two-level case - the middle locale inherits embedded
 /// from `en`, the leaf inherits it through the middle, the app's
 /// override of an embedded id survives to the leaf, and the served text
 /// carries exactly one embedded copy.
@@ -333,7 +333,7 @@ fn a_parent_map_cycle_fails_the_load() {
     write_lang(tmp.path(), "pt-BR", "app.ftl", "hello = Ola\n");
 
     // Bypass `parse_parents` (which would reject this) by inserting the
-    // cycle straight into the map — `LocalizationConfig::parents` is
+    // cycle straight into the map - `LocalizationConfig::parents` is
     // `pub`, and `from_dir` must defend itself regardless of how a
     // cyclic map was constructed.
     let mut cfg = config();
@@ -393,7 +393,7 @@ fn intra_locale_merge_preserves_unmentioned_attributes() {
     // "Antigo" and "Renomeado" share no substring, unlike the original
     // "Nome"/"Renomeado" fixture (whose `!contains("Nome")` assertion
     // below only held because "Renomeado" happens to contain lowercase
-    // "nome", not "Nome" — a coincidence that could go vacuous on a
+    // "nome", not "Nome" - a coincidence that could go vacuous on a
     // future fixture edit). A distinct sentinel makes the negative
     // assertion robust by construction, not by accident.
     write_lang(
@@ -419,7 +419,7 @@ fn intra_locale_merge_preserves_unmentioned_attributes() {
         catalog.text
     );
     // The two `field` entries must have been merged into one, not just
-    // concatenated — the superseded value must not survive verbatim
+    // concatenated - the superseded value must not survive verbatim
     // alongside the override (a raw-concatenation catalog would contain
     // both `field = Antigo` and `field = Renomeado`).
     assert!(
@@ -436,7 +436,7 @@ fn intra_locale_merge_preserves_unmentioned_attributes() {
 /// merging now folds through `super::merge` too, whose contract is
 /// that a value-less child keeps the parent's value (see `merge.rs`'s
 /// `merge_message` doc and its `a_named_attribute_is_replaced_in_the_
-/// parents_position` test) — so the same fixture now resolves. Pinned
+/// parents_position` test) - so the same fixture now resolves. Pinned
 /// here (empty `parents`, so this is purely the intra-locale fold, not
 /// the parent-chain one) so the changelog task can pick up the
 /// behavior change.
@@ -482,8 +482,8 @@ fn a_malformed_ftl_file_still_fails_loudly_naming_the_file() {
 /// Facade-level proof that `Lang` walks the fallback chain itself,
 /// independent of `FluentTranslator`'s own chain-flattened catalogs
 /// (this file's tests above). `StubTranslator` deliberately does *not*
-/// flatten anything — it is a flat `locale -> key -> value` map with no
-/// awareness of `parents` at all — so a test resolving through more than
+/// flatten anything - it is a flat `locale -> key -> value` map with no
+/// awareness of `parents` at all - so a test resolving through more than
 /// one hop only passes if `Lang::try_get_with`/`has` are doing the walk,
 /// not leaning on a driver that already did it for them.
 ///
@@ -511,13 +511,13 @@ mod facade {
 
     /// One `LocalizationConfig` registration shared by every test in this
     /// module: fallback `en`, plus every parent pair any test below
-    /// needs — `pt-PT -> pt-BR` (two-level) and the three-level
+    /// needs - `pt-PT -> pt-BR` (two-level) and the three-level
     /// `de-CH -> de-AT -> de` chain. `Config::register` writes to
     /// process-global state with no unregister (same constraint
     /// `localization_middleware.rs`'s `locale_share::register_config_with_
     /// fallback` documents), so rather than each test racing to install
     /// its own narrower config, every test calls this same idempotent
-    /// helper — since the content never varies, concurrent re-registration
+    /// helper - since the content never varies, concurrent re-registration
     /// from parallel test threads is harmless.
     fn register_config() {
         Config::register(LocalizationConfig {
@@ -537,7 +537,7 @@ mod facade {
 
     /// Non-flattening stub `Translator`: a bare `locale -> key -> value`
     /// map with no chain awareness whatsoever. Binding this instead of
-    /// `FluentTranslator` is the point — it proves the chain walk lives
+    /// `FluentTranslator` is the point - it proves the chain walk lives
     /// in the `Lang` facade, reachable by *any* driver, not something
     /// riding along on `FluentTranslator`'s own flattening.
     struct StubTranslator(HashMap<String, HashMap<String, String>>);
@@ -634,7 +634,7 @@ mod facade {
     #[serial_test::serial]
     async fn the_terminal_fallback_still_applies() {
         register_config();
-        // Defined only in `en`, the global fallback — absent from both
+        // Defined only in `en`, the global fallback - absent from both
         // pt-PT and its configured parent pt-BR.
         bind(&[("en", "only-fallback", "English only")]);
 
@@ -705,21 +705,21 @@ mod facade {
         }
     }
 
-    /// Task 5 — end-to-end proof that `LocaleShare` needs no production
+    /// Task 5 - end-to-end proof that `LocaleShare` needs no production
     /// change to report a chained locale correctly. Binds a real
-    /// `FluentTranslator` (not `StubTranslator` — its `catalog()` always
+    /// `FluentTranslator` (not `StubTranslator` - its `catalog()` always
     /// returns `None`, so this test needs the flattening driver) built
     /// from a `pt-BR`/`pt-PT` fixture identical to
     /// `a_child_locale_inherits_and_overrides_its_parent` above, and
-    /// reuses this module's `register_config()` — whose `parents` map
+    /// reuses this module's `register_config()` - whose `parents` map
     /// already carries `pt-PT -> pt-BR` and whose `fallback_locale` is
-    /// the terminal `en` — so the registered config and the translator's
+    /// the terminal `en` - so the registered config and the translator's
     /// own chain agree, exactly as they would in a real app.
     ///
     /// `LocaleShare::share` (`framework/src/localization/mod.rs`) reads
     /// `resolved_config().fallback_locale` verbatim and passes
     /// `translator.catalog(&locale)`'s hash straight into the `url`/
-    /// `hash` fields — it has no notion of "parent" at all — so this
+    /// `hash` fields - it has no notion of "parent" at all - so this
     /// pins the terminal-fallback contract by construction, not by
     /// coincidence: a regression that reported the immediate configured
     /// parent (`pt-BR`) instead of the registered `fallback_locale`
@@ -768,7 +768,7 @@ mod facade {
             value["fallback"],
             Value::String("en".into()),
             "fallback must report the terminal global fallback (en), never the \
-             configured parent (pt-BR) — LocaleShare has no notion of the chain, \
+             configured parent (pt-BR) - LocaleShare has no notion of the chain, \
              only of `LocalizationConfig::fallback_locale`"
         );
         assert_eq!(

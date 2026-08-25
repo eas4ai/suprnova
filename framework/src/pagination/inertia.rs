@@ -1,5 +1,5 @@
 //! Bridge from `LengthAwarePaginator` / `CursorPaginator` to Inertia's
-//! `ScrollMetadata` — the protocol for infinite-scroll props.
+//! `ScrollMetadata` - the protocol for infinite-scroll props.
 
 use serde_json::Value;
 
@@ -58,7 +58,7 @@ impl<T> IntoInertiaScroll<T> for LengthAwarePaginator<T> {
 /// difference that follows from what a simple paginator knows: `next` is
 /// derived from the `has_more` overflow probe rather than from a computed
 /// last page, because there is no total to compute one from. That is the
-/// entire point of the type — a listing over a table large enough to make
+/// entire point of the type - a listing over a table large enough to make
 /// `COUNT(*)` the dominant cost of the request should not pay for one to
 /// render a "next" link.
 impl<T> ProvidesScrollMetadata for Paginator<T> {
@@ -144,7 +144,7 @@ mod tests {
     /// paginator knows it is on the last page by comparing against a
     /// total; the simple paginator only knows that its `per_page + 1`
     /// fetch came back short, and that has to be enough to withhold the
-    /// next link — otherwise clients page forever into an empty tail.
+    /// next link - otherwise clients page forever into an empty tail.
     #[test]
     fn simple_paginator_last_page_withholds_next() {
         let (meta, _) = Paginator::new(vec![7, 8], 3, 3, false).into_inertia_scroll();
@@ -175,7 +175,7 @@ mod tests {
 
     // The two tests below assert literal expected values rather than
     // comparing `scroll_metadata()`'s output against
-    // `into_inertia_scroll()`'s — the latter now calls the former
+    // `into_inertia_scroll()`'s - the latter now calls the former
     // internally (this file's whole refactor), so a self-comparison
     // would pass even if both sides were wrong in the same way (e.g. a
     // `previous_page` that returned `current_page + 1`). Literal values

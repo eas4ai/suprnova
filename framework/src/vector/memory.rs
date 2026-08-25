@@ -1,8 +1,8 @@
-//! Phase 9A — in-process [`VectorDriver`] backed by a `HashMap`.
+//! Phase 9A - in-process [`VectorDriver`] backed by a `HashMap`.
 //!
 //! Used by unit tests and the `dev` profile when an external
 //! vector backend isn't worth spinning up. Cosine similarity is
-//! the only ranking — drivers that natively offer dot-product /
+//! the only ranking - drivers that natively offer dot-product /
 //! Euclidean shapes (Qdrant / Pinecone) expose those in their
 //! own configuration, not here.
 

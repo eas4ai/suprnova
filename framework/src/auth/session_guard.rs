@@ -1,4 +1,4 @@
-//! The session guard — Laravel's `SessionGuard`.
+//! The session guard - Laravel's `SessionGuard`.
 //!
 //! Resolves and persists authentication through the session
 //! (`crate::session`) and the remember-me token table
@@ -144,7 +144,7 @@ impl StatefulGuard for SessionGuard {
                 self.login(user.clone(), remember).await?;
                 // The caller just proved the password, so stamp the
                 // confirmation window. Without this, reauth-gated actions
-                // (passkey enrollment against an existing account — see
+                // (passkey enrollment against an existing account - see
                 // SEC-01 in `magnetar_integration::passkey`) would demand a
                 // password confirmation that nothing in the framework ever
                 // produces, making them unsatisfiable rather than merely
@@ -172,7 +172,7 @@ impl StatefulGuard for SessionGuard {
 
         // No user matched the supplied credentials. Drive a dummy
         // password-verify so the unknown-identifier wall-clock
-        // matches the known-identifier-wrong-password wall-clock —
+        // matches the known-identifier-wrong-password wall-clock -
         // otherwise the difference (cheap DB-miss vs full bcrypt
         // cost) is a side-channel that lets an attacker probe the
         // user database without ever triggering the brute-force
@@ -214,7 +214,7 @@ impl StatefulGuard for SessionGuard {
             return Ok(false);
         }
 
-        // No user matched — drive dummy_verify to equalise timing
+        // No user matched - drive dummy_verify to equalise timing
         // against the wrong-password branch above. See `attempt` for
         // the full rationale.
         let _ = self.provider.dummy_verify().await;
@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// Run `fut` inside both a fresh session scope and a fresh auth
-    /// request-state scope — the two task-locals `SessionGuard` reads and
+    /// request-state scope - the two task-locals `SessionGuard` reads and
     /// writes at runtime.
     async fn with_scopes<F: std::future::Future>(fut: F) -> F::Output {
         let slot = new_session_slot_for_test();

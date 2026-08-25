@@ -3,7 +3,7 @@
 //!
 //! With the default (empty) trusted-proxy allowlist, a client that sends a
 //! forged `X-Forwarded-For: 9.9.9.9` must NOT have that value surface as the
-//! webhook's `remote_addr` — an adapter that IP-allowlists via that field would
+//! webhook's `remote_addr` - an adapter that IP-allowlists via that field would
 //! otherwise be trivially spoofable. The resolved value must be the actual TCP
 //! peer (`127.0.0.1` for a loopback connect).
 
@@ -28,7 +28,7 @@ use suprnova::testing::TestDatabase;
 use suprnova::{MiddlewareRegistry, Router, handle_request_with_peer};
 
 /// Provider whose `verify` records the `remote_addr` the route passed in, then
-/// fails closed so the route short-circuits at 401 — no DB query runs, so this
+/// fails closed so the route short-circuits at 401 - no DB query runs, so this
 /// test needs no migrations.
 struct RemoteAddrProbe {
     seen: Arc<Mutex<Option<Option<IpAddr>>>>,
@@ -156,7 +156,7 @@ async fn forged_x_forwarded_for_does_not_reach_remote_addr() {
         .header("Host", "localhost")
         .header("Content-Type", "application/json")
         .header("Content-Length", body.len().to_string())
-        // Forged client-controlled header — must NOT be trusted.
+        // Forged client-controlled header - must NOT be trusted.
         .header("X-Forwarded-For", "9.9.9.9")
         .body(Full::new(body))
         .unwrap();
@@ -174,7 +174,7 @@ async fn forged_x_forwarded_for_does_not_reach_remote_addr() {
         .unwrap()
         .expect("verify should have been called");
 
-    // The forged header must NOT win — the resolved address is the loopback
+    // The forged header must NOT win - the resolved address is the loopback
     // peer, because the default trusted-proxy allowlist is empty.
     assert_eq!(
         captured,

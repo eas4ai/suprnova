@@ -15,7 +15,7 @@ pub enum WebPushError {
     ///
     /// `retry_after` is populated when the push service supplied an
     /// RFC 7231 `Retry-After` header in delta-seconds form. The HTTP-date
-    /// form is recognised but not parsed — callers that need date-form
+    /// form is recognised but not parsed - callers that need date-form
     /// support should re-fetch the header themselves; the overwhelming
     /// majority of push services (FCM, Mozilla AutoPush, APNs HTTP/2 web
     /// push) emit delta-seconds.
@@ -48,7 +48,7 @@ pub enum WebPushError {
 impl WebPushError {
     /// Whether a caller should retry the send after a transient failure.
     ///
-    /// Returns `true` for HTTP transport errors (no response received —
+    /// Returns `true` for HTTP transport errors (no response received -
     /// network/timeout/DNS), and for `PushServiceRejected` with a 408
     /// (request timeout), 429 (too many requests), or any 5xx status.
     /// Returns `false` for terminal outcomes: `SubscriptionGone` (404/410),

@@ -2,11 +2,11 @@
 //! and password-reset links without binding either flow to a particular
 //! mailer or user backend.
 //!
-//! - [`TokenPurpose`] — what a row authorizes (`email_verification` /
+//! - [`TokenPurpose`] - what a row authorizes (`email_verification` /
 //!   `password_reset`), plus its stable string and default TTL.
-//! - [`TokenStore`] — `issue` / `check` / `consume` / `prune_expired`
+//! - [`TokenStore`] - `issue` / `check` / `consume` / `prune_expired`
 //!   over the `auth_flow_tokens` table.
-//! - [`entity`] + [`create_auth_flow_tokens_table`] — the SeaORM entity
+//! - [`entity`] + [`create_auth_flow_tokens_table`] - the SeaORM entity
 //!   and schema builder migrations apply.
 //!
 //! Tokens carry 256 bits of OS entropy; only their SHA-256 hash is
@@ -64,19 +64,19 @@ impl TokenPurpose {
 ///
 /// Column shape mirrors the [`entity`] module:
 ///
-/// - `id`         BIGINT PK auto-increment — matches `Model::id: i64`
-/// - `user_id`    TEXT not null — opaque string id (String-everywhere)
-/// - `token_hash` TEXT not null UNIQUE — SHA-256 hash of the plaintext
+/// - `id`         BIGINT PK auto-increment - matches `Model::id: i64`
+/// - `user_id`    TEXT not null - opaque string id (String-everywhere)
+/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext
 ///   token; the UNIQUE constraint gives `check`/`consume` an indexed
 ///   equality lookup and backs the single-use guarantee at the DB level
-/// - `purpose`    TEXT not null — [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null — token TTL boundary
-/// - `used_at`    TIMESTAMP null — set atomically on single-use consume
+/// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
+/// - `expires_at` TIMESTAMP not null - token TTL boundary
+/// - `used_at`    TIMESTAMP null - set atomically on single-use consume
 /// - `created_at` TIMESTAMP not null
 ///
 /// Timestamps are plain `.timestamp()` (not `timestamp_with_time_zone`)
 /// to pair with the entity's `chrono::NaiveDateTime` fields, which are
-/// written via `.naive_utc()` — the same convention `auth::remember` and
+/// written via `.naive_utc()` - the same convention `auth::remember` and
 /// `magnetar_integration::ceremony` use.
 pub fn create_auth_flow_tokens_table() -> sea_orm::sea_query::TableCreateStatement {
     use sea_orm::sea_query::{ColumnDef, Table};
@@ -128,7 +128,7 @@ enum AuthFlowTokens {
 }
 
 /// Generate a fresh 256-bit high-entropy token plaintext, URL-safe
-/// base64 (43 chars, no padding) — the value handed to the user inside
+/// base64 (43 chars, no padding) - the value handed to the user inside
 /// a verification / reset link. Mirrors `auth::remember`'s verifier:
 /// `getrandom::fill` (direct OS RNG) over 32 bytes, then
 /// `URL_SAFE_NO_PAD`. No new RNG dependency.
@@ -141,12 +141,12 @@ fn generate_plaintext() -> Result<String, FrameworkError> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// SHA-256-hex of the plaintext token — what we store in `token_hash`.
+/// SHA-256-hex of the plaintext token - what we store in `token_hash`.
 ///
 /// These tokens carry 256 bits of OS entropy, so a fast cryptographic
 /// hash is the correct choice (unlike low-entropy passwords, which want
 /// a slow KDF). Delegates to the shared [`crate::hashing::sha256_hex`]
-/// helper — the single SHA-256-hex implementation `idempotency` also
+/// helper - the single SHA-256-hex implementation `idempotency` also
 /// uses; no new dependency.
 fn hash_token(plaintext: &str) -> String {
     crate::hashing::sha256_hex(plaintext)
@@ -197,7 +197,7 @@ impl TokenStore {
         Ok(plaintext)
     }
 
-    /// True if a live, unused token of `purpose` matches `token` —
+    /// True if a live, unused token of `purpose` matches `token` -
     /// non-consuming. The `token_hash` column is UNIQUE, so this is an
     /// indexed equality lookup returning 0 or 1 rows.
     pub async fn check(token: &str, purpose: TokenPurpose) -> Result<bool, FrameworkError> {
@@ -243,7 +243,7 @@ impl TokenStore {
     /// (unused, unexpired) token of the same `purpose` for the same
     /// user, and return the `user_id`; otherwise `None`.
     ///
-    /// # Security — SEC-02(a)
+    /// # Security - SEC-02(a)
     ///
     /// Before this fix, `consume`'s UPDATE was scoped to a single
     /// `token_hash` (UNIQUE), so requesting a password reset (or any
@@ -253,7 +253,7 @@ impl TokenStore {
     /// every reset record for the user on success; this mirrors that by
     /// stamping every sibling row `used_at` in the same transaction as
     /// the primary consume, so a sibling link is dead the instant this
-    /// call returns — not just eventually, at [`Self::prune_expired`].
+    /// call returns - not just eventually, at [`Self::prune_expired`].
     ///
     /// The whole read + primary-UPDATE + sibling-UPDATE sequence runs
     /// inside one database transaction (mirrors the `.begin()` /
@@ -285,7 +285,7 @@ impl TokenStore {
 
         // `token_hash` is UNIQUE: this resolves the exactly-one candidate
         // row (if any) so we can return its `user_id`. The atomic UPDATE
-        // below — not this read — is the single-use authority, so a
+        // below - not this read - is the single-use authority, so a
         // concurrent consumer that wins the UPDATE race is still rejected
         // here via `rows_affected`.
         let row = entity::Entity::find()
@@ -328,7 +328,7 @@ impl TokenStore {
         }
 
         // SEC-02(a): invalidate every other outstanding token of the
-        // same purpose for this user — a second live reset (or
+        // same purpose for this user - a second live reset (or
         // verification, or magic-link) link must not survive its
         // sibling being consumed. Harmless no-op when there are none.
         entity::Entity::update_many()
@@ -373,11 +373,11 @@ impl TokenStore {
 /// Schema (kept in sync with [`create_auth_flow_tokens_table`]):
 ///
 /// - `id`         BIGINT PK auto-increment
-/// - `user_id`    TEXT not null — opaque string id
-/// - `token_hash` TEXT not null UNIQUE — SHA-256 hash of the plaintext token
-/// - `purpose`    TEXT not null — [`TokenPurpose::as_str`] discriminator
-/// - `expires_at` TIMESTAMP not null — token TTL boundary
-/// - `used_at`    TIMESTAMP null — set on single-use consume
+/// - `user_id`    TEXT not null - opaque string id
+/// - `token_hash` TEXT not null UNIQUE - SHA-256 hash of the plaintext token
+/// - `purpose`    TEXT not null - [`TokenPurpose::as_str`] discriminator
+/// - `expires_at` TIMESTAMP not null - token TTL boundary
+/// - `used_at`    TIMESTAMP null - set on single-use consume
 /// - `created_at` TIMESTAMP not null
 pub mod entity {
     use sea_orm::entity::prelude::*;
@@ -404,7 +404,7 @@ pub mod entity {
         pub created_at: chrono::NaiveDateTime,
     }
 
-    /// SeaORM relation enum — `auth_flow_tokens` is a leaf table with no
+    /// SeaORM relation enum - `auth_flow_tokens` is a leaf table with no
     /// declared foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
@@ -439,7 +439,7 @@ mod tests {
 
     /// Fresh in-memory SQLite with the `auth_flow_tokens` table created
     /// and bound as the framework `DB` connection (thread-local via
-    /// `TestContainer`, so each `#[tokio::test]` is isolated — no global
+    /// `TestContainer`, so each `#[tokio::test]` is isolated - no global
     /// lock or `#[serial]` needed). Hold the returned guard for the whole
     /// test or `DB::connection()` loses its binding.
     async fn test_db_with_auth_flow_tokens() -> crate::testing::TestDatabase {
@@ -495,7 +495,7 @@ mod tests {
 
     /// SEC-02(a) regression test: a second outstanding token of the same
     /// purpose for the same user must be invalidated the instant the
-    /// first is consumed — not just eventually via `prune_expired`.
+    /// first is consumed - not just eventually via `prune_expired`.
     #[tokio::test]
     async fn consume_invalidates_sibling_tokens_of_same_purpose() {
         let _db = test_db_with_auth_flow_tokens().await;
@@ -515,7 +515,7 @@ mod tests {
             "sibling token must be live before either is consumed"
         );
 
-        // Consume the first — this rotates the password in the real flow.
+        // Consume the first - this rotates the password in the real flow.
         assert_eq!(
             TokenStore::consume(&first, TokenPurpose::PasswordReset)
                 .await
@@ -523,7 +523,7 @@ mod tests {
             Some("99".to_string())
         );
 
-        // The second (sibling) token must now be dead — both a
+        // The second (sibling) token must now be dead - both a
         // non-consuming check and an actual consume attempt must reject
         // it, closing the window where it stayed valid for the rest of
         // its TTL.
@@ -542,7 +542,7 @@ mod tests {
         );
     }
 
-    /// Sibling invalidation must be scoped to `(user_id, purpose)` — a
+    /// Sibling invalidation must be scoped to `(user_id, purpose)` - a
     /// different user's outstanding token of the same purpose, and this
     /// user's outstanding token of a DIFFERENT purpose, must both
     /// survive.

@@ -18,7 +18,7 @@ use crate::error::FrameworkError;
 ///
 /// The mechanism: at the top of `load_dotenv` we remove every tracked
 /// key whose current value still matches the value the loader left
-/// behind — that's the "leftover" case. Keys whose values have changed
+/// behind - that's the "leftover" case. Keys whose values have changed
 /// since the previous call survive: someone (the OS, a test harness,
 /// or the application itself) explicitly set them, so they win like
 /// every other real system env var.
@@ -63,7 +63,7 @@ impl Environment {
     /// - `test` → [`Self::Testing`]
     ///
     /// Values that don't match a known variant or alias are stored in
-    /// [`Self::Custom`] with their original casing preserved — that
+    /// [`Self::Custom`] with their original casing preserved - that
     /// string flows back through [`Self::env_file_suffix`] to pick the
     /// `.env.<suffix>` file, and lowercasing it here would silently
     /// change which file loads for a real custom environment
@@ -126,7 +126,7 @@ impl std::fmt::Display for Environment {
 /// 2. `.env.{environment}.local` (environment-specific local overrides)
 /// 3. `.env.{environment}` (environment-specific)
 /// 4. `.env.local` (local overrides, not committed)
-/// 5. `.env` (base defaults — lowest)
+/// 5. `.env` (base defaults - lowest)
 ///
 /// The loader runs five phases so that `APP_ENV` defined in the base
 /// `.env` correctly selects environment-specific files for the same
@@ -140,7 +140,7 @@ impl std::fmt::Display for Environment {
 ///    same test binary) idempotent: stale file values from an earlier
 ///    root never get promoted to system-tier precedence on the next
 ///    call.
-/// 2. Load base `.env` (non-overriding — file values fill in gaps in
+/// 2. Load base `.env` (non-overriding - file values fill in gaps in
 ///    the system env).
 /// 3. Re-detect `APP_ENV` now that base `.env` has been merged.
 /// 4. Load `.env.local`, `.env.{env}`, `.env.{env}.local` in
@@ -154,7 +154,7 @@ impl std::fmt::Display for Environment {
 ///
 /// Returns [`FrameworkError::Internal`] when any candidate `.env` file
 /// exists but cannot be read or parsed (IO errors, malformed lines).
-/// Missing `.env` files are NOT an error — they are an expected case
+/// Missing `.env` files are NOT an error - they are an expected case
 /// for environments where configuration is fully supplied by the
 /// process environment.
 pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
@@ -165,7 +165,7 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     //
     // SAFETY: `std::env::remove_var` is process-global; documented
     // unsafe because it races with concurrent getenv on some
-    // platforms. The invariant is that no other thread exists yet —
+    // platforms. The invariant is that no other thread exists yet -
     // and it is now *enforced* rather than assumed: `boot::load_env`
     // refuses when a Tokio runtime is already running, and
     // `Application::run` refuses to boot unless `#[suprnova::main]`
@@ -214,7 +214,7 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     // Phase 4: load environment-specific files in least-to-most-
     // specific order, using `from_path_override` so each later file
     // beats the earlier file. We do NOT want these to override real
-    // system env — we restore that in phase 5.
+    // system env - we restore that in phase 5.
     load_env_file(&project_root.join(".env.local"), true)?;
 
     if let Some(suffix) = env.env_file_suffix() {
@@ -229,7 +229,7 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
     // process environment BEFORE this function ran is rewritten back to
     // its original value, defeating anything a file tried to override.
     //
-    // SAFETY: see Phase 1a safety note — same boot-time invariant.
+    // SAFETY: see Phase 1a safety note - same boot-time invariant.
     for (k, v) in &system_env {
         unsafe {
             std::env::set_var(k, v);
@@ -238,7 +238,7 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
 
     // Phase 5b: record the (key, value) pairs *introduced* by this
     // call (in the current env minus the system-env snapshot) so a
-    // follow-up call can strip them in Phase 1a — but only if their
+    // follow-up call can strip them in Phase 1a - but only if their
     // value still matches what we left, see Phase 1a comment.
     let mut introduced = std::collections::HashMap::new();
     for (k, v) in std::env::vars() {
@@ -256,7 +256,7 @@ pub fn load_dotenv(project_root: &Path) -> Result<Environment, FrameworkError> {
 /// `dotenvy::from_path` semantics (only fill missing keys);
 /// `override_existing=true` matches `dotenvy::from_path_override`.
 ///
-/// File-not-found is treated as success — that's the expected case
+/// File-not-found is treated as success - that's the expected case
 /// for optional layers (`.env.local`, `.env.production`, etc.).
 /// Every other IO or parse failure becomes a [`FrameworkError`] so
 /// boot fails loudly on a typo in `.env.production`.
@@ -280,7 +280,7 @@ fn load_env_file(path: &Path, override_existing: bool) -> Result<(), FrameworkEr
 /// Returns the parsed value when the variable is set and parses
 /// cleanly, or `default` otherwise. When the variable is set but
 /// fails to parse the call emits `tracing::warn!` so a typo in a
-/// production env doesn't disappear silently — but the call itself
+/// production env doesn't disappear silently - but the call itself
 /// remains infallible because this is a Laravel-parity helper used
 /// from a wide variety of call sites (including `impl Default`).
 /// Strict validation of typed framework knobs lives in
@@ -315,8 +315,8 @@ pub fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
 ///
 /// Convenience for `main.rs` / `bootstrap.rs` where a missing variable
 /// is genuinely fatal and the panic message reads cleanly out of the
-/// process abort. For fallible call sites — queue workers, scheduler
-/// tasks, CLI subcommands — prefer [`try_env_required`], which returns
+/// process abort. For fallible call sites - queue workers, scheduler
+/// tasks, CLI subcommands - prefer [`try_env_required`], which returns
 /// the same diagnostic as a [`FrameworkError`] you can surface
 /// gracefully.
 ///
@@ -341,7 +341,7 @@ pub fn env_required<T: std::str::FromStr>(key: &str) -> T {
         })
 }
 
-/// Fallible sibling of [`env_required`] — returns a [`FrameworkError`]
+/// Fallible sibling of [`env_required`] - returns a [`FrameworkError`]
 /// instead of panicking when the variable is missing or unparseable.
 ///
 /// Use this from any context where an abort would lose work: queue
@@ -350,8 +350,8 @@ pub fn env_required<T: std::str::FromStr>(key: &str) -> T {
 /// `From` impls that may run before tokio is initialised.
 ///
 /// The returned error carries the variable name and a short
-/// description of which branch (missing vs. unparseable) failed —
-/// matching the panic message [`env_required`] would have produced —
+/// description of which branch (missing vs. unparseable) failed -
+/// matching the panic message [`env_required`] would have produced -
 /// so callers can log the cause without re-deriving it from the
 /// panic payload.
 ///
@@ -414,7 +414,7 @@ pub fn env_optional<T: std::str::FromStr>(key: &str) -> Option<T> {
 /// `load_dotenv` call behaves as if it were the first invocation
 /// for this process. Used by tests that exercise system-env-wins
 /// semantics with a value that happens to coincide with whatever
-/// a sibling test left in the tracker — the value-matching strip
+/// a sibling test left in the tracker - the value-matching strip
 /// in Phase 1a cannot distinguish "leftover" from "user re-set to
 /// the same string".
 ///
@@ -450,7 +450,7 @@ pub(crate) fn env_strict<T: std::str::FromStr>(key: &str) -> Result<Option<T>, F
 
 /// Read a boolean opt-in env var.
 ///
-/// The canonical reader for the framework's production escape hatches —
+/// The canonical reader for the framework's production escape hatches -
 /// `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION`,
 /// `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION`,
 /// `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION`. They share one definition so
@@ -461,8 +461,8 @@ pub(crate) fn env_flag_enabled(name: &str) -> bool {
 
 /// Whether an opt-in flag value counts as "yes".
 ///
-/// Anything outside the recognised truthy set — including an unparseable
-/// value — is `false`. A security override has to be affirmed exactly; a
+/// Anything outside the recognised truthy set - including an unparseable
+/// value - is `false`. A security override has to be affirmed exactly; a
 /// deploy that writes `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=maybe` must
 /// keep the guard armed rather than treat "the variable is present" as
 /// consent.
@@ -545,7 +545,7 @@ mod tests {
                 let env = Environment::detect();
                 assert!(
                     !matches!(env, Environment::Custom(_)),
-                    "APP_ENV={value:?} fell through to Custom — case-insensitive match broken"
+                    "APP_ENV={value:?} fell through to Custom - case-insensitive match broken"
                 );
             });
         }
@@ -555,7 +555,7 @@ mod tests {
     #[serial_test::serial(app_config_env)]
     fn detect_accepts_common_aliases() {
         // The finding explicitly cites `prod`. Apply the same restraint
-        // to the peer aliases — small documented set, no creative
+        // to the peer aliases - small documented set, no creative
         // expansion.
         with_app_env(Some("prod"), || {
             assert_eq!(Environment::detect(), Environment::Production);
@@ -582,7 +582,7 @@ mod tests {
     #[serial_test::serial(app_config_env)]
     fn detect_preserves_original_casing_for_custom_envs() {
         // Lowercasing the stored Custom value would silently change
-        // which `.env.<suffix>` file loads — `APP_ENV=QA` must keep
+        // which `.env.<suffix>` file loads - `APP_ENV=QA` must keep
         // loading `.env.QA`, not `.env.qa`.
         with_app_env(Some("QA"), || {
             let env = Environment::detect();

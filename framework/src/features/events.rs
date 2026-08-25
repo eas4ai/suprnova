@@ -1,7 +1,7 @@
 //! Feature-flag events.
 //!
 //! Two events fire from the admin CRUD path. `is_enabled` resolution
-//! deliberately does **not** fire an event — every request that
+//! deliberately does **not** fire an event - every request that
 //! checks any flag would multiply that event volume by N flags
 //! checked. Production deployments that need read-path audit can
 //! wire a custom `Evaluator` wrapper with a bounded log channel

@@ -24,7 +24,7 @@ use suprnova::{
 };
 
 /// The bypass cookie is encrypted, so the crypto layer must be initialized.
-/// Process-wide and idempotent — init once per test binary.
+/// Process-wide and idempotent - init once per test binary.
 fn ensure_crypt() {
     static INIT: Once = Once::new();
     INIT.call_once(|| Crypt::init(EncryptionKey::generate()));
@@ -215,7 +215,7 @@ async fn secret_url_sets_bypass_cookie_which_then_grants_access() {
         .expect("the secret URL must set a bypass cookie");
     assert!(set_cookie.starts_with("suprnova_maintenance="));
 
-    // Re-request a normal path carrying that cookie — it must now pass through.
+    // Re-request a normal path carrying that cookie - it must now pass through.
     let cookie_pair = set_cookie.split(';').next().unwrap();
     let (status, _headers, body) = request(addr, "GET", "/", &[("Cookie", cookie_pair)]).await;
     assert_eq!(status, 200, "a valid bypass cookie must grant access");
@@ -253,7 +253,7 @@ async fn file_driver_active_probe_does_not_block_the_runtime() {
     // The FileMaintenanceMode probe is called via `active().await` on every
     // request before the chain runs (see `MaintenanceMiddleware::handle`).
     // A `std::fs::metadata` call on the dispatching thread blocks the
-    // current-thread runtime — proven here by driving the probe concurrently
+    // current-thread runtime - proven here by driving the probe concurrently
     // with another runtime task and asserting both make progress in the same
     // tick. With std::fs the second task would not get a chance to advance
     // until the metadata syscall returns; with tokio::fs the syscall runs
@@ -287,7 +287,7 @@ async fn file_driver_active_probe_does_not_block_the_runtime() {
 async fn file_driver_full_lifecycle_uses_tokio_fs() {
     // Ensures the full activate -> active -> data -> deactivate path runs
     // under a Tokio runtime without panicking with "blocking call inside
-    // async context" — Tokio doesn't actually emit that diagnostic, but
+    // async context" - Tokio doesn't actually emit that diagnostic, but
     // exercising the lifecycle under the multi-threaded runtime proves
     // the awaited tokio::fs syscalls (rather than blocking std::fs) are
     // in use. A regression would block the worker thread; multi_thread

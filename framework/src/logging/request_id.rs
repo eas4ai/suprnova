@@ -1,7 +1,7 @@
 //! Per-request id stored in a `tokio::task_local!` and attached to a
 //! `tracing` span. `RequestIdMiddleware` installs it as the outermost
-//! middleware and enters a `request` span — carrying `request_id`,
-//! `method`, and `path` — around the rest of the chain, so every
+//! middleware and enters a `request` span - carrying `request_id`,
+//! `method`, and `path` - around the rest of the chain, so every
 //! downstream `tracing` event is emitted within that span and carries
 //! the id as span context (nested under `span` in the JSON formatter).
 //! The id is also seeded into the request `Context` (`_request_id`) so
@@ -63,7 +63,7 @@ pub fn current_request_id() -> Option<RequestId> {
 /// request id into the new task.
 ///
 /// `tokio::spawn` starts a task with empty task-locals, so a handler that
-/// spawns background work loses `current_request_id()` — the spawned
+/// spawns background work loses `current_request_id()` - the spawned
 /// work's logs and any id-derived correlation would be orphaned from the
 /// request that triggered them. This helper captures the caller's request
 /// id and re-scopes it for the spawned future, and attaches the current
@@ -74,7 +74,7 @@ pub fn current_request_id() -> Option<RequestId> {
 /// With no active request id (called outside a request) the future is
 /// spawned as-is, exactly like a bare `tokio::spawn`.
 ///
-/// Note: only the request id and tracing span follow the task — the
+/// Note: only the request id and tracing span follow the task - the
 /// request `Context` bag (query params, flash) deliberately does not,
 /// since background work is not serving the originating HTTP request.
 pub fn spawn_with_request_id<F>(future: F) -> JoinHandle<F::Output>
@@ -123,7 +123,7 @@ impl RequestIdMiddleware {
     /// panic boundary (`execute_chain_safely`) can echo the SAME id on a
     /// synthesized 500. A panic unwinds the `REQUEST_ID` scope, so by the
     /// time the panic is caught the id is no longer recoverable from the
-    /// task-local — it must be threaded in from outside the chain.
+    /// task-local - it must be threaded in from outside the chain.
     pub fn with_id(id: RequestId) -> Self {
         Self { id: Some(id) }
     }
@@ -146,12 +146,12 @@ const MAX_REQUEST_ID_LEN: usize = 128;
 
 /// Returns true if `s` is a safe id: non-empty, within the length cap,
 /// and composed only of ASCII alphanumerics plus the small set of
-/// separators used by every common id scheme — `-` (UUID/ULID/KSUID),
+/// separators used by every common id scheme - `-` (UUID/ULID/KSUID),
 /// `.` and `_` (free-form correlation ids), `:` (W3C `traceparent`
 /// segment delimiter, Jaeger/Zipkin trace ids).
 ///
-/// Anything outside that charset — quotes, brackets, slashes, equals,
-/// SQL or shell metacharacters — is rejected and replaced with a fresh
+/// Anything outside that charset - quotes, brackets, slashes, equals,
+/// SQL or shell metacharacters - is rejected and replaced with a fresh
 /// UUID. The earlier "anything printable, non-space" rule kept control
 /// characters and length abuse out, but still let punctuation-heavy
 /// values through that wouldn't match downstream log/trace id schemas
@@ -195,7 +195,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         // The request span carries `request_id`, `method`, and `path` as
         // fields. Entering it (via `.instrument` below) around the rest of
         // the chain means every downstream `tracing` event inherits the id
-        // as span context — without each call site having to read and
+        // as span context - without each call site having to read and
         // record it. Fields are recorded eagerly here, so the borrows of
         // `request` end before it is moved into the handler.
         let span = tracing::info_span!(
@@ -204,7 +204,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
             method = %request.method(),
             path = %request.path(),
             // Declared up front as Empty so the 5xx marker recorded after
-            // the chain actually lands — `tracing` silently ignores
+            // the chain actually lands - `tracing` silently ignores
             // `record` for fields not declared at span creation. The field
             // name is the one `tracing-opentelemetry` special-cases:
             // recording `otel.status_code = "error"` makes the bridge call
@@ -221,7 +221,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         // the span onto the caller's span so the server span is a child in
         // the same trace instead of a fresh root. No-op without the `otel`
         // feature or without a usable trace header. MUST run before
-        // `.instrument(span)` — the OTel bridge materializes the span on
+        // `.instrument(span)` - the OTel bridge materializes the span on
         // first poll, so a later `set_parent` is dropped.
         crate::telemetry::propagation::join_upstream_trace(&span, request.headers());
 
@@ -238,7 +238,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         //
         // Before this snapshot the middleware used `ContextStore::default()`,
         // so the in-scope `query` bag was always empty for real HTTP
-        // requests — `Context::query_param` always returned `None` and
+        // requests - `Context::query_param` always returned `None` and
         // Eloquent pagination silently defaulted to page 1 / no-cursor
         // regardless of `?page=` or `?cursor=` in the URL.
         let query_map: std::collections::HashMap<String, String> = request
@@ -273,7 +273,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         // `tracing-opentelemetry` bridge maps it to OTel `Status::Error`.
         // The value `"error"` on the `otel.status_code` field is what the
         // bridge matches (case-insensitively) to call `set_status`.
-        // Recorded here — the outermost middleware — so all three
+        // Recorded here - the outermost middleware - so all three
         // chain-running server paths (matched route, fallback, static 404)
         // get the marker from one place instead of three duplicated
         // post-chain blocks in `server.rs`.
@@ -282,7 +282,7 @@ impl crate::middleware::Middleware for RequestIdMiddleware {
         // future is dropped mid-flight), so a panic-induced 500 is NOT
         // marked here; `execute_chain_safely` still emits an error-level
         // log and dispatches `ErrorOccurred` for that case, so it is not
-        // silent — only the OTel span status is unset on panic.
+        // silent - only the OTel span status is unset on panic.
         #[cfg(feature = "otel")]
         {
             let status = match &result {
@@ -394,7 +394,7 @@ mod tests {
         assert!(!is_safe_request_id("a/b"));
         assert!(!is_safe_request_id("k=v"));
         assert!(!is_safe_request_id("a&b"));
-        // Plus, percent, hash, at — printable but not in any id scheme
+        // Plus, percent, hash, at - printable but not in any id scheme
         assert!(!is_safe_request_id("a+b"));
         assert!(!is_safe_request_id("a%20b"));
         assert!(!is_safe_request_id("a#b"));

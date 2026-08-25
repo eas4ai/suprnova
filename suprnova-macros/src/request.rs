@@ -13,7 +13,7 @@ struct FormRequestAttrs {
     /// through to the process-global cap at runtime.
     max_body_bytes: Option<proc_macro2::TokenStream>,
     /// When `true`, suppress the macro's default `impl FormRequest` and
-    /// let the caller write their own — needed when overriding
+    /// let the caller write their own - needed when overriding
     /// `authorize` / `after_validation` / `after_validation_async`,
     /// since you cannot add a second `impl FormRequest`. Mirrors the
     /// `#[multipart(custom_hooks)]` opt-out shape.
@@ -23,10 +23,10 @@ struct FormRequestAttrs {
 /// Parse struct-level `#[form_request(...)]` options.
 ///
 /// Supported:
-/// - `max_body_bytes = N` — per-struct cap on total request body size, in
+/// - `max_body_bytes = N` - per-struct cap on total request body size, in
 ///   bytes. When absent, the trait default delegates to the process-global
 ///   cap (see `suprnova::http::body::global_max_request_body_bytes`).
-/// - `custom_hooks` — suppress the auto-emitted `impl FormRequest` so the
+/// - `custom_hooks` - suppress the auto-emitted `impl FormRequest` so the
 ///   caller can write their own to override `authorize` /
 ///   `after_validation` / `after_validation_async`.
 fn parse_form_request_attrs(attrs: &[syn::Attribute]) -> Result<FormRequestAttrs, syn::Error> {

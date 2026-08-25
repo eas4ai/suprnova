@@ -1,4 +1,4 @@
-//! A schemaless authenticated user — Laravel's `GenericUser`.
+//! A schemaless authenticated user - Laravel's `GenericUser`.
 //!
 //! Returned by [`DatabaseUserProvider`](super::database_provider::DatabaseUserProvider),
 //! which authenticates against a raw table rather than a typed model.
@@ -50,7 +50,7 @@ impl GenericUser {
 }
 
 impl Authenticatable for GenericUser {
-    /// Returns the original string id — `GenericUser`'s identifier
+    /// Returns the original string id - `GenericUser`'s identifier
     /// column is stored as a string, so the canonical
     /// [`Authenticatable::get_auth_identifier`] surface is a clone of
     /// the stored value. The optional integer form falls back to the

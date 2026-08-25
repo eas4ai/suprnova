@@ -1,4 +1,4 @@
-//! Phase 10B T1 — verifies that `#[suprnova::model(relations = { ... })]`
+//! Phase 10B T1 - verifies that `#[suprnova::model(relations = { ... })]`
 //! emits an `inventory::submit!(RelationEntry { ... })` per declared
 //! relation, and that the helpers (`relations`, `relations_of`,
 //! `find_relation`) surface those entries by type / name.
@@ -7,7 +7,7 @@
 //! bodies (`fn profile(&self) -> HasOne<Self, RegProfile>`) land in
 //! T2 once `HasOne` exists. Declaring `relations = { profile:
 //! HasOne<RegProfile> }` is legal in T1 because the macro doesn't
-//! emit a relation method yet — only the accessors that read from
+//! emit a relation method yet - only the accessors that read from
 //! `__eager` plus the inventory submission.
 
 use suprnova::{RelationKind, find_relation, model, relations, relations_of};
@@ -41,7 +41,7 @@ fn relation_registered_in_inventory() {
         .expect("relation profile should be registered");
     assert_eq!(entry.kind, RelationKind::HasOne);
     // `target_type_name` is the type literal as written in the
-    // macro body — `RegProfile`, not the full module path. Tooling
+    // macro body - `RegProfile`, not the full module path. Tooling
     // (Phase 8) displays this in admin UIs.
     assert_eq!(entry.target_type_name, "RegProfile");
 }
@@ -66,7 +66,7 @@ fn multiple_relations_on_one_model_each_register() {
 #[test]
 fn relations_of_filters_by_parent_type() {
     // `relations_of::<T>()` returns only entries whose parent_type
-    // matches — used by Phase 8 (Admin) to walk a single model's
+    // matches - used by Phase 8 (Admin) to walk a single model's
     // relation surface.
     let count = relations_of::<RegUser>().count();
     assert!(
@@ -100,7 +100,7 @@ fn find_relation_returns_none_for_unknown_name() {
 fn relations_iter_includes_every_declaration() {
     // The global iterator must include both entries declared above
     // (alongside any other relations declared elsewhere in the test
-    // binary — order is link-time-arbitrary).
+    // binary - order is link-time-arbitrary).
     let any_profile = relations().any(|r| r.parent_type_name == "RegUser" && r.name == "profile");
     let any_posts = relations().any(|r| r.parent_type_name == "RegUser" && r.name == "posts");
     assert!(

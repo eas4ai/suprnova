@@ -17,7 +17,7 @@ use suprnova::broadcasting::Broadcastable;
 pub struct UserRegistered {
     /// Database id assigned to the new user.
     pub user_id: i64,
-    /// Email captured at registration. Stored verbatim — the listener
+    /// Email captured at registration. Stored verbatim - the listener
     /// is responsible for any normalization it needs.
     pub email: String,
 }

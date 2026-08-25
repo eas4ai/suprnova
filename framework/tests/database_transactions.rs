@@ -1,4 +1,4 @@
-//! Phase 10C T11 — Transactions integration tests.
+//! Phase 10C T11 - Transactions integration tests.
 //!
 //! Exercises the four entry points and their composition with Model
 //! / Builder paths:
@@ -198,7 +198,7 @@ async fn manual_transaction_commit_persists_changes() {
     let _db = fixture().await;
 
     // Pre-load the row BEFORE begin_transaction. On SQLite the pool
-    // has a single connection — once the tx checks it out, any read
+    // has a single connection - once the tx checks it out, any read
     // that doesn't opt into the tx (no `with_tx`, no ambient
     // CURRENT_TX) would block waiting for the pool.
     let mut alice = T11Account::query()
@@ -267,7 +267,7 @@ async fn reads_inside_transaction_see_pending_writes_in_same_tx() {
     let saw_pending = DB::transaction(|_tx| {
         Box::pin(async move {
             T11Account::create(attrs! { owner: "carol", balance: 25i64 }).await?;
-            // Inside the same tx — the new row MUST be visible.
+            // Inside the same tx - the new row MUST be visible.
             let count: i64 = T11Account::query().count().await?;
             Ok::<i64, FrameworkError>(count)
         })
@@ -330,7 +330,7 @@ async fn builder_with_tx_routes_through_explicit_transaction() {
     alice.balance = 777;
     alice.save_with_tx(&tx).await.unwrap();
 
-    // Read through the same tx — sees the pending update.
+    // Read through the same tx - sees the pending update.
     let through_tx = T11Account::query()
         .filter("owner", "alice")
         .with_tx(&tx)
@@ -353,11 +353,11 @@ async fn builder_with_tx_routes_through_explicit_transaction() {
     assert_eq!(after.balance, 777);
 }
 
-// ---- AF5 — Model::create_with_tx ----------------------------------------
+// ---- AF5 - Model::create_with_tx ----------------------------------------
 //
 // Manual `DB::begin_transaction` does not install `CURRENT_TX`, so
 // `Model::create()` inside a manual-tx scope silently routed to the
-// pool — defeating the whole point of holding the handle. AF5 adds
+// pool - defeating the whole point of holding the handle. AF5 adds
 // the missing `create_with_tx(&tx, attrs)` shim that mirrors
 // `create()` event-for-event but pins the INSERT to `tx`. These two
 // tests pin the contract end-to-end: commit lands the row, dropping
@@ -406,7 +406,7 @@ async fn savepoint_rejects_injection_payload_with_bad_request() {
             assert_eq!(err.status_code(), 400);
 
             // Sanity: well-formed names still work alongside the
-            // rejected ones — the guard does not break the legitimate path.
+            // rejected ones - the guard does not break the legitimate path.
             tx.savepoint("inner_ok").await?;
             tx.rollback_to("inner_ok").await?;
             Ok::<(), FrameworkError>(())
@@ -434,7 +434,7 @@ async fn create_with_tx_rolls_back_when_handle_dropped_without_commit() {
         let _ = T11Account::create_with_tx(&tx, attrs! { owner: "dave", balance: 1i64 })
             .await
             .unwrap();
-        // Drop `tx` without calling commit — the SeaORM
+        // Drop `tx` without calling commit - the SeaORM
         // DatabaseTransaction's Drop rolls back any uncommitted work.
         drop(tx);
     }

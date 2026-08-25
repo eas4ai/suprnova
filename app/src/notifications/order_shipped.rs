@@ -1,9 +1,9 @@
-//! OrderShipped notification — dogfood for the multi-channel
+//! OrderShipped notification - dogfood for the multi-channel
 //! Notification subsystem (Phase 5B Tasks 16-19, polished by Item 2)
 //! and for the v2 `#[derive(NotificationMailable)]` macro.
 //!
 //! Channels: `mail` AND `database`. The mail variant is produced by
-//! `NotificationMailable::to_mail` — generated here by the derive from
+//! `NotificationMailable::to_mail` - generated here by the derive from
 //! the `#[mail(...)]` attribute. The database variant writes a row
 //! into the `notifications` table.
 //!
@@ -20,7 +20,7 @@ use suprnova::serde_json;
 
 #[derive(Serialize, Deserialize, Debug, Clone, NotificationMailable)]
 #[mail(
-    subject = "Your order shipped — tracking {{ tracking }}",
+    subject = "Your order shipped - tracking {{ tracking }}",
     html = "<p>Your order is on its way.</p><p>Tracking: <code>{{ tracking }}</code></p>",
     text = "Your order is on its way.\nTracking: {{ tracking }}",
     from = "orders@suprnova.dev",

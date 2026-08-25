@@ -28,7 +28,7 @@ pub struct SessionConfig {
     pub cookie_domain: Option<String>,
     /// Whether to set Secure flag on cookie (HTTPS only)
     pub cookie_secure: bool,
-    /// Whether to set HttpOnly flag on cookie. Always `true` — we
+    /// Whether to set HttpOnly flag on cookie. Always `true` - we
     /// deliberately don't ship a knob to disable HttpOnly on the
     /// session cookie; there is no legitimate modern use case for it
     /// and disabling it forfeits the primary XSS protection.
@@ -63,7 +63,7 @@ pub struct SessionConfig {
     /// Lifetime of a remember-me token (and its cookie). Default 30 days.
     ///
     /// Configured separately from `lifetime` because remember-me is the
-    /// "I closed my browser and want to come back next month" path —
+    /// "I closed my browser and want to come back next month" path -
     /// the session cookie itself is short-lived (default 2 hours).
     pub remember_lifetime: Duration,
 }

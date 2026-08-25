@@ -5,7 +5,7 @@ APP_URL=http://localhost:8765
 
 # 32-byte AES-256 key (URL-safe base64, no padding). Generate one with
 # `suprnova key:generate` and copy it into your `.env`. Required in
-# production — Suprnova fails closed on boot when APP_ENV is not
+# production - Suprnova fails closed on boot when APP_ENV is not
 # local/dev/test and APP_KEY is unset.
 APP_KEY=
 
@@ -16,7 +16,7 @@ SERVER_PORT=8765
 
 VITE_PORT=5765
 
-# SUPRNOVA_FRONTEND=svelte   # svelte | react | vue — which frontend the HTML shell renders; the scaffolded .env sets it for you
+# SUPRNOVA_FRONTEND=svelte   # svelte | react | vue - which frontend the HTML shell renders; the scaffolded .env sets it for you
 
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db
@@ -56,7 +56,7 @@ APP_FALLBACK_LOCALE=en
 # These are the names the framework's transport actually reads. Leave the
 # credentials unset for a local catcher (maildev / mailpit / mailhog on
 # 1025); set BOTH MAIL_SMTP_USER and MAIL_SMTP_PASS for authenticated
-# STARTTLS. MAIL_SMTP_ENCRYPTION is derived from them when left blank —
+# STARTTLS. MAIL_SMTP_ENCRYPTION is derived from them when left blank -
 # set it to `tls` for a relay expecting implicit TLS on 465. Production
 # refuses to boot on an unencrypted connection.
 MAIL_DRIVER=smtp

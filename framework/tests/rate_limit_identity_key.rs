@@ -1,11 +1,11 @@
-//! Per-identity rate limiting — `identity_key` + `key_reads_body`.
+//! Per-identity rate limiting - `identity_key` + `key_reads_body`.
 //!
 //! Per-IP throttling answers "is one client noisy". It cannot answer "is
 //! one mailbox being flooded": an attacker spread across a botnet or an
 //! IPv6 /64 stays under every address budget while sending one victim
 //! thousands of password-reset mails. These tests drive the identity half
 //! over real HTTP, because the body-buffering path only exists once a
-//! request has an actual streaming body — an in-process `Request` built
+//! request has an actual streaming body - an in-process `Request` built
 //! from bytes would already be `Buffered` and would prove nothing.
 
 use std::convert::Infallible;
@@ -189,7 +189,7 @@ async fn capitalisation_does_not_buy_a_fresh_bucket() {
 
     let (first, _) = post_form(addr, "/issue", "email=victim@example.com").await;
     // Percent-encoded spaces, so the surrounding whitespace is part of
-    // the *value* — a literal space in the body would rename the field.
+    // the *value* - a literal space in the body would rename the field.
     let (recased, _) = post_form(addr, "/issue", "email=%20ViCtIm@Example.COM%20").await;
 
     assert_eq!(first, 200);
@@ -226,7 +226,7 @@ async fn the_query_string_and_the_body_share_one_bucket() {
     );
 }
 
-/// A request naming nobody must still be throttled — by IP, never by a
+/// A request naming nobody must still be throttled - by IP, never by a
 /// shared `no-identity` constant that one caller could exhaust for
 /// everyone.
 #[tokio::test]
@@ -292,7 +292,7 @@ async fn an_oversized_body_is_rejected_not_waved_through() {
     );
 }
 
-/// Without `key_reads_body` the body is never touched — the key falls
+/// Without `key_reads_body` the body is never touched - the key falls
 /// back to the IP, and the handler still gets its bytes.
 #[tokio::test]
 async fn the_body_is_left_alone_unless_the_key_asks_for_it() {
@@ -359,7 +359,7 @@ async fn the_key_does_not_carry_the_raw_address() {
 /// This limiter is designed to be stacked on an address-keyed one, and
 /// the two carry different windows and quotas. If both spelled their key
 /// `{prefix}:ip:{addr}` they would share a bucket in the backend, and
-/// each would then be evaluated under whichever config got there first —
+/// each would then be evaluated under whichever config got there first -
 /// a per-recipient limit silently enforcing the per-IP window, or the
 /// reverse. Found by reading the app's route wiring, where the address
 /// limiter already emits exactly `auth-issuance:ip:{addr}`.
@@ -400,7 +400,7 @@ async fn the_fallback_key_cannot_collide_with_a_plain_ip_key() {
     );
 }
 
-/// `only_when` must actually skip — a request the predicate rejects
+/// `only_when` must actually skip - a request the predicate rejects
 /// passes through however many times it is repeated.
 #[tokio::test]
 async fn a_skipped_request_is_not_counted_at_all() {
@@ -428,9 +428,9 @@ async fn a_skipped_request_is_not_counted_at_all() {
 ///
 /// Without it, a request naming nobody falls into `identity_key`'s
 /// address fallback and is counted against *this* limiter's quota. When
-/// this limiter is the tighter of a stacked pair — which is the normal
+/// this limiter is the tighter of a stacked pair - which is the normal
 /// arrangement, since a per-recipient budget is smaller than a per-IP
-/// one — that quota silently becomes the binding limit for every route
+/// one - that quota silently becomes the binding limit for every route
 /// that names nobody, overriding the budget those routes were given.
 /// Behind one office NAT that reads as a lockout.
 #[tokio::test]
@@ -439,7 +439,7 @@ async fn without_the_guard_a_tighter_limiter_binds_requests_it_should_ignore() {
         identity_key(req, "email", "issuance")
     })
     .key_reads_body(4096);
-    // Deliberately no `.only_when` — this is the shape being guarded against.
+    // Deliberately no `.only_when` - this is the shape being guarded against.
 
     let addr = spawn_server(echo_router(mw), 6).await;
 

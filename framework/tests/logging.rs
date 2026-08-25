@@ -32,7 +32,7 @@ impl Middleware for CaptureRequestId {
     }
 }
 
-/// A capture middleware that records `Context::get("_request_id")` —
+/// A capture middleware that records `Context::get("_request_id")` -
 /// confirms `RequestIdMiddleware` seeds the Context bag with the
 /// per-request id under the conventional key.
 struct CaptureContextRequestId(Arc<Mutex<Option<String>>>);

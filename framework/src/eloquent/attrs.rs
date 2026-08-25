@@ -2,7 +2,7 @@
 //! `update`, `first_or_create`, etc.).
 //!
 //! `Attrs` preserves insertion order (`IndexMap`-backed) so SQL UPDATE
-//! statements list columns in the same order the caller passed them —
+//! statements list columns in the same order the caller passed them -
 //! a small win for human-readable logs and snapshot tests.
 //!
 //! The companion [`attrs!`](crate::attrs) declarative macro is the

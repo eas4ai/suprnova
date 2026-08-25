@@ -1,6 +1,6 @@
 //! Public broadcasting channel for the `UserRegistered` events feed.
 //!
-//! Any subscriber — SSE controller, WS client — that wishes to
+//! Any subscriber - SSE controller, WS client - that wishes to
 //! receive user-registration activity connects to the
 //! `"user_registered"` channel. Public channels accept every
 //! subscriber (the default `authorize` returns `true`).

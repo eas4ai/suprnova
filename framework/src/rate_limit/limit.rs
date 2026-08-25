@@ -1,16 +1,16 @@
-//! [`Limit`] and friends — value type for "N attempts per window, optionally
+//! [`Limit`] and friends - value type for "N attempts per window, optionally
 //! keyed and with a response/after callback".
 //!
 //! Mirrors `Illuminate\Cache\RateLimiting\Limit`:
 //!
-//! - `Limit::per_second / per_minute / per_minutes / per_hour / per_day` —
+//! - `Limit::per_second / per_minute / per_minutes / per_hour / per_day` -
 //!   classic shorthand constructors.
 //! - `Limit::none()` returns an [`Unlimited`] (a limit that never trips).
-//! - `.by(key)` — set the bucket key (typically `request.user().id()` or
+//! - `.by(key)` - set the bucket key (typically `request.user().id()` or
 //!   `request.ip()`).
-//! - `.response(callback)` — generate a custom response when the limit is
+//! - `.response(callback)` - generate a custom response when the limit is
 //!   exceeded.
-//! - `.after(callback)` — only count the attempt if `callback(response)` is
+//! - `.after(callback)` - only count the attempt if `callback(response)` is
 //!   true (Laravel's "only fail-on-failure" pattern).
 //!
 //! A [`GlobalLimit`] is just a [`Limit`] whose key is empty: it applies
@@ -19,7 +19,7 @@
 //!
 //! The named-limiter callback registered via
 //! [`RateLimiter::define`](super::RateLimiter::define) can return any
-//! [`LimitResult`] — a single [`Limit`], a list of [`Limit`]s (each limit is
+//! [`LimitResult`] - a single [`Limit`], a list of [`Limit`]s (each limit is
 //! applied), or a fully-formed [`crate::Response`] to short-circuit. This
 //! matches Laravel's three-shape return contract for `RateLimiter::for(...)`.
 
@@ -28,11 +28,11 @@ use crate::http::HttpResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Closure type for [`Limit::after`] — the post-response predicate that
+/// Closure type for [`Limit::after`] - the post-response predicate that
 /// decides whether to debit the limit. `true` means "burn the attempt".
 pub type AfterCallback = Arc<dyn Fn(&HttpResponse) -> bool + Send + Sync>;
 
-/// Closure type for [`Limit::response`] — the custom 429 builder. Receives
+/// Closure type for [`Limit::response`] - the custom 429 builder. Receives
 /// the failing request so it can render context-aware errors.
 pub type ResponseCallback = Arc<dyn Fn(&Request) -> HttpResponse + Send + Sync>;
 
@@ -49,7 +49,7 @@ pub enum LimitResult {
     Single(Limit),
     /// Apply every supplied limit; the first one to trip wins.
     Many(Vec<Limit>),
-    /// Short-circuit with the supplied response — used to give a caller
+    /// Short-circuit with the supplied response - used to give a caller
     /// unlimited access OR to refuse the request outright.
     Response(HttpResponse),
 }
@@ -93,7 +93,7 @@ pub struct Limit {
     pub decay: Duration,
     /// If set, after the wrapped request runs, the limiter will only
     /// count the hit when `after(response)` returns true. Mirrors
-    /// Laravel's `Limit::after($callback)` — the canonical use is "only
+    /// Laravel's `Limit::after($callback)` - the canonical use is "only
     /// count failed login attempts": `after(|r| r.status() >= 400)`.
     pub after_callback: Option<AfterCallback>,
     /// If set, takes precedence over the default 429 when the limit is
@@ -104,7 +104,7 @@ pub struct Limit {
 }
 
 impl Limit {
-    /// Bare constructor — `max_attempts` per `decay`, no key, no callbacks.
+    /// Bare constructor - `max_attempts` per `decay`, no key, no callbacks.
     pub fn new(max_attempts: i64, decay: Duration) -> Self {
         Self {
             key: String::new(),
@@ -127,8 +127,8 @@ impl Limit {
     }
 
     /// `max_attempts` per `decay_minutes` minute(s). Laravel ships this as
-    /// `Limit::perMinutes($decayMinutes, $maxAttempts)` — argument order
-    /// flipped — we match the Laravel signature to keep migration mechanical.
+    /// `Limit::perMinutes($decayMinutes, $maxAttempts)` - argument order
+    /// flipped - we match the Laravel signature to keep migration mechanical.
     pub fn per_minutes(decay_minutes: u64, max_attempts: i64) -> Self {
         Self::new(max_attempts, Duration::from_secs(60 * decay_minutes))
     }
@@ -153,7 +153,7 @@ impl Limit {
         Self::new(max_attempts, Duration::from_secs(60 * 60 * 24 * decay_days))
     }
 
-    /// A limit that never trips. Mirrors `Limit::none()` — returns an
+    /// A limit that never trips. Mirrors `Limit::none()` - returns an
     /// [`Unlimited`]. Use it from a named limiter to give a caller
     /// unlimited access (e.g. admins).
     pub fn none() -> Unlimited {
@@ -224,7 +224,7 @@ impl Limit {
     }
 }
 
-/// A limit with no key — every caller hits the same bucket. Equivalent to
+/// A limit with no key - every caller hits the same bucket. Equivalent to
 /// `Limit::new(max, decay)`; the dedicated type is here for parity with
 /// `Illuminate\Cache\RateLimiting\GlobalLimit` and to make caller intent
 /// explicit at the type level.
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn per_minutes_swaps_args_to_match_laravel_signature() {
-        // Laravel: perMinutes($decayMinutes, $maxAttempts) — minutes first.
+        // Laravel: perMinutes($decayMinutes, $maxAttempts) - minutes first.
         let l = Limit::per_minutes(3, 100);
         assert_eq!(l.decay_seconds(), 180);
         assert_eq!(l.max_attempts, 100);

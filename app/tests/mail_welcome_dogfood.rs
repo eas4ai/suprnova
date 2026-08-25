@@ -1,4 +1,4 @@
-//! Phase 5B Task 20 dogfood — pin that `Mail::queue(WelcomeEmail{..})`
+//! Phase 5B Task 20 dogfood - pin that `Mail::queue(WelcomeEmail{..})`
 //! pushes a `SendMailJob` onto the queue with the right envelope.
 //!
 //! Test exercises the `Mail::queue` plumbing directly. End-to-end
@@ -6,7 +6,7 @@
 //! the full HTTP test harness comes online in Phase 6.
 //!
 //! Marked `#[serial]` because `install_fake` swaps the global queue
-//! driver — running this concurrently with other queue tests would clobber
+//! driver - running this concurrently with other queue tests would clobber
 //! the capture buffer.
 
 use serial_test::serial;
@@ -23,7 +23,7 @@ async fn welcome_route_queues_welcome_mailable() {
         .await
         .unwrap();
 
-    // The Mail::queue path pushes a SendMailJob — the WelcomeEmail itself
+    // The Mail::queue path pushes a SendMailJob - the WelcomeEmail itself
     // lives inside `SendMailJob.mailable_payload` until the worker rehydrates
     // it. Assert on that envelope shape, not the mailable type directly.
     assert_pushed::<SendMailJob>(|job| {

@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `database` #1 — missing `DATABASE_URL`
+//! Regression: HIGH audit finding `database` #1 - missing `DATABASE_URL`
 //! silently boots a local SQLite database through the library facade.
 //!
 //! `DatabaseConfig::from_env` defaulted to `sqlite://./database.db` when
@@ -120,7 +120,7 @@ fn production_with_explicit_source_is_accepted_even_for_sqlite() {
 
     // Builder path → Explicit, even when the URL happens to be SQLite.
     // The point of UrlSource is that "operator chose this URL" is
-    // different from "fallback kicked in" — both can end up at SQLite,
+    // different from "fallback kicked in" - both can end up at SQLite,
     // and the validator must accept the explicit case.
     let cfg = DatabaseConfig::builder()
         .url("sqlite://./prod-on-purpose.db")
@@ -163,11 +163,11 @@ fn local_with_default_source_is_accepted() {
     assert_eq!(cfg.url_source, UrlSource::Default);
 
     cfg.validate_for_environment(&Environment::Local)
-        .expect("Local + Default source must keep working — dev zero-setup posture");
+        .expect("Local + Default source must keep working - dev zero-setup posture");
     cfg.validate_for_environment(&Environment::Development)
         .expect("Development + Default source must keep working");
     cfg.validate_for_environment(&Environment::Testing).expect(
-        "Testing + Default source must keep working — tests use sqlite::memory: or fresh files",
+        "Testing + Default source must keep working - tests use sqlite::memory: or fresh files",
     );
 }
 
@@ -176,7 +176,7 @@ fn is_configured_reflects_url_source() {
     // The legacy `is_configured` API is preserved but its semantics
     // now derive from `UrlSource` instead of string-comparing the URL.
     // A user who explicitly sets `DATABASE_URL=sqlite://./database.db`
-    // is "configured" — they meant the local SQLite, didn't fall
+    // is "configured" - they meant the local SQLite, didn't fall
     // through to it.
     let _guard = ENV_LOCK.lock().unwrap();
     let _snap = EnvSnapshot::capture(&["DATABASE_URL"]);

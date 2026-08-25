@@ -157,7 +157,7 @@ fn failed_recovery_code_consumes_lock_the_account() {
 
         // Clear any failed counter from the previous test (#[serial]
         // gives ordering but the static magnetar instance persists across
-        // tests in this binary — a residual counter from a prior file
+        // tests in this binary - a residual counter from a prior file
         // would let this test pass for the wrong reason).
         BruteForce::reset_attempts(user.email()).await.unwrap();
         BruteForce::unlock_account(user.email()).await.unwrap();
@@ -197,7 +197,7 @@ fn successful_2fa_verify_resets_failed_attempts() {
             .await
             .expect("confirm");
 
-        // Pile up some failures — but stop one short of lockout.
+        // Pile up some failures - but stop one short of lockout.
         BruteForce::reset_attempts(user.email()).await.unwrap();
         BruteForce::unlock_account(user.email()).await.unwrap();
         for _ in 0..4 {

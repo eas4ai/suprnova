@@ -44,7 +44,7 @@ impl Middleware for WithSession {
     async fn handle(&self, request: Request, next: Next) -> Response {
         let slot = suprnova::session::new_session_slot_for_test();
         if let Some(uid) = &self.pending_user_id {
-            // Pre-populate the slot BEFORE installing the scope —
+            // Pre-populate the slot BEFORE installing the scope -
             // that's how `TwoFactorChallengeMiddleware` will observe
             // a pending session.
             let mut guard = slot.lock().unwrap();

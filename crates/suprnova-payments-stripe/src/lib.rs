@@ -34,7 +34,7 @@ use suprnova::payments::traits::{Payment, PaymentProvider, Promotions};
 /// 300-second window enforced by Stripe's official client libraries.
 ///
 /// Webhook verification rejects payloads whose `t=<ts>` claim differs from
-/// the local clock by more than this delta — a captured signed body cannot
+/// the local clock by more than this delta - a captured signed body cannot
 /// then be replayed indefinitely. Override with
 /// [`StripeProvider::with_signature_tolerance`] when tests need to lock the
 /// clock or production has unusual NTP skew.
@@ -46,7 +46,7 @@ pub const DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
 /// publishable key for client-side widget initialisation, and the webhook
 /// signing secret for `WebhookHandler::verify`.
 ///
-/// Clone is cheap — `stripe::Client` is internally `Arc`-backed.
+/// Clone is cheap - `stripe::Client` is internally `Arc`-backed.
 #[derive(Clone)]
 pub struct StripeProvider {
     client: Client,
@@ -63,7 +63,7 @@ pub struct StripeProvider {
     /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`].
     webhook_signature_tolerance_seconds: i64,
     /// Whether hosted one-off Checkout Sessions are created under Stripe's
-    /// Managed Payments (merchant-of-record) program — sends
+    /// Managed Payments (merchant-of-record) program - sends
     /// `managed_payments[enabled]=true` on session creation. Requires the
     /// Stripe account to be enrolled and the session's Prices to carry
     /// Managed-Payments-eligible tax codes.
@@ -74,7 +74,7 @@ impl std::fmt::Debug for StripeProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Do NOT forward `&self.client`: `stripe::Client` holds the API
         // secret key (`sk_…`) in its Authorization header, and its own Debug
-        // impl is outside our control — a future upstream version could print
+        // impl is outside our control - a future upstream version could print
         // it. A stable placeholder makes the "no secret in Debug" guarantee
         // hold regardless of async-stripe's Debug behavior.
         f.debug_struct("StripeProvider")
@@ -91,7 +91,7 @@ impl std::fmt::Debug for StripeProvider {
 }
 
 /// Reject a present-but-blank credential. An empty webhook signing secret is
-/// an empty-key HMAC — forgeable by anyone — so we fail closed at construction.
+/// an empty-key HMAC - forgeable by anyone - so we fail closed at construction.
 fn require_nonempty(name: &str, val: String) -> Result<String, String> {
     if val.trim().is_empty() {
         Err(format!("{name} is set but empty"))
@@ -103,9 +103,9 @@ fn require_nonempty(name: &str, val: String) -> Result<String, String> {
 impl StripeProvider {
     /// Construct a new provider.
     ///
-    /// * `secret_key`             — Stripe secret key (`sk_live_…` / `sk_test_…`).
-    /// * `publishable_key`        — Stripe publishable key (`pk_live_…` / `pk_test_…`).
-    /// * `webhook_signing_secret` — Webhook endpoint signing secret (`whsec_…`).
+    /// * `secret_key`             - Stripe secret key (`sk_live_…` / `sk_test_…`).
+    /// * `publishable_key`        - Stripe publishable key (`pk_live_…` / `pk_test_…`).
+    /// * `webhook_signing_secret` - Webhook endpoint signing secret (`whsec_…`).
     ///
     /// The webhook signature tolerance defaults to
     /// [`DEFAULT_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS`]; override with
@@ -134,7 +134,7 @@ impl StripeProvider {
     /// - `STRIPE_SECRET_KEY`
     /// - `STRIPE_PUBLISHABLE_KEY`
     /// - `STRIPE_WEBHOOK_SIGNING_SECRET`
-    /// - `STRIPE_MANAGED_PAYMENTS` (optional — `true`/`1` enables the
+    /// - `STRIPE_MANAGED_PAYMENTS` (optional - `true`/`1` enables the
     ///   Managed Payments flag on hosted one-off sessions; absent or any
     ///   other value leaves it off)
     ///
@@ -190,7 +190,7 @@ impl StripeProvider {
     /// Stripe's official client libraries default to 300 seconds; lower the
     /// window to tighten replay-resistance, raise it when the deployment has
     /// known clock skew that Stripe's retry cadence would otherwise reject.
-    /// A negative value would reject every payload — clamped to zero so the
+    /// A negative value would reject every payload - clamped to zero so the
     /// minimum behaviour is "exact-timestamp match" rather than always-fail.
     ///
     /// ```rust,no_run
@@ -206,8 +206,8 @@ impl StripeProvider {
     /// Enable or disable Stripe's Managed Payments (merchant-of-record)
     /// program on hosted one-off Checkout Sessions.
     ///
-    /// When enabled, session creation sends `managed_payments[enabled]=true`
-    /// — Stripe becomes the seller of record and handles tax calculation,
+    /// When enabled, session creation sends `managed_payments[enabled]=true` -
+    /// Stripe becomes the seller of record and handles tax calculation,
     /// collection, and remittance. The Stripe account must be enrolled in
     /// Managed Payments and every Price used in a session must carry a
     /// Managed-Payments-eligible tax code, or Stripe rejects the session.
@@ -237,13 +237,13 @@ impl PaymentProvider for StripeProvider {
         "stripe"
     }
 
-    /// Returns `Some(self)` — Stripe exposes server-capture via PaymentIntents,
+    /// Returns `Some(self)` - Stripe exposes server-capture via PaymentIntents,
     /// so the `Payment` trait is implemented for `StripeProvider`.
     fn as_payment(&self) -> Option<&dyn Payment> {
         Some(self)
     }
 
-    /// Returns `Some(self)` — Stripe mints promotion codes via
+    /// Returns `Some(self)` - Stripe mints promotion codes via
     /// `/v1/promotion_codes`, so the `Promotions` trait is implemented for
     /// `StripeProvider`.
     fn as_promotions(&self) -> Option<&dyn Promotions> {

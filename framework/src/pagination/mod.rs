@@ -1,4 +1,4 @@
-//! Pagination — `LengthAwarePaginator` (offset-based, knows total) and
+//! Pagination - `LengthAwarePaginator` (offset-based, knows total) and
 //! `CursorPaginator` (keyset-based, encrypted cursors). The
 //! [`Pagination`] facade wraps both over a SeaORM `Select<E>`.
 
@@ -37,7 +37,7 @@ impl Pagination {
     /// `current_page` is 1-based; values `< 1` are clamped to `1`.
     ///
     /// `per_page == 0` returns `FrameworkError::param("per_page")` (HTTP
-    /// 400) — the same validation the Eloquent
+    /// 400) - the same validation the Eloquent
     /// [`Builder::paginate`](crate::eloquent::Builder::paginate) enforces,
     /// so the two pagination surfaces agree on the zero-page-size contract
     /// instead of one silently emitting a `LIMIT 0` page.
@@ -57,7 +57,7 @@ impl Pagination {
         Self::length_aware_with(exec, query, per_page, current_page).await
     }
 
-    /// Run [`Self::length_aware`] against a specific named connection — the
+    /// Run [`Self::length_aware`] against a specific named connection - the
     /// facade equivalent of [`Builder::on`](crate::eloquent::Builder::on).
     /// Routing matches the builder: an ambient `DB::transaction` still wins
     /// over the named connection, and the `__primary__` sentinel selects
@@ -109,7 +109,7 @@ impl Pagination {
     /// Cursors carry a typed [`sea_orm::Value`] of the `order_col`
     /// boundary plus a direction (`next`/`prev`). The cursor is opaque and
     /// always AES-256-GCM-encrypted via the process key ring; there is no
-    /// plaintext base64 fallback — if encryption is not initialized,
+    /// plaintext base64 fallback - if encryption is not initialized,
     /// encoding returns an error rather than emitting a forgeable cursor.
     ///
     /// `per_page == 0` returns `FrameworkError::param("per_page")` (HTTP
@@ -133,7 +133,7 @@ impl Pagination {
     ///   origin).
     ///
     /// `order_col` should be a column with a total order suitable for
-    /// keyset pagination — typically the primary key. Any SeaORM
+    /// keyset pagination - typically the primary key. Any SeaORM
     /// `Value` variant (`Int`, `BigInt`, `Uuid`, datetimes, decimals,
     /// strings, bytes, …) is supported; the dialect adapter binds the
     /// variant natively so Postgres / MySQL / SQLite all see the
@@ -156,7 +156,7 @@ impl Pagination {
         Self::cursor_with(exec, query, cursor, per_page, order_col).await
     }
 
-    /// Run [`Self::cursor`] against a specific named connection — the facade
+    /// Run [`Self::cursor`] against a specific named connection - the facade
     /// equivalent of [`Builder::on`](crate::eloquent::Builder::on). Routing
     /// matches the builder: an ambient `DB::transaction` still wins over the
     /// named connection, and the `__primary__` sentinel selects the default
@@ -279,7 +279,7 @@ pub trait Paginated<T> {
     /// The items on the current page.
     fn items(&self) -> &[T];
 
-    /// `meta.pagination` payload — conventionally placed under
+    /// `meta.pagination` payload - conventionally placed under
     /// `meta.pagination` in JSON:API responses.
     fn meta_value(&self) -> serde_json::Value;
 
@@ -333,7 +333,7 @@ impl<T> Paginated<T> for CursorPaginator<T> {
 
     fn links_iter(&self) -> Box<dyn Iterator<Item = (&'static str, String)> + '_> {
         // Emit `next`/`prev` links from the stored cursor values, keyed by
-        // `cursor_name` (defaulting to "cursor" — the query key
+        // `cursor_name` (defaulting to "cursor" - the query key
         // `Builder::cursor_paginate` reads). Mirrors the length-aware
         // paginator: links are produced whenever the corresponding cursor
         // exists, with or without a base path (no path → relative

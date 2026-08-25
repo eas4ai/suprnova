@@ -1,4 +1,4 @@
-//! Video — Phase 10B T10 dogfood for the second branch of the
+//! Video - Phase 10B T10 dogfood for the second branch of the
 //! polymorphic Comment family.
 //!
 //! Carrying `morph_type = "video"` is what registers the model in
@@ -9,10 +9,10 @@
 //! The `comments` relation mirrors Post's: same morph name
 //! (`"commentable"`), different parent. The morph machinery filters
 //! by `commentable_type = "<parent>.morph_type"` so the two branches
-//! stay independent — `video.comments()` never returns a Post's
+//! stay independent - `video.comments()` never returns a Post's
 //! comments and vice-versa.
 //!
-//! The `tags` relation lands a `MorphToMany` on Video too — Tags can
+//! The `tags` relation lands a `MorphToMany` on Video too - Tags can
 //! be attached to Posts or Videos through the shared `taggables`
 //! pivot, exercising the polymorphic m2m surface with a second target
 //! family.

@@ -2,13 +2,13 @@
 //!
 //! Three entry points, increasing in guarantee:
 //!
-//! - [`Idempotency::once`] — dedupe only. Runs `body` for the first caller in
+//! - [`Idempotency::once`] - dedupe only. Runs `body` for the first caller in
 //!   the TTL window; duplicates get [`Idempotent::Duplicate`] and the body does
-//!   NOT run. The lock is never released — `ttl` IS the dedupe window.
-//! - [`Idempotency::commit_on_success`] — like `once`, but releases the lock if
+//!   NOT run. The lock is never released - `ttl` IS the dedupe window.
+//! - [`Idempotency::commit_on_success`] - like `once`, but releases the lock if
 //!   `body` returns `Err`, so a transient failure can be retried within the
 //!   window.
-//! - [`Idempotency::remember`] — dedupe WITH result replay. Stores the success
+//! - [`Idempotency::remember`] - dedupe WITH result replay. Stores the success
 //!   value and replays it to duplicate callers ([`Replay::Replayed`]). This is
 //!   the Stripe-style idempotency-key model for HTTP endpoints and queue jobs
 //!   that must return the original outcome, not merely skip re-execution.
@@ -19,7 +19,7 @@
 //! body that runs longer than `ttl` does not let the lock expire and a
 //! second caller execute concurrently. See `run_under_lease`.
 //!
-//! Renewal can still fail — the backend can go away, or the lock can be
+//! Renewal can still fail - the backend can go away, or the lock can be
 //! taken over after an expiry the refresh interval did not beat. When that
 //! happens the body is **not** cancelled: by the time a lease is lost it may
 //! already have charged a card or sent a message, and cancelling would strand
@@ -29,7 +29,7 @@
 //! So the guarantee is precisely: *`Fresh` means exclusivity held throughout;
 //! `FreshUnfenced` means the work completed but another caller may have run
 //! it concurrently.* Callers that need certainty must handle the second
-//! variant — and because it is a distinct variant rather than a flag, an
+//! variant - and because it is a distinct variant rather than a flag, an
 //! exhaustive `match` will not let it be ignored by accident.
 //!
 //! A transient refresh *error* is not treated as loss on its own: it means
@@ -46,7 +46,7 @@
 //! ## Shared backend
 //!
 //! Cross-process dedupe requires a cross-process cache (e.g. Redis). With the
-//! in-memory backend — or a Redis bootstrap that fell back to memory — the
+//! in-memory backend - or a Redis bootstrap that fell back to memory - the
 //! dedupe window is per-process only.
 
 use crate::cache::Cache;
@@ -60,12 +60,12 @@ use std::time::Duration;
 /// ([`Idempotency::once`] / [`Idempotency::commit_on_success`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Idempotent<T> {
-    /// First caller in the TTL window — `body` ran under an unbroken lease
+    /// First caller in the TTL window - `body` ran under an unbroken lease
     /// and produced this value.
     Fresh(T),
     /// `body` ran to completion and produced this value, but the lock's
     /// lease was lost partway through, so **exclusivity is not
-    /// guaranteed** — another caller may have executed concurrently.
+    /// guaranteed** - another caller may have executed concurrently.
     ///
     /// The body is deliberately not cancelled when this happens: by the
     /// time a lease is lost the body may already have charged a card or
@@ -73,11 +73,11 @@ pub enum Idempotent<T> {
     /// record. Finishing and reporting honestly beats aborting blind.
     ///
     /// Treat it as "probably fine, provably not exclusive". Reconcile,
-    /// alert, or compensate — but do not silently treat it as [`Fresh`].
+    /// alert, or compensate - but do not silently treat it as [`Fresh`].
     ///
     /// [`Fresh`]: Self::Fresh
     FreshUnfenced(T),
-    /// Duplicate caller within the TTL window — `body` was NOT run.
+    /// Duplicate caller within the TTL window - `body` was NOT run.
     Duplicate,
 }
 
@@ -85,17 +85,17 @@ pub enum Idempotent<T> {
 /// ([`Idempotency::remember`]).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Replay<T> {
-    /// First caller — `body` ran under an unbroken lease, produced this
+    /// First caller - `body` ran under an unbroken lease, produced this
     /// value, and recorded it for replay.
     Fresh(T),
     /// `body` ran to completion and its result was recorded, but the
     /// lock's lease was lost partway through, so **exclusivity is not
-    /// guaranteed** — another caller may have executed concurrently.
+    /// guaranteed** - another caller may have executed concurrently.
     ///
     /// See [`Idempotent::FreshUnfenced`] for why the body is allowed to
     /// finish rather than being cancelled.
     FreshUnfenced(T),
-    /// Duplicate caller — `body` already completed; this is the recorded result.
+    /// Duplicate caller - `body` already completed; this is the recorded result.
     Replayed(T),
     /// Duplicate caller arriving while the original `body` is still running, with
     /// no recorded result yet. The original has not finished, so there is nothing
@@ -114,7 +114,7 @@ impl Idempotency {
     /// - Subsequent callers within `ttl`: return `Ok(Idempotent::Duplicate)`
     ///   without running `body`.
     ///
-    /// The lock is intentionally NOT released on success — the TTL IS the
+    /// The lock is intentionally NOT released on success - the TTL IS the
     /// dedupe window. The lock's lease is refreshed in the background for the
     /// body's duration (see `run_under_lease`), so a body that runs longer
     /// than `ttl` does not collapse the window or allow concurrent execution;
@@ -143,7 +143,7 @@ impl Idempotency {
         match guard {
             Some(g) => {
                 let (v, lease) = run_under_lease(&g, ttl, &h, body()).await?;
-                // Do NOT release — the TTL is the dedupe window.
+                // Do NOT release - the TTL is the dedupe window.
                 Ok(match lease {
                     LeaseState::Held => Idempotent::Fresh(v),
                     LeaseState::Lost => Idempotent::FreshUnfenced(v),
@@ -200,14 +200,14 @@ impl Idempotency {
     ///
     /// Unlike [`once`](Self::once) (which only tells a duplicate that the work
     /// already happened), `remember` records the success value and hands it back
-    /// to later callers — the Stripe-style idempotency-key contract that lets an
+    /// to later callers - the Stripe-style idempotency-key contract that lets an
     /// HTTP endpoint or queue job return the original response on retry.
     ///
     /// Outcomes:
-    /// - [`Replay::Fresh`] — first caller; `body` ran and the result was recorded.
-    /// - [`Replay::Replayed`] — duplicate; the recorded result is returned and
+    /// - [`Replay::Fresh`] - first caller; `body` ran and the result was recorded.
+    /// - [`Replay::Replayed`] - duplicate; the recorded result is returned and
     ///   `body` did NOT run.
-    /// - [`Replay::InProgress`] — duplicate arriving while the original `body` is
+    /// - [`Replay::InProgress`] - duplicate arriving while the original `body` is
     ///   still running; there is no recorded result yet. Map this to a retryable
     ///   `409 Conflict` at the HTTP layer.
     ///
@@ -224,7 +224,7 @@ impl Idempotency {
     ///
     /// # Keyspace responsibility (cross-endpoint isolation)
     ///
-    /// `remember` keys the lock + result cache on `hashed(key)` only —
+    /// `remember` keys the lock + result cache on `hashed(key)` only -
     /// the caller's `key` is the entire isolation surface. The caller
     /// **MUST** namespace the key with the route + user / business
     /// identity before passing it in; otherwise an attacker who
@@ -236,7 +236,7 @@ impl Idempotency {
     /// The recommended shape:
     ///
     /// ```rust,ignore
-    /// // GOOD — endpoint + user namespace isolates the cache cell.
+    /// // GOOD - endpoint + user namespace isolates the cache cell.
     /// let cache_key = format!(
     ///     "{}:{}:{}",
     ///     request.method(),
@@ -245,7 +245,7 @@ impl Idempotency {
     /// );
     /// Idempotency::remember(&cache_key, ttl, body).await?
     ///
-    /// // BAD — bare client key leaks across endpoints.
+    /// // BAD - bare client key leaks across endpoints.
     /// Idempotency::remember(idempotency_key_from_client, ttl, body).await?
     /// ```
     ///
@@ -271,7 +271,7 @@ impl Idempotency {
         let lock_key = format!("idem:{h}");
         let result_key = format!("idem:{h}:result");
 
-        // 1. Fast path: a result is already recorded — replay it without locking.
+        // 1. Fast path: a result is already recorded - replay it without locking.
         if let Some(value) = Cache::get::<T>(&result_key).await? {
             return Ok(Replay::Replayed(value));
         }
@@ -325,7 +325,7 @@ impl Idempotency {
 /// A background task refreshes the lock at one-third of `ttl` (floored at 50ms
 /// to avoid a busy-loop on pathologically small TTLs) for as long as `body` is
 /// running, so a body that outlives its original `ttl` cannot let the lock
-/// expire and a second caller execute concurrently — the double-execution
+/// expire and a second caller execute concurrently - the double-execution
 /// window the bare lock left open. The renewal task parks (never resolves) so
 /// the `select!` always completes via `body`; if a refresh ever fails (token
 /// lost or backend error) it logs once and stops renewing rather than spamming.
@@ -342,7 +342,7 @@ enum LeaseState {
 
 /// How many consecutive refresh *errors* to ride out before giving up.
 ///
-/// A backend error is not evidence that anyone else took the lock — it is
+/// A backend error is not evidence that anyone else took the lock - it is
 /// evidence we could not ask. Treating the first blip as fatal meant one
 /// dropped packet stopped renewal for the rest of a long body, guaranteeing
 /// the lease would lapse even though the backend recovered milliseconds
@@ -388,7 +388,7 @@ async fn run_under_lease<T>(
                             error = %e,
                             consecutive_errors,
                             "idempotency lease refresh failed repeatedly; giving up \
-                             renewal — exclusivity can no longer be proven"
+                             renewal - exclusivity can no longer be proven"
                         );
                         lease_lost.store(true, std::sync::atomic::Ordering::Release);
                         break;

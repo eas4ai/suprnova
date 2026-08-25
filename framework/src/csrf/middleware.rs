@@ -22,7 +22,7 @@ const CSRF_BODY_BUFFER_CAP: usize = 64 * 1024;
 /// `$originOnly` static knobs, exposed here as a single explicit enum
 /// so the policy is a value, not a pair of bools.
 ///
-/// Defaults to [`OriginPolicy::Disabled`] — Sec-Fetch-Site is ignored
+/// Defaults to [`OriginPolicy::Disabled`] - Sec-Fetch-Site is ignored
 /// and only token validation runs. This matches the historical
 /// Suprnova behavior; opting in to origin verification is a one-call
 /// switch via [`CsrfMiddleware::allow_same_site`] /
@@ -42,7 +42,7 @@ pub enum OriginPolicy {
     /// accepting requests from `example.com`). Matches Laravel's
     /// `allowSameSite=true`.
     AllowSameSite,
-    /// Origin verification is the *only* gate — if `Sec-Fetch-Site`
+    /// Origin verification is the *only* gate - if `Sec-Fetch-Site`
     /// is missing or doesn't match, reject with **403** (matching
     /// Laravel's `OriginMismatchException`, distinct from the 419
     /// `TokenMismatchException`). Token validation is skipped.
@@ -59,7 +59,7 @@ impl OriginPolicy {
 
 /// Outcome of consulting `Sec-Fetch-Site` for the current request.
 enum OriginCheck {
-    /// Header matched the policy — let the request through without
+    /// Header matched the policy - let the request through without
     /// touching the token.
     Pass,
     /// Header didn't match. In `OriginOnly` mode this is fatal; in
@@ -67,7 +67,7 @@ enum OriginCheck {
     Fail,
 }
 
-/// One entry in the CSRF exemption list — a pre-compiled glob plus an
+/// One entry in the CSRF exemption list - a pre-compiled glob plus an
 /// optional method scope. See [`CsrfMiddleware::except`] /
 /// [`CsrfMiddleware::except_method`].
 #[derive(Clone, Debug)]
@@ -92,7 +92,7 @@ impl ExceptRule {
         let regex = if normalized.contains('*') {
             // Translate Laravel-style `*` globs into a regex. We
             // `regex::escape` the literal pieces first, then put back
-            // `.*` for each `*` — matching Laravel's `Str::is`
+            // `.*` for each `*` - matching Laravel's `Str::is`
             // semantics (`*` ⇒ zero-or-more of any character).
             let mut rebuilt = String::with_capacity(normalized.len() + 8);
             rebuilt.push('^');
@@ -141,7 +141,7 @@ fn normalize_pattern(pattern: &str) -> String {
     }
     // Strip only the LEADING slash. Stripping the trailing slash too would
     // make an exact exempt rule (`/api/webhook`) also exempt its trailing-
-    // slash sibling (`/api/webhook/`) — an over-broad exemption an attacker
+    // slash sibling (`/api/webhook/`) - an over-broad exemption an attacker
     // could ride to bypass CSRF on the unintended path.
     pattern.trim_start_matches('/').to_string()
 }
@@ -161,7 +161,7 @@ fn normalize_pattern(pattern: &str) -> String {
 /// # Origin verification (Laravel 13's `PreventRequestForgery`)
 ///
 /// In addition to (or instead of) token validation, this middleware
-/// can consult the browser's `Sec-Fetch-Site` header — modern
+/// can consult the browser's `Sec-Fetch-Site` header - modern
 /// browsers set it on every request and a same-origin request can be
 /// allowed without any token round-trip. See [`OriginPolicy`] and
 /// [`CsrfMiddleware::allow_same_site`] / [`CsrfMiddleware::origin_only`].
@@ -173,8 +173,8 @@ fn normalize_pattern(pattern: &str) -> String {
 /// This is the Laravel convention: SPA libraries (Axios, Angular)
 /// read the cookie via JavaScript and echo the value back in the
 /// `X-XSRF-TOKEN` header on subsequent state-changing requests. The
-/// cookie is `HttpOnly=false` by design — it has to be readable by
-/// the SPA — and is therefore set as plaintext (no `Crypt`
+/// cookie is `HttpOnly=false` by design - it has to be readable by
+/// the SPA - and is therefore set as plaintext (no `Crypt`
 /// round-trip) so the JS-side value matches what the middleware
 /// compares server-side.
 ///
@@ -195,7 +195,7 @@ pub struct CsrfMiddleware {
     /// Each entry is a Laravel-style glob pattern (see [`Self::is_excluded`]):
     /// `*` matches any run of characters, otherwise the pattern must
     /// match the request path exactly. Stored as a tuple of `(method,
-    /// glob)` — `method = None` is the default, "any method" — so the
+    /// glob)` - `method = None` is the default, "any method" - so the
     /// same surface can also express `POST /webhooks/*` etc. for routes
     /// that only need to bypass CSRF on specific verbs.
     except: Vec<ExceptRule>,
@@ -261,7 +261,7 @@ impl CsrfMiddleware {
     /// - leading wildcards: `"*/healthz"` matches any path ending in
     ///   `/healthz`
     ///
-    /// Patterns are normalized — a leading slash is optional, so
+    /// Patterns are normalized - a leading slash is optional, so
     /// `"webhooks/*"` and `"/webhooks/*"` behave identically.
     ///
     /// This applies to **all** HTTP methods on a matching path. Use
@@ -283,7 +283,7 @@ impl CsrfMiddleware {
         self
     }
 
-    /// Add a method-scoped exemption — bypass CSRF only when the
+    /// Add a method-scoped exemption - bypass CSRF only when the
     /// request method matches.
     ///
     /// Useful when a webhook prefix legitimately receives both
@@ -321,7 +321,7 @@ impl CsrfMiddleware {
         self
     }
 
-    /// Switch to origin-only verification — `Sec-Fetch-Site` is the
+    /// Switch to origin-only verification - `Sec-Fetch-Site` is the
     /// *only* gate, token validation is skipped, and a missing or
     /// mismatched header rejects with **403**.
     ///
@@ -349,8 +349,8 @@ impl CsrfMiddleware {
 
     /// Disable the `XSRF-TOKEN` cookie attachment on responses.
     /// Mirrors Laravel's `PreventRequestForgery::$addHttpCookie = false`.
-    /// Most apps want this on — Axios and Angular pick the cookie up
-    /// automatically — but a pure server-rendered app that issues the
+    /// Most apps want this on - Axios and Angular pick the cookie up
+    /// automatically - but a pure server-rendered app that issues the
     /// token via `{{ csrf_meta_tag() }}` doesn't need it.
     pub fn without_xsrf_cookie(mut self) -> Self {
         self.add_xsrf_cookie = false;
@@ -390,7 +390,7 @@ impl CsrfMiddleware {
     }
 
     /// Set the `XSRF-TOKEN` cookie's lifetime. Defaults to 2 hours
-    /// (matching the session-config default — Laravel sets the
+    /// (matching the session-config default - Laravel sets the
     /// cookie's `availableAt(60 * session.lifetime)`).
     pub fn xsrf_cookie_lifetime(mut self, duration: Duration) -> Self {
         self.xsrf_cookie_lifetime = duration;
@@ -488,7 +488,7 @@ impl CsrfMiddleware {
 
     /// Build the configured XSRF cookie for the current session.
     ///
-    /// The cookie is **not** `HttpOnly` — JavaScript on the page has
+    /// The cookie is **not** `HttpOnly` - JavaScript on the page has
     /// to read it to echo the value back in `X-XSRF-TOKEN`. That's
     /// Laravel's documented behavior too.
     ///
@@ -542,7 +542,7 @@ impl Middleware for CsrfMiddleware {
 
         // Reading verbs (GET/HEAD/OPTIONS) are never token-checked.
         // We still run through the bottom of the function so the
-        // XSRF-TOKEN cookie gets attached to read responses — that's
+        // XSRF-TOKEN cookie gets attached to read responses - that's
         // how SPA clients ever acquire the cookie in the first place.
         let is_reading = !self.protected_methods.contains(&method);
 
@@ -589,7 +589,7 @@ impl Middleware for CsrfMiddleware {
         };
 
         // Header tokens (AJAX / Inertia / framework conventions) are
-        // always checked first — they don't require body buffering.
+        // always checked first - they don't require body buffering.
         if let Some(token) = request
             .header("X-CSRF-TOKEN")
             .or_else(|| request.header("X-XSRF-TOKEN"))
@@ -598,14 +598,14 @@ impl Middleware for CsrfMiddleware {
                 let response = next(request).await;
                 return self.maybe_attach_xsrf_cookie(response);
             }
-            // Header was present but wrong — reject without parsing the
+            // Header was present but wrong - reject without parsing the
             // body. A correct client picks one location for the token;
             // we don't combine header + body to avoid token-splitting
             // surprises.
             return reject_with_419();
         }
 
-        // No header — for `application/x-www-form-urlencoded` bodies
+        // No header - for `application/x-www-form-urlencoded` bodies
         // we honor the documented `_token` field (the value emitted by
         // `csrf_field()` in HTML forms). We buffer the body so the
         // downstream handler can still read its form data.
@@ -618,7 +618,7 @@ impl Middleware for CsrfMiddleware {
             return reject_with_419();
         }
 
-        // Buffer the body. CSRF_BODY_BUFFER_CAP caps this at 64 KiB —
+        // Buffer the body. CSRF_BODY_BUFFER_CAP caps this at 64 KiB -
         // forms with `_token` are well under that, and a malicious large
         // form won't pin memory on CSRF validation alone.
         let request = match request.buffer_body(CSRF_BODY_BUFFER_CAP).await {
@@ -671,8 +671,8 @@ fn reject_origin_mismatch() -> Response {
 
 /// Constant-time string comparison to prevent timing attacks.
 ///
-/// Backed by [`subtle::ConstantTimeEq`] — a reviewed constant-time
-/// equality primitive — rather than a hand-rolled XOR loop. CSRF tokens
+/// Backed by [`subtle::ConstantTimeEq`] - a reviewed constant-time
+/// equality primitive - rather than a hand-rolled XOR loop. CSRF tokens
 /// in Suprnova are fixed-length hex strings, so the unequal-length
 /// short-circuit is a structural reject (a length mismatch can only
 /// come from a malformed / wrong-class token) and not a timing oracle
@@ -707,7 +707,7 @@ mod tests {
         assert!(!csrf.is_excluded("/api/private", "POST"));
         assert!(!csrf.is_excluded("/login", "POST"));
         // An exact exempt rule must NOT also exempt its trailing-slash
-        // sibling — that over-broad match was a CSRF bypass.
+        // sibling - that over-broad match was a CSRF bypass.
         assert!(!csrf.is_excluded("/api/public/", "POST"));
     }
 
@@ -724,14 +724,14 @@ mod tests {
         assert!(csrf.is_excluded("/services/healthz", "POST"));
         assert!(!csrf.is_excluded("/healthz/details", "POST"));
         // `*/healthz` requires a literal `/healthz` somewhere in the
-        // candidate — bare `/healthz` (no prefix segment) does NOT
+        // candidate - bare `/healthz` (no prefix segment) does NOT
         // match. This matches Laravel's `Str::is` behavior.
         assert!(!csrf.is_excluded("/healthz", "POST"));
     }
 
     #[test]
     fn test_is_excluded_normalizes_leading_slashes() {
-        // `/webhooks/*` and `webhooks/*` must behave identically — the
+        // `/webhooks/*` and `webhooks/*` must behave identically - the
         // user shouldn't have to remember which form Laravel prefers.
         let csrf = CsrfMiddleware::new().except(vec!["webhooks/*"]);
         assert!(csrf.is_excluded("/webhooks/stripe", "POST"));
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn test_should_attach_xsrf_cookie_off_in_origin_only_mode() {
         // Laravel: `shouldAddXsrfTokenCookie()` returns false when
-        // origin-only verification is in effect — there's no token
+        // origin-only verification is in effect - there's no token
         // round-trip to feed.
         let csrf = CsrfMiddleware::new().origin_only();
         assert!(!csrf.should_attach_xsrf_cookie());
@@ -834,7 +834,7 @@ mod tests {
         assert!(mk("strict").contains("SameSite=Strict"));
         assert!(mk("None").contains("SameSite=None"));
         assert!(mk("none").contains("SameSite=None"));
-        // Unknown / empty / typo all fall back to Lax — matches the
+        // Unknown / empty / typo all fall back to Lax - matches the
         // session middleware's parser, so a fat-fingered env var
         // produces the same result in both places.
         assert!(mk("Lax").contains("SameSite=Lax"));
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn test_build_xsrf_cookie_is_js_readable_plaintext() {
         // The cookie has to be JS-readable for SPAs to echo it in
-        // X-XSRF-TOKEN — that's the entire point of the Laravel
+        // X-XSRF-TOKEN - that's the entire point of the Laravel
         // convention. HttpOnly=false is therefore non-negotiable.
         let csrf = CsrfMiddleware::new();
         let cookie = csrf.build_xsrf_cookie("token-12345");
@@ -876,7 +876,7 @@ mod tests {
     //   (a) a matching `_token` in a form-urlencoded body passes
     //   (b) a wrong `_token` rejects with 419
     //   (c) downstream handler still sees the full form body after the
-    //       middleware buffered it (the load-bearing piece — without
+    //       middleware buffered it (the load-bearing piece - without
     //       this, the fix moved the bug instead of solving it)
     //
     // The same harness now also exercises the Laravel 13 origin-check
@@ -946,7 +946,7 @@ mod tests {
                                 let server_captured = server_captured.clone();
                                 Box::pin(async move {
                                     // Reading verbs (GET) have no body
-                                    // to parse — only buffer when the
+                                    // to parse - only buffer when the
                                     // request actually carries form data.
                                     let is_form = req
                                         .content_type()
@@ -1038,13 +1038,13 @@ mod tests {
             fields.get("username").map(|s| s.as_str()),
             Some("alice"),
             "downstream handler must still see the form body after CSRF \
-             buffered it — without this, we moved the bug instead of fixing it"
+             buffered it - without this, we moved the bug instead of fixing it"
         );
         assert_eq!(fields.get("password").map(|s| s.as_str()), Some("hunter2"));
         assert_eq!(
             fields.get("_token").map(|s| s.as_str()),
             Some(token),
-            "the _token field stays in the form bag for the handler — \
+            "the _token field stays in the form bag for the handler - \
              CSRF doesn't strip it"
         );
     }
@@ -1078,7 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn get_request_attaches_xsrf_token_cookie() {
         // Laravel's `tap()` after `isReading()` attaches the
-        // XSRF-TOKEN cookie even on read requests — that's how SPA
+        // XSRF-TOKEN cookie even on read requests - that's how SPA
         // clients ever acquire the cookie. Suprnova mirrors this:
         // every response carries Set-Cookie: XSRF-TOKEN=...
         let mw = Arc::new(CsrfMiddleware::new());
@@ -1104,7 +1104,7 @@ mod tests {
     #[tokio::test]
     async fn xsrf_cookie_is_not_http_only_so_js_can_read_it() {
         // Without HttpOnly=false the XSRF-TOKEN cookie is useless to
-        // the SPA — that's the whole point of the convention. Pin
+        // the SPA - that's the whole point of the convention. Pin
         // the absence of HttpOnly explicitly so a future "tighten
         // defaults" change can't silently break Axios / Angular.
         let mw = Arc::new(CsrfMiddleware::new());
@@ -1202,7 +1202,7 @@ mod tests {
     #[tokio::test]
     async fn cross_site_falls_through_to_token_check_under_non_origin_only_policy() {
         // `cross-site` doesn't pass origin. Without a token, falls
-        // through to 419 rather than 403 — only OriginOnly mode
+        // through to 419 rather than 403 - only OriginOnly mode
         // converts an origin failure into a 403.
         let mw = Arc::new(CsrfMiddleware::new().allow_same_site());
         let builder = hyper::Request::builder()
@@ -1243,7 +1243,7 @@ mod tests {
     #[tokio::test]
     async fn origin_only_does_not_attach_xsrf_cookie() {
         // Laravel: `shouldAddXsrfTokenCookie` returns false when
-        // originOnly is on — no point shipping a token nobody uses.
+        // originOnly is on - no point shipping a token nobody uses.
         let mw = Arc::new(CsrfMiddleware::new().origin_only());
         let builder = hyper::Request::builder()
             .method("GET")
@@ -1278,7 +1278,7 @@ mod tests {
             let io = TokioIo::new(stream);
             let service = service_fn(
                 move |hyper_req: hyper::Request<hyper::body::Incoming>| async move {
-                    // Empty session slot — get_csrf_token() returns None.
+                    // Empty session slot - get_csrf_token() returns None.
                     let slot = Arc::new(Mutex::new(None));
                     let response = SESSION_CONTEXT
                         .scope(slot, async move {

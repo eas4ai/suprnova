@@ -1,6 +1,6 @@
-//! Phase 10C T5b + T6 — emit per-model serialization helpers.
+//! Phase 10C T5b + T6 - emit per-model serialization helpers.
 //!
-//! T5b ships `field_value(&self, name: &str) -> Option<Value>` — the
+//! T5b ships `field_value(&self, name: &str) -> Option<Value>` - the
 //! macro-emitted accessor that powers `Collection<M>`'s string-keyed
 //! methods (`pluck("col")`, `group_by("col")`, `sort_by("col")`,
 //! `where_eq("col", v)`, `sum::<T>("col")`, ...). One match arm per
@@ -9,13 +9,13 @@
 //!
 //! T6 extends this file with two more emitters:
 //!
-//! - [`emit_to_array_override`] — overrides
+//! - [`emit_to_array_override`] - overrides
 //!   [`Model::to_array`](crate::eloquent::Model::to_array) when the
 //!   model declares `hidden = [...]`, `visible = [...]`, or
 //!   `appends = [...]`. The override unconditionally strips
 //!   `__eager` / `__pivot` (Phase 10B P6 contract), applies the
 //!   visible whitelist + hidden denylist, then injects appends.
-//! - [`emit_append_accessor_dispatch`] — overrides
+//! - [`emit_append_accessor_dispatch`] - overrides
 //!   [`Model::__append_accessor`](crate::eloquent::Model::__append_accessor)
 //!   with a `match` block dispatching each declared name to the user's
 //!   `#[suprnova::accessor]`-tagged method.
@@ -31,7 +31,7 @@
 //! The macro auto-injects `__eager: EagerLoadCache` and
 //! `__pivot: Option<Arc<dyn Any + ...>>` on every model (see
 //! `model.rs::inject_eager_pivot_fields`). Those are `#[serde(skip)]`
-//! scratch state, not columns — so callers MUST pass the same
+//! scratch state, not columns - so callers MUST pass the same
 //! pre-filtered `field_idents` slice that `derive_eloquent` uses for
 //! the per-column code paths. The emit helper itself doesn't filter;
 //! it consumes whatever it's given.
@@ -52,7 +52,7 @@ use syn::Ident;
 /// `serde_json::to_value` directly.
 ///
 /// `idents` is the same slice `derive_eloquent` builds for per-column
-/// code paths — already filtered to exclude the auto-injected
+/// code paths - already filtered to exclude the auto-injected
 /// `__eager` / `__pivot` runtime-state fields.
 pub fn emit_field_value(idents: &[Ident]) -> TokenStream {
     let arms = idents.iter().map(|ident| {
@@ -72,7 +72,7 @@ pub fn emit_field_value(idents: &[Ident]) -> TokenStream {
     }
 }
 
-/// Phase 10C T6 — emit a `to_array` override when the model declares
+/// Phase 10C T6 - emit a `to_array` override when the model declares
 /// any of `hidden = [...]`, `visible = [...]`, or `appends = [...]`.
 /// When all three are empty, returns an empty token stream so the
 /// trait default (which already strips `__eager` / `__pivot`) wins.
@@ -82,7 +82,7 @@ pub fn emit_field_value(idents: &[Ident]) -> TokenStream {
 /// 1. Serialise `self` via `serde_json::to_value` (Serialize::serialize
 ///    paths run all the field-level casts; `__eager` / `__pivot` are
 ///    `#[serde(skip)]` so they shouldn't be in the map to begin with).
-/// 2. Unconditionally remove `__eager` / `__pivot` keys — load-bearing
+/// 2. Unconditionally remove `__eager` / `__pivot` keys - load-bearing
 ///    P6 contract; the strip survives even if a user later adds
 ///    `__eager` / `__pivot` to a `visible = [...]` whitelist.
 /// 3. Apply `visible` as a whitelist when non-empty: every key NOT in
@@ -91,7 +91,7 @@ pub fn emit_field_value(idents: &[Ident]) -> TokenStream {
 ///    the surviving keys.
 /// 5. Inject appends: for each name in `appends`, call
 ///    `self.__append_accessor(name)` and insert the result. Appends
-///    run last so they always show up (matches Laravel — `$appends`
+///    run last so they always show up (matches Laravel - `$appends`
 ///    always serialises, even when sharing a name with a hidden
 ///    field).
 pub fn emit_to_array_override(
@@ -145,7 +145,7 @@ pub fn emit_to_array_override(
             }
 
             // Appends: invoke #[accessor]-tagged methods AFTER the
-            // filters run. Appends always show up — Laravel parity.
+            // filters run. Appends always show up - Laravel parity.
             const __SUPRNOVA_APPENDS: &[&str] = &[ #(#append_lits),* ];
             for a in __SUPRNOVA_APPENDS.iter() {
                 if let ::core::option::Option::Some(v) =
@@ -160,7 +160,7 @@ pub fn emit_to_array_override(
     }
 }
 
-/// Phase 10C T6 — emit the `__append_accessor` override when the
+/// Phase 10C T6 - emit the `__append_accessor` override when the
 /// model declares `appends = [...]`. The body is a `match` that
 /// dispatches each declared name to the corresponding method on the
 /// user's `impl #struct`, calling it and serialising the result.
@@ -170,7 +170,7 @@ pub fn emit_to_array_override(
 ///
 /// Each accessor name in `appends` is parsed as a Rust ident. The
 /// macro doesn't validate that the corresponding method exists on the
-/// user's `impl` — a missing method surfaces as a clear compiler
+/// user's `impl` - a missing method surfaces as a clear compiler
 /// error pointing at the dispatcher's `self.<name>()` call site,
 /// which is the right shape for the user to fix.
 pub fn emit_append_accessor_dispatch(appends: &[String]) -> TokenStream {

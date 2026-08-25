@@ -10,7 +10,7 @@ use std::any::Any;
 ///
 /// # Identifier model
 ///
-/// Suprnova carries the authenticated user's id as a `String` end-to-end —
+/// Suprnova carries the authenticated user's id as a `String` end-to-end -
 /// session storage, [`UserProvider::retrieve_by_id`](super::provider::UserProvider::retrieve_by_id),
 /// remember-me, the auth events. Implementors expose that string via
 /// [`get_auth_identifier`](Self::get_auth_identifier), which is the canonical
@@ -20,7 +20,7 @@ use std::any::Any;
 /// (UUIDs, ULIDs, Magnetar `UserId`s, external-provider ids) flow through
 /// unchanged.
 ///
-/// # Example — numeric primary key
+/// # Example - numeric primary key
 ///
 /// ```rust,no_run
 /// use suprnova::auth::Authenticatable;
@@ -40,7 +40,7 @@ use std::any::Any;
 /// }
 /// ```
 ///
-/// # Example — opaque string id (UUID, Magnetar)
+/// # Example - opaque string id (UUID, Magnetar)
 ///
 /// ```rust,no_run
 /// # use suprnova::auth::Authenticatable;
@@ -77,12 +77,12 @@ pub trait Authenticatable: Send + Sync + 'static {
     }
 
     /// The identifier as an `i64`. Convenience for apps whose user id IS a
-    /// signed integer primary key — Suprnova itself never calls this; it
+    /// signed integer primary key - Suprnova itself never calls this; it
     /// works exclusively in terms of [`get_auth_identifier`](Self::get_auth_identifier).
     ///
     /// Defaults to parsing [`get_auth_identifier`](Self::get_auth_identifier),
     /// falling back to `0` for non-numeric ids (UUIDs, opaque tokens). Override
-    /// for free when your model already holds an `i64` field — the default
+    /// for free when your model already holds an `i64` field - the default
     /// otherwise allocates a `String` just to parse it.
     fn auth_identifier(&self) -> i64 {
         self.get_auth_identifier().parse().unwrap_or(0)

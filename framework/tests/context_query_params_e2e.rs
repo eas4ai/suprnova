@@ -1,10 +1,10 @@
-//! Regression: HIGH audit finding `context` #333 — request query
+//! Regression: HIGH audit finding `context` #333 - request query
 //! parameters are never populated into the context on real HTTP
 //! requests.
 //!
 //! Before the fix, `RequestIdMiddleware` (the only production
 //! `CONTEXT.scope` installer) created the scope with
-//! `ContextStore::default()` — so the in-scope `query` bag was always
+//! `ContextStore::default()` - so the in-scope `query` bag was always
 //! empty for real HTTP requests, and `Context::query_param()` returned
 //! `None` regardless of the URL's `?key=value` pairs. Downstream
 //! consumers (Eloquent pagination, cursor pagination, anything reading
@@ -61,7 +61,7 @@ async fn drive_capturing_query_params(
                 let next: Next = Arc::new(move |_inner| {
                     let server_captured = server_captured.clone();
                     Box::pin(async move {
-                        // Inside the handler — the middleware should
+                        // Inside the handler - the middleware should
                         // have populated the context with the URL's
                         // query parameters.
                         let mut map = server_captured.lock().unwrap();
@@ -99,7 +99,7 @@ async fn drive_capturing_query_params(
     let (_parts, body) = resp.into_parts();
     let _ = body.collect().await.unwrap();
 
-    // The spawned server task may still hold an Arc clone — we can't
+    // The spawned server task may still hold an Arc clone - we can't
     // unwrap it. Clone the inner map under the lock instead.
     captured.lock().unwrap().clone()
 }

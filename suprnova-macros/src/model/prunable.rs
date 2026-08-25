@@ -1,4 +1,4 @@
-//! `#[suprnova::prunable]` — wraps `impl Prunable for T` (or
+//! `#[suprnova::prunable]` - wraps `impl Prunable for T` (or
 //! `impl MassPrunable for T`) and emits an inventory entry that
 //! registers the type's pruner with the `model:prune` runtime.
 //!
@@ -12,7 +12,7 @@
 //! - **MassPrunable** (set-based): renders the scope's WHERE clause
 //!   into a single `DELETE FROM ... WHERE ...` via the Builder's
 //!   `to_delete_sql_with_bindings_for` (shipped in T5) and runs that
-//!   statement directly — atomic, single round-trip.
+//!   statement directly - atomic, single round-trip.
 //!
 //! The runner closure is `'static`-callable (no captured references)
 //! because the inventory entry stores it as a fn-pointer-shaped
@@ -66,13 +66,13 @@ pub fn expand(item: TokenStream) -> Result<TokenStream> {
             let builder = <#self_ty as ::suprnova::eloquent::MassPrunable>::prunable();
             if dry_run {
                 // Count the matching rows via a SELECT COUNT(*). The
-                // builder's count() consumes self — we built a fresh
+                // builder's count() consumes self - we built a fresh
                 // one above and don't reuse it after.
                 builder.count().await.map(|c| c as u64)
             } else {
                 // Bulk delete via the builder's dedicated DELETE
                 // renderer. Walks the WHERE AST directly into
-                // `DELETE FROM table WHERE ...` — no SELECT→DELETE
+                // `DELETE FROM table WHERE ...` - no SELECT→DELETE
                 // string rewrite, so the bulk path is correct even
                 // when the prunable() scope sets `.select(...)` /
                 // `.order_by(...)` / etc.

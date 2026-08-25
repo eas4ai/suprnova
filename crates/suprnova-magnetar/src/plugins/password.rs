@@ -5,7 +5,7 @@
 //! Suprnova flows: equal-cost idempotent registration that never updates an
 //! existing credential, dual-format fixed-cost verification on every login
 //! outcome (including locked accounts), and every success routed through the
-//! shared factor gate — this plugin never mints a session itself.
+//! shared factor gate - this plugin never mints a session itself.
 
 use std::sync::Arc;
 

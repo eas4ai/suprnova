@@ -1,4 +1,4 @@
-//! `BelongsTo` — the inverse of `HasOne` / `HasMany`. The child row
+//! `BelongsTo` - the inverse of `HasOne` / `HasMany`. The child row
 //! carries the FK column; this relation looks up the parent.
 //!
 //! Mirrors Laravel's
@@ -11,7 +11,7 @@
 //! every missing parent.
 //!
 //! Without `with_default`, missing parents return `None`. The eager-
-//! load dispatcher arm in `__eager_load` honours the same fallback —
+//! load dispatcher arm in `__eager_load` honours the same fallback -
 //! both lazy and eager paths see identical behaviour.
 //!
 //! The FK column on the child can be nullable (`Option<i64>`). The
@@ -78,7 +78,7 @@ where
     ///
     /// When set, the function is called on the lookup builder right
     /// before `first().await`. The only callers are `with_trashed()`
-    /// and `only_trashed()`, both gated on `P: SoftDeletes` — which
+    /// and `only_trashed()`, both gated on `P: SoftDeletes` - which
     /// is what makes the `Builder::<P>::with_trashed()` call inside
     /// the boxed closure type-check. Erasing the `P: SoftDeletes`
     /// bound into a `Box<dyn FnOnce>` is how we avoid threading the
@@ -93,12 +93,12 @@ where
     /// [`Self::__default_fn`] for that dispatcher; not part of the
     /// public API.
     default_fn: Option<Arc<dyn Fn() -> P + Send + Sync>>,
-    /// PhantomData for the child type — see `HasOne::_phantom`.
+    /// PhantomData for the child type - see `HasOne::_phantom`.
     _phantom: PhantomData<fn() -> C>,
 }
 
 // The `P: Model` bound's where-clause is re-elaborated for the same
-// reason `Builder<M: Model>` and `HasOne<L, R>` do — `first()` calls
+// reason `Builder<M: Model>` and `HasOne<L, R>` do - `first()` calls
 // `P::query()` which carries its own associated-type bounds. See
 // `has_one.rs` for the long-form explanation.
 impl<C, P> BelongsTo<C, P>
@@ -168,21 +168,21 @@ where
     }
 
     /// Look up the parent row. Returns:
-    /// - `Some(parent)` — FK present, parent exists.
-    /// - `Some(default_fn())` — FK null OR parent missing, AND
+    /// - `Some(parent)` - FK present, parent exists.
+    /// - `Some(default_fn())` - FK null OR parent missing, AND
     ///   `with_default` was installed.
-    /// - `None` — FK null OR parent missing, AND no `with_default`.
+    /// - `None` - FK null OR parent missing, AND no `with_default`.
     ///
     /// When the relation has been chained with `with_trashed()` /
     /// `only_trashed()` (only reachable for `P: SoftDeletes`), the
     /// builder is rewritten before the lookup runs. The path is
     /// implemented via the `__apply_soft_delete_scope` helper that's
-    /// only present in the `P: SoftDeletes` impl block — calls
+    /// only present in the `P: SoftDeletes` impl block - calls
     /// monomorphise away to a no-op for non-soft-delete parents.
     pub async fn first(self) -> Result<Option<P>, FrameworkError> {
         let key_value = match &self.parent_key_value {
             None => {
-                // FK is null — short-circuit to the default if set.
+                // FK is null - short-circuit to the default if set.
                 return Ok(self.default_fn.as_ref().map(|f| f()));
             }
             Some(v) => v.clone(),
@@ -213,7 +213,7 @@ where
 /// `P` is soft-deletable. Mirrors the `HasMany` / `HasOne` impl
 /// blocks; the type-erased closure stored in `scope_rewrite` is the
 /// concession `BelongsTo` makes for not holding an eager
-/// `Builder<P>` field — the closure carries the `P: SoftDeletes` bound
+/// `Builder<P>` field - the closure carries the `P: SoftDeletes` bound
 /// past the type-erasure boundary so `BelongsTo::first` can stay
 /// generic over plain `P: Model`.
 impl<C, P> BelongsTo<C, P>

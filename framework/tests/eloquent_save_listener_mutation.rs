@@ -1,9 +1,9 @@
-//! Regression: HIGH audit finding `eloquent` #2 — `save()` and
+//! Regression: HIGH audit finding `eloquent` #2 - `save()` and
 //! `save_with_tx()` ignored listener mutations to the shared
 //! `Updating` / `Saving` attrs payload. The earlier code serialized
 //! `self`, handed listeners an `Arc<Mutex<Attrs>>` view of that
 //! payload, then built the ActiveModel from `self.clone()` and ran
-//! the UPDATE — discarding any mutations the listeners had made.
+//! the UPDATE - discarding any mutations the listeners had made.
 //!
 //! Result in production: observers that normalize, redact, audit-tag,
 //! or enforce values on update appeared to succeed but persisted the
@@ -11,7 +11,7 @@
 //! documented for years on its own Saving hooks; we ship the
 //! corrected behaviour from day one.
 //!
-//! Fix: mirror `update()`'s pattern — after the Updating + Saving
+//! Fix: mirror `update()`'s pattern - after the Updating + Saving
 //! listeners run, read the (possibly mutated) `Attrs` back from the
 //! shared mutex and apply via `apply_attrs_to_active_model` before
 //! the UPDATE fires.
@@ -47,7 +47,7 @@ impl CancellableListener<t338_save_user::events::Updating> for RedactOnUpdating 
 
 // Once-shot guard so the global registry only carries the listener
 // for the duration of one test invocation. Atomics on the listener
-// itself capture "did this run?" — used in the second test.
+// itself capture "did this run?" - used in the second test.
 static SAVE_LISTENER_FIRED: AtomicBool = AtomicBool::new(false);
 
 pub struct RecordSavingFired;
@@ -83,7 +83,7 @@ async fn save_persists_updating_listener_mutation_not_self_clone() {
         .await
         .unwrap();
 
-    // Mutate the in-memory model — but the listener will REPLACE
+    // Mutate the in-memory model - but the listener will REPLACE
     // this with the sentinel. The audit-flagged bug used to persist
     // this in-memory value instead.
     user.email = "from-self@x.com".to_string();
@@ -94,7 +94,7 @@ async fn save_persists_updating_listener_mutation_not_self_clone() {
     let reloaded = T338SaveUser::find(user.id).await.unwrap().unwrap();
     assert_eq!(
         reloaded.email, "from-listener@x.com",
-        "save() must read the listener-mutated attrs and apply them — \
+        "save() must read the listener-mutated attrs and apply them - \
          not silently use self.clone(). Got `{}` instead of \
          `from-listener@x.com`; if you see `from-self@x.com` the audit \
          regression is back.",
@@ -136,7 +136,7 @@ async fn save_with_tx_also_persists_listener_mutation() {
     let reloaded = T338SaveUser::find(user.id).await.unwrap().unwrap();
     assert_eq!(
         reloaded.email, "from-listener@x.com",
-        "save_with_tx() must also apply listener mutations — got `{}`",
+        "save_with_tx() must also apply listener mutations - got `{}`",
         reloaded.email,
     );
 }

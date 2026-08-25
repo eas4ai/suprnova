@@ -1,4 +1,4 @@
-//! Customer DTOs — request and response shapes for the [`super::super::traits::CustomerStore`] trait.
+//! Customer DTOs - request and response shapes for the [`super::super::traits::CustomerStore`] trait.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,7 +14,7 @@ use serde_json::Value;
 /// [`super::super::traits::CustomerStore::get_customer`] return `None`
 /// because the provider only knows about `provider_customer_id` and
 /// has no reverse lookup. Callers that need the app `user_id` for those
-/// paths must read the DB mirror entity directly — the mirror row is
+/// paths must read the DB mirror entity directly - the mirror row is
 /// the authoritative source for app-side identifiers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomerRef {
@@ -25,7 +25,7 @@ pub struct CustomerRef {
     pub user_id: Option<String>,
     /// Customer billing email as known to the provider.
     pub email: String,
-    /// JSON snapshot of the provider's customer object — preserved
+    /// JSON snapshot of the provider's customer object - preserved
     /// verbatim so callers can read fields the DTO does not flatten.
     pub provider_metadata: Value,
 }
@@ -33,7 +33,7 @@ pub struct CustomerRef {
 /// Request payload for [`super::super::traits::CustomerStore::create_customer`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateCustomerRequest {
-    /// App-side user identifier — round-trips back on
+    /// App-side user identifier - round-trips back on
     /// [`CustomerRef::user_id`] in the immediate response.
     pub user_id: String,
     /// Billing email; surfaced on receipts and Provider dashboards.

@@ -33,7 +33,7 @@ use serde::de::DeserializeOwned;
 
 /// Deserialize the current process's environment into `T` via envy.
 ///
-/// Field name conversion follows envy's default — `pub mail_host` →
+/// Field name conversion follows envy's default - `pub mail_host` →
 /// `MAIL_HOST`. Use `#[serde(rename = "...")]` to override a field's
 /// env-var name explicitly, and `#[serde(default = "...")]` to give a
 /// missing field a fallback.

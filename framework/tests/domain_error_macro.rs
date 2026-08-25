@@ -1,7 +1,7 @@
 //! Regression tests for `#[domain_error]` across all three struct shapes.
 //!
 //! Bug history: the macro previously emitted `#vis struct #name #fields`
-//! verbatim. For named-field structs that's correct — the `{ ... }` block
+//! verbatim. For named-field structs that's correct - the `{ ... }` block
 //! terminates the declaration. For unit and tuple structs the result was
 //! invalid syntax (`pub struct Foo` or `pub struct Foo(T)` with no trailing
 //! `;`), so the unit-struct form documented in `manual/errors.md` failed to

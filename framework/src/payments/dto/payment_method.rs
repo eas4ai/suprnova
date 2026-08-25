@@ -3,7 +3,7 @@
 use super::{CountryCode, PhoneNumber};
 use serde::{Deserialize, Serialize};
 
-/// Provider-neutral payment instrument — covers card, bank, eWallet,
+/// Provider-neutral payment instrument - covers card, bank, eWallet,
 /// Mobile Money, stablecoin, generic crypto, and a custom escape hatch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -13,7 +13,7 @@ pub enum PaymentMethod {
         /// Card network brand (`"visa"`, `"mastercard"`, etc.) as
         /// reported by the provider.
         brand: String,
-        /// Last four digits of the PAN — safe to display.
+        /// Last four digits of the PAN - safe to display.
         last4: String,
         /// Expiry month, 1–12.
         exp_month: u8,
@@ -24,18 +24,18 @@ pub enum PaymentMethod {
     BankTransfer {
         /// Display name of the issuing bank.
         bank_name: String,
-        /// Last four digits of the account number — safe to display.
+        /// Last four digits of the account number - safe to display.
         last4: String,
     },
     /// Generic eWallet (PayPal, Alipay, WeChat Pay, etc.).
     EWallet {
-        /// Wallet provider identifier (kebab-case — `"paypal"`,
+        /// Wallet provider identifier (kebab-case - `"paypal"`,
         /// `"alipay"`, `"wechat_pay"`).
         provider: String,
         /// Wallet-side account identifier or token.
         identifier: String,
     },
-    /// Mobile Money — payer identified by phone + operator + country.
+    /// Mobile Money - payer identified by phone + operator + country.
     ///
     /// The user completes the payment via a USSD prompt or operator app
     /// notification. The frontend renders a `SessionPayload::MobileMoneyPrompt`
@@ -49,7 +49,7 @@ pub enum PaymentMethod {
         /// are valid for this customer.
         country: CountryCode,
     },
-    /// Stablecoin payment — pegged crypto, different UX from generic crypto
+    /// Stablecoin payment - pegged crypto, different UX from generic crypto
     /// (no volatility risk, often treated by providers as cash-equivalent).
     Stablecoin {
         /// Specific stablecoin asset (USDC, USDT, etc.).
@@ -57,7 +57,7 @@ pub enum PaymentMethod {
         /// Optional network preference (e.g. Ethereum vs Solana for USDC).
         network: Option<String>,
     },
-    /// Generic cryptocurrency — non-pegged.
+    /// Generic cryptocurrency - non-pegged.
     Crypto {
         /// Blockchain network identifier (e.g. `"ethereum"`, `"bitcoin"`).
         network: String,
@@ -68,7 +68,7 @@ pub enum PaymentMethod {
     Custom {
         /// Kind discriminator chosen by the integrator (kebab-case).
         kind: String,
-        /// Free-form descriptor — exact shape is integration-defined.
+        /// Free-form descriptor - exact shape is integration-defined.
         descriptor: String,
     },
 }
@@ -91,7 +91,7 @@ pub enum MobileMoneyOperator {
     /// Operator-specific identifier (e.g. "tigopesa", "vodafone_cash") for
     /// providers we haven't enumerated. Lowercase, no whitespace.
     Custom {
-        /// Operator slug — lowercase, no whitespace.
+        /// Operator slug - lowercase, no whitespace.
         identifier: String,
     },
 }
@@ -109,7 +109,7 @@ pub enum StablecoinAsset {
     Dai,
     /// Other stablecoin by ticker symbol (uppercase).
     Custom {
-        /// Ticker symbol — uppercase (e.g. `"PYUSD"`).
+        /// Ticker symbol - uppercase (e.g. `"PYUSD"`).
         ticker: String,
     },
 }

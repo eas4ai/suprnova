@@ -4,14 +4,14 @@
 //! "Internal Server Error" string; the raw `err.to_string()` is NEVER
 //! returned to clients. With `APP_DEBUG=true` (false-by-default outside
 //! local/dev/test) the body additionally carries a `debug_message`
-//! field — but `message` STAYS generic, so frontends never accidentally
+//! field - but `message` STAYS generic, so frontends never accidentally
 //! key on the detail field.
 //!
 //! Status 4xx (domain errors): the original message is preserved
 //! because it's caller-facing and meaningful ("Missing required
 //! parameter: avatar", "field 'priority' must be a u32", etc.).
 //!
-//! All error bodies carry a `request_id` field — `null` outside a
+//! All error bodies carry a `request_id` field - `null` outside a
 //! request scope, the active `RequestId` inside one.
 //!
 //! # Test isolation
@@ -27,7 +27,7 @@ use serde_json::Value;
 use suprnova::error::FrameworkError;
 use suprnova::http::HttpResponse;
 
-/// Serialise the suite — every test reads `AppConfig::from_env()`
+/// Serialise the suite - every test reads `AppConfig::from_env()`
 /// inside the error-response path, which observes `APP_DEBUG` as a
 /// process-global. Without the lock, a test that sets APP_DEBUG=true
 /// races with a parallel test that sets APP_DEBUG=false.
@@ -56,7 +56,7 @@ struct AppDebugGuard {
 
 impl AppDebugGuard {
     fn new(value: &str) -> Self {
-        // Recover from poisoned locks — a previous test panicking
+        // Recover from poisoned locks - a previous test panicking
         // shouldn't make the rest of the suite unrunnable.
         let lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var("APP_DEBUG").ok();
@@ -100,11 +100,11 @@ fn internal_error_500_body_is_generic_in_production() {
     assert_eq!(status, 500);
     assert_eq!(
         body["message"], "Internal Server Error",
-        "5xx message must be generic — got: {body}"
+        "5xx message must be generic - got: {body}"
     );
     assert!(
         body.get("debug_message").is_none(),
-        "debug_message must be absent when APP_DEBUG=false — got: {body}"
+        "debug_message must be absent when APP_DEBUG=false - got: {body}"
     );
     // Raw error text must never appear anywhere in the body.
     let body_str = serde_json::to_string(&body).unwrap();
@@ -119,7 +119,7 @@ fn database_error_500_body_is_generic_in_production() {
     let _g = AppDebugGuard::falsy();
 
     let err = FrameworkError::database(
-        "syntax error at or near 'SELCT' (column 1) — relation users does not exist",
+        "syntax error at or near 'SELCT' (column 1) - relation users does not exist",
     );
     let (status, body) = render(err);
 
@@ -163,13 +163,13 @@ fn internal_error_with_debug_exposes_debug_message_keeping_message_generic() {
     let (status, body) = render(err);
 
     assert_eq!(status, 500);
-    // `message` STAYS generic even in debug mode — frontends must never
+    // `message` STAYS generic even in debug mode - frontends must never
     // be able to key on the detail field.
     assert_eq!(body["message"], "Internal Server Error");
     assert_eq!(
         body["debug_message"],
         format!("Internal server error: {raw}"),
-        "debug_message should expose the full err.to_string() — got: {body}"
+        "debug_message should expose the full err.to_string() - got: {body}"
     );
 }
 
@@ -186,7 +186,7 @@ fn domain_4xx_preserves_original_message() {
     assert_eq!(status, 400);
     assert_eq!(
         body["message"], "missing required file field 'avatar'",
-        "4xx must preserve caller-facing detail — got: {body}"
+        "4xx must preserve caller-facing detail - got: {body}"
     );
     assert!(body.get("debug_message").is_none());
 }
@@ -201,7 +201,7 @@ fn param_error_4xx_keeps_field_specific_message() {
     assert_eq!(status, 400);
     assert!(
         body["message"].as_str().unwrap().contains("priority"),
-        "ParamError must preserve param name in message — got: {body}"
+        "ParamError must preserve param name in message - got: {body}"
     );
 }
 
@@ -221,7 +221,7 @@ fn validation_4xx_keeps_per_field_errors() {
             .as_array()
             .map(|arr| !arr.is_empty())
             .unwrap_or(false),
-        "validation errors must include per-field detail — got: {body}"
+        "validation errors must include per-field detail - got: {body}"
     );
 }
 
@@ -241,7 +241,7 @@ fn all_error_responses_include_request_id_field() {
     let _g = AppDebugGuard::falsy();
 
     // Outside a REQUEST_ID scope (which is the default for these unit
-    // tests), `current_request_id()` returns None — which we render as
+    // tests), `current_request_id()` returns None - which we render as
     // JSON null. The field is always present; the value is `null` when
     // unknown. This gives frontends a stable shape to parse.
     for err in [
@@ -258,7 +258,7 @@ fn all_error_responses_include_request_id_field() {
             body.as_object()
                 .map(|o| o.contains_key("request_id"))
                 .unwrap_or(false),
-            "every error body must contain `request_id` (null when absent) — got: {body}"
+            "every error body must contain `request_id` (null when absent) - got: {body}"
         );
     }
 }
@@ -276,7 +276,7 @@ async fn request_id_propagates_into_error_body_when_scope_active() {
 
     assert_eq!(
         body["request_id"], expected,
-        "request_id from REQUEST_ID scope must land in the error body — got: {body}"
+        "request_id from REQUEST_ID scope must land in the error body - got: {body}"
     );
 }
 
@@ -313,13 +313,13 @@ fn json_api_envelope_500_with_debug_exposes_meta_debug_message() {
     let detail = parsed["errors"][0]["detail"]
         .as_str()
         .expect("detail is a string");
-    // `detail` STAYS generic — same contract as the Laravel-shape body's
+    // `detail` STAYS generic - same contract as the Laravel-shape body's
     // `message` field.
     assert_eq!(detail, "Internal server error");
     assert_eq!(
         parsed["errors"][0]["meta"]["debug_message"],
         format!("Internal server error: {raw}"),
-        "debug_message should expose the full err.to_string() — got: {parsed}"
+        "debug_message should expose the full err.to_string() - got: {parsed}"
     );
 }
 
@@ -337,6 +337,6 @@ fn json_api_envelope_4xx_preserves_detail() {
     let parsed: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         parsed["errors"][0]["detail"], "bad request: invalid type filter",
-        "json:api 4xx must preserve detail — got: {parsed}"
+        "json:api 4xx must preserve detail - got: {parsed}"
     );
 }

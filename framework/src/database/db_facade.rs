@@ -1,15 +1,15 @@
-//! Phase 10C T10 — `DB` facade extensions for model-less queries.
+//! Phase 10C T10 - `DB` facade extensions for model-less queries.
 //!
 //! This file ships two surfaces:
 //!
-//! 1. [`DbTableBuilder`] — a chainable query builder returned by
+//! 1. [`DbTableBuilder`] - a chainable query builder returned by
 //!    [`DB::table(name)`](crate::DB::table). Mirrors the
 //!    `filter`/`order_by`/`limit` shape of `Builder<M>` but materialises
 //!    rows as [`DynamicRow`] instead of a typed model. Use it for
 //!    tables that aren't worth a full `#[suprnova::model]` (audit
 //!    logs, ad-hoc reports, dashboard aggregates).
 //!
-//! 2. Raw-SQL escapes — [`DB::select`](crate::DB::select),
+//! 2. Raw-SQL escapes - [`DB::select`](crate::DB::select),
 //!    [`DB::update`](crate::DB::update), [`DB::delete`](crate::DB::delete),
 //!    [`DB::statement`](crate::DB::statement),
 //!    [`DB::affecting_statement`](crate::DB::affecting_statement). When
@@ -20,7 +20,7 @@
 //! ## Trust boundary on identifiers
 //!
 //! Table names, column names, SQL operators, and ORDER BY directions
-//! are interpolated INTO the SQL string verbatim — they are NOT bound
+//! are interpolated INTO the SQL string verbatim - they are NOT bound
 //! as parameters (SQL doesn't allow that). Treat every `impl
 //! Into<String>` argument to this builder as a trusted, compile-time
 //! literal: do NOT splice user input into table or column names.
@@ -46,7 +46,7 @@ use sea_orm::{DbBackend, JsonValue, Statement, Value as SeaValue};
 /// shape `JsonValue::find_by_statement` produces (a JSON object per
 /// row) but goes through the executor's instrumented `query_all` /
 /// `query_one` so QueryExecuted observation works. Returns `None`
-/// when the row doesn't parse as an object — matching the prior
+/// when the row doesn't parse as an object - matching the prior
 /// `filter_map` behaviour on `JsonValue`.
 fn query_result_to_dynamic_row(qr: &sea_orm::QueryResult) -> Option<DynamicRow> {
     use sea_orm::FromQueryResult;
@@ -89,7 +89,7 @@ pub struct DbTableBuilder {
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_columns: Vec<String>,
-    /// Phase 10C T12 — per-builder connection override. Set via
+    /// Phase 10C T12 - per-builder connection override. Set via
     /// [`Self::on`] or constructed pre-set via
     /// [`DB::table_on`](crate::DB::table_on). Routes terminal methods
     /// through the named connection in the
@@ -99,7 +99,7 @@ pub struct DbTableBuilder {
 
 impl DbTableBuilder {
     /// Construct a builder for the given table. Prefer
-    /// [`DB::table(name)`](crate::DB::table) — this is the underlying
+    /// [`DB::table(name)`](crate::DB::table) - this is the underlying
     /// constructor.
     pub fn new(table: impl Into<String>) -> Self {
         Self {
@@ -113,10 +113,10 @@ impl DbTableBuilder {
         }
     }
 
-    /// Phase 10C T12 — route every terminal method on this builder
+    /// Phase 10C T12 - route every terminal method on this builder
     /// through the connection registered under `name`. Inside an
     /// active transaction (`DB::transaction` closure) the override is
-    /// silently ignored — every op runs through the tx connection.
+    /// silently ignored - every op runs through the tx connection.
     pub fn on(mut self, name: impl Into<String>) -> Self {
         self.connection_override = Some(name.into());
         self
@@ -204,7 +204,7 @@ impl DbTableBuilder {
 
     /// Execute the SELECT and return every matching row as a
     /// [`Collection<DynamicRow>`]. Materialises rows through the
-    /// instrumented executor helpers — emits
+    /// instrumented executor helpers - emits
     /// [`QueryExecuted`](crate::database::events::QueryExecuted) on
     /// every call.
     pub async fn get(self) -> Result<Collection<DynamicRow>, FrameworkError> {
@@ -241,17 +241,17 @@ impl DbTableBuilder {
 
     /// Execute `SELECT COUNT(*) FROM ... WHERE ...` and return the
     /// count. Clears `select_columns` / `order` / `limit` / `offset`
-    /// before rendering — count semantics don't care about those.
+    /// before rendering - count semantics don't care about those.
     ///
     /// Uses `query_one` + `try_get` directly instead of
     /// `JsonValue::find_by_statement` because aggregate columns
     /// (`COUNT(*)`) don't always carry a type tag through sqlx's
     /// per-column type detection that backs `JsonValue`'s
-    /// `FromQueryResult` impl — on SQLite the typed accessor is the
+    /// `FromQueryResult` impl - on SQLite the typed accessor is the
     /// reliable path.
     pub async fn count(self) -> Result<u64, FrameworkError> {
         // Validate user inputs BEFORE the COUNT(*) override stomps
-        // `select_columns` — the override is framework-controlled
+        // `select_columns` - the override is framework-controlled
         // literal SQL and would otherwise fail the identifier
         // validator on the parenthesised aggregate.
         self.validate_inputs()?;
@@ -298,7 +298,7 @@ impl DbTableBuilder {
     /// the call returns a [`FrameworkError::Database`] instead of
     /// silently producing a wrong id. Use the typed Eloquent
     /// [`Model`](crate::eloquent::Model) surface for tables that don't
-    /// match the convention — it consults the model definition for
+    /// match the convention - it consults the model definition for
     /// primary-key shape and type.
     ///
     /// Backend split: Postgres + SQLite use `RETURNING id`; MySQL runs
@@ -307,14 +307,14 @@ impl DbTableBuilder {
     /// parameter-bound; explicit nulls are emitted as the constant SQL literal
     /// `NULL` so PostgreSQL can infer each target column's type.
     pub async fn insert(self, attrs: Attrs) -> Result<i64, FrameworkError> {
-        // Audit HIGH `database` #2 — validate identifiers and operators
+        // Audit HIGH `database` #2 - validate identifiers and operators
         // captured in the builder state, plus the attrs keys which are
         // themselves identifiers being interpolated into SQL.
         self.validate_inputs()?;
         for col in attrs.keys() {
             crate::database::validate_identifier(col)?;
         }
-        // T11/T12: route through resolve_write — writes never go to
+        // T11/T12: route through resolve_write - writes never go to
         // `__read_replica__`.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
@@ -368,7 +368,7 @@ impl DbTableBuilder {
                     FrameworkError::database(format!(
                         "DB::table(\"{}\")::insert: cannot read auto-increment `id` as i64 ({e}). \
                          The model-less builder assumes an `id BIGINT` (or compatible) \
-                         primary key — for UUID, composite, renamed, or non-integer \
+                         primary key - for UUID, composite, renamed, or non-integer \
                          primary keys use the typed Eloquent Model surface instead.",
                         self.table,
                     ))
@@ -377,7 +377,7 @@ impl DbTableBuilder {
             DbBackend::MySql => {
                 // MySQL doesn't support `RETURNING`. Use the driver's
                 // own per-connection `last_insert_id()` exposed through
-                // `ExecResult` — running a separate `SELECT
+                // `ExecResult` - running a separate `SELECT
                 // LAST_INSERT_ID()` against a pooled connection would
                 // be unsafe because the SELECT might land on a
                 // different physical connection than the INSERT.
@@ -390,7 +390,7 @@ impl DbTableBuilder {
                 if raw == 0 {
                     // MySQL returns 0 for tables without an
                     // AUTO_INCREMENT column (e.g. UUID PK or composite
-                    // PK). Surfacing `0` would silently lie — fail
+                    // PK). Surfacing `0` would silently lie - fail
                     // loudly with the same actionable guidance as the
                     // Postgres / SQLite branch.
                     return Err(FrameworkError::database(format!(
@@ -411,13 +411,13 @@ impl DbTableBuilder {
     /// number of rows affected.
     ///
     /// **Empty WHERE updates every row in the table.** That's a
-    /// supported but rarely-correct operation — callers should add at
+    /// supported but rarely-correct operation - callers should add at
     /// least one `filter` unless they really mean "all rows."
     ///
     /// Dual-API: this is the Laravel-faithful name; the
     /// `Builder<M>`-style alias is [`Self::update_all`]. Both call into
     /// the same implementation. Prefer the `_all` name when the
-    /// table-wide intent is the point of the call site — it makes the
+    /// table-wide intent is the point of the call site - it makes the
     /// missing `filter` visible to reviewers. Non-null attributes are bound;
     /// explicit nulls use the constant SQL literal `NULL` to retain the target
     /// column type on PostgreSQL.
@@ -428,7 +428,7 @@ impl DbTableBuilder {
                 self.table
             )));
         }
-        // Audit HIGH `database` #2 — same validation as insert; the
+        // Audit HIGH `database` #2 - same validation as insert; the
         // attrs keys land in `SET col = ?` so they must be safe
         // identifiers.
         self.validate_inputs()?;
@@ -468,7 +468,7 @@ impl DbTableBuilder {
     /// number of rows affected.
     ///
     /// **Empty WHERE truncates the table.** `DB::table("x").delete()`
-    /// removes every row by design — add a `filter` if you don't mean
+    /// removes every row by design - add a `filter` if you don't mean
     /// that.
     ///
     /// Dual-API: this is the Laravel-faithful name; the
@@ -476,7 +476,7 @@ impl DbTableBuilder {
     /// the same implementation. Prefer the `_all` name when the
     /// table-wide intent is the point of the call site.
     pub async fn delete(self) -> Result<u64, FrameworkError> {
-        // Audit HIGH `database` #2 — identifier + operator validation.
+        // Audit HIGH `database` #2 - identifier + operator validation.
         self.validate_inputs()?;
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
@@ -703,7 +703,7 @@ impl DB {
     /// Run a raw SELECT, return the FIRST column of the FIRST row.
     /// Mirrors Laravel's `DB::scalar($sql, $bindings)`.
     ///
-    /// `T` must implement `sea_orm::TryGetable` — the framework
+    /// `T` must implement `sea_orm::TryGetable` - the framework
     /// re-exports the trait at the crate root.
     ///
     /// ```rust,no_run
@@ -790,7 +790,7 @@ impl DB {
 
     /// Run a raw, unprepared SQL statement (no placeholder binding).
     /// Mirrors Laravel's `DB::unprepared($sql)`. The string is
-    /// executed VERBATIM — never splice user input into it.
+    /// executed VERBATIM - never splice user input into it.
     ///
     /// Necessary for DDL on backends that reject parameter-bound
     /// statements: `CREATE INDEX`, `ALTER TABLE`, `VACUUM`, etc.
@@ -798,7 +798,7 @@ impl DB {
         use sea_orm::ConnectionTrait;
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
-        // Emit QueryExecuted for unprepared statements as well — they
+        // Emit QueryExecuted for unprepared statements as well - they
         // are still queries from the observer's perspective.
         if super::events::is_dispatching() || !super::events::query_observation_active() {
             return match &exec {
@@ -848,7 +848,7 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<u64, FrameworkError> {
-        // T11/T12: route through resolve_write — affecting statements
+        // T11/T12: route through resolve_write - affecting statements
         // (INSERT/UPDATE/DELETE/UPSERT) never go to the replica.
         let exec =
             crate::database::transaction::ExecutorChoice::resolve_write(None, None, None).await?;
@@ -862,17 +862,17 @@ impl DB {
         Ok(result.rows_affected())
     }
 
-    // ---- Phase 10C T12 — connection-pinned raw escapes ------------------
+    // ---- Phase 10C T12 - connection-pinned raw escapes ------------------
 
-    /// Phase 10C T12 — `DB::table(name)` variant that pins the returned
+    /// Phase 10C T12 - `DB::table(name)` variant that pins the returned
     /// builder to the connection registered under `conn_name`. Equivalent
     /// to `DB::table(table).on(conn_name)`. Inside a `DB::transaction`
-    /// the override is silently ignored — every op runs through the tx.
+    /// the override is silently ignored - every op runs through the tx.
     pub fn table_on(conn_name: impl Into<String>, table: impl Into<String>) -> DbTableBuilder {
         DbTableBuilder::new(table).on(conn_name)
     }
 
-    /// Phase 10C T12 — `DB::select` variant that runs against the
+    /// Phase 10C T12 - `DB::select` variant that runs against the
     /// named connection instead of consulting the default routing
     /// chain. Errors if `conn_name` isn't registered.
     pub async fn select_on(
@@ -880,7 +880,7 @@ impl DB {
         sql: &str,
         values: impl IntoIterator<Item = SeaValue>,
     ) -> Result<Vec<DynamicRow>, FrameworkError> {
-        // Inside a transaction the tx connection wins absolutely —
+        // Inside a transaction the tx connection wins absolutely -
         // even an explicit `_on` call cannot route around it because
         // it would split the atomicity contract. Resolve_read with the
         // override expresses exactly that precedence.
@@ -900,7 +900,7 @@ impl DB {
             .collect())
     }
 
-    /// Phase 10C T12 — `DB::statement` variant that runs against the
+    /// Phase 10C T12 - `DB::statement` variant that runs against the
     /// named connection. Useful for backend-specific DDL on a read
     /// replica (e.g. `CREATE INDEX` on a follower that's been promoted
     /// to standalone).
@@ -924,7 +924,7 @@ impl DB {
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
-    /// Phase 10C T12 — `DB::affecting_statement` variant pinned to the
+    /// Phase 10C T12 - `DB::affecting_statement` variant pinned to the
     /// named connection. INSERT / UPDATE / DELETE / UPSERT on a
     /// non-primary write target.
     pub async fn affecting_statement_on(
@@ -965,14 +965,14 @@ impl DB {
     /// tracked on the Eloquent module.
     ///
     /// Listeners run synchronously inside the executor helper. A
-    /// failing or slow listener WILL slow the query — keep them light
+    /// failing or slow listener WILL slow the query - keep them light
     /// and non-blocking. The complementary
     /// [`EventFacade::listen::<QueryExecuted, _>(...)`](crate::EventFacade::listen)
     /// path runs through `dispatch_best_effort` and tolerates errors;
     /// prefer it for anything that can fail.
     ///
     /// Re-entrancy: a listener that itself issues a database query
-    /// will NOT re-fire `QueryExecuted` for that nested query — the
+    /// will NOT re-fire `QueryExecuted` for that nested query - the
     /// inner call short-circuits to skip emission.
     pub fn listen<F>(callback: F) -> Result<(), FrameworkError>
     where
@@ -985,7 +985,7 @@ impl DB {
     }
 
     /// Remove every `DB::listen` callback. Does NOT touch
-    /// `EventFacade::listen` listeners — those go through
+    /// `EventFacade::listen` listeners - those go through
     /// [`EventFacade::forget`](crate::EventFacade) (the dispatcher's
     /// per-event forget surface).
     pub fn flush_listeners() -> Result<(), FrameworkError> {
@@ -1000,8 +1000,8 @@ impl DB {
     /// be appended to a buffer drainable via [`Self::get_query_log`].
     ///
     /// **The buffer is unbounded**: every captured query grows it.
-    /// Use [`Self::flush_query_log`] periodically — or
-    /// [`Self::disable_query_log`] when done — to release memory.
+    /// Use [`Self::flush_query_log`] periodically - or
+    /// [`Self::disable_query_log`] when done - to release memory.
     pub fn enable_query_log() -> Result<(), FrameworkError> {
         let mut log = crate::database::events::query_log()
             .lock()
@@ -1032,7 +1032,7 @@ impl DB {
 
     /// Snapshot the captured query log. Returns a `Vec` of every
     /// `QueryExecuted` event since the log was enabled (or last
-    /// flushed). Does NOT drain the buffer — call
+    /// flushed). Does NOT drain the buffer - call
     /// [`Self::flush_query_log`] to clear it.
     pub fn get_query_log() -> Result<Vec<crate::database::events::QueryExecuted>, FrameworkError> {
         let log = crate::database::events::query_log()
@@ -1042,7 +1042,7 @@ impl DB {
     }
 
     /// Drop every captured entry from the query log. The log stays
-    /// enabled — new queries will still be appended. Mirrors Laravel's
+    /// enabled - new queries will still be appended. Mirrors Laravel's
     /// `DB::flushQueryLog`.
     pub fn flush_query_log() -> Result<(), FrameworkError> {
         let mut log = crate::database::events::query_log()
@@ -1057,7 +1057,7 @@ impl DB {
 
 impl DB {
     /// Return the database name extracted from the configured URL.
-    /// Mirrors Laravel's `DB::connection()->getDatabaseName()` —
+    /// Mirrors Laravel's `DB::connection()->getDatabaseName()` -
     /// returns the path component of the URL ("forge" for
     /// `postgres://u:p@host/forge"`, the file name for SQLite paths).
     ///
@@ -1088,7 +1088,7 @@ impl DB {
         })
     }
 
-    /// Return the human-readable driver title — `"Postgres"`, `"MySQL"`,
+    /// Return the human-readable driver title - `"Postgres"`, `"MySQL"`,
     /// `"SQLite"`, `"Unknown"`. Mirrors Laravel's
     /// `DB::connection()->getDriverTitle()`.
     pub fn driver_title() -> Result<&'static str, FrameworkError> {

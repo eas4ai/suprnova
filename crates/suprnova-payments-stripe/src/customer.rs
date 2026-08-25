@@ -20,7 +20,7 @@ use suprnova::payments::{
 //
 // Stripe accepts metadata as bracketed form pairs (`metadata[key]=value`).
 // `stripe_client_core::RequestBuilder::form` serialises with `serde_qs`, which
-// renders a `HashMap<String, String>` exactly in that shape — matching the
+// renders a `HashMap<String, String>` exactly in that shape - matching the
 // `CreateCustomerBuilder` field type in async-stripe-core's own customer
 // requests module.
 
@@ -91,7 +91,7 @@ fn customer_to_ref(
 
 /// Resolve `CustomerRef::provider_metadata` for a CustomerStore read /
 /// update response. Prefers the metadata Stripe returned over the
-/// request-side echo — Stripe normalises (drops nulls, truncates long
+/// request-side echo - Stripe normalises (drops nulls, truncates long
 /// values) and admin / reconciliation tooling needs the server's
 /// authoritative view, not the client's pre-flight copy. Falls back to
 /// the request-side metadata only when Stripe returned no metadata or
@@ -154,7 +154,7 @@ impl CustomerStore for StripeProvider {
 
         // update_customer returns user_id: None because Stripe's
         // Customer object doesn't carry the app's user identifier as a
-        // first-class field — callers that need the app-side id should
+        // first-class field - callers that need the app-side id should
         // read the DB mirror entity. See CustomerRef::user_id docs.
         Ok(customer_to_ref(
             c,
@@ -174,7 +174,7 @@ impl CustomerStore for StripeProvider {
         // See update_customer above for why user_id is None on the
         // get path. customer_to_ref reads `c.metadata` and only falls
         // back to the placeholder argument if Stripe omitted metadata
-        // entirely — so admin / reconciliation tooling reading
+        // entirely - so admin / reconciliation tooling reading
         // CustomerStore::get_customer always sees the server's view.
         Ok(customer_to_ref(c, None, serde_json::json!({})))
     }
@@ -182,7 +182,7 @@ impl CustomerStore for StripeProvider {
     async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
         let path = format!("/customers/{provider_customer_id}");
         // Stripe customer deletion returns a DeletedCustomer object.
-        // We only care that the call succeeded — discard the result.
+        // We only care that the call succeeded - discard the result.
         let _: DeletedCustomer = RequestBuilder::new(StripeMethod::Delete, &path)
             .customize::<DeletedCustomer>()
             .send(self.client())

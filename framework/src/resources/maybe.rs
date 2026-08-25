@@ -10,7 +10,7 @@
 //! In practice: a hand-rolled resource impl that wants conditional fields
 //! either calls `Maybe::present(v)` / `Maybe::missing()` and inserts the
 //! result via `insert_maybe(map, "key", maybe)` (provided below), or
-//! returns `Maybe<T>` from a field on a `#[derive(Data)]` struct — the
+//! returns `Maybe<T>` from a field on a `#[derive(Data)]` struct - the
 //! generated `resource_attributes` runs every field through the same
 //! `Maybe`-aware insert path so a `Missing` value never reaches the
 //! envelope.
@@ -51,13 +51,13 @@ use serde_json::{Map, Value};
 pub enum Maybe<T> {
     /// Field is present; the wrapped value is serialized as the attribute value.
     Present(T),
-    /// Field is missing — omitted from the rendered `attributes` object.
+    /// Field is missing - omitted from the rendered `attributes` object.
     #[default]
     Missing,
 }
 
 /// Laravel-shape alias for [`Maybe`]. Use whichever name fits your
-/// codebase — they are the same type.
+/// codebase - they are the same type.
 pub type MissingValue<T> = Maybe<T>;
 
 impl<T> Maybe<T> {
@@ -147,7 +147,7 @@ impl<T> From<Maybe<T>> for Option<T> {
 
 /// Sentinel object inserted into a `serde_json::Value` to signal "omit
 /// this key during the attributes-rendering pass". The wire field key
-/// itself is this long, namespaced constant — `serde_json` discards the
+/// itself is this long, namespaced constant - `serde_json` discards the
 /// struct name passed to `serialize_struct`, so the collision-resistance
 /// has to live in the field key, not the struct name. A short key like
 /// `__missing__` is plausible real user data; nobody serializes
@@ -164,8 +164,8 @@ impl<T: Serialize> Serialize for Maybe<T> {
             Maybe::Present(v) => v.serialize(serializer),
             Maybe::Missing => {
                 // Emit a one-field object that `strip_missing_values`
-                // recognises and removes. Using a tagged object — not
-                // `null` — lets us distinguish "user explicitly stored
+                // recognises and removes. Using a tagged object - not
+                // `null` - lets us distinguish "user explicitly stored
                 // null" from "value was omitted by design". The single
                 // field is keyed on the long namespaced constant so the
                 // sentinel can't collide with real user data on the wire.
@@ -179,7 +179,7 @@ impl<T: Serialize> Serialize for Maybe<T> {
 
 /// True if `v` is the sentinel object emitted by `Maybe::Missing`'s
 /// `Serialize` impl. Matches on the long namespaced key so genuine user
-/// data — even data shaped like `{"__missing__": true}` — is never
+/// data - even data shaped like `{"__missing__": true}` - is never
 /// mistaken for the sentinel.
 pub(crate) fn is_missing_sentinel(v: &Value) -> bool {
     let Some(obj) = v.as_object() else {
@@ -317,7 +317,7 @@ mod tests {
     fn user_data_shaped_like_old_sentinel_survives() {
         // Real attribute data equal to the old short, collidable sentinel
         // shape `{"__missing__": true}` must NOT be treated as a missing
-        // marker — at the top level, nested in an object, and inside an
+        // marker - at the top level, nested in an object, and inside an
         // array. Only a genuine `Maybe::Missing` is stripped.
         let collidable = || serde_json::json!({ "__missing__": true });
         let real_missing = || serde_json::to_value(Maybe::<i32>::missing()).unwrap();

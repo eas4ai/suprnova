@@ -6,7 +6,7 @@
 //! their own events (e.g. `mail.send`). Pins both presence + the
 //! `duration_ms` field on the completion event.
 //!
-//! All tests are `#[serial]` — `Mail::TRANSPORT`, the dispatcher
+//! All tests are `#[serial]` - `Mail::TRANSPORT`, the dispatcher
 //! global, and the mail renderer registry are all process-global.
 
 use serde::{Deserialize, Serialize};
@@ -117,7 +117,7 @@ async fn notify_send_emits_dispatch_span_wrapping_mail_send() {
 #[serial]
 async fn notify_send_unregistered_channel_warn_lives_under_dispatch_span() {
     // Skip the renderer registration so the mail channel WOULD fail, but
-    // also skip registering the channel — so the dispatcher just warns
+    // also skip registering the channel - so the dispatcher just warns
     // and the dispatch span still completes successfully.
     let _fake = Mail::fake();
 

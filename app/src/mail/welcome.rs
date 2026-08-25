@@ -26,7 +26,7 @@ impl Mailable for WelcomeEmail {
 
     fn html_template_source(&self) -> Option<String> {
         // Tera context exposes every public field on the struct, so `{{ name }}`
-        // resolves to `self.name`. Keep the template literal — the renderer
+        // resolves to `self.name`. Keep the template literal - the renderer
         // substitutes it rather than the format-string indirection used by an
         // earlier draft.
         Some("<h1>Hi {{ name }}!</h1><p>Glad you're here.</p>".to_string())

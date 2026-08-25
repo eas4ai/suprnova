@@ -6,7 +6,7 @@
 //! - a `tokio_util::time::DelayQueue<ReservationToken>` for visibility-timeout expiry,
 //! - a `tokio_util::time::DelayQueue<Envelope>` for delayed jobs.
 //!
-//! # Design note — paused-clock compatibility
+//! # Design note - paused-clock compatibility
 //!
 //! Both DelayQueues run on Tokio's virtual clock. Under
 //! `#[tokio::test(start_paused = true)]`, `tokio::time::advance(N)` correctly
@@ -49,7 +49,7 @@ pub struct MemoryQueueDriver {
     /// Async mutex guards the visibility DelayQueue so both `pop` and the reaper
     /// can poll it synchronously after acquiring the lock.
     visibility: Arc<AsyncMutex<DelayQueue<ReservationToken>>>,
-    /// Async mutex guards the delayed DelayQueue — runs on Tokio's virtual clock
+    /// Async mutex guards the delayed DelayQueue - runs on Tokio's virtual clock
     /// so `tokio::time::advance` correctly fires expirations in paused-clock tests.
     delayed: Arc<AsyncMutex<DelayQueue<Envelope>>>,
     reaper: tokio::task::JoinHandle<()>,
@@ -62,8 +62,8 @@ impl Drop for MemoryQueueDriver {
 }
 
 /// Drain all currently-expired visibility reservations from `dq` back into
-/// the visible queue (push_front — reservation reclaim is priority).
-/// The noop waker context must be created and dropped within this call —
+/// the visible queue (push_front - reservation reclaim is priority).
+/// The noop waker context must be created and dropped within this call -
 /// callers must ensure it is not held across an await.
 fn drain_expired(
     inner: &Mutex<Inner>,
@@ -75,7 +75,7 @@ fn drain_expired(
     while let Poll::Ready(Some(item)) = dq.poll_expired(&mut cx) {
         expired_tokens.push(item.into_inner());
     }
-    // cx / waker are dropped here — no await has occurred.
+    // cx / waker are dropped here - no await has occurred.
     if !expired_tokens.is_empty() {
         let mut g = lock::lock(inner, "memory queue state")?;
         for token in expired_tokens {
@@ -83,7 +83,7 @@ fn drain_expired(
                 // A reservation reaching here lapsed without being settled:
                 // the worker holding it never acked, nacked or released. It
                 // died mid-handler. That is a consumed attempt, and it has
-                // to be counted here because nothing else will — a job that
+                // to be counted here because nothing else will - a job that
                 // *fails* is nacked and counted by `requeue`, but a job that
                 // *kills its worker* settles nothing. Leaving the count
                 // alone makes such a job immortal: it kills each worker
@@ -103,8 +103,8 @@ fn drain_expired(
 }
 
 /// Drain all currently-expired delayed envelopes from `dq` into the visible
-/// queue (push_back — delayed jobs join the back of the FIFO line).
-/// The noop waker context must be created and dropped within this call —
+/// queue (push_back - delayed jobs join the back of the FIFO line).
+/// The noop waker context must be created and dropped within this call -
 /// callers must ensure it is not held across an await.
 fn drain_delayed(
     inner: &Mutex<Inner>,
@@ -116,7 +116,7 @@ fn drain_delayed(
     while let Poll::Ready(Some(item)) = dq.poll_expired(&mut cx) {
         ready.push(item.into_inner());
     }
-    // cx / waker are dropped here — no await has occurred.
+    // cx / waker are dropped here - no await has occurred.
     if !ready.is_empty() {
         let mut g = lock::lock(inner, "memory queue state")?;
         for env in ready {
@@ -143,7 +143,7 @@ impl MemoryQueueDriver {
         let reaper = tokio::spawn(async move {
             loop {
                 // Promote expired delayed jobs into the visible queue.
-                // Log poison/internal errors but DO NOT abort the reaper —
+                // Log poison/internal errors but DO NOT abort the reaper -
                 // a single panicking producer must not strand every
                 // delayed job in the queue. The reaper backs off via the
                 // normal 50ms sleep below before the next attempt.
@@ -238,8 +238,8 @@ impl QueueDriver for MemoryQueueDriver {
         _env: &Envelope,
         delay: Duration,
     ) -> Result<(), FrameworkError> {
-        // The reserved copy still holds the pre-run attempt count — the worker
-        // bumps only its own local envelope — so requeuing it without a bump
+        // The reserved copy still holds the pre-run attempt count - the worker
+        // bumps only its own local envelope - so requeuing it without a bump
         // is exactly "try again without burning an attempt".
         self.requeue(token, delay, false).await
     }
@@ -281,7 +281,7 @@ impl QueueDriver for MemoryQueueDriver {
             dq.clear();
             n
         };
-        // Visibility DelayQueue is reservation accounting only — clearing
+        // Visibility DelayQueue is reservation accounting only - clearing
         // the visible/reserved maps makes its expirations no-ops, but
         // emptying it too prevents stale reservation tokens from firing
         // future reclaim events.

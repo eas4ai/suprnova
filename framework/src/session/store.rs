@@ -30,14 +30,14 @@ pub struct SessionData {
     pub dirty: bool,
     /// Whether this value was loaded from an existing store row under
     /// [`Self::id`] (`true`), or is a session that has never been
-    /// persisted under the current id (`false` — a brand-new session,
+    /// persisted under the current id (`false` - a brand-new session,
     /// or one whose id was just rotated by [`Self::rotate_id`]).
     ///
-    /// # Security — SEC-02(c)
+    /// # Security - SEC-02(c)
     ///
     /// [`crate::session::driver::DatabaseSessionDriver::write`] uses
-    /// this to decide whether a write may create a row (`false` — no
-    /// existing row could conflict) or must be update-only (`true` — a
+    /// this to decide whether a write may create a row (`false` - no
+    /// existing row could conflict) or must be update-only (`true` - a
     /// missing row means someone deleted it, most likely a concurrent
     /// [`crate::session::destroy_all_for_user`] revocation, and the
     /// write must not resurrect it). A custom [`SessionStore`]
@@ -65,7 +65,7 @@ impl SessionData {
     /// [`SessionStore::write`] treats this as a brand-new row rather
     /// than attempting an update-only write against an id that has
     /// never been persisted (which would silently drop the rotated
-    /// session instead of creating it — see the SEC-02(c) note on
+    /// session instead of creating it - see the SEC-02(c) note on
     /// [`Self::loaded_from_store`]). Always marks the session dirty,
     /// since a rotated id must be persisted.
     ///
@@ -117,7 +117,7 @@ impl SessionData {
     /// Returns the removed value if it existed.
     pub fn forget(&mut self, key: &str) -> Option<serde_json::Value> {
         let removed = self.data.remove(key);
-        // Only dirty the session when something was actually removed —
+        // Only dirty the session when something was actually removed -
         // forgetting an absent key must leave a read-only request clean so it
         // isn't forced through the write (and fail-closed) path needlessly.
         if removed.is_some() {
@@ -221,13 +221,13 @@ impl SessionData {
     }
 
     // ------------------------------------------------------------------
-    // Laravel `Store` facade completions — pure HashMap-level methods.
+    // Laravel `Store` facade completions - pure HashMap-level methods.
     // Each mirrors a `Illuminate/Session/Store.php` method by name.
     // ------------------------------------------------------------------
 
     /// Get a value and forget it in a single shot. Mirrors Laravel's
     /// `Store::pull($key, $default)` (`Store.php:345-348`). Non-atomic
-    /// on every backend (same as Laravel — `Store::pull` itself reads
+    /// on every backend (same as Laravel - `Store::pull` itself reads
     /// `Arr::pull` synchronously on a PHP array).
     pub fn pull<T: DeserializeOwned>(&mut self, key: &str) -> Option<T> {
         let v = self.get::<T>(key);
@@ -336,7 +336,7 @@ impl SessionData {
     }
 
     /// Flush every key and re-populate from `kvs`. Mirrors Laravel's
-    /// `Store::replace($attributes)` (`Store.php:381-384`) — note that
+    /// `Store::replace($attributes)` (`Store.php:381-384`) - note that
     /// Laravel's `replace` is itself a `put($array)` so the existing
     /// keys survive; we go further and `flush` first because Suprnova's
     /// `put` only ever takes one key at a time and re-implementing
@@ -354,7 +354,7 @@ impl SessionData {
     }
 
     /// Bulk put. The merge-shaped half of Laravel's `Store::put($array)`
-    /// (`Store.php:393-402`) — pass-through over the existing single-key
+    /// (`Store.php:393-402`) - pass-through over the existing single-key
     /// `put`. Convenience for migrating `session(['k1' => v1, 'k2' => v2])`
     /// calls.
     pub fn put_many<T>(&mut self, kvs: &[(&str, T)])
@@ -479,7 +479,7 @@ impl SessionData {
     /// Bag keys are recovered by walking the session for
     /// `_flash.old.errors.<bag>` entries (the standard flash-age path
     /// writes flashes to `.new.*` and ages them to `.old.*` on the
-    /// next request — so by the time an Inertia response handles the
+    /// next request - so by the time an Inertia response handles the
     /// redirect destination, the flash is in `.old.*`).
     ///
     /// Called by `InertiaResponse::resolve` to seed the `errors` prop
@@ -516,16 +516,16 @@ impl SessionData {
     /// JSON-API call. Powers `redirect()->back()` in the routing layer.
     ///
     /// Re-validated on every read through the crate-internal
-    /// `routing::url::root_relative_or_none` — the same guard
+    /// `routing::url::root_relative_or_none` - the same guard
     /// [`SessionMiddleware`](crate::session::SessionMiddleware) applies
-    /// at write time — rather than trusted just because it's already in
+    /// at write time - rather than trusted just because it's already in
     /// the session. This is what makes the guard cover a session cookie
     /// that survived an upgrade from a release before the write-time
     /// guard existed: such a row can hold a raw, unsanitized value no
     /// write in *this* process ever produced, and a check that only ran
     /// at write time would do nothing for it. A value that fails the
-    /// check reads back as `None` — exactly as if nothing had ever been
-    /// recorded — so every reader's own fallback takes over instead of
+    /// check reads back as `None` - exactly as if nothing had ever been
+    /// recorded - so every reader's own fallback takes over instead of
     /// resolving an off-origin `Location`, and the session self-heals:
     /// the poisoned value is never reproduced, so the next successful GET
     /// simply records a fresh, safe one over it.
@@ -552,7 +552,7 @@ impl SessionData {
         self.put("_previous.route", route.into());
     }
 
-    /// Returns `true` when a previous URL is recorded — short-circuit
+    /// Returns `true` when a previous URL is recorded - short-circuit
     /// for `previous_url().is_some()`. Mirrors Laravel's
     /// `Store::hasPreviousUri` (`Store.php:765-768`).
     pub fn has_previous_uri(&self) -> bool {
@@ -577,7 +577,7 @@ impl SessionData {
 }
 
 /// Returns true when `id` matches the shape minted by
-/// [`super::generate_session_id`] — 40 lowercase-alphanumeric
+/// [`super::generate_session_id`] - 40 lowercase-alphanumeric
 /// characters. Mirrors Laravel's `Store::isValidId`
 /// (`Illuminate/Session/Store.php:712-715`).
 pub fn is_valid_session_id(id: &str) -> bool {

@@ -2,7 +2,7 @@
 //! `suprnova ssr:start` -> a hard-navigation HTML response contains the
 //! SSR-rendered body.
 //!
-//! `#[ignore]`d — needs Node/npm and network access for `npm install`,
+//! `#[ignore]`d - needs Node/npm and network access for `npm install`,
 //! neither of which the normal `cargo test --workspace` run can assume.
 //! Run it explicitly:
 //!
@@ -34,7 +34,7 @@ fn run_ok(mut cmd: Command, what: &str) {
     assert!(status.success(), "{what} exited with {status}");
 }
 
-/// Point the scaffold at the in-tree framework crate — the published
+/// Point the scaffold at the in-tree framework crate - the published
 /// `suprnova` tag doesn't carry this task's changes yet. Mirrors
 /// `scaffold_snapshot.rs::patch_local_suprnova`.
 fn patch_local_suprnova(project: &Path) {
@@ -61,7 +61,7 @@ fn patch_local_suprnova(project: &Path) {
     std::fs::write(&cargo_toml, rewritten).expect("write patched Cargo.toml");
 }
 
-/// SSR is off by default (Design Note 4) — this proof has to opt in
+/// SSR is off by default (Design Note 4) - this proof has to opt in
 /// itself, the same way any app adopting SSR would.
 fn enable_ssr(project: &Path) {
     let path = project.join("src/bootstrap.rs");
@@ -127,7 +127,7 @@ impl Drop for KillOnDrop {
 }
 
 #[test]
-#[ignore = "e2e: needs npm/node, runs `vite build --ssr`, boots two processes — run manually"]
+#[ignore = "e2e: needs npm/node, runs `vite build --ssr`, boots two processes - run manually"]
 fn scaffolded_ssr_entry_produces_server_rendered_html() {
     let tmp = TempDir::new().unwrap();
     let project_name = "ssr_e2e_app";
@@ -192,7 +192,7 @@ fn scaffolded_ssr_entry_produces_server_rendered_html() {
         .stderr(Stdio::null());
     let _backend = KillOnDrop(backend_cmd.spawn().expect("spawn backend"));
 
-    // The backend is a debug `cargo run` compile + boot — give it real
+    // The backend is a debug `cargo run` compile + boot - give it real
     // time rather than guessing an exact readiness signal.
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

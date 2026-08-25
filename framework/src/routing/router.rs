@@ -3,7 +3,7 @@
 //! ## Route names are process-global
 //!
 //! Suprnova stores named-route bindings in a single
-//! `OnceLock<RwLock<HashMap<String, String>>>` — there is one
+//! `OnceLock<RwLock<HashMap<String, String>>>` - there is one
 //! `name → path` table per process, not per [`Router`]. Two
 //! consequences worth knowing:
 //!
@@ -11,7 +11,7 @@
 //!    `Server::from_config` consumes a single `Router`, and the
 //!    Laravel-shaped `route("users.show", &[("id", "42")])` helper
 //!    resolves through the process-global table without a `Router`
-//!    reference — that's the ergonomic call sites depend on
+//!    reference - that's the ergonomic call sites depend on
 //!    (`http::response::Redirect::route`, handler-side
 //!    `suprnova::route`, templates). If you need two isolated
 //!    route-name spaces in one process (multi-tenant subapps,
@@ -27,7 +27,7 @@
 //!    more than once) doesn't panic.
 //!
 //! Parallel tests should pick unique names per test
-//! (`users.show.encoding`, `users.show.frag`, …) — the inline tests
+//! (`users.show.encoding`, `users.show.frag`, …) - the inline tests
 //! in this module follow that convention. Tests that want a clean
 //! slate can call [`clear_route_names_for_test`]; the matchit
 //! per-method routes themselves live on the `Router` you build per
@@ -67,7 +67,7 @@ static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new
 /// calling `clear` would see each other's effects.
 ///
 /// **Production:** the function is callable in production too, but
-/// Suprnova boots its named routes once at startup — the only
+/// Suprnova boots its named routes once at startup - the only
 /// intended call site is tests. The `_for_test` suffix signals
 /// that intent.
 ///
@@ -130,12 +130,12 @@ const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
 ///
 /// Panics if `name` is already registered under a different `path`.
 /// Two routes resolving the same name silently shadowing each other is
-/// a security-shaped bug — redirects and named-URL helpers would route
+/// a security-shaped bug - redirects and named-URL helpers would route
 /// to whichever happened to win the registration race. Route names
 /// must be unique; collisions fail loudly at boot.
 ///
 /// Re-registering the same `(name, path)` pair is a no-op (idempotent).
-/// Poisoned write locks are recovered via `PoisonError::into_inner` —
+/// Poisoned write locks are recovered via `PoisonError::into_inner` -
 /// a panic during one thread's registration must not silently make
 /// every subsequent name lookup return `None`.
 ///
@@ -165,7 +165,7 @@ pub fn try_register_route_name(name: &str, path: &str) -> Result<(), FrameworkEr
         return Err(FrameworkError::internal(format!(
             "Route name '{name}' is already registered to path '{existing}'; \
              refusing to re-register to '{path}'. Route names must be unique \
-             across the application — rename one of the routes.",
+             across the application - rename one of the routes.",
         )));
     }
     map.insert(name.to_string(), path.to_string());
@@ -188,7 +188,7 @@ fn lookup_route(name: &str) -> Option<String> {
 /// is the already-percent-encoded request target. The router matches
 /// against that raw form so encoded segment delimiters (`%2F`) stay
 /// inside a single segment instead of being misinterpreted as a path
-/// separator — that's the right matching policy and must NOT change.
+/// separator - that's the right matching policy and must NOT change.
 /// Handlers however expect Laravel-shaped, decoded values:
 /// `route("posts.show", &[("slug", "a/b")])` percent-encodes to
 /// `/posts/a%2Fb`, and the handler that receives that request must
@@ -253,7 +253,7 @@ where
 /// Strict sibling of [`substitute`]: substitute placeholders, and
 /// return `Err` carrying the (ordered, deduplicated) list of
 /// unfilled placeholder names if any required substitution was
-/// missing. The substituted-so-far prefix is discarded — callers
+/// missing. The substituted-so-far prefix is discarded - callers
 /// only care that the URL is unsafe to emit.
 fn substitute_strict<F>(pattern: &str, mut next_value: F) -> Result<String, Vec<String>>
 where
@@ -467,8 +467,8 @@ pub type BoxedHandler =
 /// successful match returns both the resolved pattern (e.g.
 /// `/api/posts/{id}`) and the handler. The pattern is what the
 /// middleware registry is keyed by, so dispatch must look up
-/// middleware under the matched pattern — not the raw request path
-/// (e.g. `/api/posts/42`) — for group-applied middleware on
+/// middleware under the matched pattern - not the raw request path
+/// (e.g. `/api/posts/42`) - for group-applied middleware on
 /// parameterised routes to run.
 pub struct Router {
     get_routes: MatchitRouter<(String, Arc<BoxedHandler>)>,
@@ -501,7 +501,7 @@ pub struct Router {
     /// `POST /api/posts` under an auth group) from silently bleeding
     /// onto a different method registered separately for the same
     /// path (e.g. a public `GET /api/posts`). This is a
-    /// security-shaped invariant — the codex review tracked it as
+    /// security-shaped invariant - the codex review tracked it as
     /// "route_middleware keyed by path leaks across methods".
     route_middleware: HashMap<(Method, String), Vec<BoxedMiddleware>>,
     /// Fallback handler for when no routes match (overrides default 404)
@@ -532,7 +532,7 @@ impl Router {
     /// Get middleware registered for a specific `(method, pattern)` pair.
     ///
     /// The key is the HTTP method plus the route **pattern** that
-    /// `add_middleware` was called with — e.g. `/api/posts/{id}`,
+    /// `add_middleware` was called with - e.g. `/api/posts/{id}`,
     /// not the resolved request path `/api/posts/42`. The dispatcher
     /// in `server.rs` calls `match_route` first to recover the matched
     /// pattern and then passes that pattern here, so parameterised
@@ -707,7 +707,7 @@ impl Router {
     /// Insert a HEAD route with a pre-boxed handler.
     ///
     /// An explicit HEAD registration wins over the GET fallback inside
-    /// [`Router::match_route`] — register HEAD only when you need custom
+    /// [`Router::match_route`] - register HEAD only when you need custom
     /// headers without running the GET body computation.
     ///
     /// # Panics
@@ -762,7 +762,7 @@ impl Router {
     /// Register a GET route.
     ///
     /// Express-style `:param` segments are converted to matchit-style
-    /// `{param}` automatically — `Router::new().get("/users/:id", h)`
+    /// `{param}` automatically - `Router::new().get("/users/:id", h)`
     /// and the `get!("/users/:id", h)` macro produce identical
     /// `matchit` registrations.
     ///
@@ -783,7 +783,7 @@ impl Router {
 
     /// Fallible sibling of [`Router::get`]: returns `Err(FrameworkError)`
     /// (naming the method + path) on a duplicate or malformed pattern
-    /// instead of panicking. The chain is consumed either way — on `Err`
+    /// instead of panicking. The chain is consumed either way - on `Err`
     /// the partially-built router is dropped. Prefer this over [`Router::get`]
     /// when route patterns come from dynamic config, plugins, or any source
     /// you don't control at compile time.
@@ -1032,7 +1032,7 @@ impl Router {
     ///
     /// CORS preflight (`OPTIONS` + `Access-Control-Request-Method`) is
     /// handled by `CorsMiddleware` installed as global middleware; explicit
-    /// OPTIONS routes are for non-preflight uses — advertising allowed
+    /// OPTIONS routes are for non-preflight uses - advertising allowed
     /// verbs (`Accept-Patch`), public API discovery, programmatic resource
     /// description.
     ///
@@ -1082,7 +1082,7 @@ impl Router {
     /// own entry in the per-method matchit registry, all sharing the same
     /// boxed handler (cloned `Arc`), so dispatch is O(1) per request. The
     /// returned [`MultiMethodRouteBuilder`] lets you attach a single name
-    /// and a single middleware list that fan out across every method —
+    /// and a single middleware list that fan out across every method -
     /// see the type docs for the fan-out semantics.
     ///
     /// Express-style `:param` segments are converted to matchit-style
@@ -1204,7 +1204,7 @@ impl Router {
     /// can read cookies, session, headers, and captured route params.
     ///
     /// Unlike `get` / `post` / etc., this returns `Router` directly
-    /// (not `RouteBuilder`) — WS routes support per-route middleware
+    /// (not `RouteBuilder`) - WS routes support per-route middleware
     /// via [`Router::ws_with_middleware`] or the `ws!(...).middleware(M)`
     /// chain on `WsRouteDef`.
     ///
@@ -1393,10 +1393,10 @@ impl Router {
 
     /// Register a pre-boxed WebSocket handler with a per-route middleware list
     /// and an optional [`WsConfig`] override. This is the canonical registration
-    /// method — all other `ws*` variants delegate to this one.
+    /// method - all other `ws*` variants delegate to this one.
     ///
     /// Express-style `:param` segments are converted to matchit-style
-    /// `{param}` automatically — `Router::new().ws("/ws/rooms/:id", h)`
+    /// `{param}` automatically - `Router::new().ws("/ws/rooms/:id", h)`
     /// and the `ws!("/ws/rooms/:id", h)` macro produce identical
     /// `matchit` registrations.
     ///
@@ -1422,7 +1422,7 @@ impl Router {
     /// Fallible sibling of [`Router::ws_boxed_with_middleware_and_config`]:
     /// returns `Err(FrameworkError)` (naming the path) on a duplicate or
     /// malformed pattern instead of panicking. This is the canonical
-    /// fallible WebSocket registration primitive — every `try_ws*` helper
+    /// fallible WebSocket registration primitive - every `try_ws*` helper
     /// delegates to it, mirroring the infallible family.
     #[doc(hidden)]
     pub fn try_ws_boxed_with_middleware_and_config(
@@ -1481,7 +1481,7 @@ impl Router {
     /// handler, and the extracted path parameters.
     ///
     /// The pattern (e.g. `/api/posts/{id}`) is what the middleware
-    /// registry is keyed by — pass it to
+    /// registry is keyed by - pass it to
     /// [`Router::get_route_middleware`] so group-applied middleware on
     /// parameterised routes runs.
     pub fn match_route(
@@ -1548,7 +1548,7 @@ impl Router {
     ///
     /// Panics on duplicate registration. See [`Router::get`] for the
     /// boot-time-fail-loud rationale. `status` must be a valid 3xx code
-    /// (300..400) — values outside that range are clamped to 302.
+    /// (300..400) - values outside that range are clamped to 302.
     pub fn redirect(self, from: &str, to: &str, status: u16) -> Router {
         let status = if (300..400).contains(&status) {
             status
@@ -1578,7 +1578,7 @@ impl Router {
     /// Register a static-page route that renders an Inertia component
     /// with constant props.
     ///
-    /// Suprnova's `Route::inertia($uri, $component, $props)` — the
+    /// Suprnova's `Route::inertia($uri, $component, $props)` - the
     /// declaration for a page whose handler would be one line
     /// (`inertia_response!(About, json!({...}))`) and nothing else:
     /// about, terms, privacy, a marketing page. Registers `GET`; a
@@ -1599,7 +1599,7 @@ impl Router {
     ///
     /// The component is a runtime string, so it does **not** get the
     /// compile-time page-component check that `inertia_response!`
-    /// performs — a proc macro cannot see through a function argument.
+    /// performs - a proc macro cannot see through a function argument.
     /// Write the handler out with `inertia_response!` when you want that
     /// guarantee; this is the shortcut for when you don't.
     ///
@@ -1637,7 +1637,7 @@ impl Router {
             serde_json::Value::Null => Vec::new(),
             other => {
                 // `internal`, like the duplicate-route error `try_get`
-                // raises a few lines below — this is a registration-time
+                // raises a few lines below - this is a registration-time
                 // programming error, not a request-time parameter miss.
                 return Err(FrameworkError::internal(format!(
                     "Failed to register Inertia route '{path}' ('{component}'): props must \
@@ -1888,7 +1888,7 @@ impl RouteBuilder {
     }
 
     /// Register a route across every common HTTP method (GET / POST /
-    /// PUT / PATCH / DELETE / HEAD / OPTIONS) — Laravel `Route::any`.
+    /// PUT / PATCH / DELETE / HEAD / OPTIONS) - Laravel `Route::any`.
     /// See [`Router::any`].
     pub fn any<H, Fut>(self, path: &str, handler: H) -> MultiMethodRouteBuilder
     where
@@ -1911,7 +1911,7 @@ impl RouteBuilder {
         self.router.try_any(path, handler)
     }
 
-    /// Register a route across an explicit list of HTTP methods —
+    /// Register a route across an explicit list of HTTP methods -
     /// Laravel `Route::match([...], ...)`. See [`Router::methods`].
     pub fn methods<H, Fut>(
         self,
@@ -1974,7 +1974,7 @@ const ANY_METHODS: &[Method] = &[
 ///   methods); reverse lookup via [`route`] returns the same URL no
 ///   matter which verb the user came from.
 /// - `.middleware(M)` adds the middleware under every
-///   `(method, path)` key — auth / CSRF / rate-limit registered on an
+///   `(method, path)` key - auth / CSRF / rate-limit registered on an
 ///   `any` route therefore guard all seven verbs, not just one.
 ///
 /// `MultiMethodRouteBuilder` cannot be re-entered as a `RouteBuilder`
@@ -2096,7 +2096,7 @@ impl WsMatch {
 
     /// Per-route [`WsConfig`] override, if the route was registered
     /// with `.config(WsConfig)` or [`Router::ws_with_config`].
-    /// Returns `None` when no override was set — the caller should
+    /// Returns `None` when no override was set - the caller should
     /// fall back to [`WsConfig::default()`].
     ///
     /// [`WsConfig`]: crate::ws::WsConfig
@@ -2152,8 +2152,8 @@ mod tests {
         let router: Router = Router::new().get("/users/:id", h).into();
         let m = router.match_route(&Method::GET, "/users/42");
         let (pattern, _handler, params) = m.expect(
-            "fluent :id syntax must match /users/42 \
-             — convert_route_params should run in the fluent path too",
+            "fluent :id syntax must match /users/42 \ -
+             convert_route_params should run in the fluent path too",
         );
         assert_eq!(pattern, "/users/{id}");
         assert_eq!(params.get("id"), Some(&"42".to_string()));
@@ -2340,8 +2340,8 @@ mod tests {
     /// round-trip is observable to application code (Laravel parity:
     /// `Request::route('slug')` returns the decoded value).
     ///
-    /// Matching itself still operates on the raw URI path — only the
-    /// extracted *value* is decoded — so encoded segment delimiters
+    /// Matching itself still operates on the raw URI path - only the
+    /// extracted *value* is decoded - so encoded segment delimiters
     /// (`%2F`) cannot inject an extra path separator into matchit's
     /// tree.
     #[test]
@@ -2507,7 +2507,7 @@ mod tests {
 
     /// `Router::any` registers the handler against every common HTTP
     /// method (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS).
-    /// Pins the seven-method fan-out — if a verb is missed, `match_route`
+    /// Pins the seven-method fan-out - if a verb is missed, `match_route`
     /// against it returns `None` and the request 404s.
     #[test]
     fn any_route_registers_all_seven_methods() {
@@ -2626,7 +2626,7 @@ mod tests {
             assert_eq!(
                 router.get_route_middleware(&m, "/m").len(),
                 1,
-                "any().middleware(M) must register on ({m}, /m) — \
+                "any().middleware(M) must register on ({m}, /m) - \
                  fan-out missed this verb",
             );
         }
@@ -2636,7 +2636,7 @@ mod tests {
     /// registry: a name registered, then cleared, no longer resolves.
     ///
     /// `clear()` wipes the *entire* table, not just this test's
-    /// `clear.test.*` keys — so the `route_registry` serial key is what
+    /// `clear.test.*` keys - so the `route_registry` serial key is what
     /// actually isolates it. Every other registry-touching test shares
     /// that key (see the module docstring); without that, this global
     /// drain could land between another test's registration and its
@@ -2661,7 +2661,7 @@ mod tests {
             "clear_route_names_for_test must drain prior bindings",
         );
 
-        // Subsequent registrations work normally — the OnceLock holds
+        // Subsequent registrations work normally - the OnceLock holds
         // the same RwLock<HashMap>, only its contents got cleared.
         let _ = Router::new()
             .get("/after-clear", h)

@@ -2,7 +2,7 @@
 //!
 //! Two signals mean "stop", and which one arrives depends entirely on who
 //! is doing the asking. A developer at a terminal sends SIGINT. Every
-//! automated supervisor — `docker stop`, Coolify, systemd, Kubernetes —
+//! automated supervisor - `docker stop`, Coolify, systemd, Kubernetes -
 //! sends SIGTERM. A process that listens for only one of them is correct
 //! in exactly one of those situations.
 //!
@@ -14,8 +14,8 @@
 //!
 //! # Why a listener and not a future
 //!
-//! The obvious fix — build a combined signal future inside each loop's
-//! `select!` — reintroduces a bug the server already fixed. A signal
+//! The obvious fix - build a combined signal future inside each loop's
+//! `select!` - reintroduces a bug the server already fixed. A signal
 //! future only observes signals delivered *after* it registers, so
 //! rebuilding one every iteration leaves a window: a signal arriving
 //! between dropping the old future and constructing the new one is lost,
@@ -30,7 +30,7 @@
 //!
 //! Installing a handler is not optional politeness. The kernel does not
 //! apply default signal dispositions to PID 1, so an unhandled SIGTERM to
-//! PID 1 is discarded rather than fatal — and `CMD ["app", "queue:work"]`
+//! PID 1 is discarded rather than fatal - and `CMD ["app", "queue:work"]`
 //! makes the process PID 1. Without a handler the container does not die
 //! promptly and unpleasantly; it does not die at all until the supervisor
 //! gives up and sends SIGKILL, taking in-flight work with it.
@@ -42,9 +42,9 @@
 /// an operator to very different places.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShutdownSignal {
-    /// SIGINT — a developer pressing Ctrl-C.
+    /// SIGINT - a developer pressing Ctrl-C.
     Interrupt,
-    /// SIGTERM — a supervisor stopping the process.
+    /// SIGTERM - a supervisor stopping the process.
     Terminate,
 }
 
@@ -68,7 +68,7 @@ pub(crate) struct ShutdownListener {
 }
 
 impl ShutdownListener {
-    /// Resolve once shutdown has been signalled — immediately if it
+    /// Resolve once shutdown has been signalled - immediately if it
     /// already was.
     ///
     /// Safe to call repeatedly inside a loop: each call clones a fresh
@@ -141,7 +141,7 @@ mod tests {
 
     /// Build a listener that can be fired by hand, so the loops that
     /// consume one are testable without raising real signals at the test
-    /// process — which would take the test runner down with them.
+    /// process - which would take the test runner down with them.
     fn riggable() -> (
         tokio::sync::watch::Sender<Option<ShutdownSignal>>,
         ShutdownListener,
@@ -153,7 +153,7 @@ mod tests {
     /// The property that makes one listener correct for a whole loop. The
     /// shape this replaced rebuilt its signal future every iteration, and
     /// a freshly built one only observes signals delivered after it
-    /// registers — so a signal arriving between two iterations was lost.
+    /// registers - so a signal arriving between two iterations was lost.
     #[tokio::test]
     async fn a_waiter_that_arrives_after_the_signal_still_observes_it() {
         let (tx, listener) = riggable();
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(seen, ShutdownSignal::Terminate);
     }
 
-    /// A waiter already parked when the signal arrives sees it too — the
+    /// A waiter already parked when the signal arrives sees it too - the
     /// ordinary case, asserted so a future refactor cannot fix one
     /// direction by breaking the other.
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Phase 10C T8 — Chunking and lazy iteration on `Builder<M>`.
+//! Phase 10C T8 - Chunking and lazy iteration on `Builder<M>`.
 //!
 //! Seven streaming entry points: `chunk` (OFFSET batches),
 //! `chunk_by_id` (PK-cursor batches, concurrent-safe), `chunk_map`
@@ -7,7 +7,7 @@
 //! (custom batch size), `cursor` (Laravel alias for `lazy`).
 //!
 //! All seven memory-bound by their respective batch size and reject
-//! eager loads up front — chunking-with-`.with(...)` would silently
+//! eager loads up front - chunking-with-`.with(...)` would silently
 //! drop the eager plan during the cross-batch builder clone, so we
 //! surface it as a loud error instead.
 
@@ -58,7 +58,7 @@ async fn fixture(rows: u64) -> TestDatabase {
 #[tokio::test]
 async fn chunk_iterates_all_rows_in_batches() {
     // 25 rows / 10 per chunk = [10, 10, 5]. Pins the OFFSET-paginated
-    // shape against under- and over-shoot — the last batch is short,
+    // shape against under- and over-shoot - the last batch is short,
     // the loop must terminate exactly once the partial batch lands.
     let _db = fixture(25).await;
 
@@ -124,7 +124,7 @@ async fn chunk_by_id_safe_under_concurrent_inserts() {
     // never duplicate or skip an original row).
     //
     // This is the canonical pattern for production-grade bulk
-    // processing — OFFSET-based `chunk` skips/duplicates rows when
+    // processing - OFFSET-based `chunk` skips/duplicates rows when
     // the table shifts mid-iteration.
     let _db = fixture(20).await;
 
@@ -138,7 +138,7 @@ async fn chunk_by_id_safe_under_concurrent_inserts() {
                 // Simulate a concurrent insert mid-iteration. The
                 // inserted row's PK is above any seen so far; it
                 // either lands in a later batch or terminates the
-                // walk depending on timing — but never causes an
+                // walk depending on timing - but never causes an
                 // original row to skip or duplicate.
                 T8Order::create(attrs! { amount: 99999_i64 })
                     .await
@@ -158,7 +158,7 @@ async fn chunk_by_id_safe_under_concurrent_inserts() {
 
 #[tokio::test]
 async fn chunk_by_id_short_last_batch_terminates() {
-    // 12 rows / 5 per chunk: [5, 5, 2] — last batch is short, the
+    // 12 rows / 5 per chunk: [5, 5, 2] - last batch is short, the
     // `count < n` branch must terminate cleanly.
     let _db = fixture(12).await;
     let mut sizes = Vec::new();
@@ -174,7 +174,7 @@ async fn chunk_by_id_short_last_batch_terminates() {
 
 #[tokio::test]
 async fn chunk_zero_n_errors() {
-    // `chunk(0)` would issue `LIMIT 0` forever — same hazard
+    // `chunk(0)` would issue `LIMIT 0` forever - same hazard
     // `paginate(0)` / `simple_paginate(0)` / `cursor_paginate(0)`
     // reject up front with `FrameworkError::param`. Pin the parity.
     let _db = fixture(5).await;
@@ -187,7 +187,7 @@ async fn chunk_zero_n_errors() {
 
 #[tokio::test]
 async fn chunk_by_id_zero_n_errors() {
-    // Same explicit-parameter-error contract as `chunk(0)` — a zero
+    // Same explicit-parameter-error contract as `chunk(0)` - a zero
     // batch size has no defensible meaning and must surface loudly.
     let _db = fixture(5).await;
     let err = T8Order::query()
@@ -285,7 +285,7 @@ async fn lazy_streams_rows_one_at_a_time() {
 #[tokio::test]
 async fn lazy_by_id_respects_custom_batch_size() {
     // Custom batch size doesn't change the consumer-visible stream
-    // shape — same rows in the same order. The contract is that
+    // shape - same rows in the same order. The contract is that
     // internal round-trip count changes; user code can't observe
     // it directly except by row order.
     let _db = fixture(7).await;
@@ -368,7 +368,7 @@ async fn chunk_with_eager_load_returns_error() {
 async fn chunk_by_id_with_eager_load_returns_error() {
     // `chunk_by_id` shares the same per-batch builder.clone() loop as
     // `chunk` and the same eager-spec drop hazard. The rejection has
-    // been in place since Phase 10C T8 but had no regression test —
+    // been in place since Phase 10C T8 but had no regression test -
     // surfaced by the AF3 audit, pinned here so the guard at
     // `framework/src/eloquent/builder.rs:2419-2423` doesn't silently
     // disappear in a future refactor.

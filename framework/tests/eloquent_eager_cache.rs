@@ -1,4 +1,4 @@
-//! Phase 10B Task 1 — `EagerLoadCache` storage type for eager-loaded
+//! Phase 10B Task 1 - `EagerLoadCache` storage type for eager-loaded
 //! relation rows + aggregates.
 
 use suprnova::EagerLoadCache;
@@ -83,7 +83,7 @@ fn eager_cache_has_returns_truth() {
 
 #[test]
 fn eager_cache_clone_is_deep() {
-    // Required because models implement Clone — the cache must clone
+    // Required because models implement Clone - the cache must clone
     // too, not share state.
     let mut a = EagerLoadCache::new();
     a.set_many(

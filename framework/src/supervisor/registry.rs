@@ -19,7 +19,7 @@ use super::Supervisor;
 
 /// A compile-time registry entry for a supervised task.
 ///
-/// Submitted via `inventory::submit!` — typically at the bottom of the file
+/// Submitted via `inventory::submit!` - typically at the bottom of the file
 /// that defines the [`Supervisor`] implementation:
 ///
 /// ```rust,ignore

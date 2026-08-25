@@ -1,4 +1,4 @@
-//! Phase 10A T7b — Structured + enum casts + `with_casts` runtime
+//! Phase 10A T7b - Structured + enum casts + `with_casts` runtime
 //! override.
 //!
 //! Same model-hoisting convention as T7a: each test's model lives at
@@ -10,7 +10,7 @@
 //! cleanly without a custom impl. The final two tests exercise the
 //! `Builder<M>::with_casts(...)` runtime override path: one with
 //! well-formed data (proves the pipeline runs end-to-end), one with
-//! malformed data (proves the cast actually fires — without it the
+//! malformed data (proves the cast actually fires - without it the
 //! query succeeds; with it the cast errors).
 //!
 //! T7c finishes the cast surface with encrypted + hashed casts.
@@ -126,7 +126,7 @@ pub struct WcParseFailModel {
 // so the storage shape (`i64`) differs from the runtime shape (`bool`).
 // The override-semantic test below replaces the static cast with a
 // runtime `AsInt<i64>` cast and asserts the runtime cast saw the
-// storage shape — proving runtime casts bypass static casts entirely,
+// storage shape - proving runtime casts bypass static casts entirely,
 // not stack on top of them.
 #[model(
     table = "t7b_override",
@@ -187,7 +187,7 @@ async fn as_collection_wraps_vec_in_collection() {
         .unwrap();
     let read = ColModel::find(made.id).await.unwrap().unwrap();
     assert_eq!(read.items.len(), 3);
-    // Deref to slice works — Collection<T>::Deref::Target = [T].
+    // Deref to slice works - Collection<T>::Deref::Target = [T].
     assert_eq!(&read.items[0], "a");
 }
 
@@ -272,7 +272,7 @@ async fn with_casts_bypasses_static_casts_entirely() {
     // then call `with_casts` setting an unrelated column. If the static
     // pipeline were still running, the bool field would land in `M` as
     // `true`/`false`. With the bypass semantic it lands in raw storage
-    // shape (`i64`), which fails to deserialize into `M.flag: bool` —
+    // shape (`i64`), which fails to deserialize into `M.flag: bool` -
     // proving the static cast did NOT run.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared(
@@ -293,7 +293,7 @@ async fn with_casts_bypasses_static_casts_entirely() {
     // With a runtime cast set on an unrelated column (`id` here), the
     // static cast pipeline is bypassed for ALL columns. The `flag`
     // column comes back as raw i64 (storage shape), which fails to
-    // deserialize into the user's `bool` field — surfacing as a
+    // deserialize into the user's `bool` field - surfacing as a
     // FrameworkError.
     let result = OverrideModel::query()
         .with_casts(suprnova::casts! { id = AsInt<i64> })
@@ -310,7 +310,7 @@ async fn with_casts_pipeline_actually_runs_proven_by_parse_failure() {
     // Stored data: a non-date string. Without a runtime cast, the
     // query succeeds (the model's String field accepts anything). With
     // an AsDate runtime cast, the pipeline tries to parse "not-a-date"
-    // as a NaiveDate at decode time and the parse fails — surfacing as
+    // as a NaiveDate at decode time and the parse fails - surfacing as
     // a FrameworkError. This unambiguously proves the cast actually ran.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared(

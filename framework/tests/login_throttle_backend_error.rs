@@ -1,10 +1,10 @@
-//! M46 — `LoginThrottleMiddleware` backend-error policy. This file
+//! M46 - `LoginThrottleMiddleware` backend-error policy. This file
 //! intentionally does NOT initialize magnetar: with no magnetar bound the
 //! `BruteForce::get_lockout_status` call errors out via `instance()?`,
 //! letting us exercise the FailClosed / FailOpen branches end-to-end.
 //!
 //! The matching magnetar-bound integration tests live in
-//! `framework/tests/brute_force.rs` — those cover the locked /
+//! `framework/tests/brute_force.rs` - those cover the locked /
 //! unlocked paths where the backend returns a real `LockoutStatus`.
 
 use std::convert::Infallible;
@@ -93,7 +93,7 @@ fn email_extractor() -> impl Fn(&suprnova::Request) -> Option<String> + Send + S
     |req: &suprnova::Request| req.header("X-Login-Email").map(|s| s.to_string())
 }
 
-/// `LoginThrottleMiddleware` default policy is `FailClosed` — when the
+/// `LoginThrottleMiddleware` default policy is `FailClosed` - when the
 /// backend errors (no magnetar bound here), the middleware MUST refuse
 /// the request with 503 + `Retry-After: 1` rather than letting it
 /// through to the login handler.

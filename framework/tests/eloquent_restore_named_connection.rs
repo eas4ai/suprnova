@@ -6,7 +6,7 @@
 //! called `ExecutorChoice::resolve()`, which only consults
 //! `CURRENT_TX` and then falls back to `DB::connection()?`. A model
 //! tagged `#[model(connection = "alt")]` had every write-side
-//! method route through `alt` — except `restore()`, which landed
+//! method route through `alt` - except `restore()`, which landed
 //! on the primary pool instead. The fix routes restore through
 //! `ExecutorChoice::resolve_write(None, None,
 //! Self::default_connection_name())`, exactly matching `create` /
@@ -30,7 +30,7 @@ pub struct RncUser {
 #[tokio::test]
 #[serial]
 async fn restore_routes_through_per_model_named_connection() {
-    // Primary pool is a fresh empty in-memory SQLite — it does NOT
+    // Primary pool is a fresh empty in-memory SQLite - it does NOT
     // have an `rnc_users` table. If `restore()` were still routing
     // through `DB::connection()?` (the buggy resolve() path) it
     // would crash with "no such table: rnc_users" on the primary.
@@ -38,7 +38,7 @@ async fn restore_routes_through_per_model_named_connection() {
 
     // Register `alt` as a separate in-memory pool with the table
     // present + a pre-seeded soft-deleted row. The full 5-step
-    // precedence chain — driven by `#[model(connection = "alt")]` —
+    // precedence chain - driven by `#[model(connection = "alt")]` -
     // must steer the restore here.
     let alt_conn = sea_orm::Database::connect("sqlite::memory:?mode=rwc")
         .await
@@ -55,7 +55,7 @@ async fn restore_routes_through_per_model_named_connection() {
         )
         .await
         .unwrap();
-    // Pre-seed a trashed row directly on `alt` — bypassing the model
+    // Pre-seed a trashed row directly on `alt` - bypassing the model
     // so the test setup never touches the (table-less) primary. The
     // assertion below targets restore() specifically.
     alt.inner()
@@ -129,7 +129,7 @@ async fn restore_routes_through_per_model_named_connection() {
 }
 
 /// The soft-delete `delete()` and `force_delete()` write paths must
-/// route through `#[model(connection = "alt")]` too — the same defect
+/// route through `#[model(connection = "alt")]` too - the same defect
 /// `restore()` had. (`touch()` shares the identical `resolve_write`
 /// routing and is covered by the same fix.) Before the fix these
 /// resolved through `DB::connection()?` (primary), which has no
@@ -194,7 +194,7 @@ async fn soft_delete_and_force_delete_route_through_per_model_named_connection()
         "deleted_at must be set on the alt row",
     );
 
-    // Hard-delete row 2 via force_delete — also must land on `alt`.
+    // Hard-delete row 2 via force_delete - also must land on `alt`.
     let bob = RncUser::find(2i64)
         .await
         .unwrap()

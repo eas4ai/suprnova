@@ -21,7 +21,7 @@ export interface LangShare {
 }
 
 /**
- * Minimal structural shape of an Inertia page object — matches
+ * Minimal structural shape of an Inertia page object - matches
  * `@inertiajs/vue3`'s `Page<T>` (and its React/Svelte equivalents)
  * without importing `@inertiajs/core` directly.
  */
@@ -39,13 +39,13 @@ let bundle: FluentBundle | null = null
 // Bumped on every successful/failed catalog load. `bundle` itself lives
 // outside Vue's reactivity system (a `FluentBundle` instance doesn't
 // survive being wrapped in a reactive Proxy), so `t()` reads this ref to
-// register as a dependency — components calling `t()` inside a template
+// register as a dependency - components calling `t()` inside a template
 // or `computed()` re-evaluate when the catalog changes.
 const catalogVersion: Ref<number> = ref(0)
 
 /**
  * Read the `lang` shared prop off `page`, then fetch and parse its
- * Fluent catalog. Safe to call on every Inertia navigation — the
+ * Fluent catalog. Safe to call on every Inertia navigation - the
  * `?v=<hash>` cache-buster on `catalog.url` makes a repeat fetch for an
  * unchanged locale a browser cache hit.
  *
@@ -79,7 +79,7 @@ export async function initLang(page: LangPage): Promise<void> {
     next.addResource(new FluentResource(source))
     bundle = next
   } catch {
-    // Offline, network failure, etc. — degrade to the raw-key fallback
+    // Offline, network failure, etc. - degrade to the raw-key fallback
     // below rather than leaving the page unable to render.
     bundle = null
   }
@@ -89,7 +89,7 @@ export async function initLang(page: LangPage): Promise<void> {
 /**
  * Translate `key`, formatting `args` into the message's Fluent
  * placeables. When no catalog is loaded (pre-`initLang`, a translator-less
- * app, or a fetch failure) or `key` has no entry, returns `key` itself —
+ * app, or a fetch failure) or `key` has no entry, returns `key` itself -
  * a missing translation should be visibly wrong, never a crashed page.
  */
 export function t(key: MessageKey, args?: Record<string, string | number>): string {

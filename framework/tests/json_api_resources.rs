@@ -106,7 +106,7 @@ async fn sparse_fieldsets_filter_attributes_per_type() {
         email: "alice@example.com".into(),
         password: "x".into(),
     };
-    // `?fields[users]=id` — "id" is the id field, so it lives at data.id,
+    // `?fields[users]=id` - "id" is the id field, so it lives at data.id,
     // not in attributes. Requesting only "id" should yield empty attributes.
     let fieldset = RequestFieldsetSet::from_query("fields[users]=id");
     let envelope = scope_fieldset(fieldset, async move {
@@ -157,11 +157,11 @@ async fn no_fieldset_param_returns_all_attributes() {
     assert_eq!(body["data"]["attributes"]["email"], "alice@example.com");
 }
 
-// ── Codex review finding 9 — fieldset URL decoding ────────────────────────
+// ── Codex review finding 9 - fieldset URL decoding ────────────────────────
 
 #[tokio::test]
 async fn sparse_fieldsets_decode_encoded_bracket_keys() {
-    // `%5B`/`%5D` are `[`/`]` — the type-key must be recognized after
+    // `%5B`/`%5D` are `[`/`]` - the type-key must be recognized after
     // the percent-decode pass.
     use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
 
@@ -238,7 +238,7 @@ async fn sparse_fieldsets_filter_relationships_per_spec() {
     assert!(
         envelope["data"].get("relationships").is_none(),
         "fields[posts]=title with no relationship in the allowlist must \
-         omit the relationships member entirely (spec §6.3 — sparse \
+         omit the relationships member entirely (spec §6.3 - sparse \
          fieldsets cover relationships, not just attributes)"
     );
 }
@@ -248,7 +248,7 @@ async fn sparse_fieldsets_keep_named_relationships_only() {
     use suprnova::resources::{RequestFieldsetSet, scope_fieldset};
 
     let post = make_post_with_author_and_tags();
-    // `author` is named — keep it. `tags` is not named — drop it.
+    // `author` is named - keep it. `tags` is not named - drop it.
     let fieldset = RequestFieldsetSet::from_query("fields[posts]=title,author");
     let envelope = scope_fieldset(fieldset, async move {
         let resp = Resource::single(post).render().await.unwrap();
@@ -795,7 +795,7 @@ async fn resource_meta_emitted_per_resource() {
 
 #[tokio::test]
 async fn empty_resource_links_member_omitted() {
-    // Default impl returns empty — no `links` key on the resource
+    // Default impl returns empty - no `links` key on the resource
     // object means the spec's "may" stays "absent".
     let user = UserResource {
         id: 1,

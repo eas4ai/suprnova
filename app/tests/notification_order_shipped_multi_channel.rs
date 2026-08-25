@@ -1,9 +1,9 @@
-//! Polish Item 2 — multi-channel `OrderShipped` end-to-end dogfood.
+//! Polish Item 2 - multi-channel `OrderShipped` end-to-end dogfood.
 //!
 //! Sets up real channels: `MailChannel` against an `InMemoryMailTransport`
 //! plus `DatabaseChannel` against an in-memory sqlite that has been
 //! migrated with the production notifications schema. A single
-//! `Notify::send` call must fan out to both channels — the mail must
+//! `Notify::send` call must fan out to both channels - the mail must
 //! land in the transport's capture buffer with the rendered subject/
 //! body produced by `OrderShipped::to_mail`, AND a row must land in
 //! the `notifications` table.
@@ -44,7 +44,7 @@ impl Notifiable for User {
 const NOTIFICATIONS_MIGRATION: &str =
     include_str!("../../framework/migrations/20260516_create_notifications_table.sql");
 
-// Naive — truncates at the first `--` in each line. Safe ONLY because
+// Naive - truncates at the first `--` in each line. Safe ONLY because
 // the embedded migration has no quoted string literals containing
 // "--". Mirrors `framework/tests/notification_database.rs`.
 fn strip_sql_line_comments(src: &str) -> String {
@@ -88,7 +88,7 @@ async fn order_shipped_dispatches_to_mail_and_database() {
         .register_channel(Arc::new(DatabaseChannel::new(db.clone(), "users")));
     let _ = suprnova::notifications::set_dispatcher(Arc::new(dispatcher));
 
-    // One Notify::send — fans out across both registered channels.
+    // One Notify::send - fans out across both registered channels.
     Notify::send(
         &User {
             id: 42,

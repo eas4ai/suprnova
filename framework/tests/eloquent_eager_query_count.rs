@@ -1,21 +1,21 @@
 //! Regression for the batched nested eager loader.
 //!
 //! `with(["posts.comments"])` previously recursed the tail segment
-//! per-parent — one comments query per user (N+1). The fix gathers every
+//! per-parent - one comments query per user (N+1). The fix gathers every
 //! parent's children into one slice, issues a single IN query for the
 //! next segment, recurses once, then redistributes the children back to
 //! their original parents.
 //!
 //! Two properties are pinned here:
 //!
-//! 1. **Query count** — `with(["posts.comments"])` issues exactly one
+//! 1. **Query count** - `with(["posts.comments"])` issues exactly one
 //!    SELECT per level (base + posts + comments = 3), never one query per
 //!    parent (the N+1 the batched recurse exists to avoid). Eloquent
 //!    reads now route through the instrumented `ExecutorChoice`
 //!    terminals, so they surface in `DB::get_query_log()` and the count
 //!    is directly observable.
 //!
-//! 2. **Correct redistribution** — each parent gets back EXACTLY its own
+//! 2. **Correct redistribution** - each parent gets back EXACTLY its own
 //!    children after the batch. The dataset is deliberately asymmetric
 //!    (different child counts per parent, with content that encodes the
 //!    owning parent), so any mis-ordering in the take/put-back would hand
@@ -127,7 +127,7 @@ async fn batched_nested_eager_redistributes_children_to_correct_parents() {
                 "post u{u}-p{p} must own exactly its {} comments",
                 p + 1,
             );
-            // Every comment body must encode THIS post — the proof that
+            // Every comment body must encode THIS post - the proof that
             // the batched put-back returned each parent its own children.
             for comment in comments {
                 assert!(
@@ -140,7 +140,7 @@ async fn batched_nested_eager_redistributes_children_to_correct_parents() {
     }
 }
 
-/// The nested eager load issues exactly one SELECT per level — never one
+/// The nested eager load issues exactly one SELECT per level - never one
 /// per parent. Now that Eloquent reads route through the instrumented
 /// `ExecutorChoice` terminals, this is directly observable in the query
 /// log; before, the count was only guaranteed "by construction".

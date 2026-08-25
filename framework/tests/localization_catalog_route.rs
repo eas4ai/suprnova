@@ -1,4 +1,4 @@
-//! `GET /_suprnova/lang/<locale>.ftl` — the merged-catalog HTTP endpoint.
+//! `GET /_suprnova/lang/<locale>.ftl` - the merged-catalog HTTP endpoint.
 //!
 //! Drives the real `handle_request` short-circuit end to end through a
 //! socket, the same way `health_readiness_gate.rs` and
@@ -227,8 +227,8 @@ async fn if_none_match_304() {
 }
 
 /// End-to-end proof (task 5) that the catalog route needs no production
-/// change to serve a chained locale: `translator.catalog(&locale)` — the
-/// only thing `handle_request`'s short-circuit block touches — already
+/// change to serve a chained locale: `translator.catalog(&locale)` - the
+/// only thing `handle_request`'s short-circuit block touches - already
 /// returns the flattened document for a locale with a configured parent,
 /// exactly as it does for an unchained one. `pt-BR` carries two keys,
 /// `pt-PT` overrides one of them and configures `pt-BR` as its parent

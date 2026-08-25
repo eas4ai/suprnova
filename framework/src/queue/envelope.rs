@@ -36,7 +36,7 @@ pub fn queue_matches(envelope_queue: Option<&str>, queues: &[String]) -> bool {
 /// Wire-format envelope every queue driver round-trips on push and pop.
 ///
 /// Bumping fields requires a `schema_version` increment and a dual-read
-/// worker for one minor release — see the module docs.
+/// worker for one minor release - see the module docs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     /// Envelope schema version; rejected on pop if greater than
@@ -51,7 +51,7 @@ pub struct Envelope {
     /// [`Job::queue`](crate::queue::Job::queue), then the driver default.
     ///
     /// `None` means "the driver's default queue" and is what every envelope
-    /// written before routing existed deserializes to — the field is
+    /// written before routing existed deserializes to - the field is
     /// `serde(default)` and `Envelope` does not deny unknown fields, so old
     /// and new workers round-trip each other's envelopes without a
     /// `schema_version` bump.
@@ -97,7 +97,7 @@ pub struct Envelope {
     /// non-batched jobs.
     #[serde(default)]
     pub batch_id: Option<String>,
-    /// Tail of a queued chain — remaining links to dispatch after this
+    /// Tail of a queued chain - remaining links to dispatch after this
     /// envelope's handler reports success. Empty for non-chained jobs
     /// (the common case).
     #[serde(default)]
@@ -117,7 +117,7 @@ pub enum EnvelopeError {
 
 impl Envelope {
     /// Decode an envelope, accepting both schema v1 and v2. v1 envelopes
-    /// land with empty `batch_id` / `chain_remaining` via serde defaults —
+    /// land with empty `batch_id` / `chain_remaining` via serde defaults -
     /// the new fields don't change semantics for jobs that pre-date them.
     pub fn from_json(s: &str) -> Result<Self, EnvelopeError> {
         let env: Envelope = serde_json::from_str(s)?;

@@ -55,8 +55,8 @@ pub fn init_repository() -> &'static RwLock<ConfigRepository> {
 
 /// Register a config in the global repository.
 ///
-/// A poisoned write lock — possible if another thread panicked while
-/// holding the lock during boot — is recovered via
+/// A poisoned write lock - possible if another thread panicked while
+/// holding the lock during boot - is recovered via
 /// `PoisonError::into_inner` rather than silently dropping the
 /// registration. Silent failure here would mean a custom `DatabaseConfig`
 /// or `MailConfig` vanishes from the repository for the rest of the

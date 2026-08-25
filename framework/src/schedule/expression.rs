@@ -8,19 +8,19 @@ use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 /// Day of week enum for scheduling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DayOfWeek {
-    /// Sunday — cron numeric value `0`.
+    /// Sunday - cron numeric value `0`.
     Sunday = 0,
-    /// Monday — cron numeric value `1`.
+    /// Monday - cron numeric value `1`.
     Monday = 1,
-    /// Tuesday — cron numeric value `2`.
+    /// Tuesday - cron numeric value `2`.
     Tuesday = 2,
-    /// Wednesday — cron numeric value `3`.
+    /// Wednesday - cron numeric value `3`.
     Wednesday = 3,
-    /// Thursday — cron numeric value `4`.
+    /// Thursday - cron numeric value `4`.
     Thursday = 4,
-    /// Friday — cron numeric value `5`.
+    /// Friday - cron numeric value `5`.
     Friday = 5,
-    /// Saturday — cron numeric value `6`.
+    /// Saturday - cron numeric value `6`.
     Saturday = 6,
 }
 
@@ -97,7 +97,7 @@ struct FieldBounds {
     min: u32,
     /// Largest value accepted in this field (inclusive).
     max: u32,
-    /// Human label for error messages — `"minute"`, `"hour"`, etc.
+    /// Human label for error messages - `"minute"`, `"hour"`, etc.
     name: &'static str,
 }
 
@@ -316,7 +316,7 @@ impl CronExpression {
 
     /// Check if this expression is due for the supplied instant.
     ///
-    /// Exposed so tests can drive cron evaluation against a fixed clock —
+    /// Exposed so tests can drive cron evaluation against a fixed clock -
     /// the same-minute dedup test and any future timezone/DST test build a
     /// `DateTime<Local>` from a fixed `NaiveDateTime` rather than racing
     /// `tokio::time::pause()` against wall-clock advancement. Generic over
@@ -325,7 +325,7 @@ impl CronExpression {
     ///
     /// The day-of-month and day-of-week fields follow the Vixie/POSIX cron
     /// rule (which Laravel inherits): when *both* day fields are restricted
-    /// (neither is `*`), the expression fires when *either* matches — so
+    /// (neither is `*`), the expression fires when *either* matches - so
     /// `0 0 13 * 5` runs on the 13th of the month OR on any Friday. When at
     /// least one day field is `*`, the two combine with AND as usual. The
     /// minute, hour, and month fields always AND.
@@ -361,7 +361,7 @@ impl CronExpression {
     /// on parse failure) and [`try_at`](Self::try_at) (fallible).
     ///
     /// Range-checking (hour `0..=23`, minute `0..=59`) is intentionally
-    /// NOT performed here — the existing `at` surface accepts any `u32`
+    /// NOT performed here - the existing `at` surface accepts any `u32`
     /// for compatibility, and tightening it would change the accepted
     /// input set for the infallible form. Use
     /// [`try_daily_at`](Self::try_daily_at) when range validation is
@@ -389,7 +389,7 @@ impl CronExpression {
     ///
     /// `time` is a `HH:MM` 24-hour-clock string. On parse failure (wrong
     /// segment count or non-numeric segment) the modifier logs at
-    /// `tracing::warn!` and returns `self` unchanged — this preserves the
+    /// `tracing::warn!` and returns `self` unchanged - this preserves the
     /// existing builder ergonomics. Use [`try_at`](Self::try_at) when a
     /// malformed time should surface as an error instead of being silently
     /// swallowed.
@@ -422,7 +422,7 @@ impl CronExpression {
     ///
     /// Returns `Err` when `time` is not exactly two `:`-separated segments
     /// or when either segment fails to parse as `u32`. Range-checking
-    /// (hour `0..=23`, minute `0..=59`) is intentionally not performed —
+    /// (hour `0..=23`, minute `0..=59`) is intentionally not performed -
     /// use [`try_daily_at`](Self::try_daily_at) for that.
     pub fn try_at(mut self, time: &str) -> Result<Self, String> {
         let (hour, minute) = Self::parse_hh_mm(time)?;
@@ -459,8 +459,8 @@ impl CronExpression {
 
     /// Fallible sibling of [`every_n_minutes`](Self::every_n_minutes): returns
     /// `Err` instead of panicking when `n` is outside `1..=59`. (The infallible
-    /// helper's `# Panics` contract was previously unenforced — the cron parser
-    /// accepts any `u32` without range-checking — so a bad step silently
+    /// helper's `# Panics` contract was previously unenforced - the cron parser
+    /// accepts any `u32` without range-checking - so a bad step silently
     /// produced a never-firing schedule; this validates the contract.)
     ///
     /// # Errors
@@ -522,8 +522,8 @@ impl CronExpression {
     /// # Panics
     ///
     /// Panics if either numeric segment is out of cron range (hour `0..=23`,
-    /// minute `0..=59`). Pass a well-formed `"HH:MM"` to avoid the panic —
-    /// e.g. `"09:30"` or `"23:00"` — or use [`try_daily_at`](Self::try_daily_at).
+    /// minute `0..=59`). Pass a well-formed `"HH:MM"` to avoid the panic -
+    /// e.g. `"09:30"` or `"23:00"` - or use [`try_daily_at`](Self::try_daily_at).
     pub fn daily_at(time: &str) -> Self {
         Self::try_daily_at(time)
             .expect("daily_at: HH:MM segments must be in cron range (hour 0..=23, minute 0..=59)")
@@ -582,7 +582,7 @@ impl CronExpression {
     /// # Panics
     ///
     /// Panics if `day` is outside `1..=31`. Use a day-of-month value
-    /// the calendar can hit — months without a 31st silently skip
+    /// the calendar can hit - months without a 31st silently skip
     /// (this is cron-standard behaviour).
     pub fn monthly_on(day: u32) -> Self {
         Self::try_monthly_on(day).expect("monthly_on: `day` must be in 1..=31")
@@ -594,7 +594,7 @@ impl CronExpression {
     /// # Errors
     ///
     /// Returns `Err` when `day` is outside `1..=31` (the cron day-of-month
-    /// field width). Months without a 31st silently skip — that is
+    /// field width). Months without a 31st silently skip - that is
     /// cron-standard behaviour.
     pub fn try_monthly_on(day: u32) -> Result<Self, String> {
         if !(1..=31).contains(&day) {
@@ -808,7 +808,7 @@ mod tests {
             "month = 0 is below the 1..=12 floor"
         );
 
-        // Valid edge cases still parse — defends against regressions
+        // Valid edge cases still parse - defends against regressions
         // that would tighten the bounds incorrectly.
         assert!(CronExpression::parse("59 23 31 12 6").is_ok());
         assert!(CronExpression::parse("0 0 1 1 0").is_ok());
@@ -817,13 +817,13 @@ mod tests {
     #[test]
     fn parse_rejects_zero_step_in_steps() {
         // `*/0 * * * *` previously parsed as `Step(0)` and matched only
-        // value 0 — silently became "every hour at minute 0".
+        // value 0 - silently became "every hour at minute 0".
         let err = CronExpression::parse("*/0 * * * *").unwrap_err();
         assert!(
             err.contains("step") && err.contains("invalid"),
             "should reject `*/0` as a malformed step: {err}"
         );
-        // `5/0 * * * *` — StepFrom with zero step — same issue.
+        // `5/0 * * * *` - StepFrom with zero step - same issue.
         assert!(CronExpression::parse("5/0 * * * *").is_err());
 
         // Non-zero steps still parse.
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn parse_rejects_inverted_range() {
         // `5-1` previously built `Range(5, 1)` which `matches` never
-        // satisfied — a silent no-op schedule.
+        // satisfied - a silent no-op schedule.
         let err = CronExpression::parse("5-1 * * * *").unwrap_err();
         assert!(
             err.contains("range start") && err.contains("greater than end"),
@@ -864,7 +864,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_out_of_range_step_from_start() {
-        // `99/5 * * * *` — start is out of minute range; previously
+        // `99/5 * * * *` - start is out of minute range; previously
         // accepted silently.
         let err = CronExpression::parse("99/5 * * * *").unwrap_err();
         assert!(
@@ -879,7 +879,7 @@ mod tests {
     // when BOTH are restricted (neither is `*`), the expression fires when
     // EITHER matches. The previous all-fields-ANDed evaluation required the
     // 13th to also be a Friday, so `0 0 13 * 5` would only ever fire on a
-    // Friday-the-13th — silently dropping every other 13th and every other
+    // Friday-the-13th - silently dropping every other 13th and every other
     // Friday.
 
     /// Build a fixed local instant at midnight for OR-semantics tests.
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn both_day_fields_restricted_fires_on_either_match() {
-        // `0 0 13 * 5` — midnight on the 13th OR on any Friday.
+        // `0 0 13 * 5` - midnight on the 13th OR on any Friday.
         let expr = CronExpression::parse("0 0 13 * 5").unwrap();
 
         // 2026-06-13 is a Saturday (not Friday) but it IS the 13th -> fires
@@ -929,13 +929,13 @@ mod tests {
 
     #[test]
     fn one_day_field_wildcard_keeps_and_semantics() {
-        // `0 0 13 * *` — day-of-week is `*`, so only the 13th fires; an
+        // `0 0 13 * *` - day-of-week is `*`, so only the 13th fires; an
         // ordinary day must not.
         let dom_only = CronExpression::parse("0 0 13 * *").unwrap();
         assert!(dom_only.is_due_at(at_midnight(2026, 6, 13)));
         assert!(!dom_only.is_due_at(at_midnight(2026, 6, 14)));
 
-        // `0 0 * * 5` — day-of-month is `*`, so only Fridays fire.
+        // `0 0 * * 5` - day-of-month is `*`, so only Fridays fire.
         let dow_only = CronExpression::parse("0 0 * * 5").unwrap();
         let friday = at_midnight(2026, 6, 19);
         assert_eq!(friday.weekday(), chrono::Weekday::Fri);

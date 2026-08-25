@@ -58,7 +58,7 @@ impl Notification for PreludeOrderShipped {
 impl NotificationMailable for PreludeOrderShipped {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
         Ok(MailRendering {
-            subject: format!("Order shipped — tracking {}", self.tracking),
+            subject: format!("Order shipped - tracking {}", self.tracking),
             text: Some(format!("Tracking: {}", self.tracking)),
             ..Default::default()
         })
@@ -94,7 +94,7 @@ impl Job for PreludePingJob {
 #[tokio::test]
 #[serial]
 async fn prelude_covers_typical_mail_and_notification_flow() {
-    // Mail facade + Mailable + Address + MailFake — all from prelude.
+    // Mail facade + Mailable + Address + MailFake - all from prelude.
     let fake = Mail::fake();
     Mail::to("alice@example.org")
         .send(PreludeWelcome {
@@ -106,7 +106,7 @@ async fn prelude_covers_typical_mail_and_notification_flow() {
     fake.assert_sent(|m| m.subject == "Welcome aboard, Alice");
 
     // Notification facade + Notifiable + Notification + NotificationMailable
-    // + MailRendering + register_mail_renderer — all from prelude.
+    // + MailRendering + register_mail_renderer - all from prelude.
     let _ = register_mail_renderer::<PreludeOrderShipped>();
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
     let _ = set_dispatcher(Arc::new(dispatcher));
@@ -128,7 +128,7 @@ async fn prelude_covers_typical_mail_and_notification_flow() {
     assert!(last.subject.contains("1Z-PRELUDE"));
 }
 
-/// Reachability pin — every symbol in the curated prelude must be
+/// Reachability pin - every symbol in the curated prelude must be
 /// referenceable through `prelude::*` without further qualification.
 /// If a re-export is dropped or renamed in `prelude.rs`, this stops
 /// compiling.
@@ -147,7 +147,7 @@ fn every_prelude_symbol_is_reachable() {
         let _: Option<MailFake> = None;
         let _: Option<MailRendering> = None;
     }
-    // Facade types — pin them as ZST type references.
+    // Facade types - pin them as ZST type references.
     fn _facades() {
         let _: Option<Mail> = None;
         let _: Option<Notify> = None;
@@ -158,13 +158,13 @@ fn every_prelude_symbol_is_reachable() {
         let _: Option<Auth> = None;
         let _: Option<App> = None;
     }
-    // Function pointers — proves the items are reachable.
+    // Function pointers - proves the items are reachable.
     fn _functions() {
         let _: fn() = || {
             let _ = register_mail_renderer::<PreludeOrderShipped>();
         };
     }
-    // Traits in scope — referenced via where-clauses.
+    // Traits in scope - referenced via where-clauses.
     fn _traits<M, J, N, R>()
     where
         M: Mailable,

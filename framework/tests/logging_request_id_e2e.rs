@@ -5,7 +5,7 @@
 //! Driving `handle_request` is what makes the panic-boundary and
 //! built-in-endpoint behaviours testable: a handler panic is caught in
 //! `execute_chain_safely`, and the health endpoint short-circuits
-//! before the normal routing path — neither is reachable through a
+//! before the normal routing path - neither is reachable through a
 //! bare `chain.execute()`.
 
 use std::collections::HashMap;
@@ -124,7 +124,7 @@ fn router() -> Router {
             text("unreachable")
         })
         .get("/logs", |_req| async {
-            // Deliberately does NOT mention any request id — if the id
+            // Deliberately does NOT mention any request id - if the id
             // shows up in this event's captured output, it can only have
             // come from the surrounding `request` span context.
             tracing::info!(target: "span_probe", "handler executed");
@@ -180,7 +180,7 @@ async fn panic_response_echoes_a_fresh_request_id_when_none_supplied() {
 /// `request_id`, so a downstream handler's `tracing` event inherits the
 /// id as span context even though the event itself never mentions it.
 /// `logs_contain` matches against the formatted output, which includes
-/// the span-field prefix — so a hit proves the id propagated via the
+/// the span-field prefix - so a hit proves the id propagated via the
 /// span, not via the event. Without `.instrument(span)` the id would be
 /// absent from the handler's log line.
 #[tokio::test]
@@ -243,7 +243,7 @@ async fn health_endpoint_echoes_a_fresh_request_id_when_none_supplied() {
 }
 
 /// An unrouted path with no registered fallback hits the static 404, which
-/// still runs the RequestId + global middleware chain — so the 404 must
+/// still runs the RequestId + global middleware chain - so the 404 must
 /// carry `X-Request-Id`, keeping even not-found traffic correlatable.
 #[tokio::test]
 async fn default_404_echoes_request_id() {

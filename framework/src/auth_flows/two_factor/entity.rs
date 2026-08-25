@@ -1,6 +1,6 @@
 //! SeaORM entity for the framework-owned `two_factor_credentials` table.
 //!
-//! Holds per-user TOTP secrets and recovery codes — encrypted at rest
+//! Holds per-user TOTP secrets and recovery codes - encrypted at rest
 //! via [`crate::crypto::Crypt`]. The `user_id` is opaque (any stringy
 //! identifier the application uses, typically `UserId::to_string()`)
 //! and intentionally has no FK constraint so the schema is decoupled
@@ -44,7 +44,7 @@ pub struct Model {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// SeaORM relation enum — `two_factor_credentials` is a leaf table with
+/// SeaORM relation enum - `two_factor_credentials` is a leaf table with
 /// no declared foreign-key relations.
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}

@@ -1,4 +1,4 @@
-//! Cursor paginator — keyset-style pagination with encrypted cursors.
+//! Cursor paginator - keyset-style pagination with encrypted cursors.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
@@ -68,7 +68,7 @@ impl CursorDirection {
 /// field's presence.
 ///
 /// This shape is **not** identical to Laravel's
-/// `CursorPaginator::toArray()` — Laravel additionally emits
+/// `CursorPaginator::toArray()` - Laravel additionally emits
 /// `next_page_url` and `prev_page_url` (absolute URLs derived from
 /// `path` + cursor). Suprnova routes URL generation through the
 /// response-shape constructors that own URL context:
@@ -88,8 +88,8 @@ pub struct CursorPaginator<T> {
     /// The rows on this page.
     pub data: Vec<T>,
     /// Page size used to fetch this page. Mirrored from the call to
-    /// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate)
-    /// — useful when clients want to thread `?per_page=N` for parity
+    /// [`Builder::cursor_paginate`](crate::eloquent::Builder::cursor_paginate) -
+    /// useful when clients want to thread `?per_page=N` for parity
     /// with offset pagination.
     pub per_page: u64,
     /// Cursor to fetch the next page, or `None` at the last page.
@@ -97,13 +97,13 @@ pub struct CursorPaginator<T> {
     /// Cursor to fetch the previous page, or `None` on the first page
     /// (when the caller passed `cursor: None`).
     pub prev_cursor: Option<String>,
-    /// Optional base URL — clients that build full pagination URLs out
+    /// Optional base URL - clients that build full pagination URLs out
     /// of `next_cursor` / `prev_cursor` use this as the path prefix.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Query-string parameter name the JSON:API link builder uses when
     /// constructing the `next`/`prev` cursor URLs. `None` resolves to
-    /// `"cursor"` — the key [`Builder::cursor_paginate`] reads. Not
+    /// `"cursor"` - the key [`Builder::cursor_paginate`] reads. Not
     /// serialized; parallels [`LengthAwarePaginator::page_name`]
     /// (clients receive the cursor values and rebuild URLs their side).
     ///
@@ -166,7 +166,7 @@ impl<T> CursorPaginator<T> {
     /// `CursorPaginator::hasMorePages`, except that Laravel's cursor
     /// paginator considers itself "has more" only forward; Suprnova's
     /// cursor paginator is bidirectional and reports either direction
-    /// as a "more page" — matching the bidirectional surface levelled
+    /// as a "more page" - matching the bidirectional surface levelled
     /// in the 2026-05-29 closure.
     pub fn has_more_pages(&self) -> bool {
         self.next_cursor.is_some() || self.prev_cursor.is_some()
@@ -202,9 +202,9 @@ impl<T> CursorPaginator<T> {
 /// Wire envelope serialized into the cursor before encryption /
 /// base64.
 ///
-/// `t` is the SeaORM `Value` variant discriminator — exactly the
+/// `t` is the SeaORM `Value` variant discriminator - exactly the
 /// variant name (`"Int"`, `"BigInt"`, `"Uuid"`,
-/// `"ChronoDateTimeUtc"`, etc.) — so the decoded `Value` re-binds with
+/// `"ChronoDateTimeUtc"`, etc.) - so the decoded `Value` re-binds with
 /// the same SQL type the original column emitted. `v` is the value,
 /// JSON-serialized in the natural form for that variant. `d` is the
 /// scan direction (`"next"` or `"prev"`).
@@ -217,20 +217,20 @@ pub(crate) struct CursorPayload {
 
 impl<T> CursorPaginator<T> {
     /// Encode a typed boundary `sea_orm::Value` plus scan direction
-    /// into the wire cursor. The cursor is AES-256-GCM authenticated
-    /// — `Crypt` must be initialized (the framework guarantees this
+    /// into the wire cursor. The cursor is AES-256-GCM authenticated -
+    /// `Crypt` must be initialized (the framework guarantees this
     /// via `Server::from_config` at boot).
     ///
     /// Direct callers (controllers that build cursors outside
     /// `Pagination::cursor`) use this to produce a typed cursor over
-    /// a non-string boundary — pass a `Value::BigInt(...)`,
+    /// a non-string boundary - pass a `Value::BigInt(...)`,
     /// `Value::Uuid(...)`, etc. and `Pagination::cursor` will
     /// re-bind the same SQL type on decode.
     ///
     /// # Errors
     ///
     /// Returns `Err` if the SeaORM variant isn't a supported cursor
-    /// boundary or if `Crypt` is not initialized (defensive — should
+    /// boundary or if `Crypt` is not initialized (defensive - should
     /// be impossible after `Server::from_config`). Cursors must be
     /// signed; never emit an unsigned/forgeable cursor payload.
     pub fn encode_value(
@@ -247,7 +247,7 @@ impl<T> CursorPaginator<T> {
             FrameworkError::internal(format!("Cursor payload JSON encode failed: {e}"))
         })?;
         // `Crypt::encrypt_string` returns Err when Crypt isn't
-        // initialized — propagate verbatim. No plaintext base64
+        // initialized - propagate verbatim. No plaintext base64
         // fallback. Bound to `CryptPurpose::Cursor` so cursor
         // ciphertext cannot be replayed into any other surface
         // (cookie, 2FA secret, cast, etc.).
@@ -257,7 +257,7 @@ impl<T> CursorPaginator<T> {
     /// Decode the wire cursor into a typed `sea_orm::Value` plus the
     /// scan direction it was emitted with.
     ///
-    /// Cursors must be authenticated — there is no plaintext fallback
+    /// Cursors must be authenticated - there is no plaintext fallback
     /// even if `Crypt` is not initialized (which would itself be a
     /// boot bug). Any attempt to decode an unsigned base64 payload
     /// errors.
@@ -267,13 +267,13 @@ impl<T> CursorPaginator<T> {
     /// Cursors are read directly off the wire (typically the
     /// `?cursor=…` query string), so attacker-controlled garbage,
     /// tampered ciphertext, and bit-flipped base64 are the expected
-    /// failure modes — not server bugs. To keep client-triggerable
+    /// failure modes - not server bugs. To keep client-triggerable
     /// failures off the 500 telemetry channel:
     ///
     /// - The `Crypt::decrypt_string` step (base64 decode + AEAD tag
     ///   verification) is downgraded to a 400 `bad_request` carrying a
     ///   static "Invalid pagination cursor" message. The original
-    ///   cryptographic error is intentionally not surfaced — the
+    ///   cryptographic error is intentionally not surfaced - the
     ///   client gains no signal about why decryption failed, and
     ///   operators chasing real `Crypt` problems still see the post-
     ///   decrypt path's internal errors.
@@ -305,8 +305,8 @@ impl<T> CursorPaginator<T> {
     /// Encode a cursor boundary as a plain string. **Legacy helper**
     /// preserved only so callers that manually wrap a string cursor
     /// (e.g. controllers that don't go through `Pagination::cursor`)
-    /// keep working. New code should use `Pagination::cursor` directly
-    /// — the typed cursor encoding is automatic.
+    /// keep working. New code should use `Pagination::cursor` directly -
+    /// the typed cursor encoding is automatic.
     ///
     /// Internally this calls [`Self::encode_value`] with a
     /// `Value::String` variant and `CursorDirection::Next`.
@@ -316,9 +316,9 @@ impl<T> CursorPaginator<T> {
     /// Panics if `Crypt` is not initialized. The framework guarantees
     /// initialization in `Server::from_config`; if it isn't, the
     /// process never reached steady-state and emitting an unsigned
-    /// cursor would be a security bug. For a non-panicking form — in
+    /// cursor would be a security bug. For a non-panicking form - in
     /// library code, or anywhere outside the server's post-boot request
-    /// path where the `Crypt`-initialized invariant is not guaranteed —
+    /// path where the `Crypt`-initialized invariant is not guaranteed -
     /// use [`Self::try_encode_cursor`].
     pub fn encode_cursor(value: &str) -> String {
         Self::try_encode_cursor(value).expect(
@@ -327,7 +327,7 @@ impl<T> CursorPaginator<T> {
         )
     }
 
-    /// Fallible sibling of [`Self::encode_cursor`] — returns `Err`
+    /// Fallible sibling of [`Self::encode_cursor`] - returns `Err`
     /// instead of panicking when `Crypt` is not initialized. Prefer
     /// this anywhere the post-boot `Crypt` invariant is not guaranteed;
     /// it follows the framework's `try_*` convention for fallible
@@ -341,7 +341,7 @@ impl<T> CursorPaginator<T> {
 
     /// Decode a cursor produced by [`Self::encode_cursor`] /
     /// [`Self::try_encode_cursor`] back to its string payload.
-    /// **Legacy helper** — see [`Self::encode_cursor`].
+    /// **Legacy helper** - see [`Self::encode_cursor`].
     ///
     /// Errors when the wire cursor decodes to a non-`String` typed
     /// boundary (e.g. a `BigInt` cursor emitted by the typed
@@ -380,7 +380,7 @@ pub(crate) struct ScanPlan {
     /// `true` → fetch ASC (first page / forward step); `false` → fetch
     /// DESC (backward step, which the caller reverses back to ASC).
     pub order_asc: bool,
-    /// `Some((op, boundary))` keyset filter — `op` is `">"` (forward)
+    /// `Some((op, boundary))` keyset filter - `op` is `">"` (forward)
     /// or `"<"` (backward). `None` on the first page.
     pub filter: Option<(&'static str, sea_orm::Value)>,
     /// Direction this scan represents; drives the cursor computation in
@@ -401,7 +401,7 @@ pub(crate) struct PageFlags {
 }
 
 /// Resolve a decoded cursor (`None` = first page) into the scan to run.
-/// Pure — no query mechanics, no IO.
+/// Pure - no query mechanics, no IO.
 pub(crate) fn plan_scan(decoded: Option<(sea_orm::Value, CursorDirection)>) -> ScanPlan {
     match decoded {
         None => ScanPlan {
@@ -728,7 +728,7 @@ mod tests {
     static CURSOR_LOCK: Mutex<()> = Mutex::new(());
 
     fn ensure_key() {
-        // _test_install_key returns false if a key is already present —
+        // _test_install_key returns false if a key is already present -
         // that's fine; we just need *some* key in the OnceLock.
         let _ = crate::crypto::_test_install_key(crate::EncryptionKey::generate());
     }
@@ -851,8 +851,8 @@ mod tests {
 
     #[test]
     fn decode_cursor_errors_on_non_string_typed_cursor() {
-        // A typed (non-String) cursor — e.g. one produced by the typed
-        // `encode_value` path — must NOT silently Debug-stringify through
+        // A typed (non-String) cursor - e.g. one produced by the typed
+        // `encode_value` path - must NOT silently Debug-stringify through
         // the legacy String helper; it errors so a type mismatch surfaces.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
@@ -883,7 +883,7 @@ mod tests {
         ensure_key();
         let err = CursorPaginator::<i32>::decode_value("!!! not base64 !!!").unwrap_err();
         // Non-base64 noise off the wire is also a client error, not a
-        // server bug — 400, not 500.
+        // server bug - 400, not 500.
         assert_eq!(err.status_code(), 400, "got: {err}");
     }
 
@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn cursor_decode_post_decrypt_garbage_stays_500() {
         // After AEAD authentication, any payload-shape failure must
-        // have been emitted by us — so it stays a 500 the operator
+        // have been emitted by us - so it stays a 500 the operator
         // sees in telemetry, not a 400 the client sees. We synthesize
         // by encrypting a known-bad JSON payload (e.g. an unknown
         // variant tag): the ciphertext authenticates as ours but the
@@ -922,7 +922,7 @@ mod tests {
         ensure_key();
         // Mint under the Cursor purpose so the AEAD step authenticates
         // (the wire is "ours") and the post-decrypt JSON parse is what
-        // surfaces — otherwise the AEAD step would fail first and we'd
+        // surfaces - otherwise the AEAD step would fail first and we'd
         // get a 400 from the bad-cursor downgrade instead of the 500
         // we're asserting.
         let wire =
@@ -1065,8 +1065,8 @@ mod tests {
 
     #[test]
     fn value_int32_round_trip_preserves_variant() {
-        // Important: encoding an Int(i32) must decode back as Int —
-        // not BigInt — or Postgres int4 columns will see the wrong bind.
+        // Important: encoding an Int(i32) must decode back as Int -
+        // not BigInt - or Postgres int4 columns will see the wrong bind.
         let _g = CURSOR_LOCK.lock().unwrap();
         ensure_key();
         let v = sea_orm::Value::Int(Some(42_i32));
@@ -1156,25 +1156,25 @@ mod tests {
 
     #[test]
     fn predicates_track_cursor_presence() {
-        // First page — has next, no prev.
+        // First page - has next, no prev.
         let p = cursor_with(Some("NEXT"), None, vec![1, 2, 3]);
         assert!(p.on_first_page());
         assert!(!p.on_last_page());
         assert!(p.has_more_pages());
         assert!(p.has_pages());
-        // Middle page — both cursors present.
+        // Middle page - both cursors present.
         let p = cursor_with(Some("NEXT"), Some("PREV"), vec![4, 5, 6]);
         assert!(!p.on_first_page());
         assert!(!p.on_last_page());
         assert!(p.has_more_pages());
         assert!(p.has_pages());
-        // Last page — prev cursor, no next.
+        // Last page - prev cursor, no next.
         let p = cursor_with(None, Some("PREV"), vec![7, 8]);
         assert!(!p.on_first_page());
         assert!(p.on_last_page());
         assert!(p.has_more_pages());
         assert!(p.has_pages());
-        // Single page — neither cursor present.
+        // Single page - neither cursor present.
         let p = cursor_with(None, None, vec![1, 2]);
         assert!(p.on_first_page());
         assert!(p.on_last_page());

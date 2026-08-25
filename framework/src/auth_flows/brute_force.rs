@@ -31,10 +31,10 @@ fn locked_event_dedup() -> &'static Mutex<HashMap<String, DateTime<Utc>>> {
 /// email, `false` for every duplicate firing while the same lockout
 /// window is still active. Magnetar's `locked_until` is computed
 /// dynamically from the last failed attempt (each subsequent failure
-/// extends the window), so we can't dedupe on equality alone — we
+/// extends the window), so we can't dedupe on equality alone - we
 /// fire only when the previously-recorded lockout has lapsed (or no
 /// prior record exists). Lock-poisoning recovers in place via
-/// `into_inner` — a panicked listener has already left the dedup
+/// `into_inner` - a panicked listener has already left the dedup
 /// state healthy; we'd rather under-fire than abort the failed-login
 /// path.
 fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> bool {
@@ -46,10 +46,10 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
         .unwrap_or_else(|e| e.into_inner());
     let now = Utc::now();
     let fire = match guard.get(email) {
-        // Previous lockout window is still in effect — additional
+        // Previous lockout window is still in effect - additional
         // failed attempts inside it must not re-fire AccountLocked.
         Some(prev) if *prev > now => false,
-        // No prior fire, or the previous lockout has lapsed — this
+        // No prior fire, or the previous lockout has lapsed - this
         // is a fresh unlocked→locked transition.
         _ => true,
     };
@@ -58,7 +58,7 @@ fn should_fire_locked_once(email: &str, locked_until: Option<DateTime<Utc>>) -> 
         // Bounded eviction: every fresh insert sweeps stale entries
         // (those whose `locked_until` is already in the past) so the
         // map can't grow unbounded across the lifetime of the
-        // process. The sweep is amortised — we only do it on the
+        // process. The sweep is amortised - we only do it on the
         // "fire" branch, which by construction is rare (one per
         // lockout cycle per email).
         if guard.len() >= DEDUP_SWEEP_THRESHOLD {
@@ -112,7 +112,7 @@ impl BruteForce {
     ///
     /// Fires [`AccountLocked`] **only** on the unlocked → locked
     /// state transition. Subsequent calls while the account remains
-    /// locked do not re-fire the event — listeners can treat each
+    /// locked do not re-fire the event - listeners can treat each
     /// `AccountLocked` as a fresh security incident worth notifying.
     pub async fn record_failed_attempt(
         email: &str,
@@ -144,7 +144,7 @@ impl BruteForce {
         lockout_status(email).await
     }
 
-    /// Convenience check — `true` if the account is currently locked.
+    /// Convenience check - `true` if the account is currently locked.
     /// Equivalent to `get_lockout_status(email).await?.is_locked`.
     pub async fn is_locked(email: &str) -> Result<bool, FrameworkError> {
         Ok(Self::get_lockout_status(email).await?.is_locked)
@@ -154,7 +154,7 @@ impl BruteForce {
     /// successful authentication so a user's earlier typos don't
     /// linger toward a lockout.
     ///
-    /// Does **not** dispatch [`AccountUnlocked`] — `reset_attempts`
+    /// Does **not** dispatch [`AccountUnlocked`] - `reset_attempts`
     /// is the success-path bookkeeping operation, not an admin
     /// unlock. See [`BruteForce::unlock_account`] for the
     /// audit-event-firing variant.
@@ -168,7 +168,7 @@ impl BruteForce {
     ///
     /// Returns `true` if the account was previously locked (so a
     /// real state transition occurred), `false` otherwise. The
-    /// [`AccountUnlocked`] event fires **only** on `true` — see the
+    /// [`AccountUnlocked`] event fires **only** on `true` - see the
     /// module-level docs for rationale.
     pub async fn unlock_account(email: &str) -> Result<bool, FrameworkError> {
         let was_locked = unlock_account(email).await?;
@@ -184,7 +184,7 @@ impl BruteForce {
                 guard.remove(email);
             }
 
-            // Intentionally discard the dispatch error — the unlock has
+            // Intentionally discard the dispatch error - the unlock has
             // already committed; a downstream listener failure must not
             // surface as an unlock failure to the caller. The dispatcher
             // itself logs listener errors via tracing.
@@ -212,7 +212,7 @@ use std::sync::Arc;
 /// attempts.
 ///
 /// Composes naturally with [`crate::RateLimitMiddleware`] for IP-level
-/// throttling — this middleware handles **per-account** lockout, the
+/// throttling - this middleware handles **per-account** lockout, the
 /// rate-limit middleware handles per-IP / per-route quotas. Run both
 /// for a layered defence against credential stuffing.
 ///
@@ -235,7 +235,7 @@ use std::sync::Arc;
 /// * a query-string parameter (`?email=…`);
 /// * a route parameter (`/login/{email}`).
 ///
-/// Returning `None` is the explicit "I have nothing to check" signal —
+/// Returning `None` is the explicit "I have nothing to check" signal -
 /// the middleware passes the request through unchanged. This makes the
 /// middleware safe to install on routes that occasionally see anonymous
 /// traffic (e.g. the same `POST /login` endpoint that also handles
@@ -246,9 +246,9 @@ use std::sync::Arc;
 /// On lock the middleware returns:
 ///
 /// * HTTP `429 Too Many Requests`
-/// * `Retry-After: <seconds>` — computed from the lockout's
+/// * `Retry-After: <seconds>` - computed from the lockout's
 ///   `locked_until` timestamp via [`LockoutStatus::retry_after_seconds`].
-///   Falls back to 900 (15 minutes — Magnetar's default `lockout_period`)
+///   Falls back to 900 (15 minutes - Magnetar's default `lockout_period`)
 ///   if the timestamp is somehow absent.
 /// * Body: `"Account locked due to too many failed login attempts. Try again later."`
 ///
@@ -258,7 +258,7 @@ use std::sync::Arc;
 /// Magnetar outage), the middleware's response is governed by an
 /// explicit [`BackendErrorPolicy`] that defaults to
 /// [`BackendErrorPolicy::FailClosed`]: a 503 with `Retry-After: 1`.
-/// The login endpoint is the most sensitive route in the stack — an
+/// The login endpoint is the most sensitive route in the stack - an
 /// attacker who can degrade the backing store must not be able to
 /// bypass brute-force protection and resume credential-stuffing.
 /// Deployments that prefer to keep login available during a
@@ -288,7 +288,7 @@ use std::sync::Arc;
 ///     .middleware(throttle);
 /// ```
 /// Type-erased email-extractor closure stored inside
-/// [`LoginThrottleMiddleware`]. Sync over `&Request` — see the
+/// [`LoginThrottleMiddleware`]. Sync over `&Request` - see the
 /// middleware's docs for why body access isn't possible.
 type EmailExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static;
 
@@ -301,7 +301,7 @@ type EmailExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static
 /// `Retry-After` from `LockoutStatus::retry_after_seconds`). A
 /// backend error means the middleware cannot make a lockout
 /// decision at all, so it must choose between availability and the
-/// lockout guarantee — and for a credential-stuffing-sensitive
+/// lockout guarantee - and for a credential-stuffing-sensitive
 /// route, the right default is to refuse the request.
 ///
 /// This mirrors [`crate::rate_limit::BackendErrorPolicy`] for the
@@ -404,7 +404,7 @@ impl Middleware for LoginThrottleMiddleware {
 
         // 3. Compute Retry-After from `locked_until`. Magnetar's default
         //    `lockout_period` is 15 minutes (900s); fall back to that
-        //    if the timestamp is somehow absent (defensive — Magnetar
+        //    if the timestamp is somehow absent (defensive - Magnetar
         //    populates it whenever is_locked is true).
         let retry_after = status
             .retry_after_seconds()
@@ -423,7 +423,7 @@ impl Middleware for LoginThrottleMiddleware {
 mod login_throttle_policy_tests {
     use super::*;
 
-    /// `LoginThrottleMiddleware::new` must default to FailClosed —
+    /// `LoginThrottleMiddleware::new` must default to FailClosed -
     /// regression test for the policy default.
     #[test]
     fn default_policy_is_fail_closed() {
@@ -435,7 +435,7 @@ mod login_throttle_policy_tests {
         );
     }
 
-    /// `on_backend_error` is the builder method — assert the override
+    /// `on_backend_error` is the builder method - assert the override
     /// actually flips the field.
     #[test]
     fn on_backend_error_overrides_default_policy() {

@@ -1,4 +1,4 @@
-//! `HasMany` — one-to-many from parent to children.
+//! `HasMany` - one-to-many from parent to children.
 //!
 //! Mirrors Laravel's
 //! [`hasMany`](https://laravel.com/docs/12.x/eloquent-relationships#one-to-many)
@@ -8,7 +8,7 @@
 //! customisable through the macro's `fk = "..."` / `lk = "..."`
 //! options.
 //!
-//! Chainable — `user.posts().latest().take(5).get().await?` flows
+//! Chainable - `user.posts().latest().take(5).get().await?` flows
 //! through the inner [`Builder<R>`]. The dual-API surface
 //! (`filter` / `db_where`) is honoured on the wrapper too, matching
 //! the [`HasOne`](super::HasOne) shape so callers writing Laravel-
@@ -17,12 +17,12 @@
 //! The chainable surface covers `filter` / `db_where` / `order_by` /
 //! `latest` / `oldest` / `limit` / `take` and the terminal
 //! `first` / `get` / `count`. `latest()` / `oldest()` are sugar for
-//! `order_by("created_at", ...)` — they only resolve when the
+//! `order_by("created_at", ...)` - they only resolve when the
 //! related model declares a `created_at` column (which the
 //! `#[suprnova::model]` macro auto-adds when timestamps are on).
 //!
 //! Customisation flows through the `fk = "..."` / `lk = "..."` inline
-//! options on the relation declaration — the macro bakes the chosen
+//! options on the relation declaration - the macro bakes the chosen
 //! keys into the call to [`HasMany::__new`].
 //!
 //! Eager-load orchestration lives in the parent model's
@@ -67,7 +67,7 @@ where
 {
     /// Parent row's local-key value, JSON-encoded. Stored as
     /// `serde_json::Value` for the same reason
-    /// [`HasOne`](super::HasOne) does — the builder's `WhereTerm`
+    /// [`HasOne`](super::HasOne) does - the builder's `WhereTerm`
     /// storage holds JSON, and converting once at construction keeps
     /// the FK-typing flexibility (i64 / String / Uuid-via-string)
     /// without polluting every chainable call with a `T: IntoVal`
@@ -120,7 +120,7 @@ where
     /// method; not part of the public API.
     ///
     /// `parent_key_value` is the JSON-serialised parent PK (e.g.
-    /// `serde_json::to_value(&self.id)`) — the macro pays for the
+    /// `serde_json::to_value(&self.id)`) - the macro pays for the
     /// conversion once at construction so the builder's JSON-shaped
     /// `WhereTerm` storage stays homogeneous.
     #[doc(hidden)]
@@ -152,7 +152,7 @@ where
     }
 
     /// Override the LK column post-construction. Only updates the
-    /// metadata the [`Relation`] impl exposes — the inner builder
+    /// metadata the [`Relation`] impl exposes - the inner builder
     /// already holds the LK's *value* (extracted from the parent row
     /// at construction time), so the column name only matters for
     /// eager-load dispatchers reading [`Relation::parent_key`].
@@ -180,7 +180,7 @@ where
         self
     }
 
-    /// `ORDER BY created_at DESC` — Laravel-shape sugar.
+    /// `ORDER BY created_at DESC` - Laravel-shape sugar.
     ///
     /// Resolves only against models that declare a `created_at`
     /// column (which `#[suprnova::model]` auto-adds when timestamps
@@ -190,7 +190,7 @@ where
         self.order_by("created_at", Direction::Desc)
     }
 
-    /// `ORDER BY created_at ASC` — Laravel-shape sugar. See
+    /// `ORDER BY created_at ASC` - Laravel-shape sugar. See
     /// [`Self::latest`] for the timestamp-column caveat.
     pub fn oldest(self) -> Self {
         self.order_by("created_at", Direction::Asc)
@@ -218,7 +218,7 @@ where
 
     /// Execute the inner builder and return every matching child row.
     ///
-    /// Returns a [`Collection<R>`](crate::eloquent::Collection) — the
+    /// Returns a [`Collection<R>`](crate::eloquent::Collection) - the
     /// Laravel-shaped wrapper around `Vec<R>`. Slice-shape access
     /// (`.iter()`, `.len()`, indexing) works directly via
     /// `Deref<Target = [R]>`; call sites that need an owned `Vec`
@@ -229,7 +229,7 @@ where
     }
 
     /// Count children. Returns `i64` to match the inner
-    /// [`Builder::count`] surface — the per-row
+    /// [`Builder::count`] surface - the per-row
     /// `<rel>_count() -> u64` cache accessor lives on the parent
     /// struct (populated by `__count_relation` at eager-load time).
     pub async fn count(self) -> Result<i64, FrameworkError> {

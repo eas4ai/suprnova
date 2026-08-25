@@ -70,7 +70,7 @@ fn map_status(s: &StripeSubStatus) -> SubscriptionStatus {
         }
         StripeSubStatus::Paused => SubscriptionStatus::Paused,
         StripeSubStatus::Unpaid => SubscriptionStatus::PastDue,
-        // SubscriptionStatus is #[non_exhaustive] — surface new states as Incomplete (safest
+        // SubscriptionStatus is #[non_exhaustive] - surface new states as Incomplete (safest
         // default; callers should treat as not-yet-billable until clarified by a webhook).
         _ => SubscriptionStatus::Incomplete,
     }

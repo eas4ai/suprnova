@@ -4,7 +4,7 @@
 //! [`LengthAwarePaginator`][crate::pagination::LengthAwarePaginator]:
 //! it skips the `COUNT(*)` query entirely and instead fetches
 //! `per_page + 1` rows to detect whether a next page exists. Use it
-//! for large tables where a total row count is too expensive — every
+//! for large tables where a total row count is too expensive - every
 //! page costs one query instead of two.
 //!
 //! ## JSON shape
@@ -24,8 +24,8 @@
 //!
 //! `path` is omitted when unset.
 //!
-//! This shape is **not** identical to Laravel's `Paginator::toArray()`
-//! — Laravel additionally emits `current_page_url`, `first_page_url`,
+//! This shape is **not** identical to Laravel's `Paginator::toArray()` -
+//! Laravel additionally emits `current_page_url`, `first_page_url`,
 //! `next_page_url`, `prev_page_url`, and `from`/`to`. Suprnova routes
 //! URL generation through the response-shape constructors that own URL
 //! context (see [`Inertia::paginate`](crate::inertia::Inertia::paginate)
@@ -50,7 +50,7 @@ pub struct Paginator<T> {
     /// Computed by fetching `per_page + 1` rows and checking for the
     /// overflow.
     pub has_more: bool,
-    /// Optional base URL — `path?page=N` is the typical URL shape
+    /// Optional base URL - `path?page=N` is the typical URL shape
     /// clients build out of this paginator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,

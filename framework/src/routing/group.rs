@@ -105,7 +105,7 @@ impl GroupBuilder {
     /// (naming the offending method + full path) on a duplicate or
     /// malformed pattern instead of panicking.
     ///
-    /// A manual `TryFrom<GroupBuilder> for Router` is impossible — the
+    /// A manual `TryFrom<GroupBuilder> for Router` is impossible - the
     /// existing `From<GroupBuilder> for Router` triggers the std blanket
     /// `impl<T, U: Into<T>> TryFrom<U> for T` (with `Error = Infallible`),
     /// so a second `TryFrom` impl would be a conflicting implementation.
@@ -114,12 +114,12 @@ impl GroupBuilder {
     /// control at compile time.
     ///
     /// Path normalisation: prefix + inner path are joined on a single
-    /// canonical `/` boundary (`join_paths` — a child of `/` resolves to
+    /// canonical `/` boundary (`join_paths` - a child of `/` resolves to
     /// the prefix itself, a root `/` prefix contributes nothing) and then
     /// run through `convert_route_params` so Express-style `:id` segments
     /// are translated to matchit-style `{id}`. The same canonical pattern
     /// is used both for the matchit insert and for the middleware lookup
-    /// key — without that, group middleware on a parameterised route
+    /// key - without that, group middleware on a parameterised route
     /// would miss the dispatcher's lookup (it queries by matched pattern,
     /// not raw path).
     pub fn try_finalize(mut self) -> Result<Router, FrameworkError> {
@@ -130,7 +130,7 @@ impl GroupBuilder {
 
             // Insert into the appropriate method router using pub(crate)
             // fallible methods, and capture the canonical `hyper::Method` so
-            // middleware is keyed by (method, path) — sibling routes on the
+            // middleware is keyed by (method, path) - sibling routes on the
             // same path under different methods MUST NOT share middleware.
             let http_method = match route.method {
                 GroupMethod::Get => {
@@ -341,7 +341,7 @@ impl GroupRouter {
         )
     }
 
-    /// Register one handler against an explicit list of HTTP methods —
+    /// Register one handler against an explicit list of HTTP methods -
     /// Laravel `Route::match([...], ...)` in the fluent-group form.
     ///
     /// # Panics
@@ -349,7 +349,7 @@ impl GroupRouter {
     /// Panics if `methods` is empty or contains a verb other than
     /// GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS. Use
     /// [`GroupRouter::try_methods`] for a fallible sibling that
-    /// returns `Err(FrameworkError)` instead — the right choice when
+    /// returns `Err(FrameworkError)` instead - the right choice when
     /// the method list comes from a config file or other runtime
     /// source you can't validate at compile time.
     pub fn methods<H, Fut>(self, methods: &[Method], path: &str, handler: H) -> Self
@@ -515,7 +515,7 @@ mod tests {
     }
 
     /// Fluent `r.head(...)` registers explicit HEAD (the GET fallback
-    /// already runs without this — explicit HEAD is for the override
+    /// already runs without this - explicit HEAD is for the override
     /// case).
     #[test]
     fn fluent_group_registers_head_explicit() {
@@ -657,7 +657,7 @@ mod tests {
     }
 
     /// A root-prefix fluent group (`.group("/", …)`) registers child
-    /// paths verbatim — never `//login`-style unmatchable patterns.
+    /// paths verbatim - never `//login`-style unmatchable patterns.
     /// Mirrors the macro-group regression found by the Nebula kit.
     #[test]
     fn fluent_root_prefix_group_routes_match() {

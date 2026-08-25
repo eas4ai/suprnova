@@ -1,4 +1,4 @@
-//! Phase 10A T11 polish — auto-inject `AsDateTime` /
+//! Phase 10A T11 polish - auto-inject `AsDateTime` /
 //! `AsOptionalDateTime` for every `DateTime<Utc>` / `Option<DateTime<Utc>>`
 //! field on a `#[suprnova::model]` struct.
 //!
@@ -8,7 +8,7 @@
 //! `use sea_orm::entity::prelude::*` scope, which shadows
 //! `chrono::DateTime` with SeaORM's `NaiveDateTime` alias. So a bare
 //! `pub last_seen_at: DateTime<Utc>` on a Suprnova model would
-//! mis-compile inside the inner `Model` declaration — the storage
+//! mis-compile inside the inner `Model` declaration - the storage
 //! shape would be `NaiveDateTime` while the user reads `DateTime<Utc>`.
 //!
 //! Before this polish landed, T9 / T10 worked around the issue ONLY
@@ -16,10 +16,10 @@
 //! `deleted_at`). Any user-defined `DateTime<Utc>` column required a
 //! manual `casts = { last_seen_at = AsDateTime }` declaration. This
 //! generalisation auto-injects the right cast on every datetime
-//! field unless the user already declared one — closing the gap so
+//! field unless the user already declared one - closing the gap so
 //! `#[suprnova::model]` "just works" for natural timestamp shapes.
 //!
-//! User-declared casts on the same field still win — the auto-inject
+//! User-declared casts on the same field still win - the auto-inject
 //! is a fallback, not an override.
 
 use chrono::{DateTime, Utc};
@@ -57,7 +57,7 @@ async fn migrate_auto_dt_users(db: &TestDatabase) {
 
 #[tokio::test]
 async fn datetime_field_compiles_without_explicit_cast() {
-    // Bare existence — if the macro didn't auto-inject `AsDateTime`,
+    // Bare existence - if the macro didn't auto-inject `AsDateTime`,
     // this file wouldn't compile (SeaORM's DeriveEntityModel would
     // resolve `DateTime<Utc>` to `NaiveDateTime` and the
     // From<inner::Model> bridge would mismatch). The test reaching
@@ -99,7 +99,7 @@ async fn optional_datetime_field_null_round_trips() {
     let u = AutoDtUser::create(attrs! {
         name: "Alice",
         last_seen_at: Utc::now(),
-        // seen_count_at omitted — null in storage, None in runtime.
+        // seen_count_at omitted - null in storage, None in runtime.
     })
     .await
     .unwrap();

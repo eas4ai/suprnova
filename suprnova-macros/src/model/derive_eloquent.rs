@@ -1,6 +1,6 @@
 //! Emits Eloquent trait impls for the user's struct.
 //!
-//! Task 3 shipped the `EloquentModel` marker — enough to register the
+//! Task 3 shipped the `EloquentModel` marker - enough to register the
 //! type as a Suprnova model and bridge the user's struct name (e.g.
 //! `User`) to the inner-module SeaORM `Entity` / `Column` types
 //! (`user::Entity`, `user::Column`).
@@ -29,7 +29,7 @@ use super::serialization;
 pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let struct_ident = &input.item.ident;
     let module_name = input.module_name();
-    // The literal table string from the macro attribute — used in the
+    // The literal table string from the macro attribute - used in the
     // `const TABLE` initialiser further down. SeaORM 1.1's
     // `EntityName::table_name` isn't `const fn`, so we can't call it
     // here; the parser captured the same value the runtime would
@@ -37,7 +37,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let table = &input.table;
 
     // `touches` names relations, and both attributes are parsed from
-    // the same `#[model(...)]` invocation — so a name that doesn't
+    // the same `#[model(...)]` invocation - so a name that doesn't
     // resolve, or resolves to a kind the cascade can't write, is a
     // build error rather than a surprise on the first save.
     for name in &input.touches {
@@ -53,7 +53,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 return Err(syn::Error::new_spanned(
                     &rel.name,
                     format!(
-                        "`touches = [\"{name}\"]` needs a `BelongsTo` relation — `{name}` is \
+                        "`touches = [\"{name}\"]` needs a `BelongsTo` relation - `{name}` is \
                          declared as {:?}. Only the owning side of a relation can be touched; \
                          polymorphic (`MorphTo`) owners are not supported yet.",
                         rel.kind,
@@ -75,13 +75,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let pk_name = &input.primary_key;
     let pk_ident = quote::format_ident!("{pk_name}");
 
-    // Phase 10C T12 — emit a `default_connection_name` override when
+    // Phase 10C T12 - emit a `default_connection_name` override when
     // the user declared `#[model(connection = "name")]`. The trait
     // default returns `None` (i.e. "fall through to the routing
     // chain"); the override returns `Some(<literal>)` so the
     // `ExecutorChoice::resolve_{read,write}` steps 4 picks it up.
     //
-    // `__primary__` is legal here — it pins reads to the default
+    // `__primary__` is legal here - it pins reads to the default
     // pool even when a `__read_replica__` is registered. Any other
     // literal goes through `DB::named(name)` at resolve time.
     let default_connection_impl = match input.connection.as_deref() {
@@ -93,7 +93,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         None => quote! {},
     };
 
-    // T6 — wire the parsed `fillable = [...]` / `guarded = [...]`
+    // T6 - wire the parsed `fillable = [...]` / `guarded = [...]`
     // attributes into the per-model `fillable_filter()` impl. Mutual
     // exclusion was already enforced at parse time (parse.rs:67-72), so
     // the `(Some, Some)` arm here is unreachable.
@@ -122,7 +122,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // Exception: `#[model(unique_id = "...")]` models opt the
             // PK back into the fillable surface. The id is a generated
             // string and Laravel allows caller-supplied overrides for
-            // `HasUuids` / `HasUlids` models — Suprnova matches that.
+            // `HasUuids` / `HasUlids` models - Suprnova matches that.
             if input.unique_id.is_some() {
                 quote! {
                     fn fillable_filter() -> ::suprnova::eloquent::Fillable {
@@ -147,15 +147,15 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         _ => unreachable!("validated in derive_seaorm"),
     };
 
-    // Phase 10B T1 — exclude the auto-injected `__eager` / `__pivot`
+    // Phase 10B T1 - exclude the auto-injected `__eager` / `__pivot`
     // fields from every per-column code path. They're runtime scratch
     // state, not database columns, and the inner SeaORM Model doesn't
-    // have them — so `From<Model> for User`, `From<User> for Model`,
+    // have them - so `From<Model> for User`, `From<User> for Model`,
     // `apply_attrs_to_active_model`, `replicate_with`, and `fill` all
     // need to step around them. The two reverse paths
     // (`From<Model> for User`, `Default for User`, `replicate_with`)
     // that *construct* a `User` value initialise the two fields via
-    // `Default::default()` — `EagerLoadCache::default()` returns the
+    // `Default::default()` - `EagerLoadCache::default()` returns the
     // empty cache and `Option::None` is the pivot default.
     let field_idents: Vec<_> = fields
         .iter()
@@ -167,7 +167,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .collect();
     let field_strs: Vec<String> = field_idents.iter().map(|i| i.to_string()).collect();
 
-    // Phase 10C T5b — emit `field_value(&self, name) -> Option<Value>`
+    // Phase 10C T5b - emit `field_value(&self, name) -> Option<Value>`
     // off the same filtered field-ident slice that drives every other
     // per-column code path. The result is one match-arm per column
     // calling `serde_json::to_value(&self.<field>)`; unknown names
@@ -200,12 +200,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         __pivot: self.__pivot.clone(),
     };
 
-    // T7a — route per-field through `casts::apply_arm`. Fields with a
+    // T7a - route per-field through `casts::apply_arm`. Fields with a
     // declared cast (in `input.casts`) decode JSON → Runtime →
     // `Cast::to_storage` → ActiveModel; uncast fields use the same
     // direct `serde_json::from_value` shape as before T7a.
     //
-    // T8 — fields listed in `mutators = [...]` take precedence over
+    // T8 - fields listed in `mutators = [...]` take precedence over
     // the cast/direct apply paths. The mutator arm builds a scratch
     // `Self::default()`, calls `scratch.set_<field>(val)?`, then
     // serialises the transformed value back into JSON and feeds it
@@ -249,7 +249,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         });
 
-    // T8 — when the field name is in `mutators = [...]`, route
+    // T8 - when the field name is in `mutators = [...]`, route
     // through `s.set_<field>(value)?` so unsaved-instance builders
     // (`first_or_new`) apply the same transformation as `create` /
     // `update`. Non-mutator fields take the direct
@@ -258,7 +258,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // P2-10: that direct apply used to end in `.unwrap_or_default()`,
     // so a value of the wrong type became the field's `Default` and the
     // call returned `Ok`. `first_or_new({"age": "abc"})` produced a row
-    // with `age = 0` and no indication anything had gone wrong — the
+    // with `age = 0` and no indication anything had gone wrong - the
     // same silent-wrong-data class as P2-09(a)'s dropped eager loads,
     // and reachable wherever attrs are built from request input. The
     // enclosing `from_attrs_unsaved` already returns
@@ -302,7 +302,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // explicitly: PK as Unchanged (it's the WHERE clause), every other
     // field as Set.
     //
-    // T7a — cast fields route through `Cast::to_storage` here so the
+    // T7a - cast fields route through `Cast::to_storage` here so the
     // inner Model's Storage-typed field matches what `derive_seaorm`
     // emitted. Without this the ActiveModel write would type-check
     // against the user's Runtime type and miscompile.
@@ -315,7 +315,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 casts::active_model_update_stmt(ident, is_pk, input.cast_for_field(name))
             });
 
-    // T7a — read-direction arm for `From<inner::Model> for UserStruct`.
+    // T7a - read-direction arm for `From<inner::Model> for UserStruct`.
     // Cast fields call `Cast::from_storage` to inflate the storage
     // shape back into the runtime type.
     let from_storage_arms = field_idents
@@ -323,7 +323,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::from_storage_arm(ident, input.cast_for_field(name)));
 
-    // T7a — write-direction arm for `From<UserStruct> for inner::Model`.
+    // T7a - write-direction arm for `From<UserStruct> for inner::Model`.
     // Cast fields call `Cast::to_storage` to flatten the runtime
     // shape back into the storage type the inner Model expects.
     let to_storage_arms = field_idents
@@ -346,7 +346,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         .zip(field_strs.iter())
         .map(|(ident, name)| casts::try_to_storage_arm(ident, input.cast_for_field(name)));
 
-    // Phase 10C T6 — emit the `to_array` + `__append_accessor`
+    // Phase 10C T6 - emit the `to_array` + `__append_accessor`
     // overrides on the `Model` trait when the model declares any of
     // `hidden = [...]` / `visible = [...]` / `appends = [...]`. When
     // none of those attributes are declared, the emitters return empty
@@ -362,7 +362,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         serialization::emit_to_array_override(&input.hidden, visible_slice_opt, &input.appends);
     let append_accessor_dispatch = serialization::emit_append_accessor_dispatch(&input.appends);
 
-    // T8 — `fill` body arms. Mutator-routed fields call
+    // T8 - `fill` body arms. Mutator-routed fields call
     // `self.set_<field>(value.clone())?`; non-mutator fields
     // direct-assign via `serde_json::from_value(...)`. We skip the
     // duplicate match-pattern hazard by partitioning the lists.
@@ -378,7 +378,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             .zip(field_strs.iter())
             .filter_map(|(ident, name)| {
                 if mutators_list.iter().any(|m| m == name) {
-                    // Mutator-listed: skip — its arm is emitted above. Emitting
+                    // Mutator-listed: skip - its arm is emitted above. Emitting
                     // both arms would produce duplicate match patterns and a
                     // hard rustc error.
                     None
@@ -402,7 +402,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 }
             });
 
-    // T9 — auto-managed timestamps + `Touchable` impl + `touches`
+    // T9 - auto-managed timestamps + `Touchable` impl + `touches`
     // marker. The macro auto-detects timestamps in `parse.rs` (both
     // columns present → enabled, neither → disabled, partial →
     // compile_error) and auto-injects `AsDateTime` casts for the
@@ -428,7 +428,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     //   even on models without timestamps. Read by `Model::touch_owners`
     //   (framework/src/eloquent/model.rs), which runs one
     //   `UPDATE <owner> SET <updated_at> = NOW() WHERE <key> = ?` per
-    //   declared touch relation after create/update/delete — the cascade
+    //   declared touch relation after create/update/delete - the cascade
     //   is real, not a no-op.
     let timestamps_enabled = input.timestamps;
     let updated_at_col = &input.updated_at;
@@ -448,7 +448,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // When `#[model(unique_id = "uuid" | "uuid_v4" | "ulid")]` is set,
     // the macro emits two artifacts:
     //
-    //   1. `impl HasUniqueId for #struct_ident` — exposes the kind
+    //   1. `impl HasUniqueId for #struct_ident` - exposes the kind
     //      and the per-model generator override hook.
     //   2. A pre-INSERT inject block (`unique_id_inject_apply`) that
     //      checks whether the user supplied the PK; if not, the
@@ -490,7 +490,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
     let timestamp_inject_apply = if timestamps_enabled {
         quote! {
-            // Always bump updated_at — covers create() and
+            // Always bump updated_at - covers create() and
             // update(attrs) in one place.
             let __suprnova_now = ::suprnova::chrono::Utc::now();
             am.#updated_col_ident = ::suprnova::sea_orm::Set(
@@ -542,7 +542,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // task-local flag is on, touch() is a no-op.
                     // Mirrors Laravel's `Model::withoutTouching`. The
                     // per-type `without_touching_on::<Self, _, _>` scope
-                    // is the same silence, narrowed to this type — it's
+                    // is the same silence, narrowed to this type - it's
                     // exactly Laravel's `withoutTouchingOn([static::class])`.
                     if ::suprnova::eloquent::touches_disabled()
                         || ::suprnova::eloquent::touches_ignored_for(
@@ -561,8 +561,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         )?,
                     );
                     // Route through `resolve_write` so the timestamp
-                    // bump honours the full write-side precedence chain
-                    // — tx override → ambient CURRENT_TX → per-model
+                    // bump honours the full write-side precedence chain -
+                    // tx override → ambient CURRENT_TX → per-model
                     // `#[model(connection = ".")]` → primary. The bare
                     // `resolve()` only consults CURRENT_TX, silently
                     // ignoring per-model connection routing.
@@ -592,7 +592,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
     };
 
-    // T10 — soft deletes. When `#[model(soft_deletes)]` is set:
+    // T10 - soft deletes. When `#[model(soft_deletes)]` is set:
     //
     // - `Model::query()` overrides to auto-apply `filter_null("deleted_at")`
     //   so default reads skip trashed rows. `with_trashed()` /
@@ -603,7 +603,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // - Inherent `delete(self)` / `restore(self)` / `force_delete(self)`
     //   / `trashed(&self)` / `with_trashed()` / `only_trashed()` swap in
     //   the tombstone semantics. The lifecycle methods take `self` by
-    //   value to match `Model::delete(self)`'s signature — Rust's
+    //   value to match `Model::delete(self)`'s signature - Rust's
     //   method-resolution prefers an inherent method over a trait
     //   default only when they share auto-ref level, so an inherent
     //   `delete(&self)` override would silently lose to the trait's
@@ -622,8 +622,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             fn query() -> ::suprnova::Builder<Self> {
                 // Auto-apply the soft_deletes scope so default reads
                 // skip trashed rows. with_trashed() / only_trashed()
-                // build their own unscoped Builder directly — they
-                // don't go through query() — so we don't need a
+                // build their own unscoped Builder directly - they
+                // don't go through query() - so we don't need a
                 // runtime check here. The `"soft_deletes"` tag (set
                 // via `__disable_named_scope`) remains informational
                 // for Phase 10C's typed scope registry.
@@ -642,7 +642,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     // Trait-level `find` override for soft-delete models. The macro
     // also emits an inherent `find` (for ergonomic concrete-receiver
     // calls below), but Rust's method resolution picks the inherent
-    // only when the receiver is a concrete type — generic dispatch
+    // only when the receiver is a concrete type - generic dispatch
     // (`M::find(id)` with `M: Model`) walks the trait table and hits
     // the unscoped default, exposing trashed rows. Pinning the trait
     // method here closes that gap so route binding (`RouteParam<M>`),
@@ -674,7 +674,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         quote! {}
     };
 
-    // Phase 10C T4 — seed builder used by the global-scope opt-out
+    // Phase 10C T4 - seed builder used by the global-scope opt-out
     // helpers. Soft-delete models include the `deleted_at IS NULL`
     // filter so opt-out doesn't accidentally surface trashed rows;
     // soft-deletes is a separate path from the typed scope registry.
@@ -698,18 +698,18 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             impl #struct_ident {
                 /// Soft-delete: `UPDATE table SET deleted_at = NOW()
                 /// WHERE pk = ?` instead of DELETE. Takes `self` by
-                /// value to override `Model::delete(self)` cleanly —
+                /// value to override `Model::delete(self)` cleanly -
                 /// a `&self` inherent override would lose to the
                 /// trait default through auto-ref resolution.
                 ///
                 /// ## Lifecycle events (Phase 10C T1)
                 ///
-                /// 1. `Deleting { is_force: false }` — cancellable
+                /// 1. `Deleting { is_force: false }` - cancellable
                 /// 2. *UPDATE deleted_at lands*
                 /// 3. `Trashed`
                 /// 4. `Deleted { is_force: false }`
                 ///
-                /// Cancellation at step 1 aborts the UPDATE — the row
+                /// Cancellation at step 1 aborts the UPDATE - the row
                 /// stays alive. The `Trashed` event distinguishes
                 /// soft-deletes from hard-deletes for listeners that
                 /// only care about the tombstone case.
@@ -722,9 +722,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let table = <Self as ::suprnova::eloquent::EloquentModel>::TABLE;
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     // Route through `resolve_write` so the tombstone
-                    // UPDATE honours the full write-side precedence chain
-                    // — tx override → ambient CURRENT_TX → per-model
-                    // `#[model(connection = ".")]` → primary — matching
+                    // UPDATE honours the full write-side precedence chain -
+                    // tx override → ambient CURRENT_TX → per-model
+                    // `#[model(connection = ".")]` → primary - matching
                     // `restore()`. The bare `resolve()` only consults
                     // CURRENT_TX, silently ignoring per-model routing.
                     let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -769,11 +769,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ///
                 /// ## Lifecycle events (Phase 10C T1)
                 ///
-                /// 1. `Restoring` — cancellable
+                /// 1. `Restoring` - cancellable
                 /// 2. *UPDATE deleted_at = NULL lands*
                 /// 3. `Restored`
                 ///
-                /// Cancellation at step 1 aborts the UPDATE — the row
+                /// Cancellation at step 1 aborts the UPDATE - the row
                 /// stays trashed with `deleted_at` intact.
                 pub async fn restore(self) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                     <Self as ::suprnova::eloquent::events::ModelEventHooks>::__dispatch_restoring(&self).await?;
@@ -782,7 +782,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let pk_name = <Self as ::suprnova::eloquent::Model>::primary_key_name();
                     // Route through `resolve_write` (not `resolve`) so
                     // restores honour the full write-side precedence
-                    // chain — tx override → ambient CURRENT_TX → builder
+                    // chain - tx override → ambient CURRENT_TX → builder
                     // `on(name)` → per-model `#[model(connection = ".")]`
                     // → primary. The bare `resolve()` would only consult
                     // CURRENT_TX and fall back to `DB::connection()`,
@@ -846,13 +846,13 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ///
                 /// ## Lifecycle events (Phase 10C T1)
                 ///
-                /// 1. `Deleting { is_force: true }` — cancellable
+                /// 1. `Deleting { is_force: true }` - cancellable
                 /// 2. `ForceDeleting`
                 /// 3. *DELETE FROM lands*
                 /// 4. `ForceDeleted`
                 /// 5. `Deleted { is_force: true }`
                 ///
-                /// `Trashed` is NOT fired — the row is gone, not
+                /// `Trashed` is NOT fired - the row is gone, not
                 /// tombstoned. Listeners on `Deleted` can branch on
                 /// `is_force` to disambiguate from the soft-delete
                 /// path.
@@ -864,9 +864,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     let row: <<Self as ::suprnova::eloquent::EloquentModel>::Entity as ::suprnova::sea_orm::EntityTrait>::Model = self.into();
                     let am = <_ as ::suprnova::sea_orm::IntoActiveModel<_>>::into_active_model(row);
                     // Route through `resolve_write` so the hard DELETE
-                    // honours the full write-side precedence chain — tx
+                    // honours the full write-side precedence chain - tx
                     // override → ambient CURRENT_TX → per-model
-                    // `#[model(connection = ".")]` → primary — matching
+                    // `#[model(connection = ".")]` → primary - matching
                     // `restore()`. The bare `resolve()` only consults
                     // CURRENT_TX, silently ignoring per-model routing.
                     let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -887,7 +887,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                 /// Look up a row by primary key, honouring the
                 /// soft-delete scope. Inherent override of the trait
-                /// default — non-soft-delete models still use the
+                /// default - non-soft-delete models still use the
                 /// SeaORM `find_by_id` path. Bypass the scope via
                 /// `Self::with_trashed().filter(Self::primary_key_name(), id).first()`.
                 pub async fn find(
@@ -923,7 +923,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 }
 
                 /// Fetch every alive row (skips trashed). Inherent
-                /// override of the trait default — matches the trait
+                /// override of the trait default - matches the trait
                 /// `all` return type ([`Collection<Self>`](::suprnova::eloquent::Collection)).
                 pub async fn all() -> ::core::result::Result<
                     ::suprnova::eloquent::Collection<Self>,
@@ -934,12 +934,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
                 /// Fetch every alive row whose PK is in `ids` (skips
                 /// trashed). Result order is the database's natural
-                /// order — does not preserve `ids` order. Use
+                /// order - does not preserve `ids` order. Use
                 /// `Self::with_trashed().where_in(pk, ids).get()` to
                 /// include trashed rows.
                 ///
                 /// Returns `Vec<Self>` (not `Collection<Self>`) to match
-                /// the trait's `find_many` shape — it's a PK-set
+                /// the trait's `find_many` shape - it's a PK-set
                 /// lookup, not a generic query, so the Collection
                 /// surface is unnecessary.
                 pub async fn find_many<I>(
@@ -964,7 +964,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 
     // Soft-delete column for the `const SOFT_DELETES_COLUMN` initialiser
     // on `impl EloquentModel`. Empty when the model didn't opt into
-    // `#[model(soft_deletes)]` — the has/where-has engine treats `""` as
+    // `#[model(soft_deletes)]` - the has/where-has engine treats `""` as
     // "do not auto-apply the deleted_at IS NULL filter".
     let soft_deletes_column_const: &str = if input.soft_deletes {
         &input.soft_deletes_column
@@ -978,11 +978,11 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             type Column = #module_name::Column;
             // The declared primary-key Rust type. `key_type` is the
             // parsed `#[model(key_type = "...")]` attribute, defaulted
-            // to `i64` at parse time — the same type the inherent
+            // to `i64` at parse time - the same type the inherent
             // `find` / `find_many` signatures already use, so a model
             // whose key compiles there compiles here.
             type Key = #key_type;
-            // Literal table string captured at parse time — see T3
+            // Literal table string captured at parse time - see T3
             // for why this is the literal rather than a SeaORM call.
             const TABLE: &'static str = #table;
             // The macro-parsed primary key name. Mirrors the
@@ -993,12 +993,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             const PRIMARY_KEY: &'static str = #pk_name;
             // Soft-delete column when `#[model(soft_deletes)]` is set;
             // empty string otherwise. The existence engine consults
-            // this through the `RelationEntry` table — the related
+            // this through the `RelationEntry` table - the related
             // model's PK and soft-delete column are baked into each
             // relation's inventory entry at link time.
             const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
 
-            // Read by `Model::touch_owners`, which is a trait default —
+            // Read by `Model::touch_owners`, which is a trait default -
             // so this has to be a trait const, not an inherent one, or
             // the generic body can't see it.
             #touches_const
@@ -1169,7 +1169,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         //
         // The framework's blanket `impl<M, E> Persistable for M where
         // M: ModelTrait<Entity = E> + IntoActiveModel<...>` covers
-        // SeaORM Models — but the user-facing `#[suprnova::model]`
+        // SeaORM Models - but the user-facing `#[suprnova::model]`
         // struct (e.g. `User`) is NOT itself a `ModelTrait`. Adding a
         // second blanket impl gated on `EloquentModel` would conflict
         // with the existing one under Rust's coherence rules (the
@@ -1178,7 +1178,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         //
         // The bridge piggybacks on the From<...> impls emitted above:
         //   1. Convert `self` to the inner SeaORM Model (storage shape).
-        //   2. Hand off to `persist_via_seaorm` — which knows how to
+        //   2. Hand off to `persist_via_seaorm` - which knows how to
         //      flip the PK to NotSet so the database assigns the id.
         //   3. Convert the post-insert inner Model back to the
         //      Eloquent-facing struct (running `Cast::from_storage`
@@ -1195,9 +1195,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             async fn persist(self) -> ::core::result::Result<Self, ::suprnova::FrameworkError> {
                 let inner: #module_name::Model = self.into();
                 // Route through `resolve_write` so factory persists honour
-                // the full write-side precedence chain — tx override →
+                // the full write-side precedence chain - tx override →
                 // ambient CURRENT_TX → per-model `#[model(connection = ".")]`
-                // → primary — matching every other write path. The bare
+                // → primary - matching every other write path. The bare
                 // `resolve()` only consults CURRENT_TX, silently ignoring
                 // per-model connection routing.
                 let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -1243,7 +1243,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         }
 
-        // Phase 10C T6 — `to_json` / `to_array` moved off the inherent
+        // Phase 10C T6 - `to_json` / `to_array` moved off the inherent
         // surface and onto the `Model` trait. The trait defaults strip
         // `__eager` / `__pivot`; the per-model overrides (emitted
         // above when `hidden` / `visible` / `appends` is non-empty)
@@ -1262,7 +1262,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             /// filter declared on `#[model]` runs first, dropping any
             /// columns the caller isn't allowed to set. To bypass the
             /// filter, wrap the call in
-            /// [`::suprnova::eloquent::unguarded`] — the same
+            /// [`::suprnova::eloquent::unguarded`] - the same
             /// task-local escape hatch `Model::create` / `update`
             /// honour.
             pub fn fill(
@@ -1275,28 +1275,28 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     match k {
                         #(#fill_mutator_arms,)*
                         #(#fill_direct_arms,)*
-                        _ => {} // unknown column — silently skip (Laravel parity)
+                        _ => {} // unknown column - silently skip (Laravel parity)
                     }
                 }
                 ::core::result::Result::Ok(())
             }
         }
 
-        // Phase 10C T4 — global-scope opt-out static helpers.
+        // Phase 10C T4 - global-scope opt-out static helpers.
         //
         // The tricky bit: `Model::query()` applies registered scopes
         // EAGERLY (so every read path is auto-scoped). Calling
         // `Model::query().without_global_scopes()` would set the mask
-        // AFTER scopes have already mutated the builder — too late.
+        // AFTER scopes have already mutated the builder - too late.
         //
         // The fix: build a fresh `Builder` directly, stamp the mask
         // BEFORE running the registry, then dispatch into
         // `ScopeRegistry::apply_to` which honours the mask. For
         // soft-delete models we also layer the `deleted_at IS NULL`
         // filter on top, matching `Model::query()`'s soft-delete
-        // override — opt-out targets user-defined scopes only.
+        // override - opt-out targets user-defined scopes only.
         impl #struct_ident {
-            /// Phase 10C T4 — start a query that bypasses one global
+            /// Phase 10C T4 - start a query that bypasses one global
             /// scope by type. Other registered scopes still apply.
             /// Soft-delete filter (when `#[model(soft_deletes)]`) is
             /// preserved.
@@ -1316,9 +1316,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 ::suprnova::eloquent::scopes::ScopeRegistry::apply_to::<Self>(b)
             }
 
-            /// Phase 10C T4 — start a query that bypasses every
+            /// Phase 10C T4 - start a query that bypasses every
             /// registered global scope. Soft-delete filter (when
-            /// `#[model(soft_deletes)]`) is preserved — soft-deletes
+            /// `#[model(soft_deletes)]`) is preserved - soft-deletes
             /// don't route through the typed registry.
             ///
             /// ## Example
@@ -1335,22 +1335,22 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             }
         }
 
-        // Phase 10C T12 — per-model connection-routing entry points.
+        // Phase 10C T12 - per-model connection-routing entry points.
         // The trait-level [`Builder::on`] / [`Builder::on_write_connection`]
         // already exist; these inherent shortcuts let users write
         // `User::on("analytics")` instead of
         // `User::query().on("analytics")`, matching the Laravel shape.
         impl #struct_ident {
-            /// Phase 10C T12 — start a query routed through the named
+            /// Phase 10C T12 - start a query routed through the named
             /// connection. Equivalent to
             /// `<Self as Model>::query().on(name)`. Inside a
             /// `DB::transaction` closure the override is silently
-            /// ignored — every op runs through the tx connection.
+            /// ignored - every op runs through the tx connection.
             pub fn on(name: impl ::core::convert::Into<::std::string::String>) -> ::suprnova::Builder<Self> {
                 <Self as ::suprnova::eloquent::Model>::query().on(name)
             }
 
-            /// Phase 10C T12 — start a query routed through the
+            /// Phase 10C T12 - start a query routed through the
             /// primary pool, even when `__read_replica__` is
             /// registered. Use for read-your-writes scenarios where
             /// the replica might not have caught up.
@@ -1410,7 +1410,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::query().max(col).await
             }
 
-            /// `SELECT col FROM table` — returns one column from every row.
+            /// `SELECT col FROM table` - returns one column from every row.
             pub async fn pluck<T>(
                 col: impl ::suprnova::eloquent::builder::IntoColumn,
             ) -> ::core::result::Result<::std::vec::Vec<T>, ::suprnova::FrameworkError>
@@ -1420,7 +1420,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::query().pluck(col).await
             }
 
-            /// `SELECT key_col, val_col FROM table` — returns a `HashMap`
+            /// `SELECT key_col, val_col FROM table` - returns a `HashMap`
             /// keyed by `key_col`, valued by `val_col`.
             pub async fn pluck_keyed<K, V>(
                 key_col: impl ::suprnova::eloquent::builder::IntoColumn,
@@ -1438,7 +1438,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     .await
             }
 
-            /// Static-style `filter` — opens a `Builder<Self>` with
+            /// Static-style `filter` - opens a `Builder<Self>` with
             /// one equality WHERE clause already attached.
             #[doc(alias = "db_where")]
             pub fn filter(
@@ -1477,14 +1477,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 <Self as ::suprnova::eloquent::Model>::query().where_like(col, pattern)
             }
 
-            /// Static-style `latest` — `ORDER BY created_at DESC`. Models
+            /// Static-style `latest` - `ORDER BY created_at DESC`. Models
             /// without a `created_at` column will fail at the SQL layer;
             /// timestamp surface lands in T9.
             pub fn latest() -> ::suprnova::Builder<Self> {
                 <Self as ::suprnova::eloquent::Model>::query().order_by_desc("created_at")
             }
 
-            /// Static-style `oldest` — `ORDER BY created_at ASC`.
+            /// Static-style `oldest` - `ORDER BY created_at ASC`.
             pub fn oldest() -> ::suprnova::Builder<Self> {
                 <Self as ::suprnova::eloquent::Model>::query().order_by_asc("created_at")
             }

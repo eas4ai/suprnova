@@ -10,7 +10,7 @@ use async_trait::async_trait;
 /// (which is to say: all of them).
 ///
 /// Returns a [`SessionPayload`] tagged by `flow` so the frontend SDK can
-/// dispatch to the right widget — Stripe Elements, Paddle inline,
+/// dispatch to the right widget - Stripe Elements, Paddle inline,
 /// Mobile Money prompt, generic redirect, etc.
 #[async_trait]
 pub trait Checkout: Send + Sync {
@@ -25,7 +25,7 @@ pub trait Checkout: Send + Sync {
     /// This is the server-side verification primitive for redirect flows:
     /// a return page (or a reconciliation sweep) passes the
     /// `provider_session_id` it recorded at [`Self::start_session`] time
-    /// and gets back an authoritative [`CheckoutSessionState`] — never
+    /// and gets back an authoritative [`CheckoutSessionState`] - never
     /// trust the query parameters the customer's browser carried home.
     ///
     /// The default implementation returns [`PaymentError::NotSupported`];

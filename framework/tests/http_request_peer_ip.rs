@@ -62,7 +62,7 @@ async fn ip_resolves_from_peer_addr_when_no_proxy_header() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap().to_string();
 
-    // Body is the client IP — for a 127.0.0.1 connect, that's "127.0.0.1".
+    // Body is the client IP - for a 127.0.0.1 connect, that's "127.0.0.1".
     assert_eq!(body, "127.0.0.1", "got body: {body}");
 
     // Drop the sender to let the connection task drain; bound everything

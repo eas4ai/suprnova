@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `container` #291 — `TestContainer`
+//! Regression: HIGH audit finding `container` #291 - `TestContainer`
 //! is thread-local, not async-task scoped. `TEST_CONTAINER` is a
 //! `thread_local!`, and `App::get` / `App::make` consult it first. Tests
 //! that exercise async work on a `flavor = "multi_thread"` runtime can
@@ -10,7 +10,7 @@
 //! `TestContainer::scope(future)` helper that binds the override to the
 //! future itself, not the calling thread. `App::*` lookups consult the
 //! task-local first, then the existing thread-local, then the global
-//! container — so `TestContainer::fake()` keeps working for sync /
+//! container - so `TestContainer::fake()` keeps working for sync /
 //! current_thread callers while the new scope helper closes the
 //! multi-thread / future-migration hole.
 //!
@@ -21,7 +21,7 @@
 //!    by a different worker after the yield).
 //! 3. Two concurrent scopes don't bleed into each other.
 //! 4. Task-local takes precedence over thread-local when both are
-//!    active in the same call site (defensive — users shouldn't do
+//!    active in the same call site (defensive - users shouldn't do
 //!    this, but the precedence must be defined).
 
 use std::sync::Arc;
@@ -88,7 +88,7 @@ async fn scope_survives_yield_across_worker_threads() {
 async fn concurrent_scopes_do_not_bleed() {
     // Two scopes running concurrently must each see only their own
     // override. This is the load-bearing isolation guarantee for any
-    // test framework — if it fails, parallel test runs would be
+    // test framework - if it fails, parallel test runs would be
     // hopelessly flaky.
     let scope_a = TestContainer::scope(async {
         TestContainer::bind::<dyn Tagger>(Arc::new(TagA));

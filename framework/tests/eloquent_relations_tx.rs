@@ -1,4 +1,4 @@
-//! Phase 10C audit-fix AF1 — eager relation arms honor CURRENT_TX.
+//! Phase 10C audit-fix AF1 - eager relation arms honor CURRENT_TX.
 //!
 //! The Phase 10C closeout audit found that several macro-emitted eager
 //! arms issue raw `query_all(db, stmt)` against the pool connection,
@@ -6,14 +6,14 @@
 //! `DB::transaction` closure that means an in-flight `with_count` /
 //! `with_sum` / Through eager load reads the *pre-transaction* state,
 //! and rollback never un-writes data that was never on the tx in the
-//! first place — both serious correctness leaks.
+//! first place - both serious correctness leaks.
 //!
 //! ## Why a custom multi-connection pool
 //!
 //! [`TestDatabase::sqlite_memory`] uses `max_connections(1)`. With a
 //! single pool connection, an active `DB::transaction` holds it, and
-//! every subsequent `DB::connection()?` lookup returns the same handle
-//! — so even leaky arms accidentally observe the in-tx state because
+//! every subsequent `DB::connection()?` lookup returns the same handle -
+//! so even leaky arms accidentally observe the in-tx state because
 //! there's literally one physical connection. That masks the bug.
 //!
 //! These tests instead build a file-backed SQLite database with
@@ -31,7 +31,7 @@
 //!    a. Insert a second child.
 //!    b. Run the eager-load query against the parent.
 //!    c. Assert the count/sum/eager-loaded slice sees BOTH children
-//!    (the in-tx insert + the pre-tx row) — pre-fix, this fails
+//!    (the in-tx insert + the pre-tx row) - pre-fix, this fails
 //!    because the eager SQL ran against the pool.
 //!    d. Return `Err(...)` to roll back.
 //! 3. Re-run the eager-load OUTSIDE the closure and assert the count
@@ -51,7 +51,7 @@ use suprnova::{DB, DbConnection, FrameworkError, Model, attrs, model};
 ///
 /// WAL mode is critical here. With the default ROLLBACK journal, a
 /// `BEGIN IMMEDIATE` (which SeaORM uses) acquires a RESERVED lock that
-/// blocks every other connection's read until the tx commits — so the
+/// blocks every other connection's read until the tx commits - so the
 /// pool-pinned leaky eager arm just deadlocks instead of returning the
 /// stale state. WAL allows concurrent readers against the last-
 /// committed snapshot while a writer holds the WAL, which is the
@@ -412,7 +412,7 @@ async fn has_many_through_terminal_get_inside_tx_sees_in_tx_inserts() {
     // The eager `with(["..."])` path above exercised the macro-emitted
     // arm; this test pins the user-facing terminal `country.posts().get()`
     // path. Before A2-H-002 the terminal called `DB::connection()?`
-    // directly, bypassing CURRENT_TX — the in-tx insert below would not
+    // directly, bypassing CURRENT_TX - the in-tx insert below would not
     // appear in the result.
     let (conn, _guard, _tmp) = fresh_multiconn_sqlite().await;
     migrate_through(&conn).await;

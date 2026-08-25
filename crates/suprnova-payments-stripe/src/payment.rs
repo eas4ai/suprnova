@@ -157,7 +157,7 @@ fn pi_to_charge_result(
             status: PaymentStatus::Canceled,
             provider_metadata: meta,
         }),
-        // PaymentIntentStatus is #[non_exhaustive] — surface unrecognized statuses honestly.
+        // PaymentIntentStatus is #[non_exhaustive] - surface unrecognized statuses honestly.
         other => Err(PaymentError::Provider(format!(
             "PaymentIntent has unrecognized status: {}",
             other.as_str()
@@ -179,7 +179,7 @@ fn refund_to_result(refund: Refund) -> Result<RefundResult, PaymentError> {
     let amount = stripe_currency_to_money(refund.amount, refund.currency)?;
 
     // RefundReason / RefundStatus from stripe-shared are #[non_exhaustive] enums without
-    // serde::Serialize impls — debug-format them into JSON strings for the audit metadata.
+    // serde::Serialize impls - debug-format them into JSON strings for the audit metadata.
     Ok(RefundResult {
         provider_refund_id: refund.id.as_str().to_string(),
         provider_transaction_id: pi_id,
@@ -201,7 +201,7 @@ impl Payment for StripeProvider {
     ///
     /// `capture_method` is set to `"manual"` so that the caller can capture later
     /// (via [`Payment::capture`]) or void (via [`Payment::void`]) if needed.
-    /// For immediate capture set `capture_method` to `"automatic"` — but that
+    /// For immediate capture set `capture_method` to `"automatic"` - but that
     /// pattern should go through `Checkout::start_session` instead.
     async fn charge(&self, req: ChargeRequest) -> PaymentResult<ChargeResult> {
         let currency = money_to_stripe_currency(&req.amount);
@@ -271,7 +271,7 @@ impl Payment for StripeProvider {
             .map_err(|e| {
                 let msg = format!("{e}");
                 // Stripe returns a 409 for intents already captured with a message
-                // containing "already succeeded" — surface that as Validation.
+                // containing "already succeeded" - surface that as Validation.
                 if msg.contains("already succeeded") || msg.contains("You cannot cancel") {
                     PaymentError::Validation(format!(
                         "cannot void payment_intent {provider_transaction_id}: {msg}"

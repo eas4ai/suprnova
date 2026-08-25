@@ -27,7 +27,7 @@ impl PostPolicy {
     /// The author or an admin may delete a post.
     ///
     /// `is_admin()` is a helper method on User because the dogfood entity
-    /// has no `is_admin` column — a real app would persist this flag and
+    /// has no `is_admin` column - a real app would persist this flag and
     /// add it to the migration.
     fn delete(user: &User, post: &Post) -> bool {
         post.author_id == user.id || user.is_admin()

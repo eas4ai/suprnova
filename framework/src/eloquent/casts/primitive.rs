@@ -1,4 +1,4 @@
-//! Primitive casts — boolean, integer, float, decimal, string.
+//! Primitive casts - boolean, integer, float, decimal, string.
 //!
 //! Each cast declares its `Runtime` (the Rust type the user works
 //! with in their model struct) and `Storage` (the type SeaORM
@@ -9,7 +9,7 @@
 //! ## Boolean storage convention
 //!
 //! `AsBool` round-trips through `i64` because SQLite has no native
-//! BOOLEAN — it stores booleans as integers 0/1. Postgres / MySQL
+//! BOOLEAN - it stores booleans as integers 0/1. Postgres / MySQL
 //! `BOOLEAN` columns accept the same i64 over the wire, so a single
 //! storage shape covers every backend without driver branching.
 //!
@@ -29,7 +29,7 @@ use crate::error::FrameworkError;
 // ---- AsBool ---------------------------------------------------------------
 
 /// Cast `bool` ↔ `INTEGER` (0/1). The single-backend-compatible storage
-/// shape for booleans — every SQL backend round-trips i64 cleanly.
+/// shape for booleans - every SQL backend round-trips i64 cleanly.
 pub struct AsBool;
 
 impl Cast for AsBool {
@@ -52,7 +52,7 @@ impl DynCast for AsBoolDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate the input shape so a
+        // Domain 7 audit D7-A - strict-validate the input shape so a
         // misconfigured column produces a clear "expected integer, got
         // <value>" message instead of silently coercing to `false`.
         let n = v
@@ -144,7 +144,7 @@ impl IntoDynCast for AsInt<i64> {
 
 // ---- AsFloat --------------------------------------------------------------
 
-/// Cast `f64` ↔ `REAL`. Pass-through both directions — the cast exists
+/// Cast `f64` ↔ `REAL`. Pass-through both directions - the cast exists
 /// for parity with Laravel's `'float'` cast name; backends already
 /// round-trip floats natively.
 pub struct AsFloat;
@@ -257,7 +257,7 @@ impl<const P: u32> DynCast for AsDecimalDyn<P> {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("0")` which
+        // Domain 7 audit D7-A - was `v.as_str().unwrap_or("0")` which
         // silently coerced non-strings to "0" and returned 0.00 without
         // surfacing the type mismatch. Now strict.
         let s = v
@@ -286,14 +286,14 @@ impl<const P: u32> IntoDynCast for AsDecimal<P> {
 
 #[cfg(test)]
 mod tests {
-    //! Domain 7 audit D7-A regression — the dyn-cast layer used to
+    //! Domain 7 audit D7-A regression - the dyn-cast layer used to
     //! silently coerce malformed JSON input ("" / "0" / `false`) before
     //! attempting to parse, producing cryptic downstream errors. The
     //! fix makes every dyn cast surface an explicit type-mismatch
     //! diagnostic so a misconfigured column produces a clear "expected
     //! JSON <type>, got <actual>" error.
     //!
-    //! These tests assert ONE representative misshape per cast — full
+    //! These tests assert ONE representative misshape per cast - full
     //! happy-path coverage lives in
     //! `framework/tests/eloquent_casts_*.rs`.
     use super::*;

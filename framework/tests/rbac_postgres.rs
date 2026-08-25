@@ -2,7 +2,7 @@
 //! and `Model::increment`.
 //!
 //! All three built raw SQL with `?` placeholders. Postgres rejects `?`
-//! outright, so every one of these paths failed there — and the failure
+//! outright, so every one of these paths failed there - and the failure
 //! went unnoticed because the rest of the suite runs on SQLite. These
 //! tests exist to make the backend difference observable: run them against
 //! a real Postgres and a regression fails immediately instead of surfacing
@@ -92,7 +92,7 @@ async fn postgres_rbac_round_trips_roles_and_permissions() {
         has_permission_for_model("App::User", "42", "articles.publish")
             .await
             .expect("has_permission_for_model"),
-        "a permission inherited through the role must resolve — this is the \
+        "a permission inherited through the role must resolve - this is the \
          five-bind join, the widest statement in the module"
     );
 

@@ -131,7 +131,7 @@ async fn precognition_failure_returns_422_with_filtered_errors() {
 async fn precognition_only_unrequested_fields_failing_returns_204() {
     // password is invalid but client only asked about email which IS
     // valid. From the client's perspective, the answer they asked for
-    // is "OK" — return 204, not 422.
+    // is "OK" - return 204, not 422.
     let addr = spawn().await;
     let resp = post_json(
         addr,

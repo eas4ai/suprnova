@@ -3,16 +3,16 @@
 //! Hyper documents a 30s default `header_read_timeout`, but that default
 //! only arms when a `Timer` is installed on the connection builder. Before
 //! `Server::run` started installing `hyper_util::rt::TokioTimer`, the
-//! "default" was silently inert — hyper logged a warning and enforced
+//! "default" was silently inert - hyper logged a warning and enforced
 //! nothing, so a client that opened a connection and never completed its
 //! request head could hold it open indefinitely (a slowloris-style
 //! exhaustion; worse when `SERVER_MAX_CONNECTIONS` is set, since the
 //! stalled connection also pins a semaphore permit forever).
 //!
 //! `Server::run` boots telemetry, cache, queue, mail, and rate-limit
-//! drivers as process-wide singletons, so — like the other boot-time
+//! drivers as process-wide singletons, so - like the other boot-time
 //! process-global tests in this crate (see
-//! `app_key_production_fail_closed.rs`) — this scenario lives in its own
+//! `app_key_production_fail_closed.rs`) - this scenario lives in its own
 //! test binary rather than sharing one with unrelated tests.
 
 use std::time::Duration;
@@ -33,7 +33,7 @@ async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
     let port = probe.local_addr().expect("probe local_addr").port();
     drop(probe);
 
-    // Keep the deadline short so the suite stays fast — the production
+    // Keep the deadline short so the suite stays fast - the production
     // default (unset `SERVER_HEADER_READ_TIMEOUT`) is 30s.
     let deadline = Duration::from_millis(300);
 
@@ -46,7 +46,7 @@ async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
     tokio::spawn(async move {
         // The test ends (and the per-test tokio runtime tears down,
         // aborting this task) long before any graceful shutdown signal
-        // would arrive — that's fine, there's nothing to clean up.
+        // would arrive - that's fine, there's nothing to clean up.
         let _ = server.run().await;
     });
 
@@ -74,7 +74,7 @@ async fn incomplete_request_head_is_closed_within_the_configured_deadline() {
 
     // If the header-read deadline is active, hyper closes the connection
     // (clean FIN) once `deadline` elapses without a complete head. If the
-    // deadline is inert (the SEC-07 bug), this read just hangs forever —
+    // deadline is inert (the SEC-07 bug), this read just hangs forever -
     // bound the wait well above `deadline` so the assertion is reliable,
     // but far short of "indefinitely" so a regression fails fast instead
     // of hanging the suite.

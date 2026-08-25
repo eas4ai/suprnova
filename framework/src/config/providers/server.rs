@@ -4,7 +4,7 @@ use crate::http::body::DEFAULT_MAX_REQUEST_BODY_BYTES;
 
 /// Default listen port when neither `SERVER_PORT` nor `PORT` is set.
 ///
-/// Chosen to be distinctive — `8080`/`8000` collide with nearly every
+/// Chosen to be distinctive - `8080`/`8000` collide with nearly every
 /// other dev server and proxy on a typical machine. `8765` (an 8-7-6-5
 /// countdown) is rarely squatted; the `8xxx` prefix keeps it readable as
 /// a backend port. The matching Vite default is `5765`
@@ -14,7 +14,7 @@ pub const DEFAULT_SERVER_PORT: u16 = 8765;
 /// Default header-read timeout (seconds) when `SERVER_HEADER_READ_TIMEOUT`
 /// is unset, blank, zero, or unparseable.
 ///
-/// Hyper documents a 30s default for this deadline, but — critically —
+/// Hyper documents a 30s default for this deadline, but - critically -
 /// that default only arms when a [`Timer`](hyper::rt::Timer) is installed
 /// on the connection builder. Before `Server::run` started installing
 /// `hyper_util::rt::TokioTimer`, the "default" was silently inert: hyper
@@ -23,7 +23,7 @@ pub const DEFAULT_SERVER_PORT: u16 = 8765;
 /// (and, with `SERVER_MAX_CONNECTIONS` set, a semaphore permit) forever
 /// (SEC-07, a slowloris-style exhaustion). This constant surfaces the
 /// same 30s figure as an explicit, operator-configurable value instead
-/// of leaving it as an implicit — and previously inactive — default.
+/// of leaving it as an implicit - and previously inactive - default.
 pub const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
 /// Finite fallback for `SERVER_MAX_CONNECTIONS` when the env var is set
@@ -65,10 +65,10 @@ pub struct ServerConfig {
     /// accepted connection and holds it until the connection closes;
     /// once all `n` permits are taken the accept loop blocks until an
     /// existing connection ends. When `None` (the default), behaviour is
-    /// unchanged — connections are unbounded.
+    /// unchanged - connections are unbounded.
     ///
     /// Set via `SERVER_MAX_CONNECTIONS` in the environment. Blank or unset
-    /// is treated as `None` (unbounded) — that's an intentional choice, not
+    /// is treated as `None` (unbounded) - that's an intentional choice, not
     /// a misconfiguration. An unparseable or zero value, by contrast, means
     /// the operator DID ask for a cap and got it wrong; that falls back to
     /// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] (with a
@@ -85,7 +85,7 @@ pub struct ServerConfig {
     /// `hyper_util::rt::TokioTimer` on every connection and passes this
     /// value to hyper's `header_read_timeout`, so a client that opens a
     /// connection and never completes its request head is dropped instead
-    /// of held indefinitely. Only bounds header parsing — it does not
+    /// of held indefinitely. Only bounds header parsing - it does not
     /// apply to already-established WebSocket/SSE connections.
     pub header_read_timeout: std::time::Duration,
     /// Optional shared secret required to reach the *readiness* half of
@@ -93,7 +93,7 @@ pub struct ServerConfig {
     ///
     /// Set via `SERVER_HEALTH_READINESS_TOKEN`; blank or unset is `None`.
     ///
-    /// When `None` (the default), readiness is public — which is the
+    /// When `None` (the default), readiness is public - which is the
     /// behaviour every deployment guide in `manual/` documents, and the
     /// behaviour the generated Docker `HEALTHCHECK`, the Railway
     /// `healthcheckPath`, and the DigitalOcean app spec all depend on.
@@ -102,7 +102,7 @@ pub struct ServerConfig {
     ///
     /// When `Some(token)`, any request that would probe a dependency
     /// (`/_suprnova/health/ready`, or `/_suprnova/health?db=true`) must
-    /// carry `X-Suprnova-Health-Token: <token>` or it is answered 404 —
+    /// carry `X-Suprnova-Health-Token: <token>` or it is answered 404 -
     /// not 401, so the readiness surface is invisible rather than merely
     /// closed. Liveness stays public either way: a probe that needs no
     /// secret is one less credential in a k8s manifest.
@@ -121,7 +121,7 @@ impl ServerConfig {
     /// by [`crate::http::body::global_max_request_body_bytes`] before
     /// boot wires the runtime value in.
     ///
-    /// This helper is intentionally lenient — a typed env var that
+    /// This helper is intentionally lenient - a typed env var that
     /// fails to parse falls back to the default (with a
     /// `tracing::warn!`). It is invoked from `impl Default` and other
     /// infallible paths. The strict, boot-failing variant is
@@ -151,7 +151,7 @@ impl ServerConfig {
     /// of silently reverting to the default.
     pub fn try_from_env() -> Result<Self, FrameworkError> {
         let host = env_strict::<String>("SERVER_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string());
-        // Precedence: SERVER_PORT (explicit) > PORT (PaaS convention —
+        // Precedence: SERVER_PORT (explicit) > PORT (PaaS convention -
         // Heroku/Railway/Render/Fly inject it) > distinctive default.
         let port = match env_strict::<u16>("SERVER_PORT")? {
             Some(p) => p,
@@ -166,7 +166,7 @@ impl ServerConfig {
             parse_max_connections(std::env::var("SERVER_MAX_CONNECTIONS").ok().as_deref());
         // `SERVER_HEADER_READ_TIMEOUT` is likewise lenient: it's an
         // optional hardening knob, and an invalid value already degrades
-        // to the SAFE default (30s) rather than to "no timeout" — there is
+        // to the SAFE default (30s) rather than to "no timeout" - there is
         // no unsafe fallback to guard against here, so a typo need not
         // abort boot.
         let header_read_timeout = resolve_header_read_timeout(
@@ -217,13 +217,13 @@ fn resolve_port_lenient() -> u16 {
 /// Parse the optional `SERVER_MAX_CONNECTIONS` cap from a raw env-var
 /// string.
 ///
-/// A blank or absent value is treated as unset (`None` = unbounded) —
+/// A blank or absent value is treated as unset (`None` = unbounded) -
 /// that is the intentional, documented default; nobody asked for a cap.
 /// An unparseable or zero value is different: the operator DID set this
 /// knob and got it wrong, so falling back to `None` would silently
 /// discard the cap they asked for. That case instead falls back to
 /// [`DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION`] with a
-/// `tracing::warn!`, rather than a boot error — it remains an optional
+/// `tracing::warn!`, rather than a boot error - it remains an optional
 /// hardening knob, so a typo still doesn't prevent the server from
 /// starting, it just doesn't silently disappear either.
 pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
@@ -235,7 +235,7 @@ pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
                 raw_value = trimmed,
                 fallback = DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION,
                 "SERVER_MAX_CONNECTIONS is set but invalid or zero; falling back to a finite \
-                 safe default instead of leaving connections unbounded — unbounded is not a \
+                 safe default instead of leaving connections unbounded - unbounded is not a \
                  safe interpretation of a misconfigured limit."
             );
             Some(DEFAULT_MAX_CONNECTIONS_ON_MISCONFIGURATION)
@@ -249,7 +249,7 @@ pub(crate) fn parse_max_connections(raw: Option<&str>) -> Option<usize> {
 /// Unlike `SERVER_MAX_CONNECTIONS`, there is no "unset" special case to
 /// preserve here: a blank/absent value falls back to
 /// [`DEFAULT_HEADER_READ_TIMEOUT_SECS`], and so does an unparseable or
-/// zero value — zero would mean "no timeout," which is exactly the
+/// zero value - zero would mean "no timeout," which is exactly the
 /// SEC-07 hole this knob exists to close, so it is treated the same as
 /// any other invalid input rather than honored as "disable."
 pub(crate) fn resolve_header_read_timeout(raw: Option<&str>) -> std::time::Duration {
@@ -337,7 +337,7 @@ impl ServerConfigBuilder {
     }
 
     /// Override the header-read timeout (see
-    /// [`ServerConfig::header_read_timeout`] — the SEC-07 slowloris
+    /// [`ServerConfig::header_read_timeout`] - the SEC-07 slowloris
     /// mitigation). Default: [`DEFAULT_HEADER_READ_TIMEOUT_SECS`] (30s).
     pub fn header_read_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.header_read_timeout = Some(timeout);
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn parses_max_connections_from_env() {
-        // unset / blank → None (unbounded — the intentional default; no
+        // unset / blank → None (unbounded - the intentional default; no
         // cap was requested, so there's nothing to fall back "safely" from).
         assert_eq!(parse_max_connections(None), None);
         assert_eq!(parse_max_connections(Some("")), None);
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(
             config.max_body_size, DEFAULT_MAX_REQUEST_BODY_BYTES,
             "ServerConfig default must match the body collector's \
-             DEFAULT_MAX_REQUEST_BODY_BYTES — divergent defaults caused \
+             DEFAULT_MAX_REQUEST_BODY_BYTES - divergent defaults caused \
              SERVER_MAX_BODY_SIZE to be a dead knob"
         );
         // Restore prior env state for sibling tests.
@@ -528,7 +528,7 @@ mod tests {
         let prior_port = std::env::var("PORT").ok();
 
         // SAFETY: single-threaded scope (no await across the mutation),
-        // restored at the end — same pattern as the sibling env tests.
+        // restored at the end - same pattern as the sibling env tests.
         unsafe {
             std::env::remove_var("SERVER_PORT");
             std::env::remove_var("PORT");

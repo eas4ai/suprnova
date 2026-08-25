@@ -33,7 +33,7 @@ impl SendGridMailTransport {
         // Trim trailing slash first so `https://x.example/v3/mail/send/` is
         // detected as already-terminated and we don't double-append.
         let e = endpoint.as_ref().trim_end_matches('/');
-        // `ends_with` (not `contains`) — a base URL like
+        // `ends_with` (not `contains`) - a base URL like
         // `/v3/mail/send-archive/api` only *contains* the substring but is
         // not the SendGrid endpoint, so we must still append.
         let url = if e.ends_with("/v3/mail/send") {
@@ -144,7 +144,7 @@ impl MailTransport for SendGridMailTransport {
             .collect();
 
         // SendGrid v3 `/v3/mail/send` only accepts a single `reply_to`
-        // object — unlike Postmark (CSV) or SES (array). If the caller
+        // object - unlike Postmark (CSV) or SES (array). If the caller
         // configured multiple addresses we still send the first but
         // surface a warn so the dropped recipients aren't invisible.
         let reply_to = msg.reply_to.first().map(to_sg);

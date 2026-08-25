@@ -1,7 +1,7 @@
 //! `Lang`'s ICU4X-backed formatting surface (`number`/`currency`/`date`/
 //! `time`/`datetime`/`list`/`relative`) and the `DATETIME()` Fluent
-//! function. Formatting reads only the current locale — catalogs can be
-//! empty — but every test still binds a `Translator` (via
+//! function. Formatting reads only the current locale - catalogs can be
+//! empty - but every test still binds a `Translator` (via
 //! `bind_empty_translator`/`bind_translator`, mirroring
 //! `localization_translate.rs`'s `lang_facade` module) and runs
 //! `#[serial_test::serial]`, since binding the container is shared
@@ -41,7 +41,7 @@ fn bind_translator(dir: &std::path::Path) {
 }
 
 /// A `Translator` with no catalogs beyond the framework's own embedded
-/// English one — formatting doesn't consult it, but every test binds one
+/// English one - formatting doesn't consult it, but every test binds one
 /// anyway to mirror the established harness shape.
 fn bind_empty_translator() {
     let tmp = tempfile::tempdir().unwrap();
@@ -120,7 +120,7 @@ async fn datetime_fluent_function_formats_inside_a_message() {
 }
 
 /// `DATETIME($when, ...)` also accepts `$when` as an epoch-milliseconds
-/// number, not just an ISO-8601 string — the other half of the
+/// number, not just an ISO-8601 string - the other half of the
 /// documented `$value` contract, previously untested.
 #[tokio::test]
 #[serial_test::serial]
@@ -141,8 +141,8 @@ async fn datetime_fluent_function_accepts_epoch_milliseconds() {
     .await;
 }
 
-/// An unrecognized `dateStyle`/`timeStyle` keyword must not fail silently
-/// — `DATETIME()` warns (naming the option and the bad value) and falls
+/// An unrecognized `dateStyle`/`timeStyle` keyword must not fail silently -
+/// `DATETIME()` warns (naming the option and the bad value) and falls
 /// back to treating it as absent, same as `$value` itself does.
 #[tokio::test]
 #[serial_test::serial]
@@ -170,7 +170,7 @@ async fn datetime_fluent_function_warns_on_an_unrecognized_style_keyword() {
 
 /// [`DateStyle::Full`] is the one mapping this crate invents beyond
 /// ICU4X's own three-length `Length` enum (see `format.rs`'s doc
-/// comment on `DateStyle`) — pin that it actually differs from `Long` by
+/// comment on `DateStyle`) - pin that it actually differs from `Long` by
 /// carrying the weekday, not just alias it silently.
 #[tokio::test]
 #[serial_test::serial]
@@ -192,7 +192,7 @@ async fn date_style_full_includes_the_weekday() {
 }
 
 /// `try_currency`'s fraction digits come from `iso_currency`'s ISO 4217
-/// minor-unit table, not a hardcoded 2 — JPY (0 decimals) and BHD (3
+/// minor-unit table, not a hardcoded 2 - JPY (0 decimals) and BHD (3
 /// decimals) must render accordingly, and a code the table doesn't know
 /// still falls back to 2 (unchanged prior behavior).
 #[tokio::test]
@@ -214,7 +214,7 @@ async fn currency_fraction_digits_follow_iso_4217() {
     .await;
 }
 
-/// Count the digits after the last `.` in a formatted amount — robust to
+/// Count the digits after the last `.` in a formatted amount - robust to
 /// currency symbol/placement, which varies by code and locale.
 fn fraction_digit_count(s: &str) -> usize {
     match s.rfind('.') {

@@ -107,7 +107,7 @@ async fn bulk_delayed_job_is_not_pending_undelayed_sibling_is() {
     Queue::set_driver(driver.clone());
 
     // `bulk<J>` is monomorphic in `J`, so one Vec cannot mix a delayed and
-    // an undelayed job — two `bulk` calls, one per job type, land both
+    // an undelayed job - two `bulk` calls, one per job type, land both
     // envelopes on the same driver instead.
     Queue::bulk(vec![DelayedMarker { x: 1 }]).await.unwrap();
     Queue::bulk(vec![Marker { x: 1 }]).await.unwrap();

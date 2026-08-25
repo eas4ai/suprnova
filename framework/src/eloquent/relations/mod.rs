@@ -1,4 +1,4 @@
-//! Relations — Laravel-shape one-to-one / one-to-many / many-to-many
+//! Relations - Laravel-shape one-to-one / one-to-many / many-to-many
 //! and polymorphic relations layered over SeaORM JOINs and `IN` queries.
 //!
 //! Phase 10B foundation (T1). Each concrete relation type (`HasOne`,
@@ -9,7 +9,7 @@
 //! `#[suprnova::model(relations = { ... })]` macro emits, per declared
 //! relation:
 //!
-//! 1. A relation method (`fn posts(&self) -> HasMany<Self, Post>`) —
+//! 1. A relation method (`fn posts(&self) -> HasMany<Self, Post>`) -
 //!    bodies land in T2-T7 (this task ships placeholder skeletons only
 //!    if the kind is supported).
 //! 2. A loaded-accessor (`posts_loaded() -> &[Post]`).
@@ -55,7 +55,7 @@ pub use morph_registry::{MorphTypeEntry, find_morph_type, find_morph_type_by_id,
 pub use morph_to_many::{MorphToMany, MorphedByMany};
 pub use through::{HasManyThrough, HasOneThrough};
 
-// Domain 8 audit D8-A — SQL identifier contract (security).
+// Domain 8 audit D8-A - SQL identifier contract (security).
 //
 // Every relation kind extends the same trust model as the core
 // `Builder<M>` (see `framework/src/eloquent/builder.rs` module docs §
@@ -85,7 +85,7 @@ use crate::error::FrameworkError;
 
 /// The exhaustive list of Eloquent relation flavours Suprnova ships.
 ///
-/// New flavours can NOT be added by user code — the macro pattern-
+/// New flavours can NOT be added by user code - the macro pattern-
 /// matches on this enum exhaustively. v2 ask for plugin-loader-
 /// registered relation types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +133,7 @@ pub enum AggregateKind {
 impl AggregateKind {
     /// Lower-case spelling used inside aggregate cache keys
     /// (`"sum"` / `"avg"` / `"min"` / `"max"`). Stable wire-style
-    /// representation — do not change without bumping the cache-key
+    /// representation - do not change without bumping the cache-key
     /// contract.
     pub fn as_key_str(self) -> &'static str {
         match self {
@@ -146,9 +146,9 @@ impl AggregateKind {
 }
 
 /// Build the wide cache key the aggregate dispatcher arms write into
-/// `EagerLoadCache::set_aggregate`. The shape is `<rel>_<kind>_<col>`
-/// — `with_sum(("posts","id"))` lands under `"posts_sum_id"`,
-/// `with_avg(("posts","id"))` under `"posts_avg_id"`, etc. — so a
+/// `EagerLoadCache::set_aggregate`. The shape is `<rel>_<kind>_<col>` -
+/// `with_sum(("posts","id"))` lands under `"posts_sum_id"`,
+/// `with_avg(("posts","id"))` under `"posts_avg_id"`, etc. - so a
 /// single eager-load plan can stack multiple aggregates on the same
 /// relation without colliding on the cache cell.
 ///
@@ -193,11 +193,11 @@ pub const fn touch_column(has_timestamps: bool, updated_at_column: &'static str)
 /// Sealed trait every concrete relation type implements.
 ///
 /// "Sealed" in the sense that all impl sites live inside the framework
-/// crate — user code never hand-writes a `Relation` impl. The macro
+/// crate - user code never hand-writes a `Relation` impl. The macro
 /// emits all impls from `#[model(relations = { ... })]` declarations.
 ///
 /// The trait carries the metadata an eager loader needs without
-/// knowing the concrete relation type — `KIND` for dispatch,
+/// knowing the concrete relation type - `KIND` for dispatch,
 /// `parent_key` + `foreign_key` for the `IN` query, and the associated
 /// `Parent` / `Target` types for compile-time wiring.
 pub trait Relation {
@@ -241,23 +241,23 @@ pub trait Relation {
 ///
 /// | Kind                | target_table          | foreign_key                       | parent_key                | pivot_*                                              | morph_*                                                |
 /// |---------------------|-----------------------|-----------------------------------|---------------------------|------------------------------------------------------|--------------------------------------------------------|
-/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | — / — / —                                            | — / —                                                  |
-/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | — / — / —                                            | — / —                                                  |
-/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related| — / —                                                  |
-/// | HasOneThrough/Many  | final target table    | through table's FK                | parent column (PK)        | through table / — / through→target FK                | — / —                                                  |
-/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | — / — / —                                            | `<morph>_type` / parent's morph type string            |
-/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | — / — / —                                            | child's `<morph>_type` / `""`                          |
+/// | HasOne / HasMany    | child table           | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                            | - / -                                                  |
+/// | BelongsTo           | parent table          | child column (FK → parent.pk)     | parent column (PK)        | - / - / -                                            | - / -                                                  |
+/// | BelongsToMany       | related table         | unused                            | parent column (PK)        | pivot table / pivot col → parent / pivot col → related| - / -                                                  |
+/// | HasOneThrough/Many  | final target table    | through table's FK                | parent column (PK)        | through table / - / through→target FK                | - / -                                                  |
+/// | MorphOne / MorphMany| child table           | `<morph>_id` column               | parent column (PK)        | - / - / -                                            | `<morph>_type` / parent's morph type string            |
+/// | MorphTo             | `""` (variable)       | child's `<morph>_id`              | child column (PK)         | - / - / -                                            | child's `<morph>_type` / `""`                          |
 /// | MorphToMany         | related table         | unused                            | parent column (PK)        | pivot table / `<morph>_id` / `<related>_id`          | `<morph>_type` / parent's morph type string            |
 /// | MorphedByMany       | related table         | unused                            | parent column (PK)        | pivot table / `<related>_id` / `<morph>_id`          | `<morph>_type` / related's morph type string           |
 ///
-/// `""` (empty string) indicates "not applicable for this kind" — never
+/// `""` (empty string) indicates "not applicable for this kind" - never
 /// `None`, because `inventory::submit!` requires every field to be
 /// const-evaluable.
 #[derive(Debug, Clone, Copy)]
 pub struct RelationEntry {
-    /// `TypeId::of::<L>` — the owning model.
+    /// `TypeId::of::<L>` - the owning model.
     pub parent_type: fn() -> TypeId,
-    /// `TypeId::of::<R>` — the related model. For `MorphTo` this is
+    /// `TypeId::of::<R>` - the related model. For `MorphTo` this is
     /// `TypeId::of::<()>` because the target is a per-family enum
     /// generated by T6, not a single concrete type.
     pub target_type: fn() -> TypeId,
@@ -268,7 +268,7 @@ pub struct RelationEntry {
     /// Owning model's type name (`"User"`).
     pub parent_type_name: &'static str,
     /// Related model's type name (`"Post"`). For `MorphTo` this is
-    /// `"<morph>"` — the per-family enum type name lives in the
+    /// `"<morph>"` - the per-family enum type name lives in the
     /// generated code, not in the entry.
     pub target_type_name: &'static str,
     /// Target table name for the existence subquery. See the table
@@ -290,7 +290,7 @@ pub struct RelationEntry {
     /// Stable string used in the `<morph>_type` column for THIS side of
     /// the relation (Laravel morph map / FQCN). `""` when not a morph
     /// kind, or when the discriminator value is unknown at the parent's
-    /// macro expansion site (`MorphTo` — the value lives on the child
+    /// macro expansion site (`MorphTo` - the value lives on the child
     /// row itself).
     pub morph_type_value: &'static str,
     /// Primary-key column name on the related/target side. Used by the
@@ -310,7 +310,7 @@ pub struct RelationEntry {
     /// The parent's `updated_at` column when the parent opts into
     /// timestamps, `""` when it doesn't. Populated by [`touch_column`]
     /// at link time. The parent-touch cascade reads this: empty means
-    /// "this owner disclaims timestamps, skip it" — not an error and
+    /// "this owner disclaims timestamps, skip it" - not an error and
     /// not a write.
     pub related_updated_at_column: &'static str,
 }
@@ -349,19 +349,19 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 // The trait carries one method per dispatcher kind (`eager_load`,
 // `count_relation`, `aggregate_relation`, `recurse_eager_load`); T2
 // only uses `eager_load` from `Builder::get`. T3-T7 keep adding
-// per-kind match arms inside the inherent dispatcher methods — those
+// per-kind match arms inside the inherent dispatcher methods - those
 // changes never touch the trait surface, since the trait is just a
 // thin pass-through.
 
 /// Language-level seal for [`EagerLoadDispatch`].
 ///
-/// The module is `pub` but doc-hidden — the macro-emitted impl in the
+/// The module is `pub` but doc-hidden - the macro-emitted impl in the
 /// user's crate needs a public path to reach [`Sealed`][__sealed::Sealed],
 /// but downstream code that finds it has gone out of its way to reach
 /// past the framework convention reserving leading-double-underscore
 /// names (`__eager`, `__pivot`, `__async_trait`) for framework-private
 /// machinery. The trait is empty: hand-rolling an `impl Sealed for X`
-/// alone doesn't get you a working `EagerLoadDispatch` — you'd also
+/// alone doesn't get you a working `EagerLoadDispatch` - you'd also
 /// need to hand-roll every dispatcher method on `X`, which is exactly
 /// what `#[suprnova::model]` exists to emit.
 ///
@@ -435,7 +435,7 @@ pub fn find_relation<T: 'static>(name: &str) -> Option<&'static RelationEntry> {
 /// __sealed::Sealed` is not satisfied*.
 #[doc(hidden)]
 pub mod __sealed {
-    /// Sealed marker — only the `#[suprnova::model]` macro implements
+    /// Sealed marker - only the `#[suprnova::model]` macro implements
     /// this for user structs.
     pub trait Sealed {}
 }
@@ -445,9 +445,9 @@ pub mod __sealed {
 /// `__aggregate_relation` / `__recurse_eager_load` inherent methods.
 ///
 /// **Sealed.** Implemented automatically by `#[suprnova::model]`; user
-/// code cannot hand-write an impl — the [`__sealed::Sealed`]
+/// code cannot hand-write an impl - the [`__sealed::Sealed`]
 /// supertrait blocks it. Returning `Pin<Box<dyn Future>>` (rather than
-/// `async fn`) keeps the trait object-safety friendly — `async fn`
+/// `async fn`) keeps the trait object-safety friendly - `async fn`
 /// trait methods would force `Builder<M>` to carry a Pin<Box<...>>
 /// state itself, complicating the type. For T2 we don't actually need
 /// `dyn EagerLoadDispatch`, but the boxed-future shape stays cleanest
@@ -504,7 +504,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// The per-parent form issues the next segment's IN query once per
     /// parent, which is N+1 at every nested level. This form gathers all
     /// parents' cached children of `relation` into one slice, loads the
-    /// next segment with a single IN query, and recurses the same way —
+    /// next segment with a single IN query, and recurses the same way -
     /// so a dotted path like `"posts.comments.author"` stays a constant
     /// number of queries regardless of how many parents are in the set.
     /// `missing_only` carries the same partition semantics as the
@@ -535,7 +535,7 @@ pub trait EagerLoadDispatch: __sealed::Sealed + Sized {
     /// to skip already-loaded relations.
     ///
     /// Implemented automatically by `#[suprnova::model]` as
-    /// `self.__eager.has(name)`. Not part of the user surface — the
+    /// `self.__eager.has(name)`. Not part of the user surface - the
     /// `<rel>_loaded()` accessor is the user-side read path.
     fn has_eager(&self, name: &str) -> bool;
 }
@@ -550,7 +550,7 @@ mod seal_tests {
 
     use super::__sealed::Sealed;
 
-    /// A framework-side type that opts into the seal — the test
+    /// A framework-side type that opts into the seal - the test
     /// passes if this compiles, confirming `Sealed` is reachable and
     /// implementable inside the framework crate. The type itself is
     /// never constructed; its `impl Sealed` is the assertion.

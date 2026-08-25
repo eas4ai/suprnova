@@ -2,8 +2,8 @@
 //! by [`crate::workflow::store`].
 //!
 //! Schema mirrors the CLI scaffolder template at
-//! `suprnova-cli/src/templates/files/backend/migrations/create_workflows_table.rs.tpl`
-//! — see [`crate::workflow::migrations`] for the convention.
+//! `suprnova-cli/src/templates/files/backend/migrations/create_workflows_table.rs.tpl` -
+//! see [`crate::workflow::migrations`] for the convention.
 
 use sea_orm_migration::prelude::*;
 

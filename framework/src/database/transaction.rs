@@ -1,15 +1,15 @@
-//! Phase 10C T11 — Transactions: closure form, manual form,
+//! Phase 10C T11 - Transactions: closure form, manual form,
 //! savepoints, retry-on-deadlock.
 //!
 //! Three transaction entry points:
 //!
-//! - [`DB::transaction`](crate::DB::transaction) — closure form. The
+//! - [`DB::transaction`](crate::DB::transaction) - closure form. The
 //!   closure runs inside a transaction; commit on `Ok`, rollback on
 //!   `Err`. Operations inside the closure pick up the active
-//!   transaction automatically via a `tokio::task_local` — callers
+//!   transaction automatically via a `tokio::task_local` - callers
 //!   don't have to thread a tx handle through every model call.
 //!
-//! - [`DB::begin_transaction`](crate::DB::begin_transaction) — manual
+//! - [`DB::begin_transaction`](crate::DB::begin_transaction) - manual
 //!   form. Returns a [`Transaction`] handle the caller commits or
 //!   rolls back explicitly. Useful when the transaction's lifetime
 //!   spans multiple control-flow branches that don't fit a closure.
@@ -18,7 +18,7 @@
 //!   the `Model::*_with_tx` shims.
 //!
 //! - [`DB::transaction_with_attempts`](crate::DB::transaction_with_attempts)
-//!   — retry-on-deadlock closure form. Re-runs the closure up to `n`
+//!   - retry-on-deadlock closure form. Re-runs the closure up to `n`
 //!   times when the inner `FrameworkError` looks like a serialization
 //!   failure or deadlock (Postgres SQLSTATE `40001` / `40P01`, or any
 //!   error containing the case-insensitive substring `"deadlock"`).
@@ -29,13 +29,13 @@
 //! [`Transaction::rollback_to`] checkpoint and roll back nested work
 //! without aborting the outer transaction. SQLite supports
 //! `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` even though it doesn't have
-//! row-level locking — the user-visible contract ("commit inner work
+//! row-level locking - the user-visible contract ("commit inner work
 //! only if everything succeeded; otherwise restore the snapshot") is
 //! the same across all three backends.
 //!
 //! ## Nested `DB::transaction` is rejected at runtime
 //!
-//! SeaORM's `DatabaseConnection::begin()` doesn't compose — calling
+//! SeaORM's `DatabaseConnection::begin()` doesn't compose - calling
 //! it on a connection that's already holding a transaction starts a
 //! brand-new physical transaction that commits / rolls back
 //! independently of the outer scope. That's a silent data-integrity
@@ -57,7 +57,7 @@ use std::time::Duration;
 /// / `TransactionRolledBack` event carries the actual connection name
 /// rather than a hard-coded sentinel.
 ///
-/// `Arc<str>` not `String` for the name — every clone of a `TxHandle`
+/// `Arc<str>` not `String` for the name - every clone of a `TxHandle`
 /// duplicates the pair, and the connection name is small + immutable
 /// for the transaction's lifetime.
 pub(crate) struct TxState {
@@ -69,11 +69,11 @@ tokio::task_local! {
     /// Active transaction installed by [`DB::transaction`] /
     /// [`DB::transaction_with_attempts`] for the duration of their
     /// inner closure. Every terminal method on `Builder<M>` and every
-    /// CRUD method on `Model` consults this — when `Some(_)`, the SQL
+    /// CRUD method on `Model` consults this - when `Some(_)`, the SQL
     /// runs through the transaction's connection; otherwise the
     /// global pool from [`DB::connection`] handles it.
     ///
-    /// Implementation detail — exposed `pub(crate)` because the
+    /// Implementation detail - exposed `pub(crate)` because the
     /// executor-dispatch helpers in `eloquent::builder` and
     /// `eloquent::model` need to read it from outside this module.
     pub(crate) static CURRENT_TX: Option<Arc<TxState>>;
@@ -87,7 +87,7 @@ tokio::task_local! {
 /// Holding a `Transaction` ties up one connection from the pool for
 /// the lifetime of the handle. On SQLite (single shared connection)
 /// any parallel non-transactional read will block until the
-/// transaction completes — load any pre-flight rows BEFORE
+/// transaction completes - load any pre-flight rows BEFORE
 /// `DB::begin_transaction()` and scope every dependent write through
 /// the returned `tx` handle.
 pub struct Transaction {
@@ -98,11 +98,11 @@ pub struct Transaction {
 /// Cheap shareable view of a [`Transaction`] used to scope a single
 /// query through `Builder::with_tx(&tx)` /
 /// `Model::*_with_tx(&tx, ...)`. Cloning a `TxHandle` is an
-/// `Arc::clone` — every clone points at the same underlying
+/// `Arc::clone` - every clone points at the same underlying
 /// `DatabaseTransaction`.
 ///
 /// `TxHandle` is also the executor-dispatch carrier inside
-/// `Builder<M>::tx_override` — when set, it short-circuits the
+/// `Builder<M>::tx_override` - when set, it short-circuits the
 /// `CURRENT_TX` lookup so a builder cloned out of a tx scope can
 /// still target the original transaction.
 #[derive(Clone)]
@@ -112,7 +112,7 @@ pub struct TxHandle {
 }
 
 impl TxHandle {
-    /// Borrow the underlying SeaORM transaction. Internal — exposed
+    /// Borrow the underlying SeaORM transaction. Internal - exposed
     /// `pub(crate)` so the executor-dispatch helpers in
     /// [`ExecutorChoice`] can reach the same `DatabaseTransaction` the
     /// closure / `Transaction` handle owns. User code goes through
@@ -132,16 +132,16 @@ impl TxHandle {
 ///
 /// The three-way precedence is:
 ///
-/// 1. **Builder-level override** — `Builder::with_tx(&tx)` /
+/// 1. **Builder-level override** - `Builder::with_tx(&tx)` /
 ///    `Model::*_with_tx(&tx, ...)` set a [`TxHandle`] on the builder.
 ///    Takes precedence over the task-local because explicit beats
 ///    ambient.
-/// 2. **Ambient `CURRENT_TX`** — installed by [`DB::transaction`] /
+/// 2. **Ambient `CURRENT_TX`** - installed by [`DB::transaction`] /
 ///    [`DB::transaction_with_attempts`] for the closure's task scope.
-/// 3. **Pool fallback** — `DB::connection()?` returns the global
+/// 3. **Pool fallback** - `DB::connection()?` returns the global
 ///    [`DbConnection`](crate::database::DbConnection) singleton.
 ///
-/// The arm-by-arm `match` is verbose but mechanically sound — SeaORM
+/// The arm-by-arm `match` is verbose but mechanically sound - SeaORM
 /// generics on `&C: ConnectionTrait` don't compose into a single
 /// `&dyn ConnectionTrait` cleanly because the trait isn't dyn-safe
 /// across every helper we touch. Per-method match arms sidestep the
@@ -150,12 +150,12 @@ impl TxHandle {
 pub enum ExecutorChoice {
     /// Route through an active transaction's connection (closure form
     /// CURRENT_TX or explicit `with_tx` override). Second field is the
-    /// logical connection name the transaction was opened against —
+    /// logical connection name the transaction was opened against -
     /// threaded into every `QueryExecuted` / transaction-lifecycle
     /// event so observers see the real connection.
     Tx(Arc<DatabaseTransaction>, Arc<str>),
     /// Route through a pool. Second field is the logical name of the
-    /// pool the executor resolved — `__primary__` for the default,
+    /// pool the executor resolved - `__primary__` for the default,
     /// `__read_replica__` for the auto-routed replica, or whatever
     /// name was passed to [`Builder::on`](crate::eloquent::Builder::on)
     /// / `#[model(connection = "...")]` / [`DB::register_named`].
@@ -196,7 +196,7 @@ impl ExecutorChoice {
     }
 
     /// Pick the executor for an operation that may carry a builder-
-    /// level override. The override wins outright when present —
+    /// level override. The override wins outright when present -
     /// otherwise the behaviour matches [`Self::resolve`].
     #[doc(hidden)]
     pub fn resolve_with_override(
@@ -211,14 +211,14 @@ impl ExecutorChoice {
         Self::resolve()
     }
 
-    /// Phase 10C T12 — pick the executor for a READ-shape operation.
+    /// Phase 10C T12 - pick the executor for a READ-shape operation.
     /// Five-step precedence:
     ///
     /// 1. **Builder-level transaction override** (`Builder::with_tx`).
     ///    Explicit beats every other consideration.
     /// 2. **Ambient `CURRENT_TX`** installed by [`DB::transaction`] /
     ///    [`DB::transaction_with_attempts`]. Inside a closure-form
-    ///    transaction every read uses the tx connection — `on(name)`
+    ///    transaction every read uses the tx connection - `on(name)`
     ///    routing is silently ignored.
     /// 3. **Per-builder `connection_override`** (`Builder::on(name)`).
     ///    The `__primary__` sentinel short-circuits to
@@ -289,7 +289,7 @@ impl ExecutorChoice {
     /// Like [`Self::resolve_read`] but skips the auto-routed
     /// `__read_replica__` step. Read terminals that emit
     /// `SELECT ... FOR UPDATE` / `FOR SHARE` route through this so the
-    /// lock lands on a primary-capable pool — Postgres hot-standbys
+    /// lock lands on a primary-capable pool - Postgres hot-standbys
     /// reject locked reads outright, and MySQL replicas accept them
     /// but the lock is local to the replica and useless.
     ///
@@ -339,12 +339,12 @@ impl ExecutorChoice {
         ))
     }
 
-    /// Phase 10C T12 — pick the executor for a WRITE-shape operation
+    /// Phase 10C T12 - pick the executor for a WRITE-shape operation
     /// (`Model::create`, `Model::save`, `Model::update`, `Model::delete`,
     /// `DbTableBuilder::insert/update/delete`).
     ///
     /// Same precedence as [`Self::resolve_read`] EXCEPT step 5 is
-    /// skipped — writes never auto-route to `__read_replica__`. If the
+    /// skipped - writes never auto-route to `__read_replica__`. If the
     /// caller wants a write against a non-primary connection they must
     /// chain `Builder::on(name)` (step 3) or tag the model with
     /// `#[model(connection = "...")]` (step 4) explicitly.
@@ -527,7 +527,7 @@ impl ExecutorChoice {
     /// Execute a prepared `Statement` that produces rows.
     ///
     /// Emits [`QueryExecuted`](crate::database::events::QueryExecuted)
-    /// to every registered listener — `DB::listen` callback, dispatcher
+    /// to every registered listener - `DB::listen` callback, dispatcher
     /// listener, and the in-memory query log. Re-entrancy guarded:
     /// a listener that re-queries does not re-fire QueryExecuted.
     #[doc(hidden)]
@@ -566,13 +566,13 @@ impl ExecutorChoice {
 
     /// Execute a prepared `Statement` that produces rows and hydrate
     /// each into `T` via [`FromQueryResult`](sea_orm::FromQueryResult).
-    /// Instrumented identically to [`Self::query_all`] — emits
+    /// Instrumented identically to [`Self::query_all`] - emits
     /// [`QueryExecuted`](crate::database::events::QueryExecuted) when
     /// observation is active.
     ///
     /// This is the read terminal the Eloquent `Builder` uses, so model
-    /// SELECTs — and the eager-load IN-queries that recurse back through
-    /// `Builder::get` — surface in `DB::listen` / the query log the way
+    /// SELECTs - and the eager-load IN-queries that recurse back through
+    /// `Builder::get` - surface in `DB::listen` / the query log the way
     /// Laravel's do. Behaviourally equivalent to
     /// `find_by_statement(stmt).all(conn)` (SeaORM hydrates each row with
     /// the empty column prefix) but routed through the observability
@@ -621,7 +621,7 @@ impl ExecutorChoice {
     ///
     /// Listener errors are observational: the closure's result is
     /// returned to the caller verbatim regardless of listener outcome.
-    /// Re-entrancy is guarded — listeners that themselves run queries
+    /// Re-entrancy is guarded - listeners that themselves run queries
     /// will not re-fire QueryExecuted.
     async fn run_instrumented<F, T>(
         &self,
@@ -643,7 +643,7 @@ impl ExecutorChoice {
             return f(stmt, self).await;
         }
         // Capture SQL/bindings BEFORE the call (the Statement is moved
-        // into `f`). Cloning here is the cost of observability — gated
+        // into `f`). Cloning here is the cost of observability - gated
         // by the active-observer check above.
         let sql = stmt.sql.clone();
         let bindings: Vec<String> = stmt
@@ -763,7 +763,7 @@ impl Transaction {
     ///
     /// Pair with [`Self::rollback_to`] to drop a block of inner work
     /// while keeping outer changes intact. Works on all three
-    /// backends — SQLite's `SAVEPOINT` is fully functional even
+    /// backends - SQLite's `SAVEPOINT` is fully functional even
     /// though SQLite has no row-level locking.
     ///
     /// The savepoint name is validated as an unqualified SQL
@@ -787,7 +787,7 @@ impl Transaction {
     /// without aborting the outer transaction.
     ///
     /// The savepoint name is validated the same way as
-    /// [`Self::savepoint`] before interpolation — see that method
+    /// [`Self::savepoint`] before interpolation - see that method
     /// for the accepted shape.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
         let name = super::identifier::validate_savepoint_name(name)?;
@@ -800,13 +800,13 @@ impl Transaction {
     }
 
     /// Commit the manual transaction returned by
-    /// [`DB::begin_transaction`]. Consumes the handle — any
+    /// [`DB::begin_transaction`]. Consumes the handle - any
     /// [`TxHandle`] clones stored elsewhere become inert (their
     /// `DatabaseTransaction` is still alive in the `Arc`, but the
     /// underlying connection is no longer in a transactional state).
     ///
     /// Errors if any outstanding [`TxHandle`] clones prevent
-    /// `Arc::try_unwrap` from unwrapping the inner transaction —
+    /// `Arc::try_unwrap` from unwrapping the inner transaction -
     /// that's the correct behaviour, because committing while
     /// another part of the program might still write through the
     /// same `TxHandle` would create a race.
@@ -866,7 +866,7 @@ impl DB {
     /// - Closure returns `Err` → rollback. Original error returned.
     ///
     /// Nested `DB::transaction` calls are rejected with a database
-    /// error — SeaORM's `begin()` doesn't compose. Use
+    /// error - SeaORM's `begin()` doesn't compose. Use
     /// [`Transaction::savepoint`] for nested-rollback behaviour.
     ///
     /// ## Example
@@ -887,7 +887,7 @@ impl DB {
     /// ```
     ///
     /// The `Box::pin(async move { ... })` shape is required because
-    /// the closure's return type is `Pin<Box<dyn Future + 'b>>` —
+    /// the closure's return type is `Pin<Box<dyn Future + 'b>>` -
     /// the HRTB lifetime lets the future borrow `&tx` across `.await`
     /// points (so `tx.savepoint(...)` calls work).
     pub async fn transaction<F, T>(f: F) -> Result<T, FrameworkError>
@@ -909,7 +909,7 @@ impl DB {
         // Reject nested calls before doing any work. Without this
         // guard, `conn.inner().begin()` below would start a brand-new
         // top-level transaction on a pooled connection that's
-        // independent of the outer scope — silently corrupting the
+        // independent of the outer scope - silently corrupting the
         // composition semantics callers expect.
         let nested = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
         if nested {
@@ -928,7 +928,7 @@ impl DB {
             .begin()
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
-        // BEGIN succeeded — fire TransactionBeginning before the
+        // BEGIN succeeded - fire TransactionBeginning before the
         // closure runs so listeners observe the open tx.
         emit_tx_event(super::events::TransactionBeginning {
             connection_name: conn_name.to_string(),
@@ -976,14 +976,14 @@ impl DB {
             Err(e) => {
                 // Try to roll back immediately. If TxHandle clones
                 // were leaked past the closure boundary,
-                // `Arc::try_unwrap` returns the `Arc` back — drop it
+                // `Arc::try_unwrap` returns the `Arc` back - drop it
                 // here so OUR reference goes away, log loudly, and
                 // surface the original closure error. SeaORM's
                 // `DatabaseTransaction::drop` rolls back when the
                 // LAST reference drops; until the leaked clones go
                 // away the transaction is in a zombie state
                 // (queries via the leaked handle still run against
-                // an open tx). Audit HIGH `database` #3 — escalate
+                // an open tx). Audit HIGH `database` #3 - escalate
                 // the diagnostic so this can't disappear silently.
                 match Arc::try_unwrap(tx_arc) {
                     Ok(tx) => {
@@ -1003,7 +1003,7 @@ impl DB {
                         }
                     }
                     Err(arc) => {
-                        // Leaked clones — count them before our Arc
+                        // Leaked clones - count them before our Arc
                         // drops so the operator sees the size of the
                         // leak.
                         let strong_count = Arc::strong_count(&arc);
@@ -1014,7 +1014,7 @@ impl DB {
                             closure_error = %e,
                             "DB::transaction: closure returned Err but TxHandle clones \
                              leaked past the closure boundary. The transaction is in \
-                             ZOMBIE STATE — pending rollback until ALL leaked handles \
+                             ZOMBIE STATE - pending rollback until ALL leaked handles \
                              drop. Queries via the leaked handles continue to run \
                              against the still-open transaction. Drop them before the \
                              closure returns so rollback is deterministic.",
@@ -1033,7 +1033,7 @@ impl DB {
     ///
     /// Note: the implicit drop-rollback rolls back the database but does
     /// NOT emit the [`TransactionRolledBack`](crate::database::TransactionRolledBack)
-    /// event — only an explicit [`Transaction::rollback`] does. A `Drop`
+    /// event - only an explicit [`Transaction::rollback`] does. A `Drop`
     /// impl is synchronous and cannot await the async dispatcher without a
     /// detached spawn that could outlive runtime shutdown, so the event is
     /// tied to the explicit call. If a listener must observe every rollback
@@ -1070,7 +1070,7 @@ impl DB {
     /// when the inner `FrameworkError` looks like a deadlock or
     /// serialization failure.
     ///
-    /// The closure body runs from scratch on every attempt — capture
+    /// The closure body runs from scratch on every attempt - capture
     /// owned state (or `Arc`s) rather than `&mut` references so the
     /// retry path is well-defined.
     ///
@@ -1084,8 +1084,8 @@ impl DB {
     ///   surfaced deadlock string)
     ///
     /// Between attempts a jittered backoff sleeps for the internal
-    /// `deadlock_retry_backoff` helper's computed duration — exponential
-    /// with full jitter, capped at 500ms — so contending writers don't
+    /// `deadlock_retry_backoff` helper's computed duration - exponential
+    /// with full jitter, capped at 500ms - so contending writers don't
     /// thrash the database after a deadlock victim is chosen. On the
     /// final attempt the error propagates unchanged with no sleep.
     pub async fn transaction_with_attempts<F, T>(
@@ -1093,7 +1093,7 @@ impl DB {
         mut f: F,
     ) -> Result<T, FrameworkError>
     where
-        // HRTB matching `transaction` — the closure must accept a
+        // HRTB matching `transaction` - the closure must accept a
         // freshly-borrowed `&Transaction` per attempt and return a
         // boxed future that borrows it. The `FnMut` bound lets the
         // closure capture state (e.g. an `Arc<AtomicU32>` retry
@@ -1129,7 +1129,7 @@ impl DB {
                 Err(e) => return Err(e),
             }
         }
-        // unreachable — the loop either returns `Ok(_)` or the final
+        // unreachable - the loop either returns `Ok(_)` or the final
         // `Err(_)` branch above. Kept as a hardened fallthrough.
         Err(FrameworkError::internal(
             "transaction_with_attempts: loop exited without returning",
@@ -1200,7 +1200,7 @@ async fn finish_query_event<T>(
 /// Fan a [`QueryExecuted`](super::events::QueryExecuted) event out to
 /// every registered observer. Three sinks:
 ///
-/// 1. Direct `DB::listen(|q| { ... })` callbacks — synchronous.
+/// 1. Direct `DB::listen(|q| { ... })` callbacks - synchronous.
 /// 2. The in-memory query log when
 ///    [`DB::enable_query_log`](crate::DB::enable_query_log) is active.
 /// 3. The framework-wide [`EventDispatcher`](crate::EventDispatcher)
@@ -1210,7 +1210,7 @@ async fn finish_query_event<T>(
 /// [`with_dispatching_flag`](super::events::with_dispatching_flag) so
 /// any listener that re-queries does not re-fire QueryExecuted.
 /// Listener errors at the EventFacade layer are swallowed via
-/// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) —
+/// [`dispatch_best_effort`](crate::EventFacade::dispatch_best_effort) -
 /// observation must never fail the query.
 pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
     super::events::with_dispatching_flag(async move {
@@ -1218,7 +1218,7 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         // listener Vec keeps the lock window tight; listeners are
         // Arc-cloned so calling them outside the lock is safe.
         //
-        // Each callback runs inside a `catch_unwind` boundary — the
+        // Each callback runs inside a `catch_unwind` boundary - the
         // query already completed (we're emitting the post-execution
         // event), so a panicking listener must NOT unwind through the
         // executor and surface as a "query failed" error to the
@@ -1254,7 +1254,7 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         {
             log.entries.push(event.clone());
         }
-        // (3) EventFacade dispatch. Best-effort — a logging listener
+        // (3) EventFacade dispatch. Best-effort - a logging listener
         // returning Err must not fail the query.
         if crate::EventFacade::has_listeners::<super::events::QueryExecuted>() {
             let _ = crate::EventFacade::dispatch_best_effort(event).await;
@@ -1264,7 +1264,7 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
 }
 
 /// Fire a transaction-lifecycle event through `EventFacade`. Best-effort
-/// dispatch — a failing listener does not abort the transaction. The
+/// dispatch - a failing listener does not abort the transaction. The
 /// no-listeners short-circuit makes this a no-op in the common case.
 async fn emit_tx_event<E: crate::Event>(event: E) {
     if crate::EventFacade::has_listeners::<E>() {
@@ -1334,7 +1334,7 @@ mod tests {
     fn deadlock_retry_backoff_window_grows_with_attempt() {
         // Full jitter is uniform in `[0, capped_ms]`. Sample heavily
         // and assert the empirical maximum reaches at least 50% of the
-        // expected ceiling for each early attempt — looser than the
+        // expected ceiling for each early attempt - looser than the
         // upper bound but tight enough to catch a regression that
         // accidentally drops the exponential growth.
         let expected_ceilings = [10u64, 20, 40, 80, 160, 320, 500];
@@ -1353,7 +1353,7 @@ mod tests {
             }
             assert!(
                 observed_max >= ceiling / 2,
-                "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms — jitter window may have collapsed"
+                "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms - jitter window may have collapsed"
             );
         }
     }

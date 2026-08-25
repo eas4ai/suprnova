@@ -55,7 +55,7 @@ fn duplicate_handler_keys_are_valid_identifiers() {
     // First occurrence keeps the handler name.
     assert!(block.contains("serve:"), "block: {block}");
 
-    // No key may contain a '.' — that is the exact bug (member access, not a key).
+    // No key may contain a '.' - that is the exact bug (member access, not a key).
     assert!(
         !block.contains(".png:") && !block.contains(".webmanifest:") && !block.contains(".json:"),
         "leaked a dotted key: {block}"
@@ -75,7 +75,7 @@ fn duplicate_handler_keys_are_valid_identifiers() {
 
 #[test]
 fn unique_handler_names_are_untouched() {
-    // Distinct handlers keep their clean names — no spurious sanitizing.
+    // Distinct handlers keep their clean names - no spurious sanitizing.
     let routes = vec![
         route("/favicon.ico", "serve", None),
         route("/health", "healthcheck", None),

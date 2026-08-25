@@ -79,7 +79,7 @@ impl RestartBackoff {
 
 /// Colors auto-assigned to `Suprnova.toml` dev processes that don't set
 /// one, rotating so several unstyled entries stay visually distinct.
-/// Skips magenta/cyan — those are the backend/frontend prefixes.
+/// Skips magenta/cyan - those are the backend/frontend prefixes.
 const DEV_PROCESS_PALETTE: [console::Color; 4] = [
     console::Color::Green,
     console::Color::Yellow,
@@ -123,7 +123,7 @@ struct DevProcessConfig {
 }
 
 /// Load `[[serve.process]]` entries from `Suprnova.toml` at `path`. A
-/// missing file means "nothing configured" (`Ok(vec![])`) — most projects
+/// missing file means "nothing configured" (`Ok(vec![])`) - most projects
 /// will never have one. A file that exists but is malformed, or has a
 /// broken entry, is a hard error: silently skipping it would start
 /// `serve` without a process the developer believes is running.
@@ -511,7 +511,7 @@ impl ProcessManager {
 
     /// Reap exited children, schedule or perform respawns, and report
     /// whether a crash means the whole session must shut down
-    /// (`--no-restart` only — with restart enabled, a crash is handled
+    /// (`--no-restart` only - with restart enabled, a crash is handled
     /// here and never asks the caller to stop). `stderr` diagnostics
     /// (`ui::warning`/`ui::error`) print unconditionally, same as
     /// before this task; the `DevEvent`s alongside them are the
@@ -649,11 +649,11 @@ fn give_up(mp: &mut ManagedProcess, mode: OutputMode, restart_tries: u32) {
 
 /// Spawn `spec`'s command and wire its stdout/stderr to either prefixed,
 /// optionally timestamped lines (`OutputMode::Prefixed`) or `DevEvent`
-/// NDJSON lines (`OutputMode::Json`) — both stdout- and stderr-sourced
+/// NDJSON lines (`OutputMode::Json`) - both stdout- and stderr-sourced
 /// lines are carried as `DevEvent::Output` payloads on *our* stdout in
 /// `--json` mode, never passed through raw, so a consumer never has to
 /// also watch our stderr for child output. Used for both the first spawn
-/// of a process and every respawn — a respawned child gets fresh reader
+/// of a process and every respawn - a respawned child gets fresh reader
 /// threads because its pipes are new.
 fn spawn_child_and_stream(
     spec: &ProcessSpec,
@@ -667,7 +667,7 @@ fn spawn_child_and_stream(
 
     // The framework's `.env` loader (Phase 5a in config/env.rs) restores
     // real system env over file values, so a var we set on the child here
-    // wins over the scaffold `.env` — that's how the resolved/scanned
+    // wins over the scaffold `.env` - that's how the resolved/scanned
     // ports reach the backend and Vite.
     for (key, value) in &spec.envs {
         cmd.env(key, value);
@@ -727,7 +727,7 @@ fn spawn_child_and_stream(
                         eprint_prefixed(&prefix_err, color, &line, timestamps)
                     }
                     // Note: a stderr-sourced line still becomes a
-                    // DevEvent::Output on *our* stdout, not stderr — see
+                    // DevEvent::Output on *our* stdout, not stderr - see
                     // the schema's doc comment on why.
                     OutputMode::Json => emit_event(
                         mode,
@@ -802,7 +802,7 @@ fn validate_suprnova_project(backend_only: bool, frontend_only: bool) -> Result<
 /// Version requirement for the `cargo-watch` we install on demand.
 ///
 /// Bounded to a major version because `serve` drives it as
-/// `cargo watch -x <cmd>` — a flag whose meaning is not guaranteed across
+/// `cargo watch -x <cmd>` - a flag whose meaning is not guaranteed across
 /// a major bump. Unbounded, `cargo install cargo-watch` takes whatever is
 /// newest, so a future release could break `suprnova serve` on machines
 /// that happened to install it that day, with nothing in this repo
@@ -826,7 +826,7 @@ fn ensure_cargo_watch(json: bool) -> Result<(), String> {
             // in its own Cargo.lock instead of re-resolving its dependency
             // tree at install time. Without it, `suprnova serve` silently
             // compiles and runs whatever transitive versions happen to be
-            // newest on the day — the thing you least want from a command
+            // newest on the day - the thing you least want from a command
             // that installs software as a side effect of starting a dev
             // server.
             let install = Command::new("cargo")
@@ -915,7 +915,7 @@ fn first_free_port(base: u16) -> u16 {
 }
 
 // Arguments mirror `Commands::Serve`'s CLI flags one-to-one, dispatched
-// verbatim from `main.rs` like every other `commands::*::run` — grouping
+// verbatim from `main.rs` like every other `commands::*::run` - grouping
 // them into a struct would just move the flag list, not shrink it.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -995,7 +995,7 @@ pub fn run(
 
         // lang-keys.ts stays quiet on Ok(0) (no `lang/` dir, or zero
         // message ids) rather than getting the "no structs found" hint
-        // InertiaProps gets above — most projects aren't localized at
+        // InertiaProps gets above - most projects aren't localized at
         // all, and printing that on every single `serve` would be
         // permanent noise for the common case.
         let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
@@ -1117,7 +1117,7 @@ pub fn run(
     }
 
     // Extra dev processes declared in Suprnova.toml. Always run,
-    // independent of --backend-only/--frontend-only — a queue worker or
+    // independent of --backend-only/--frontend-only - a queue worker or
     // log tailer isn't "the frontend" or "the backend".
     for proc in &dev_processes {
         if !json {
@@ -1218,7 +1218,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
     }
 
     // `lang/` is optional and, unlike `src/`, may not exist at all for a
-    // non-localized project — `notify` can't watch a path that isn't
+    // non-localized project - `notify` can't watch a path that isn't
     // there, so this watch is skipped rather than treated as an error.
     // A project that adds `lang/` after `serve` started needs a restart
     // to pick it up, same as any other watcher-registration-time gap.
@@ -1244,7 +1244,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 
     let mut debounce = Debounce::new(Duration::from_millis(500));
     // Independent debounce/regeneration for `lang-keys.ts`, mirroring the
-    // Rust-file one exactly (same quiet period, same trailing-edge fire) —
+    // Rust-file one exactly (same quiet period, same trailing-edge fire) -
     // separate because a `.rs` save shouldn't reparse every `.ftl` file
     // and vice versa; the two artifacts have nothing to do with each
     // other beyond sharing this watcher loop.
@@ -1341,8 +1341,8 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 
 /// Trailing-edge debounce: fire once the burst has gone quiet.
 ///
-/// The watcher used to debounce on the *leading* edge —
-/// `if is_rust_change && last_regen.elapsed() > debounce_duration` — which
+/// The watcher used to debounce on the *leading* edge -
+/// `if is_rust_change && last_regen.elapsed() > debounce_duration` - which
 /// regenerates on the first event of a burst and then silently drops every
 /// event for the next 500ms with no trailing run.
 ///
@@ -1351,7 +1351,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 /// format-on-save across several files, a branch switch, and any editor
 /// that writes a temp file and renames it all produce one. The regenerate
 /// fires on the *first* file, before the rest are written, so the types on
-/// disk reflect a partial edit — and nothing regenerates them until some
+/// disk reflect a partial edit - and nothing regenerates them until some
 /// unrelated future save happens to land outside a quiet window. The
 /// developer sees stale types and no error.
 ///
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn env_port_rejects_empty_and_garbage() {
         // Indirection through a real (unset) env var name keeps this
-        // hermetic — no global env mutation.
+        // hermetic - no global env mutation.
         assert_eq!(env_port("SUPRNOVA_DEFINITELY_UNSET_PORT_VAR"), None);
     }
 }
@@ -1451,7 +1451,7 @@ mod tests {
 #[cfg(test)]
 mod debounce_tests {
     //! P2-13. The watcher debounced on the leading edge, which does not
-    //! delay work — it discards it. These drive `Debounce` with explicit
+    //! delay work - it discards it. These drive `Debounce` with explicit
     //! `Instant`s, so they are deterministic and take no wall-clock time.
 
     use super::Debounce;
@@ -1467,7 +1467,7 @@ mod debounce_tests {
         assert!(!d.should_fire(t0));
         assert!(
             !d.should_fire(t0 + Duration::from_secs(60)),
-            "an idle watcher must never regenerate — the quiet period is \
+            "an idle watcher must never regenerate - the quiet period is \
              measured from an event, not from process start"
         );
     }
@@ -1490,7 +1490,7 @@ mod debounce_tests {
     }
 
     /// The regression, stated directly. A burst of saves must produce one
-    /// regeneration, and it must happen *after the last one* — that is the
+    /// regeneration, and it must happen *after the last one* - that is the
     /// save whose types were previously lost.
     #[test]
     fn a_burst_fires_once_and_only_after_its_final_event() {
@@ -1505,7 +1505,7 @@ mod debounce_tests {
             assert!(
                 !d.should_fire(at),
                 "firing at event {i} would regenerate from a partially \
-                 written burst — the leading-edge bug"
+                 written burst - the leading-edge bug"
             );
         }
 
@@ -1536,7 +1536,7 @@ mod debounce_tests {
         let t0 = Instant::now();
         d.on_event(t0);
 
-        // 300ms in — inside the old 500ms window, where this event used
+        // 300ms in - inside the old 500ms window, where this event used
         // to be discarded outright.
         let second = t0 + Duration::from_millis(300);
         d.on_event(second);
@@ -1572,7 +1572,7 @@ mod debounce_tests {
 mod restart_backoff_tests {
     //! T15. `RestartBackoff` is the pure state machine behind crash
     //! respawn: exact numbers only, driven by explicit `Instant`s so the
-    //! test takes no wall-clock time — same style as `Debounce`'s tests
+    //! test takes no wall-clock time - same style as `Debounce`'s tests
     //! above.
 
     use super::{BACKOFF_CAP, BACKOFF_FLOOR, RestartBackoff};
@@ -1646,7 +1646,7 @@ mod restart_backoff_tests {
         assert_eq!(b.tries(), 3);
 
         // Respawned, then survives a full healthy window before crashing
-        // again — both the delay and the tries count must reset.
+        // again - both the delay and the tries count must reset.
         b.record_spawn(t0);
         let healthy_crash = t0 + Duration::from_secs(30);
         b.next_delay(healthy_crash);
@@ -1660,7 +1660,7 @@ mod restart_backoff_tests {
 
 #[cfg(test)]
 mod dev_process_config_tests {
-    //! T15. `Suprnova.toml`'s `[[serve.process]]` array — the declarative
+    //! T15. `Suprnova.toml`'s `[[serve.process]]` array - the declarative
     //! registry a project uses in place of Laravel's `DevCommands::register`.
 
     use super::{DevProcessConfig, parse_dev_processes};
@@ -1702,7 +1702,7 @@ color = "yellow"
         let toml = "[[serve.process]]\nname = \"logs\"\ncommand = \"tail\"\n";
         let procs = parse_dev_processes(toml).unwrap();
         assert_eq!(procs[0].args, Vec::<String>::new());
-        let _ = procs[0].color; // no panic, no error — palette assigned one
+        let _ = procs[0].color; // no panic, no error - palette assigned one
     }
 
     #[test]
@@ -1719,7 +1719,7 @@ color = "yellow"
                 "duplicate",
             ),
             // Whitespace-only `name`/`command` must be caught here, with
-            // an actionable message naming the file and the entry —
+            // an actionable message naming the file and the entry -
             // rather than passing parsing and surfacing later as an
             // opaque OS "No such file or directory" spawn error.
             (

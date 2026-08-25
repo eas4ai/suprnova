@@ -141,13 +141,13 @@ async fn head_falls_back_to_get_and_strips_body() {
     // HEAD responses.
     //
     // Suprnova's `HttpResponse::text(...)` doesn't set Content-Length
-    // explicitly — hyper computes it from the body's `size_hint()` at
+    // explicitly - hyper computes it from the body's `size_hint()` at
     // serialization time. After `strip_body_for_head` swaps the body
     // for an empty `BoxBody`, hyper sees `size_hint().exact() == 0`
     // through the boxed body and emits NO Content-Length header at
     // all on the wire (chunked-or-omit fallback). RFC 9110 §9.3.2
     // SHOULD says HEAD responses ought to carry the Content-Length
-    // GET would have sent — clients tolerate the omission, but it's
+    // GET would have sent - clients tolerate the omission, but it's
     // a deferred polish item (tracked in the routing MEDIUMs list).
     //
     // This assertion pins the current behavior so a future hyper
@@ -157,7 +157,7 @@ async fn head_falls_back_to_get_and_strips_body() {
         headers.get("content-length").is_none(),
         "hyper currently emits no Content-Length for stripped HEAD \
          responses (size_hint-driven, header-implicit). RFC 9110 §9.3.2 \
-         SHOULD says HEAD should carry the GET Content-Length — when \
+         SHOULD says HEAD should carry the GET Content-Length - when \
          we tighten the strip path to preserve it, update this test.",
     );
 
@@ -260,7 +260,7 @@ async fn head_against_unrouted_path_returns_404() {
 }
 
 /// User-call-site smoke test for the `patch!` / `head!` / `options!`
-/// macros — exercises the full chain: `#[macro_export]` macro →
+/// macros - exercises the full chain: `#[macro_export]` macro →
 /// `__verb_impl` → `RouteDefBuilder` → `RouteDefBuilder::register` →
 /// `Router::{patch, head, options}`. If any of those links break, this
 /// test fails before the integration tests above can.
@@ -404,7 +404,7 @@ async fn any_macro_inside_group_inherits_prefix_and_middleware() {
 /// `routes!{}`-friendly middleware: captures its tag and the global
 /// `any_macro_tracker()` static, no per-instance state. The earlier
 /// `TaggingMiddleware` carries an `Arc<Mutex<...>>` field which means
-/// a fresh instance is needed per test — `StaticTracker` shares one
+/// a fresh instance is needed per test - `StaticTracker` shares one
 /// process-global Vec so the routes! body (a `fn` item) can construct
 /// it inline.
 #[derive(Clone)]

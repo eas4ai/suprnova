@@ -1,4 +1,4 @@
-//! Phase 10B T3 — `HasMany<L, R>` + chainable builder + eager-load
+//! Phase 10B T3 - `HasMany<L, R>` + chainable builder + eager-load
 //! grouping.
 //!
 //! T2 shipped HasOne / BelongsTo and established the patterns this
@@ -19,7 +19,7 @@
 //! - `__count_relation`: `GROUP BY fk` counting, distributed via
 //!   `set_count`. Parents with no children get 0.
 //! - `__aggregate_relation`: real SUM/AVG/MIN/MAX over the per-parent
-//!   group — NOT T2's "record the single row's column" pattern.
+//!   group - NOT T2's "record the single row's column" pattern.
 //!   Empty groups fall back through the Sum|Avg vs Min|Max branch.
 
 use suprnova::testing::TestDatabase;
@@ -175,7 +175,7 @@ async fn has_many_returns_empty_for_unrelated_parent() {
     assert!(posts.is_empty());
 }
 
-// Custom FK / LK overrides — pin the macro option plumbing for HasMany
+// Custom FK / LK overrides - pin the macro option plumbing for HasMany
 // the same way `has_one_custom_fk_lk_resolves` does for HasOne.
 #[model(table = "otm_owners", relations = {
     posts: HasMany<OtmPost> { fk = "otm_user_id", lk = "id" },
@@ -264,7 +264,7 @@ async fn has_many_oldest_orders_asc_by_created_at() {
 
 #[tokio::test]
 async fn has_many_order_by_desc_chains_through_wrapper() {
-    // Direct `order_by` exercise — separate from latest()/oldest()
+    // Direct `order_by` exercise - separate from latest()/oldest()
     // so a future regression in created_at handling doesn't mask a
     // regression in the explicit `order_by` chain through the wrapper.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -320,7 +320,7 @@ async fn has_many_eager_load_groups_by_parent() {
 async fn has_many_eager_load_empty_parent_gets_empty_slice() {
     // A parent with no children must still get an empty slice in
     // `posts_loaded()`, not a panic. The dispatcher must explicitly
-    // populate the cache for every parent — otherwise the accessor's
+    // populate the cache for every parent - otherwise the accessor's
     // "you forgot `with()`" panic would fire incorrectly.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -347,7 +347,7 @@ async fn has_many_loaded_accessor_panics_without_with() {
 // ---- Count dispatcher --------------------------------------------------
 //
 // `__count_relation` must populate `__eager.set_count` for EVERY
-// parent — including those with zero children (which get 0). Mirrors
+// parent - including those with zero children (which get 0). Mirrors
 // the T2 HasOne / BelongsTo behaviour but over GROUP-BY-style counts.
 
 #[tokio::test]
@@ -388,7 +388,7 @@ async fn has_many_count_dispatcher_distributes_counts() {
 // ---- Aggregate dispatcher ---------------------------------------------
 //
 // HasMany's aggregate is the real-deal SUM/AVG/MIN/MAX over the
-// per-parent group — distinct from T2's "record the single row's
+// per-parent group - distinct from T2's "record the single row's
 // column" pattern. Empty groups still fall through the Sum|Avg vs
 // Min|Max branch (Sum/Avg → 0.0, Min/Max → None).
 
@@ -632,7 +632,7 @@ async fn has_many_sum_avg_zero_on_empty_group() {
 //
 // 1. Large fan-out: the count is loaded correctly AND the `set_many`
 //    slot remains empty (the dispatcher must NOT populate the eager
-//    rows cell as a side effect — `posts_loaded()` is for `with()`,
+//    rows cell as a side effect - `posts_loaded()` is for `with()`,
 //    `posts_count()` is for `with_count()`).
 // 2. Parent with zero children: count is explicitly 0 (not "missing"),
 //    so `posts_count()` returns 0 instead of panicking.
@@ -660,7 +660,7 @@ async fn has_many_count_loads_count_without_populating_set_many() {
 
     // `__count_relation` must NOT populate the `set_many` cell;
     // `posts_loaded()` is only valid after `with(["posts"])`. The
-    // accessor panics with the "was not eager-loaded" message — any
+    // accessor panics with the "was not eager-loaded" message - any
     // panic is sufficient for `catch_unwind`'s `is_err()` check.
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = u_loaded.posts_loaded();
@@ -726,7 +726,7 @@ async fn has_many_aggregate_via_server_side_group_by() {
         .expect("sum cache populated");
     assert!(*sum > 0.0, "sum of post IDs should be positive, got {sum}");
 
-    // posts_loaded must still panic — aggregate-only path doesn't
+    // posts_loaded must still panic - aggregate-only path doesn't
     // populate the `set_many` cell.
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = u_loaded.posts_loaded();

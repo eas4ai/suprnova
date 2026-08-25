@@ -36,7 +36,7 @@ use suprnova::events::testing::{assert_dispatched, assert_not_dispatched};
 use suprnova::http::cookie::Cookie;
 use suprnova::{Auth, Crypt, EncryptionKey, EventFacade};
 
-/// Shared runtime — SQLx pools die with their creating runtime, so
+/// Shared runtime - SQLx pools die with their creating runtime, so
 /// every DB-touching path runs here.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
@@ -49,7 +49,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     Crypt::init(EncryptionKey::generate());
 
     RT.block_on(async {
-        // Framework DB — the `App::singleton(DbConnection)` install is
+        // Framework DB - the `App::singleton(DbConnection)` install is
         // what backs `DB::connection()` for the 2FA + remember-me code.
         let config = suprnova::database::DatabaseConfig::builder()
             .url("sqlite::memory:")
@@ -83,7 +83,7 @@ impl MigratorTrait for LocalMigrator {
 }
 
 /// Mirrors the canonical `remember_tokens` shape from
-/// `tests/auth_session_guard.rs` / `tests/remember_me.rs` — the schema
+/// `tests/auth_session_guard.rs` / `tests/remember_me.rs` - the schema
 /// consumer apps own and ship with their own migrator. The framework
 /// does not ship this migration; tests recreate it.
 struct CreateRememberTokensTable;
@@ -205,7 +205,7 @@ fn totp_code_for(otpauth_url: &str) -> String {
 /// installs: the session, the pending-cookies bag, and the auth
 /// request state. The caller passes the pending-cookies slot in so
 /// they can keep an `Arc` clone outside the closure and inspect the
-/// queued cookies live from inside the closure — same pattern as
+/// queued cookies live from inside the closure - same pattern as
 /// `tests/remember_me.rs`.
 async fn run_in_request_with_slot<F, T>(pending_slot: Arc<StdMutex<Vec<Cookie>>>, fut: F) -> T
 where
@@ -347,7 +347,7 @@ fn complete_challenge_with_remember_true_reissues_remember_me_cookie() {
         let captured_user_id = user_id.clone();
 
         // Pre-create the slot so we can clone it for live inspection
-        // inside the closure — the scope retains the original, our
+        // inside the closure - the scope retains the original, our
         // clone gives a read window from outside the scope's borrow.
         let pending_slot = suprnova::session::new_pending_cookies_slot_for_test();
         let inspector = pending_slot.clone();
@@ -502,7 +502,7 @@ fn complete_challenge_with_bad_code_dispatches_failed_event_and_no_login() {
 
         assert_dispatched::<TwoFactorChallengeFailed>(|e| e.user_id == captured_user_id);
         // The standard auth lifecycle events MUST NOT fire on a
-        // failed challenge — listeners would otherwise see a "Login"
+        // failed challenge - listeners would otherwise see a "Login"
         // for a user who never actually got in.
         assert_not_dispatched::<Login>(|_| true);
         assert_not_dispatched::<Authenticated>(|_| true);
@@ -533,7 +533,7 @@ fn complete_challenge_rejects_locked_account_without_checking_code() {
             "lockout precondition: account must be locked before complete_challenge"
         );
 
-        // Even the CORRECT TOTP code must be rejected with 429 — a
+        // Even the CORRECT TOTP code must be rejected with 429 - a
         // locked account cannot bypass the lockout by submitting the
         // right code. This is the symmetric counterpart of the
         // password path's `LoginThrottleMiddleware` gate.

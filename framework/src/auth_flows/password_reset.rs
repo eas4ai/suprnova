@@ -59,7 +59,7 @@ use std::sync::Arc;
 /// // instead of relying on the `warn!` log line (SEC-02(d)):
 /// let outcome = PasswordReset::complete_with_outcome(&token_from_query, &new_password).await?;
 /// if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err() {
-///     // e.g. page an operator — the password rotated, but a stolen
+///     // e.g. page an operator - the password rotated, but a stolen
 ///     // credential may still have a live session or remember-me cookie.
 /// }
 /// # Ok(()) }
@@ -82,7 +82,7 @@ pub struct PasswordResetOutcome {
     pub user_id: String,
     /// Result of revoking every session row for `user_id` via
     /// [`crate::session::destroy_all_for_user`]. `Ok(n)` is the number
-    /// of rows revoked — zero is a legitimate outcome (the user simply
+    /// of rows revoked - zero is a legitimate outcome (the user simply
     /// had no other active sessions), not a failure signal on its own.
     pub sessions_revoked: Result<u64, FrameworkError>,
     /// Result of revoking every remember-me token row for `user_id` via
@@ -92,7 +92,7 @@ pub struct PasswordResetOutcome {
 }
 
 impl PasswordReset {
-    /// Send a password-reset link by email — the anti-enumeration entry point.
+    /// Send a password-reset link by email - the anti-enumeration entry point.
     ///
     /// Uses the installed Magnetar engine when present. Otherwise the active
     /// [`UserProvider`] must explicitly support password reset and return an
@@ -107,7 +107,7 @@ impl PasswordReset {
     /// best-effort: a listener panic or transient dispatcher error is discarded
     /// (the token is already minted) and does not surface as an `Err`.
     ///
-    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM` (required —
+    /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM` (required -
     /// errors if unset) from the process environment. Defaulting `MAIL_FROM` to
     /// a placeholder breaks DMARC/SPF in production, so the facade fails closed
     /// instead of silently sending from a domain the operator doesn't control.
@@ -179,7 +179,7 @@ impl PasswordReset {
     /// mutation back.
     ///
     /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM` (required for
-    /// the notification — a missing `MAIL_FROM` only skips the best-effort
+    /// the notification - a missing `MAIL_FROM` only skips the best-effort
     /// notification; the password change itself still commits).
     ///
     /// # Errors
@@ -193,7 +193,7 @@ impl PasswordReset {
     ///   or persisting the password.
     ///
     /// A session-revocation or remember-me-revocation failure does
-    /// **not** surface as an `Err` here — see
+    /// **not** surface as an `Err` here - see
     /// [`Self::complete_with_outcome`] for a sibling that reports those
     /// outcomes to the caller (SEC-02(d)) instead of only logging them.
     pub async fn complete(token: &str, new_password: &str) -> Result<String, FrameworkError> {
@@ -208,7 +208,7 @@ impl PasswordReset {
     /// alone.
     ///
     /// See [`Self::complete`] for the full side-effect ordering and
-    /// error semantics — they are identical here; this method differs
+    /// error semantics - they are identical here; this method differs
     /// only in what it returns on success. Both revocation steps are
     /// still logged exactly as [`Self::complete`] logs them (`info!` on
     /// a nonzero revoked count, `warn!` on failure), so existing
@@ -217,7 +217,7 @@ impl PasswordReset {
     ///
     /// # Errors
     ///
-    /// Identical to [`Self::complete`] — a revocation failure is
+    /// Identical to [`Self::complete`] - a revocation failure is
     /// reported through the returned [`PasswordResetOutcome`], not
     /// through this method's `Result`.
     pub async fn complete_with_outcome(

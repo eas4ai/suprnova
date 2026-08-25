@@ -2,16 +2,16 @@
 //!
 //! The write half lives in
 //! [`crate::notifications::channels::database::DatabaseChannel`]. This
-//! module provides the Laravel-equivalent read surface — fetch
+//! module provides the Laravel-equivalent read surface - fetch
 //! all/unread/read rows for a notifiable, mark as read/unread, and the
-//! mass-update + delete helpers — without forcing every consumer to write
+//! mass-update + delete helpers - without forcing every consumer to write
 //! the SQL themselves.
 //!
 //! Laravel exposes these through the `Notifiable` + `HasDatabaseNotifications`
 //! traits returning Eloquent relationships. Suprnova's `Notifiable` trait is
 //! intentionally minimal (just `route_for`), so the read surface ships as
 //! free functions on the framework side that take an explicit
-//! `(notifiable_type, notifiable_id)` pair — the same polymorphic pair
+//! `(notifiable_type, notifiable_id)` pair - the same polymorphic pair
 //! [`DatabaseChannel`](crate::notifications::channels::database::DatabaseChannel)
 //! writes.
 
@@ -27,7 +27,7 @@ use sea_orm::{
 pub struct StoredNotification {
     /// Row primary key (string-typed to carry UUID/ULID notification ids verbatim).
     pub id: String,
-    /// Notification type — the `Notification::notification_name()` of the
+    /// Notification type - the `Notification::notification_name()` of the
     /// originating notification.
     pub type_name: String,
     /// Recipient model name (e.g. `"users"`).
@@ -87,7 +87,7 @@ async fn run(
 /// statement shares, with placeholders starting at ordinal `first`.
 ///
 /// `first` is a parameter rather than a constant because `mark_all_as_read`
-/// binds two timestamps ahead of the recipient pair — on Postgres a clause
+/// binds two timestamps ahead of the recipient pair - on Postgres a clause
 /// that restarts its numbering silently reads the wrong bind.
 fn recipient_predicate(db: &DatabaseConnection, first: usize) -> Result<String, FrameworkError> {
     let backend = db.get_database_backend();

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 /// Result of a `Bus::dispatch` call.
 ///
 /// In normal mode, dispatch returns `Executed(output)`. Under
-/// `Bus::fake()` it returns `Captured` — the command is recorded for
+/// `Bus::fake()` it returns `Captured` - the command is recorded for
 /// `assert_dispatched` but the handler is not run.
 #[derive(Debug)]
 pub enum Dispatched<T> {
@@ -48,7 +48,7 @@ impl<T> Dispatched<T> {
         matches!(self, Dispatched::Captured)
     }
 
-    /// Convert to `Option<T>` — `Some(T)` if executed, `None` if captured.
+    /// Convert to `Option<T>` - `Some(T)` if executed, `None` if captured.
     pub fn executed(self) -> Option<T> {
         match self {
             Dispatched::Executed(v) => Some(v),
@@ -84,11 +84,11 @@ pub struct Bus;
 
 impl Bus {
     /// Register a handler for command type `C`. Overwrites any previous handler
-    /// for the same type and logs a warning when that happens — tests routinely
+    /// for the same type and logs a warning when that happens - tests routinely
     /// re-register, but a duplicate binding from boot usually indicates two
     /// `register` calls from different service providers.
     ///
-    /// The dispatcher path keeps commands and outputs as native Rust values —
+    /// The dispatcher path keeps commands and outputs as native Rust values -
     /// no serde round-trip. Only the test-fake path serializes commands (so it
     /// can store them by predicate-friendly value). That means a `C::Output`
     /// only has to be `Send + 'static`; non-serde types like `Bytes`, opaque
@@ -104,7 +104,7 @@ impl Bus {
             Box::pin(async move {
                 let cmd: C = *any_cmd.downcast::<C>().unwrap_or_else(|_| {
                     panic!(
-                        "Bus: internal type invariant — dispatcher for {} got a value of the \
+                        "Bus: internal type invariant - dispatcher for {} got a value of the \
                          wrong concrete type. This is a framework bug.",
                         C::command_name()
                     )
@@ -141,7 +141,7 @@ impl Bus {
     /// its typed output wrapped in [`Dispatched`].
     ///
     /// Under [`testing::install_fake`], the command is captured and
-    /// `Ok(Dispatched::Captured)` is returned — the handler is **not** invoked.
+    /// `Ok(Dispatched::Captured)` is returned - the handler is **not** invoked.
     /// Real failures (no handler registered or handler error) still produce
     /// `Err(_)`.
     pub async fn dispatch<C: Command>(cmd: C) -> Result<Dispatched<C::Output>, FrameworkError> {
@@ -161,7 +161,7 @@ impl Bus {
         let result = dispatcher(Box::new(cmd)).await?;
         let out: C::Output = *result.downcast::<C::Output>().unwrap_or_else(|_| {
             panic!(
-                "Bus: internal type invariant — handler for {} returned a value of the wrong \
+                "Bus: internal type invariant - handler for {} returned a value of the wrong \
                  concrete type. This is a framework bug.",
                 C::command_name()
             )
@@ -172,7 +172,7 @@ impl Bus {
     /// Run commands sequentially, stopping on (and including) the first error.
     ///
     /// This is the in-process synchronous helper and is intentionally
-    /// homogeneous over a single command type `C` — the dispatcher returns
+    /// homogeneous over a single command type `C` - the dispatcher returns
     /// `Dispatched<C::Output>`, which only makes sense when every input
     /// shares one `Output`. For Laravel-style heterogeneous chains of
     /// different job types, use [`Queue::chain`](crate::queue::Queue::chain),

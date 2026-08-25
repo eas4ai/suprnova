@@ -1,4 +1,4 @@
-//! `bootstrap_from_env` must always replace the registered driver — even when
+//! `bootstrap_from_env` must always replace the registered driver - even when
 //! the requested driver is `memory` or unknown. The earlier implementation
 //! delegated those branches to `bootstrap_default`, which short-circuits if a
 //! driver is already wired, pinning a long-running process to whatever booted
@@ -103,9 +103,9 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
 
 /// `QUEUE_DRIVER=database` must bring its failed-jobs store with it.
 ///
-/// The `failed_jobs` table is part of that driver's contract —
+/// The `failed_jobs` table is part of that driver's contract -
 /// `queue:retry` reads it and `Queue::retry_failed` cannot work without
-/// it — but `bootstrap_from_env` used to bind the driver and leave the
+/// it - but `bootstrap_from_env` used to bind the driver and leave the
 /// store unset. A database-backed queue therefore dead-lettered into
 /// nothing unless the app wired one by hand, and nothing in the scaffold
 /// or the docs prompted anyone to.
@@ -116,7 +116,7 @@ async fn bootstrap_from_env_unknown_driver_resets_to_memory() {
 #[tokio::test]
 #[serial]
 async fn the_database_driver_binds_a_failed_jobs_store() {
-    // The binding is what is under test, not the schema — `bootstrap_from_env`
+    // The binding is what is under test, not the schema - `bootstrap_from_env`
     // only needs a live connection to hand the two stores.
     suprnova::DB::init_with(
         suprnova::DatabaseConfig::builder()

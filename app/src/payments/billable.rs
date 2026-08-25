@@ -13,7 +13,7 @@ pub struct BillableUser {
 
 impl BillableUser {
     /// Create a customer with the provider, then open a checkout session for
-    /// the given price. Returns the flow-tagged SessionPayload — the frontend
+    /// the given price. Returns the flow-tagged SessionPayload - the frontend
     /// dispatches on `flow` to render the right widget.
     pub async fn start_subscription(
         &self,

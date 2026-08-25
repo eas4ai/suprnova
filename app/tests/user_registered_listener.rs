@@ -1,6 +1,6 @@
 //! Tests the application's `UserRegistered` event listeners in
-//! isolation — the welcome-email logger and the hub-based broadcast
-//! path — without touching the process-global dispatcher or the
+//! isolation - the welcome-email logger and the hub-based broadcast
+//! path - without touching the process-global dispatcher or the
 //! bootstrap state. Listeners are invoked directly so the tests stay
 //! parallel-safe and don't depend on registration order.
 //!
@@ -59,7 +59,7 @@ async fn broadcast_listener_forwards_event_to_subscriber() {
 
 #[tokio::test]
 async fn broadcast_listener_is_ok_with_no_subscribers() {
-    // No subscriber — hub publishes silently. The listener must not error.
+    // No subscriber - hub publishes silently. The listener must not error.
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     let listener = BroadcastListener::<UserRegistered>::new(Arc::clone(&hub));
 

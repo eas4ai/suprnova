@@ -1,11 +1,11 @@
-//! `HasOne` — one-to-one from parent to child.
+//! `HasOne` - one-to-one from parent to child.
 //!
 //! Mirrors Laravel's [`hasOne`](https://laravel.com/docs/12.x/eloquent-relationships#one-to-one)
 //! semantics: the child table carries a foreign key pointing at the
 //! parent. Default FK convention: `<parent_snake>_id`. Default LK
 //! (the parent column the FK matches against): `"id"`.
 //!
-//! Chainable — `user.profile().filter("verified", true).first().await?`
+//! Chainable - `user.profile().filter("verified", true).first().await?`
 //! flows through the inner [`Builder<R>`]. The dual-API surface
 //! (`filter` / `db_where`) is honoured on the wrapper too: both names
 //! forward to the inner builder so callers writing Laravel-flavoured
@@ -15,7 +15,7 @@
 //! per `relations = { rel: HasOne<Target> }` declaration; user code
 //! never invokes [`HasOne::__new`] directly. Customisation flows
 //! through the `fk = "..."` / `lk = "..."` inline options on the
-//! relation declaration — the macro bakes the chosen keys into the
+//! relation declaration - the macro bakes the chosen keys into the
 //! call to [`HasOne::__new`].
 //!
 //! Eager-load orchestration lives in the parent model's
@@ -57,13 +57,13 @@ where
     <<R::Entity as sea_orm::EntityTrait>::PrimaryKey as sea_orm::PrimaryKeyTrait>::ValueType:
         Send + Into<sea_orm::Value>,
 {
-    /// Parent row's local-key value (typically `parent.id`) — the
+    /// Parent row's local-key value (typically `parent.id`) - the
     /// right-hand side of the inner builder's `WHERE fk = ?` predicate.
     /// Stored as `serde_json::Value` because the builder's `WhereTerm`
     /// holds JSON; the macro emits `serde_json::to_value(&self.id)`
     /// at the call site so the conversion is paid once at construction
     /// (and the framework can serialise any FK type the user might
-    /// declare — `i64`, `String`, `Uuid`-via-string, etc.).
+    /// declare - `i64`, `String`, `Uuid`-via-string, etc.).
     parent_key_value: serde_json::Value,
     /// Column on the child table that points at the parent.
     foreign_key: String,
@@ -110,7 +110,7 @@ where
     /// method; not part of the public API.
     ///
     /// `parent_key_value` is the JSON-serialised parent PK (e.g.
-    /// `serde_json::to_value(&self.id)`) — the macro pays for the
+    /// `serde_json::to_value(&self.id)`) - the macro pays for the
     /// conversion once at construction so the builder's JSON-shaped
     /// `WhereTerm` storage stays homogeneous.
     #[doc(hidden)]
@@ -142,7 +142,7 @@ where
     }
 
     /// Override the LK column post-construction. Only updates the
-    /// metadata the [`Relation`] impl exposes — the inner builder
+    /// metadata the [`Relation`] impl exposes - the inner builder
     /// already holds the LK's *value* (extracted from the parent row
     /// at construction time), so the column name only matters for
     /// eager-load dispatchers reading [`Relation::parent_key`].
@@ -187,7 +187,7 @@ where
 /// Soft-delete scope modifiers for relations whose **target** model
 /// is soft-deletable. The forwarding methods route through the inner
 /// `Builder<R>`'s `with_trashed` / `only_trashed`, which themselves
-/// only exist when `R: SoftDeletes` — so this impl is the only place
+/// only exist when `R: SoftDeletes` - so this impl is the only place
 /// the soft-delete escape hatch is reachable from a `HasOne` chain.
 impl<L, R> HasOne<L, R>
 where

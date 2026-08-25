@@ -1,28 +1,28 @@
-//! Phase 10B T10 — schema for the relations dogfood.
+//! Phase 10B T10 - schema for the relations dogfood.
 //!
 //! Adds the tables every Phase 10B relation kind needs to exercise
 //! against the example app's real `Migrator`. The new tables compose
 //! with the existing `users` / `posts` / `todos` schema:
 //!
-//! - `roles` + `role_user` — User has_many_to_many Roles with an
+//! - `roles` + `role_user` - User has_many_to_many Roles with an
 //!   `assigned_at` pivot column. UNIQUE on `(user_id, role_id)` so
 //!   the `attach` / `sync` semantics line up with Laravel's pivot
 //!   constraints (every pair shows up at most once).
-//! - `comments` — polymorphic via `commentable_id` + `commentable_type`.
+//! - `comments` - polymorphic via `commentable_id` + `commentable_type`.
 //!   Single table, indexed on the pair, no FK constraints (matches
-//!   Laravel's morph convention — type-string discrimination, not
+//!   Laravel's morph convention - type-string discrimination, not
 //!   per-target tables).
-//! - `videos` — second target for the morph relation, so the
+//! - `videos` - second target for the morph relation, so the
 //!   dogfood exercises both branches of `CommentableMorph::Post(...)`
 //!   and `CommentableMorph::Video(...)`.
-//! - `tags` + `taggables` — polymorphic m2m. UNIQUE on
+//! - `tags` + `taggables` - polymorphic m2m. UNIQUE on
 //!   `(tag_id, taggable_id, taggable_type)` so the same tag is never
 //!   attached twice to the same parent.
 //!
 //! Postgres-compatible SQL via SeaORM `Table::create`; SQLite friendly
 //! (the dogfood test bed runs against `TestDatabase::fresh::<Migrator>()`).
 //! `timestamp_with_time_zone` matches the rest of the Phase-10A migration
-//! family — the framework's `chrono::DateTime<chrono::Utc>` deserializer
+//! family - the framework's `chrono::DateTime<chrono::Utc>` deserializer
 //! handles either flavour.
 
 use sea_orm_migration::prelude::*;
@@ -114,7 +114,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // ---- comments (polymorphic — Post + Video) ----------------------
+        // ---- comments (polymorphic - Post + Video) ----------------------
         manager
             .create_table(
                 Table::create()

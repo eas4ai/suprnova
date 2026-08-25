@@ -50,7 +50,7 @@ async fn chain_runs_in_order() {
         .unwrap();
 
     // The chain dispatches one envelope; the worker pops it, runs step 1,
-    // then pushes step 2 on success — and so on. So we need three loop
+    // then pushes step 2 on success - and so on. So we need three loop
     // iterations to drain.
     let cfg = WorkerConfig {
         visibility_timeout: Duration::from_secs(5),
@@ -135,7 +135,7 @@ async fn chain_stops_after_a_failing_link() {
 }
 
 // Lights up the M39 fix: a job overriding `Job::backoff()` must propagate
-// that schedule through the chain — `ChainLink::to_envelope` previously
+// that schedule through the chain - `ChainLink::to_envelope` previously
 // hardcoded `BackoffSchedule::default()` and dropped the override on
 // rehydration.
 #[derive(Serialize, Deserialize, Clone)]
@@ -202,7 +202,7 @@ async fn chain_dispatch_uses_bound_driver_not_global() {
 
     // Build the chain envelope on the bound driver while the GLOBAL
     // slot points at a different driver. Pre-fix: handle_completed
-    // would route step 2 to `global` via `current_driver()` —
+    // would route step 2 to `global` via `current_driver()` -
     // `bound`'s worker would then sit idle and the chain would never
     // complete.
     Queue::set_driver(bound.clone());
@@ -229,13 +229,13 @@ async fn chain_dispatch_uses_bound_driver_not_global() {
     assert_eq!(
         seen,
         vec![1, 2],
-        "both chain steps must execute on the bound worker — proves the next \
+        "both chain steps must execute on the bound worker - proves the next \
          link landed on `bound` (where the worker polls), not on `global`"
     );
     assert_eq!(
         global.size().await.unwrap(),
         0,
-        "the global driver must remain empty — no stray chain links should \
+        "the global driver must remain empty - no stray chain links should \
          have leaked onto it"
     );
 }
@@ -264,7 +264,7 @@ fn v2_chain_link_without_backoff_decodes_to_default() {
 
 // The declared-queue analogue of the backoff capture above: `Job::queue()` is
 // unreachable from a type-erased chain link, so `ChainLink::from_job` captures
-// it at build time. Previously it was silently dropped — a job routed to a
+// it at build time. Previously it was silently dropped - a job routed to a
 // dedicated pool when pushed directly landed on `default` when chained.
 #[derive(Serialize, Deserialize, Clone)]
 struct DeclaredQueueJob;

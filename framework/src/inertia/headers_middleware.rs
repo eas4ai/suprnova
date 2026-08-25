@@ -7,10 +7,10 @@
 //! 1. **`Vary: X-Inertia` everywhere.** The same URL serves two different
 //!    representations depending on one request header: an HTML shell to a
 //!    hard navigation, a JSON page object to an Inertia XHR. A shared
-//!    cache that doesn't know that will hand one to the other — raw JSON
+//!    cache that doesn't know that will hand one to the other - raw JSON
 //!    rendered in the browser, or an HTML shell the client rejects as
 //!    non-Inertia. The Inertia responses themselves set the header; this
-//!    middleware covers redirects, 404s, 422s, and static files too —
+//!    middleware covers redirects, 404s, 422s, and static files too -
 //!    exactly the responses a cache is most willing to store.
 //!    Laravel sets it unconditionally (`Middleware.php:123`).
 //!
@@ -36,7 +36,7 @@ use async_trait::async_trait;
 pub struct InertiaHeadersMiddleware;
 
 impl InertiaHeadersMiddleware {
-    /// Build a new `InertiaHeadersMiddleware`. Stateless — no arguments needed.
+    /// Build a new `InertiaHeadersMiddleware`. Stateless - no arguments needed.
     pub fn new() -> Self {
         Self
     }
@@ -53,7 +53,7 @@ impl Default for InertiaHeadersMiddleware {
 /// Appends a separate `Vary` header line rather than rewriting an
 /// existing one: RFC 9110 §5.3 says repeated field lines combine, so
 /// `Vary: Precognition` + `Vary: X-Inertia` means the same thing as the
-/// comma list — and rewriting would risk dropping a `Vary` some other
+/// comma list - and rewriting would risk dropping a `Vary` some other
 /// middleware set for its own reasons.
 ///
 /// Checks every `Vary` line via
@@ -91,8 +91,8 @@ impl Middleware for InertiaHeadersMiddleware {
             // `303`, not the `302` Laravel emits here, because Laravel
             // leans on its own later `302 → 303` conversion for
             // PUT/PATCH/DELETE and leaves GET at 302. A substituted
-            // redirect is never a continuation of the original method —
-            // the client must issue a GET — so we say so directly.
+            // redirect is never a continuation of the original method -
+            // the client must issue a GET - so we say so directly.
             let redirect: Response = Redirect::back("/").into();
             let substituted = redirect.unwrap_or_else(|e| e).status(303);
             return Ok(ensure_vary_x_inertia(substituted));
@@ -112,7 +112,7 @@ mod tests {
         // `header_value` (singular) only ever sees the first `Vary` line.
         // A response that carries `Vary: Precognition` first and
         // `Vary: X-Inertia` as a separate, later line already advertises
-        // the token — checking only the first line would miss it and
+        // the token - checking only the first line would miss it and
         // append a redundant third line.
         let response = HttpResponse::new()
             .header("Vary", "Precognition")

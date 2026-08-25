@@ -13,7 +13,7 @@
 //! has no implicit shared-by-reference for owned values, so Suprnova exposes
 //! two flavours that map to the same intent:
 //!
-//! - **Trait bindings — `App::bind::<dyn Trait>(Arc::new(impl))`**: the
+//! - **Trait bindings - `App::bind::<dyn Trait>(Arc::new(impl))`**: the
 //!   stored `Arc<dyn Trait>` is cloned on resolution. All callers see the
 //!   same underlying object. This is the recommended shape whenever shared
 //!   state matters (caches, brokers, drivers, hubs, registries).
@@ -24,7 +24,7 @@
 //!   types this is fine, and for `Arc<...>` / `Arc<Mutex<...>>` the
 //!   clone is a refcount bump so callers still see the same inner state.
 //!   For a plain non-trivial struct with mutable interior state, wrap it
-//!   in `Arc<Mutex<T>>` (or bind a trait) before registering — bare
+//!   in `Arc<Mutex<T>>` (or bind a trait) before registering - bare
 //!   `singleton::<T>(...)` would otherwise give each resolver an
 //!   independent copy of the data.
 //!
@@ -39,7 +39,7 @@
 //! whatever was registered before the poison. This matches the
 //! recover-in-place pattern used elsewhere in the framework for
 //! hot-path registries (see the `lock` module's `read`/`write`/`lock`
-//! helpers — `pub(crate)`, not part of the consumer surface).
+//! helpers - `pub(crate)`, not part of the consumer surface).
 //!
 //! # Example
 //!
@@ -83,7 +83,7 @@ static APP_CONTAINER: OnceLock<RwLock<Container>> = OnceLock::new();
 //
 // Suitable for sync tests and `#[tokio::test]` running on the default
 // `current_thread` flavour. NOT safe across `flavor = "multi_thread"`
-// or `tokio::spawn` boundaries — see [`TASK_CONTAINER`] for the
+// or `tokio::spawn` boundaries - see [`TASK_CONTAINER`] for the
 // async-safe alternative.
 thread_local! {
     pub(crate) static TEST_CONTAINER: RefCell<Option<Container>> = const { RefCell::new(None) };
@@ -98,14 +98,14 @@ thread_local! {
 // multi-thread runtime when the future migrated to a different worker.
 //
 // Lookups in `App` consult this first, then [`TEST_CONTAINER`], then
-// the global container — so existing `TestContainer::fake()` callers
+// the global container - so existing `TestContainer::fake()` callers
 // keep working unchanged while new tests opt into the async-safe path
 // via [`testing::TestContainer::scope`].
 //
 // Note on `tokio::spawn`: bare `tokio::spawn`'d child tasks do NOT
 // inherit task-locals. Tests that spawn sub-tasks needing access to
-// the override should use [`testing::TestContainer::spawn`] instead
-// — it captures the current task-local container and re-installs it
+// the override should use [`testing::TestContainer::spawn`] instead -
+// it captures the current task-local container and re-installs it
 // inside the spawned future, so the fakes remain visible across the
 // spawn boundary.
 tokio::task_local! {
@@ -157,7 +157,7 @@ impl Binding {
 pub struct Container {
     /// Type bindings: TypeId -> Binding
     bindings: HashMap<TypeId, Binding>,
-    /// Inertia shared-data registry. One per Container instance — scoped
+    /// Inertia shared-data registry. One per Container instance - scoped
     /// to either the global app or a `TestContainer::fake()` test override.
     inertia: Arc<crate::inertia::InertiaRegistry>,
 }
@@ -220,7 +220,7 @@ impl Container {
     /// This stores the value under `TypeId::of::<Arc<dyn Trait>>()` which allows
     /// trait objects to be resolved via `make::<dyn Trait>()`.
     ///
-    /// Last write wins — calling `bind` again for the same trait overwrites the
+    /// Last write wins - calling `bind` again for the same trait overwrites the
     /// previous binding. Use [`Container::bind_if_absent`] when registering
     /// from boot hooks that may run more than once.
     ///
@@ -301,7 +301,7 @@ impl Container {
 
     /// Clone the binding for `type_id` out of the map. Returned `Binding`
     /// is cheap to clone (both variants are `Arc`s) and can be resolved
-    /// after any surrounding lock has been released — used by `App::get`
+    /// after any surrounding lock has been released - used by `App::get`
     /// and `App::make` to avoid running factory closures while a read
     /// guard on the container is still alive.
     fn binding(&self, type_id: TypeId) -> Option<Binding> {
@@ -323,7 +323,7 @@ impl Container {
         self.binding(TypeId::of::<T>())?.resolve_concrete::<T>()
     }
 
-    /// Resolve a trait binding — returns `Arc<T>`.
+    /// Resolve a trait binding - returns `Arc<T>`.
     ///
     /// # Example
     /// ```rust,no_run
@@ -398,8 +398,8 @@ impl App {
     ///
     /// One value is stored per `TypeId::<T>`; [`App::get::<T>`] returns a
     /// [`Clone`] of it on every resolution. For shared mutable state wrap
-    /// `T` in `Arc<Mutex<...>>` (or use [`App::bind`] with a trait object)
-    /// — see the module docs for the full sharing-semantics note.
+    /// `T` in `Arc<Mutex<...>>` (or use [`App::bind`] with a trait object) -
+    /// see the module docs for the full sharing-semantics note.
     ///
     /// Recovers in place from a poisoned container lock so the registration
     /// is never silently dropped.
@@ -421,7 +421,7 @@ impl App {
 
     /// Register an existing instance as a shared singleton.
     ///
-    /// Laravel-named alias of [`App::singleton`] — mirrors
+    /// Laravel-named alias of [`App::singleton`] - mirrors
     /// `$container->instance($abstract, $instance)`. In Laravel this is the
     /// "I already constructed this thing, just remember it" call; Suprnova's
     /// `singleton` accepts a value directly so the two share the same
@@ -465,7 +465,7 @@ impl App {
 
     /// Bind a trait object to a concrete implementation (as singleton).
     ///
-    /// Last write wins — calling `bind` again for the same trait overwrites
+    /// Last write wins - calling `bind` again for the same trait overwrites
     /// the previous binding. Use [`App::bind_if_absent`] when registering from
     /// boot hooks that may run more than once.
     ///
@@ -496,7 +496,7 @@ impl App {
     /// Manual `App::bind` calls always override, so application code retains
     /// the ability to replace a default-registered service explicitly.
     ///
-    /// Recovers in place from a poisoned container lock — the binding is
+    /// Recovers in place from a poisoned container lock - the binding is
     /// honoured against whatever was registered before the poison.
     pub fn bind_if_absent<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) -> bool {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
@@ -513,7 +513,7 @@ impl App {
     /// Manual `App::singleton` calls always override, so application code can
     /// still install a custom instance after boot.
     ///
-    /// Recovers in place from a poisoned container lock — the registration
+    /// Recovers in place from a poisoned container lock - the registration
     /// is honoured against whatever was registered before the poison.
     pub fn singleton_if_absent<T: Any + Send + Sync + 'static>(instance: T) -> bool {
         let container = APP_CONTAINER.get_or_init(|| RwLock::new(Container::new()));
@@ -550,11 +550,11 @@ impl App {
     /// Resolve a concrete type.
     ///
     /// Lookup order:
-    /// 1. Task-local test override ([`testing::TestContainer::scope`]) —
+    /// 1. Task-local test override ([`testing::TestContainer::scope`]) -
     ///    async-safe across multi-thread runtimes.
-    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) —
+    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) -
     ///    sync / `current_thread` tests.
-    /// 3. Global container — production lookup.
+    /// 3. Global container - production lookup.
     ///
     /// All three layers recover in place from a poisoned lock so a panic
     /// in one registration does not turn every later resolution into a
@@ -578,7 +578,7 @@ impl App {
         let type_id = TypeId::of::<T>();
 
         // Task-local first (async-safe). Clone the binding out from under
-        // the read guard so any factory closure runs lock-free — otherwise
+        // the read guard so any factory closure runs lock-free - otherwise
         // a factory that re-enters `App::*` (or any writer) would deadlock,
         // and an expensive factory would needlessly block container mutation.
         if let Some(binding) = TASK_CONTAINER
@@ -610,20 +610,20 @@ impl App {
         binding.resolve_concrete::<T>()
     }
 
-    /// Resolve a trait binding — returns `Arc<T>`.
+    /// Resolve a trait binding - returns `Arc<T>`.
     ///
     /// Lookup order:
-    /// 1. Task-local test override ([`testing::TestContainer::scope`]) —
+    /// 1. Task-local test override ([`testing::TestContainer::scope`]) -
     ///    async-safe across multi-thread runtimes.
-    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) —
+    /// 2. Thread-local test override ([`testing::TestContainer::fake`]) -
     ///    sync / `current_thread` tests.
-    /// 3. Global container — production lookup.
+    /// 3. Global container - production lookup.
     ///
     /// All three layers recover in place from a poisoned lock so a panic
     /// in one registration does not turn every later resolution into a
     /// silent service-not-found.
     ///
-    /// Factory closures run AFTER the container lock is released — see
+    /// Factory closures run AFTER the container lock is released - see
     /// [`App::get`] for the full contract; the same guarantee holds for
     /// trait factories registered via [`App::bind_factory`].
     ///
@@ -778,7 +778,7 @@ impl App {
             .unwrap_or(false)
     }
 
-    /// Laravel-named alias for [`App::has`] — `bound::<T>()` returns true
+    /// Laravel-named alias for [`App::has`] - `bound::<T>()` returns true
     /// when a concrete type is registered with the container.
     ///
     /// Laravel's `$container->bound($abstract)` answers a single question
@@ -790,7 +790,7 @@ impl App {
         Self::has::<T>()
     }
 
-    /// Laravel-named alias for [`App::has_binding`] — `bound_binding::<dyn
+    /// Laravel-named alias for [`App::has_binding`] - `bound_binding::<dyn
     /// Trait>()` returns true when a trait binding is registered.
     pub fn bound_binding<T: ?Sized + 'static>() -> bool {
         Self::has_binding::<T>()
@@ -811,7 +811,7 @@ impl App {
         provider::bootstrap()
     }
 
-    /// Resolve the active Inertia registry — test override if set, else
+    /// Resolve the active Inertia registry - test override if set, else
     /// the global container's. Used by both `App::inertia_share*` writes
     /// and `InertiaResponse::resolve` reads so tests that swap a
     /// `TestContainer::fake()` (thread-local) or `TestContainer::scope`
@@ -819,7 +819,7 @@ impl App {
     ///
     /// Lookup order matches [`App::get`]: task-local, thread-local, global.
     /// Recovers in place from a poisoned lock at every layer rather than
-    /// panicking — matches the rest of `App::*` reads/writes.
+    /// panicking - matches the rest of `App::*` reads/writes.
     pub fn inertia_registry() -> Arc<crate::inertia::InertiaRegistry> {
         // Task-local first (async-safe).
         if let Ok(reg) =
@@ -850,7 +850,7 @@ impl App {
 
     /// Register a synchronous Inertia shared prop. Included in every
     /// Inertia response (unless filtered by partial reload). Last write
-    /// wins for a given key — call once per key at bootstrap time.
+    /// wins for a given key - call once per key at bootstrap time.
     ///
     /// Writes to the active container's registry: production writes to
     /// the global container; tests using `TestContainer::fake()` write
@@ -871,7 +871,7 @@ impl App {
     /// Register an async lazy Inertia shared prop. The resolver runs on
     /// every Inertia response where the prop is needed (i.e. not excluded
     /// by partial-reload filtering). Use when the shared value requires
-    /// async work — DB lookups, HTTP calls, etc.
+    /// async work - DB lookups, HTTP calls, etc.
     ///
     /// # Example
     /// ```rust,no_run
@@ -902,12 +902,12 @@ impl App {
         Self::inertia_registry().register_trait(provider);
     }
 
-    /// Register an Inertia shared *once* prop — resolved on the first
+    /// Register an Inertia shared *once* prop - resolved on the first
     /// page that needs it, then cached on the client across navigations.
     /// Maps to `Inertia::shareOnce($k, fn() => ...)`.
     ///
     /// Use for shared data that's expensive to compute but rarely
-    /// changes — locale lists, plan catalogs, navigation menus, etc.
+    /// changes - locale lists, plan catalogs, navigation menus, etc.
     /// The client tracks the cache key and the framework skips the
     /// resolver via `X-Inertia-Except-Once-Props` on subsequent visits.
     pub fn inertia_share_once<F, Fut, V>(key: impl Into<String>, resolver: F)
@@ -919,18 +919,18 @@ impl App {
         Self::inertia_registry().share_once(key, resolver);
     }
 
-    /// Read a value back out of the static Inertia shared-prop registry —
+    /// Read a value back out of the static Inertia shared-prop registry -
     /// Laravel's `Inertia::getShared($key)`. Supports the same dot
     /// notation `App::inertia_share` accepts: `App::inertia_shared("user.name")`
     /// finds a value shared under that literal key, or nested under an
     /// earlier dotted share to the same parent, either way.
     ///
     /// Returns `None` for an unregistered key, and for a key that only
-    /// resolves through `App::inertia_share_lazy` / `App::inertia_share_once`
-    /// — this is a synchronous read of the registry, not a resolution,
+    /// resolves through `App::inertia_share_lazy` / `App::inertia_share_once` -
+    /// this is a synchronous read of the registry, not a resolution,
     /// matching Laravel's `getShared`, which returns the raw `Closure`
     /// rather than invoking it. Per-request trait-provider shares
-    /// (`App::register_inertia_shared`) aren't visible here either — they
+    /// (`App::register_inertia_shared`) aren't visible here either - they
     /// need a request to produce anything.
     ///
     /// # Example
@@ -949,7 +949,7 @@ impl App {
     }
 
     /// Clear every prop registered via `App::inertia_share` /
-    /// `App::inertia_share_lazy` / `App::inertia_share_once` — Laravel's
+    /// `App::inertia_share_lazy` / `App::inertia_share_once` - Laravel's
     /// `Inertia::flushShared()`. Leaves the trait-provider registration
     /// (`App::register_inertia_shared`) untouched; there's no per-request
     /// state there to flush. Mainly useful between tests that don't use
@@ -987,13 +987,13 @@ impl App {
                     error = %err,
                     "App::flash value failed to serialise; dropping the entry. \
                      This typically means a HashMap with non-string keys, or a \
-                     custom Serialize impl returned Err — both are caller bugs."
+                     custom Serialize impl returned Err - both are caller bugs."
                 );
             }
         }
     }
 
-    /// Clear the client's history state on the **next** page — Laravel's
+    /// Clear the client's history state on the **next** page - Laravel's
     /// `Inertia::clearHistory()`.
     ///
     /// Flashes a one-shot session flag that the next Inertia response
@@ -1001,7 +1001,7 @@ impl App {
     /// point: the canonical caller is a logout handler, which redirects.
     /// Its own response is discarded by the browser following the
     /// `Location` header, so the flag has to ride the redirect and land on
-    /// the login page — the page that actually renders. Setting it on the
+    /// the login page - the page that actually renders. Setting it on the
     /// redirect response itself (which is what
     /// [`InertiaResponse::clear_history`](crate::InertiaResponse::clear_history)
     /// does) leaves the previous session's encrypted history entries
@@ -1010,7 +1010,7 @@ impl App {
     /// **Call this after [`Auth::logout`](crate::Auth::logout) or
     /// [`Auth::logout_and_invalidate`](crate::Auth::logout_and_invalidate),
     /// not before.** Invalidation flushes the whole session, and this
-    /// flag lives in the session — flash it first and the flush erases
+    /// flag lives in the session - flash it first and the flush erases
     /// it before it ever reaches the login page, so the clear silently
     /// never happens.
     ///
@@ -1039,7 +1039,7 @@ impl App {
                 "App::clear_history called with no active session scope; the \
                  history-clear flag was dropped. This typically means \
                  SessionMiddleware is not registered, or the call happened \
-                 outside a request — both are caller bugs."
+                 outside a request - both are caller bugs."
             );
         }
     }
@@ -1152,7 +1152,7 @@ mod poison_tests {
     //!
     //! These assertions guarantee that the framework keeps registering
     //! services through a poisoned container instead of silently
-    //! dropping the binding — the bug fixed alongside these tests.
+    //! dropping the binding - the bug fixed alongside these tests.
     use super::*;
     use std::sync::RwLock;
     use std::thread;
@@ -1223,7 +1223,7 @@ mod poison_tests {
     }
 
     /// The pre-fix `if let Ok(...)` write path silently dropped the
-    /// registration on poison — the failure mode the audit flagged.
+    /// registration on poison - the failure mode the audit flagged.
     /// This regression test pins the pre-fix shape next to the fix so
     /// a future refactor that re-introduces the silent-drop pattern
     /// trips here instead of in production.
@@ -1257,7 +1257,7 @@ mod lock_release_tests {
     //! Factory closures must run AFTER the container read lock has been
     //! released. `App::get`/`App::make` clone the binding out from under
     //! the guard via `Container::binding(type_id)` and only then invoke
-    //! the factory — otherwise a factory that re-enters `App::*` (or any
+    //! the factory - otherwise a factory that re-enters `App::*` (or any
     //! writer that needs the lock) would deadlock, and an expensive
     //! factory would needlessly block container mutation.
     //!
@@ -1280,7 +1280,7 @@ mod lock_release_tests {
         // Probe lock the factory will try to write-lock. If the
         // production path still held a read guard on `lock` during the
         // factory invocation, registering the factory with a closure
-        // that probes `lock` itself would be the natural test — but
+        // that probes `lock` itself would be the natural test - but
         // that mixes "binding storage" with "deadlock surface". Use a
         // dedicated probe lock instead so the assertion is unambiguous:
         // the factory must observe that the container lock is free.
@@ -1292,7 +1292,7 @@ mod lock_release_tests {
             let mut c = lock.write().unwrap();
             c.factory(move || {
                 // While this closure runs we must NOT be holding a read
-                // guard on the container — assert by trying to acquire
+                // guard on the container - assert by trying to acquire
                 // a write guard. `try_write` is non-blocking, so a
                 // regression to the old "factory inside read guard"
                 // shape returns `WouldBlock` instead of hanging.
@@ -1349,7 +1349,7 @@ mod lock_release_tests {
 
         assert!(
             !saw_lock_free.load(Ordering::SeqCst),
-            "legacy chained `read()...get()` keeps the guard alive while the factory runs — \
+            "legacy chained `read()...get()` keeps the guard alive while the factory runs - \
              production now extracts the binding first and drops the guard",
         );
     }
@@ -1405,7 +1405,7 @@ mod lock_release_tests {
         use std::collections::HashMap;
         let mut bad: HashMap<(i32, i32), &str> = HashMap::new();
         bad.insert((1, 2), "value");
-        // No assertion needed — the test's value is that this call
+        // No assertion needed - the test's value is that this call
         // returns normally instead of panicking. Pre-fix it would
         // unwind with `expect("App::flash value must serialize cleanly")`.
         super::App::flash("offending_key", bad);

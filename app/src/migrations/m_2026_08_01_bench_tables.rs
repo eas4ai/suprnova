@@ -1,15 +1,15 @@
 //! Tables the queue and scheduler experiments write their evidence to.
 //!
 //! Both experiments work by killing a process, so the evidence has to
-//! outlive the process that produced it — which rules out anything held
+//! outlive the process that produced it - which rules out anything held
 //! in memory.
 //!
-//! `bench_scheduler_ticks` (1.2) — every scheduled run appends
+//! `bench_scheduler_ticks` (1.2) - every scheduled run appends
 //! `(instance_id, tick_minute)`. Three `schedule:work` replicas against one
 //! database should produce exactly one row per `tick_minute`; three rows
 //! means the per-process dedup is doing nothing across replicas.
 //!
-//! `bench_job_runs` (1.5) — each job inserts its own id. The UNIQUE index
+//! `bench_job_runs` (1.5) - each job inserts its own id. The UNIQUE index
 //! on `job_id` is the assertion: if two workers ever claim the same job,
 //! the second insert fails loudly instead of leaving a duplicate row for
 //! someone to notice later. A benchmark that can only detect a defect by

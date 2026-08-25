@@ -4,7 +4,7 @@
 //! choose it.
 //!
 //! `dev:tls` loads the project's `.env` (for `SERVER_PORT`), and `dotenvy`
-//! defines variables the real environment leaves unset — so a checked-in
+//! defines variables the real environment leaves unset - so a checked-in
 //! `.env` with `PORTLESS_STATE_DIR=…` used to select the certificate that got
 //! installed. These tests drive the real binary with a fake `portless` and a
 //! fake `certutil` that logs its arguments, so the assertions are about what

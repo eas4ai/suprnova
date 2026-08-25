@@ -1,7 +1,7 @@
 //! Shared plumbing for the framework's built-in vendor REST drivers.
 //!
 //! These are the drivers that talk to a third-party HTTP API on the
-//! framework's behalf — the HTTP mail providers (Postmark, SES, SendGrid,
+//! framework's behalf - the HTTP mail providers (Postmark, SES, SendGrid,
 //! Resend, Mailgun) and the Pinecone vector driver. They deliberately use
 //! `reqwest` directly rather than the [`Http`](super::Http) facade: the
 //! facade's fakes are task-local, and a driver invoked from a queue worker
@@ -52,7 +52,7 @@ pub(crate) fn build_client(user_agent: &'static str) -> Client {
 
 /// Stream and accumulate up to [`MAX_ERROR_BODY_BYTES`] of an error
 /// response body, then drop the response so the remainder is not buffered.
-/// The returned string is UTF-8-lossy — a provider may emit arbitrary
+/// The returned string is UTF-8-lossy - a provider may emit arbitrary
 /// bytes, but the snippet is for diagnostic surfacing only.
 ///
 /// Dropping the response once the cap is reached closes the connection (or

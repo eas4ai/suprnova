@@ -142,7 +142,7 @@ async fn registry_purge_clears_every_disk_but_keeps_the_registry_alive() {
     Storage::purge();
     assert!(Storage::disks().is_empty());
 
-    // The registry itself is still usable after purge — re-registration works.
+    // The registry itself is still usable after purge - re-registration works.
     Storage::register_memory("post-purge");
     assert_eq!(Storage::disks(), vec!["post-purge".to_string()]);
 }

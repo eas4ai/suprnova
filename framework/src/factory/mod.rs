@@ -1,4 +1,4 @@
-//! Model factories — produce randomized model instances for tests and
+//! Model factories - produce randomized model instances for tests and
 //! seed data with a Laravel-style fluent builder.
 //!
 //! ```rust,no_run
@@ -50,7 +50,7 @@ pub use persist::{Persistable, persist_via_seaorm};
 pub use sequence::Sequence;
 
 /// A factory produces randomized instances of `Model`. Each call to
-/// `definition()` returns a fresh, independently-randomized value —
+/// `definition()` returns a fresh, independently-randomized value -
 /// the trait carries no per-instance state.
 ///
 /// Implementors are typically zero-sized marker types so callers can
@@ -63,7 +63,7 @@ pub trait Factory {
     /// Build one instance with all default-randomized fields. The
     /// builder's `with(...)` overrides run AFTER this returns, so
     /// implementations should populate every field they want
-    /// randomized — overrides correct the parts the test cares about.
+    /// randomized - overrides correct the parts the test cares about.
     fn definition() -> Self::Model
     where
         Self: Sized;
@@ -92,7 +92,7 @@ pub trait Factory {
     }
 }
 
-/// Boxed override closure shape — extracted into a type alias so the
+/// Boxed override closure shape - extracted into a type alias so the
 /// builder's field reads clean and clippy's `type_complexity` lint is
 /// satisfied at the public API boundary.
 pub(crate) type Override<M> = Box<dyn Fn(&mut M) + Send + Sync + 'static>;
@@ -101,7 +101,7 @@ pub(crate) type Override<M> = Box<dyn Fn(&mut M) + Send + Sync + 'static>;
 /// count and the list of override closures.
 ///
 /// Boxed closures are `Send + Sync + 'static` so the builder itself is
-/// `Send` — important for the async `create` / `create_many` paths,
+/// `Send` - important for the async `create` / `create_many` paths,
 /// which capture the builder across an `.await` point on the SeaORM
 /// insert.
 pub struct FactoryBuilder<M> {
@@ -135,7 +135,7 @@ impl<M> FactoryBuilder<M> {
     /// override runs BEFORE any other registered override, so
     /// downstream `with(...)` calls win on the same field.
     ///
-    /// Mirrors Laravel's `Factory::prependState($state)` — useful
+    /// Mirrors Laravel's `Factory::prependState($state)` - useful
     /// when a state method wants to set a default that a caller can
     /// still override with a later `with(...)`.
     pub fn prepend<F>(mut self, f: F) -> Self
@@ -146,7 +146,7 @@ impl<M> FactoryBuilder<M> {
         self
     }
 
-    /// Conditional builder extension — applies `f` to the builder
+    /// Conditional builder extension - applies `f` to the builder
     /// only if `cond` is true; otherwise returns the builder
     /// unchanged. Mirrors Laravel's `Conditionable::when($cond, $cb)`
     /// for the "thread a flag through a chain" pattern without
@@ -166,7 +166,7 @@ impl<M> FactoryBuilder<M> {
     }
 
     /// Build a single in-memory instance. Runs every registered
-    /// override against the produced value. Does NOT persist —
+    /// override against the produced value. Does NOT persist -
     /// see `persist::FactoryBuilder::create` for the persisted
     /// variant.
     pub fn make(self) -> M {
@@ -177,7 +177,7 @@ impl<M> FactoryBuilder<M> {
         model
     }
 
-    /// Force-single in-memory build — discards any prior `count(n)`
+    /// Force-single in-memory build - discards any prior `count(n)`
     /// and produces exactly one instance. Equivalent to
     /// `self.count(1).make()`, but reads cleaner when a shared state
     /// method has set `count` internally and the caller wants one.
@@ -209,7 +209,7 @@ impl<M> FactoryBuilder<M> {
 }
 
 /// Persistence-aware builder methods. Available whenever `M:
-/// Persistable` — which, thanks to the blanket impl in
+/// Persistable` - which, thanks to the blanket impl in
 /// `persist`, every SeaORM `Model` satisfies for free.
 impl<M> FactoryBuilder<M>
 where
@@ -222,7 +222,7 @@ where
         self.make().persist().await
     }
 
-    /// Force-single persisted build — discards any prior `count(n)`
+    /// Force-single persisted build - discards any prior `count(n)`
     /// and produces exactly one persisted instance. Equivalent to
     /// `self.count(1).create().await`.
     ///
@@ -232,7 +232,7 @@ where
     }
 
     /// Build `count` instances + persist each in turn. Returns every
-    /// post-insert model. Persists sequentially — if a later insert
+    /// post-insert model. Persists sequentially - if a later insert
     /// fails, the prior inserts are NOT rolled back (the call site is
     /// expected to wrap a transaction if it needs atomicity).
     pub async fn create_many(self) -> Result<Vec<M>, crate::error::FrameworkError> {

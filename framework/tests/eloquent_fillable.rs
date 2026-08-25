@@ -1,4 +1,4 @@
-//! Phase 10A T6 — Fillable / Guarded + `unguarded` escape hatch.
+//! Phase 10A T6 - Fillable / Guarded + `unguarded` escape hatch.
 //!
 //! Mass-assignment guard tests. Each model declares its policy via
 //! `#[model(fillable = [...])]` or `#[model(guarded = [...])]`. The
@@ -6,7 +6,7 @@
 //! filter is applied by `Model::create` / `Model::update` before the
 //! ActiveModel is built.
 //!
-//! `unguarded(|| async { ... })` is the task-local escape hatch —
+//! `unguarded(|| async { ... })` is the task-local escape hatch -
 //! useful for migrations and seeders where the caller intentionally
 //! controls every column. The `unguarded_scope_does_not_leak` test is
 //! the discriminator that proves the bypass flag is task-local rather
@@ -63,7 +63,7 @@ async fn fillable_drops_unlisted_fields() {
     let user = T6User::create(attrs! {
         name: "Alice",
         email: "a@x.com",
-        admin: true, // not in fillable — should be dropped
+        admin: true, // not in fillable - should be dropped
     })
     .await
     .expect("create");
@@ -71,7 +71,7 @@ async fn fillable_drops_unlisted_fields() {
     assert_eq!(user.name, "Alice");
     assert!(
         !user.admin,
-        "admin should be Default::default() — dropped by Fillable"
+        "admin should be Default::default() - dropped by Fillable"
     );
 }
 
@@ -81,7 +81,7 @@ async fn guarded_blocks_listed_fields() {
     migrate(&db).await;
 
     let post = T6Post::create(attrs! {
-        user_id: 99, // guarded — should be dropped
+        user_id: 99, // guarded - should be dropped
         title: "Hello",
         body: "World",
     })

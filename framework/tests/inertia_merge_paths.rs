@@ -10,7 +10,7 @@
 //! fields at once, and `InertiaResponse::merge_lazy` / `merge_lazy_with`.
 //!
 //! Like those files, these drive `InertiaResponse::resolve` through an
-//! in-test `InertiaRequestExt` mock — `hyper::body::Incoming` cannot be
+//! in-test `InertiaRequestExt` mock - `hyper::body::Incoming` cannot be
 //! constructed outside hyper's connection machinery.
 
 use std::collections::HashMap;
@@ -116,7 +116,7 @@ async fn merge_with_path_emits_the_nested_key_in_merge_props() {
     assert_eq!(
         page["props"]["posts"]["data"],
         json!([{ "id": 1 }]),
-        "the value itself is unaffected by the path — only the merge instruction narrows"
+        "the value itself is unaffected by the path - only the merge instruction narrows"
     );
 }
 
@@ -165,7 +165,7 @@ async fn merge_with_path_accumulates_multiple_paths_in_call_order() {
 #[tokio::test]
 async fn merge_with_path_alone_without_a_merge_flag_is_ignored() {
     // `merge_with_path` is stored unconditionally and read only when
-    // `merge_mode()` is set — the same "documented as ignored" shape
+    // `merge_mode()` is set - the same "documented as ignored" shape
     // T32 established for `group()`/`rescue()` on a non-deferred prop.
     let resp = InertiaResponse::new("Feed/Index")
         .prop(
@@ -186,7 +186,7 @@ async fn merge_with_path_alone_without_a_merge_flag_is_ignored() {
 
 #[tokio::test]
 async fn merge_with_path_is_ignored_on_a_deep_merge_prop() {
-    // Deep merge already recurses into every nested field on its own —
+    // Deep merge already recurses into every nested field on its own -
     // Laravel excludes deep-merge props from the root/path partition
     // entirely (`Response.php:590`) and always emits the bare key.
     let resp = InertiaResponse::new("Chat/Show")
@@ -209,7 +209,7 @@ async fn merge_with_path_is_ignored_on_a_deep_merge_prop() {
 async fn merge_with_path_is_ignored_on_a_scroll_prop() {
     // A scroll prop's merge instruction is computed by the dedicated
     // scroll block in `resolve_props`, which nests under
-    // `scroll_wrap_key()` alone — the general merge block that reads
+    // `scroll_wrap_key()` alone - the general merge block that reads
     // `merge_with_path`'s accumulated paths short-circuits on
     // `scroll_metadata().is_some()` and never runs for this prop at all.
     // `.scroll_wrap("data")` is the scroll equivalent of this call; this
@@ -228,7 +228,7 @@ async fn merge_with_path_is_ignored_on_a_scroll_prop() {
         .unwrap();
     let page = page_of(resp).await;
 
-    // The bare key, not `posts.data` — `.merge_with_path("data")` never took.
+    // The bare key, not `posts.data` - `.merge_with_path("data")` never took.
     assert_eq!(names(&page, "mergeProps"), vec!["posts".to_string()]);
 }
 
@@ -350,7 +350,7 @@ async fn merge_lazy_with_applies_an_explicit_strategy_and_match_on() {
 async fn defer_then_merge_with_path_announces_on_visit_one_and_merges_nested_on_the_follow_up() {
     // Visit 1: a standard visit. The resolver must not run; the key is
     // announced under deferredProps. The merge instruction still rides
-    // along at its nested path — T32's metadata gate reads only
+    // along at its nested path - T32's metadata gate reads only
     // only/except, never whether the value resolved.
     let calls = Arc::new(AtomicUsize::new(0));
     let resp = InertiaResponse::new("Feed/Index")

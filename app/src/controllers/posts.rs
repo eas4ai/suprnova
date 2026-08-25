@@ -3,12 +3,12 @@
 //! Dogfoods the real SeaORM-backed `Post` model added by codex review
 //! finding #17. Three endpoints:
 //!
-//! - `POST /api/posts` — authenticated create. Body is the `CreatePost`
+//! - `POST /api/posts` - authenticated create. Body is the `CreatePost`
 //!   DTO (title/body/is_public). `author_id` comes from the session via
 //!   `Auth::user_as::<User>()`, never from the request body.
-//! - `GET  /api/posts` — list every public post (gated at the query
+//! - `GET  /api/posts` - list every public post (gated at the query
 //!   layer via `Post::all_public`); does not require auth.
-//! - `GET  /api/posts/{id}` — fetch a single post; the `PostPolicy`
+//! - `GET  /api/posts/{id}` - fetch a single post; the `PostPolicy`
 //!   `view` rule (post.is_public) is enforced via `Gate::authorize`.
 //!
 //! `DELETE /api/posts/{id}` continues to live in
@@ -22,7 +22,7 @@ use suprnova::{Auth, FrameworkError, Gate, HttpResponse, Model, Request, Respons
 use crate::models::posts::Post;
 use crate::models::users::User;
 
-/// Body for `POST /api/posts`. `author_id` is intentionally omitted —
+/// Body for `POST /api/posts`. `author_id` is intentionally omitted -
 /// the server derives it from the session-authenticated user to keep
 /// the trust boundary clean (a client must not be able to author a
 /// post as someone else).
@@ -36,7 +36,7 @@ pub struct CreatePost {
     pub is_public: bool,
 }
 
-/// `POST /api/posts` — create a post owned by the current user.
+/// `POST /api/posts` - create a post owned by the current user.
 pub async fn store(req: Request) -> Response {
     store_inner(req).await.map_err(HttpResponse::from)
 }
@@ -73,7 +73,7 @@ async fn store_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     .status(201))
 }
 
-/// `GET /api/posts` — list every public post.
+/// `GET /api/posts` - list every public post.
 pub async fn index(_req: Request) -> Response {
     index_inner().await.map_err(HttpResponse::from)
 }
@@ -83,7 +83,7 @@ async fn index_inner() -> Result<HttpResponse, FrameworkError> {
     // unbounded listing is a denial-of-service primitive as soon as the
     // table is real: at 50M posts a single request would materialise ~42M
     // rows and tens of gigabytes before the process died. Page size is
-    // fixed here rather than caller-supplied — see `Post::public_page`.
+    // fixed here rather than caller-supplied - see `Post::public_page`.
     const PER_PAGE: u64 = 20;
 
     let page = Post::public_page(PER_PAGE).await?;
@@ -108,7 +108,7 @@ async fn index_inner() -> Result<HttpResponse, FrameworkError> {
     })))
 }
 
-/// `GET /api/posts/{id}` — fetch a single post, gated by the
+/// `GET /api/posts/{id}` - fetch a single post, gated by the
 /// `view-post` policy (`post.is_public`).
 ///
 /// The Gate runs `view-post` registered automatically by the

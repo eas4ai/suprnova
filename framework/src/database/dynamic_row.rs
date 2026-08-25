@@ -1,4 +1,4 @@
-//! Phase 10C T10 — `DynamicRow` newtype over `serde_json::Map`.
+//! Phase 10C T10 - `DynamicRow` newtype over `serde_json::Map`.
 //!
 //! Returned by [`DB::table(name)`](crate::DB::table) and
 //! [`DB::select`](crate::DB::select) for the model-less escape hatch:
@@ -35,10 +35,10 @@
 //! The `get_*` family returns `Err(FrameworkError::param)` when the
 //! column is absent from the row. `get_optional_*` distinguishes:
 //!
-//! - **Column missing** → `Err` (schema mismatch — the caller asked
+//! - **Column missing** → `Err` (schema mismatch - the caller asked
 //!   for a column the query didn't select).
 //! - **Column present, value null** → `Ok(None)` (nullable column
-//!   semantics — the column exists but the row carries SQL NULL).
+//!   semantics - the column exists but the row carries SQL NULL).
 //! - **Column present, value typed** → `Ok(Some(_))`.
 //!
 //! Use the typed `get_*` for non-nullable columns and `get_optional_*`
@@ -120,7 +120,7 @@ impl DynamicRow {
 
     /// Read the raw JSON value for a column. Useful when you want the
     /// `serde_json::Value` directly (e.g. nested objects, arrays).
-    /// Returns a clone — the row stays usable.
+    /// Returns a clone - the row stays usable.
     pub fn get_value(&self, key: &str) -> Result<Value, FrameworkError> {
         self.0
             .get(key)
@@ -129,7 +129,7 @@ impl DynamicRow {
     }
 
     /// Deserialise a column into any `T: DeserializeOwned`. The full
-    /// `serde_json` deserialisation surface is available — `T` can be a
+    /// `serde_json` deserialisation surface is available - `T` can be a
     /// `Vec<U>`, a `HashMap<K, V>`, a `chrono::DateTime`, or a
     /// user-defined struct with `#[derive(Deserialize)]`.
     ///
@@ -159,7 +159,7 @@ impl DynamicRow {
     }
 
     /// Read a nullable integer column. Same contract as
-    /// [`Self::get_optional_string`] — missing column errors, SQL NULL
+    /// [`Self::get_optional_string`] - missing column errors, SQL NULL
     /// returns `Ok(None)`.
     pub fn get_optional_int(&self, key: &str) -> Result<Option<i64>, FrameworkError> {
         match self.0.get(key) {

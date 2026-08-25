@@ -1,4 +1,4 @@
-//! Rate limiting — two complementary surfaces.
+//! Rate limiting - two complementary surfaces.
 //!
 //! ## Sliding-window driver SPI
 //!
@@ -18,7 +18,7 @@
 //! ## Laravel-shape facade
 //!
 //! [`RateLimiter`] (the struct, not the driver trait) mirrors
-//! `Illuminate\Cache\RateLimiter` — a Cache-backed fixed-window counter
+//! `Illuminate\Cache\RateLimiter` - a Cache-backed fixed-window counter
 //! API. Use it for the `Cache::add(timer)` + `Cache::increment(counter)`
 //! workflow when you want named limiters, `attempt()` callbacks, and
 //! `X-RateLimit-*` response headers. [`ThrottleRequestsMiddleware`] is
@@ -102,7 +102,7 @@ const DEFAULT_INACTIVITY_WINDOW: Duration = Duration::from_secs(900);
 
 /// Wire the in-memory rate limiter as the default. Idempotent.
 ///
-/// The driver is registered with a periodic sweep task — the bucket
+/// The driver is registered with a periodic sweep task - the bucket
 /// map drops any bucket whose last hit aged out past 15 minutes,
 /// preventing unbounded growth when keying by an attacker-controlled
 /// signature. The sweep self-terminates when the driver `Arc` count
@@ -120,7 +120,7 @@ pub async fn bootstrap_default() {
 
 /// Operator opt-in that lets a production deployment boot on the
 /// in-memory rate limiter. Truthiness rules match
-/// `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION` — deliberately, so an
+/// `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION` - deliberately, so an
 /// operator learns one escape-hatch pattern rather than three.
 ///
 /// The legitimate use is a genuinely single-process deployment, where a
@@ -165,7 +165,7 @@ struct LimiterSelection {
     driver: RateLimitDriverKind,
     /// `Some(raw)` when the value named a driver this build does not know
     /// and selection fell back to memory. Carried out so the warning can
-    /// quote the operator's literal value — usually the typo itself.
+    /// quote the operator's literal value - usually the typo itself.
     unknown_value: Option<String>,
 }
 
@@ -181,14 +181,14 @@ struct LimiterSelection {
 /// in one process's heap. Behind N replicas each keeps its own count, so
 /// a "5 attempts per 15 minutes" password-reset throttle is really 5N,
 /// and every deploy resets all of them to zero. The limit an operator
-/// configured is not the limit they get, and nothing says so — the
+/// configured is not the limit they get, and nothing says so - the
 /// requests succeed, which is exactly what a working throttle looks like
 /// from the outside. That is worth failing a boot over on the same
 /// reasoning as SEC-03: a security control that silently does much less
 /// than it claims is worse than one that is visibly absent.
 ///
 /// An unrecognised value collapses into the same failure, because it
-/// falls back to memory. `RATE_LIMIT_DRIVER=Redis` — capitalised — would
+/// falls back to memory. `RATE_LIMIT_DRIVER=Redis` - capitalised - would
 /// otherwise warn once at boot and quietly leave a multi-replica
 /// deployment throttling per-process.
 fn select_limiter_driver(
@@ -232,7 +232,7 @@ fn select_limiter_driver(
              by every deploy, so login and password-reset throttles do not limit \
              what they claim to. Set RATE_LIMIT_DRIVER=redis with \
              RATE_LIMIT_REDIS_URL, or set {ALLOW_MEMORY_LIMITER_ENV}=true to \
-             acknowledge per-process limits — which is only accurate if you run \
+             acknowledge per-process limits - which is only accurate if you run \
              exactly one process."
         )));
     }
@@ -244,7 +244,7 @@ fn select_limiter_driver(
 ///
 /// Outside production, an unset or unrecognised value falls back to the
 /// in-memory limiter with a warning. In production both cases are a hard
-/// boot failure unless the operator opts in — see
+/// boot failure unless the operator opts in - see
 /// `select_limiter_driver` in this module. (Deliberately not an
 /// intra-doc link: the target is private, and this doc is public.)
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
@@ -297,7 +297,7 @@ use std::sync::Arc;
 /// They do not answer "is one mailbox being flooded". An attacker with a
 /// botnet, a rotating proxy pool, or simply an IPv6 /64 stays under every
 /// per-IP budget while sending a victim thousands of password-reset
-/// emails — the victim's inbox is the resource being exhausted, and the
+/// emails - the victim's inbox is the resource being exhausted, and the
 /// victim's address is the only thing the requests have in common. The
 /// reverse is also true: behind carrier-grade NAT or an office gateway,
 /// per-IP limits punish a crowd for one member's behaviour.
@@ -309,7 +309,7 @@ use std::sync::Arc;
 /// # Where the identity is read from
 ///
 /// `field` is looked up in the query string first, then in a buffered
-/// form body — so one key function serves `POST /resend?email=…` and a
+/// form body - so one key function serves `POST /resend?email=…` and a
 /// form-encoded `POST /password/request` alike. Reading the body
 /// requires
 /// [`RateLimitMiddleware::key_reads_body`]; without it the body half is
@@ -319,7 +319,7 @@ use std::sync::Arc;
 ///
 /// The value is trimmed and lowercased, because `Alice@Example.com` and
 /// `alice@example.com` reach the same mailbox and must therefore share a
-/// bucket — otherwise the limit is bypassed by changing capitalisation.
+/// bucket - otherwise the limit is bypassed by changing capitalisation.
 ///
 /// It is then hashed. The key is an opaque bucket identifier, and a
 /// rate-limit backend is frequently a shared Redis with weaker access
@@ -330,7 +330,7 @@ use std::sync::Arc;
 /// # Fallback
 ///
 /// A request with no such field falls back to the caller's IP, never to
-/// one shared constant — a single `no-identity` bucket would let one
+/// one shared constant - a single `no-identity` bucket would let one
 /// caller exhaust it and lock out everyone else's fieldless requests.
 ///
 /// That fallback key is deliberately *not* spelled the way a plain
@@ -360,7 +360,7 @@ pub fn identity_key(request: &Request, field: &str, prefix: &str) -> String {
             let normalised = value.trim().to_lowercase();
             format!("{prefix}:{field}:{}", hashed_identity(&normalised))
         }
-        // No identity to key on — fall back to the caller, so the request
+        // No identity to key on - fall back to the caller, so the request
         // is still throttled by *something*. The `-absent` marker keeps
         // this out of any co-mounted per-IP limiter's bucket.
         _ => format!(
@@ -399,7 +399,7 @@ pub fn names_identity(request: &Request, field: &str) -> bool {
 }
 
 /// Query string first, then a buffered form body. `None` for absent or
-/// blank — a blank value is not an identity, and treating it as one
+/// blank - a blank value is not an identity, and treating it as one
 /// would hand every caller who sends `field=` the same free bucket.
 fn read_identity(request: &Request, field: &str) -> Option<String> {
     request
@@ -408,7 +408,7 @@ fn read_identity(request: &Request, field: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Hex of the first 16 bytes of SHA-256. Not a secret — a stable,
+/// Hex of the first 16 bytes of SHA-256. Not a secret - a stable,
 /// bounded-length, non-reversible bucket label. 128 bits is far past
 /// where collisions matter for a throttle bucket, and the truncation
 /// keeps Redis keys short.
@@ -423,7 +423,7 @@ fn hashed_identity(normalised: &str) -> String {
 }
 
 /// How [`RateLimitMiddleware`] reacts when the rate-limiter *backend* itself
-/// errors — e.g. Redis is unreachable — as opposed to a request legitimately
+/// errors - e.g. Redis is unreachable - as opposed to a request legitimately
 /// exceeding its quota.
 ///
 /// This is distinct from the over-quota path (always HTTP 429). A backend
@@ -501,9 +501,9 @@ where
 {
     /// Create a new `RateLimitMiddleware`.
     ///
-    /// * `limiter` — the rate-limiter backend (in-memory or Redis)
-    /// * `config`  — window duration and per-key request cap
-    /// * `key_fn`  — closure that maps each incoming request to a bucket key string
+    /// * `limiter` - the rate-limiter backend (in-memory or Redis)
+    /// * `config`  - window duration and per-key request cap
+    /// * `key_fn`  - closure that maps each incoming request to a bucket key string
     pub fn new(
         limiter: Arc<dyn RateLimiterDriver>,
         config: SlidingWindowConfig,
@@ -524,7 +524,7 @@ where
     ///
     /// This exists for limiters that are *stacked* on a broader one. A
     /// per-recipient limit, for instance, has nothing to say about a
-    /// request that names no recipient — and if it falls back to keying
+    /// request that names no recipient - and if it falls back to keying
     /// those by address, its own (usually tighter) quota silently becomes
     /// the binding limit for every such route, overriding the per-IP
     /// budget that was chosen for them. Skipping is the honest answer:
@@ -533,7 +533,7 @@ where
     /// The predicate runs *after* any [`key_reads_body`](Self::key_reads_body)
     /// buffering, so it can inspect form fields.
     ///
-    /// Skipping is not a way out of being limited — it only makes sense
+    /// Skipping is not a way out of being limited - it only makes sense
     /// when another limiter covers the same route. Do not use it as the
     /// sole limiter on a path.
     pub fn only_when<P>(mut self, predicate: P) -> Self
@@ -554,14 +554,14 @@ where
     /// that.
     ///
     /// **A body over `max_bytes` is rejected with 413**, before the
-    /// handler sees it. The alternative — pass it through unkeyed — would
+    /// handler sees it. The alternative - pass it through unkeyed - would
     /// let a caller opt out of per-identity throttling by padding the
     /// body, which defeats the point. So only enable this on routes whose
     /// bodies are genuinely small (login and reset forms are a few hundred
     /// bytes), and size `max_bytes` above the largest legitimate one.
     ///
-    /// The handler still reads the same bytes — [`Request::body_bytes`]
-    /// returns the buffered copy — so this is otherwise invisible
+    /// The handler still reads the same bytes - [`Request::body_bytes`]
+    /// returns the buffered copy - so this is otherwise invisible
     /// downstream.
     ///
     /// Not needed for keys built from the path, headers, or query string;
@@ -591,7 +591,7 @@ where
     async fn handle(&self, request: Request, next: crate::Next) -> Response {
         // Buffer first when the key comes out of the body. `buffer_body`
         // consumes the request, so an over-cap body cannot be handed
-        // onward — see `key_reads_body` for why 413 is the right answer
+        // onward - see `key_reads_body` for why 413 is the right answer
         // rather than passing it through unkeyed.
         let request = match self.key_body_cap {
             None => request,
@@ -630,7 +630,7 @@ where
                     .status(429)
                     .header("retry-after", secs.to_string()))
             }
-            // The limiter backend itself errored (e.g. Redis unreachable) —
+            // The limiter backend itself errored (e.g. Redis unreachable) -
             // it could not make a decision. Behavior is governed by the
             // configured `BackendErrorPolicy`. Either way the error is now
             // logged (it was previously swallowed silently): `warn` when
@@ -663,7 +663,7 @@ where
 
 #[cfg(test)]
 mod driver_selection_tests {
-    //! P2-02 — the in-memory limiter as a production default.
+    //! P2-02 - the in-memory limiter as a production default.
     //!
     //! Same discipline as the SEC-03 matrix in `mail::boot`: every case
     //! drives [`select_limiter_driver`] with explicit arguments, so none
@@ -715,7 +715,7 @@ mod driver_selection_tests {
 
     /// The finding. A per-process limiter behind N replicas is an N×
     /// quota that resets on every deploy, and nothing about the running
-    /// system says so — the requests succeed, which is what a working
+    /// system says so - the requests succeed, which is what a working
     /// throttle looks like from outside.
     #[test]
     fn production_refuses_the_in_memory_limiter() {
@@ -735,7 +735,7 @@ mod driver_selection_tests {
     #[test]
     fn production_refuses_an_unknown_driver_rather_than_falling_back() {
         for raw in ["Redis", "REDIS", "redis ", "rediss", "in-memory", "none"] {
-            // `"redis "` is trimmed and IS valid — assert the rest fail.
+            // `"redis "` is trimmed and IS valid - assert the rest fail.
             let result = choose(Some(raw), true, false);
             if raw.trim() == "redis" {
                 assert!(result.is_ok(), "{raw:?} trims to a real driver");
@@ -784,7 +784,7 @@ mod driver_selection_tests {
         assert_eq!(s.driver, RateLimitDriverKind::Redis);
         assert!(
             s.driver.is_shared(),
-            "redis is the shared-quota driver — that is the whole reason it \
+            "redis is the shared-quota driver - that is the whole reason it \
              passes the guard"
         );
     }

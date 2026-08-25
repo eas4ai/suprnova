@@ -7,7 +7,7 @@
 //! file in memory), making the helper safe for arbitrarily large objects.
 //!
 //! Because it is built on the `Operator` abstraction, the source and
-//! destination disks can be backed by *any* opendal driver pair —
+//! destination disks can be backed by *any* opendal driver pair -
 //! filesystem → S3, S3 → Azure Blob, in-memory → GCS, and so on.
 //!
 //! # Example
@@ -58,7 +58,7 @@ pub async fn copy_between_disks(
     let dest_op = Storage::disk(dest)?;
 
     // `reader_with(..).chunk(N).await` builds a reader that fetches at most N
-    // bytes per stream item — this is what makes the "streams in 64 KiB
+    // bytes per stream item - this is what makes the "streams in 64 KiB
     // chunks" guarantee real on backends whose default chunk is the whole
     // file (notably the in-memory service used in tests).
     let reader = src_op
@@ -74,7 +74,7 @@ pub async fn copy_between_disks(
 
     // Once the writer is open, a mid-stream failure can leave a partial object
     // at `dest_path`. Run the transfer separately so that on ANY error we
-    // discard the partial write before propagating — a failed copy must never
+    // discard the partial write before propagating - a failed copy must never
     // be observable as a truncated destination object.
     match stream_to_writer(reader, &mut writer).await {
         Ok(total) => Ok(total),
@@ -82,7 +82,7 @@ pub async fn copy_between_disks(
             // `abort` discards staged writes for backends that buffer them
             // (e.g. S3 multipart parts); `delete` removes an already-visible
             // partial file (e.g. the local FS backend). Both are best-effort
-            // and only logged — the caller still sees the original error.
+            // and only logged - the caller still sees the original error.
             if let Err(abort_err) = writer.abort().await {
                 tracing::warn!(
                     disk = dest,
@@ -113,7 +113,7 @@ async fn stream_to_writer(
     reader: opendal::Reader,
     writer: &mut opendal::Writer,
 ) -> Result<u64, FrameworkError> {
-    // Full range — copy the entire object. Stream item is `io::Result<Bytes>`.
+    // Full range - copy the entire object. Stream item is `io::Result<Bytes>`.
     let stream = reader
         .into_bytes_stream(..)
         .await

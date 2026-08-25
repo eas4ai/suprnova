@@ -112,7 +112,7 @@ impl WorkflowHandle {
     /// comes first. Returns `Err(FrameworkError::Timeout(...))` when the
     /// deadline fires while the workflow is still pending or running.
     ///
-    /// A timeout error does **not** cancel the workflow — the worker
+    /// A timeout error does **not** cancel the workflow - the worker
     /// continues processing it. Re-call `wait*` later, or use
     /// [`Self::status`] to poll directly.
     pub async fn wait_with_timeout(
@@ -205,7 +205,7 @@ pub struct ClaimedWorkflow {
     /// Identifier of the worker that holds this claim, as persisted by the
     /// claiming `UPDATE ... RETURNING`. Together with `attempts` this is the
     /// fencing token every subsequent mutation of the row (lease refresh,
-    /// success/requeue/failure settlement) must present back to the store —
+    /// success/requeue/failure settlement) must present back to the store -
     /// see `workflow::store`'s fenced `UPDATE ... WHERE worker_id = ? AND
     /// attempts = ?` calls. Sourced from the database rather than echoed
     /// back from the caller's input so it reflects exactly what was

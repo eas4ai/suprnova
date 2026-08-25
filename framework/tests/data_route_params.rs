@@ -3,7 +3,7 @@
 //! Route params are injected into the body map before deserialization, with
 //! path params winning over body keys (IDOR protection). The TCP listener
 //! pattern is used because `hyper::body::Incoming` cannot be constructed
-//! outside hyper — the server's `service_fn` closure sets route params via
+//! outside hyper - the server's `service_fn` closure sets route params via
 //! `Request::with_params(...)` to simulate the routing layer.
 
 use std::collections::HashMap;
@@ -141,7 +141,7 @@ async fn body_and_route_param_merge() {
 
 #[tokio::test]
 async fn missing_route_param_returns_400() {
-    // No route params at all — "id" is missing.
+    // No route params at all - "id" is missing.
     let params = HashMap::new();
     let (addr, captured) = spawn_server::<UpdateUserDto>(params).await;
     patch_json(addr, serde_json::json!({"name": "Ada"})).await;
@@ -167,7 +167,7 @@ async fn route_param_overrides_body() {
     // Security property: body sends id=999, route param sends id=42. Route wins.
     let params = HashMap::from([("id".to_string(), "42".to_string())]);
     let (addr, captured) = spawn_server::<UpdateUserDto>(params).await;
-    // Body contains id=999 — an IDOR attempt.
+    // Body contains id=999 - an IDOR attempt.
     patch_json(addr, serde_json::json!({"id": 999, "name": "Ada"})).await;
 
     tokio::task::yield_now().await;

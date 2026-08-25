@@ -1,4 +1,4 @@
-//! Phase 10A T11 — extend `users` (and `todos`) with the columns the
+//! Phase 10A T11 - extend `users` (and `todos`) with the columns the
 //! migrated `#[suprnova::model]` versions of the dogfood entities
 //! declare.
 //!

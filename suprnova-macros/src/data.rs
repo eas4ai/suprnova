@@ -1,5 +1,5 @@
 #![allow(clippy::collapsible_if)]
-//! `#[derive(Data)]` — composite derive that produces:
+//! `#[derive(Data)]` - composite derive that produces:
 //! - `Serialize` (skipping `#[data(input_only)]` fields)
 //! - `Deserialize` (rejecting payloads containing `#[data(output_only)]`
 //!   fields; using `T::default()` for output_only fields on deserialize)
@@ -47,9 +47,9 @@
 //! hook) and only routes `authorize` to the named function. The function
 //! must have the signature `fn(req: &::suprnova::Request) -> bool`.
 //!
-//! The earlier `#[data(custom_authorize)]` flag — which suppressed the
+//! The earlier `#[data(custom_authorize)]` flag - which suppressed the
 //! whole `FormRequest` impl and forced callers to reimplement extraction,
-//! parsing, validation, and Precognition by hand — is removed.
+//! parsing, validation, and Precognition by hand - is removed.
 //!
 //! # Optional and tri-state fields
 //!
@@ -72,14 +72,14 @@
 //! at the struct level:
 //!
 //! ```ignore
-//! // Strict by default — `{"email": "a@b", "typo": "x"}` fails fast.
+//! // Strict by default - `{"email": "a@b", "typo": "x"}` fails fast.
 //! #[derive(Data, Validate)]
 //! struct CreateUser {
 //!     #[validate(email)]
 //!     email: String,
 //! }
 //!
-//! // Permissive opt-in — for response DTOs that may carry extra keys.
+//! // Permissive opt-in - for response DTOs that may carry extra keys.
 //! #[derive(Data)]
 //! #[data(allow_unknown_fields)]
 //! struct WebhookEvent {
@@ -101,14 +101,14 @@ use syn::{Data, DataStruct, DeriveInput, Field, Fields, Ident, Meta, parse_macro
 
 /// Flavors of lazy resolution for a `#[data(lazy)]` field.
 ///
-/// - `Plain` / `Inertia` — standard lazy prop, gated behind `?include=`.
+/// - `Plain` / `Inertia` - standard lazy prop, gated behind `?include=`.
 ///   Both emit `PropEntry::LazyOwned`.
-/// - `Deferred` — Inertia deferred prop (follow-up XHR). Emits
+/// - `Deferred` - Inertia deferred prop (follow-up XHR). Emits
 ///   `PropEntry::DeferredOwned`.
-/// - `Closure` — closure-resolved prop (resolves eagerly on initial load
+/// - `Closure` - closure-resolved prop (resolves eagerly on initial load
 ///   in a future release; same runtime as LazyOwned for v1). Emits
 ///   `PropEntry::ClosureOwned`.
-/// - `WhenLoaded(relation)` — delegates to the `when_loaded!` macro at
+/// - `WhenLoaded(relation)` - delegates to the `when_loaded!` macro at
 ///   runtime to produce a lazy `Prop` or `Prop::absent()` based on whether
 ///   the named relation is preloaded on the source entity.
 #[derive(Default, Clone, Debug)]
@@ -126,8 +126,8 @@ struct FieldOptions {
     input_only: bool,
     output_only: bool,
     allow_include: bool,
-    /// `Some(None)` means bare `#[data(from_route_param)]` — use the field name.
-    /// `Some(Some(s))` means `#[data(from_route_param("s"))]` — use the explicit key.
+    /// `Some(None)` means bare `#[data(from_route_param)]` - use the field name.
+    /// `Some(Some(s))` means `#[data(from_route_param("s"))]` - use the explicit key.
     /// `None` means the attribute was not present on this field.
     from_route_param: Option<Option<String>>,
     /// Set by `#[data(lazy)]` or derived from `#[data(auto_lazy)]` at the
@@ -144,7 +144,7 @@ struct StructOptions {
     /// impl (body parsing, validation, Precognition, route-param
     /// injection, `after_validation`) is always emitted.
     authorize_fn: Option<syn::ExprPath>,
-    /// `#[data(allow_unknown_fields)]` — when set, the generated
+    /// `#[data(allow_unknown_fields)]` - when set, the generated
     /// `Deserialize` visitor silently drops payload keys that don't
     /// match any struct field (the serde-default permissive behaviour).
     /// The DEFAULT is strict: unknown keys produce
@@ -153,10 +153,10 @@ struct StructOptions {
     /// for response DTOs read back from external services that may
     /// carry forward-compatible extra keys.
     allow_unknown_fields: bool,
-    /// `Some(N)` when `#[data(max_body_bytes = N)]` is present — overrides
+    /// `Some(N)` when `#[data(max_body_bytes = N)]` is present - overrides
     /// the `FormRequest::max_body_bytes` trait default for this DTO.
     /// Honored by both the simple (no route-param) and the inlined-lifecycle
-    /// (with route-param) `FormRequest` impl arms — the override is part
+    /// (with route-param) `FormRequest` impl arms - the override is part
     /// of the trait surface, not a route-param-only feature.
     max_body_bytes: Option<u64>,
     /// `Some(...)` when `#[json_resource("...")]` is present on the struct.
@@ -182,7 +182,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                 if meta.path.is_ident("auto_lazy") {
                     opts.auto_lazy = true;
                 } else if meta.path.is_ident("authorize") {
-                    // #[data(authorize = "path::to::fn")] — route the
+                    // #[data(authorize = "path::to::fn")] - route the
                     // generated `FormRequest::authorize` to a user
                     // function. Quoted string + `LitStr::parse::<ExprPath>`
                     // mirrors serde's `#[serde(with = "...")]` convention
@@ -194,7 +194,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                 } else if meta.path.is_ident("allow_unknown_fields") {
                     opts.allow_unknown_fields = true;
                 } else if meta.path.is_ident("max_body_bytes") {
-                    // #[data(max_body_bytes = N)] — overrides
+                    // #[data(max_body_bytes = N)] - overrides
                     // FormRequest::max_body_bytes for this DTO. N must
                     // be a non-zero integer literal.
                     let lit: syn::LitInt = meta.value()?.parse()?;
@@ -202,14 +202,14 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                         syn::Error::new(
                             lit.span(),
                             format!(
-                                "#[data(max_body_bytes = N)] — N must parse as u64: {}",
+                                "#[data(max_body_bytes = N)] - N must parse as u64: {}",
                                 e
                             ),
                         )
                     })?;
                     if value == 0 {
                         return Err(meta.error(
-                            "#[data(max_body_bytes = 0)] is not allowed — a zero-byte cap would reject every request; use a positive value (the trait default is 64 MiB)",
+                            "#[data(max_body_bytes = 0)] is not allowed - a zero-byte cap would reject every request; use a positive value (the trait default is 64 MiB)",
                         ));
                     }
                     opts.max_body_bytes = Some(value);
@@ -225,11 +225,11 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                     // `authorize = "fn"` so body parsing, validation,
                     // and Precognition still get generated for you.
                     return Err(meta.error(
-                        "#[data(custom_authorize)] was removed — use #[data(authorize = \"path::to::fn\")] instead; the derive keeps emitting the FormRequest impl and only routes authorize to your function",
+                        "#[data(custom_authorize)] was removed - use #[data(authorize = \"path::to::fn\")] instead; the derive keeps emitting the FormRequest impl and only routes authorize to your function",
                     ));
                 } else {
                     return Err(meta.error(
-                        "unknown struct-level #[data(...)] flag — expected auto_lazy, authorize, allow_unknown_fields, or max_body_bytes",
+                        "unknown struct-level #[data(...)] flag - expected auto_lazy, authorize, allow_unknown_fields, or max_body_bytes",
                     ));
                 }
                 Ok(())
@@ -242,7 +242,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                 _ => {
                     return Err(syn::Error::new_spanned(
                         attr,
-                        "#[json_resource(...)] requires arguments — at minimum a type string, e.g. #[json_resource(\"users\")]",
+                        "#[json_resource(...)] requires arguments - at minimum a type string, e.g. #[json_resource(\"users\")]",
                     ));
                 }
             };
@@ -318,7 +318,7 @@ fn parse_struct_options(attrs: &[syn::Attribute]) -> Result<StructOptions, syn::
                                 return Err(syn::Error::new_spanned(
                                     &assign.right,
                                     format!(
-                                        "`id_field = \"{value}\"` — must parse as a Rust \
+                                        "`id_field = \"{value}\"` - must parse as a Rust \
                                          identifier because it names a struct field on the \
                                          resource type. Use a snake_case name without \
                                          dashes / spaces (e.g. \"user_id\")."
@@ -370,7 +370,7 @@ enum RouteParamKind {
     F64,
     F32,
     Bool,
-    /// Everything else (String, Uuid, &str, custom types) — pass as JSON string.
+    /// Everything else (String, Uuid, &str, custom types) - pass as JSON string.
     Str,
 }
 
@@ -470,7 +470,7 @@ fn build_form_request(
     // we route to the user's function; without it, we keep Laravel's
     // permissive default (true). Either way the rest of the `FormRequest`
     // impl is emitted intact (body parsing, validation, Precognition,
-    // route-param injection, after_validation hook) — the prior
+    // route-param injection, after_validation hook) - the prior
     // `custom_authorize`-skips-everything trap is gone.
     let authorize_body = match &struct_opts.authorize_fn {
         Some(path) => quote! { #path(req) },
@@ -512,7 +512,7 @@ fn build_form_request(
         })
         .collect();
 
-    // `#[data(max_body_bytes = N)]` — emit an override that shadows the
+    // `#[data(max_body_bytes = N)]` - emit an override that shadows the
     // trait default. Both the simple (no-op extract) and the inlined-
     // lifecycle (with route-param) arms emit it; the inlined arm calls
     // `Self::max_body_bytes()` directly, so the override propagates
@@ -544,7 +544,7 @@ fn build_form_request(
     // At least one field is injected from a route param: generate a custom
     // `extract` that runs the FULL FormRequest lifecycle (Precognition
     // detection, content-type-aware body parsing honoring max_body_bytes,
-    // after_validation cross-field hook) with one extra step — route-param
+    // after_validation cross-field hook) with one extra step - route-param
     // injection into the parsed body map before deserialization, with path
     // params winning (IDOR protection).
     //
@@ -636,7 +636,7 @@ fn build_form_request(
                         }
                     };
 
-                // Inject route params into the map (path params WIN — IDOR protection).
+                // Inject route params into the map (path params WIN - IDOR protection).
                 #(#route_param_injections)*
 
                 // Deserialize the merged map into Self.
@@ -745,7 +745,7 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                         other => {
                             return Err(syn::Error::new(
                                 flavor_ident.span(),
-                                format!("unknown lazy flavor `{other}` — expected inertia, deferred, closure, or when_loaded"),
+                                format!("unknown lazy flavor `{other}` - expected inertia, deferred, closure, or when_loaded"),
                             ));
                         }
                     });
@@ -753,8 +753,8 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                     opts.lazy = Some(LazyFlavor::Plain);
                 }
             } else if meta.path.is_ident("from_route_param") {
-                // `#[data(from_route_param("key"))]` — explicit param name
-                // `#[data(from_route_param)]`        — use the field name
+                // `#[data(from_route_param("key"))]` - explicit param name
+                // `#[data(from_route_param)]`        - use the field name
                 if meta.input.peek(syn::token::Paren) {
                     let content;
                     syn::parenthesized!(content in meta.input);
@@ -765,7 +765,7 @@ fn parse_field_options(field: &Field) -> Result<FieldOptions, syn::Error> {
                 }
             } else {
                 return Err(meta.error(
-                    "unknown #[data(...)] flag — expected input_only, output_only, allow_include, lazy, or from_route_param",
+                    "unknown #[data(...)] flag - expected input_only, output_only, allow_include, lazy, or from_route_param",
                 ));
             }
             Ok(())
@@ -848,7 +848,7 @@ fn build_prop_entry(
             ));
         }
     } else if fallible {
-        // __try_into_inertia_props — propagate the serialize failure as a
+        // __try_into_inertia_props - propagate the serialize failure as a
         // FrameworkError via `?` instead of panicking. Same diagnostic
         // shape (Struct::field + source error) as the infallible path's panic.
         //
@@ -1086,7 +1086,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
             struct_opts.allow_unknown_fields,
         )
     };
-    // Fully-qualified type name expression — used as the registry key for
+    // Fully-qualified type name expression - used as the registry key for
     // include allowlists and as the `owner` field on lazy PropEntry variants.
     // `concat!(module_path!(), "::", stringify!(StructName))` resolves to a
     // single `&'static str` literal at compile time, unique per module path
@@ -1157,7 +1157,7 @@ pub fn derive_data_impl(input: TokenStream) -> TokenStream {
 /// Last-segment matching accepts fully-qualified paths
 /// (`std::option::Option<T>`, `suprnova::data::Field<T>`) as well as the
 /// short forms. False positives require a user type named exactly `Option` or
-/// `Field` — an acceptable and easily documented limitation.
+/// `Field` - an acceptable and easily documented limitation.
 fn is_option_or_field(ty: &syn::Type) -> bool {
     if let syn::Type::Path(p) = ty {
         if let Some(seg) = p.path.segments.last() {
@@ -1265,7 +1265,7 @@ fn build_deserialize(
     // Split input fields into groups based on how an absent key is handled.
     // Reference-typed fields (e.g. `&'a T`) cannot be deserialized in general;
     // they are treated as reference-backed (skipped from the key-match, given
-    // Default::default() in the constructor — caller must accept this semantic).
+    // Default::default() in the constructor - caller must accept this semantic).
     let input_fields: Vec<(&Ident, &str, &syn::Type)> = parsed
         .iter()
         .filter(|(_, o)| !o.output_only)
@@ -1276,7 +1276,7 @@ fn build_deserialize(
         })
         .collect();
 
-    // Required fields — missing key is an error (non-Option, non-Field).
+    // Required fields - missing key is an error (non-Option, non-Field).
     // Note: reference-typed fields never appear here because build_deserialize
     // is only called when has_reference_fields is false (see derive_data_impl).
     let req_idents: Vec<&Ident> = input_fields
@@ -1295,7 +1295,7 @@ fn build_deserialize(
         .map(|(_, _, ty)| *ty)
         .collect();
 
-    // Defaultable fields — missing key yields Default::default().
+    // Defaultable fields - missing key yields Default::default().
     let def_idents: Vec<&Ident> = input_fields
         .iter()
         .filter(|(_, _, ty)| is_option_or_field(ty))
@@ -1328,7 +1328,7 @@ fn build_deserialize(
     // that read forward-compatible payloads from external services.
     //
     // The expected-fields slice is the union of required, defaultable,
-    // and output_only names — output_only keys are rejected with a more
+    // and output_only names - output_only keys are rejected with a more
     // specific message earlier in the match, so listing them here only
     // affects the diagnostic output for keys that match nothing at all.
     let all_known_names: Vec<String> = req_names
@@ -1340,7 +1340,7 @@ fn build_deserialize(
     let unknown_field_arm = if allow_unknown_fields {
         quote! {
             _ => {
-                // Unknown keys silently dropped — opt-in permissive
+                // Unknown keys silently dropped - opt-in permissive
                 // behaviour via `#[data(allow_unknown_fields)]`.
                 let _: ::serde::de::IgnoredAny = map.next_value()?;
             }
@@ -1384,9 +1384,9 @@ fn build_deserialize(
                     }
 
                     fn visit_map<__A: ::serde::de::MapAccess<'__de>>(self, mut map: __A) -> ::core::result::Result<#struct_name #ty_generics, __A::Error> {
-                        // Required fields — slot is None until the key appears.
+                        // Required fields - slot is None until the key appears.
                         #(let mut #req_idents: ::core::option::Option<#req_types> = None;)*
-                        // Defaultable fields (Option<T>, Field<T>) — slot is
+                        // Defaultable fields (Option<T>, Field<T>) - slot is
                         // None until the key appears; absent yields Default.
                         #(let mut #def_idents: ::core::option::Option<#def_types> = None;)*
 
@@ -1538,7 +1538,7 @@ fn build_into_json_resource(
         // On recursive failure, prepend the current relationship name to
         // the error path so the client sees the full rejected dotted path
         // (e.g. `author.bogus` rather than just `bogus`). `on_type` stays
-        // at the deepest type — the one whose allowlist actually rejected.
+        // at the deepest type - the one whose allowlist actually rejected.
         quote! {
             if let ::std::option::Option::Some(subtree) = include_tree.subtree(#name) {
                 ::suprnova::resources::PushIncluded::push_included(
@@ -1626,13 +1626,13 @@ fn build_allowlist_registration(
         return quote! {};
     }
 
-    // Register via `inventory` — the same plugin-registration crate used
+    // Register via `inventory` - the same plugin-registration crate used
     // by typetag, sqlx, and clap-derive. Unlike `#[ctor::ctor]`, it
     // survives `cargo test` symbol stripping because the linker sees
     // these as live data, not unused init functions.
     //
     // The registry key is the FULLY-QUALIFIED type name
-    // (`my_crate::my_module::MyDto`) — not the bare struct name. This
+    // (`my_crate::my_module::MyDto`) - not the bare struct name. This
     // prevents two DTOs with the same identifier in different modules
     // from overwriting each other's include allowlists nondeterministically.
     // `concat!(module_path!(), "::", stringify!(...))` resolves to a

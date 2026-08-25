@@ -154,7 +154,7 @@ async fn notification_queue_unregistered_notification_surfaces_unknown_error_fro
     use suprnova::queue::Job;
 
     // The dispatcher binding is required by handle() before the factory
-    // lookup runs — bind a minimal one so the assertion targets the
+    // lookup runs - bind a minimal one so the assertion targets the
     // factory error, not the missing-dispatcher error.
     let _ = suprnova::notifications::set_dispatcher(Arc::new(NotificationDispatcher::new()));
 
@@ -198,7 +198,7 @@ impl Channel for CountingChannel {
 #[tokio::test]
 #[serial]
 async fn notify_send_delivers_synchronously_through_bound_dispatcher() {
-    // Notify::send is the sync sibling of Notify::queue — it must forward
+    // Notify::send is the sync sibling of Notify::queue - it must forward
     // to the bound dispatcher in-process with no queue round-trip.
     SEND_HITS.store(0, Ordering::SeqCst);
 
@@ -256,7 +256,7 @@ impl Notifiable for DualUser {
 
 // Regression: Notify::queue must push ONE SendNotificationJob per declared,
 // routed channel. Before the fix, a single envelope carried the full
-// channel list — so any per-channel failure restarted ALL channels on
+// channel list - so any per-channel failure restarted ALL channels on
 // retry, causing the database channel to insert twice and the recipient
 // to receive the same email twice.
 #[tokio::test]
@@ -312,7 +312,7 @@ async fn notify_queue_pushes_one_envelope_per_routed_channel() {
 }
 
 // Regression: a recipient whose `route_for` returns None for a declared
-// channel must not produce an envelope for that channel — matches the
+// channel must not produce an envelope for that channel - matches the
 // pre-fix behaviour where the handle path skipped unrouted channels.
 #[tokio::test]
 #[serial]
@@ -403,7 +403,7 @@ async fn notify_queue_honors_the_notifications_own_queue_override() {
 
 // `OrderShipped` (defined at the top of this file) overrides none of the
 // five queue-tuning methods. Its envelope must come out identical to
-// what a bare `Queue::push` would have produced — proving `Notify::queue`'s
+// what a bare `Queue::push` would have produced - proving `Notify::queue`'s
 // always-`Some` overlay for `fail_on_timeout`/`max_tries`/`backoff`
 // (Design note 2) doesn't silently change behavior for the common case.
 #[tokio::test]
@@ -497,7 +497,7 @@ fn notification_defaults_match_send_notification_jobs_job_defaults() {
 }
 
 // The Q12 (#61072) proof: `fail_on_timeout(&self) == true` plus a
-// `timeout()` the channel exceeds dead-letters on the FIRST timeout —
+// `timeout()` the channel exceeds dead-letters on the FIRST timeout -
 // exactly one `JobFailed`, zero retries. `max_tries()` is left at its
 // default (3) deliberately: if `fail_on_timeout`'s override were dropped
 // on the floor, `attempts(1) < max_tries(3)` would let the job retry

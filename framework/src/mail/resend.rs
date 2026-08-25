@@ -34,7 +34,7 @@ impl ResendMailTransport {
         // Trim trailing slash first so `https://x.example/emails/` is detected
         // as already-terminated and we don't double-append.
         let e = endpoint.as_ref().trim_end_matches('/');
-        // `ends_with` (not `contains`) — a base URL like `/emails-archive/api`
+        // `ends_with` (not `contains`) - a base URL like `/emails-archive/api`
         // only *contains* the substring but is not the Resend endpoint, so we
         // must still append.
         let url = if e.ends_with("/emails") {
@@ -105,7 +105,7 @@ impl MailTransport for ResendMailTransport {
         // Resend tags are a list of `{name, value}` objects; the
         // Suprnova model carries plain strings, so we send the
         // tag-name only. Metadata maps to provider headers (Resend has
-        // no first-class metadata field — `headers` is the standard
+        // no first-class metadata field - `headers` is the standard
         // pass-through). Caller-set custom headers union over metadata.
         let tags: Vec<RsTag> = msg.tags.iter().map(|t| RsTag { name: t }).collect();
         let mut headers: BTreeMap<String, String> = BTreeMap::new();

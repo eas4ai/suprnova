@@ -1,4 +1,4 @@
-//! Database notification channel — writes one row per notification.
+//! Database notification channel - writes one row per notification.
 //!
 //! Persists notifications to the `notifications` table created by the
 //! `20260516_create_notifications_table.sql` migration. Each delivery is
@@ -57,7 +57,7 @@ impl Channel for DatabaseChannel {
 
         let backend = self.db.get_database_backend();
         // `read_at` is the literal NULL in the middle of the list, so the
-        // seven binds are not the eight columns — the placeholder run has to
+        // seven binds are not the eight columns - the placeholder run has to
         // be rendered around it rather than one-per-column.
         let stmt = Statement::from_sql_and_values(
             backend,

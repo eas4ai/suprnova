@@ -7,7 +7,7 @@
 //! function coverage of the policy lives in
 //! `framework/src/crypto/mod.rs::boot_tests`; this binary exercises
 //! the end-to-end boot path in the *dev* direction (Local env, no
-//! APP_KEY) — which is the path that has to be zero-config.
+//! APP_KEY) - which is the path that has to be zero-config.
 //!
 //! Production fail-closed is verified via the pure
 //! `resolve_boot_key` unit tests in the crypto module. Those tests
@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use suprnova::{Crypt, Router, Server};
 
-/// Boot tests serialize on a single mutex — both APP_KEY/APP_ENV and
+/// Boot tests serialize on a single mutex - both APP_KEY/APP_ENV and
 /// the `CRYPT_KEY` `OnceLock` are process-globals.
 static BOOT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -66,7 +66,7 @@ fn local_env_without_app_key_boots_and_installs_transient_key() {
         result.err()
     );
 
-    // After boot, Crypt must be initialized — either with the
+    // After boot, Crypt must be initialized - either with the
     // transient dev key generated in this test, or with a key already
     // installed by an earlier test in the binary. Either way, the
     // encrypt path must work end-to-end.
@@ -106,7 +106,7 @@ fn second_boot_is_idempotent_and_does_not_panic() {
 fn boot_with_explicit_app_key_installs_that_key() {
     // When an operator does supply APP_KEY, the boot path must use
     // it (not generate a transient one). We verify this by encrypting
-    // before and after boot — the round-trip works either way, but
+    // before and after boot - the round-trip works either way, but
     // setting APP_KEY exercises the `Configured` branch of
     // `resolve_boot_key` end-to-end.
     //
@@ -114,8 +114,8 @@ fn boot_with_explicit_app_key_installs_that_key() {
     // us, `Crypt::is_initialized()` is true and `from_config` skips
     // key install. The pure-function coverage of the `Configured`
     // branch lives in
-    // `framework/src/crypto/mod.rs::boot_tests::production_with_valid_key_succeeds`
-    // — that test is order-independent. This integration test
+    // `framework/src/crypto/mod.rs::boot_tests::production_with_valid_key_succeeds` -
+    // that test is order-independent. This integration test
     // serves as a smoke check that the full boot path with
     // APP_KEY=<valid> stays panic-free.
     let _guard = BOOT_LOCK.lock().unwrap();

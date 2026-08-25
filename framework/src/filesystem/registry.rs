@@ -14,7 +14,7 @@
 //! `warn!` (an accidental duplicate could swap a production disk for a
 //! local/memory one). Tests that exercise disks in parallel must isolate
 //! through [`crate::filesystem::Storage::fake`], whose guard serializes against
-//! other fake users and resets the registry on drop — calling `register_*`
+//! other fake users and resets the registry on drop - calling `register_*`
 //! directly from multiple parallel tests races on this global state.
 
 use crate::FrameworkError;
@@ -29,7 +29,7 @@ static REGISTRY: RwLock<Option<HashMap<String, Operator>>> = RwLock::new(None);
 /// Disks are meant to be registered once at boot. Replacing an existing name
 /// emits a `warn!` because it is almost always accidental (a duplicate name in
 /// config, or a re-bootstrap) and can swap a production disk for a different
-/// backend. The replacement still happens — this is a signal, not a hard error,
+/// backend. The replacement still happens - this is a signal, not a hard error,
 /// so legitimate re-registration (e.g. `Storage::fake` setup) keeps working.
 pub(crate) fn register(name: impl Into<String>, op: Operator) {
     let name = name.into();
@@ -68,7 +68,7 @@ pub(crate) fn reset() {
 
 /// Drop a single named disk from the registry, returning whether it was
 /// present. Mirrors Laravel's `FilesystemManager::forgetDisk`. Safe to call
-/// from production code — applications occasionally need to drop and
+/// from production code - applications occasionally need to drop and
 /// re-register a disk at runtime (e.g. after a configuration reload).
 pub(crate) fn forget(name: &str) -> bool {
     let mut guard = REGISTRY

@@ -1,17 +1,17 @@
-//! [`ThrottleRequestsMiddleware`] — HTTP wrapper around the
+//! [`ThrottleRequestsMiddleware`] - HTTP wrapper around the
 //! Cache-backed [`RateLimiter`] facade. Mirrors
 //! `Illuminate\Routing\Middleware\ThrottleRequests`.
 //!
 //! Construct one of three ways:
 //!
-//! - [`ThrottleRequestsMiddleware::by_name`] — resolve a named limiter
+//! - [`ThrottleRequestsMiddleware::by_name`] - resolve a named limiter
 //!   registered via [`RateLimiter::define`]. The named callback receives
 //!   the `&Request` and returns a [`LimitResult`] (single limit, list of
 //!   limits, or a short-circuit response).
-//! - [`ThrottleRequestsMiddleware::with`] — provide a max-attempts /
+//! - [`ThrottleRequestsMiddleware::with`] - provide a max-attempts /
 //!   decay-minutes / prefix tuple directly. The literal Laravel
 //!   `throttle:60,1` shape.
-//! - [`ThrottleRequestsMiddleware::with_limits`] — build the
+//! - [`ThrottleRequestsMiddleware::with_limits`] - build the
 //!   [`Limit`]s in Rust and pass them through. Useful when the limits
 //!   are computed at boot time and don't need to be named.
 //!
@@ -66,7 +66,7 @@ impl ThrottleRequestsMiddleware {
     /// [`RateLimiter::define`]; otherwise every request returns
     /// `503 Service Unavailable` with a body that names the missing
     /// limiter (matching the `MissingRateLimiterException` that Laravel
-    /// throws — Suprnova surfaces it as an HTTP response rather than
+    /// throws - Suprnova surfaces it as an HTTP response rather than
     /// panicking the worker thread).
     pub fn by_name(name: impl Into<String>) -> Self {
         Self {
@@ -115,12 +115,12 @@ impl Middleware for ThrottleRequestsMiddleware {
             ResolvedLimits::Ok(limits) => limits,
             ResolvedLimits::ShortCircuit(resp) => return Ok(resp),
             ResolvedLimits::MissingLimiter(name) => {
-                // A boot misconfiguration, not a client error — but the body must
+                // A boot misconfiguration, not a client error - but the body must
                 // not name the internal limiter or echo framework API instructions
                 // to the public. The operator gets the actionable detail in the log.
                 tracing::error!(
                     name = %name,
-                    "throttle middleware: named limiter [{name}] not registered — \
+                    "throttle middleware: named limiter [{name}] not registered - \
                      register it with RateLimiter::define(\"{name}\", |req| ...) at boot",
                 );
                 return Err(HttpResponse::text("Service Unavailable").status(503));
@@ -137,7 +137,7 @@ impl Middleware for ThrottleRequestsMiddleware {
         //   gate and the debit are fused into a single atomic
         //   increment-and-check (`hit_and_check`). Gating on the
         //   post-increment count closes the check-then-act race a separate
-        //   `too_many_attempts`-then-`hit` pair would leave open — a
+        //   `too_many_attempts`-then-`hit` pair would leave open - a
         //   concurrent burst can no longer all observe a below-limit count and
         //   all pass, over-admitting past the ceiling.
         // - Limits WITH an `after_callback` only burn an attempt when the
@@ -276,7 +276,7 @@ fn default_request_key(request: &Request) -> String {
     // `X-Real-IP` are honoured only when the TCP peer is in the
     // configured allowlist, and otherwise the TCP peer wins. Falls
     // back to the literal `"unknown"` only when no peer was threaded
-    // into the request — that path is reserved for in-process tests
+    // into the request - that path is reserved for in-process tests
     // and the WS upgrade replay; production traffic always has a
     // peer.
     //
@@ -286,7 +286,7 @@ fn default_request_key(request: &Request) -> String {
     // # Security note
     //
     // Without a `TrustedProxiesConfig` opt-in, the bucket key is
-    // grounded in the TCP peer — there is no XFF spoofing path. With
+    // grounded in the TCP peer - there is no XFF spoofing path. With
     // an opt-in, the operator has already attested that the listed
     // proxy hops can be trusted. Either way, the historical "every
     // anonymous caller shares one `anon` bucket" failure mode is
@@ -302,7 +302,7 @@ async fn build_too_many_attempts_response(
 ) -> Result<HttpResponse, HttpResponse> {
     let retry_after = RateLimiter::available_in(key).await.map_err(|e| {
         // The backend error (Redis address, Lua script detail, key names) must
-        // not reach the wire — every other 5xx in the framework is sanitised to
+        // not reach the wire - every other 5xx in the framework is sanitised to
         // a fixed body, this direct HttpResponse path was the exception. Detail
         // stays in the structured log.
         tracing::error!(error = %e, "rate limiter backend error computing retry-after");

@@ -167,7 +167,7 @@ async fn release_returns_the_job_without_burning_an_attempt_but_nack_burns_one()
     );
 }
 
-/// A released job must leave the reserved set — otherwise visibility expiry
+/// A released job must leave the reserved set - otherwise visibility expiry
 /// would put a second copy back and the release would double the work.
 #[tokio::test]
 async fn a_released_job_is_no_longer_reserved() {

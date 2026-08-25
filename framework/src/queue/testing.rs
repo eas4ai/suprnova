@@ -1,4 +1,4 @@
-//! `Queue::fake()` — installs an in-memory recorder that captures
+//! `Queue::fake()` - installs an in-memory recorder that captures
 //! dispatched jobs without running them.
 //!
 //! `install_fake()` acquires a process-wide serialization mutex for the
@@ -67,7 +67,7 @@ pub(crate) fn record<J: Job>(job: &J, available_at: DateTime<Utc>) -> Result<Uui
 /// [`Queue::later_with`](crate::queue::Queue::later_with) caller declared.
 /// Without this, a push's queue/connection/timeout/etc overrides were
 /// silently dropped under the fake, making a `push_with` caller
-/// indistinguishable from a plain `push` — see [`pushed_with_overrides`].
+/// indistinguishable from a plain `push` - see [`pushed_with_overrides`].
 pub(crate) fn record_with_overrides<J: Job>(
     job: &J,
     available_at: DateTime<Utc>,
@@ -227,7 +227,7 @@ pub fn pushed_with_id<J: Job>() -> Vec<(J, Uuid)> {
 /// [`Queue::push_with`](crate::queue::Queue::push_with) /
 /// [`Queue::later_with`](crate::queue::Queue::later_with). Every other
 /// entry point records `EnvelopeOverrides::default()`, since none of them
-/// take one — that default is indistinguishable from "no override was
+/// take one - that default is indistinguishable from "no override was
 /// declared", the same way a bare `Queue::push` would read.
 ///
 /// Use [`assert_pushed_on_queue`] / [`assert_pushed_on_connection`] for the

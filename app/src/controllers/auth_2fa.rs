@@ -1,23 +1,23 @@
-//! Phase 11 dogfood — TOTP two-factor authentication.
+//! Phase 11 dogfood - TOTP two-factor authentication.
 //!
 //! All three handlers are session-gated by `SessionAuthMiddleware`
 //! at the route layer (see `app/src/routes.rs`). Inside the handler
-//! we still resolve `Auth::id()` defensively — if the middleware
+//! we still resolve `Auth::id()` defensively - if the middleware
 //! is ever taken off the group by accident, we surface a 401 rather
 //! than acting as some other user.
 //!
-//! - `POST /auth/2fa/enroll`  — generate secret + recovery codes,
+//! - `POST /auth/2fa/enroll`  - generate secret + recovery codes,
 //!   return otpauth URL + QR-code SVG + plaintext recovery codes.
 //!   The recovery codes are shown exactly once; there is no later
 //!   API to retrieve them.
-//! - `POST /auth/2fa/confirm` — body `code=...`, stamp the
+//! - `POST /auth/2fa/confirm` - body `code=...`, stamp the
 //!   enrollment as confirmed after the user proves they can read
 //!   the TOTP code from their authenticator app.
-//! - `POST /auth/2fa/disable` — delete the row + fire
+//! - `POST /auth/2fa/disable` - delete the row + fire
 //!   `TwoFactorDisabled` (only on real state transitions).
 //!
 //! The app's own `User` model is a stub with no `email` column, so
-//! we look up the framework authentication `User` by id — that record carries the
+//! we look up the framework authentication `User` by id - that record carries the
 //! email field 2FA needs to render the authenticator-app label.
 
 use serde::Deserialize;
@@ -25,7 +25,7 @@ use suprnova::auth_flows::{TwoFactor, TwoFactorUser};
 use suprnova::magnetar_integration::{User as AuthUser, find_user_by_id};
 use suprnova::{Auth, FrameworkError, HttpResponse, Request, Response};
 
-/// Body for `POST /auth/2fa/confirm` — form-urlencoded `code=...`.
+/// Body for `POST /auth/2fa/confirm` - form-urlencoded `code=...`.
 #[derive(Deserialize)]
 pub struct ConfirmForm {
     pub code: String,
@@ -35,7 +35,7 @@ pub struct ConfirmForm {
 /// facade's [`TwoFactorUser`] trait.
 ///
 /// `TwoFactor::enroll` folds `email()` into the authenticator-app
-/// label inside the otpauth URL — that's why the email is part of
+/// label inside the otpauth URL - that's why the email is part of
 /// the trait. `user_id()` is the opaque storage key the 2FA table
 /// is indexed by; we use the application `UserId` string so a future
 /// migration that surfaces `Auth::user_as::<User>()` doesn't have
@@ -57,8 +57,8 @@ impl<'a> TwoFactorUser for AppUser2FA<'a> {
 /// Resolve the current session's authentication user, or fail 401.
 ///
 /// The route group already sits behind `SessionAuthMiddleware`, so
-/// in production `Auth::id()` is guaranteed `Some`. We still check
-/// — the cheap defensive branch keeps these handlers honest if the
+/// in production `Auth::id()` is guaranteed `Some`. We still check -
+/// the cheap defensive branch keeps these handlers honest if the
 /// middleware ever gets disabled by accident.
 async fn current_auth_user() -> Result<AuthUser, FrameworkError> {
     let user_id = Auth::id().ok_or(FrameworkError::Unauthorized)?;
@@ -67,16 +67,16 @@ async fn current_auth_user() -> Result<AuthUser, FrameworkError> {
         .ok_or(FrameworkError::Unauthorized)
 }
 
-/// `POST /auth/2fa/enroll` — start enrollment.
+/// `POST /auth/2fa/enroll` - start enrollment.
 ///
 /// Generates a fresh TOTP secret + 10 recovery codes, persists them
 /// encrypted, and returns:
 ///
-/// - `otpauth_url` — `otpauth://totp/...`, deep-linkable into any
+/// - `otpauth_url` - `otpauth://totp/...`, deep-linkable into any
 ///   authenticator app.
-/// - `qr_code_svg` — SVG wrapping a base64 PNG; safe to embed inline.
-/// - `recovery_codes` — ten plaintext single-use codes. **Show these
-///   to the user exactly once** — there is no later retrieval API.
+/// - `qr_code_svg` - SVG wrapping a base64 PNG; safe to embed inline.
+/// - `recovery_codes` - ten plaintext single-use codes. **Show these
+///   to the user exactly once** - there is no later retrieval API.
 ///
 /// Until the user submits a valid code through
 /// [`confirm`], 2FA is **not** enforced on the
@@ -97,7 +97,7 @@ async fn enroll_inner() -> Result<HttpResponse, FrameworkError> {
     })))
 }
 
-/// `POST /auth/2fa/confirm` — confirm a pending enrollment.
+/// `POST /auth/2fa/confirm` - confirm a pending enrollment.
 ///
 /// Body is form-urlencoded `code=NNNNNN`. On success, stamps
 /// `confirmed_at` on the row and fires `TwoFactorEnrolled`. An
@@ -107,8 +107,8 @@ pub async fn confirm(req: Request) -> Response {
 }
 
 async fn confirm_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
-    // Snapshot the auth identity *before* consuming the request body
-    // — `req.form()` takes `self`. Tying the read of `Auth::id()` to
+    // Snapshot the auth identity *before* consuming the request body -
+    // `req.form()` takes `self`. Tying the read of `Auth::id()` to
     // the same task-local scope as the form parse keeps the
     // ordering deterministic for tests that mock session state.
     let user = current_auth_user().await?;
@@ -121,7 +121,7 @@ async fn confirm_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     })))
 }
 
-/// `POST /auth/2fa/disable` — turn 2FA off for the current user.
+/// `POST /auth/2fa/disable` - turn 2FA off for the current user.
 ///
 /// Idempotent: a disable on an account that never enrolled is not
 /// an error. Fires `TwoFactorDisabled` only on a real state

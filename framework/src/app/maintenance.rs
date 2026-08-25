@@ -1,4 +1,4 @@
-//! Maintenance mode — Suprnova's analogue of Laravel's `down` / `up`.
+//! Maintenance mode - Suprnova's analogue of Laravel's `down` / `up`.
 //!
 //! While the application is "down", [`MaintenanceMiddleware`] short-circuits
 //! every request with a `503 Service Unavailable` (configurable status code),
@@ -15,7 +15,7 @@
 //! ```rust,no_run
 //! use suprnova::{global_middleware, MaintenanceMiddleware};
 //! # fn ex() {
-//! // In bootstrap.rs — health checks stay reachable while down.
+//! // In bootstrap.rs - health checks stay reachable while down.
 //! global_middleware!(MaintenanceMiddleware::new().except(["api/health"]));
 //! # }
 //! ```
@@ -52,7 +52,7 @@ const BYPASS_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 /// `Debug`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MaintenancePayload {
-    /// Request paths that stay reachable while down — exact match or a
+    /// Request paths that stay reachable while down - exact match or a
     /// trailing-`*` prefix (e.g. `"api/health"`, `"webhooks/*"`).
     #[serde(default)]
     pub except: Vec<String>,
@@ -168,7 +168,7 @@ impl MaintenanceMode for FileMaintenanceMode {
         // Write to a sibling temp file then rename into place. `rename` is
         // atomic on the same filesystem, so a request reading the down file
         // concurrently with `down` never observes a half-written (and thus
-        // unparseable) file — which would otherwise surface as a 500.
+        // unparseable) file - which would otherwise surface as a 500.
         let tmp = self.path.with_extension("tmp");
         tokio::fs::write(&tmp, json).await.map_err(|e| {
             FrameworkError::internal(format!("maintenance: write {}: {e}", tmp.display()))
@@ -184,7 +184,7 @@ impl MaintenanceMode for FileMaintenanceMode {
     async fn deactivate(&self) -> Result<(), FrameworkError> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => Ok(()),
-            // Already up — idempotent.
+            // Already up - idempotent.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(FrameworkError::internal(format!(
                 "maintenance: remove {}: {e}",
@@ -196,7 +196,7 @@ impl MaintenanceMode for FileMaintenanceMode {
     async fn active(&self) -> Result<bool, FrameworkError> {
         // tokio::fs::try_exists returns Ok(false) on NotFound (mirroring the
         // std::path::Path::exists semantics we used before) and Err on other
-        // IO errors — surface those so a flaky FS shows up rather than being
+        // IO errors - surface those so a flaky FS shows up rather than being
         // silently treated as "up". Callers that want the prior fail-open
         // behaviour wrap with `.unwrap_or(false)` (see MaintenanceMiddleware).
         tokio::fs::try_exists(&self.path).await.map_err(|e| {
@@ -265,7 +265,7 @@ impl MaintenanceMode for CacheMaintenanceMode {
 }
 
 /// The configured maintenance driver, chosen by `MAINTENANCE_DRIVER`
-/// (`file` — default — or `cache`).
+/// (`file` - default - or `cache`).
 pub fn maintenance_mode() -> Arc<dyn MaintenanceMode> {
     match std::env::var("MAINTENANCE_DRIVER").as_deref() {
         Ok("cache") => Arc::new(CacheMaintenanceMode::new()),
@@ -304,7 +304,7 @@ enum Decision {
 /// The secret-URL comparison is constant-time. The secret is a bearer
 /// credential that travels in the request path, so an early-exit compare
 /// would publish, in response latency, how long a prefix the caller got
-/// right — the same reason Laravel moved this compare to `hash_equals`
+/// right - the same reason Laravel moved this compare to `hash_equals`
 /// (`PreventRequestsDuringMaintenance.php:76`).
 fn decide(
     path: &str,
@@ -326,8 +326,8 @@ fn decide(
         // differing byte, so response time tells an attacker how many
         // leading bytes were right and reduces guessing a 32-char secret
         // from one 16^32 search to 32 sequential 16-way searches.
-        // `ct_eq` returns `Choice(0)` immediately on a length mismatch —
-        // the same short-circuit PHP's `hash_equals` takes — and
+        // `ct_eq` returns `Choice(0)` immediately on a length mismatch -
+        // the same short-circuit PHP's `hash_equals` takes - and
         // otherwise compares every byte. Mirrors the cookie compare in
         // `has_valid_bypass_cookie`.
         if bool::from(path.as_bytes().ct_eq(expected.as_bytes())) {
@@ -371,7 +371,7 @@ impl MaintenanceMiddleware {
         }
     }
 
-    /// Paths that stay reachable while down — exact match or a trailing-`*`
+    /// Paths that stay reachable while down - exact match or a trailing-`*`
     /// prefix. Merged with any `except` recorded at `down` time.
     pub fn except<I, S>(mut self, paths: I) -> Self
     where
@@ -580,7 +580,7 @@ mod tests {
             "a near-miss secret must not grant bypass"
         );
         // Differing in the FIRST byte must take the same code path as
-        // differing in the last — both are plain rejections.
+        // differing in the last - both are plain rejections.
         assert_eq!(
             decide("1123456789abcdef", &p, &[], false),
             Decision::Unavailable
@@ -658,7 +658,7 @@ mod tests {
         // it, and the assertion below fails with no hint of who moved it.
         // It went red exactly once in a gate run and could not be
         // reproduced in nineteen attempts afterwards, which is the most
-        // expensive kind of failure to own — too rare to debug, frequent
+        // expensive kind of failure to own - too rare to debug, frequent
         // enough to teach people the gate lies.
         //
         // A scoped binding removes the dependency rather than the
@@ -682,7 +682,7 @@ mod tests {
 
         // Isolation, asserted rather than assumed: the write landed in the
         // store *this test* bound. Holding a handle to it is what makes the
-        // scope verifiable — without this the test would pass identically
+        // scope verifiable - without this the test would pass identically
         // while reading through the global store it used to depend on.
         assert!(
             store.has(&key).await.unwrap(),

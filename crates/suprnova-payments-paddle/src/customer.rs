@@ -1,6 +1,6 @@
 //! Implementation of the `CustomerStore` trait for `PaddleProvider`.
 //!
-//! Paddle does NOT expose customer deletion via its API — `delete_customer`
+//! Paddle does NOT expose customer deletion via its API - `delete_customer`
 //! returns `PaymentError::NotSupported` with a pointer to the archive-via-update
 //! workaround. A test asserts this invariant.
 
@@ -114,7 +114,7 @@ impl CustomerStore for PaddleProvider {
 
         // Round-trip Paddle's `custom_data` (Paddle's name for
         // caller-supplied metadata). Empty object when the customer
-        // has no `custom_data` set — matches the contract callers
+        // has no `custom_data` set - matches the contract callers
         // rely on (always a JSON value, never null).
         let provider_metadata = resp
             .data
@@ -201,7 +201,7 @@ mod tests {
     // server-returned value over the request-side echo so admin /
     // reconciliation tooling sees Paddle's authoritative view. The two
     // tests below pin that selection rule by exercising the
-    // `unwrap_or` chain directly — the same shape both call sites use.
+    // `unwrap_or` chain directly - the same shape both call sites use.
 
     fn pick_paddle_metadata(
         server: Option<serde_json::Value>,

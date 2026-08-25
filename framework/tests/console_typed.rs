@@ -55,7 +55,7 @@ impl TypedCommand for TypedGreet {
 #[derive(Parser, Command, Debug)]
 #[console(name = "typed:require", description = "Requires a positional arg")]
 struct TypedRequire {
-    /// Required positional that has no default — missing it forces
+    /// Required positional that has no default - missing it forces
     /// a clap parse error.
     #[arg(value_name = "TARGET")]
     target: String,
@@ -146,7 +146,7 @@ async fn typed_command_missing_required_arg_returns_err() {
         .expect_err("missing required positional ⇒ clap parse error ⇒ Err");
     // Clap formatted the error to stderr inside dispatch (the user sees
     // it via the binary). The returned Err is silent so the binary's
-    // main doesn't double-print — same contract that
+    // main doesn't double-print - same contract that
     // `dispatch_returns_err_for_unknown_command` pins in tests/console.rs.
     assert!(
         err.is_silent(),

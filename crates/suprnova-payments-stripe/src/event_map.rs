@@ -11,9 +11,9 @@ use suprnova::payments::NeutralEventKind;
 /// exists.
 pub fn stripe_event_to_neutral(event_type: &str) -> Option<NeutralEventKind> {
     match event_type {
-        // PaymentIntent succeeded — all capture paths land here.
+        // PaymentIntent succeeded - all capture paths land here.
         "payment_intent.succeeded" => Some(NeutralEventKind::PaymentSucceeded),
-        // PaymentIntent failed — covers both auth failures and insufficient funds.
+        // PaymentIntent failed - covers both auth failures and insufficient funds.
         "payment_intent.payment_failed" => Some(NeutralEventKind::PaymentFailed),
         // Charge refunded fully or partially.
         "charge.refunded" => Some(NeutralEventKind::PaymentRefunded),
@@ -28,7 +28,7 @@ pub fn stripe_event_to_neutral(event_type: &str) -> Option<NeutralEventKind> {
         "customer.subscription.resumed" => Some(NeutralEventKind::SubscriptionUpdated),
         "customer.subscription.trial_will_end" => Some(NeutralEventKind::SubscriptionUpdated),
 
-        // Invoice events — cover recurring billing.
+        // Invoice events - cover recurring billing.
         "invoice.payment_succeeded" | "invoice.paid" => Some(NeutralEventKind::InvoicePaid),
         "invoice.payment_failed" => Some(NeutralEventKind::InvoiceFailed),
 
@@ -36,7 +36,7 @@ pub fn stripe_event_to_neutral(event_type: &str) -> Option<NeutralEventKind> {
         "customer.created" => Some(NeutralEventKind::CustomerCreated),
         "customer.updated" => Some(NeutralEventKind::CustomerUpdated),
 
-        // Everything else — caller handles via raw payload.
+        // Everything else - caller handles via raw payload.
         _ => None,
     }
 }

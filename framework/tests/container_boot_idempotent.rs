@@ -1,9 +1,9 @@
-//! Regression: HIGH audit finding `container` #289 — auto-registered
+//! Regression: HIGH audit finding `container` #289 - auto-registered
 //! services overwrite explicit application bindings on every boot.
 //!
 //! `App::boot_services()` iterates inventory and calls each registration
 //! function. Previously those generated functions called `App::bind` /
-//! `App::singleton`, both of which use `HashMap::insert` — a manual
+//! `App::singleton`, both of which use `HashMap::insert` - a manual
 //! override installed before boot (or a stateful singleton already in
 //! place from a previous boot) would be silently replaced with a fresh
 //! `Default::default()` instance.
@@ -44,7 +44,7 @@ impl Echoer for FakeEchoer {
 
 #[test]
 fn bind_if_absent_returns_true_on_first_call_false_after() {
-    // This test exercises the new primitive directly — no boot loop
+    // This test exercises the new primitive directly - no boot loop
     // involved. It's the building block #[service] uses, so the
     // semantics are worth pinning explicitly.
     //
@@ -67,7 +67,7 @@ fn bind_if_absent_returns_true_on_first_call_false_after() {
     assert_eq!(
         resolved.echo(),
         "default",
-        "the FIRST binding must win — bind_if_absent is no-op when occupied"
+        "the FIRST binding must win - bind_if_absent is no-op when occupied"
     );
 }
 
@@ -100,7 +100,7 @@ fn singleton_if_absent_returns_true_on_first_call_false_after() {
 fn manual_bind_still_overrides_after_if_absent_installed_default() {
     // The "if absent" semantics only apply to the inventory boot path.
     // Application code calling `App::bind` explicitly must still be able
-    // to swap implementations — last write wins for the manual API.
+    // to swap implementations - last write wins for the manual API.
     use suprnova::container::Container;
 
     let mut c = Container::new();
@@ -108,14 +108,14 @@ fn manual_bind_still_overrides_after_if_absent_installed_default() {
     let installed = c.bind_if_absent::<dyn Echoer>(Arc::new(DefaultEchoer));
     assert!(installed);
 
-    // Manual override after — `bind` (not `bind_if_absent`) overwrites.
+    // Manual override after - `bind` (not `bind_if_absent`) overwrites.
     c.bind::<dyn Echoer>(Arc::new(FakeEchoer));
 
     let resolved = c.make::<dyn Echoer>().expect("must resolve");
     assert_eq!(
         resolved.echo(),
         "fake",
-        "manual App::bind retains override semantics — only the inventory \
+        "manual App::bind retains override semantics - only the inventory \
          boot path uses if-absent"
     );
 }
@@ -144,7 +144,7 @@ fn app_singleton_if_absent_pre_boot_override_survives() {
     let installed = App::singleton_if_absent(SurvivorState { marker: "pre-boot" });
     assert!(installed, "first install must succeed");
 
-    // Now run boot_services — which would historically overwrite all
+    // Now run boot_services - which would historically overwrite all
     // inventory-registered singletons. Our marker type isn't registered
     // via `#[injectable]`, but the equivalent contract is: any second
     // attempt to install via if_absent leaves the original in place.

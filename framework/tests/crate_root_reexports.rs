@@ -3,14 +3,14 @@
 //!
 //! Integration tests are separate crates and see only `pub` items from
 //! `suprnova`; a name failing to resolve here is a regression of the
-//! crate-root re-export rule — anything a consumer should reach is named
+//! crate-root re-export rule - anything a consumer should reach is named
 //! from the crate root, so app code never needs `use sea_orm::*` or
 //! `use tokio::*`. The bodies are empty on purpose: compilation is the
 //! assertion.
 
 #![allow(unused_imports, dead_code)]
 
-// L27 — `Storage::disk(name)` returns `opendal::Operator` and `DiskExt` is
+// L27 - `Storage::disk(name)` returns `opendal::Operator` and `DiskExt` is
 // implemented on `opendal::Operator`. The full `opendal` crate must be
 // reachable as `suprnova::opendal` so consumers never need to add `opendal`
 // to their own Cargo.toml or risk a version-skew mismatch.
@@ -21,12 +21,12 @@ use suprnova::opendal::Operator;
 #[cfg(feature = "filesystem")]
 use suprnova::opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 
-// L28 — builder helpers for `AppConfig` / `ServerConfig` are the canonical
+// L28 - builder helpers for `AppConfig` / `ServerConfig` are the canonical
 // way to construct those configs programmatically, so they belong at the
 // root next to the value types they build.
 use suprnova::{AppConfig, AppConfigBuilder, ServerConfig, ServerConfigBuilder};
 
-// L28 — Inertia helper types referenced by the canonical surface
+// L28 - Inertia helper types referenced by the canonical surface
 // (`Inertia::*`, the manifest pipeline, SSR, response/prop construction)
 // must be reachable at the crate root, not buried under `suprnova::inertia::*`.
 use suprnova::{

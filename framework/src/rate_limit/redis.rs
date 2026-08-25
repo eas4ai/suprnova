@@ -87,7 +87,7 @@ impl RateLimiterDriver for RedisRateLimiter {
         // Single Lua block so the evict / count / oldest-score reads
         // observe the same snapshot. As three separate round-trips a
         // concurrent `try_acquire` (which is itself atomic) could
-        // ZADD between our ZCARD and our ZRANGE — count says "at
+        // ZADD between our ZCARD and our ZRANGE - count says "at
         // limit" then ZRANGE returns a *newer* member's score,
         // shrinking the computed Retry-After well below the real
         // remaining window. Returns -1 for "under limit, no header

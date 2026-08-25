@@ -1,4 +1,4 @@
-//! `#[command]` — attribute macro for registering an async fn as a
+//! `#[command]` - attribute macro for registering an async fn as a
 //! console command.
 //!
 //! Applied to an `async fn(Vec<String>) -> Result<(), FrameworkError>`,
@@ -13,9 +13,9 @@
 //!
 //! Attributes:
 //!
-//!   - `name = "db:seed"` (required) — the invocation name used on the
+//!   - `name = "db:seed"` (required) - the invocation name used on the
 //!     command line (allowed to contain `:` etc.)
-//!   - `description = "..."` (optional, default `""`) — one-line help
+//!   - `description = "..."` (optional, default `""`) - one-line help
 //!     text shown by `console --help`
 //!
 //! Modelled after `#[workflow]` (see `suprnova-macros/src/workflow.rs`),
@@ -78,7 +78,7 @@ fn parse_attrs(attr: TokenStream) -> syn::Result<CommandAttrs> {
                 return Err(syn::Error::new_spanned(
                     &nv.path,
                     format!(
-                        "unknown key `{other}` in #[command(...)] — supported keys: name, description"
+                        "unknown key `{other}` in #[command(...)] - supported keys: name, description"
                     ),
                 ));
             }

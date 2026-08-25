@@ -1,5 +1,5 @@
 //! End-to-end integration tests for `#[derive(Data)]` used as both inbound
-//! `FormRequest` and outbound Inertia response — the "one struct, both ends"
+//! `FormRequest` and outbound Inertia response - the "one struct, both ends"
 //! pattern.
 //!
 //! Test patterns:
@@ -312,7 +312,7 @@ async fn inbound_rejects_output_only_in_payload() {
 // Codex review finding #10: unknown-field handling
 // ---------------------------------------------------------------------------
 //
-// Default mode REJECTS unknown payload keys with HTTP 422 — client typos
+// Default mode REJECTS unknown payload keys with HTTP 422 - client typos
 // and schema drift surface at the boundary instead of silently disappearing.
 // Response DTOs that read forward-compatible payloads from external services
 // can opt into the serde-default permissive behaviour with
@@ -370,7 +370,7 @@ async fn default_mode_rejects_unknown_key_with_422() {
         .take()
         .expect("server did not process request");
     let err = result.expect_err(
-        "unknown field on a default-strict DTO must be rejected — \
+        "unknown field on a default-strict DTO must be rejected - \
          strict is the default per codex review finding #10",
     );
     assert_eq!(
@@ -417,7 +417,7 @@ async fn allow_unknown_fields_silently_drops_extras() {
         .take()
         .expect("server did not process request");
     let dto = result.expect(
-        "#[data(allow_unknown_fields)] must accept extra payload keys — \
+        "#[data(allow_unknown_fields)] must accept extra payload keys - \
          response DTOs reading forward-compatible payloads rely on this",
     );
     assert_eq!(dto.name, "shawn");

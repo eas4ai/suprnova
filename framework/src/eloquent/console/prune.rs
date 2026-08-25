@@ -1,4 +1,4 @@
-//! `suprnova console model:prune` — scheduled cleanup of stale rows.
+//! `suprnova console model:prune` - scheduled cleanup of stale rows.
 //!
 //! Walks the [`PrunerEntry`][crate::eloquent::PrunerEntry] registry
 //! and force-deletes every row each registered Prunable /
@@ -6,7 +6,7 @@
 //! restricts to a single type; with `--pretend` it reports the
 //! rowcount that would be deleted without modifying any rows.
 //!
-//! Typed command shape — uses `#[derive(clap::Parser)] +
+//! Typed command shape - uses `#[derive(clap::Parser)] +
 //! #[derive(Command)] + impl TypedCommand` per Phase 6B's typed-args
 //! console pattern. The struct is the source of truth for clap's
 //! argument parsing; the `impl TypedCommand` body owns the runtime
@@ -18,7 +18,7 @@ use suprnova_macros::Command;
 use crate::console::TypedCommand;
 use crate::error::FrameworkError;
 
-/// CLI args for `suprnova model:prune` — runs every registered
+/// CLI args for `suprnova model:prune` - runs every registered
 /// `Prunable` / `MassPrunable` model's prune routine.
 #[derive(clap::Parser, Debug, Command)]
 #[console(
@@ -31,7 +31,7 @@ pub struct PruneArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Dry run — report the rowcount that would be deleted without
+    /// Dry run - report the rowcount that would be deleted without
     /// modifying any rows.
     #[arg(long)]
     pub pretend: bool,

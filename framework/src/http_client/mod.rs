@@ -17,7 +17,7 @@
 //! - [`Http::fail_on_real_calls`] flips a process-global guard so any
 //!   outbound request that doesn't match an active fake errors out
 //!   (with a `FrameworkError::internal` instead of hitting the
-//!   network). This catches accidental escape from a fake scope —
+//!   network). This catches accidental escape from a fake scope -
 //!   e.g. a `tokio::spawn` that doesn't inherit task-local state.
 //!   Use [`FailOnRealCallsGuard`] for the RAII pattern that resets on
 //!   drop, so a test forgetting to call `allow_real_calls` doesn't
@@ -26,7 +26,7 @@
 //! - [`Http::spawn_with_fake_inheritance`] is the explicit opt-in for
 //!   spawning a task that inherits the parent's fake state. Recorded
 //!   requests and consumed canned responses are shared with the
-//!   parent — `assert_sent` on the parent sees what the child sent.
+//!   parent - `assert_sent` on the parent sees what the child sent.
 
 pub(crate) mod fake;
 pub(crate) mod vendor;
@@ -44,8 +44,8 @@ use crate::FrameworkError;
 pub use fake::{RecordedRequest, assert_not_sent, assert_sent, fake_response};
 
 /// Process-global flag flipped by [`Http::fail_on_real_calls`]. When
-/// `true`, [`RequestBuilder::send`] refuses to hit the real network
-/// — every outbound call that isn't intercepted by an active fake
+/// `true`, [`RequestBuilder::send`] refuses to hit the real network -
+/// every outbound call that isn't intercepted by an active fake
 /// returns an error.
 ///
 /// The flag is process-global by design: the goal is to fail closed on
@@ -65,7 +65,7 @@ static REQWEST_CLIENT_NO_REDIRECT: OnceLock<reqwest::Client> = OnceLock::new();
 /// [`RequestBuilder::max_response_bytes`].
 pub(crate) const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 25 * 1024 * 1024;
 
-/// Process-global response-body cap. `0` means "unset" — readers fall
+/// Process-global response-body cap. `0` means "unset" - readers fall
 /// back to [`DEFAULT_MAX_RESPONSE_BODY_BYTES`].
 static MAX_RESPONSE_BODY_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -88,11 +88,11 @@ fn client() -> &'static reqwest::Client {
     REQWEST_CLIENT.get_or_init(|| {
         base_builder()
             .build()
-            .expect("reqwest::Client::builder().build() — rustls available")
+            .expect("reqwest::Client::builder().build() - rustls available")
     })
 }
 
-/// A client that never follows redirects — a 3xx is returned to the caller
+/// A client that never follows redirects - a 3xx is returned to the caller
 /// as-is. Selected per request via [`RequestBuilder::no_redirects`]. Use it
 /// when the request URL is influenced by untrusted input: a redirect to an
 /// internal or cloud-metadata host (SSRF) surfaces as a 3xx response rather
@@ -102,11 +102,11 @@ fn client_no_redirect() -> &'static reqwest::Client {
         base_builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("reqwest::Client::builder().build() — rustls available")
+            .expect("reqwest::Client::builder().build() - rustls available")
     })
 }
 
-/// Static facade for outbound HTTP requests. Closed for v1 — we do not
+/// Static facade for outbound HTTP requests. Closed for v1 - we do not
 /// expose the underlying `reqwest::Client`. To grow the surface, add
 /// methods here.
 pub struct Http;
@@ -147,8 +147,8 @@ impl Http {
     ///
     /// **Caveat:** the scope is `tokio::task_local!`, which is scoped
     /// to the *current* task only. Work spawned via `tokio::spawn`
-    /// inside `f` runs on a different task and will NOT see the fake
-    /// — those requests will hit the real network. If you need a
+    /// inside `f` runs on a different task and will NOT see the fake -
+    /// those requests will hit the real network. If you need a
     /// spawned task to use the fake, capture the work into a closure
     /// and `await` it directly, or pass the fake scope's data through
     /// explicit channels.
@@ -188,7 +188,7 @@ impl Http {
     /// real network.
     ///
     /// This is intentionally process-global so it catches the case it
-    /// was built for — `tokio::spawn`-ed work escaping the caller's
+    /// was built for - `tokio::spawn`-ed work escaping the caller's
     /// task-local [`Http::fake`] scope and silently calling real
     /// services. Pair with [`Self::allow_real_calls`] in teardown, or
     /// prefer [`FailOnRealCallsGuard`] which resets on drop:
@@ -222,7 +222,7 @@ impl Http {
         MAX_RESPONSE_BODY_BYTES.store(limit, Ordering::SeqCst);
     }
 
-    /// The effective process-global response-body cap — the value set by
+    /// The effective process-global response-body cap - the value set by
     /// [`Self::set_max_response_bytes`], or
     /// `DEFAULT_MAX_RESPONSE_BODY_BYTES` (25 MiB) if unset.
     pub fn max_response_bytes() -> usize {
@@ -240,15 +240,15 @@ impl Http {
     /// current task's fake state (an `Arc<Mutex<FakeState>>`) and
     /// re-installs it in the child's task-local scope. Recorded
     /// requests from the child are visible to the parent through the
-    /// same Arc — `assert_sent` after the child completes sees what
+    /// same Arc - `assert_sent` after the child completes sees what
     /// the child sent.
     ///
-    /// Most production code shouldn't need this — it's a test-time
+    /// Most production code shouldn't need this - it's a test-time
     /// helper for code-under-test that itself spawns tasks (e.g. a
     /// queue worker that makes outbound HTTP from a spawned future).
     ///
     /// If no fake scope is active on the calling task, this is
-    /// equivalent to `tokio::spawn(future)` — the child runs without
+    /// equivalent to `tokio::spawn(future)` - the child runs without
     /// any fake context and outbound calls take the normal real
     /// network path (or fail closed when
     /// [`Self::fail_on_real_calls`] is on).
@@ -304,7 +304,7 @@ impl Http {
 /// # Parallel-task caveat
 ///
 /// The underlying flag is a process-global `AtomicBool`, so parallel
-/// tasks that each install their own guard race on the same cell — an
+/// tasks that each install their own guard race on the same cell - an
 /// inner guard from one task can briefly relax the guard for another
 /// task that expects it to stay on. Process-global by design: this
 /// catches the exact failure it was built for (work `tokio::spawn`-ed
@@ -312,7 +312,7 @@ impl Http {
 /// parallel test isolation, prefer per-task fake scopes via
 /// [`Http::fake`] + [`Http::spawn_with_fake_inheritance`] instead of
 /// relying on the guard alone.
-#[must_use = "FailOnRealCallsGuard releases the guard on drop — bind it to a name"]
+#[must_use = "FailOnRealCallsGuard releases the guard on drop - bind it to a name"]
 pub struct FailOnRealCallsGuard {
     previous: bool,
 }
@@ -366,7 +366,7 @@ impl Method {
         }
     }
 
-    /// Whether this method is idempotent per RFC 7231 §4.2.2 — sending
+    /// Whether this method is idempotent per RFC 7231 §4.2.2 - sending
     /// the request more than once has the same effect as sending it once.
     /// Retries are only safe (no duplicated side effect) for idempotent
     /// methods. GET/PUT/DELETE are idempotent; POST and PATCH are not.
@@ -397,7 +397,7 @@ pub(crate) struct RetryPolicy {
     /// When `false` (the default, set by [`RequestBuilder::retry`]),
     /// retries are limited to idempotent methods. When `true` (set by
     /// [`RequestBuilder::retry_non_idempotent`]), POST/PATCH are retried
-    /// too — only safe when the upstream is protected by an idempotency
+    /// too - only safe when the upstream is protected by an idempotency
     /// key or is otherwise safe to call more than once.
     pub(crate) retry_non_idempotent: bool,
 }
@@ -406,10 +406,10 @@ pub(crate) struct RetryPolicy {
 /// is being asked about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryOutcome {
-    /// The attempt never got a response — a connect, DNS, or timeout
+    /// The attempt never got a response - a connect, DNS, or timeout
     /// failure before any bytes came back.
     TransportError,
-    /// The attempt got a response with this status code — always
+    /// The attempt got a response with this status code - always
     /// `500..600`, the only status the built-in policy ever retries.
     Status(u16),
 }
@@ -430,7 +430,7 @@ pub struct RetryContext {
     pub outcome: RetryOutcome,
 }
 
-/// Boxed [`RequestBuilder::retry_when`] predicate shape — extracted into a
+/// Boxed [`RequestBuilder::retry_when`] predicate shape - extracted into a
 /// type alias so the field below reads clean and clippy's
 /// `type_complexity` lint is satisfied.
 pub(crate) type RetryPredicate = Box<dyn Fn(&RetryContext) -> bool + Send + Sync>;
@@ -450,7 +450,7 @@ pub struct RequestBuilder {
     /// Optional predicate consulted before every retry the built-in
     /// policy (`retry`) would otherwise make. Set via
     /// [`RequestBuilder::retry_when`]. Returning `false` vetoes that one
-    /// retry; the predicate can never expand the policy — it isn't
+    /// retry; the predicate can never expand the policy - it isn't
     /// consulted for an attempt the policy wasn't already going to
     /// retry, and it can't push the attempt count past `max_attempts`.
     pub(crate) retry_when: Option<RetryPredicate>,
@@ -459,7 +459,7 @@ pub struct RequestBuilder {
     pub(crate) max_response_bytes: Option<usize>,
     /// When `true` ([`RequestBuilder::no_redirects`]), this request routes
     /// through the non-following client so a 3xx is returned as-is rather
-    /// than followed — an SSRF guard for user-influenced URLs.
+    /// than followed - an SSRF guard for user-influenced URLs.
     pub(crate) no_redirects: bool,
 }
 
@@ -485,7 +485,7 @@ impl RequestBuilder {
     /// The default client follows redirects (up to reqwest's cap of 10),
     /// which is the right behavior for a general-purpose client calling
     /// trusted endpoints. Reach for this when the request URL is derived
-    /// from untrusted input — it closes a redirect-based SSRF vector where
+    /// from untrusted input - it closes a redirect-based SSRF vector where
     /// a hostile endpoint answers with a 3xx pointing at an internal or
     /// cloud-metadata address. With redirects disabled, that 3xx surfaces
     /// as a normal response your code can inspect and reject.
@@ -514,7 +514,7 @@ impl RequestBuilder {
     }
 
     /// Send the body as `application/x-www-form-urlencoded`. The value
-    /// must serialize to a JSON object — keys become form fields.
+    /// must serialize to a JSON object - keys become form fields.
     pub fn form<T: Serialize>(mut self, value: &T) -> Self {
         match serde_json::to_value(value) {
             Ok(v) => self.body = Some(Body::Form(v)),
@@ -550,7 +550,7 @@ impl RequestBuilder {
         self.header("Authorization", format!("Bearer {}", token.as_ref()))
     }
 
-    /// Attach HTTP Basic auth. `password` is optional — `None` produces
+    /// Attach HTTP Basic auth. `password` is optional - `None` produces
     /// `user:`.
     pub fn basic_auth(self, user: impl AsRef<str>, password: Option<&str>) -> Self {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -569,7 +569,7 @@ impl RequestBuilder {
     /// thundering herd), capped at 30s.
     ///
     /// A request is eligible for retry only if its method is idempotent
-    /// (GET/PUT/DELETE) — see [`Self::retry_non_idempotent`] to opt POST/
+    /// (GET/PUT/DELETE) - see [`Self::retry_non_idempotent`] to opt POST/
     /// PATCH in. An eligible request is retried when:
     /// - The send fails before we have a response (connect / timeout /
     ///   DNS errors), or
@@ -598,7 +598,7 @@ impl RequestBuilder {
     /// already performed the write but the response was lost (or it
     /// returned 5xx *after* committing), a blind retry duplicates the
     /// side effect. Only reach for this when the request is safe to send
-    /// more than once — e.g. it carries an idempotency key the server
+    /// more than once - e.g. it carries an idempotency key the server
     /// honors, or the operation is naturally safe to repeat. Idempotent
     /// methods (GET/PUT/DELETE) are retried by both this and
     /// [`Self::retry`]; calling either again replaces the previous policy.
@@ -679,7 +679,7 @@ impl RequestBuilder {
                 // that don't match an active fake error out instead
                 // of hitting the real network. Mirrors Laravel's
                 // `Http::preventStrayRequests()`. The error is
-                // `FrameworkError::internal` — the request URL is
+                // `FrameworkError::internal` - the request URL is
                 // included so the user can identify where the
                 // unmatched call originated, but no headers/body
                 // detail leaks.
@@ -788,7 +788,7 @@ async fn build_and_send(builder: &RequestBuilder) -> Result<ClientResponse, Fram
     }
 
     // Build the request so we can mutate its header map to inject
-    // W3C trace context (otel feature only — no-op otherwise).
+    // W3C trace context (otel feature only - no-op otherwise).
     let mut request = req
         .build()
         .map_err(|e| FrameworkError::internal(format!("Http::send failed: {e}")))?;
@@ -821,7 +821,7 @@ fn inject_w3c_trace_context(request: &mut reqwest::Request) {
     global::get_text_map_propagator(|propagator| propagator.inject_context(&cx, &mut injector));
 }
 
-/// No-op stub when the `otel` feature is disabled — header injection
+/// No-op stub when the `otel` feature is disabled - header injection
 /// has nothing to do because no propagator is installed.
 #[cfg(not(feature = "otel"))]
 fn inject_w3c_trace_context(_request: &mut reqwest::Request) {}
@@ -981,10 +981,10 @@ impl ClientResponse {
     /// escape hatch for callers that need to reach for a `reqwest`
     /// API we don't expose (streaming bodies, redirect policy
     /// inspection, etc.). The response-body cap does NOT apply once you
-    /// take the raw response — you own the read from there.
+    /// take the raw response - you own the read from there.
     ///
     /// Returns `Err(FrameworkError::internal(...))` if the response
-    /// was produced by [`Http::fake`] — there is no underlying
+    /// was produced by [`Http::fake`] - there is no underlying
     /// `reqwest::Response` in that case. Real responses are returned
     /// via `Ok`.
     pub fn into_inner(self) -> Result<reqwest::Response, FrameworkError> {

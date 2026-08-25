@@ -1,8 +1,8 @@
-//! Phase 10A T11 — End-to-end coverage for the migrated app models
+//! Phase 10A T11 - End-to-end coverage for the migrated app models
 //! against the real `app::migrations::Migrator`.
 //!
-//! Uses `TestDatabase::fresh::<Migrator>()` — NOT `sqlite_memory()` +
-//! manual DDL — so the test schema can never drift from the migrator
+//! Uses `TestDatabase::fresh::<Migrator>()` - NOT `sqlite_memory()` +
+//! manual DDL - so the test schema can never drift from the migrator
 //! the dev DB actually runs. The same pattern Phase 11 / 13 app
 //! dogfood tests use.
 
@@ -36,7 +36,7 @@ async fn user_lifecycle_end_to_end() {
         .unwrap();
     assert!(by_email.is_some());
 
-    // Cache the id before any moving call — soft delete / restore /
+    // Cache the id before any moving call - soft delete / restore /
     // force_delete all take `self` (matching the Model trait signature
     // so the inherent overrides actually fire, see T10).
     let alice_id = alice.id;
@@ -80,7 +80,7 @@ async fn user_lifecycle_end_to_end() {
 
 #[tokio::test]
 async fn dual_api_users_consistent_sql() {
-    // SQL emission is independent of any DB connection — verifies the
+    // SQL emission is independent of any DB connection - verifies the
     // Laravel-named methods (`db_where`, `where_in`) and the
     // Rust-named methods (`filter`, `filter_in`) produce byte-identical
     // SQL.
@@ -165,7 +165,7 @@ async fn fillable_filter_blocks_unlisted_user_columns() {
         name: "Alice",
         email: "a@x.com",
         password: "hashed",
-        // Not in `fillable = ["name", "email", "password"]` — should
+        // Not in `fillable = ["name", "email", "password"]` - should
         // fall through to the column default (active = true per the
         // migration).
         active: false,
@@ -176,11 +176,11 @@ async fn fillable_filter_blocks_unlisted_user_columns() {
 
     assert!(
         user.active,
-        "active not in fillable — falls back to column default true"
+        "active not in fillable - falls back to column default true"
     );
     assert!(
         user.deleted_at.is_none(),
-        "deleted_at not in fillable — stays null"
+        "deleted_at not in fillable - stays null"
     );
 }
 

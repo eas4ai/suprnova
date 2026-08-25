@@ -301,7 +301,7 @@ impl DB {
         Self::connection()
     }
 
-    /// Phase 10C T12 — register an auxiliary database connection under
+    /// Phase 10C T12 - register an auxiliary database connection under
     /// `name`. The primary pool is registered through [`Self::init`] /
     /// [`Self::init_with`]; this method is for read replicas, sharded
     /// shards, and per-model "warehouse" pools.
@@ -310,7 +310,7 @@ impl DB {
     /// [`Model::on(name)`]. Per-model default: tag the model with
     /// `#[model(connection = "name")]`.
     ///
-    /// `__primary__` is reserved — registering under that name fails.
+    /// `__primary__` is reserved - registering under that name fails.
     /// `__read_replica__` is the well-known read-replica name; when
     /// registered, every read-shape terminal method on
     /// [`Builder<M>`](crate::eloquent::Builder) auto-routes through it.
@@ -323,7 +323,7 @@ impl DB {
     }
 
     /// Look up the connection registered under `name`. Errors when no
-    /// connection is registered — no automatic fallback to the primary
+    /// connection is registered - no automatic fallback to the primary
     /// (would mask misconfiguration).
     pub async fn named(name: &str) -> Result<DbConnection, FrameworkError> {
         ConnectionRegistry::get(name).await
@@ -363,7 +363,7 @@ mod init_with_tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             for (k, v) in &self.keys {
-                // SAFETY: same as above — serial test, single-threaded
+                // SAFETY: same as above - serial test, single-threaded
                 // env mutation.
                 unsafe {
                     match v {
@@ -406,7 +406,7 @@ mod init_with_tests {
             std::env::set_var("APP_ENV", "production");
         }
 
-        // An explicit builder URL is UrlSource::Explicit — the operator
+        // An explicit builder URL is UrlSource::Explicit - the operator
         // chose it, so production must accept it.
         let config = DatabaseConfig::builder().url("sqlite::memory:").build();
         assert_eq!(config.url_source, UrlSource::Explicit);
@@ -427,7 +427,7 @@ mod init_with_tests {
         }
 
         // Testing is not production-like, so even the env-sourced URL
-        // (or the silent fallback) is allowed — the guard is a no-op.
+        // (or the silent fallback) is allowed - the guard is a no-op.
         let config = DatabaseConfig::from_env();
         assert_eq!(config.url_source, UrlSource::Env);
 

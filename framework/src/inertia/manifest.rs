@@ -7,7 +7,7 @@
 //! `framework/src/inertia/response.rs::render_prod_head` reads this
 //! manifest at first use and emits the correct asset tags in the
 //! production HTML shell. Without it the framework would serve hardcoded
-//! `/assets/main.js` paths that don't match Vite's hashed output —
+//! `/assets/main.js` paths that don't match Vite's hashed output -
 //! production deployments would 404 on every page.
 //!
 //! # Schema
@@ -58,7 +58,7 @@ pub struct ManifestEntry {
     #[serde(default)]
     pub imports: Vec<String>,
 
-    /// Marks this entry as a Vite "isEntry" target. Informational —
+    /// Marks this entry as a Vite "isEntry" target. Informational -
     /// resolution doesn't require it; we look up by configured path.
     #[serde(default, rename = "isEntry")]
     pub is_entry: bool,

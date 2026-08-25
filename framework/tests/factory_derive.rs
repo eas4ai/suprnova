@@ -11,7 +11,7 @@ use serial_test::serial;
 use suprnova::{Dummy, Factory};
 
 // ============================================================================
-// Variant 1 — basic derive on a Dummy-deriving model
+// Variant 1 - basic derive on a Dummy-deriving model
 // ============================================================================
 
 #[derive(Dummy, Factory, Debug, Clone)]
@@ -28,8 +28,8 @@ fn factory_derive_generates_marker_struct_and_factory_impl() {
     // and therefore the model's `Dummy` impl.
     let user = UserAFactory::new().make();
 
-    // `Dummy` for primitives picks non-default values most of the time
-    // — assert a defensible "the generator actually ran" check rather
+    // `Dummy` for primitives picks non-default values most of the time -
+    // assert a defensible "the generator actually ran" check rather
     // than a specific value.
     assert!(!user.name.is_empty(), "Dummy populated name");
     assert!(!user.email.is_empty(), "Dummy populated email");
@@ -57,7 +57,7 @@ fn factory_derive_supports_with_overrides() {
 }
 
 // ============================================================================
-// Variant 2 — `#[factory(name = "...")]` overrides the generated name
+// Variant 2 - `#[factory(name = "...")]` overrides the generated name
 // ============================================================================
 
 #[derive(Dummy, Factory, Debug)]
@@ -69,13 +69,13 @@ pub struct UserB {
 
 #[test]
 fn factory_name_attribute_picks_custom_marker_name() {
-    // No `UserBFactory` was generated — the marker is `AdminBuilder`.
+    // No `UserBFactory` was generated - the marker is `AdminBuilder`.
     let admin = AdminBuilder::new().make();
     assert!(!admin.name.is_empty());
 }
 
 // ============================================================================
-// Variant 3 — visibility propagation (pub model → pub factory)
+// Variant 3 - visibility propagation (pub model → pub factory)
 // ============================================================================
 
 mod inner {
@@ -101,7 +101,7 @@ fn factory_derive_propagates_model_visibility_to_marker() {
 }
 
 // ============================================================================
-// Variant 4 — derive composes with the integration into Persistable
+// Variant 4 - derive composes with the integration into Persistable
 // (sanity check that nothing about the derive disturbs the rest of the
 // factory machinery; the SeaORM-specific persistence behavior is pinned
 // by framework/tests/factory_persist.rs).

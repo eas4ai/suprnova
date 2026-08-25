@@ -1,4 +1,4 @@
-//! `init_telemetry` — the unified entry point that wires `tracing` and
+//! `init_telemetry` - the unified entry point that wires `tracing` and
 //! (optionally) the OpenTelemetry SDK pipelines into a single subscriber.
 //!
 //! See [`crate::telemetry`] for the high-level design.
@@ -28,12 +28,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// **The rest of the standard OTLP knobs are read by the SDK, not here.**
 /// `OTEL_EXPORTER_OTLP_HEADERS` (collector auth), `_PROTOCOL`, `_TIMEOUT`,
 /// and `_COMPRESSION` are consumed directly by the `opentelemetry-otlp`
-/// exporter builders when `init_telemetry` calls `.build()` — so operators
+/// exporter builders when `init_telemetry` calls `.build()` - so operators
 /// get the standard behavior without Suprnova re-modeling each one. The one
 /// value Suprnova sets explicitly is the endpoint (via `.with_endpoint`),
 /// which means a per-signal override like `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
 /// is currently shadowed by the base `OTEL_EXPORTER_OTLP_ENDPOINT` for all
-/// three signals — see `MODULE_REVIEW_NOTES` for that known limitation.
+/// three signals - see `MODULE_REVIEW_NOTES` for that known limitation.
 #[derive(Debug, Clone)]
 pub struct OtelConfig {
     /// OTLP collector base URL (e.g. `http://localhost:4318`).
@@ -110,7 +110,7 @@ fn parse_sdk_disabled(value: Option<&str>) -> bool {
 ///
 /// Call [`shutdown`](Self::shutdown) before the process exits. Dropping
 /// the guard without calling `shutdown` emits a warning via `tracing`
-/// because batch processors buffer span/metric/log payloads in memory —
+/// because batch processors buffer span/metric/log payloads in memory -
 /// silently dropping the guard would silently drop telemetry.
 ///
 /// The guard is `Send + Sync` so it can be moved into spawned tasks if
@@ -128,7 +128,7 @@ pub struct TelemetryGuard {
 
 impl TelemetryGuard {
     /// `true` when this guard owns at least one live SDK provider that
-    /// still needs an explicit flush. The Drop warning is gated on this —
+    /// still needs an explicit flush. The Drop warning is gated on this -
     /// a guard with no providers (the disabled path, the legacy
     /// `init_subscriber` path, or any non-`otel` build) has nothing to
     /// lose on drop and must stay silent.
@@ -145,7 +145,7 @@ impl TelemetryGuard {
         false
     }
 
-    /// Mark this guard as "shutdown" without invoking provider flush —
+    /// Mark this guard as "shutdown" without invoking provider flush -
     /// used by the legacy `init_subscriber` path. That path holds no
     /// providers, so [`Self::owns_providers`] already keeps Drop silent;
     /// this additionally records the shutdown so the state is unambiguous.
@@ -188,11 +188,11 @@ impl Drop for TelemetryGuard {
         // Warn only when we hold providers that were never flushed.
         // Guards with no providers (disabled path, legacy subscriber path,
         // non-`otel` builds) have nothing buffered, so a silent drop is
-        // correct — warning there would be pure noise on every process that
+        // correct - warning there would be pure noise on every process that
         // runs without a collector configured.
         if self.owns_providers() && !self.shutdown_called.load(Ordering::SeqCst) {
             tracing::warn!(
-                "TelemetryGuard dropped without shutdown() — buffered \
+                "TelemetryGuard dropped without shutdown() - buffered \
                  telemetry may be lost. Call guard.shutdown().await before \
                  exiting."
             );
@@ -362,7 +362,7 @@ fn init_telemetry_with_otel(log_config: LogConfig, otel_config: OtelConfig) -> T
     //
     // `OpenTelemetryLayer<S, T>` is parameterized on the subscriber type
     // `S` it wraps, so we have to build the bridge layers fresh inside
-    // each format arm — the inferred `S` differs between Pretty and Json
+    // each format arm - the inferred `S` differs between Pretty and Json
     // (different concrete fmt::Layer types) and a single layer instance
     // can only commit to one `S`.
     let env_filter = build_env_filter(&log_config.level);
@@ -413,7 +413,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Same env-serialization pattern as `crate::logging::config` —
+    // Same env-serialization pattern as `crate::logging::config` -
     // tests in this module touch global env so they must run sequentially.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -526,7 +526,7 @@ mod tests {
     fn empty_guard_owns_no_providers_so_drop_is_silent() {
         // The disabled path returns `empty_guard()`. It holds no providers,
         // so `owns_providers()` is false and Drop must not warn about lost
-        // telemetry — there is nothing buffered. Regression guard for the
+        // telemetry - there is nothing buffered. Regression guard for the
         // spurious "buffered telemetry may be lost" warning that fired on
         // every collector-less process before this fix.
         let guard = empty_guard();
@@ -537,7 +537,7 @@ mod tests {
         // Drop runs here with shutdown_called still false; the assertion
         // above pins the invariant the Drop warning is gated on. (A
         // subscriber-capture assertion would need global subscriber state,
-        // which collides with parallel tests — the owns_providers gate is
+        // which collides with parallel tests - the owns_providers gate is
         // the deterministic core.)
         drop(guard);
     }

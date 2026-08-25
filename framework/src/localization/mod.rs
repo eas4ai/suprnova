@@ -53,11 +53,11 @@ static GLOBAL_LOCALE: OnceLock<RwLock<Option<Locale>>> = OnceLock::new();
 /// re-reading `Config`/env on each of those calls. Before bootstrap runs
 /// (e.g. tests that bind a `Translator` directly without going through
 /// `Localization::bootstrap`), [`resolved_config`] falls back to a fresh
-/// `Config::get`/`from_env` read each time — correct, just not memoized.
+/// `Config::get`/`from_env` read each time - correct, just not memoized.
 static LOCALIZATION_CONFIG: OnceLock<LocalizationConfig> = OnceLock::new();
 
 /// Dedup set for `Lang::get`/`Lang::get_with`'s "translation missing in
-/// current and fallback locale" warning — logged at most once per key
+/// current and fallback locale" warning - logged at most once per key
 /// per process, so a hot path repeatedly hitting the same missing key
 /// doesn't spam `tracing::warn!`.
 fn warned_missing_keys() -> &'static Mutex<HashSet<String>> {
@@ -69,7 +69,7 @@ fn warned_missing_keys() -> &'static Mutex<HashSet<String>> {
 /// [`Localization::bootstrap`] has run, else `Config::get` /
 /// `LocalizationConfig::from_env()`, else the hard `en`/`en` default. A
 /// malformed `APP_LOCALE`/`APP_FALLBACK_LOCALE` must not make `Lang`
-/// panic or become unusable, so it falls back silently here — callers
+/// panic or become unusable, so it falls back silently here - callers
 /// who invoke `LocalizationConfig::from_env()` directly still get the
 /// loud `Err`.
 fn resolved_config() -> LocalizationConfig {
@@ -102,13 +102,13 @@ fn resolved_config() -> LocalizationConfig {
 /// cyclic map bypassing `parse_parents`'s rejection (`config.rs`'s
 /// `parse_parents_rejects_cycles` documents the same concern for the
 /// env-parsed path). Revisiting an already-seen locale stops the walk
-/// there rather than looping forever — the chain is simply truncated to
+/// there rather than looping forever - the chain is simply truncated to
 /// whatever it collected before the repeat, then the fallback is
 /// appended per the dedup rule above.
 pub(crate) fn fallback_chain(current: &Locale, config: &LocalizationConfig) -> Vec<Locale> {
     let mut chain = Vec::new();
     // `visited` borrows from `current` and `config`, which both outlive
-    // this body — so the walk clones only what it actually returns.
+    // this body - so the walk clones only what it actually returns.
     let mut visited: HashSet<&Locale> = HashSet::new();
     visited.insert(current);
 
@@ -169,7 +169,7 @@ pub struct Localization;
 
 impl Localization {
     /// Bind the default `FluentTranslator`, unless a `dyn Translator` is
-    /// already bound — an app-level `bootstrap_fn` override (a custom
+    /// already bound - an app-level `bootstrap_fn` override (a custom
     /// driver, a pre-seeded translator for tests) always wins, the same
     /// "respect app overrides" contract `Cache::bootstrap` follows.
     ///
@@ -189,7 +189,7 @@ impl Localization {
         let translator = FluentTranslator::from_dir(crate::app::paths::lang_path(""), &config)?;
         App::bind::<dyn Translator>(Arc::new(translator));
         // Best-effort: if another task raced us and already set this,
-        // keep theirs — both snapshots came from the same config source.
+        // keep theirs - both snapshots came from the same config source.
         let _ = LOCALIZATION_CONFIG.set(config);
         Ok(())
     }
@@ -199,7 +199,7 @@ impl Localization {
 /// macro) resolves a Fluent message key against the current locale,
 /// falls back to the configured fallback locale on a miss, and finally
 /// falls back to the key itself so a missing translation never crashes
-/// a page — `Lang::try_get`/`try_get_with` are the `Result`-returning
+/// a page - `Lang::try_get`/`try_get_with` are the `Result`-returning
 /// siblings for callers that want to detect the miss instead.
 pub struct Lang;
 
@@ -207,7 +207,7 @@ impl Lang {
     /// The locale in effect for the current call. Resolution order: the
     /// task-local locale ([`scope_locale`] / `LocaleMiddleware`), the
     /// process-global override (`Lang::set_locale` outside a scope),
-    /// then the configured default locale. Never panics — a malformed
+    /// then the configured default locale. Never panics - a malformed
     /// env default falls back to the hard-coded `en`.
     pub fn locale() -> Locale {
         if let Ok(l) =
@@ -223,7 +223,7 @@ impl Lang {
 
     /// Set the current locale. Inside a [`scope_locale`]d future (a
     /// request, typically), this mutates the task-local slot so the
-    /// switch is visible for the rest of that scope — Laravel's
+    /// switch is visible for the rest of that scope - Laravel's
     /// `App::setLocale` called mid-request. Outside a scope (console
     /// commands, queue workers), it sets the process-global override
     /// consulted by [`Lang::locale`].
@@ -237,9 +237,9 @@ impl Lang {
     }
 
     /// Translate `key` for the current locale, walking its fallback
-    /// chain on a miss — the current locale's configured parents
+    /// chain on a miss - the current locale's configured parents
     /// ([`LocalizationConfig::parents`]), transitively, then the global
-    /// fallback locale — and finally falling back to the key itself if
+    /// fallback locale - and finally falling back to the key itself if
     /// nothing in the chain resolves it. Never panics, never errs.
     /// Equivalent to `__!(key)`. Logs a `tracing::warn!` (once per key
     /// per process) when the key resolves nowhere in the chain.
@@ -284,7 +284,7 @@ impl Lang {
     /// This walk runs regardless of which `Translator` is bound, even
     /// though [`FluentTranslator`] already serves chain-flattened
     /// catalogs (each locale's served catalog is pre-merged with its
-    /// parent chain — see `localization/fluent.rs`). That is deliberate
+    /// parent chain - see `localization/fluent.rs`). That is deliberate
     /// double-cover, not redundancy to trim: the flattening is a
     /// `FluentTranslator`-specific optimization, but the `Translator`
     /// trait itself makes no such promise, so a custom driver that never
@@ -292,9 +292,9 @@ impl Lang {
     /// needs the facade to walk the chain on its behalf, or chains would
     /// silently stop working for any driver but the default one. For
     /// `FluentTranslator` specifically, the earlier chain steps here are
-    /// redundant-but-harmless in practice — the current locale's already-
+    /// redundant-but-harmless in practice - the current locale's already-
     /// flattened catalog contains the parents' keys, so this loop
-    /// short-circuits on the first `translate` call — but that is an
+    /// short-circuits on the first `translate` call - but that is an
     /// implementation detail of one driver, not a property of the trait.
     /// Do not "optimize" this walk away in favor of relying on
     /// `FluentTranslator`'s flattening; that would silently break chains
@@ -318,7 +318,7 @@ impl Lang {
     }
 
     /// Whether `key` resolves for the current locale or anywhere in its
-    /// fallback chain — i.e. whether [`Lang::get`] would return a real
+    /// fallback chain - i.e. whether [`Lang::get`] would return a real
     /// translation rather than the bare key. Chain-aware: a key defined
     /// only in a configured parent locale, or only in the global
     /// fallback catalog, still counts, because `Lang::get`/`try_get`
@@ -347,7 +347,7 @@ impl Lang {
 
     /// Locale-aware number formatting via ICU4X, e.g. `1234567.89` renders
     /// as `1,234,567.89` in `en-US` and `1.234.567,89` in `de-DE`. Never
-    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// panics - any ICU failure logs a `tracing::warn!` and falls back to
     /// `format!("{n}")`.
     pub fn number(n: f64) -> String {
         Self::try_number(n).unwrap_or_else(|e| {
@@ -363,8 +363,8 @@ impl Lang {
     }
 
     /// Locale-aware currency formatting. `iso_code` is a 3-letter ISO
-    /// 4217 code (`"USD"`, `"EUR"`, ...), case-insensitive. Never panics
-    /// — any ICU failure (including an invalid `iso_code`) logs a
+    /// 4217 code (`"USD"`, `"EUR"`, ...), case-insensitive. Never panics -
+    /// any ICU failure (including an invalid `iso_code`) logs a
     /// `tracing::warn!` and falls back to `format!("{iso_code} {amount}")`.
     pub fn currency(amount: f64, iso_code: &str) -> String {
         Self::try_currency(amount, iso_code).unwrap_or_else(|e| {
@@ -379,7 +379,7 @@ impl Lang {
         format::try_currency(&Self::locale(), amount, iso_code)
     }
 
-    /// Locale-aware date formatting. See [`DateStyle`]. Never panics —
+    /// Locale-aware date formatting. See [`DateStyle`]. Never panics -
     /// any ICU failure logs a `tracing::warn!` and falls back to the
     /// plain ISO-8601 date (`dt.date()`'s `Display`).
     pub fn date(dt: &NaiveDateTime, style: DateStyle) -> String {
@@ -396,7 +396,7 @@ impl Lang {
     }
 
     /// Locale-aware time-of-day formatting. See [`TimeStyle`]. Never
-    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// panics - any ICU failure logs a `tracing::warn!` and falls back to
     /// the plain 24-hour time (`dt.time()`'s `Display`).
     pub fn time(dt: &NaiveDateTime, style: TimeStyle) -> String {
         Self::try_time(dt, style).unwrap_or_else(|e| {
@@ -412,7 +412,7 @@ impl Lang {
     }
 
     /// Locale-aware combined date + time formatting. See [`DateStyle`]
-    /// and [`TimeStyle`]. Never panics — any ICU failure logs a
+    /// and [`TimeStyle`]. Never panics - any ICU failure logs a
     /// `tracing::warn!` and falls back to `dt`'s plain `Display`.
     pub fn datetime(dt: &NaiveDateTime, date: DateStyle, time: TimeStyle) -> String {
         Self::try_datetime(dt, date, time).unwrap_or_else(|e| {
@@ -431,7 +431,7 @@ impl Lang {
         format::try_datetime(&Self::locale(), dt, date, time)
     }
 
-    /// Locale-aware list formatting. See [`ListStyle`]. Never panics —
+    /// Locale-aware list formatting. See [`ListStyle`]. Never panics -
     /// any ICU failure logs a `tracing::warn!` and falls back to a plain
     /// comma join (`items.join(", ")`).
     pub fn list(items: &[&str], style: ListStyle) -> String {
@@ -449,7 +449,7 @@ impl Lang {
 
     /// Locale-aware relative time formatting, e.g. `-3` with
     /// [`RelativeUnit::Day`] renders as `"3 days ago"` in `en`. Never
-    /// panics — any ICU failure logs a `tracing::warn!` and falls back to
+    /// panics - any ICU failure logs a `tracing::warn!` and falls back to
     /// `format!("{amount} {unit:?}")`.
     pub fn relative(amount: i64, unit: RelativeUnit) -> String {
         Self::try_relative(amount, unit).unwrap_or_else(|e| {
@@ -465,16 +465,16 @@ impl Lang {
     }
 }
 
-/// Translate a Fluent message key for the current locale — the
+/// Translate a Fluent message key for the current locale - the
 /// ergonomic entry point to [`Lang::get`] / [`Lang::get_with`].
 /// `suprnova::__!("key")` calls `Lang::get`; `suprnova::__!("key", name:
 /// value, ...)` builds a `TranslateArgs` from the named arguments and
-/// calls `Lang::get_with`. Named after Laravel's `__()` helper — `_`
+/// calls `Lang::get_with`. Named after Laravel's `__()` helper - `_`
 /// alone is Rust's ignore pattern, so it can't be a macro name.
 ///
 /// Named-argument values are converted through `$crate::serde_json::Value`
 /// (the framework's re-export of `serde_json` at the crate root), not a
-/// bare `::serde_json::Value` path — so callers never need `serde_json`
+/// bare `::serde_json::Value` path - so callers never need `serde_json`
 /// as a direct dependency of their own; only `suprnova` does.
 ///
 /// ```rust,no_run
@@ -498,7 +498,7 @@ macro_rules! __ {
     }};
 }
 
-/// Inertia shared-data provider for the active locale — the `lang` prop
+/// Inertia shared-data provider for the active locale - the `lang` prop
 /// that tells the frontend which language is in effect and where to
 /// fetch its Fluent catalog.
 ///
@@ -522,7 +522,7 @@ macro_rules! __ {
 /// }
 /// ```
 ///
-/// `locale` is [`Lang::locale`] — the per-request locale bound by
+/// `locale` is [`Lang::locale`] - the per-request locale bound by
 /// `LocaleMiddleware` / [`scope_locale`]. `fallback` is the configured
 /// [`LocalizationConfig::fallback_locale`], resolved the same way
 /// `Lang`'s hot path does (the bootstrap snapshot if one exists, else a
@@ -532,7 +532,7 @@ macro_rules! __ {
 /// request it as immutably cacheable once it already has the hash (from
 /// this share, or from a prior fetch's `ETag`).
 ///
-/// `catalog` is JSON `null` — never an error — when no [`Translator`] is
+/// `catalog` is JSON `null` - never an error - when no [`Translator`] is
 /// bound, or the active locale has no loaded catalog: a page must never
 /// fail to render for want of a translation source.
 pub struct LocaleShare;
@@ -578,7 +578,7 @@ mod tests {
         Locale::parse(s).unwrap()
     }
 
-    /// A minimal `LocalizationConfig` for `fallback_chain` unit tests —
+    /// A minimal `LocalizationConfig` for `fallback_chain` unit tests -
     /// only `parents` and `fallback_locale` matter to it; the rest are
     /// unused-but-required fields, same defaults `config.rs`'s own
     /// `#[cfg(test)]` helpers use.
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn a_hand_built_cycle_terminates_the_walk() {
         // Bypasses `parse_parents`'s cycle rejection by building the map
-        // directly — `LocalizationConfig::parents` is `pub`, so
+        // directly - `LocalizationConfig::parents` is `pub`, so
         // `fallback_chain` must defend itself regardless of how a cyclic
         // map was constructed, the same contract `parents_cycle` in
         // `config.rs` documents for `from_dir`'s defense.

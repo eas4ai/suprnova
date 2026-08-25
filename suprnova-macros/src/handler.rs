@@ -8,7 +8,7 @@
 //! The macro generates a single transformed `fn(req: Request)` shape that
 //! moves `req` into at most one of the body-consuming extractors. `Request`
 //! and `FormRequest` both consume the request body, so the macro **rejects
-//! at expansion time** any combination with more than one of them — the
+//! at expansion time** any combination with more than one of them - the
 //! emitted code would otherwise trip E0382 (use of moved value) with no
 //! actionable diagnostic for the user.
 //!
@@ -83,7 +83,7 @@ pub fn handler_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
 /// `proc_macro2`-flavoured entry point. The outer `handler_impl` is a thin
 /// shim that converts the host `proc_macro::TokenStream`. Splitting the work
 /// here lets the unit tests below feed in token streams directly and assert
-/// on the rendered output — the host `proc_macro::TokenStream` cannot be
+/// on the rendered output - the host `proc_macro::TokenStream` cannot be
 /// constructed outside a real macro-expansion context.
 fn handler_impl_inner(input: TokenStream2) -> TokenStream2 {
     let input_fn: ItemFn = match syn::parse2(input) {
@@ -217,7 +217,7 @@ fn classify_param_type(ty: &Type) -> ParamKind {
                 }
             }
 
-            // Check for Model type (path ends with ::Model) — the
+            // Check for Model type (path ends with ::Model) - the
             // unscoped escape hatch. See `RouteParam<M>` below for
             // the scoped default.
             if let Some(last_segment) = segments.last()
@@ -227,7 +227,7 @@ fn classify_param_type(ty: &Type) -> ParamKind {
                 return ParamKind::Model;
             }
 
-            // Check for RouteParam<M> — the scoped binding wrapper.
+            // Check for RouteParam<M> - the scoped binding wrapper.
             // Routes through M::find (Eloquent's CRUD entrypoint) so
             // global scopes, soft-delete filter, and per-model
             // connection apply. See `suprnova::RouteParam` rustdoc.
@@ -305,7 +305,7 @@ mod tests {
     //! Macro-expansion regressions for the body-consumer constraint.
     //!
     //! Two-FormRequest, Request + FormRequest, and friends would emit
-    //! `let _ = __suprnova_req; let _ = …(__suprnova_req).await?;` —
+    //! `let _ = __suprnova_req; let _ = …(__suprnova_req).await?;` -
     //! moving the same value twice. rustc reports E0382 deep inside
     //! generated code, far from the user's signature, with no hint at
     //! the actual constraint. The macro now rejects those signatures
@@ -404,7 +404,7 @@ mod tests {
         // The documented Mixed example: `update(user: user::Model,
         // form: UpdateUserRequest)`. Model reads from the cloned
         // params map and never touches `__suprnova_req`, so this
-        // counts as one body-consumer overall — legal.
+        // counts as one body-consumer overall - legal.
         let out = expansion(quote! {
             pub async fn update(user: user::Model, form: UpdateUserRequest) -> Response { todo!() }
         });
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn accepts_primitive_plus_request_mix() {
-        // Request is a consumer, but only ONE of it — Primitive reads
+        // Request is a consumer, but only ONE of it - Primitive reads
         // from the cloned params clone, so the combination is legal.
         let out = expansion(quote! {
             pub async fn show(id: i32, req: Request) -> Response { todo!() }

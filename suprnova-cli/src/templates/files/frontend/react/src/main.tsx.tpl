@@ -24,7 +24,7 @@ createInertiaApp({
     return pages[`./pages/${name}.tsx`]
   },
   async setup({ el, App, props }) {
-    // `el` is `null` when `setup` runs server-side — @inertiajs/react's
+    // `el` is `null` when `setup` runs server-side - @inertiajs/react's
     // `createInertiaApp` reuses this same callback for both the browser
     // bootstrap and an SSR render pass (see `ssr.tsx`, which calls this
     // same `createInertiaApp` shape from inside `createServer`).
@@ -37,7 +37,7 @@ createInertiaApp({
     // Caution: awaiting `initLang` here, before mount/hydrate, means a
     // hydrating client's first paint carries real translations while
     // the server-rendered markup it hydrates against still has `t()`'s
-    // untranslated fallback (SSR always skips `initLang` — see above) —
+    // untranslated fallback (SSR always skips `initLang` - see above) -
     // a hydration content mismatch on any translated string. This
     // scaffold accepts that trade-off (translate before first paint,
     // for the common case) rather than deferring the catalog load until

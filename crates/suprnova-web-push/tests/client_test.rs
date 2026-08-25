@@ -34,7 +34,7 @@ async fn client_posts_encrypted_payload_with_vapid_headers() {
     let key = VapidKey::generate();
     let signer = VapidSigner::new(key);
     // wiremock serves `http://127.0.0.1:<port>`, which the production-default
-    // Strict endpoint policy would reject — opt into AllowAny for the mock.
+    // Strict endpoint policy would reject - opt into AllowAny for the mock.
     let client = WebPushClient::new(signer, "mailto:admin@example.org")
         .expect("test subject is a valid mailto: URI")
         .with_endpoint_policy(EndpointPolicy::AllowAny);
@@ -170,7 +170,7 @@ async fn client_is_retryable_classifies_5xx_and_408_and_429() {
 
 #[tokio::test]
 async fn client_is_retryable_returns_false_for_4xx_other_than_408_429() {
-    // 400 Bad Request — a protocol error, not transient.
+    // 400 Bad Request - a protocol error, not transient.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/push"))
@@ -193,10 +193,10 @@ async fn client_is_retryable_returns_false_for_4xx_other_than_408_429() {
 #[tokio::test]
 async fn client_caps_rejection_body_at_a_few_kib() {
     // A hostile push service streams a giant rejection body. The client must
-    // accumulate at most a few KiB and drop the rest — the returned body
+    // accumulate at most a few KiB and drop the rest - the returned body
     // length must be bounded regardless of how large the response is.
     let server = MockServer::start().await;
-    // 1 MiB of 'A' bytes — far larger than the 8 KiB internal cap.
+    // 1 MiB of 'A' bytes - far larger than the 8 KiB internal cap.
     let huge_body = "A".repeat(1024 * 1024);
     Mock::given(method("POST"))
         .and(path("/push"))
@@ -216,14 +216,14 @@ async fn client_caps_rejection_body_at_a_few_kib() {
     match err {
         WebPushError::PushServiceRejected { status, body, .. } => {
             assert_eq!(status, 500);
-            // Body must be bounded — never anywhere close to the 1 MiB sent.
+            // Body must be bounded - never anywhere close to the 1 MiB sent.
             assert!(
                 body.len() <= 16 * 1024,
                 "rejection body must be capped, got {} bytes",
                 body.len()
             );
             // And the bytes we did capture are the start of the response,
-            // not random middle/end — first chars must be the 'A's we sent.
+            // not random middle/end - first chars must be the 'A's we sent.
             assert!(body.starts_with('A'), "captured prefix wrong");
         }
         other => panic!("expected PushServiceRejected, got {other:?}"),
@@ -309,7 +309,7 @@ async fn strict_default_rejects_metadata_host() {
 }
 
 // ---------------------------------------------------------------------------
-// VAPID subject — invalid subjects must fail at construction so a startup
+// VAPID subject - invalid subjects must fail at construction so a startup
 // misconfig blows up early instead of producing JWTs every push service
 // silently refuses (RFC 8292 §2.1).
 // ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ fn new_rejects_non_uri_subject() {
 #[test]
 fn new_rejects_http_subject() {
     let signer = VapidSigner::new(VapidKey::generate());
-    // RFC 8292 requires `mailto:` or `https:` — http:// is not acceptable.
+    // RFC 8292 requires `mailto:` or `https:` - http:// is not acceptable.
     let err = WebPushClient::new(signer, "http://example.org").unwrap_err();
     assert!(
         matches!(err, WebPushError::Vapid(_)),
@@ -386,5 +386,5 @@ async fn client_does_not_follow_redirects_ssrf_guard() {
         matches!(err, WebPushError::PushServiceRejected { status: 302, .. }),
         "expected an unfollowed 302; got {err:?}"
     );
-    // On drop, `internal` asserts its `.expect(0)` — it was never contacted.
+    // On drop, `internal` asserts its `.expect(0)` - it was never contacted.
 }

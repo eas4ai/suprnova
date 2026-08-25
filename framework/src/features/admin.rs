@@ -47,11 +47,11 @@ pub struct FeatureRow {
 
 impl From<entity::Model> for FeatureRow {
     fn from(m: entity::Model) -> Self {
-        // Phase 10A T11 — `entity::Model` now carries the storage
+        // Phase 10A T11 - `entity::Model` now carries the storage
         // shape (RFC-3339 string timestamps from the `AsDateTime`
         // cast). Parse back to `DateTime<Utc>` for the admin/JSON
         // surface; failures fall back to the unix epoch so a corrupt
-        // row never panics the admin listing — the FeatureRow is
+        // row never panics the admin listing - the FeatureRow is
         // serialised by the admin UI which treats parse errors as
         // "unknown timestamp" rather than fatal.
         let parse = |s: &str| {
@@ -118,7 +118,7 @@ pub async fn upsert(
     actor_id: Option<String>,
 ) -> Result<FeatureRow, FrameworkError> {
     let db = DB::connection()?;
-    // Phase 10A T11 — the inner SeaORM Model now stores timestamps as
+    // Phase 10A T11 - the inner SeaORM Model now stores timestamps as
     // RFC-3339 strings (the `AsDateTime` cast's `Storage` type). Format
     // the chrono value the same way the cast pipeline does so the
     // round-trip back through the FeatureRow conversion below parses
@@ -157,7 +157,7 @@ pub async fn upsert(
         .await?
         .ok_or_else(|| FrameworkError::internal("features upsert: row missing after insert"))?;
 
-    // Propagate to live evaluators *before* returning — kill-switch
+    // Propagate to live evaluators *before* returning - kill-switch
     // semantics require the in-memory snapshot + any cache to reflect
     // the new row by the time the admin call comes back. No-op when
     // no `FeatureSync` is bound.

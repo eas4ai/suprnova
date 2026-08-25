@@ -18,14 +18,14 @@ use super::store::{SessionData, SessionStore};
 
 // Per-request session slot. `tokio::task_local!` (not `thread_local!`)
 // so the binding survives `.await` points that resume on a different
-// worker thread — the same fix applied to `InertiaContext` in Tier 0.
+// worker thread - the same fix applied to `InertiaContext` in Tier 0.
 //
 // The slot is `Arc<Mutex<Option<SessionData>>>` rather than a bare
 // `RefCell` because (a) the future inside `SESSION_CONTEXT.scope` may
 // move between threads (so we need `Send + Sync`), and (b) the
 // middleware needs to read the saved session back out *after* the
 // scope returns. Closures passed to `session_mut` do not await, so a
-// synchronous `std::sync::Mutex` is sound — guards drop before `.await`.
+// synchronous `std::sync::Mutex` is sound - guards drop before `.await`.
 tokio::task_local! {
     pub(crate) static SESSION_CONTEXT: Arc<Mutex<Option<SessionData>>>;
     /// Active request session configuration. Auth flows use this to build
@@ -39,7 +39,7 @@ tokio::task_local! {
     /// drains the slot when assembling the response, applying each cookie
     /// next to the session cookie.
     ///
-    /// We can't have handlers mutate the `Response` directly — they
+    /// We can't have handlers mutate the `Response` directly - they
     /// return one synchronously, and the cookie machinery is in the
     /// middleware layer that already owns the response. A task-local
     /// slot is the same shape we use for the session itself.
@@ -56,8 +56,8 @@ tokio::task_local! {
 /// Returns `true` when the cookie was queued and `false` when the
 /// `PENDING_COOKIES` task-local was not installed (e.g. a unit test
 /// running without the session middleware). Callers that have
-/// already done side-effecting work — issuing a DB row, rotating a
-/// token — must check the result and either roll back or fail loud:
+/// already done side-effecting work - issuing a DB row, rotating a
+/// token - must check the result and either roll back or fail loud:
 /// dropping the cookie silently leaves the client without the durable
 /// half of the credential.
 #[must_use = "callers that already committed side effects (DB rows, token rotations) must check whether the cookie was actually queued"]
@@ -71,7 +71,7 @@ pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
 
 /// Queue a cookie for the outgoing response, replacing any cookie
 /// already queued under the same name. Backs the public
-/// `Cookie::queue` facade (`http::cookie::Cookie::queue`) — unlike
+/// `Cookie::queue` facade (`http::cookie::Cookie::queue`) - unlike
 /// `push_pending_cookie` above, which always appends (nothing in this
 /// file or `Auth` ever queues the same name twice in one request), a
 /// second `Cookie::queue` call for the same name is expected to
@@ -80,7 +80,7 @@ pub(crate) fn push_pending_cookie(cookie: Cookie) -> bool {
 /// either path is visible to `queued_cookie` / `unqueue_cookie` and
 /// drains onto the response the same way.
 ///
-/// Silently does nothing outside a request scope — the same posture
+/// Silently does nothing outside a request scope - the same posture
 /// `inertia::flash::push` takes outside a flash scope.
 pub(crate) fn queue_cookie(cookie: Cookie) {
     let _ = PENDING_COOKIES.try_with(|slot| {
@@ -122,9 +122,9 @@ pub(crate) fn unqueue_cookie(name: &str) {
 /// (existing-session read failure with a dirtied fallback session,
 /// session write failure for a dirty session, session-cookie
 /// encryption failure). A queued cookie can already represent a side
-/// effect committed elsewhere — e.g. `Auth::login_remember` has
+/// effect committed elsewhere - e.g. `Auth::login_remember` has
 /// already written the fresh remember-me token row by the time it
-/// calls `push_pending_cookie` — so dropping it only because a 500
+/// calls `push_pending_cookie` - so dropping it only because a 500
 /// short-circuited the normal control-flow path before the drain loop
 /// would strand that side effect on the server with no cookie ever
 /// reaching the client to redeem it. That is the exact hazard
@@ -326,7 +326,7 @@ pub struct SessionMiddleware {
 /// Publish `store` into the application container as `dyn SessionStore`,
 /// but only if nothing is registered there yet.
 ///
-/// # Security — SEC-02(b)
+/// # Security - SEC-02(b)
 ///
 /// [`crate::session::destroy_all_for_user`] (the primitive
 /// [`crate::auth_flows::PasswordReset::complete`] and friends call to
@@ -336,7 +336,7 @@ pub struct SessionMiddleware {
 /// custom store (Redis, per the `with_store` worked example in
 /// `manual/session.md`) would have its revocation calls silently
 /// operate against the wrong backend and report success while revoking
-/// nothing — the manual's own claim that "a security-team forced reset
+/// nothing - the manual's own claim that "a security-team forced reset
 /// also kicks out an active attacker" did not hold.
 ///
 /// `SessionMiddleware` is normally constructed exactly once per process
@@ -347,7 +347,7 @@ pub struct SessionMiddleware {
 ///
 /// `bind_if_absent` (not `bind`) deliberately: this is implicit,
 /// framework-driven registration, so it must not clobber a binding the
-/// application installed itself, and — just as importantly — it must
+/// application installed itself, and - just as importantly - it must
 /// not let a *second* `SessionMiddleware` constructed later in the same
 /// process (a pattern this framework's own test suite uses heavily,
 /// constructing many short-lived middleware instances with distinct
@@ -377,13 +377,13 @@ impl SessionMiddleware {
 
     /// Construct the middleware AND register a [`SessionGcSupervisor`]
     /// that calls [`SessionStore::gc`] once per `interval`. The Tokio
-    /// equivalent of Laravel's `StartSession::collectGarbage` lottery
-    /// — a real supervised task instead of a 2/100 chance per request.
+    /// equivalent of Laravel's `StartSession::collectGarbage` lottery -
+    /// a real supervised task instead of a 2/100 chance per request.
     ///
     /// The gc loop is spawned through
     /// [`crate::supervisor::SupervisorRegistry::spawn`] so it (a) gets
     /// a proper restart loop with exponential backoff on panic, and
-    /// (b) participates in the framework's shutdown drain — when
+    /// (b) participates in the framework's shutdown drain - when
     /// `Server::run` fires its supervisor cancellation token, the gc
     /// loop exits cleanly within the 5-second grace window instead of
     /// being silently force-aborted.
@@ -417,7 +417,7 @@ impl SessionMiddleware {
     }
 
     /// Build the outbound session cookie. Returns `Err` if `Crypt`
-    /// failed to encrypt the session id — which by design only happens
+    /// failed to encrypt the session id - which by design only happens
     /// when `Crypt` is not initialized.
     ///
     /// `Server::from_config` guarantees `Crypt` is installed before
@@ -486,7 +486,7 @@ impl SessionMiddleware {
 /// cookie (HttpOnly, optional Secure, SameSite=Lax).
 ///
 /// `max_age` is set explicitly to match the TTL of the underlying
-/// `remember_tokens` row — codex review demanded "expires-at matches
+/// `remember_tokens` row - codex review demanded "expires-at matches
 /// token expiration." Callers (login_remember + middleware rotation)
 /// pass the same `ttl_minutes` they used to issue the row.
 ///
@@ -554,7 +554,7 @@ pub fn create_forget_remember_cookie(config: &SessionConfig) -> Cookie {
 /// The loop honours the supervisor cancellation token via
 /// `tokio::select!` so it exits cleanly within the 5-second drain
 /// window instead of being aborted. Per-tick `gc()` errors are
-/// `warn!`-logged and the loop keeps going — the call site treats
+/// `warn!`-logged and the loop keeps going - the call site treats
 /// transient backend failure as something to ride out, not something
 /// to kill the daemon over. Panics escape this `run()` and are caught
 /// then restarted with exponential backoff by the supervisor restart
@@ -615,9 +615,9 @@ impl Middleware for SessionMiddleware {
         // Defensive: refuse to run at all when `Crypt` isn't installed.
         // `Server::from_config` guarantees a key is in place before
         // middleware boots (failing closed in production, generating a
-        // transient key in dev). If we somehow got here without one
-        // — e.g. an embedder built a service loop without going through
-        // `Server::from_config` — bail out closed rather than emit or
+        // transient key in dev). If we somehow got here without one -
+        // e.g. an embedder built a service loop without going through
+        // `Server::from_config` - bail out closed rather than emit or
         // accept plaintext session ids.
         if !crate::crypto::Crypt::is_initialized() {
             return Err(crate::http::HttpResponse::text(
@@ -629,7 +629,7 @@ impl Middleware for SessionMiddleware {
         // Read the session ID from the inbound cookie. The cookie
         // value is AES-256-GCM ciphertext; decrypt failure (tamper,
         // key rotation) silently mints a fresh session id rather than
-        // logging per-request — same fail-quietly semantics as Laravel
+        // logging per-request - same fail-quietly semantics as Laravel
         // when the SESSION cookie is unreadable.
         //
         // `original_session_id` carries the id we LOADED the session
@@ -638,7 +638,7 @@ impl Middleware for SessionMiddleware {
         // handler (login, 2FA promotion, remember-me hydration, manual
         // regenerate, logout_and_invalidate) rotated the id this
         // request. `None` when no cookie was present or when the
-        // cookie was unreadable — neither case names a real row, so
+        // cookie was unreadable - neither case names a real row, so
         // there's nothing to migrate away from.
         //
         // Shape validation: even a successfully-decrypted id must
@@ -646,7 +646,7 @@ impl Middleware for SessionMiddleware {
         // `generate_session_id` before we let it reach the store.
         // The AES-256-GCM cookie is authenticated, so a foreign id
         // requires a key-compromise OR a rotated key whose ciphertext
-        // we can no longer trust — either way, the right move is to
+        // we can no longer trust - either way, the right move is to
         // mint a fresh id rather than route an attacker-controlled
         // string into the session-store lookup. Mirrors Laravel's
         // `Store::isValidId` check in `Illuminate/Session/Store.php`
@@ -692,7 +692,7 @@ impl Middleware for SessionMiddleware {
                     ),
                     Err(e) => {
                         // Store read failed (outage, corruption). Degrade
-                        // gracefully by minting a fresh session — same posture as
+                        // gracefully by minting a fresh session - same posture as
                         // Laravel when the session row is unreadable. `warn!`, not
                         // `error!`: this fires once per request, so during an
                         // outage an error-level line would spam at request rate.
@@ -902,12 +902,12 @@ impl Middleware for SessionMiddleware {
         let mut session = slot.lock().unwrap().take();
 
         // Record the current URL as `_previous.url` if this turned out
-        // to be a "real" HTML page navigation — successful, GET, not
+        // to be a "real" HTML page navigation - successful, GET, not
         // Inertia partial, not JSON-API. Drives `Redirect::back`.
         //
         // We only write when the value would change. Same-URL navigations
         // (a GET that returns to the same page on retry, a duplicate
-        // request) leave the session clean — that preserves the
+        // request) leave the session clean - that preserves the
         // "unmodified session never gets a fail-closed write" invariant
         // exercised by the session-persistence regression tests.
         let response_status = match &response {
@@ -921,14 +921,14 @@ impl Middleware for SessionMiddleware {
         // isn't rejected at the HTTP-parse layer). `_previous.url` backs
         // `Redirect::back`, `Redirect::refresh`, and `url::previous`, and
         // none of those readers re-check the value before it lands in a
-        // `Location` header — so an app whose `fallback!` route (the
+        // `Location` header - so an app whose `fallback!` route (the
         // standard Inertia/SPA app-shell pattern: any unmatched path
         // renders 200) answers `GET //evil.test/anything` with 200 would,
         // without this guard, persist `//evil.test/anything` verbatim and
         // hand every later `Redirect::back()` an off-origin target.
         //
         // Guarding here, at the one write site, closes it for all three
-        // readers at once — fixing only a caller would leave the others
+        // readers at once - fixing only a caller would leave the others
         // exposed. When the candidate fails the check, the write is
         // skipped entirely rather than replaced with a synthesized value
         // like `/`: every reader already treats "no previous URL
@@ -948,7 +948,7 @@ impl Middleware for SessionMiddleware {
             s.set_previous_url(safe_current_url);
         }
 
-        // Drain pending cookies — both the ones queued from the
+        // Drain pending cookies - both the ones queued from the
         // middleware (remember-me rotation / clear) and any queued by
         // handlers via `Auth::login_remember` etc.
         let mut response = response;
@@ -993,7 +993,7 @@ impl Middleware for SessionMiddleware {
             // calls `handler->destroy($oldId)` as part of regenerate.
             //
             // Without this, the old row keeps carrying its prior
-            // `user_id` (or whatever state it had) until TTL — an
+            // `user_id` (or whatever state it had) until TTL - an
             // attacker holding the prior encrypted session cookie can
             // replay it and remain authenticated, which is the exact
             // inverse of what `logout_and_invalidate` documents. This
@@ -1004,7 +1004,7 @@ impl Middleware for SessionMiddleware {
             // The inequality check is load-bearing: a normal navigation
             // keeps the same id, and destroying-then-writing would race
             // with concurrent reads on the same row. Destroy is
-            // best-effort cleanup of OLD state — failures are
+            // best-effort cleanup of OLD state - failures are
             // `warn!`-logged and never fail the request, because a 500
             // here wouldn't undo the regeneration in memory and would
             // block legitimate logouts. GC reaps the stale row at TTL.
@@ -1047,7 +1047,7 @@ impl Middleware for SessionMiddleware {
                     // success response now would lie: the client would get
                     // a session cookie for state the store never recorded,
                     // so the next request loads an empty session and the
-                    // mutation silently vanishes — e.g. a "successful"
+                    // mutation silently vanishes - e.g. a "successful"
                     // login that didn't stick. Fail closed. We return
                     // BEFORE create_session_cookie below, so no cookie is
                     // attached: a cookie for an id the store never saw is
@@ -1067,7 +1067,7 @@ impl Middleware for SessionMiddleware {
 
             if write_succeeded {
                 // Add session cookie to response. Encryption must succeed
-                // here — we already verified Crypt is initialized at the
+                // here - we already verified Crypt is initialized at the
                 // top of `handle`. If it doesn't, fail the request closed.
                 let cookie = match self.create_session_cookie(&session.id, touched_at) {
                     Ok(c) => c,
@@ -1110,7 +1110,7 @@ pub fn regenerate_session_id() {
 /// regenerate the session id (and CSRF token) so a fixed/stale id can't
 /// be replayed against the now-empty session. Rotating the id here keeps
 /// `invalidate_session` in lockstep with [`regenerate_session_id`] and
-/// `Auth::logout_and_invalidate` — the regeneration-aware persistence
+/// `Auth::logout_and_invalidate` - the regeneration-aware persistence
 /// step in [`SessionMiddleware`] then destroys the old store row.
 pub fn invalidate_session() {
     session_mut(|session| {
@@ -1175,7 +1175,7 @@ pub fn clear_auth_user() {
 ///
 /// Kept in the generic data bag rather than as a typed field on
 /// `SessionData` so adding 2FA-challenge support doesn't require
-/// every session driver to learn about a new column — the bag is
+/// every session driver to learn about a new column - the bag is
 /// already serialized end-to-end.
 const TWO_FACTOR_PENDING_KEY: &str = "_two_factor_pending_user_id";
 
@@ -1194,7 +1194,7 @@ pub fn two_factor_pending_user_id() -> Option<String> {
 
 /// Stash a "2FA challenge pending" user-id in the session. The caller
 /// (typically [`crate::auth_flows::TwoFactor::start_challenge`]) is
-/// responsible for clearing the fully-authenticated slot first —
+/// responsible for clearing the fully-authenticated slot first -
 /// pending and authed are mutually exclusive states.
 pub fn set_two_factor_pending(user_id: impl Into<String>) {
     let user_id = user_id.into();
@@ -1225,7 +1225,7 @@ pub fn clear_two_factor_pending() {
 /// can re-issue the remember-me cookie.
 ///
 /// Lives in the generic data bag rather than as a typed field on
-/// `SessionData` for the same reason as [`TWO_FACTOR_PENDING_KEY`] —
+/// `SessionData` for the same reason as [`TWO_FACTOR_PENDING_KEY`] -
 /// avoiding driver churn for a feature whose state is naturally
 /// transient.
 const TWO_FACTOR_PENDING_REMEMBER_KEY: &str = "_two_factor_pending_remember";
@@ -1247,8 +1247,8 @@ pub fn two_factor_pending_remember() -> bool {
 }
 
 /// Stash the "user asked to be remembered" preference alongside the
-/// pending user-id. The caller — typically
-/// [`crate::auth_flows::TwoFactor::start_challenge`] — passes through
+/// pending user-id. The caller - typically
+/// [`crate::auth_flows::TwoFactor::start_challenge`] - passes through
 /// the `remember` argument it received from the login form.
 ///
 /// Stored as a JSON boolean; clears the slot when `remember` is

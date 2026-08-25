@@ -14,7 +14,7 @@
 //! 1. Append `expires` if present: `?foo=1&bar=2&expires=1748800000`
 //! 2. Sort query pairs lexicographically by `(key, value)` so equivalent
 //!    URLs hash identically regardless of caller insertion order. Sorting
-//!    on the value too — not the key alone — is what makes the order total
+//!    on the value too - not the key alone - is what makes the order total
 //!    when a key repeats.
 //! 3. Build the canonical string `path?<sorted_kv>` (omit the `?` when no
 //!    pairs exist). **Every pair is carried, including repeated keys.**
@@ -32,27 +32,27 @@
 //!
 //! ## Why HMAC over the path + sorted query
 //!
-//! - **Path** binds the URL to its route — switching `/orders/1` to
+//! - **Path** binds the URL to its route - switching `/orders/1` to
 //!   `/orders/2` invalidates the signature even when query parameters match.
 //! - **Sorted query** prevents trivial reorderings from producing different
 //!   signatures for the same effective URL (matching Laravel's
 //!   `ksort($queryString)` policy).
 //! - **`expires` inside the signed payload** binds the expiration to the
-//!   signature itself — a client cannot strip or extend the expiration
+//!   signature itself - a client cannot strip or extend the expiration
 //!   without invalidating the HMAC.
-//! - **HMAC-SHA256, hex** — a 32-byte digest rendered as 64 lowercase hex
+//! - **HMAC-SHA256, hex** - a 32-byte digest rendered as 64 lowercase hex
 //!   characters, the same primitive and encoding Laravel uses.
 //!
 //! ## Not byte-compatible with Laravel's default signatures
 //!
 //! Suprnova signs the **path + sorted query** (host-independent). Laravel's
-//! default `UrlGenerator` signs the **absolute URL** — scheme, host, path,
+//! default `UrlGenerator` signs the **absolute URL** - scheme, host, path,
 //! and query together. Because the signed payloads differ, a signature
 //! minted by one side will **not** verify on the other even when the
 //! `APP_KEY` is identical: same primitive, different message. Signing
 //! path+query keeps Suprnova links portable across hostnames (proxies,
 //! preview domains, local vs. production) without re-minting, which is the
-//! deliberate divergence — at the cost of cross-framework wire interchange.
+//! deliberate divergence - at the cost of cross-framework wire interchange.
 //!
 //! ## Key source
 //!
@@ -88,7 +88,7 @@ pub enum SignatureVerdict {
     /// HMAC, but the `expires` timestamp is in the past.
     Expired,
     /// Signature is missing, malformed, or does not match the recomputed
-    /// HMAC. Treat as untrusted — do not trust the embedded `expires`
+    /// HMAC. Treat as untrusted - do not trust the embedded `expires`
     /// value either.
     Invalid,
 }
@@ -110,7 +110,7 @@ impl SignatureVerdict {
 /// Resolve the signing key for URL signatures.
 ///
 /// Returns the active encryption key's raw 32 bytes. Falls back to a
-/// `FrameworkError` if no key is installed — signed URLs are a
+/// `FrameworkError` if no key is installed - signed URLs are a
 /// trust-boundary feature and silently signing with a missing key would
 /// produce unverifiable links. The caller (route helpers, middleware)
 /// should treat the error as a 500-equivalent boot misconfiguration.
@@ -128,10 +128,10 @@ fn signed_url_key() -> Result<Vec<u8>, FrameworkError> {
 }
 
 /// Compute the HMAC-SHA256 over the canonical payload bytes and return
-/// the hex-encoded digest. Pure function — no global state.
+/// the hex-encoded digest. Pure function - no global state.
 fn hmac_hex(key: &[u8], payload: &[u8]) -> String {
     let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC accepts any key length — input is fine");
+        HmacSha256::new_from_slice(key).expect("HMAC accepts any key length - input is fine");
     mac.update(payload);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -191,7 +191,7 @@ fn split_url(url: &str) -> (String, Vec<(String, String)>) {
 ///
 /// For a URL with no repeated keys this emits byte-identical output to the
 /// map version it replaces, so signatures minted before the fix still
-/// verify — the format did not change, only what it refuses to lose.
+/// verify - the format did not change, only what it refuses to lose.
 fn canonicalize(path: &str, pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
         return path.to_string();
@@ -246,7 +246,7 @@ pub fn sign_url(
         pairs.push((EXPIRES_KEY.to_string(), ts.to_string()));
     }
 
-    // Canonical order. Every pair survives, including repeated keys — a
+    // Canonical order. Every pair survives, including repeated keys - a
     // caller signing `?tag=a&tag=b` gets both values covered by the HMAC
     // rather than silently losing one.
     sort_pairs(&mut pairs);
@@ -254,7 +254,7 @@ pub fn sign_url(
 
     let signature = hmac_hex(&key, canonical.as_bytes());
 
-    // Append signature OUTSIDE the canonicalised payload — verifiers
+    // Append signature OUTSIDE the canonicalised payload - verifiers
     // recompute over everything except `signature`, so position is
     // semantically irrelevant; we append last for human readability.
     let mut out = canonical;
@@ -324,8 +324,8 @@ pub fn verify_signature(
 /// `Crypt::init` callers in the same lib-test binary).
 ///
 /// Tries `current_key` first. If that misses, walks `previous_keys`
-/// in order — mirroring [`crate::crypto::Crypt::decrypt_string`]'s
-/// fallback — and emits a single `tracing::warn!` with the matching
+/// in order - mirroring [`crate::crypto::Crypt::decrypt_string`]'s
+/// fallback - and emits a single `tracing::warn!` with the matching
 /// previous-ring index on a hit so an operator running a log search
 /// for "APP_KEY_PREVIOUS" sees one consistent rotation-in-progress
 /// signal across the crypto surface.
@@ -357,7 +357,7 @@ fn verify_signature_with_keys(
     }
 
     // A repeated control parameter has no legitimate meaning and leaves
-    // the authoritative value ambiguous — whichever one we picked would be
+    // the authoritative value ambiguous - whichever one we picked would be
     // a guess about what the *handler* will read. Refuse instead of
     // guessing. Ordinary parameters may legitimately repeat and are
     // covered by the canonical payload below.
@@ -369,7 +369,7 @@ fn verify_signature_with_keys(
         return SignatureVerdict::Invalid;
     };
 
-    // Canonical recomputation. Build once — the payload is identical
+    // Canonical recomputation. Build once - the payload is identical
     // across every key in the ring.
     sort_pairs(&mut rest);
     let canonical = canonicalize(&path, &rest);
@@ -449,7 +449,7 @@ mod tests {
     }
 
     /// The three verdicts are genuinely three, and `Invalid` is not
-    /// `Expired` — a forged signature never had an expiry to miss.
+    /// `Expired` - a forged signature never had an expiry to miss.
     ///
     /// That is a true statement about the enum and it stays. It is also
     /// exactly why `url::signature_has_not_expired` could not be built on
@@ -462,7 +462,7 @@ mod tests {
     fn invalid_is_a_third_state_not_a_flavour_of_expired() {
         assert!(
             !SignatureVerdict::Invalid.is_expired(),
-            "an Invalid verdict is not Expired — which is why `!is_expired()` \
+            "an Invalid verdict is not Expired - which is why `!is_expired()` \
              is not a safe basis for an expiry helper"
         );
         assert!(
@@ -570,7 +570,7 @@ mod tests {
         let s2 = without_frag.rsplit("signature=").next().unwrap();
         assert_eq!(
             s1, s2,
-            "fragment must not influence the signature — browsers don't echo it back",
+            "fragment must not influence the signature - browsers don't echo it back",
         );
     }
 
@@ -633,7 +633,7 @@ mod tests {
         out
     }
 
-    // M22 — Signed URL APP_KEY_PREVIOUS fallback. The lib-test binary
+    // M22 - Signed URL APP_KEY_PREVIOUS fallback. The lib-test binary
     // shares one `Crypt` OnceLock across every test module, so we
     // can't reliably install a multi-key ring from here. Instead we
     // drive [`verify_signature_with_keys`] directly with the ring
@@ -646,7 +646,7 @@ mod tests {
         // Operator rotated APP_KEY; the now-current key was not the
         // key that signed this URL, but a previous key (still
         // installed via APP_KEY_PREVIOUS) was. The verifier must
-        // walk the ring and accept the URL — otherwise every
+        // walk the ring and accept the URL - otherwise every
         // outstanding signed link breaks the moment the operator
         // rotates.
         let current = EncryptionKey::generate();
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn rotation_fallback_preserves_expiry_verdict() {
-        // The fallback must NOT downgrade the verdict — a previous-
+        // The fallback must NOT downgrade the verdict - a previous-
         // key-signed URL that has since elapsed `expires=` returns
         // Expired (not Valid, not Invalid).
         let current = EncryptionKey::generate();
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn rotation_fallback_rejects_url_signed_by_key_outside_ring() {
         // A URL signed by a key that is in NEITHER `current` nor
-        // `previous` must be rejected as Invalid — the fallback is
+        // `previous` must be rejected as Invalid - the fallback is
         // bounded by the installed ring, not an open sesame.
         let current = EncryptionKey::generate();
         let prev = EncryptionKey::generate();
@@ -738,7 +738,7 @@ mod tests {
     fn trailing_slash_on_verify_matches_signed_path() {
         // sign_url produces a canonical path without a trailing slash.
         // A request that arrives at /orders/1/ (browser or proxy appended the
-        // slash) must still verify — split_url normalises both sides identically.
+        // slash) must still verify - split_url normalises both sides identically.
         ensure_key();
         let signed = sign_url("/orders/1", None).expect("sign");
         // Inject a trailing slash into the path portion before verifying.
@@ -764,7 +764,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // SEC-04 — duplicate query keys
+    // SEC-04 - duplicate query keys
     // ------------------------------------------------------------------
 
     /// The attack the lossless canonical form exists to stop.
@@ -772,7 +772,7 @@ mod tests {
     /// Take a legitimately signed `?user=victim`, prepend a second value
     /// for the same key, and send the original signature untouched. Under
     /// the map-based canonical form the verifier hashed only the *last*
-    /// value — `victim` — so the signature still matched, while
+    /// value - `victim` - so the signature still matched, while
     /// `Request::query_param` handed the handler the *first*. Verified and
     /// executed were different URLs.
     #[test]
@@ -817,7 +817,7 @@ mod tests {
 
     /// A repeated key is legitimate in ordinary URLs (`?tag=a&tag=b`), so
     /// the fix must carry every value into the signature rather than
-    /// refuse the URL outright — otherwise "reject duplicates" would break
+    /// refuse the URL outright - otherwise "reject duplicates" would break
     /// list parameters for everyone to stop one attack.
     #[test]
     fn a_genuinely_repeated_key_signs_and_verifies_with_every_value() {
@@ -838,7 +838,7 @@ mod tests {
         );
     }
 
-    /// Reordering equivalent parameters must not change the signature —
+    /// Reordering equivalent parameters must not change the signature -
     /// the property the sort exists for, now that ordering includes the
     /// value as a tiebreak.
     #[test]
@@ -887,7 +887,7 @@ mod tests {
     /// this lapsed?", and the verifier must not be the one guessing.
     ///
     /// Unlike the `signature` case this is **defence in depth, not the
-    /// load-bearing guard** — `expires` lives *inside* the signed payload,
+    /// load-bearing guard** - `expires` lives *inside* the signed payload,
     /// so a second copy already changes the canonical form and breaks the
     /// HMAC. Deleting the `expires_count` check alone leaves this test
     /// green; deleting the lossless canonical form fails it. Said plainly
@@ -912,7 +912,7 @@ mod tests {
     /// Signatures minted before the lossless canonical form must still
     /// verify. For a URL with no repeated keys, sorting the pair list by
     /// `(key, value)` yields exactly the order `BTreeMap` iteration gave,
-    /// so the payload bytes are unchanged — this pins that, because a
+    /// so the payload bytes are unchanged - this pins that, because a
     /// canonical-form change that silently invalidated every outstanding
     /// password-reset link would be a far worse outage than the bug.
     #[test]

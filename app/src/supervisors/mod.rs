@@ -1,4 +1,4 @@
-//! Application supervisors — framework-managed long-running background tasks.
+//! Application supervisors - framework-managed long-running background tasks.
 //!
 //! Each module here defines a [`suprnova::supervisor::Supervisor`] implementation
 //! and registers it via `inventory::submit!` so that

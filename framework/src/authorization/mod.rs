@@ -2,7 +2,7 @@
 //!
 //! Mirrors Laravel's `Gate` facade: register named abilities (or full
 //! `Policy` impls keyed by resource type) against the global gate, then
-//! call `Gate::allows("update", &user, &post)` from anywhere — controllers,
+//! call `Gate::allows("update", &user, &post)` from anywhere - controllers,
 //! middleware, Inertia view models.
 //!
 //! The [`Authorizable`] shim adds `user.can("update", &post)` directly on
@@ -19,7 +19,7 @@ pub use response::Response;
 /// instead of `Gate::allows(action, &user, &resource)`. Mirrors
 /// Laravel's `Authorizable` trait.
 ///
-/// `impl Authorizable for YourUser {}` is enough — every method has
+/// `impl Authorizable for YourUser {}` is enough - every method has
 /// a default body that delegates to [`Gate`]. The trait requires
 /// `Sized + 'static` so the type-erased registry can dispatch via
 /// `TypeId` (same constraints [`Gate::define`] imposes).
@@ -36,8 +36,8 @@ pub trait Authorizable: Sized + 'static {
     /// Authorize the action, returning the denial as an error.
     ///
     /// A bare denial maps to `FrameworkError::Unauthorized` (403). A rich
-    /// denial — from a [`Gate::define_with`] gate that returned a [`Response`]
-    /// with a custom message/status — maps to `FrameworkError::Domain`
+    /// denial - from a [`Gate::define_with`] gate that returned a [`Response`]
+    /// with a custom message/status - maps to `FrameworkError::Domain`
     /// carrying that message and status (e.g. 404 from
     /// `Response::deny_as_not_found()`).
     fn authorize<R: 'static>(
@@ -106,7 +106,7 @@ inventory::collect!(__PolicyRegistration);
 /// Eagerly run all `#[policy]` gate registrations.
 ///
 /// Called automatically from `Server::serve`. May also be called manually in
-/// tests. Safe to call multiple times — the inner `Once` ensures each
+/// tests. Safe to call multiple times - the inner `Once` ensures each
 /// registered closure runs exactly once.
 pub fn init_policies() {
     static ONCE: std::sync::Once = std::sync::Once::new();

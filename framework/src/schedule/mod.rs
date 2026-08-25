@@ -165,7 +165,7 @@ fn check_single_server_locking(
          lock lives in this process's heap. Every replica would win its own \
          election and run the task, which is what on_one_server() exists to \
          prevent. Set CACHE_DRIVER=redis with REDIS_URL, or set {}=true to \
-         acknowledge per-process locking — which is only accurate if you run \
+         acknowledge per-process locking - which is only accurate if you run \
          exactly one scheduler.",
         requesting.len(),
         requesting.join(", "),
@@ -185,7 +185,7 @@ impl Schedule {
     /// [`TaskBuilder::on_one_server`] elects one replica per tick with a
     /// [`Cache::lock`]. Under `CACHE_DRIVER=memory` that lock lives in one
     /// process's heap, so every replica wins its own election and every
-    /// replica runs the task — the exact outcome the call was written to
+    /// replica runs the task - the exact outcome the call was written to
     /// prevent, with nothing in the logs to say so.
     ///
     /// That is the same shape as the in-memory rate limiter, and it gets
@@ -206,7 +206,7 @@ impl Schedule {
     /// [`Cache::lock`]: crate::cache::Cache::lock
     pub fn validate_single_server_locking(&self) -> Result<(), FrameworkError> {
         // Unset defaults to memory, and an unparseable value falls back to
-        // memory too — both leave the lock per-process, so both have to
+        // memory too - both leave the lock per-process, so both have to
         // count as "not shared". Reading the raw var rather than the bound
         // store keeps this independent of boot order.
         let cache_is_shared = matches!(
@@ -262,7 +262,7 @@ impl Schedule {
     /// Returns a [`TaskBuilder`] for fluent configuration. **The builder
     /// is not registered until it is passed to [`add`](Self::add).** A
     /// chain that ends at `.daily()` compiles, runs, and schedules
-    /// nothing — the builder is simply dropped, and `schedule:list`
+    /// nothing - the builder is simply dropped, and `schedule:list`
     /// reports no tasks.
     ///
     /// # Example
@@ -348,7 +348,7 @@ impl Schedule {
     /// Same as [`run_due_tasks`](Self::run_due_tasks) but routes background tasks into the supplied
     /// `joinset` instead of awaiting them locally.
     ///
-    /// Returns only the inline (non-background) results — caller is
+    /// Returns only the inline (non-background) results - caller is
     /// responsible for draining `joinset` to observe background-task
     /// outcomes. Background tasks are wrapped with `catch_unwind` so a panic
     /// surfaces as `Err(FrameworkError::internal(...))` carrying the task
@@ -402,7 +402,7 @@ impl Schedule {
 /// Background tasks ([`TaskEntry::run_in_background`] is `true`) are spawned
 /// into `joinset` via `tokio::spawn`, with `catch_unwind` so a handler panic
 /// is converted into `Err(FrameworkError::internal(...))` carrying the task
-/// name — the scheduler tick loop is never unwound by user code.
+/// name - the scheduler tick loop is never unwound by user code.
 ///
 /// Both paths route through
 /// [`task::run_handler_with_optional_overlap_guard`] so the
@@ -646,7 +646,7 @@ mod tests {
             schedule.run_due_tasks(),
         )
         .await
-        .expect("background tasks must run concurrently — barrier(2) would deadlock if sequential");
+        .expect("background tasks must run concurrently - barrier(2) would deadlock if sequential");
 
         assert_eq!(results.len(), 2);
         for (name, r) in results {
@@ -755,7 +755,7 @@ mod tests {
     }
 
     /// Inline tasks (no `run_in_background`) keep their original
-    /// sequential semantics — used as a regression test against the
+    /// sequential semantics - used as a regression test against the
     /// `_into` plumbing accidentally spawning everything.
     #[tokio::test]
     async fn inline_tasks_run_sequentially() {
@@ -844,11 +844,11 @@ mod tests {
 
     /// Without Cache bootstrapped, the `without_overlapping` in-process
     /// AtomicBool must skip a second invocation while the first is still
-    /// in the handler — across a (simulated) minute boundary so the
+    /// in the handler - across a (simulated) minute boundary so the
     /// same-minute CAS gate doesn't pre-empt the assertion.
     ///
-    /// Design note: each registered task carries its own `Arc<TaskState>`
-    /// — the overlap flag is per-task identity, not a global gate. The
+    /// Design note: each registered task carries its own `Arc<TaskState>` -
+    /// the overlap flag is per-task identity, not a global gate. The
     /// always-on same-minute CAS would otherwise fire first; we reset
     /// `last_run_minute` between drive 1 and drive 2 to simulate the
     /// minute rolling over so the in-process layer is exercised. The
@@ -857,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn without_overlapping_in_process_fallback_skips_overlapping_call() {
         use crate::testing::TestContainer;
-        // No CacheStore binding in this scope — Cache::lock will Err(...)
+        // No CacheStore binding in this scope - Cache::lock will Err(...)
         // and the executor will fall back to in-process AtomicBool
         // protection.
         let _scope = TestContainer::fake();
@@ -902,7 +902,7 @@ mod tests {
 
         // Simulate the minute rolling over so the always-on same-minute
         // CAS does not pre-empt the in-process AtomicBool we're trying to
-        // exercise. Reset last_run_minute to 0 (the init value) — drive 2
+        // exercise. Reset last_run_minute to 0 (the init value) - drive 2
         // will then see prev < now_minute, win the same-minute CAS, and
         // proceed to the without_overlapping branch.
         state
@@ -937,7 +937,7 @@ mod tests {
     }
 
     /// Sequential invocations across different minutes must release the
-    /// in-process flag so the next run can proceed — the AtomicBool must
+    /// in-process flag so the next run can proceed - the AtomicBool must
     /// reset whether the handler returned Ok or Err. We reset the
     /// same-minute CAS state between iterations to simulate the minute
     /// rolling over; the in-process AtomicBool reset is what we're
@@ -984,7 +984,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Two `run_due_tasks` calls within the same wall-clock minute must
-    /// dedup the second one — closes the in-process subset of the
+    /// dedup the second one - closes the in-process subset of the
     /// audit's HIGH 3 case (cross-process external-cron same-minute
     /// dedup is the opt-in path via `without_overlapping` + a Cache
     /// backend; the always-on in-process CAS does not span processes).
@@ -998,7 +998,7 @@ mod tests {
     /// microseconds, so they land in the same UNIX minute with
     /// probability ≈1 − 8e-7 (≈ms-budget / 60s-budget). A flake here
     /// would mean a real-time minute boundary fired between the two
-    /// calls — vanishingly unlikely and easy to retry.
+    /// calls - vanishingly unlikely and easy to retry.
     #[tokio::test]
     async fn same_minute_cas_dedups_repeated_call_within_same_minute() {
         use crate::testing::TestContainer;
@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     /// `CronExpression::is_due_at` lets tests drive cron evaluation
-    /// against a fixed clock — the audit's test-coverage gap "Add
+    /// against a fixed clock - the audit's test-coverage gap "Add
     /// clock-controlled tests for once-per-minute de-duplication,
     /// repeated `run_due_tasks`, and daemon tick behavior" depends on
     /// this hook. Pin both a matching and a non-matching minute.
@@ -1070,7 +1070,7 @@ mod tests {
         let expr = expression::CronExpression::daily().at("03:00");
         assert_eq!(expr.expression(), "0 3 * * *");
 
-        // A synthetic clock pointing at 03:00 on some arbitrary day —
+        // A synthetic clock pointing at 03:00 on some arbitrary day -
         // must report due.
         let due_clock = Local
             .with_ymd_and_hms(2026, 5, 28, 3, 0, 0)
@@ -1081,7 +1081,7 @@ mod tests {
             "0 3 * * * should be due at 2026-05-28 03:00:00 local",
         );
 
-        // Same day, 03:01 — minute field doesn't match, must NOT be due.
+        // Same day, 03:01 - minute field doesn't match, must NOT be due.
         let off_clock = Local
             .with_ymd_and_hms(2026, 5, 28, 3, 1, 0)
             .single()
@@ -1091,7 +1091,7 @@ mod tests {
             "0 3 * * * must NOT be due at 03:01 (minute mismatch)",
         );
 
-        // Same minute, different hour — must NOT be due.
+        // Same minute, different hour - must NOT be due.
         let wrong_hour = Local
             .with_ymd_and_hms(2026, 5, 28, 4, 0, 0)
             .single()
@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     /// Plain `without_overlapping` (no `_for`) uses the documented default
-    /// of 30 minutes — pinned so future changes to the constant are seen.
+    /// of 30 minutes - pinned so future changes to the constant are seen.
     #[test]
     fn without_overlapping_uses_default_ttl_when_unspecified() {
         let mut schedule = Schedule::new();

@@ -1,4 +1,4 @@
-//! Phase 10C T3 + T4 — local scopes (trait emissions from the
+//! Phase 10C T3 + T4 - local scopes (trait emissions from the
 //! `#[suprnova::scopes]` macro live in `suprnova-macros/src/scopes.rs`)
 //! and global scopes (this file).
 //!
@@ -11,7 +11,7 @@
 //! ## Soft deletes coexistence
 //!
 //! Suprnova's [`SoftDeletes`][crate::eloquent::SoftDeletes] pathway
-//! does **not** route through this registry — it ships its own inherent
+//! does **not** route through this registry - it ships its own inherent
 //! `Model::query` override (emitted by `#[suprnova::model(soft_deletes)]`)
 //! that prepends a `deleted_at IS NULL` filter, and a
 //! `global_scopes_disabled: Vec<&'static str>` tag system on the
@@ -23,7 +23,7 @@
 //! Global scopes apply through [`Model::query`]. [`Model::find`],
 //! [`Model::find_many`], and [`Model::all`] go through SeaORM's
 //! `find_by_id` / `find().all()` directly and do **not** receive
-//! registered scopes — matching Laravel's `Eloquent\Model::find`
+//! registered scopes - matching Laravel's `Eloquent\Model::find`
 //! semantics. Callers that want scoped PK lookups use
 //! `Self::query().filter("id", pk).first().await`.
 //!
@@ -79,7 +79,7 @@ use crate::eloquent::model::Model;
 /// The where-clause re-elaborates [`Model`]'s own bounds because
 /// Rust's trait elaboration doesn't transitively propagate
 /// associated-type bounds from a supertrait's where-clause to a
-/// subtrait's method bodies — the same pattern [`FirstOrCreate`] and
+/// subtrait's method bodies - the same pattern [`FirstOrCreate`] and
 /// [`SoftDeletes`] use for the same reason.
 ///
 /// [`Model`]: crate::eloquent::Model
@@ -108,7 +108,7 @@ where
 /// registration time; the closure downcasts a `Box<dyn Any>` back to
 /// `Builder<M>`, runs the scope, and re-boxes the result. The
 /// `register::<M, S>` generics guarantee the closure is only ever
-/// invoked against `Builder<M>` of the matching type — `register`
+/// invoked against `Builder<M>` of the matching type - `register`
 /// stores the closure under `TypeId::of::<M>()`, and `apply_to::<M>`
 /// looks it up under the same key.
 type ErasedApply = Arc<dyn Fn(Box<dyn Any + Send>) -> Box<dyn Any + Send> + Send + Sync>;
@@ -144,7 +144,7 @@ impl ScopeRegistry {
     /// supported; they apply in registration order.
     ///
     /// `S` must be a unit struct or otherwise carry no per-call
-    /// state — the captured `Arc<S>` is shared across every query.
+    /// state - the captured `Arc<S>` is shared across every query.
     /// Per-request state (e.g. the current tenant ID) belongs in a
     /// thread-local / `tokio::task_local!` / `AtomicI64` that the
     /// scope reads inside `apply`.
@@ -174,7 +174,7 @@ impl ScopeRegistry {
             Box::new(result) as Box<dyn Any + Send>
         });
 
-        // Domain 9 audit D9-B — degrade gracefully on poisoned lock
+        // Domain 9 audit D9-B - degrade gracefully on poisoned lock
         // rather than propagating the panic into application boot.
         // An app whose scope registry is poisoned has bigger problems
         // than a missing scope; the error log lets ops surface it.
@@ -199,12 +199,12 @@ impl ScopeRegistry {
         }
     }
 
-    /// Phase 10C audit-fix AF4 — wipe every registered global scope.
+    /// Phase 10C audit-fix AF4 - wipe every registered global scope.
     /// `#[doc(hidden)]` because this is a test-only escape hatch
     /// (mirrors [`crate::database::ConnectionRegistry::clear`]).
     /// Called from [`crate::testing::TestContainerGuard::drop`] so
     /// the next test in the same process starts with an empty scope
-    /// registry. Production code never calls this — global scopes
+    /// registry. Production code never calls this - global scopes
     /// register at boot and live for the process lifetime.
     #[doc(hidden)]
     pub fn clear() {
@@ -247,7 +247,7 @@ impl ScopeRegistry {
         // code so a scope that itself touches the registry doesn't
         // deadlock.
         //
-        // Domain 9 audit D9-B — degrade to no-scope-applied on
+        // Domain 9 audit D9-B - degrade to no-scope-applied on
         // poison. Returning the unscoped builder preserves the
         // documented "no scope registered = query unchanged"
         // semantic; an error log lets ops see the underlying poison.
@@ -284,7 +284,7 @@ impl ScopeRegistry {
     /// isolation simple; production code should NEVER call this.
     ///
     /// Mirrors [`Self::clear`] (the `#[doc(hidden)]` opt-in)'s poison
-    /// handling — silently skip on poison rather than propagate.
+    /// handling - silently skip on poison rather than propagate.
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn __clear_for_tests() {

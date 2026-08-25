@@ -1,4 +1,4 @@
-//! Phase 10C T12 — named connections + read-write split routing.
+//! Phase 10C T12 - named connections + read-write split routing.
 //!
 //! [`ConnectionRegistry`] holds every named [`DbConnection`] the
 //! application has registered through [`crate::DB::register_named`].
@@ -10,13 +10,13 @@
 //!
 //! Two names are reserved by the framework:
 //!
-//! - `__primary__` — the default pool reachable through
+//! - `__primary__` - the default pool reachable through
 //!   [`crate::DB::connection`]. Cannot be registered into the registry;
 //!   the registry rejects the attempt. [`Builder::on_write_connection`]
 //!   sets this name on a per-query builder to opt back to the primary
 //!   pool when a read replica is otherwise routing reads elsewhere.
 //!
-//! - `__read_replica__` — the read replica. When registered, every
+//! - `__read_replica__` - the read replica. When registered, every
 //!   read-shape terminal method ([`Builder::get`], [`Builder::first`],
 //!   [`Builder::count`], etc.) routes through it by default; writes
 //!   ([`Model::create`], [`Model::save`], [`Model::delete`]) ignore it
@@ -36,7 +36,7 @@
 //! ## Lock-poisoning policy (Domain 6 audit D6-1)
 //!
 //! The registry uses `std::sync::RwLock`. Historically every guard
-//! acquisition was `.expect("connection registry poisoned")` — a single
+//! acquisition was `.expect("connection registry poisoned")` - a single
 //! panicked writer would take down the whole framework on the next
 //! request. The fixed shape:
 //!
@@ -48,7 +48,7 @@
 //! - [`ConnectionRegistry::has`] is called inline as a `bool` by the executor
 //!   read-replica routing path; widening its signature to
 //!   `Result<bool, FrameworkError>` would force every caller to
-//!   `?`-bubble. Instead `has` degrades to `false` on poison — the
+//!   `?`-bubble. Instead `has` degrades to `false` on poison - the
 //!   safe fallback (executor drops back to the primary pool).
 //!
 //! [`Builder::get`]: crate::eloquent::Builder::get
@@ -73,7 +73,7 @@ use std::sync::{OnceLock, RwLock};
 /// split contract.
 pub struct ConnectionRegistry;
 
-/// The name of the default pool. Reserved — registering anything under
+/// The name of the default pool. Reserved - registering anything under
 /// this name fails. [`Builder::on_write_connection`] sets it on a
 /// builder to opt that query back to the default pool.
 ///
@@ -86,7 +86,7 @@ pub const PRIMARY_CONNECTION_NAME: &str = "__primary__";
 pub const READ_REPLICA_CONNECTION_NAME: &str = "__read_replica__";
 
 /// Process-global storage. `std::sync::RwLock` (not `tokio::sync`) so
-/// the registry can be inspected from sync contexts — most importantly
+/// the registry can be inspected from sync contexts - most importantly
 /// from `Drop` implementations that call [`ConnectionRegistry::clear`]
 /// for test isolation. Cloning a [`DbConnection`] is an `Arc::clone`
 /// (sync, cheap), so the read path never blocks an async task.
@@ -96,7 +96,7 @@ static REGISTRY: OnceLock<RwLock<HashMap<String, DbConnection>>> = OnceLock::new
 /// a poisoned registry lock. The next read still falls back to the
 /// primary pool (the safe behaviour documented on `has`), and the
 /// warn-once gate keeps the hot routing path from spamming the log on
-/// every subsequent request — poison is sticky on `RwLock`, so without
+/// every subsequent request - poison is sticky on `RwLock`, so without
 /// this gate every read would re-fire the warning.
 static REGISTRY_POISON_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -106,7 +106,7 @@ fn reg() -> &'static RwLock<HashMap<String, DbConnection>> {
 
 impl ConnectionRegistry {
     /// Open a fresh connection pool from `config` and register it
-    /// under `name`. Production entry point — called from the
+    /// under `name`. Production entry point - called from the
     /// application boot sequence.
     ///
     /// `__primary__` is rejected (it's the default pool reachable via
@@ -117,7 +117,7 @@ impl ConnectionRegistry {
         Self::ensure_name_writable(name)?;
         // Route through `connect_as(...)` so the ConnectionEstablished
         // event carries the registered name rather than the
-        // `__primary__` sentinel — multi-pool observers (logging,
+        // `__primary__` sentinel - multi-pool observers (logging,
         // metrics) need to tell pools apart.
         let conn = DbConnection::connect_as(&config, name).await?;
         let mut r = crate::lock::write(reg(), "connection registry")?;
@@ -139,7 +139,7 @@ impl ConnectionRegistry {
     }
 
     /// Look up the connection registered under `name`. Returns a
-    /// `Database` error when no connection is registered — application
+    /// `Database` error when no connection is registered - application
     /// code must handle this failure (no automatic fallback to the
     /// primary; that would mask the misconfiguration). Returns an
     /// `Internal` error if the registry lock is poisoned.
@@ -163,7 +163,7 @@ impl ConnectionRegistry {
     /// Emits a single `tracing::warn!` the first time poison is
     /// observed so operators see the condition in logs even when no
     /// subsequent [`Self::get`] is exercised. Repeat observations are
-    /// silenced — `RwLock` poison is sticky and the hot routing path
+    /// silenced - `RwLock` poison is sticky and the hot routing path
     /// must not flood the log.
     pub async fn has(name: &str) -> bool {
         match reg().read() {
@@ -175,7 +175,7 @@ impl ConnectionRegistry {
                 if !REGISTRY_POISON_WARNED.swap(true, Ordering::SeqCst) {
                     tracing::warn!(
                         target: "suprnova::database",
-                        "ConnectionRegistry RwLock is poisoned — a panicked writer left the \
+                        "ConnectionRegistry RwLock is poisoned - a panicked writer left the \
                          registry in a guarded state. `has(\"{name}\")` is degrading to false; \
                          the executor will fall back to the primary pool for this and every \
                          subsequent routed read. The next ConnectionRegistry::get(...) call \
@@ -192,7 +192,7 @@ impl ConnectionRegistry {
     /// teardown so the next test in the same process starts with an
     /// empty registry. Production code does not call this.
     ///
-    /// Sync — does not block on the lock for `await`, which is what
+    /// Sync - does not block on the lock for `await`, which is what
     /// lets it run from a `Drop` impl.
     #[doc(hidden)]
     pub fn clear() {
@@ -204,7 +204,7 @@ impl ConnectionRegistry {
     }
 
     /// Reject the reserved primary name. Other reserved names like
-    /// `__read_replica__` ARE registerable — the framework reads them
+    /// `__read_replica__` ARE registerable - the framework reads them
     /// back through [`Self::has`] / [`Self::get`].
     fn ensure_name_writable(name: &str) -> Result<(), FrameworkError> {
         if name == PRIMARY_CONNECTION_NAME {
@@ -242,7 +242,7 @@ mod tests {
         assert!(ConnectionRegistry::has("unit_test_round_trip").await);
         // The round-trip succeeded if `get` returned a connection; no
         // need for a follow-up `is_closed` check (the prior call to
-        // that method was a tautology — it hardcoded `false`. See the
+        // that method was a tautology - it hardcoded `false`. See the
         // Domain 6 audit D6-3 note in `database/connection.rs`).
         let _conn = ConnectionRegistry::get("unit_test_round_trip")
             .await
@@ -295,7 +295,7 @@ mod tests {
     /// and `has` degrades to `false` so the executor's read-replica
     /// routing safely falls back to the primary pool.
     ///
-    /// Runs in a fresh `RwLock` (not the global `REGISTRY`) — we
+    /// Runs in a fresh `RwLock` (not the global `REGISTRY`) - we
     /// can't intentionally poison the global one without contaminating
     /// every other test in the same process.
     #[test]
@@ -317,7 +317,7 @@ mod tests {
 
         // `crate::lock::write` / `crate::lock::read` propagate the
         // poison as a `FrameworkError` instead of panicking. The
-        // production `register`/`get` paths use these helpers — the
+        // production `register`/`get` paths use these helpers - the
         // shape below is the exact transformation.
         let write_err = crate::lock::write(&lock, "test connection registry").err();
         assert!(
@@ -330,7 +330,7 @@ mod tests {
             "lock::read must return Err on poison, got Ok",
         );
 
-        // `has` degrades to `false` on the same condition — see the
+        // `has` degrades to `false` on the same condition - see the
         // `has` impl above.
         let has_result = match lock.read() {
             Ok(r) => r.contains_key("anything"),

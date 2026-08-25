@@ -27,7 +27,7 @@ use suprnova::{
     SessionGuard, StatefulGuard, UserProvider,
 };
 
-/// Shared runtime — SQLx pools die with their creating runtime, so every
+/// Shared runtime - SQLx pools die with their creating runtime, so every
 /// DB-touching path runs here rather than on a per-test runtime.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
@@ -314,7 +314,7 @@ fn attempt_with_valid_credentials_dispatches_attempting_login_authenticated() {
 
 /// SEC-01 follow-through. The passkey-enrollment gate refuses to bind a new
 /// authenticator to an existing account unless the session carries a recent
-/// `password_confirmed` stamp — but nothing in the framework produced that
+/// `password_confirmed` stamp - but nothing in the framework produced that
 /// stamp, so the gate was unsatisfiable rather than merely strict. A
 /// successful `attempt` is precisely the moment the caller proves their
 /// password, so it is what stamps the window.
@@ -352,7 +352,7 @@ fn attempt_with_valid_credentials_stamps_password_confirmation() {
 }
 
 /// The stamp is earned by proving a password, not by being logged in. A
-/// failed attempt must leave the window closed — otherwise a wrong-password
+/// failed attempt must leave the window closed - otherwise a wrong-password
 /// request would hand out the reauth window that gates passkey enrollment.
 #[test]
 fn attempt_with_wrong_password_does_not_stamp_password_confirmation() {
@@ -570,7 +570,7 @@ fn facade_once_authenticates_without_login_event() {
 }
 
 // Bare `Auth::login` + `Auth::logout`: login fires Login, logout fires Logout
-// AND clears the request-scoped user (so `Auth::id()` reports `None` after) —
+// AND clears the request-scoped user (so `Auth::id()` reports `None` after) -
 // the request-state clear that the bare facade previously skipped.
 #[test]
 fn facade_login_then_logout_fires_events_and_clears_request_user() {
@@ -594,7 +594,7 @@ fn facade_login_then_logout_fires_events_and_clears_request_user() {
 }
 
 // `Auth::logout_and_invalidate` is the "complete session destruction"
-// variant — distinct from `Auth::logout` (which keeps the session for
+// variant - distinct from `Auth::logout` (which keeps the session for
 // flash messages etc.). Its contract requires a fresh session id on
 // the way out so the same id cannot be reused after the wipe. Without
 // this, `flush()` only clears `data` + `user_id` but keeps `session.id`,
@@ -638,7 +638,7 @@ fn facade_logout_and_invalidate_rotates_session_id() {
 }
 
 /// Action that the inner handler runs against the per-request session
-/// scope — boxed so the harness can dispatch any async fn (login,
+/// scope - boxed so the harness can dispatch any async fn (login,
 /// logout_and_invalidate, both) without the type signature mentioning
 /// each one. Returns a `Pin<Box<dyn Future>>` so the harness can `.await`
 /// it; takes `()` (the closures own everything they need).
@@ -654,7 +654,7 @@ type HandlerAction =
 /// the post-rotation session id observed inside the scope and the
 /// middleware's response.
 ///
-/// `Next` is `Arc<dyn Fn(Request) -> Pin<Box<...>>>` — it's stored
+/// `Next` is `Arc<dyn Fn(Request) -> Pin<Box<...>>>` - it's stored
 /// in `MiddlewareChain` so it MUST be `Send + Sync + 'static` and
 /// independent of any per-request lifetimes.
 #[cfg(feature = "testing")]
@@ -694,7 +694,7 @@ async fn drive_middleware_with_session_cookie(
     // name-unbound cookie that middleware must continue accepting.
     let encrypted_cookie = suprnova::Crypt::encrypt_string(suprnova::CryptPurpose::Cookie, seed_id)
         .expect("encrypt seed session id");
-    // Step 3: build a real `Request` over a duplex pipe — same shape
+    // Step 3: build a real `Request` over a duplex pipe - same shape
     // as `framework/tests/remember_me.rs::middleware_hydrates_session_from_remember_cookie`.
     let mut http_bytes = Vec::new();
     http_bytes.extend_from_slice(b"GET / HTTP/1.1\r\n");
@@ -743,7 +743,7 @@ async fn drive_middleware_with_session_cookie(
         Box::pin(async move {
             // Auth request-state scope must wrap the inner work so
             // `Auth::id()` / `request_state::clear_current_user()` behave
-            // the way they do in a real request — they're task-locals,
+            // the way they do in a real request - they're task-locals,
             // and the middleware doesn't install them itself.
             request_state::request_state_scope_for_test(async move {
                 action().await;
@@ -805,8 +805,8 @@ fn logout_and_invalidate_destroys_old_session_row() {
         );
 
         // The real assertion: the OLD row keyed on `seed_id` is gone.
-        // Without the middleware fix, this row would survive — still
-        // carrying `user_id = Some("7")` from when we seeded it — and
+        // Without the middleware fix, this row would survive - still
+        // carrying `user_id = Some("7")` from when we seeded it - and
         // the prior cookie would replay successfully.
         let store = middleware.store();
         let leftover = store
@@ -818,7 +818,7 @@ fn logout_and_invalidate_destroys_old_session_row() {
             "old session row at {seed_id} must be destroyed once the id rotates; \
              leaving it lets an attacker replay the prior encrypted cookie"
         );
-        // And the new row exists — proving we actually persisted to the
+        // And the new row exists - proving we actually persisted to the
         // new id rather than just dropping everything.
         let post = store.read(&new_id).await.expect("read post-rotation id");
         assert!(
@@ -890,7 +890,7 @@ fn login_destroys_pre_auth_session_row() {
     });
 }
 
-// Logout clears BOTH 2FA pending slots (user_id + remember preference) — they
+// Logout clears BOTH 2FA pending slots (user_id + remember preference) - they
 // are auth state too, and a tear-down that drops one but leaves the other
 // strands the auth state machine for the next request. The pending_remember
 // slot was added with the 2FA challenge integration; without an explicit
@@ -905,7 +905,7 @@ fn facade_logout_clears_both_two_factor_pending_slots() {
 
         run_in_request(async {
             Auth::login(the_user(), false).await.unwrap();
-            // Install both pending slots — typically `start_challenge`
+            // Install both pending slots - typically `start_challenge`
             // would do this, but we set them directly to assert the
             // tear-down clears each one independently.
             suprnova::session::set_two_factor_pending("7");

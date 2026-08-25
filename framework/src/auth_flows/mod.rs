@@ -2,26 +2,26 @@
 //!
 //! Five auth-flow features behind one cohesive module:
 //!
-//! - [`EmailVerification`] — single-use verification tokens in the
+//! - [`EmailVerification`] - single-use verification tokens in the
 //!   framework's own `auth_flow_tokens` table, the user marked verified
 //!   through the configured [`UserProvider`](crate::auth::UserProvider),
 //!   mail dispatched via Suprnova's [`crate::Mail`] facade.
-//! - [`PasswordReset`] — single-use reset tokens in the same
+//! - [`PasswordReset`] - single-use reset tokens in the same
 //!   `auth_flow_tokens` table, the password rotated through the configured
 //!   [`UserProvider`](crate::auth::UserProvider), with anti-enumeration
 //!   `send_link` and a fire-and-forget [`PasswordChangedMail`] notification.
-//! - `BruteForce` + `LoginThrottleMiddleware` — Magnetar-backed lockout
+//! - `BruteForce` + `LoginThrottleMiddleware` - Magnetar-backed lockout
 //!   plus an HTTP middleware that 429s pre-handler when the targeted
 //!   account is locked. Available when any `database-*` feature is enabled.
-//! - [`TwoFactor`] — TOTP enrollment + verification + recovery codes.
+//! - [`TwoFactor`] - TOTP enrollment + verification + recovery codes.
 //!   Framework-owned storage (`two_factor_credentials` table), secrets
 //!   and recovery codes encrypted at rest via [`crate::crypto::Crypt`].
-//! - [`remember_me`] — re-export of [`crate::auth::remember`]. The
+//! - [`remember_me`] - re-export of [`crate::auth::remember`]. The
 //!   stronger DB-row + bcrypt + single-use rotation design that
 //!   shipped with the auth module; listed here for namespace cohesion.
 //!
 //! All flows dispatch transactional emails through the same
-//! [`crate::Mail`] facade — Magnetar's optional `mailer` feature is
+//! [`crate::Mail`] facade - Magnetar's optional `mailer` feature is
 //! intentionally disabled (see `framework/Cargo.toml`).
 //!
 //! See `manual/auth-flows.md` for end-to-end usage.
@@ -52,7 +52,7 @@ pub use brute_force::{
 };
 // Also re-export `BackendErrorPolicy` under its short name for
 // callers who reach for it via `auth_flows::BackendErrorPolicy`.
-// Two re-exports of the same type aren't ambiguous — they share an
+// Two re-exports of the same type aren't ambiguous - they share an
 // identity.
 #[cfg(any(
     feature = "database-sqlite",
@@ -72,18 +72,18 @@ pub use token_store::{TokenPurpose, create_auth_flow_tokens_table};
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorUser};
 pub use two_factor_challenge_middleware::TwoFactorChallengeMiddleware;
 
-/// Resolve the `MAIL_FROM` env var. Errors when unset — the auth-flow
+/// Resolve the `MAIL_FROM` env var. Errors when unset - the auth-flow
 /// facades dispatch mail through this address and silently defaulting
 /// to a placeholder (`noreply@example.com`) breaks production
 /// DMARC / SPF and ships from a domain the operator doesn't control.
 ///
-/// Apps set this once at boot (`.env`, systemd unit, k8s secret —
+/// Apps set this once at boot (`.env`, systemd unit, k8s secret -
 /// whatever the deploy uses). Tests set it via
 /// `std::env::set_var("MAIL_FROM", "...")` in their setup helper.
 pub(crate) fn require_mail_from() -> Result<String, crate::error::FrameworkError> {
     std::env::var("MAIL_FROM").map_err(|_| {
         crate::error::FrameworkError::internal(
-            "MAIL_FROM environment variable is not set — auth_flows facades require \
+            "MAIL_FROM environment variable is not set - auth_flows facades require \
              a real from-address. Set MAIL_FROM=ops@example.com in your environment.",
         )
     })
@@ -91,7 +91,7 @@ pub(crate) fn require_mail_from() -> Result<String, crate::error::FrameworkError
 
 /// Resolve the `APP_NAME` env var, falling back to `"Suprnova"`. Used
 /// in mail subjects + greetings. Unlike `MAIL_FROM`, a default here is
-/// safe — the worst case is an unbranded subject line, not a delivery
+/// safe - the worst case is an unbranded subject line, not a delivery
 /// failure.
 pub(crate) fn app_name() -> String {
     std::env::var("APP_NAME").unwrap_or_else(|_| "Suprnova".into())
@@ -103,7 +103,7 @@ pub(crate) fn app_name() -> String {
 /// `https://app.example/reset/` and `https://app.example/reset`
 /// produce the same URL.
 ///
-/// `token` is treated as opaque here — Magnetar's plaintext token is
+/// `token` is treated as opaque here - Magnetar's plaintext token is
 /// URL-safe (base64url), so we don't `percent_encode` it; if a future
 /// driver ships a token with reserved characters, that's where to
 /// reach for `urlencoding::encode`.
@@ -128,7 +128,7 @@ mod tests {
     impl MailFromGuard {
         fn unset() -> Self {
             let previous = std::env::var("MAIL_FROM").ok();
-            // SAFETY: serial test — no parallel observer.
+            // SAFETY: serial test - no parallel observer.
             unsafe {
                 std::env::remove_var("MAIL_FROM");
             }
@@ -139,7 +139,7 @@ mod tests {
     impl Drop for MailFromGuard {
         fn drop(&mut self) {
             if let Some(prev) = self.previous.take() {
-                // SAFETY: serial test — no parallel observer.
+                // SAFETY: serial test - no parallel observer.
                 unsafe {
                     std::env::set_var("MAIL_FROM", prev);
                 }
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     #[serial]
     fn require_mail_from_returns_value_when_set() {
-        // SAFETY: serial test — no parallel observer.
+        // SAFETY: serial test - no parallel observer.
         unsafe {
             std::env::set_var("MAIL_FROM", "ops@example.com");
         }
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn app_name_defaults_to_suprnova_when_unset() {
-        // No env touch — APP_NAME is typically unset in tests. The
+        // No env touch - APP_NAME is typically unset in tests. The
         // default is the load-bearing contract.
         let name = app_name();
         // Either the test env set it, or the default kicked in. Both
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn append_token_query_picks_ampersand_when_base_already_has_query() {
         // Pre-fix: `format!("{}?token={}", ...)` produced
-        // `/reset?campaign=x?token=abc` — two `?`s, parsed as the
+        // `/reset?campaign=x?token=abc` - two `?`s, parsed as the
         // literal token "x?token=abc" by most query parsers (the
         // second `?` is treated as part of the value). The fix lets
         // ops wire deep links through their tracking layer without

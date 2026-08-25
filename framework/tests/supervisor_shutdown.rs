@@ -29,7 +29,7 @@ use suprnova::supervisor::{SupervisorRegistry, supervisor_cancel_token, supervis
 /// 2. We manually inject a cancel-aware sentinel task into the JoinSet.
 /// 3. `shutdown(1s)` fires the cancel token, the task exits, JoinSet drains.
 /// 4. A second `shutdown(1s)` on the already-empty/already-cancelled statics
-///    returns immediately (no hang, no panic) — verifies the idempotent path.
+///    returns immediately (no hang, no panic) - verifies the idempotent path.
 #[tokio::test]
 async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
     // ── Phase 1: initialize statics ──────────────────────────────────────────
@@ -45,7 +45,7 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
             .expect("start_all must have initialised SUPERVISOR_CANCEL")
             .clone();
         // Only inject when the token hasn't already fired (e.g., from a prior
-        // test binary run that somehow shared state — extremely unlikely but
+        // test binary run that somehow shared state - extremely unlikely but
         // defensive).
         if !cancel.is_cancelled() {
             let exited_clone = Arc::clone(&exited);
@@ -63,7 +63,7 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
         }
     }
 
-    // ── Phase 3: shutdown — must cancel token and drain ──────────────────────
+    // ── Phase 3: shutdown - must cancel token and drain ──────────────────────
     let before = std::time::Instant::now();
     SupervisorRegistry::shutdown(Duration::from_secs(1)).await;
     let elapsed = before.elapsed();
@@ -97,7 +97,7 @@ async fn shutdown_cancels_token_drains_tasks_and_is_idempotent() {
         );
     }
 
-    // ── Phase 4: second shutdown — idempotent, no hang ───────────────────────
+    // ── Phase 4: second shutdown - idempotent, no hang ───────────────────────
     // Token already cancelled, JoinSet already empty. Shutdown must return
     // immediately without hanging or panicking.
     let before2 = std::time::Instant::now();

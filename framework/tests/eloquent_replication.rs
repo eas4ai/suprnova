@@ -1,11 +1,11 @@
-//! Phase 10C T13 — Model::replicate becomes async + fires
+//! Phase 10C T13 - Model::replicate becomes async + fires
 //! `Replicating` event.
 //!
 //! 10A T4 shipped `replicate` / `replicate_except` / `replicate_into`
 //! as a sync (Self) signature. T13 makes them async + Result, and
 //! wires `Replicating { source, replica }` to fire from
 //! `replicate` and `replicate_except`. `replicate_into<T>` skips
-//! the event because it's per-source-type — see the docstring on
+//! the event because it's per-source-type - see the docstring on
 //! `Model::replicate_into`.
 //!
 //! ## Test isolation
@@ -225,7 +225,7 @@ async fn replicate_into_copies_matching_fields_and_drops_target_extras() {
     assert_eq!(draft.author_id, 7);
     assert_eq!(draft.id, 0, "PK reset on the cross-type replica");
 
-    // Unsaved — replicate_into never touches the database.
+    // Unsaved - replicate_into never touches the database.
     assert_eq!(T13Draft::all().await.unwrap().len(), 0);
 }
 
@@ -289,7 +289,7 @@ async fn replicate_preserves_eager_loaded_relations() {
         "eager-loaded `posts` must survive replicate (Laravel parity)"
     );
 
-    // `replicate_except` follows the same parity rule — the `except`
+    // `replicate_except` follows the same parity rule - the `except`
     // list filters column values, not relation cache entries.
     let replica2 = source.replicate_except(["name"]).await.unwrap();
     assert_eq!(replica2.name, "", "name cleared by `except`");
@@ -300,7 +300,7 @@ async fn replicate_preserves_eager_loaded_relations() {
     );
 
     // Mutating the replica's cache must not bleed back into the
-    // source — `EagerLoadCache::clone` is deep, not Arc-shared.
+    // source - `EagerLoadCache::clone` is deep, not Arc-shared.
     let mut owned = replica;
     owned.__eager = Default::default();
     assert_eq!(

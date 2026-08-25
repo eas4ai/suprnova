@@ -1,4 +1,4 @@
-//! Phase 10B P12 — pin the Prunable + relations cascade contract.
+//! Phase 10B P12 - pin the Prunable + relations cascade contract.
 //!
 //! Suprnova's `Prunable` and `MassPrunable` do NOT cascade to related
 //! rows. Pruning a parent leaves children orphaned (FK still references
@@ -8,7 +8,7 @@
 //! either via database-level FK cascades OR via the `pruning(&self)`
 //! per-row hook on `Prunable` (which fires before each row delete).
 //!
-//! `MassPrunable` is set-based — no per-row hook fires; users who need
+//! `MassPrunable` is set-based - no per-row hook fires; users who need
 //! cascade should use `Prunable` instead.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,7 +50,7 @@ static PRUNING_HOOK_FIRES: AtomicUsize = AtomicUsize::new(0);
 #[async_trait]
 impl Prunable for P12User {
     fn prunable() -> Builder<Self> {
-        // Match every row in the table — tests control the population.
+        // Match every row in the table - tests control the population.
         Self::query().filter_op("id", ">", 0)
     }
 
@@ -146,7 +146,7 @@ async fn prunable_leaves_related_posts_orphaned_by_default() {
     // User row gone.
     assert!(P12User::find(u.id).await.unwrap().is_none());
 
-    // Posts STILL EXIST — Prunable did NOT cascade. Default v1 contract.
+    // Posts STILL EXIST - Prunable did NOT cascade. Default v1 contract.
     let surviving = P12Post::query().get().await.unwrap();
     assert_eq!(
         surviving.len(),
@@ -178,7 +178,7 @@ async fn mass_prunable_skips_per_row_pruning_hook() {
 
     // MassPrunable has no per-row hook by definition. The Prunable
     // hook counter belongs to a different type (P12User) but the
-    // assertion that THIS run didn't bump it is meaningful — confirms
+    // assertion that THIS run didn't bump it is meaningful - confirms
     // no cross-type bleed.
     assert_eq!(
         PRUNING_HOOK_FIRES.load(Ordering::SeqCst),
@@ -198,7 +198,7 @@ async fn pruning_hook_can_cascade_when_user_implements_it() {
     // model whose hook DOES the cascade, proving the path exists.
 
     // For brevity we exercise the contract via a direct invocation of
-    // the hook (not the full pruner runner) — the runner test above
+    // the hook (not the full pruner runner) - the runner test above
     // already proves the hook fires.
 
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -212,7 +212,7 @@ async fn pruning_hook_can_cascade_when_user_implements_it() {
         .await
         .unwrap();
 
-    // The recommended cascade — delete children via the user's own
+    // The recommended cascade - delete children via the user's own
     // code before / during pruning. Real apps would put this in the
     // `pruning(&self)` impl.
     let conn = db.conn();

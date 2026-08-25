@@ -61,10 +61,10 @@ fn allowlist_keyed_by_fully_qualified_type_name() {
     );
     assert!(!registry::is_allowed(qualified, "items"));
 
-    // Bare struct names must NOT match — that was the collision-prone
+    // Bare struct names must NOT match - that was the collision-prone
     // contract this audit finding closed.
     assert!(!registry::is_allowed("Paginated", "meta"));
-    // Per-instantiation keys must not match either — generic
+    // Per-instantiation keys must not match either - generic
     // instantiations share the type's allowlist.
     assert!(!registry::is_allowed("Paginated<Item>", "meta"));
 }

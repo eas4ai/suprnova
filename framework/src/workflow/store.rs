@@ -140,7 +140,7 @@ pub async fn claim_next_workflow(
 
     // Eligible-row predicate covers two cases:
     //   1. status='pending' rows ready to run (next_run_at elapsed, no live lock).
-    //   2. status='running' rows whose `locked_until` lease has expired — the
+    //   2. status='running' rows whose `locked_until` lease has expired - the
     //      worker that owned them is presumed dead (process crash, hard kill,
     //      or panic that escaped the spawn boundary before our catch_unwind
     //      net was added). Reclaiming these is what turns `locked_until` from
@@ -226,9 +226,9 @@ pub async fn claim_next_workflow(
 /// Fenced by `worker_id` + `attempts` (the values returned by the claim
 /// that produced the [`ClaimedWorkflow`] this refresh belongs to): the
 /// `UPDATE` only touches the row when both still match what's currently
-/// persisted. If a heartbeat or per-step refresh loses that race — because
+/// persisted. If a heartbeat or per-step refresh loses that race - because
 /// `claim_next_workflow` already reclaimed the row for another worker,
-/// bumping `attempts` and overwriting `worker_id` — the predicate matches
+/// bumping `attempts` and overwriting `worker_id` - the predicate matches
 /// zero rows. That is treated as "lease lost", not an error: the new owner
 /// is authoritative now, so we log at `warn` and return `Ok(())` rather
 /// than fail or retry a write that would otherwise stomp the winner's
@@ -262,8 +262,8 @@ pub async fn refresh_lock(
             workflow_id = id,
             worker_id,
             attempts,
-            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \
-             — another worker has reclaimed this row; dropping this refresh"
+            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \ -
+             another worker has reclaimed this row; dropping this refresh"
         );
     }
 
@@ -272,7 +272,7 @@ pub async fn refresh_lock(
 
 /// Mark workflow as succeeded
 ///
-/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// Fenced by `worker_id` + `attempts` - see [`refresh_lock`] for the
 /// mechanism. A caller whose lease was reclaimed by another worker affects
 /// zero rows here; that is logged at `warn` and treated as success from
 /// this caller's point of view (`Ok(())`), because the reclaiming worker
@@ -322,7 +322,7 @@ pub async fn mark_succeeded(
             workflow_id = id,
             worker_id,
             attempts,
-            "workflow settlement (mark_succeeded): fencing check failed — another worker owns \
+            "workflow settlement (mark_succeeded): fencing check failed - another worker owns \
              this row now; dropping this write, the new owner is authoritative"
         );
     }
@@ -332,7 +332,7 @@ pub async fn mark_succeeded(
 
 /// Requeue workflow for retry
 ///
-/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// Fenced by `worker_id` + `attempts` - see [`refresh_lock`] for the
 /// mechanism and [`mark_succeeded`] for the lease-lost handling this
 /// mirrors.
 pub async fn requeue(
@@ -376,7 +376,7 @@ pub async fn requeue(
             workflow_id = id,
             worker_id,
             attempts,
-            "workflow settlement (requeue): fencing check failed — another worker owns this row \
+            "workflow settlement (requeue): fencing check failed - another worker owns this row \
              now; dropping this write, the new owner is authoritative"
         );
     }
@@ -386,7 +386,7 @@ pub async fn requeue(
 
 /// Mark workflow as failed
 ///
-/// Fenced by `worker_id` + `attempts` — see [`refresh_lock`] for the
+/// Fenced by `worker_id` + `attempts` - see [`refresh_lock`] for the
 /// mechanism and [`mark_succeeded`] for the lease-lost handling this
 /// mirrors.
 pub async fn mark_failed(
@@ -429,7 +429,7 @@ pub async fn mark_failed(
             workflow_id = id,
             worker_id,
             attempts,
-            "workflow settlement (mark_failed): fencing check failed — another worker owns this \
+            "workflow settlement (mark_failed): fencing check failed - another worker owns this \
              row now; dropping this write, the new owner is authoritative"
         );
     }

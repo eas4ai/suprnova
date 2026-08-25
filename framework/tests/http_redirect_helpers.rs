@@ -6,7 +6,7 @@
 //!
 //! Session-flashing tests run inside an isolated `session_scope_for_test`
 //! and are gated `#[serial]` because they touch the process-wide
-//! `SESSION_CONTEXT` task-local — a fully-parallel run can let
+//! `SESSION_CONTEXT` task-local - a fully-parallel run can let
 //! sibling tests stomp the same slot.
 
 use serial_test::serial;
@@ -53,7 +53,7 @@ async fn back_falls_back_when_session_empty() {
 
 #[tokio::test]
 async fn back_falls_back_when_no_session_scope() {
-    // Outside any SessionMiddleware scope — back() must fall through
+    // Outside any SessionMiddleware scope - back() must fall through
     // to the fallback cleanly (no panic).
     let url = into_response_url(Redirect::back("/login"));
     assert_eq!(url, "/login");
@@ -305,7 +305,7 @@ async fn with_errors_flows_into_inertia_errors_prop() {
             .get("default")
             .expect("default error bag must be present after drain");
         assert_eq!(default_bag["email"][0], "Invalid");
-        // Second drain must be empty — the flash is one-shot.
+        // Second drain must be empty - the flash is one-shot.
         let drained_twice = session_mut(|s| s.pull_errors_flash()).unwrap_or_default();
         assert!(drained_twice.is_empty(), "errors flash must be one-shot");
     })

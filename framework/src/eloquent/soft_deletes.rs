@@ -1,4 +1,4 @@
-//! Soft deletes — tombstone column + auto-applied global scope.
+//! Soft deletes - tombstone column + auto-applied global scope.
 //!
 //! Models annotated `#[suprnova::model(soft_deletes)]` swap their
 //! `delete()` semantics: instead of `DELETE FROM table WHERE pk = ?`,
@@ -17,7 +17,7 @@
 //! tombstone column name and a `is_trashed()` accessor. The companion
 //! inherent methods (`delete`, `force_delete`, `restore`, `trashed`,
 //! `with_trashed`, `only_trashed`) live on `impl #struct {}` so they
-//! can take `self` by value — matching the `Model::delete(self)`
+//! can take `self` by value - matching the `Model::delete(self)`
 //! signature and dodging the auto-ref method-resolution trap that
 //! would silently route through the trait default instead of the
 //! override.
@@ -57,26 +57,26 @@ where
     fn deleted_at_column() -> &'static str;
 
     /// Whether the row is currently soft-deleted (`deleted_at IS NOT
-    /// NULL` at row materialisation time). Cheap accessor — does not
+    /// NULL` at row materialisation time). Cheap accessor - does not
     /// touch the database.
     fn is_trashed(&self) -> bool;
 }
 
-/// Builder modifiers for soft-deleted models — `Self::with_trashed()`
+/// Builder modifiers for soft-deleted models - `Self::with_trashed()`
 /// and `Self::only_trashed()` are *inherent* methods on the model
 /// struct (emitted by `#[suprnova::model(soft_deletes)]`) because
 /// they construct a fresh, unscoped builder. These two are the
-/// *chainable* variants that operate on an existing builder — they're
+/// *chainable* variants that operate on an existing builder - they're
 /// what enables:
 ///
-/// - `Model::query().with_trashed()` — equivalent to the static
+/// - `Model::query().with_trashed()` - equivalent to the static
 ///   `Model::with_trashed()`, but discoverable from a builder
 ///   you already have in hand.
 /// - `User::query().with_where(("posts", |q: Builder<Post>| q.with_trashed()))`
-///   — the only path through the eager-load closure surface for
+///   - the only path through the eager-load closure surface for
 ///   widening child scope, because the closure receives a
 ///   `Builder<R>` not a `Post`-the-struct.
-/// - `user.posts().with_trashed()` — relation wrappers forward to
+/// - `user.posts().with_trashed()` - relation wrappers forward to
 ///   these methods on their inner `Builder<R>`.
 ///
 /// **Mutation strategy.** The soft-delete scope is installed by
@@ -104,7 +104,7 @@ where
 {
     /// Widen the query to include trashed rows. Removes the
     /// `deleted_at IS NULL` term the global scope installed via
-    /// `Self::query()`. Idempotent — calling it twice does nothing
+    /// `Self::query()`. Idempotent - calling it twice does nothing
     /// the first call didn't already do.
     pub fn with_trashed(mut self) -> Self {
         let col = M::deleted_at_column();

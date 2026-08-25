@@ -1,4 +1,4 @@
-//! Subscription DTOs — request, result, and item-snapshot shapes
+//! Subscription DTOs - request, result, and item-snapshot shapes
 //! exchanged with [`super::super::traits::Subscription`].
 
 use crate::payments::Money;
@@ -20,7 +20,7 @@ pub enum SubscriptionStatus {
     Canceled,
     /// Setup not yet complete (e.g. initial payment requires action).
     Incomplete,
-    /// Temporarily paused — billing suspended pending resume.
+    /// Temporarily paused - billing suspended pending resume.
     Paused,
 }
 
@@ -54,7 +54,7 @@ pub struct UpdateSubscriptionRequest {
     pub idempotency_key: Option<String>,
 }
 
-/// Result of any `Subscription::*` call — a fresh snapshot of the
+/// Result of any `Subscription::*` call - a fresh snapshot of the
 /// provider-side subscription state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionResult {
@@ -64,7 +64,7 @@ pub struct SubscriptionResult {
     pub provider_customer_id: String,
     /// Provider-neutral lifecycle status.
     pub status: SubscriptionStatus,
-    /// Per-line breakdown — see [`SubscriptionItemSnapshot`].
+    /// Per-line breakdown - see [`SubscriptionItemSnapshot`].
     pub items: Vec<SubscriptionItemSnapshot>,
     /// Start of the currently-billed period.
     pub current_period_start: DateTime<Utc>,

@@ -2,8 +2,8 @@
 //! failed-jobs store (DATA-01).
 //!
 //! Both stores hand-write their SQL. Before DATA-01 they emitted `?`
-//! positional placeholders — SQLite/MySQL syntax that Postgres rejects
-//! outright — so every parameterised statement (push, ack, nack, the
+//! positional placeholders - SQLite/MySQL syntax that Postgres rejects
+//! outright - so every parameterised statement (push, ack, nack, the
 //! counters, the queue filter, and the whole failed-jobs surface) failed
 //! on Postgres. The rest of the suite is SQLite-only, which is exactly why
 //! that survived; these tests exercise the same paths against a real
@@ -42,7 +42,7 @@ async fn connect_postgres() -> DatabaseConnection {
 
 /// Create the `jobs` table exactly as `manual/queues.md` documents it, so
 /// the placeholder fix is proved against the schema users actually copy.
-/// Each test owns its own table name — the binary's tests run in parallel
+/// Each test owns its own table name - the binary's tests run in parallel
 /// against one database.
 async fn fresh_jobs_table(db: &DatabaseConnection, table: &str) {
     for sql in [
@@ -215,7 +215,7 @@ async fn postgres_pop_from_filters_by_queue_and_treats_null_as_default() {
     d.push(reports).await.unwrap();
     d.push(legacy).await.unwrap();
 
-    // Two names in the IN list — $3 and $4.
+    // Two names in the IN list - $3 and $4.
     let got = d
         .pop_from(
             Duration::from_secs(60),

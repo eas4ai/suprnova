@@ -1,4 +1,4 @@
-//! Metrics facade — the user-facing API for counters, histograms, and gauges.
+//! Metrics facade - the user-facing API for counters, histograms, and gauges.
 //!
 //! Two compile-time shapes:
 //!
@@ -30,7 +30,7 @@ mod real {
     /// / `Arc<Histogram>` / `Arc<Gauge>` after the first call. Caching
     /// at our layer was a trap: if `Metrics::counter("x")` ran once
     /// before `init_telemetry` installed the real provider, the cached
-    /// handle was bound to the no-op meter permanently — silent data
+    /// handle was bound to the no-op meter permanently - silent data
     /// loss. Going through `global::meter("suprnova")` per call always
     /// resolves to whatever provider is currently installed.
     fn to_keyvalues(attrs: &[(&'static str, &str)]) -> Vec<KeyValue> {
@@ -105,7 +105,7 @@ mod real {
     pub struct GaugeHandle(pub(crate) Arc<Gauge<f64>>);
 
     impl GaugeHandle {
-        /// Set the gauge to `value`. (OTel's gauge API uses `record` —
+        /// Set the gauge to `value`. (OTel's gauge API uses `record` -
         /// we expose `set` for clarity to users.)
         pub fn set(&self, value: f64) {
             self.0.record(value, &[]);
@@ -221,7 +221,7 @@ mod tests {
     }
 
     // Each Metrics::counter()/histogram()/gauge() call returns a fresh
-    // handle (we don't cache at this layer — see the module-level note
+    // handle (we don't cache at this layer - see the module-level note
     // for rationale). The OTel SDK is responsible for instrument
     // identity under the (name, unit, description) key. These tests
     // verify the API is idempotent in observable behavior: repeated

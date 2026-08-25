@@ -7,7 +7,7 @@
 //! by Phase 8 (Admin) to render the polymorphic relation graph.
 //!
 //! Structurally identical to the [`ModelEntry`](crate::eloquent::ModelEntry)
-//! registry — opt-in: only structs that actually declare a
+//! registry - opt-in: only structs that actually declare a
 //! `morph_type = "..."` attribute appear here. Plain `#[suprnova::model]`
 //! structs without that attribute are deliberately absent (the
 //! `morph_type_not_registered_for_non_morph_models` test pins this).
@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 /// All non-fn fields are `&'static` so the entry is a const initialiser
 /// (a requirement of `inventory::submit!`). The `type_id` field is a
 /// `fn() -> TypeId` rather than a stored `TypeId` because `TypeId` is
-/// not constructible in a const context on stable Rust — wrapping
+/// not constructible in a const context on stable Rust - wrapping
 /// `TypeId::of::<T>` (itself a `const fn`) keeps the entry `Copy` and
 /// the lookup is one indirection.
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +35,7 @@ pub struct MorphTypeEntry {
     pub type_name: &'static str,
     /// The SQL table name (`"posts"`).
     pub table: &'static str,
-    /// `TypeId::of::<T>` thunk — wrapped as `fn() -> TypeId` because
+    /// `TypeId::of::<T>` thunk - wrapped as `fn() -> TypeId` because
     /// `TypeId` itself isn't a stable const, so it can't be stored
     /// directly in an `inventory::submit!` constant.
     pub type_id: fn() -> TypeId,
@@ -67,7 +67,7 @@ fn morph_by_type_id() -> &'static HashMap<TypeId, &'static MorphTypeEntry> {
 }
 
 /// Find a morph type by its stored `*_type` string. `None` if no model
-/// registers that string — distinguishes "registered but not in this
+/// registers that string - distinguishes "registered but not in this
 /// MorphTo's target list" from "completely unknown" at runtime. O(1)
 /// after the first lookup builds the index; linear scans previously
 /// scaled with the number of `#[suprnova::model(morph_type)]` decls,

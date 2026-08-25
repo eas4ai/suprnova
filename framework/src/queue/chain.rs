@@ -31,7 +31,7 @@ pub struct ChainLink {
     /// When `true`, a timeout consumes the attempt as a permanent failure.
     pub fail_on_timeout: bool,
     /// Job-side backoff schedule captured at chain-build time. `#[serde(default)]`
-    /// keeps schema-v2 chain payloads (which omitted this field) decoding —
+    /// keeps schema-v2 chain payloads (which omitted this field) decoding -
     /// they get the framework default just as they did before.
     #[serde(default)]
     pub backoff: BackoffSchedule,
@@ -39,7 +39,7 @@ pub struct ChainLink {
     /// chain-build time because the link stores its job type-erased and the
     /// trait method is unreachable at dispatch. `skip_serializing_if` keeps
     /// an undeclared queue off the wire, and `serde(default)` keeps chain
-    /// payloads written before this field existed decoding — those links
+    /// payloads written before this field existed decoding - those links
     /// behave exactly as they did: a registered route or the driver default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
@@ -64,7 +64,7 @@ impl ChainLink {
 
     /// Reify into a dispatchable envelope with a fresh random id.
     ///
-    /// The worker does **not** use this for chain continuation — see
+    /// The worker does **not** use this for chain continuation - see
     /// [`to_envelope_after`](Self::to_envelope_after) and the reason why.
     /// This remains for callers reifying a link outside a running chain.
     pub fn to_envelope(&self) -> Envelope {
@@ -88,7 +88,7 @@ impl ChainLink {
     ///
     /// That last one matters most. The framework's delivery contract is
     /// at-least-once and its answer to duplicates is "handlers must be
-    /// idempotent" — but a handler keyed on `env.id`, the one identifier it
+    /// idempotent" - but a handler keyed on `env.id`, the one identifier it
     /// is handed, could not satisfy that contract for a chained job, because
     /// the duplicate arrived under a new id every time. The contract was
     /// unsatisfiable by construction.
@@ -102,7 +102,7 @@ impl ChainLink {
     /// This makes the duplicate **detectable** on every driver. On drivers
     /// that implement [`QueueDriver::settle`](crate::queue::QueueDriver::settle)
     /// the duplicate does not arise in the first place, because the successor
-    /// and the acknowledgement commit together — the stable id is then what
+    /// and the acknowledgement commit together - the stable id is then what
     /// keeps a replayed settlement addressing the same logical step rather
     /// than minting a new one.
     pub fn to_envelope_after(&self, predecessor: uuid::Uuid) -> Envelope {
@@ -120,7 +120,7 @@ impl ChainLink {
             // `self.queue` at chain-build time, because the job is stored
             // type-erased here), then the driver default. Without the captured
             // fallback, `Job::queue()` was silently dropped for every chained
-            // job — routed to a dedicated pool when pushed directly, dumped on
+            // job - routed to a dedicated pool when pushed directly, dumped on
             // `default` when dispatched as part of a chain.
             queue: crate::queue::routing::route_for(&self.job_name)
                 .and_then(|r| r.queue)

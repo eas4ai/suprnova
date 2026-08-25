@@ -2,22 +2,22 @@
 //! payments subsystem.
 //!
 //! Tables created:
-//! - `payments_customers`          — one row per (provider, user_id) pair
-//! - `payments_payment_methods`    — stored payment methods per customer
-//! - `payments_subscriptions`      — subscription lifecycle state
-//! - `payments_subscription_items` — line items inside a subscription
-//! - `payments_transactions`       — one-off charges and subscription invoices
-//! - `payments_webhook_events`     — audit log + idempotency guard
+//! - `payments_customers`          - one row per (provider, user_id) pair
+//! - `payments_payment_methods`    - stored payment methods per customer
+//! - `payments_subscriptions`      - subscription lifecycle state
+//! - `payments_subscription_items` - line items inside a subscription
+//! - `payments_transactions`       - one-off charges and subscription invoices
+//! - `payments_webhook_events`     - audit log + idempotency guard
 //!
 //! Consumer apps include this migration in their `Migrator`'s
-//! `migrations()` list — the framework owns the schema, the app owns
+//! `migrations()` list - the framework owns the schema, the app owns
 //! when to apply it.
 
 use sea_orm_migration::prelude::*;
 
 /// SeaORM migration that creates every `payments_*` mirror table.
 ///
-/// Apps include this in their `Migrator::migrations()` list — see the module
+/// Apps include this in their `Migrator::migrations()` list - see the module
 /// docs for the full table inventory.
 #[derive(DeriveMigrationName)]
 pub struct Migration;

@@ -2,24 +2,24 @@
 //!
 //! Two flavours of test isolation:
 //!
-//! - **Thread-local — [`TestContainer::fake`]**: ergonomic for sync tests and
+//! - **Thread-local - [`TestContainer::fake`]**: ergonomic for sync tests and
 //!   `#[tokio::test]` running on the default `current_thread` flavour. The
 //!   override is bound to the thread that called `fake()`. Tasks spawned with
 //!   `tokio::spawn` (which can run on different worker threads) do NOT see
 //!   the override.
 //!
-//! - **Task-local — [`TestContainer::scope`]**: async-safe across multi-thread
+//! - **Task-local - [`TestContainer::scope`]**: async-safe across multi-thread
 //!   runtimes (`#[tokio::test(flavor = "multi_thread")]`). The override is
 //!   bound to the future passed to `scope`, so it persists across awaits even
 //!   if the runtime migrates the future between worker threads. Bind your
 //!   fakes inside the scoped future via `TestContainer::bind` / `singleton`
-//!   / `factory` — those calls route through the task-local first.
+//!   / `factory` - those calls route through the task-local first.
 //!
 //! Lookup order in [`crate::App`]: task-local, then thread-local, then global.
 //! Mutation helpers ([`TestContainer::bind`], etc.) write to whichever scope
 //! is currently active (task-local takes precedence over thread-local).
 //!
-//! # Example — thread-local
+//! # Example - thread-local
 //!
 //! ```rust,no_run
 //! # use std::sync::Arc;
@@ -41,7 +41,7 @@
 //! # }
 //! ```
 //!
-//! # Example — task-local (multi-thread runtime)
+//! # Example - task-local (multi-thread runtime)
 //!
 //! ```rust,no_run
 //! # use std::sync::Arc;
@@ -76,8 +76,8 @@ use tokio::task::JoinHandle;
 /// wiped when the count transitions back to zero, so a guard dropping
 /// in one parallel test cannot erase a connection name still being used
 /// by another concurrent test. Required because `ConnectionRegistry`
-/// itself is `OnceLock<RwLock<HashMap>>` — purely process-global, no
-/// per-test scoping — while the thread-local `TEST_CONTAINER` it sits
+/// itself is `OnceLock<RwLock<HashMap>>` - purely process-global, no
+/// per-test scoping - while the thread-local `TEST_CONTAINER` it sits
 /// next to is per-test.
 static FAKE_GUARDS: AtomicUsize = AtomicUsize::new(0);
 
@@ -113,12 +113,12 @@ impl TestContainer {
     ///
     /// Async-safe alternative to [`TestContainer::fake`]. Use this for
     /// `#[tokio::test(flavor = "multi_thread")]` or any test where the
-    /// future may migrate between worker threads — the task-local
+    /// future may migrate between worker threads - the task-local
     /// override persists for the entire future regardless of which
     /// thread the runtime picks.
     ///
     /// Bind your fakes inside the scoped future via the usual
-    /// `TestContainer::bind` / `singleton` / `factory` helpers — those
+    /// `TestContainer::bind` / `singleton` / `factory` helpers - those
     /// route through the task-local first, so a call inside `scope`
     /// writes to the task-local container.
     ///
@@ -145,7 +145,7 @@ impl TestContainer {
     ///     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     ///     do_async_work().await;  // sees the fake across worker hops
     ///     TestContainer::spawn(async {
-    ///         // also sees the fake — task-local was captured and re-installed
+    ///         // also sees the fake - task-local was captured and re-installed
     ///         let client = App::make::<dyn HttpClient>().unwrap();
     ///     })
     ///     .await
@@ -162,7 +162,7 @@ impl TestContainer {
     /// Spawn an async task that inherits the current task-local test
     /// container.
     ///
-    /// `tokio::spawn` does not inherit task-locals — a future spawned
+    /// `tokio::spawn` does not inherit task-locals - a future spawned
     /// from inside a [`TestContainer::scope`] block would otherwise
     /// see only the global container. This helper captures the
     /// current scope's `Arc<RwLock<Container>>` and re-installs it
@@ -189,7 +189,7 @@ impl TestContainer {
     /// TestContainer::scope(async {
     ///     TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     ///     let h = TestContainer::spawn(async {
-    ///         // resolves the fake — task-local propagated
+    ///         // resolves the fake - task-local propagated
     ///         App::make::<dyn HttpClient>().unwrap()
     ///     });
     ///     let _client = h.await.unwrap();
@@ -226,7 +226,7 @@ impl TestContainer {
     /// TestContainer::singleton(FakeDatabase::new());
     /// ```
     pub fn singleton<T: Any + Send + Sync + 'static>(instance: T) {
-        // Task-local first. Recover in place on a poisoned lock — a
+        // Task-local first. Recover in place on a poisoned lock - a
         // panicked writer leaves the container map structurally intact,
         // and silently dropping the registration would surface as a
         // baffling "fake not found" later in the same test.
@@ -245,7 +245,7 @@ impl TestContainer {
 
     /// Register a fake factory for testing.
     ///
-    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// Writes to the active scope - see [`TestContainer::singleton`] for
     /// the precedence rules.
     ///
     /// # Example
@@ -260,7 +260,7 @@ impl TestContainer {
         T: Any + Send + Sync + 'static,
         F: Fn() -> T + Send + Sync + 'static,
     {
-        // Recover in place on a poisoned task-local lock — see
+        // Recover in place on a poisoned task-local lock - see
         // [`TestContainer::singleton`] for the rationale.
         if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
             let mut c = container.write().unwrap_or_else(|e| e.into_inner());
@@ -276,7 +276,7 @@ impl TestContainer {
 
     /// Bind a fake trait implementation for testing.
     ///
-    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// Writes to the active scope - see [`TestContainer::singleton`] for
     /// the precedence rules.
     ///
     /// # Example
@@ -290,7 +290,7 @@ impl TestContainer {
     /// TestContainer::bind::<dyn HttpClient>(Arc::new(FakeHttpClient::new()));
     /// ```
     pub fn bind<T: ?Sized + Send + Sync + 'static>(instance: Arc<T>) {
-        // Recover in place on a poisoned task-local lock — see
+        // Recover in place on a poisoned task-local lock - see
         // [`TestContainer::singleton`] for the rationale.
         if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
             let mut c = container.write().unwrap_or_else(|e| e.into_inner());
@@ -306,7 +306,7 @@ impl TestContainer {
 
     /// Bind a fake trait factory for testing.
     ///
-    /// Writes to the active scope — see [`TestContainer::singleton`] for
+    /// Writes to the active scope - see [`TestContainer::singleton`] for
     /// the precedence rules.
     ///
     /// # Example
@@ -323,7 +323,7 @@ impl TestContainer {
     where
         F: Fn() -> Arc<T> + Send + Sync + 'static,
     {
-        // Recover in place on a poisoned task-local lock — see
+        // Recover in place on a poisoned task-local lock - see
         // [`TestContainer::singleton`] for the rationale.
         if let Ok(container) = TASK_CONTAINER.try_with(|c| c.clone()) {
             let mut c = container.write().unwrap_or_else(|e| e.into_inner());
@@ -367,7 +367,7 @@ impl Drop for TestContainerGuard {
         // accidentally clearing another test's entries.
         //
         // The eloquent `EventDispatcher`, `clear_cancellable_listeners`,
-        // and `ScopeRegistry` are keyed by `TypeId::<M>()` — the
+        // and `ScopeRegistry` are keyed by `TypeId::<M>()` - the
         // current discipline is that each test uses a unique model
         // struct so the registrations don't collide. Wiping those
         // registries from `Drop` would break parallel test execution
@@ -440,7 +440,7 @@ mod refcount_tests {
         // The teardown clear fires only when a drop takes the *global*
         // live-guard count to zero. Under a parallel `cargo test`, other
         // (non-serial) tests may still hold fake guards via `TestDatabase`,
-        // in which case NOT clearing is the correct behaviour — so only
+        // in which case NOT clearing is the correct behaviour - so only
         // assert the clear when we are genuinely the last live guard.
         // Asserting unconditionally is order-dependent and flaky; the
         // regression that matters (an inner drop must not wipe entries owned
@@ -460,7 +460,7 @@ mod poison_recovery_tests {
     //! (and friends) must survive a poisoned task-local container lock.
     //! A test that panics while holding the container write guard would
     //! otherwise poison the `RwLock`, and the old `if let Ok(mut c) =
-    //! container.write()` pattern silently dropped the registration —
+    //! container.write()` pattern silently dropped the registration -
     //! the fake would never resolve, surfacing as a confusing "not
     //! found" rather than the original panic.
     use super::*;

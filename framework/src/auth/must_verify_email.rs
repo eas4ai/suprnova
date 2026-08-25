@@ -1,4 +1,4 @@
-//! `MustVerifyEmail` + `CanResetPassword` — model traits letting the
+//! `MustVerifyEmail` + `CanResetPassword` - model traits letting the
 //! email-verification and password-reset flows read a user's email/name,
 //! verification timestamp, and write a new password hash independent of the
 //! storage backend. Laravel's `MustVerifyEmail` and `CanResetPassword`.
@@ -33,13 +33,13 @@ pub trait MustVerifyEmail: Authenticatable {
 /// particular storage backend. The Suprnova analogue of Laravel's
 /// `CanResetPassword` contract.
 pub trait CanResetPassword: Authenticatable {
-    /// The address the password-reset / password-changed mail is sent to —
+    /// The address the password-reset / password-changed mail is sent to -
     /// Laravel's `getEmailForPasswordReset`. Usually the user's email, but kept
     /// distinct so a model can route reset mail to an alternate address.
     fn email_for_reset(&self) -> &str;
     /// Overwrite the stored password hash. The value arrives ALREADY HASHED
     /// (the password-reset flow hashes the new plaintext before calling the
-    /// provider) — store it verbatim. The single mutable field the reset flow
+    /// provider) - store it verbatim. The single mutable field the reset flow
     /// writes through this trait, so a generic
     /// [`UserProvider`](crate::auth::UserProvider) can persist a reset password
     /// without coupling to any concrete model's field layout.
@@ -54,7 +54,7 @@ pub struct AuthFlowUser {
     /// The user's stable identifier (Laravel's `getAuthIdentifier`), carried as
     /// a `String` end-to-end like the rest of the auth surface.
     pub id: String,
-    /// The user's email address — the verification/reset target.
+    /// The user's email address - the verification/reset target.
     pub email: String,
     /// Optional display name for the email greeting.
     pub name: Option<String>,

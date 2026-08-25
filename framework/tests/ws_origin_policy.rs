@@ -9,7 +9,7 @@
 //!
 //! 2. A handler returning `Err(_)` causes the framework to send an explicit
 //!    Close frame with code 1011 (Error) before tearing the connection
-//!    down — matching the documented `WebSocketHandler` trait contract.
+//!    down - matching the documented `WebSocketHandler` trait contract.
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 // ---------------------------------------------------------------------------
-// Echo handler — used by Origin-policy tests where the handler itself isn't
+// Echo handler - used by Origin-policy tests where the handler itself isn't
 // the subject under test.
 // ---------------------------------------------------------------------------
 
@@ -122,7 +122,7 @@ fn ws_request_with_origin(
 async fn same_origin_default_rejects_missing_origin_header() {
     // Bare `connect_async(url)` does NOT send an `Origin` header. Under the
     // production-default `SameOrigin` policy this must fail the upgrade with
-    // a non-2xx response — proving SameOrigin closes the no-Origin bypass.
+    // a non-2xx response - proving SameOrigin closes the no-Origin bypass.
     let port = spawn_server(Router::new().ws_with_config(
         "/ws/echo",
         EchoHandler,
@@ -141,7 +141,7 @@ async fn same_origin_default_rejects_missing_origin_header() {
 async fn same_origin_default_rejects_cross_origin() {
     // A browser pointing at `evil.example.com` would send
     // `Origin: https://evil.example.com` while connecting to our Host
-    // (127.0.0.1:port). SameOrigin compares hosts — different → reject.
+    // (127.0.0.1:port). SameOrigin compares hosts - different → reject.
     let port = spawn_server(Router::new().ws_with_config(
         "/ws/echo",
         EchoHandler,
@@ -226,7 +226,7 @@ async fn allow_list_rejects_unlisted_origin() {
 
 #[tokio::test]
 async fn allow_list_rejects_missing_origin() {
-    // No Origin header — AllowList has nothing to match against, must reject.
+    // No Origin header - AllowList has nothing to match against, must reject.
     let port = spawn_server(Router::new().ws_with_config(
         "/ws/echo",
         EchoHandler,
@@ -251,7 +251,7 @@ async fn allow_list_rejects_missing_origin() {
 async fn handler_err_sends_close_1011() {
     // Connect with AllowAny so the upgrade succeeds, then verify the
     // server sends a Close frame with code 1011 (Error) when the handler
-    // returns Err — matching the documented `WebSocketHandler` contract.
+    // returns Err - matching the documented `WebSocketHandler` contract.
     let port = spawn_server(Router::new().ws_with_config(
         "/ws/err",
         ErroringHandler,

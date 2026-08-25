@@ -202,7 +202,7 @@ async fn disallowed_origin_gets_no_allow_origin_header() {
 
     assert_eq!(
         status, 200,
-        "the handler still runs — CORS is a browser-side gate"
+        "the handler still runs - CORS is a browser-side gate"
     );
     assert_eq!(body, "data");
     assert!(
@@ -281,7 +281,7 @@ async fn paths_scoping_restricts_cors_to_matching_routes() {
 }
 
 /// A preflight to a `paths`-out-of-scope route is NOT short-circuited by
-/// the CORS middleware — it falls through to the (missing) handler and
+/// the CORS middleware - it falls through to the (missing) handler and
 /// becomes a 404. This proves `paths` correctly gates BOTH preflight
 /// handling and actual-response decoration.
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn paths_scoping_lets_out_of_scope_preflight_fall_through() {
 }
 
 /// A `skip_when` predicate that fires for `X-Internal` headers makes the
-/// middleware forward the request directly, with no CORS decoration —
+/// middleware forward the request directly, with no CORS decoration -
 /// even though the origin would otherwise be allowed.
 #[tokio::test]
 async fn skip_when_predicate_short_circuits_cors() {

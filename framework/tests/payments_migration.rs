@@ -1,4 +1,4 @@
-//! Phase 12 T5 — payments DB mirror migration integration test.
+//! Phase 12 T5 - payments DB mirror migration integration test.
 //!
 //! Boots a fresh in-memory SQLite via `TestDatabase::fresh::<PaymentsTestMigrator>()`
 //! and confirms all six payments tables exist and are queryable.

@@ -56,7 +56,7 @@ fn encrypt_with_bad_p256dh_returns_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Key-length validation — RFC 8291 fixes p256dh at a 65-byte uncompressed
+// Key-length validation - RFC 8291 fixes p256dh at a 65-byte uncompressed
 // SEC1 point and auth at a 16-byte secret. A short / long / wrong-tag value
 // must surface a framework-typed Encryption error with the offending size or
 // tag in the message, not get passed to `ece::encrypt` (which would surface
@@ -71,7 +71,7 @@ fn b64url(bytes: &[u8]) -> String {
 
 #[test]
 fn encrypt_rejects_short_p256dh() {
-    // 64 bytes instead of 65 — one short of an uncompressed P-256 point.
+    // 64 bytes instead of 65 - one short of an uncompressed P-256 point.
     let short = b64url(&[0x04u8; 64]);
     let err = Payload::encrypt(
         b"hi",
@@ -93,7 +93,7 @@ fn encrypt_rejects_short_p256dh() {
 
 #[test]
 fn encrypt_rejects_long_p256dh() {
-    // 66 bytes — one byte too many.
+    // 66 bytes - one byte too many.
     let long = b64url(&[0x04u8; 66]);
     let err = Payload::encrypt(
         b"hi",
@@ -136,7 +136,7 @@ fn encrypt_rejects_compressed_sec1_point() {
 
 #[test]
 fn encrypt_rejects_short_auth_secret() {
-    // 15 bytes — one short of the 16-byte auth secret.
+    // 15 bytes - one short of the 16-byte auth secret.
     let short = b64url(&[0xAAu8; 15]);
     let err = Payload::encrypt(
         b"hi",
@@ -155,7 +155,7 @@ fn encrypt_rejects_short_auth_secret() {
 
 #[test]
 fn encrypt_rejects_long_auth_secret() {
-    // 17 bytes — one byte too many.
+    // 17 bytes - one byte too many.
     let long = b64url(&[0xAAu8; 17]);
     let err = Payload::encrypt(
         b"hi",

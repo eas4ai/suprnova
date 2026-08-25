@@ -45,7 +45,7 @@ pub fn find(name: &str) -> Option<&'static WorkflowEntry> {
 /// Duplicate `#[workflow]` registrations under a single name are a
 /// bug: which body runs depends on inventory link order, which depends
 /// on the platform linker. Two `welcome_flow` workflows from different
-/// modules can have wildly different behaviour at runtime — silent
+/// modules can have wildly different behaviour at runtime - silent
 /// shadowing is undebuggable. Boot-time callers (workers, `start_named`)
 /// should prefer this over [`find`].
 pub fn find_strict(name: &str) -> Result<Option<&'static WorkflowEntry>, FrameworkError> {

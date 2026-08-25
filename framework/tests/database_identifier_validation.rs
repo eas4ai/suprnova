@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `database` #2 — `DbTableBuilder`
+//! Regression: HIGH audit finding `database` #2 - `DbTableBuilder`
 //! interpolates table names, column names, and operators directly
 //! into SQL. SeaORM parameterises *values* but not identifiers (SQL
 //! itself doesn't), so the validator is the only thing standing
@@ -213,7 +213,7 @@ async fn operator_allowlist_accepts_canonical_comparisons() {
 // `Builder<M>` ships bulk mutators as `update_all` / `delete_all` so the
 // table-wide intent reads loud at the call site. The model-less
 // `DbTableBuilder` historically only offered the Laravel-faithful
-// `update` / `delete`. Both names now resolve to the same path — these
+// `update` / `delete`. Both names now resolve to the same path - these
 // tests pin the alias parity end-to-end.
 
 #[tokio::test]

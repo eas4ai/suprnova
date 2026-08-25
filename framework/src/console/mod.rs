@@ -1,4 +1,4 @@
-//! Console — runtime CLI dispatch for user commands and framework
+//! Console - runtime CLI dispatch for user commands and framework
 //! builtins.
 //!
 //! Each Suprnova project ships a `console` binary that calls
@@ -11,11 +11,11 @@
 //! Two registration shapes feed the same registry:
 //!
 //! - `#[command(name = "...", description = "...")]` on an
-//!   `async fn(Vec<String>) -> Result<(), FrameworkError>` — the
+//!   `async fn(Vec<String>) -> Result<(), FrameworkError>` - the
 //!   simple path; clap captures the trailing positional args via
 //!   `trailing_var_arg` and hands them to the handler verbatim.
 //! - `#[derive(Command)]` on a `clap::Parser`-deriving struct that
-//!   implements [`TypedCommand`] — the typed path; clap parses
+//!   implements [`TypedCommand`] - the typed path; clap parses
 //!   the struct fields, the dispatcher calls `parsed.run().await`.
 //!
 //! Why a per-project console binary instead of a global CLI shell-out:
@@ -23,7 +23,7 @@
 //! (seeders, commands, models) without either cargo-running the
 //! project (slow, defeats the purpose) or dynamic loading (too much
 //! complexity for v1). Per-project console matches Laravel's
-//! `php artisan` model — same script, same process, same address
+//! `php artisan` model - same script, same process, same address
 //! space.
 
 use crate::error::FrameworkError;
@@ -72,7 +72,7 @@ static VERSION: OnceLock<&'static str> = OnceLock::new();
 /// `env!("CARGO_PKG_VERSION")` so the value reflects the user's
 /// project, not the framework.
 ///
-/// Subsequent calls are silently ignored (`OnceLock` semantics) —
+/// Subsequent calls are silently ignored (`OnceLock` semantics) -
 /// the first registration wins. Tests and programmatic callers that
 /// don't call this just get no `--version` support, which is fine.
 pub fn set_version(version: &'static str) {
@@ -95,14 +95,14 @@ pub fn list() -> Vec<&'static CommandEntry> {
 }
 
 /// Build the top-level `clap::Command` with every registered
-/// subcommand attached. Name is the static literal "console" —
+/// subcommand attached. Name is the static literal "console" -
 /// help output reads "Usage: console <COMMAND>" regardless of where
 /// the binary lives on disk. Clap won't accept a runtime-owned
 /// `String` here because `clap::builder::Str` only converts from
 /// `&'static str` or `Box<str>`, and we'd rather not leak per call.
 fn build_root() -> clap::Command {
     let mut root = clap::Command::new("console")
-        .about("Suprnova console — per-project command dispatch")
+        .about("Suprnova console - per-project command dispatch")
         .arg_required_else_help(true)
         .subcommand_required(false);
     if let Some(v) = VERSION.get() {
@@ -115,7 +115,7 @@ fn build_root() -> clap::Command {
 }
 
 /// Dispatch the process's argv to a registered command. Same as
-/// [`dispatch_argv_with_init`] but with a no-op init callback —
+/// [`dispatch_argv_with_init`] but with a no-op init callback -
 /// convenient for tests and programmatic callers that don't need
 /// lazy bootstrapping.
 pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
@@ -126,7 +126,7 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// `lazy_init` between clap's argv parse and the matched handler.
 ///
 /// `lazy_init` runs only when clap matches a real registered
-/// subcommand — help, version, missing-subcommand, and parse-error
+/// subcommand - help, version, missing-subcommand, and parse-error
 /// paths all skip it. The typical use is to defer expensive
 /// bootstrap (DB connect, queue init, event listener wiring) so
 /// `console --help` doesn't require `DATABASE_URL` to be set.
@@ -134,7 +134,7 @@ pub async fn dispatch_argv(argv: Vec<String>) -> Result<(), FrameworkError> {
 /// The full clap tree (every registered subcommand) is built each
 /// call; clap then parses argv and routes to the right entry.
 /// Help flags (`--help`, `-h`, missing subcommand) are clap's
-/// responsibility — handled via `handle_clap_error` which prints
+/// responsibility - handled via `handle_clap_error` which prints
 /// formatted output and returns Ok (for help/version) or a silent
 /// Err (for parse failures) so `main` doesn't double-print.
 pub async fn dispatch_argv_with_init<F, Fut>(
@@ -166,12 +166,12 @@ where
         // for every entry returned by `inventory::iter::<CommandEntry>`,
         // and `find(name)` searches the same iterator. Clap therefore
         // cannot match a name that `find` then misses unless those two
-        // call sites disagree about the registry — a contract violation,
+        // call sites disagree about the registry - a contract violation,
         // not a runtime condition. Panic so the breakage surfaces
         // immediately rather than silently exiting non-zero.
         unreachable!(
             "clap matched subcommand '{name}' but the inventory registry has no entry \
-             by that name — build_root() and find() are out of sync"
+             by that name - build_root() and find() are out of sync"
         );
     }
 
@@ -188,7 +188,7 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
     use clap::error::ErrorKind;
     // Clap formats the error / help / version output and writes it
     // to the right stream (stdout for help, stderr for errors). We
-    // never let `main` add a redundant second print — for clap-shaped
+    // never let `main` add a redundant second print - for clap-shaped
     // failures the returned Err carries an empty message; the binary
     // skips its own eprintln and just translates to a non-zero
     // ExitCode.
@@ -201,7 +201,7 @@ fn handle_clap_error(err: clap::Error) -> Result<(), FrameworkError> {
     }
 }
 
-/// Helper for `#[command]` macro expansion — extracts the trailing
+/// Helper for `#[command]` macro expansion - extracts the trailing
 /// positional args (clap parsed via `trailing_var_arg`) into a
 /// `Vec<String>` for the legacy raw-fn handler shape.
 #[doc(hidden)]
@@ -212,7 +212,7 @@ pub fn collect_trailing_args(matches: &clap::ArgMatches) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Helper for `#[command]` macro expansion — builds the clap
+/// Helper for `#[command]` macro expansion - builds the clap
 /// subcommand for a raw `fn(Vec<String>)` handler. The single
 /// trailing-var-arg captures every positional after the command
 /// name; `.allow_hyphen_values(true)` lets users pass `-x` style

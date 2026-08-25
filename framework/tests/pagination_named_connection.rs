@@ -1,4 +1,4 @@
-//! Facade named-connection routing — `Pagination::length_aware_on` /
+//! Facade named-connection routing - `Pagination::length_aware_on` /
 //! `cursor_on`.
 //!
 //! This lives in its own test binary on purpose. Named-connection routing

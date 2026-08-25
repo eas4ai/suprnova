@@ -3,22 +3,22 @@
 //! Nine events covering the security-state transitions emitted by the
 //! auth_flows facades:
 //!
-//! - [`EmailVerified`] — `EmailVerification::verify` consumed a valid token.
-//! - [`PasswordResetLinkSent`] — `PasswordReset::send_link` issued a token
+//! - [`EmailVerified`] - `EmailVerification::verify` consumed a valid token.
+//! - [`PasswordResetLinkSent`] - `PasswordReset::send_link` issued a token
 //!   for an on-file email (anti-enumeration: no event fires when the
 //!   email is absent).
-//! - [`PasswordResetCompleted`] — `PasswordReset::complete` succeeded.
-//! - [`AccountLocked`] — `BruteForce::record_failed_attempt` pushed an
+//! - [`PasswordResetCompleted`] - `PasswordReset::complete` succeeded.
+//! - [`AccountLocked`] - `BruteForce::record_failed_attempt` pushed an
 //!   account across the threshold (unlocked → locked transition).
-//! - [`AccountUnlocked`] — `BruteForce::unlock_account` cleared a real
+//! - [`AccountUnlocked`] - `BruteForce::unlock_account` cleared a real
 //!   lock (no-op unlocks on already-unlocked accounts do not fire).
-//! - [`TwoFactorEnrolled`] — `TwoFactor::confirm` set `confirmed_at`.
-//! - [`TwoFactorChallenged`] — `TwoFactor::complete_challenge` promoted
+//! - [`TwoFactorEnrolled`] - `TwoFactor::confirm` set `confirmed_at`.
+//! - [`TwoFactorChallenged`] - `TwoFactor::complete_challenge` promoted
 //!   a pending session to fully authenticated.
-//! - [`TwoFactorChallengeFailed`] — `TwoFactor::complete_challenge`
+//! - [`TwoFactorChallengeFailed`] - `TwoFactor::complete_challenge`
 //!   rejected a submitted code (neither a valid TOTP nor an unused
 //!   recovery code).
-//! - [`TwoFactorDisabled`] — `TwoFactor::disable` removed an existing
+//! - [`TwoFactorDisabled`] - `TwoFactor::disable` removed an existing
 //!   2FA row (no-op disables on never-enrolled users do not fire).
 //!
 //! Every event is `Debug + Clone + 'static`, carries no sensitive data
@@ -51,7 +51,7 @@ impl Event for EmailVerified {
 /// issues a reset token for an email that is on file.
 ///
 /// **Anti-enumeration:** the event does **not** fire when the email
-/// is absent — that path mints no token and has no side effect, so a
+/// is absent - that path mints no token and has no side effect, so a
 /// listener that counts events cannot distinguish "absent email" from
 /// "no request made." Listeners typically audit-log the action (the
 /// user just received a sensitive security email) or alert on
@@ -95,14 +95,14 @@ impl Event for PasswordResetCompleted {
 }
 
 /// Fires when `crate::auth_flows::BruteForce::record_failed_attempt`
-/// pushes an account across the lockout threshold — the
+/// pushes an account across the lockout threshold - the
 /// unlocked → locked state transition. Subsequent failed attempts
 /// while the account remains locked do not re-fire the event, so
 /// listeners can treat each `AccountLocked` as a fresh security
 /// incident worth notifying (admin alert, audit log, throttle a peer
 /// IP, etc.).
 ///
-/// `failed_attempts` is the count at the moment of lock — useful when
+/// `failed_attempts` is the count at the moment of lock - useful when
 /// the threshold is configurable and the listener wants to log how
 /// many attempts triggered this specific lock.
 #[derive(Debug, Clone)]
@@ -161,11 +161,11 @@ impl Event for TwoFactorEnrolled {
 }
 
 /// Fires when a user successfully completes the 2FA challenge step
-/// after a password login — `TwoFactor::complete_challenge` promoted
+/// after a password login - `TwoFactor::complete_challenge` promoted
 /// the session from "password verified" to fully authenticated.
 ///
 /// `user_id` is the stringified Magnetar `UserId`. Failed challenge
-/// attempts do **not** fire this event — they go through the standard
+/// attempts do **not** fire this event - they go through the standard
 /// `crate::auth_flows::BruteForce` throttling path that
 /// [`crate::auth_flows::TwoFactor::verify`] already drives, so audit
 /// listeners distinguish successful 2FA challenge passes (here) from
@@ -183,7 +183,7 @@ impl Event for TwoFactorChallenged {
 }
 
 /// Fires when `crate::auth_flows::TwoFactor::complete_challenge`
-/// rejects a submitted code — neither a current TOTP code nor an
+/// rejects a submitted code - neither a current TOTP code nor an
 /// unused recovery code matched. Distinct from
 /// [`crate::auth::events::Failed`], which is the
 /// password-failed-to-authenticate event: at this point the user
@@ -191,7 +191,7 @@ impl Event for TwoFactorChallenged {
 /// listener has nothing to say. Mirrors Fortify's
 /// `TwoFactorAuthenticationFailed`.
 ///
-/// The submitted code is intentionally NOT carried — listeners should
+/// The submitted code is intentionally NOT carried - listeners should
 /// rely on the `BruteForce` counters keyed on the user's email if
 /// they need attempt-count semantics rather than re-implementing
 /// rate logic from raw event streams.
@@ -210,7 +210,7 @@ impl Event for TwoFactorChallengeFailed {
 /// Fires when 2FA is disabled for a user via
 /// [`crate::auth_flows::TwoFactor::disable`].
 ///
-/// **Only** emitted when a real state transition occurs — i.e. a row
+/// **Only** emitted when a real state transition occurs - i.e. a row
 /// existed in `two_factor_credentials` and was removed. A no-op
 /// disable on a user who never enrolled does not fire, mirroring the
 /// [`AccountUnlocked`] contract so audit listeners can treat each

@@ -1,4 +1,4 @@
-//! Loose end — `GET /api/v3/users` was unbounded, and both JSON:API user
+//! Loose end - `GET /api/v3/users` was unbounded, and both JSON:API user
 //! endpoints were anonymous.
 //!
 //! `list_users` called `User::find_all()`: every row materialised into
@@ -9,7 +9,7 @@
 //! Worse, and not on any list before this: `/api/v3/users` and
 //! `/api/users/{id}` sat at the top level of the router with no
 //! middleware, while `UserResource` serialises `email`. So the dogfood
-//! app handed every user's address to unauthenticated callers — the same
+//! app handed every user's address to unauthenticated callers - the same
 //! defect Group 0 fixed in the `--api` scaffold
 //! (`api_user_routes_are_behind_an_auth_gate`). The scaffold got the fix.
 //! The dogfood, which is the other thing people copy, did not.
@@ -94,7 +94,7 @@ async fn get(addr: SocketAddr, path: &str) -> (u16, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The exposure. An anonymous caller must not receive a user listing —
+/// The exposure. An anonymous caller must not receive a user listing -
 /// and specifically must not receive an email address.
 #[tokio::test]
 async fn anonymous_callers_cannot_list_users() {
@@ -131,7 +131,7 @@ async fn anonymous_callers_cannot_read_a_single_user() {
     );
 }
 
-/// The delete demo is deliberately left ungated here — it authorizes via
+/// The delete demo is deliberately left ungated here - it authorizes via
 /// `Gate::authorize` inside the handler, which is the thing it exists to
 /// demonstrate. Pinned so the group edit above is not silently widened
 /// to swallow it.
@@ -143,7 +143,7 @@ async fn the_gate_demo_route_is_not_swallowed_by_the_auth_group() {
 
     assert_ne!(
         status, 404,
-        "`/api/posts/{{id}}` stopped resolving — moving the user routes \
+        "`/api/posts/{{id}}` stopped resolving - moving the user routes \
          into a group must not have taken this one with them"
     );
 }

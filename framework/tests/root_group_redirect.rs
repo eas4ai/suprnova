@@ -2,7 +2,7 @@
 //! a scaffolded app over a real connection:
 //!
 //! 1. `group!("/", { ... })` registered `//login`-style patterns that
-//!    matchit can never match — every route in a root-prefix group
+//!    matchit can never match - every route in a root-prefix group
 //!    404'd over the wire even though facade-level tests passed.
 //! 2. `redirect!("/path")` resolved its argument as a route *name*,
 //!    500ing at runtime in any app that names no routes.
@@ -113,8 +113,8 @@ async fn send_request(
     (parts.status, parts.headers, collected)
 }
 
-/// The scaffold's `routes.rs.tpl` shape — two root-prefix groups, each
-/// with group middleware — serves every route over real HTTP. Before
+/// The scaffold's `routes.rs.tpl` shape - two root-prefix groups, each
+/// with group middleware - serves every route over real HTTP. Before
 /// the `join_paths` fix these all registered as `//login` etc. and
 /// 404'd on the wire.
 #[tokio::test]
@@ -159,8 +159,8 @@ async fn root_prefix_groups_serve_over_http() {
     assert_eq!(status.as_u16(), 404);
 }
 
-/// `redirect!("/literal")` in a handler — the scaffold's `auth.rs.tpl`
-/// logout/login flow — answers 302 with the literal `Location`. Before
+/// `redirect!("/literal")` in a handler - the scaffold's `auth.rs.tpl`
+/// logout/login flow - answers 302 with the literal `Location`. Before
 /// the macro dispatch fix this expanded to `Redirect::route("/login")`
 /// and 500'd because no route is *named* "/login".
 #[tokio::test]
@@ -192,14 +192,14 @@ async fn redirect_macro_literal_path_redirects_over_http() {
 
 /// The literal-dispatch arm covers the root path, query chaining, and
 /// absolute URLs; the named-route arm must still expand to the params
-/// builder — the `_named` binding type-checks only if the macro emitted
+/// builder - the `_named` binding type-checks only if the macro emitted
 /// `Redirect::route` (whose `.with(...)` binds a route parameter and
 /// returns `RedirectRouteBuilder`).
 #[tokio::test]
 async fn redirect_macro_dispatches_on_literal_shape() {
     let _named: suprnova::RedirectRouteBuilder = redirect!("users.show").with("id", "42");
 
-    // Root path — the scaffold's `redirect!("/")` logout target.
+    // Root path - the scaffold's `redirect!("/")` logout target.
     let resp: Response = redirect!("/").into();
     let hyper_resp = resp.unwrap_or_else(|e| e).into_hyper();
     assert_eq!(hyper_resp.status().as_u16(), 302);
@@ -213,7 +213,7 @@ async fn redirect_macro_dispatches_on_literal_shape() {
         "/search?q=rust",
     );
 
-    // Absolute URL with a scheme — off-site redirect.
+    // Absolute URL with a scheme - off-site redirect.
     let resp: Response = redirect!("https://example.com/oauth").into();
     let hyper_resp = resp.unwrap_or_else(|e| e).into_hyper();
     assert_eq!(hyper_resp.status().as_u16(), 302);

@@ -1,4 +1,4 @@
-//! Laravel-13 parity sweep — additions that landed in the per-domain
+//! Laravel-13 parity sweep - additions that landed in the per-domain
 //! Eloquent audit.
 //!
 //! Each test covers ONE of the new surfaces added by the parity work:
@@ -435,7 +435,7 @@ async fn delete_or_fail_errors_when_row_gone() {
 async fn update_or_fail_returns_404_status_when_row_vanished() {
     // A TOCTOU loss between the existence check and the UPDATE must
     // surface as `FrameworkError::not_found` (HTTP 404), the same
-    // shape a stale-handle pre-flight failure would produce — not
+    // shape a stale-handle pre-flight failure would produce - not
     // as the generic 500 a `DbErr::RecordNotUpdated` would otherwise
     // map to.
     let _db = TestDatabase::sqlite_memory().await.unwrap();

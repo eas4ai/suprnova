@@ -1,4 +1,4 @@
-//! `WsSocket` — typed send/recv API over a `tokio_tungstenite::WebSocketStream`.
+//! `WsSocket` - typed send/recv API over a `tokio_tungstenite::WebSocketStream`.
 //!
 //! Handlers see this, not the raw tungstenite stream. Internally we split
 //! the stream into Sink + Stream halves: a forwarder task owns the sink
@@ -29,7 +29,7 @@ const SEND_CHANNEL_CAPACITY: usize = 32;
 ///
 /// `send_text` / `send_binary` enqueue onto an internal mpsc that a
 /// dedicated forwarder task drains into the underlying sink. The
-/// receiver half of the stream is owned directly by `WsSocket` — only
+/// receiver half of the stream is owned directly by `WsSocket` - only
 /// the handler reads, so no split is needed there.
 pub struct WsSocket {
     sender: mpsc::Sender<Outbound>,
@@ -39,7 +39,7 @@ pub struct WsSocket {
     /// upgrade path extracts it via [`WsSocket::take_forwarder_handle`]
     /// before moving the socket into the handler future, so it can
     /// `.await` the forwarder after the handler returns and `outbound`
-    /// is dropped — ensuring the close handshake completes before the
+    /// is dropped - ensuring the close handshake completes before the
     /// connection's task is reported as joined to `WS_TASKS`.
     ///
     /// `None` after `take_forwarder_handle` is called (the framework
@@ -134,7 +134,7 @@ impl WsSocket {
     /// forwarder (the sink is `close()`'d and the forwarder task
     /// terminates). Without this mapping, a heartbeat or fanout task
     /// that sends a close frame would just enqueue an `Outbound::Msg`
-    /// the forwarder writes to the wire but never acts on — the
+    /// the forwarder writes to the wire but never acts on - the
     /// underlying sink would stay open until every other Sender
     /// dropped, defeating the close intent.
     ///
@@ -159,12 +159,12 @@ impl WsSocket {
     ///
     /// # Multiple callers
     ///
-    /// Cached on first call — repeat invocations clone the same
+    /// Cached on first call - repeat invocations clone the same
     /// `mpsc::Sender<Message>` so multiple producers share one
     /// `SEND_CHANNEL_CAPACITY`-deep buffer and one bridge task. The
     /// previous behaviour spawned a new bridge per call, which made
     /// the doc invariant "call once per connection" load-bearing for
-    /// backpressure correctness — a doc invariant is not enough when
+    /// backpressure correctness - a doc invariant is not enough when
     /// the broadcasting hub or a heartbeat helper might both reach
     /// for `sender()` on the same socket. Caching makes it safe.
     pub(crate) fn sender(&self) -> mpsc::Sender<Message> {
@@ -225,16 +225,16 @@ impl WsSocket {
     /// This method consumes and drops the following frame kinds before
     /// returning the next `Text`:
     ///
-    /// - `Message::Binary` — binary payload from the peer
-    /// - `Message::Ping` — peer-initiated ping (the WebSocket layer
+    /// - `Message::Binary` - binary payload from the peer
+    /// - `Message::Ping` - peer-initiated ping (the WebSocket layer
     ///   handles the corresponding pong automatically)
-    /// - `Message::Pong` — peer pong (the missed-ping counter is reset
+    /// - `Message::Pong` - peer pong (the missed-ping counter is reset
     ///   as a side effect before the frame is discarded)
-    /// - `Message::Frame` — raw frame, only emitted from server-side
+    /// - `Message::Frame` - raw frame, only emitted from server-side
     ///   contexts and never expected at this layer
     ///
-    /// If your handler needs to observe any of those — e.g. a protocol
-    /// that mixes text and binary, or one that wants to count pings —
+    /// If your handler needs to observe any of those - e.g. a protocol
+    /// that mixes text and binary, or one that wants to count pings -
     /// use [`WsSocket::recv`] from the very first read. Once a frame
     /// has been swallowed by `recv_text` it is gone; there is no
     /// retroactive way to see it.
@@ -244,7 +244,7 @@ impl WsSocket {
                 Some(Ok(Message::Text(t))) => return Ok(Some(t.to_string())),
                 Some(Ok(Message::Binary(_))) => continue,
                 Some(Ok(Message::Pong(_))) => {
-                    // Pong from peer — reset the missed-ping counter.
+                    // Pong from peer - reset the missed-ping counter.
                     self.missed_pings.store(0, Ordering::Release);
                     continue;
                 }
@@ -261,7 +261,7 @@ impl WsSocket {
         match self.receiver.next().await {
             Some(Ok(msg)) => {
                 if matches!(msg, Message::Pong(_)) {
-                    // Pong from peer — reset the missed-ping counter.
+                    // Pong from peer - reset the missed-ping counter.
                     self.missed_pings.store(0, Ordering::Release);
                 }
                 Ok(Some(msg))
@@ -271,7 +271,7 @@ impl WsSocket {
         }
     }
 
-    /// Send a close frame. Idempotent — subsequent sends will Err
+    /// Send a close frame. Idempotent - subsequent sends will Err
     /// because the forwarder will have terminated.
     ///
     /// # Validation
@@ -279,7 +279,7 @@ impl WsSocket {
     /// `code` must be a value tungstenite considers allowed for sending
     /// (RFC 6455 §7.4). The reserved/non-app codes 1004, 1005, 1006,
     /// 1015, anything below 1000, and codes above 4999 are rejected
-    /// up front — these would either be silently mangled by the wire
+    /// up front - these would either be silently mangled by the wire
     /// encoder or violate the protocol. Use 1000 for normal closure,
     /// 1001-1013 for the defined reasons, 3000-3999 for IANA-registered
     /// codes, or 4000-4999 for application-private codes.
@@ -290,7 +290,7 @@ impl WsSocket {
     /// string. Longer reasons are rejected.
     ///
     /// Both checks return [`FrameworkError::Internal`] without enqueuing
-    /// anything — the connection stays open and the caller can retry
+    /// anything - the connection stays open and the caller can retry
     /// with a valid close.
     pub async fn close(
         &mut self,
@@ -354,6 +354,6 @@ async fn forwarder_task<S>(
             }
         }
     }
-    // Channel closed — drop the sink to release the connection.
+    // Channel closed - drop the sink to release the connection.
     let _ = sink.close().await;
 }

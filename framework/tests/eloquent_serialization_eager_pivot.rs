@@ -1,11 +1,11 @@
-//! Phase 10B P6 — serialization audit for the auto-injected
+//! Phase 10B P6 - serialization audit for the auto-injected
 //! `__eager` and `__pivot` fields.
 //!
 //! Every `#[suprnova::model]` struct gains two private slots:
 //!
-//! - `__eager: EagerLoadCache` — eager-loaded relation rows / counts /
+//! - `__eager: EagerLoadCache` - eager-loaded relation rows / counts /
 //!   aggregates.
-//! - `__pivot: Option<Arc<dyn Any + Send + Sync>>` — pivot row when
+//! - `__pivot: Option<Arc<dyn Any + Send + Sync>>` - pivot row when
 //!   loaded via `BelongsToMany`.
 //!
 //! Both carry `#[serde(skip)]`, so the trait-derived `Serialize` impl
@@ -13,9 +13,9 @@
 //! pins that the exclusion holds across every user-facing serialization
 //! path Phase 10A wired up:
 //!
-//! - `to_array()` — Laravel-shape JSON object emitter (returns
+//! - `to_array()` - Laravel-shape JSON object emitter (returns
 //!   `serde_json::Value`).
-//! - `to_json()` — string form, returns `serde_json::to_string(&to_array())`.
+//! - `to_json()` - string form, returns `serde_json::to_string(&to_array())`.
 //! - The `hidden = [...]` / `visible = [...]` / `appends = [...]`
 //!   visibility filters.
 //! - Real-world loaded state: parent rows after `with([...])`, related
@@ -35,7 +35,7 @@ use suprnova::{EagerLoadCache, Model, attrs, model};
 
 // ---- Models -------------------------------------------------------------
 //
-// Models are declared at module scope (NOT inside test fns) — the macro
+// Models are declared at module scope (NOT inside test fns) - the macro
 // emits an inner module whose `use super::*;` only sees the file's
 // top-level imports. See `eloquent_accessors.rs` for the same
 // constraint.
@@ -60,7 +60,7 @@ pub struct SerPost {
 
 /// Visibility-filtered model with both `hidden` and `appends`. Pins
 /// that `hidden` need not enumerate the framework's auto-injected
-/// fields — the `#[serde(skip)]` exclusion runs before the filter
+/// fields - the `#[serde(skip)]` exclusion runs before the filter
 /// touches the JSON map.
 #[model(
     table = "ser_visible_filtered",
@@ -121,13 +121,13 @@ async fn migrate(db: &TestDatabase) {
 // ---- Tests --------------------------------------------------------------
 
 /// Pin: a freshly-instantiated model produces EXACTLY the user's
-/// declared columns — neither `__eager` nor `__pivot` appears in the
+/// declared columns - neither `__eager` nor `__pivot` appears in the
 /// output JSON, and no other extra key sneaks in either.
 ///
 /// Stronger than the existing smoke test in
 /// `eloquent_macro_smoke_relations.rs`: that test only asserts
 /// `__eager` / `__pivot` absent. This one also asserts the JSON's key
-/// set matches the user's declared field set exactly — anything the
+/// set matches the user's declared field set exactly - anything the
 /// macro might add later would fail this.
 #[tokio::test]
 async fn to_json_excludes_eager_and_pivot_fields() {
@@ -145,11 +145,11 @@ async fn to_json_excludes_eager_and_pivot_fields() {
     // Auto-injected fields must be absent.
     assert!(
         !obj.contains_key("__eager"),
-        "__eager must be excluded from to_array — got {v}",
+        "__eager must be excluded from to_array - got {v}",
     );
     assert!(
         !obj.contains_key("__pivot"),
-        "__pivot must be excluded from to_json — got {v}",
+        "__pivot must be excluded from to_json - got {v}",
     );
 
     // The user's declared columns ARE present.
@@ -209,18 +209,18 @@ async fn to_json_does_not_leak_loaded_relations() {
     assert!(!obj.contains_key("__eager"), "got: {v}");
     assert!(!obj.contains_key("__pivot"), "got: {v}");
 
-    // The relation NAME ("posts") must not appear under any guise —
+    // The relation NAME ("posts") must not appear under any guise -
     // not as a top-level key, not as anything else. To surface
     // related rows in JSON the user opts in explicitly via
     // `appends = ["posts"]` + an accessor that reads
     // `self.posts_loaded()`.
     assert!(
         !obj.contains_key("posts"),
-        "loaded relation `posts` must not bleed into to_array — got {v}",
+        "loaded relation `posts` must not bleed into to_array - got {v}",
     );
 
     // The post titles must not appear anywhere in the JSON string
-    // representation — catches any accidental nested-relation leak
+    // representation - catches any accidental nested-relation leak
     // that a key-only check would miss.
     let s = v.to_string();
     assert!(
@@ -236,7 +236,7 @@ async fn to_json_does_not_leak_loaded_relations() {
 
 /// Pin: `to_array()` honours the `__eager` / `__pivot` exclusion, and
 /// `to_json()` is its serialised-string counterpart. Phase 10C T6
-/// moved both methods onto the [`Model`] trait — `to_array()` returns
+/// moved both methods onto the [`Model`] trait - `to_array()` returns
 /// the `Value`, `to_json()` returns `serde_json::to_string(&to_array())`.
 /// This test pins both the auto-exclusion AND the to_json-as-stringified-
 /// to_array contract.
@@ -256,13 +256,13 @@ async fn to_array_excludes_eager_and_pivot_fields() {
     assert!(!obj.contains_key("__eager"));
     assert!(!obj.contains_key("__pivot"));
 
-    // `to_json()` returns the string form of `to_array()` — pinning
+    // `to_json()` returns the string form of `to_array()` - pinning
     // the delegation so both surfaces stay coherent.
     assert_eq!(u.to_json(), serde_json::to_string(&v).unwrap());
 }
 
 /// Pin: when the user declares `hidden = ["password"]`, they don't
-/// need to also list `__eager` / `__pivot` — those are auto-excluded
+/// need to also list `__eager` / `__pivot` - those are auto-excluded
 /// at the serde layer before the `hidden` filter runs. The two
 /// exclusion mechanisms compose without the user having to know
 /// about the framework's internal field names.
@@ -282,15 +282,15 @@ async fn hidden_attribute_does_not_need_to_exclude_eager_explicitly() {
     // The user's `hidden = ["password"]` did its job.
     assert!(
         !obj.contains_key("password"),
-        "hidden field must be excluded from to_array — got {v}",
+        "hidden field must be excluded from to_array - got {v}",
     );
 
-    // The framework's auto-injected fields are excluded too — even
+    // The framework's auto-injected fields are excluded too - even
     // though the user didn't enumerate them in `hidden`.
     assert!(!obj.contains_key("__eager"));
     assert!(!obj.contains_key("__pivot"));
 
-    // The appended accessor still fires — appends bypass the
+    // The appended accessor still fires - appends bypass the
     // hidden/visible filter (matches Laravel).
     assert_eq!(obj["display_name"], "@Alice");
 
@@ -301,7 +301,7 @@ async fn hidden_attribute_does_not_need_to_exclude_eager_explicitly() {
 
 /// Pin: the `visible = [...]` allowlist drops every column not
 /// listed. The auto-injected `__eager` / `__pivot` are absent even
-/// though they weren't enumerated — the user's allowlist controls
+/// though they weren't enumerated - the user's allowlist controls
 /// user-facing columns only, the framework's internal fields are
 /// excluded at the serde layer.
 #[tokio::test]
@@ -325,7 +325,7 @@ async fn visible_allowlist_does_not_need_to_exclude_eager_explicitly() {
         "visible allowlist must drop non-listed columns",
     );
 
-    // Auto-injected fields are absent — user didn't have to list
+    // Auto-injected fields are absent - user didn't have to list
     // them.
     assert!(!obj.contains_key("__eager"));
     assert!(!obj.contains_key("__pivot"));
@@ -343,7 +343,7 @@ async fn visible_allowlist_does_not_need_to_exclude_eager_explicitly() {
 /// case; this one closes the `Some(_)` half of the matrix.
 #[tokio::test]
 async fn to_json_excludes_populated_pivot_slot() {
-    /// Stand-in pivot type — any `'static + Send + Sync` value will
+    /// Stand-in pivot type - any `'static + Send + Sync` value will
     /// do, since the `__pivot` slot only constrains those bounds.
     #[derive(Debug)]
     #[allow(dead_code)]
@@ -371,7 +371,7 @@ async fn to_json_excludes_populated_pivot_slot() {
     // Populated pivot is still excluded.
     assert!(
         !obj.contains_key("__pivot"),
-        "populated __pivot must still be excluded from to_array — got {v}",
+        "populated __pivot must still be excluded from to_array - got {v}",
     );
 
     // And the pivot's payload field names / values don't leak via

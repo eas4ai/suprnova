@@ -1,4 +1,4 @@
-//! Webhook DTOs — the neutral event taxonomy plus the verification /
+//! Webhook DTOs - the neutral event taxonomy plus the verification /
 //! parsing payloads consumed by [`super::super::traits::WebhookHandler`].
 
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,11 @@ pub enum NeutralEventKind {
     CustomerUpdated,
 }
 
-/// Parsed view of a provider webhook payload — ready for domain
+/// Parsed view of a provider webhook payload - ready for domain
 /// dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.).
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.).
     pub provider: String,
     /// Provider-issued event identifier (e.g. Stripe's `evt_…`).
     pub provider_event_id: String,
@@ -46,19 +46,19 @@ pub struct WebhookEvent {
     pub provider_event_type: String,
     /// Neutral classification, when the provider's event type maps
     /// onto a [`NeutralEventKind`]. `None` for provider-specific events
-    /// the framework does not normalise — handlers still see the raw
+    /// the framework does not normalise - handlers still see the raw
     /// `provider_event_type` and `raw_payload`.
     pub neutral: Option<NeutralEventKind>,
     /// Provider's raw event payload, preserved verbatim.
     pub raw_payload: Value,
 }
 
-/// Context passed to [`super::super::traits::WebhookHandler::verify`] —
+/// Context passed to [`super::super::traits::WebhookHandler::verify`] -
 /// the raw bytes plus the HTTP envelope the framework received.
 #[derive(Debug, Clone)]
 pub struct WebhookContext<'a> {
     /// Raw request body. Verification implementations sign or HMAC over
-    /// these exact bytes — do not pre-normalise.
+    /// these exact bytes - do not pre-normalise.
     pub body: &'a [u8],
     /// Full inbound header map; verification reads provider-specific
     /// signature headers from here (e.g. `Stripe-Signature`).

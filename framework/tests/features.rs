@@ -1,4 +1,4 @@
-//! Phase 13 — feature flags integration tests.
+//! Phase 13 - feature flags integration tests.
 //!
 //! Covers [`DatabaseEvaluator`]'s SeaORM snapshot path:
 //!
@@ -47,7 +47,7 @@ async fn database_evaluator_returns_explicit_enabled() {
     flagger.set_flag("checkout-v2", "", true).await.unwrap();
 
     let result = with_flagger(Arc::clone(&flagger), || {
-        // Root context — no scope fields. Should hit the global
+        // Root context - no scope fields. Should hit the global
         // `""` scope and return Some(true).
         let ctx = Context::root();
         flagger.is_enabled("checkout-v2", &ctx)
@@ -100,7 +100,7 @@ async fn database_evaluator_unknown_returns_none() {
 }
 
 // =============================================================================
-// T6 — Admin CRUD tests
+// T6 - Admin CRUD tests
 //
 // The admin module operates against the global `DB::connection()`
 // (not the standalone connection `DatabaseEvaluator::new_in_memory`
@@ -142,7 +142,7 @@ async fn admin_upsert_inserts_then_updates_returning_canonical_row() {
     assert_eq!(row.updated_by.as_deref(), Some("7"));
     let initial_id = row.id;
 
-    // Update via the same name+scope_key — `OnConflict` updates in place.
+    // Update via the same name+scope_key - `OnConflict` updates in place.
     let updated = admin::upsert(
         "checkout-v2",
         "",
@@ -226,7 +226,7 @@ async fn admin_delete_returns_true_then_false_on_repeat() {
 }
 
 // --------------------------------------------------------------------
-// R5 — Composition tests: Cached(Database) chain wired via
+// R5 - Composition tests: Cached(Database) chain wired via
 // `FeatureSync` propagation, end-to-end through admin CRUD.
 //
 // These are the regression tests for Phase 13 R1: a kill-switch flag
@@ -238,7 +238,7 @@ async fn admin_delete_returns_true_then_false_on_repeat() {
 //
 // Each test uses [`TestDatabase`] for hermetic per-test DB isolation
 // AND binds a fresh [`CompositeFeatureSync`] into the same test
-// container — `bootstrap_database_cached` would set featureflag's
+// container - `bootstrap_database_cached` would set featureflag's
 // process-global default, which would leak between parallel tests
 // and cross-contaminate (advisor flag #5). We construct the chain
 // manually here so each test starts from a clean evaluator slate.
@@ -270,14 +270,14 @@ async fn cached_chain_sees_upsert_without_manual_reload_or_ttl_wait() {
         Duration::from_secs(60), // a TTL long enough that R1, not the TTL, is what we're testing.
     ));
 
-    // 3. Wire the composite — data sources first, caches second —
+    // 3. Wire the composite - data sources first, caches second -
     //    into the TestContainer so admin::upsert's notify() resolves
     //    it.
     let composite = Arc::new(CompositeFeatureSync::new(
         vec![database.clone() as Arc<dyn FeatureSync>],
         vec![cached.clone() as Arc<dyn FeatureSync>],
     ));
-    // Bind into the *test* container, not the global App container —
+    // Bind into the *test* container, not the global App container -
     // parallel tests would otherwise stomp on each other's binding
     // and resolve the wrong evaluator (advisor flag #5).
     TestContainer::bind::<dyn FeatureSync>(composite);
@@ -292,7 +292,7 @@ async fn cached_chain_sees_upsert_without_manual_reload_or_ttl_wait() {
     });
 
     // 5. Baseline: flag not configured → cached returns None.
-    //    The cache will memoize this None entry — exactly what R1 has
+    //    The cache will memoize this None entry - exactly what R1 has
     //    to invalidate when upsert lands.
     assert_eq!(cached.is_enabled("kill-switch", &ctx), None);
 
@@ -343,7 +343,7 @@ async fn cached_chain_sees_admin_delete_without_manual_reload() {
         vec![database.clone() as Arc<dyn FeatureSync>],
         vec![cached.clone() as Arc<dyn FeatureSync>],
     ));
-    // Bind into the *test* container, not the global App container —
+    // Bind into the *test* container, not the global App container -
     // parallel tests would otherwise stomp on each other's binding
     // and resolve the wrong evaluator (advisor flag #5).
     TestContainer::bind::<dyn FeatureSync>(composite);
@@ -359,7 +359,7 @@ async fn cached_chain_sees_admin_delete_without_manual_reload() {
     assert_eq!(
         cached.is_enabled("preview", &ctx),
         Some(true),
-        "seeded flag must be visible — guards the upsert path before we test delete",
+        "seeded flag must be visible - guards the upsert path before we test delete",
     );
 
     // Delete: cached chain must observe the removal immediately. Falls
@@ -409,7 +409,7 @@ async fn cached_chain_handles_scoped_override_then_delete() {
         vec![database.clone() as Arc<dyn FeatureSync>],
         vec![cached.clone() as Arc<dyn FeatureSync>],
     ));
-    // Bind into the *test* container, not the global App container —
+    // Bind into the *test* container, not the global App container -
     // parallel tests would otherwise stomp on each other's binding
     // and resolve the wrong evaluator (advisor flag #5).
     TestContainer::bind::<dyn FeatureSync>(composite);

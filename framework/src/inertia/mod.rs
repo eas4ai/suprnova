@@ -1,7 +1,7 @@
 //! [Inertia.js](https://inertiajs.com/) server adapter.
 //!
-//! Lets controllers return a typed page payload — component name plus
-//! props — that Inertia turns into a full SPA page on initial load and a
+//! Lets controllers return a typed page payload - component name plus
+//! props - that Inertia turns into a full SPA page on initial load and a
 //! JSON visit on subsequent navigations. Handles props, partial reloads,
 //! deferred / lazy / encrypted history props, shared data, asset
 //! versioning, flash messages, and SSR.
@@ -39,7 +39,7 @@ pub use validation_redirect_middleware::InertiaValidationRedirectMiddleware;
 pub use version_middleware::InertiaVersionMiddleware;
 
 // Test helpers for setting up a flash scope outside of a real server.
-// Production code never calls these — the flash scope is set up
+// Production code never calls these - the flash scope is set up
 // automatically by `Server::handle_request`.
 #[doc(hidden)]
 pub fn flash_new_bag_for_test()

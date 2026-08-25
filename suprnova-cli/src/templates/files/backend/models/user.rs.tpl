@@ -97,7 +97,7 @@ impl Authenticatable for User {
 
     // Returning the stored hash is what lets the registered
     // `EloquentUserProvider<User>` verify credentials. The trait default
-    // returns `None` (for models that authenticate by other means —
+    // returns `None` (for models that authenticate by other means -
     // OAuth, passkeys), which makes `Auth::attempt` reject every
     // password.
     fn get_auth_password(&self) -> Option<&str> {

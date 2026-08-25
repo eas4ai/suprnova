@@ -1,4 +1,4 @@
-//! Phase 10C audit-fix AF4 — process-global registries expose a
+//! Phase 10C audit-fix AF4 - process-global registries expose a
 //! sync `clear()` for opt-in test teardown.
 //!
 //! The audit (Area 4) flagged that `EventDispatcher`, the cancellable-
@@ -9,7 +9,7 @@
 //!
 //! AF4 ships sync `clear()` / `clear_global()` /
 //! `clear_cancellable_listeners()` for the three registries. They are
-//! NOT wired into `TestContainerGuard::drop` — that would break
+//! NOT wired into `TestContainerGuard::drop` - that would break
 //! parallel test execution (test A's drop clearing test B's still-
 //! needed listeners, since cargo runs `#[tokio::test]`s on shared
 //! process-global registries). Tests that need a wipe call them
@@ -20,7 +20,7 @@
 //! 1. Register a listener for a test-local event type.
 //! 2. Fire it once, observe the count tick.
 //! 3. Call the clear() helper directly.
-//! 4. Fire again, observe the count stays where it was — listener
+//! 4. Fire again, observe the count stays where it was - listener
 //!    cleared.
 
 use std::sync::Arc;
@@ -70,7 +70,7 @@ async fn cancellable_listener_registry_clears_on_demand() {
         "listener should fire after registration"
     );
 
-    // Opt-in clear — the registry is process-global so tests that
+    // Opt-in clear - the registry is process-global so tests that
     // want strict isolation reach for this directly.
     suprnova::eloquent::events::clear_cancellable_listeners();
 
@@ -78,7 +78,7 @@ async fn cancellable_listener_registry_clears_on_demand() {
     assert_eq!(
         AF4_FIRES.load(Ordering::SeqCst),
         1,
-        "post-clear dispatch must be a no-op — listener has been wiped"
+        "post-clear dispatch must be a no-op - listener has been wiped"
     );
 }
 
@@ -154,7 +154,7 @@ impl suprnova::eloquent::GlobalScope<Af4Scoped> for Af4NoopScope {
 #[tokio::test]
 async fn scope_registry_clears_on_demand() {
     // Register a scope, then call the AF4 clear hook. The registry's
-    // internals are private — we can't probe it directly — so the
+    // internals are private - we can't probe it directly - so the
     // signal is: a second `register` after `clear` runs without
     // panicking (the registry is in a fresh state). The first
     // register is the seed; the clear is what we're pinning; the

@@ -20,7 +20,7 @@
 //! in a way the type system can't catch. This module is one call.
 //!
 //! Reach past it only when your evaluator topology isn't
-//! Cached(Database) — e.g. a Redis-backed cache, a remote sync source,
+//! Cached(Database) - e.g. a Redis-backed cache, a remote sync source,
 //! a chain of evaluators. The lower-level primitives
 //! ([`DatabaseEvaluator`], [`CachedEvaluator`], [`CompositeFeatureSync`],
 //! [`install_evaluator`]) all stay public for that case.
@@ -59,8 +59,8 @@ use std::time::Duration;
 /// decide whether to log the "no evaluator installed" warning on
 /// first request. Apps that bypass these helpers and call
 /// `featureflag::evaluator::set_global_default` directly will trip
-/// the warning unless they also call [`mark_installed`] themselves
-/// — fine, intentional, the warning is the contract.
+/// the warning unless they also call [`mark_installed`] themselves -
+/// fine, intentional, the warning is the contract.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Manually mark the evaluator as "installed" for the purposes of the
@@ -72,7 +72,7 @@ pub fn mark_installed() {
 }
 
 /// Query the installation tracker. `false` means no evaluator was
-/// registered via the framework's helpers — [`FeatureMiddleware`](crate::features::middleware::FeatureMiddleware)
+/// registered via the framework's helpers - [`FeatureMiddleware`](crate::features::middleware::FeatureMiddleware)
 /// uses this to gate its one-shot warning.
 pub fn is_installed() -> bool {
     INSTALLED.load(Ordering::Acquire)
@@ -81,13 +81,13 @@ pub fn is_installed() -> bool {
 /// Register `evaluator` as featureflag's global default and flip the
 /// framework's installation tracker.
 ///
-/// Uses [`try_set_global_default`] under the hood — featureflag's
+/// Uses [`try_set_global_default`] under the hood - featureflag's
 /// global slot is `OnceLock`-backed, so a second installation in the
 /// same process is impossible to make stick. We swallow the error
 /// silently and log a `tracing::warn!`: the first install wins, the
 /// installation tracker still flips (the framework knows *something*
 /// is installed), and the App container's `dyn FeatureSync` binding
-/// still updates to the new composite — that part isn't OnceLock'd.
+/// still updates to the new composite - that part isn't OnceLock'd.
 ///
 /// In practice, the only callers that would re-install in the same
 /// process are tests that bootstrap twice. Production boots install
@@ -114,7 +114,7 @@ pub fn install_evaluator(evaluator: Arc<dyn Evaluator + Send + Sync>) {
 /// * inspect snapshot state via `database` for an admin diff view,
 /// * peek at `cached.len()` for a cache-size metric.
 ///
-/// Most apps boot and never look at the return value again — the
+/// Most apps boot and never look at the return value again - the
 /// composite is bound into the App container, the global default is
 /// set, and `is_enabled!` Just Works from there.
 pub struct BootstrappedFeatures {
@@ -131,7 +131,7 @@ pub struct BootstrappedFeatures {
 /// 1. Constructs a [`DatabaseEvaluator`] against the primary database
 ///    pool (the same one `DB::connection()` returns).
 /// 2. Wraps it in a [`CachedEvaluator`] with the requested `ttl`.
-///    `Duration::ZERO` disables caching — useful for low-flag-count
+///    `Duration::ZERO` disables caching - useful for low-flag-count
 ///    apps that don't want the cache layer at all but still get the
 ///    `FeatureSync` plumbing.
 /// 3. Registers the cached evaluator as featureflag's global default
@@ -143,7 +143,7 @@ pub struct BootstrappedFeatures {
 ///
 /// # Errors
 ///
-/// Propagates the underlying [`DatabaseEvaluator::new`] failure —
+/// Propagates the underlying [`DatabaseEvaluator::new`] failure -
 /// either the App container hasn't initialised a `DB`, or the initial
 /// `SELECT * FROM features` failed. Both should surface as a clear
 /// startup error, not get swallowed.
@@ -154,7 +154,7 @@ pub struct BootstrappedFeatures {
 /// binding to the new composite, but **featureflag's global default
 /// is set-once-per-process** (OnceLock semantics). The second call
 /// emits a `tracing::warn!` and the original evaluator stays as the
-/// global default — meaning `is_enabled!` calls keep reading from the
+/// global default - meaning `is_enabled!` calls keep reading from the
 /// first chain while admin writes propagate via the new composite,
 /// which would desync the two layers. In practice this matters only
 /// for tests that bootstrap twice; production boots install exactly
@@ -198,14 +198,14 @@ mod tests {
     //    (regression for the advisor-flagged idempotency lie)
     #[test]
     fn tracker_starts_false_install_flips_repeats_stay_true() {
-        // Snapshot the current state so we can restore it — other
+        // Snapshot the current state so we can restore it - other
         // bootstrap tests in the same process may have already
         // installed something.
         let prior = INSTALLED.load(Ordering::Acquire);
         INSTALLED.store(false, Ordering::Release);
         assert!(!is_installed(), "tracker starts false after reset");
 
-        // Use a stand-in evaluator — featureflag's tests use
+        // Use a stand-in evaluator - featureflag's tests use
         // Context::root() panics-on-no-default semantics, but we're
         // not exercising context here.
         struct NoopEvaluator;

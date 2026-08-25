@@ -62,7 +62,7 @@ impl SessionStore for DatabaseSessionDriver {
                 user_id: session.user_id,
                 csrf_token: session.csrf_token,
                 dirty: false,
-                // This row was read from storage under its own id —
+                // This row was read from storage under its own id -
                 // see `SessionData::loaded_from_store` (SEC-02(c)).
                 loaded_from_store: true,
             }))
@@ -80,11 +80,11 @@ impl SessionStore for DatabaseSessionDriver {
         let now = chrono::Utc::now().naive_utc();
 
         // SEC-02(c): a session that was read from an existing row under
-        // `session.id` must be written back as an UPDATE-ONLY — no
+        // `session.id` must be written back as an UPDATE-ONLY - no
         // INSERT fallback. Without this branch, the upsert below would
         // silently recreate (resurrect) a row that was deleted between
-        // this request's read and its write — e.g. a concurrent
-        // `destroy_for_user` password-reset revocation, or `gc` — and
+        // this request's read and its write - e.g. a concurrent
+        // `destroy_for_user` password-reset revocation, or `gc` - and
         // hand the resurrected row's session cookie right back to
         // whoever is holding it, including the party the revocation was
         // meant to lock out. `session.id` is guaranteed fresh (never
@@ -111,7 +111,7 @@ impl SessionStore for DatabaseSessionDriver {
                 .map_err(|e| FrameworkError::database(e.to_string()))?;
 
             if result.rows_affected == 0 {
-                // The row is gone — most likely a concurrent
+                // The row is gone - most likely a concurrent
                 // revocation. Declining to resurrect it is the correct
                 // outcome, not a failure: the next read of this
                 // session id will correctly find nothing.
@@ -124,10 +124,10 @@ impl SessionStore for DatabaseSessionDriver {
             return Ok(());
         }
 
-        // Fresh session (never read as existing under this id) — atomic
+        // Fresh session (never read as existing under this id) - atomic
         // upsert: INSERT ... ON CONFLICT(id) DO UPDATE SET ...
         // The previous check-then-insert/update was a read-modify-write
-        // race — two parallel writers persisting a fresh-but-shared
+        // race - two parallel writers persisting a fresh-but-shared
         // session id (e.g. a SPA reconnecting after the DB row was
         // gc'd while the cookie was still valid) could both see "no
         // existing row" and both attempt INSERT; one would win, the
@@ -224,7 +224,7 @@ pub mod sessions {
         pub last_activity: chrono::NaiveDateTime,
     }
 
-    /// SeaORM relation enum — `sessions` is a leaf table with no declared
+    /// SeaORM relation enum - `sessions` is a leaf table with no declared
     /// foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}

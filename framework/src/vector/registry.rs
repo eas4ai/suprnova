@@ -1,4 +1,4 @@
-//! Phase 9A — process-global driver registry + the public
+//! Phase 9A - process-global driver registry + the public
 //! [`VectorStore`] handle.
 
 use super::driver::{VectorDriver, VectorItem, VectorMatch};
@@ -12,7 +12,7 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<dyn VectorDriver>>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Static facade for the registry — call sites usually go through
+/// Static facade for the registry - call sites usually go through
 /// [`Vector::register`](super::Vector::register) /
 /// [`Vector::store`](super::Vector::store) but this is exposed for
 /// integration tests that need to clear state between runs.
@@ -22,7 +22,7 @@ impl VectorRegistry {
     /// Insert or replace a driver under `name`.
     ///
     /// **Poison policy** (Domain 18 audit D18-A): on RwLock poison
-    /// the driver is NOT installed — a `tracing::error!` is emitted.
+    /// the driver is NOT installed - a `tracing::error!` is emitted.
     /// Next `VectorRegistry::lookup(name)` returns the existing
     /// "not registered" error via the read path, which already
     /// propagates poison via `?` at L34. Symmetric with the
@@ -50,7 +50,7 @@ impl VectorRegistry {
             .cloned()
             .ok_or_else(|| {
                 FrameworkError::not_found(format!(
-                    "vector store '{name}' is not registered — call \
+                    "vector store '{name}' is not registered - call \
                      Vector::register(\"{name}\", driver) at bootstrap"
                 ))
             })?;
@@ -69,7 +69,7 @@ impl VectorRegistry {
     }
 
     /// Drop every registered driver. Intended for tests that need
-    /// hermetic state — production code never calls this.
+    /// hermetic state - production code never calls this.
     #[doc(hidden)]
     pub fn clear() {
         if let Ok(mut guard) = registry().write() {
@@ -79,7 +79,7 @@ impl VectorRegistry {
 }
 
 /// Handle to a named vector store. Constructed by
-/// [`Vector::store`](super::Vector::store) — never directly.
+/// [`Vector::store`](super::Vector::store) - never directly.
 #[derive(Clone)]
 pub struct VectorStore {
     name: String,

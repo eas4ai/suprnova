@@ -59,7 +59,7 @@ fn invalid_credentials() -> suprnova::FrameworkError {
 pub async fn login(form: LoginRequest) -> Response {
     // `Auth::attempt` verifies the password through the registered user
     // provider, logs the user into the session on success, and issues a
-    // remember-me token when requested — all via the named-guard system
+    // remember-me token when requested - all via the named-guard system
     // wired in bootstrap.rs.
     match Auth::attempt(
         &Credentials::password(&form.email, &form.password),

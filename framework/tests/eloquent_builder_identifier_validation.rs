@@ -1,8 +1,8 @@
-//! Regression: HIGH audit finding `eloquent` #1 — `Builder<M>` accepts
+//! Regression: HIGH audit finding `eloquent` #1 - `Builder<M>` accepts
 //! plain `&str` / `String` for column names, operators, and various
 //! other identifier-shaped inputs through the `IntoColumn` typed-or-
 //! string passthrough and through `&str` operator args. The renderer
-//! interpolates these into the SQL string verbatim — values are
+//! interpolates these into the SQL string verbatim - values are
 //! parameterised by SeaORM, but identifiers cannot be (SQL doesn't
 //! allow placeholder-bound identifiers).
 //!
@@ -14,16 +14,16 @@
 //! Fix: every public terminal (`get`, `count`, `first`, `exists`,
 //! `paginate`, `simple_paginate`, `cursor_paginate`, the chunk family,
 //! the aggregate helpers, `pluck`, `pluck_pair`) goes through one of
-//! two render paths — `render_select_for` or `render_count_select_for`.
+//! two render paths - `render_select_for` or `render_count_select_for`.
 //! Both now run `Builder::validate_inputs` before emitting SQL,
 //! walking every identifier and operator on the builder and rejecting
 //! anything that doesn't pass `database::validate_identifier` /
 //! `database::validate_sql_operator`.
 //!
 //! These tests prove the validator bites at the terminal boundary for
-//! the surfaces that matter most — `filter` (where col), `filter_op`
+//! the surfaces that matter most - `filter` (where col), `filter_op`
 //! (where col + op), `order_by_*` (sort col), `group_by` (group col),
-//! `select` (projection col) — and accepts the typical legitimate
+//! `select` (projection col) - and accepts the typical legitimate
 //! shapes (schema-qualified `users.id`, snake_case columns).
 
 use suprnova::Model;
@@ -134,7 +134,7 @@ async fn count_terminal_also_validates() {
 
 #[tokio::test]
 async fn schema_qualified_identifiers_pass() {
-    // Postgres-style `schema.table` and `table.column` should pass —
+    // Postgres-style `schema.table` and `table.column` should pass -
     // they're a normal SeaORM/Eloquent shape for joined queries.
     let _db = setup().await;
     let _ = T338BuilderIdentUser::query()
@@ -164,12 +164,12 @@ async fn increment_validates_column_argument() {
         .await
         .unwrap();
 
-    // Happy path — legitimate column name.
+    // Happy path - legitimate column name.
     row.increment("views", 1)
         .await
         .expect("a normal column name must succeed");
 
-    // Attacker control rejected — note that `column` is interpolated
+    // Attacker control rejected - note that `column` is interpolated
     // raw into the UPDATE statement, so the validator is the only
     // defense.
     let err = row
@@ -186,7 +186,7 @@ async fn increment_validates_column_argument() {
 // directly (it is passed to the renderer as `column_expr`, bypassing
 // `validate_inputs`, which only walks the WHERE / GROUP BY / ORDER BY
 // / `select()` identifiers). Without an explicit guard, a
-// request-derived column name reaches the SQL string verbatim — e.g.
+// request-derived column name reaches the SQL string verbatim - e.g.
 // `query().pluck(user_param)` is an injection vector. These tests prove
 // the projection column is now validated too.
 
@@ -247,7 +247,7 @@ async fn pluck_keyed_projection_columns_are_validated() {
         .expect_err("attacker-controlled pluck_keyed value column must be rejected");
     assert!(format!("{err}").contains("SQL identifier"));
 
-    // Both legitimate — must still execute.
+    // Both legitimate - must still execute.
     let _: std::collections::HashMap<i64, String> = T338BuilderIdentUser::query()
         .pluck_keyed("id", "email")
         .await

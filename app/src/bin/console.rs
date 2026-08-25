@@ -1,4 +1,4 @@
-//! Suprnova app console — runtime command dispatch for this project.
+//! Suprnova app console - runtime command dispatch for this project.
 //!
 //! Per-project entry point for runtime CLI commands: `db:seed`,
 //! user-defined commands registered via `#[command]`, etc. Calls
@@ -11,7 +11,7 @@
 //! should exit when its handler returns. Same crate, same bootstrap,
 //! different `fn main`.
 //!
-//! `bootstrap::register()` is process-wide only — it no longer installs
+//! `bootstrap::register()` is process-wide only - it no longer installs
 //! the HTTP stack (`Inertia::install`, global middleware), which now
 //! lives behind `.http_bootstrap` in `cmd/main.rs`. That means this
 //! binary boots and runs commands in a container image that ships no
@@ -25,7 +25,7 @@
 //! ./target/debug/console help
 //! ```
 //!
-//! Tokio runtime flavor is `current_thread` — console commands are
+//! Tokio runtime flavor is `current_thread` - console commands are
 //! one-shot, so the multi-threaded worker pool overhead would buy
 //! nothing.
 
@@ -35,7 +35,7 @@ use std::process::ExitCode;
 async fn main() -> ExitCode {
     // `.env` is loaded by `#[suprnova::main]` before the runtime is
     // built. This used to call `dotenvy::dotenv()` here, inside the
-    // runtime — the same unsound env mutation the server binary had.
+    // runtime - the same unsound env mutation the server binary had.
     //
     // Surface this project's package version via `--version` and
     // `--help`. Uses `env!("CARGO_PKG_VERSION")` so the value reflects
@@ -43,7 +43,7 @@ async fn main() -> ExitCode {
     suprnova::console::set_version(env!("CARGO_PKG_VERSION"));
 
     let argv: Vec<String> = std::env::args().collect();
-    // Bootstrap runs only when a real subcommand is matched — help,
+    // Bootstrap runs only when a real subcommand is matched - help,
     // version, missing-subcommand, and parse-error paths all skip
     // it. That's how `console --help` works without DATABASE_URL
     // set (DB::init would panic during bootstrap otherwise).

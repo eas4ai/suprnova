@@ -132,7 +132,7 @@ pub fn register_http_stack() {
     Inertia::install(&InertiaConfig::new().frontend(Frontend::{frontend_variant}))
         .expect("Inertia install failed (production needs a built frontend manifest)");
 
-    // Locale detection — registered after SessionMiddleware, since its
+    // Locale detection - registered after SessionMiddleware, since its
     // detection chain checks the session first (then cookie, then
     // Accept-Language). Reads APP_LOCALE / APP_FALLBACK_LOCALE from the
     // environment and scopes the detected locale for the rest of the

@@ -1,14 +1,14 @@
-//! Integration tests for the webhook ingress route — idempotency layer.
+//! Integration tests for the webhook ingress route - idempotency layer.
 //!
 //! Tests:
-//!   1. `duplicate_webhook_deduped_and_returns_ok` — posting the same webhook
+//!   1. `duplicate_webhook_deduped_and_returns_ok` - posting the same webhook
 //!      twice persists exactly one row and both calls return 200.
-//!   2. `webhook_for_unknown_provider_returns_404` — a request for an
+//!   2. `webhook_for_unknown_provider_returns_404` - a request for an
 //!      unregistered provider name returns 404.
 //!
 //! These tests use a real TCP server (`spawn_server`) and a raw hyper HTTP
 //! client (`send_webhook`) to drive the handler end-to-end.  No tower or
-//! axum test helpers are used — the framework is hyper-native.
+//! axum test helpers are used - the framework is hyper-native.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -130,8 +130,8 @@ fn register_mock(name: &'static str) -> Arc<MockPaymentProvider> {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// Posting the same webhook payload twice:
-///   - First POST: 200 "ok" — event inserted and processed.
-///   - Second POST: 200 "duplicate" — idempotency check fires, no second row.
+///   - First POST: 200 "ok" - event inserted and processed.
+///   - Second POST: 200 "duplicate" - idempotency check fires, no second row.
 ///   - DB: exactly one row in `payments_webhook_events` with matching fields.
 #[tokio::test]
 async fn duplicate_webhook_deduped_and_returns_ok() {
@@ -144,7 +144,7 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
     let conn = Arc::new(db.conn().clone());
 
     // Pre-populate a subscription in the mock so the webhook's
-    // Subscription::get(id) call returns canonical state instead of NotFound —
+    // Subscription::get(id) call returns canonical state instead of NotFound -
     // we're testing idempotency, but the full hydration path now runs in a
     // transaction and a missing subscription would fail with 503.
     let sub = mock
@@ -175,7 +175,7 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
     );
     let path = format!("/webhooks/payments/{provider_name}");
 
-    // First request — fresh event.
+    // First request - fresh event.
     let (status1, body1) = send_webhook(addr, &path, webhook_body.clone()).await;
     assert_eq!(
         status1.as_u16(),
@@ -185,7 +185,7 @@ async fn duplicate_webhook_deduped_and_returns_ok() {
     );
     assert_eq!(body1.as_ref(), b"ok", "first POST must return body 'ok'");
 
-    // Second request — duplicate.
+    // Second request - duplicate.
     let (status2, body2) = send_webhook(addr, &path, webhook_body.clone()).await;
     assert_eq!(
         status2.as_u16(),

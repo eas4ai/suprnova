@@ -140,7 +140,7 @@ async fn worker_dead_letters_after_max_tries() {
 // `MemoryQueueDriver` is HashMap-backed and never fails ack/nack in
 // practice, but real backends (Redis, SQL, queue brokers) can fail on
 // network drop / pool exhaustion / shutdown. The worker must surface those
-// failures — log + telemetry counter — and continue the poll loop rather
+// failures - log + telemetry counter - and continue the poll loop rather
 // than crash. This driver wraps a real memory driver and toggles deliberate
 // ack/nack failures so we can verify the surface.
 
@@ -330,7 +330,7 @@ async fn worker_surfaces_nack_failure_and_continues() {
     Queue::push(AlwaysFailJob { id: 1 }).await.unwrap();
     Queue::push(AlwaysOkJob { id: 2 }).await.unwrap();
 
-    // Bound the run: two settlement attempts is enough — the first should
+    // Bound the run: two settlement attempts is enough - the first should
     // hit the nack-failure path (job failed, nack rejected). After that the
     // worker proceeds to the next job.
     let cfg = WorkerConfig {
@@ -370,7 +370,7 @@ async fn worker_surfaces_nack_failure_and_continues() {
 /// Pins the cancel-during-empty-pop path: a worker idling on
 /// `sleep(poll_interval)` between pops must wake within milliseconds of
 /// cancel, not wait out the full interval. The deliberately long
-/// `poll_interval = 5s` is the test's teeth — without the `tokio::select!`
+/// `poll_interval = 5s` is the test's teeth - without the `tokio::select!`
 /// wrapping both pop and the empty-queue sleep, this would time out.
 #[tokio::test]
 #[serial]

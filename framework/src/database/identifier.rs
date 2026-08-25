@@ -2,7 +2,7 @@
 //!
 //! Audit HIGH `database` #2: the model-less query builder
 //! ([`DbTableBuilder`]) interpolates table names, column names, and
-//! operators directly into the SQL string — SeaORM's `Statement` API
+//! operators directly into the SQL string - SeaORM's `Statement` API
 //! parameterises *values* but not identifiers, because SQL itself
 //! doesn't allow placeholder-bound identifiers. The builder's module
 //! docs warn callers to treat identifier args as trusted, but the
@@ -11,13 +11,13 @@
 //!
 //! This module exposes two pure validators:
 //!
-//! - [`validate_identifier`] — accepts `[A-Za-z_][A-Za-z0-9_]*`,
+//! - [`validate_identifier`] - accepts `[A-Za-z_][A-Za-z0-9_]*`,
 //!   optionally followed by `.[A-Za-z_][A-Za-z0-9_]*` for one level of
 //!   schema qualification (Postgres `public.users`). Length capped at
 //!   128 (well under every backend's limit) so the error path bites
 //!   before a malformed identifier reaches SeaORM.
 //!
-//! - [`validate_sql_operator`] — accepts a fixed allowlist of common
+//! - [`validate_sql_operator`] - accepts a fixed allowlist of common
 //!   SQL comparison operators (case-insensitive for the alpha ones).
 //!
 //! Both return the input borrow on success so callers can chain into
@@ -27,7 +27,7 @@
 //!
 //! These are called from the terminal methods on [`DbTableBuilder`]
 //! (`get` / `update` / `delete` / `insert`) right before the SQL is
-//! rendered — the fluent builder methods stay infallible so chaining
+//! rendered - the fluent builder methods stay infallible so chaining
 //! reads naturally, and validation happens once at the I/O boundary.
 //!
 //! [`DbTableBuilder`]: crate::database::DbTableBuilder
@@ -177,7 +177,7 @@ const ALLOWED_OPERATORS: &[&str] = &[
 
 /// Validate a SQL comparison operator against the allowlist.
 ///
-/// Returns the *canonical* form (matching the allowlist entry — alpha
+/// Returns the *canonical* form (matching the allowlist entry - alpha
 /// operators are upper-cased) so callers can drop it straight into a
 /// `format!()` without worrying about case-folding.
 ///
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn savepoint_name_rejects_dot_qualified() {
-        // Savepoints are unqualified — `public.inner` is invalid SQL
+        // Savepoints are unqualified - `public.inner` is invalid SQL
         // and must be rejected before reaching the executor.
         assert!(validate_savepoint_name("public.inner").is_err());
     }

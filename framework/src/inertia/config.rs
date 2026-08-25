@@ -10,7 +10,7 @@ pub(crate) type SsrErrorHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// Closure that derives the Inertia page object's `url` field from the
 /// request. See [`InertiaConfig::url_resolver`]. Named (rather than
 /// spelled out inline on the field) to keep `clippy::type_complexity`
-/// quiet — it is the same `Arc<dyn Fn(...) + Send + Sync>` type either
+/// quiet - it is the same `Arc<dyn Fn(...) + Send + Sync>` type either
 /// way, just given a name.
 pub(crate) type UrlResolver = Arc<dyn Fn(&dyn InertiaRequestExt) -> String + Send + Sync>;
 
@@ -22,7 +22,7 @@ pub(crate) type UrlResolver = Arc<dyn Fn(&dyn InertiaRequestExt) -> String + Sen
 /// exactly when the built assets do, with nothing to remember to bump.
 /// [`Static`](Self::Static) bakes in a literal, chosen once and fixed
 /// until the config changes. [`Dynamic`](Self::Dynamic) computes the
-/// version per-request — for long-running deploys, hot-reloaded dev
+/// version per-request - for long-running deploys, hot-reloaded dev
 /// environments, or any value the manifest hash can't stand in for.
 #[derive(Clone)]
 pub enum VersionResolver {
@@ -53,7 +53,7 @@ impl VersionResolver {
         Self::Dynamic(Arc::new(f))
     }
 
-    /// Build a resolver that hashes a Vite manifest's bytes — the first
+    /// Build a resolver that hashes a Vite manifest's bytes - the first
     /// 16 bytes of its SHA-256, hex-encoded (32 characters, the same
     /// length Laravel's xxh128 produces).
     ///
@@ -64,7 +64,7 @@ impl VersionResolver {
     /// automatic.
     ///
     /// The file is read on every [`resolve`](Self::resolve) call, which
-    /// is what Laravel's `hash_file` does too — a few KB out of the page
+    /// is what Laravel's `hash_file` does too - a few KB out of the page
     /// cache per version check, and a rebuild is picked up immediately.
     /// If you have measured that and want it gone, resolve once at boot:
     /// `InertiaConfig::new().version(VersionResolver::from_manifest(p).resolve())`.
@@ -116,7 +116,7 @@ pub const MANIFEST_VERSION_FALLBACK: &str = "1.0";
 
 /// Hex of the first 16 bytes of the manifest's SHA-256.
 ///
-/// Not a secret — a stable, bounded-length identifier that changes iff
+/// Not a secret - a stable, bounded-length identifier that changes iff
 /// the built assets change. 128 bits is far past where a collision would
 /// matter for a cache-busting token, and the truncation keeps the value
 /// short enough to sit in a request header without comment.
@@ -130,7 +130,7 @@ fn manifest_version(path: &std::path::Path) -> String {
             // `debug!`, not `warn!`: in development the manifest
             // legitimately doesn't exist (Vite serves from memory) and
             // this runs on every version check, so a warning here would
-            // be per-request noise. Production cannot reach this arm —
+            // be per-request noise. Production cannot reach this arm -
             // `Inertia::install` refuses to boot without a manifest.
             tracing::debug!(
                 path = %path.display(),
@@ -148,7 +148,7 @@ fn manifest_version(path: &std::path::Path) -> String {
 /// scaffolds this into `.env` when generating a new project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
-    /// Svelte 5 (runes-on) starter — the default.
+    /// Svelte 5 (runes-on) starter - the default.
     Svelte,
     /// React 19 starter.
     React,
@@ -159,7 +159,7 @@ pub enum Frontend {
 impl Frontend {
     /// Read `SUPRNOVA_FRONTEND` from the environment.
     ///
-    /// Defaults to `Svelte` when unset or unrecognized — matches the
+    /// Defaults to `Svelte` when unset or unrecognized - matches the
     /// CLI's default frontend choice in `suprnova new`.
     pub fn detect_from_env() -> Self {
         match std::env::var("SUPRNOVA_FRONTEND").as_deref() {
@@ -223,7 +223,7 @@ pub struct InertiaConfig {
     /// `false` for production (loads built assets from `/assets/`).
     ///
     /// Defaults to the inverse of [`crate::config::Environment::detect`]`().`
-    /// [`is_production`](crate::config::Environment::is_production) — see
+    /// [`is_production`](crate::config::Environment::is_production) - see
     /// `impl Default for InertiaConfig` (CFG-01: this used to hardcode
     /// `true` regardless of environment, so a production deploy that
     /// didn't explicitly call [`production`](Self::production) rendered
@@ -269,13 +269,13 @@ pub struct InertiaConfig {
     /// `ErrorValue = string`. Set `true` when your pages render every
     /// message for a field; the client-side type then needs the matching
     /// `errorValueType: string[]` module augmentation. Applies to errors
-    /// drained from the session flash only — an `errors` prop a handler
+    /// drained from the session flash only - an `errors` prop a handler
     /// sets itself passes through as-is.
     pub with_all_errors: bool,
     /// Maximum number of lazy/deferred/once/shared prop resolvers that
     /// run concurrently for a single response.
     ///
-    /// Default: 16 — generous for typical Inertia pages while bounding
+    /// Default: 16 - generous for typical Inertia pages while bounding
     /// downstream fan-out on pages with many lazy resolvers. Without
     /// this cap a page with N lazy props issues N parallel database /
     /// HTTP calls per request.
@@ -284,7 +284,7 @@ pub struct InertiaConfig {
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
     /// holds `Some(manifest)` on successful load and `None` when the
-    /// file is missing or malformed — both states are stable for the
+    /// file is missing or malformed - both states are stable for the
     /// process lifetime, matching how a long-running production server
     /// reads the build artefact exactly once. Use `manifest_path()` to
     /// repoint at a different file for tests; that builder method
@@ -301,9 +301,9 @@ pub struct InertiaConfig {
 
 /// SSR (server-side rendering) configuration.
 ///
-/// Suprnova talks to an out-of-process SSR worker — usually the
+/// Suprnova talks to an out-of-process SSR worker - usually the
 /// `@inertiajs/{vue3,react,svelte}/server` `createServer()` bundle run
-/// under Node, Bun, or Deno — over HTTP loopback. The worker accepts
+/// under Node, Bun, or Deno - over HTTP loopback. The worker accepts
 /// a JSON page object on `POST /render` and returns
 /// `{ head: string[], body: string }`. Configure the worker URL here;
 /// boot it separately (e.g. `suprnova ssr:start`).
@@ -316,7 +316,7 @@ pub struct SsrConfig {
     /// The framework posts to `<url>/render`.
     pub url: String,
     /// Request timeout for the SSR call. Past this, the response falls
-    /// back to CSR. Keep tight in production — a hung worker shouldn't
+    /// back to CSR. Keep tight in production - a hung worker shouldn't
     /// block real users.
     pub timeout: std::time::Duration,
     /// When `true`, SSR errors propagate as 500s instead of falling
@@ -334,15 +334,15 @@ pub struct SsrConfig {
     pub on_error: Option<SsrErrorHook>,
     /// Cap on the SSR worker's response body. Bytes past this point
     /// abort the read and the request falls back to CSR (or 500 if
-    /// `throw_on_error` is set). Default: 8 MiB — comfortably larger
+    /// `throw_on_error` is set). Default: 8 MiB - comfortably larger
     /// than any realistic SSR-rendered page but small enough to bound
     /// damage from a misconfigured or compromised loopback worker.
     pub max_response_bytes: usize,
-    /// Path to the built SSR bundle (e.g. `frontend/bootstrap/ssr/ssr.js`
-    /// — the default `vite build --ssr` output for a scaffolded project,
+    /// Path to the built SSR bundle (e.g. `frontend/bootstrap/ssr/ssr.js` -
+    /// the default `vite build --ssr` output for a scaffolded project,
     /// and what `suprnova ssr:start` looks for by default). `None`
     /// (the default) means "not configured" and disables the existence
-    /// check regardless of [`Self::ensure_bundle_exists`] — there being
+    /// check regardless of [`Self::ensure_bundle_exists`] - there being
     /// nothing to check. Unlike Laravel's `BundleDetector`, this is
     /// **never auto-detected**: an app that calls `.ssr(url)` without
     /// also calling [`InertiaConfig::ssr_bundle_path`] gets no bundle
@@ -351,9 +351,9 @@ pub struct SsrConfig {
     pub bundle_path: Option<PathBuf>,
     /// When `true` (the default) and [`Self::bundle_path`] is `Some`,
     /// the SSR gateway checks the bundle exists on disk before every
-    /// dispatch and falls back to CSR immediately — without paying
+    /// dispatch and falls back to CSR immediately - without paying
     /// [`Self::timeout`] on a connection that was never going to
-    /// succeed — when it doesn't. Mirrors Laravel's
+    /// succeed - when it doesn't. Mirrors Laravel's
     /// `inertia.ssr.ensure_bundle_exists` config
     /// (`Inertia\Ssr\HttpGateway::shouldDispatch()`). Has no effect
     /// while `bundle_path` is `None`.
@@ -468,7 +468,7 @@ pub const DEFAULT_VITE_PORT: u16 = 5765;
 /// `http://localhost:{VITE_PORT}` > `http://localhost:5765`. `suprnova
 /// serve` sets `VITE_PORT` on the backend child to the port it actually
 /// launched Vite on, so the injected `<script src=…>` tag always matches
-/// the running Vite server — even after free-port scanning moved it.
+/// the running Vite server - even after free-port scanning moved it.
 fn vite_dev_server_from_env() -> String {
     if let Ok(url) = std::env::var("INERTIA_VITE_DEV_SERVER") {
         let trimmed = url.trim();
@@ -498,7 +498,7 @@ impl Default for InertiaConfig {
             // CFG-01: derive from the actual runtime environment instead
             // of hardcoding `true`. Every environment other than
             // `Production` still defaults to dev mode (loads via the Vite
-            // dev server) — that's unchanged. Only a real production boot
+            // dev server) - that's unchanged. Only a real production boot
             // now defaults to production asset loading without requiring
             // every app to remember to call `.production()`.
             development: !crate::config::Environment::detect().is_production(),
@@ -546,7 +546,7 @@ impl InertiaConfig {
     /// page-object emission and every version-mismatch check; cache
     /// inside the closure if invocation isn't cheap.
     ///
-    /// The closure is synchronous and infallible by design — it mirrors
+    /// The closure is synchronous and infallible by design - it mirrors
     /// Laravel's `Inertia::version($closure)` contract. For
     /// async / fallible computation (e.g. read a manifest from S3),
     /// resolve once at boot and pass the cached `String` to
@@ -592,7 +592,7 @@ impl InertiaConfig {
     /// Explicitly set development vs. production mode, overriding the
     /// environment-derived default (see the `development` field doc).
     /// Useful for forcing dev mode in a non-`Production` `APP_ENV` that
-    /// should nonetheless load built assets (or vice versa) — most apps
+    /// should nonetheless load built assets (or vice versa) - most apps
     /// won't need this and should rely on the default.
     pub fn development(mut self, enabled: bool) -> Self {
         self.development = enabled;
@@ -666,7 +666,7 @@ impl InertiaConfig {
     }
 
     /// Point the SSR bundle-existence check at the built bundle. Not set
-    /// by default — see [`SsrConfig::bundle_path`]'s doc for why an
+    /// by default - see [`SsrConfig::bundle_path`]'s doc for why an
     /// unset path is the safe default rather than an auto-detected one.
     /// `frontend/bootstrap/ssr/ssr.js` is the conventional location:
     /// what `suprnova ssr:start` looks for and what the scaffolded
@@ -706,7 +706,7 @@ impl InertiaConfig {
         let path = path.into();
         // Keep the default version resolver pointed at the manifest the
         // app actually uses. An explicit `.version(...)` /
-        // `.version_with(...)` is left alone — the caller named a
+        // `.version_with(...)` is left alone - the caller named a
         // version on purpose, and silently overruling that would be the
         // worst kind of surprise.
         if matches!(self.version, VersionResolver::Manifest(_)) {
@@ -727,7 +727,7 @@ impl InertiaConfig {
     }
 
     /// Override the per-response cap on concurrent prop resolvers.
-    /// Default: 16. Zero is treated as `usize::MAX` (no cap) — the
+    /// Default: 16. Zero is treated as `usize::MAX` (no cap) - the
     /// builder normalizes that for the caller.
     pub fn max_concurrent_resolvers(mut self, n: usize) -> Self {
         self.max_concurrent_resolvers = if n == 0 { usize::MAX } else { n };
@@ -752,8 +752,8 @@ impl InertiaConfig {
     /// request. Mirrors Laravel's `Inertia::resolveUrlUsing($closure)`.
     ///
     /// The default is the request's path plus query string. Override when
-    /// the URL the client should record differs from the URL that arrived
-    /// — a locale prefix the SPA doesn't route on, a path a reverse proxy
+    /// the URL the client should record differs from the URL that arrived -
+    /// a locale prefix the SPA doesn't route on, a path a reverse proxy
     /// rewrote, a canonical host-relative form.
     ///
     /// The closure is synchronous and infallible by design: it runs on
@@ -779,7 +779,7 @@ impl InertiaConfig {
     /// [`Self::manifest_path`] from disk; subsequent calls return the
     /// cached value (or cached `None` if the read failed).
     ///
-    /// `None` is returned when the file is missing or malformed — the
+    /// `None` is returned when the file is missing or malformed - the
     /// production HTML shell renderer falls back to a legacy hardcoded
     /// path and logs a `tracing::warn!`. This keeps existing
     /// pre-manifest apps booting; new apps with a proper Vite build
@@ -836,7 +836,7 @@ mod tests {
         let prior_url = std::env::var("INERTIA_VITE_DEV_SERVER").ok();
         let prior_port = std::env::var("VITE_PORT").ok();
         // SAFETY: single-threaded scope (serialized via serial_test), env
-        // restored at the end — same pattern as the config provider tests.
+        // restored at the end - same pattern as the config provider tests.
         unsafe {
             std::env::remove_var("INERTIA_VITE_DEV_SERVER");
             std::env::remove_var("VITE_PORT");
@@ -854,7 +854,7 @@ mod tests {
         }
         assert_eq!(vite_dev_server_from_env(), "http://localhost:5790");
 
-        // INERTIA_VITE_DEV_SERVER (full URL) wins over VITE_PORT — this is
+        // INERTIA_VITE_DEV_SERVER (full URL) wins over VITE_PORT - this is
         // the hook for pointing the page at an HTTPS Vite (e.g. behind a
         // TLS dev proxy).
         unsafe {
@@ -948,7 +948,7 @@ mod tests {
     //
     // Path-style glob: `*` matches one segment (no slash), `**` matches
     // any characters including slashes. Standard rsync/gitignore-style
-    // semantics — `/admin/**` matches `/admin/x` but NOT bare `/admin`
+    // semantics - `/admin/**` matches `/admin/x` but NOT bare `/admin`
     // (use `/admin*` or two patterns for that).
 
     #[test]

@@ -32,7 +32,7 @@ fn otel_config_api_compiles() {
     // `from_env` is safe to call regardless of what's in the env; it
     // never panics, and `is_enabled` reflects whatever it found.
     let env_cfg = OtelConfig::from_env();
-    // No assertion on `is_enabled()` here — the test runner may or may
+    // No assertion on `is_enabled()` here - the test runner may or may
     // not have OTEL_EXPORTER_OTLP_ENDPOINT set.
     let _ = env_cfg.service_name;
     let _ = env_cfg.service_version;

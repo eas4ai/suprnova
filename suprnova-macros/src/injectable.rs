@@ -90,7 +90,7 @@ pub fn injectable_impl(input: TokenStream) -> TokenStream {
                         ::suprnova::inventory::submit! {
                             ::suprnova::container::provider::SingletonEntry {
                                 register: || -> ::std::result::Result<(), ::std::string::String> {
-                                    // singleton_if_absent — boot is idempotent
+                                    // singleton_if_absent - boot is idempotent
                                     // and does not clobber manual overrides or
                                     // stateful instances installed before boot.
                                     ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
@@ -145,7 +145,7 @@ fn generate_for_named_struct(
             ::suprnova::inventory::submit! {
                 ::suprnova::container::provider::SingletonEntry {
                     register: || -> ::std::result::Result<(), ::std::string::String> {
-                        // singleton_if_absent — boot is idempotent and does
+                        // singleton_if_absent - boot is idempotent and does
                         // not clobber manual overrides. No `#[inject]` fields,
                         // so we always return Ok.
                         ::suprnova::App::singleton_if_absent(<#name as ::std::default::Default>::default());
@@ -196,7 +196,7 @@ fn generate_with_injection(
             // "still waiting on a dependency" from genuine missing/cyclic
             // deps. Inventory iteration order is implementation-defined,
             // so a producer #[injectable] may register after us on the
-            // first pass — returning Err here makes the bootstrap loop
+            // first pass - returning Err here makes the bootstrap loop
             // retry this entry on the next iteration, by which point the
             // producer is installed.
             field_initializations.push(quote! {
@@ -240,7 +240,7 @@ fn generate_with_injection(
         ::suprnova::inventory::submit! {
             ::suprnova::container::provider::SingletonEntry {
                 register: || -> ::std::result::Result<(), ::std::string::String> {
-                    // singleton_if_absent — boot is idempotent and does not
+                    // singleton_if_absent - boot is idempotent and does not
                     // clobber manual overrides. `?` defers to the bootstrap
                     // loop if a dependency isn't installed yet.
                     let instance = #name::__resolve_dependencies()?;

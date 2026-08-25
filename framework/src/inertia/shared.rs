@@ -3,12 +3,12 @@
 //! The registry lives on the [`crate::container::Container`]; production
 //! reads use the global container, tests use the thread-local
 //! [`crate::testing::TestContainer`] guard for isolation. There is no
-//! process-global static state — set up a test container, register
+//! process-global static state - set up a test container, register
 //! shared data, and the guard cleans it up when dropped.
 //!
 //! ## Precedence
 //!
-//! On every Inertia response build, props are layered in this order —
+//! On every Inertia response build, props are layered in this order -
 //! later writes overwrite earlier ones at the same key:
 //!
 //! 1. **Static registry** (sync values + lazy resolvers added via
@@ -20,14 +20,14 @@
 //!
 //! ## Dot-key nesting
 //!
-//! A key containing `.` — from any of the three layers above, or from
-//! `InertiaResponse::with` and friends — nests into the wire response the
+//! A key containing `.` - from any of the three layers above, or from
+//! `InertiaResponse::with` and friends - nests into the wire response the
 //! way Laravel's `Arr::set`-backed `Inertia::share('user.name', …)` does:
 //! `App::inertia_share("user.name", "Todd")` and
 //! `App::inertia_share("user.locale", "es")` both land under one `user`
 //! object in `props`, not two literal `"user.name"` / `"user.locale"`
 //! keys. The unpacking happens once, in `InertiaResponse::resolve`, over
-//! the fully resolved prop bag — see `framework/src/inertia/dotted.rs`.
+//! the fully resolved prop bag - see `framework/src/inertia/dotted.rs`.
 //! `App::inertia_shared(key)` reads the static registry back with the
 //! same dot notation (Laravel's `Inertia::getShared`);
 //! `App::flush_inertia_shared()` clears it (`Inertia::flushShared`).
@@ -54,7 +54,7 @@ pub trait InertiaSharedData: Send + Sync + 'static {
     /// Produce the per-request shared props merged into every Inertia response.
     ///
     /// `component` is the page component name the response is being built
-    /// for — Laravel's `RenderContext::$component`
+    /// for - Laravel's `RenderContext::$component`
     /// (`reference/inertia-laravel-2.0.25/src/RenderContext.php`), which
     /// `ProvidesInertiaProperties::toInertiaProperties` receives alongside
     /// the request. Suprnova passes it as a plain parameter rather than a
@@ -92,7 +92,7 @@ pub struct InertiaRegistry {
     /// `TestContainer::fake()` guard cannot leak into tests running in
     /// parallel. `RwLock<Option<_>>` rather than `OnceLock` because
     /// `Inertia::install` is legitimately called more than once (tests,
-    /// and apps that re-bootstrap) — last write wins.
+    /// and apps that re-bootstrap) - last write wins.
     config: RwLock<Option<InertiaConfig>>,
 }
 
@@ -113,14 +113,14 @@ impl InertiaRegistry {
     /// # Panics
     ///
     /// Panics if `value`'s `Serialize` impl returns `Err`. This is a
-    /// programmer error in the value's type — `share_value` is typically
+    /// programmer error in the value's type - `share_value` is typically
     /// called from `App` bootstrap (`bootstrap.rs`), so a broken
     /// `Serialize` impl surfaces at process startup. If called from a
     /// request handler, the framework's request-level panic-catch
     /// middleware (`framework/src/middleware/chain.rs`) converts the
     /// panic to a 500 instead of taking the process down.
     ///
-    /// For runtime-fallible values use [`share_lazy`] — its resolver
+    /// For runtime-fallible values use [`share_lazy`] - its resolver
     /// returns `Result<V, FrameworkError>` and surfaces serialization
     /// failures as Inertia JSON errors instead of panics.
     ///
@@ -225,7 +225,7 @@ impl InertiaRegistry {
 
     /// The config retained by `Inertia::install`, if any.
     ///
-    /// `None` — not an error — is the normal state for an app or a test
+    /// `None` - not an error - is the normal state for an app or a test
     /// that never calls `Inertia::install`; the caller then uses
     /// `InertiaConfig::default()`. The one reader is
     /// `InertiaResponse::new`, which is sync and infallible, so a
@@ -244,7 +244,7 @@ impl InertiaRegistry {
         }
     }
 
-    /// Snapshot of the static registry — clones each entry. Cheap because
+    /// Snapshot of the static registry - clones each entry. Cheap because
     /// `Prop` either holds a `Value` (cheap clone) or an `Arc`-backed
     /// resolver. Internal use by `InertiaResponse::resolve`.
     pub(crate) fn snapshot_static(&self) -> Result<Vec<(String, Prop)>, FrameworkError> {
@@ -263,15 +263,15 @@ impl InertiaRegistry {
     }
 
     /// Read a value back out of the static share registry by key, honoring
-    /// the same dot notation `share_value` accepts — Laravel's
+    /// the same dot notation `share_value` accepts - Laravel's
     /// `Inertia::getShared($key)` (`ResponseFactory.php:106-113`). Builds a
     /// nested tree from every **eager** entry (via `dotted::arr_set`) and
     /// walks it with `dotted::arr_get`, so `"user.name"` finds a value
     /// shared under that literal key, or nested under an earlier
     /// `"user.…"` share, either way. A lazy entry (`share_lazy` /
-    /// `share_once`) has no synchronous value to offer — like Laravel,
+    /// `share_once`) has no synchronous value to offer - like Laravel,
     /// which returns the raw stored `Closure` rather than invoking it,
-    /// this is a read of what's registered, not a resolution — so a lazy
+    /// this is a read of what's registered, not a resolution - so a lazy
     /// entry (and anything nested under one) is invisible here. Internal
     /// use by `App::inertia_shared`.
     ///
@@ -299,7 +299,7 @@ impl InertiaRegistry {
         }
     }
 
-    /// Clear every entry from the static share registry — Laravel's
+    /// Clear every entry from the static share registry - Laravel's
     /// `Inertia::flushShared()` (`ResponseFactory.php:120-123`). Does not
     /// touch the trait-provider registration (`register_trait`); there is
     /// no per-request state there to flush.

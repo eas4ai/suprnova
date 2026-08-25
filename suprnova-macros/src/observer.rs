@@ -1,4 +1,4 @@
-//! Phase 10C T2b — `#[suprnova::observer(M)]` attribute macro.
+//! Phase 10C T2b - `#[suprnova::observer(M)]` attribute macro.
 //!
 //! Walks an `impl Observer<M> for SomeObserver { ... }` block at parse
 //! time, identifies which trait methods the user overrode (by name
@@ -79,7 +79,7 @@ const CANCELLABLE_METHODS: &[(&str, &str)] = &[
 /// overridden trait method, and emits an `ObserverEntry` inventory
 /// submission whose `install` closure registers every adapter.
 pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Domain 5 audit M-D5-7 — parse the model arg as `syn::Path`
+    // Domain 5 audit M-D5-7 - parse the model arg as `syn::Path`
     // (not `syn::Expr`). The downstream module-path emission requires
     // a sequence of named segments (`crate::models::User` → walk to
     // `user`); `Expr` accepted unparseable shapes like `123` or
@@ -242,7 +242,7 @@ fn to_snake(s: &str) -> String {
 /// through verbatim because they're already-valid module identifiers
 /// authored by the user.
 ///
-/// Domain 5 audit M-D5-7 — takes `&syn::Path` instead of `&syn::Expr`
+/// Domain 5 audit M-D5-7 - takes `&syn::Path` instead of `&syn::Expr`
 /// so the segment-walk operates on typed `PathSegment`s. The previous
 /// implementation round-tripped through a string and called
 /// `Ident::new(&snake, ...)` on the result, which panicked when the
@@ -261,7 +261,7 @@ fn path_to_snake_module_path(model: &Path) -> TokenStream2 {
     if segments.len() == 1 {
         // Preserve the leading `::` (absolute path) on the
         // sole-segment case for consistency with the multi-segment
-        // branch — only matters when the user writes `::User`,
+        // branch - only matters when the user writes `::User`,
         // which is syntactically legal but unusual.
         if model.leading_colon.is_some() {
             quote! { ::#snake_ident }
@@ -271,7 +271,7 @@ fn path_to_snake_module_path(model: &Path) -> TokenStream2 {
     } else {
         // Walk all-but-last segments verbatim, then append the
         // snake-cased final segment. Each segment is already a valid
-        // ident — no string round-trip / re-parse needed.
+        // ident - no string round-trip / re-parse needed.
         let prefix_segments = segments.iter().take(segments.len() - 1);
         let leading = if model.leading_colon.is_some() {
             quote! { :: }
@@ -327,7 +327,7 @@ fn emit_non_cancellable_adapter(
 /// field layout emitted by `model/events.rs`.
 fn emit_adapter_call(method: &str) -> TokenStream2 {
     match method {
-        // `Retrieving` carries no payload — fires once per query.
+        // `Retrieving` carries no payload - fires once per query.
         "retrieving" => quote! { obs.retrieving().await },
         // Single-model events.
         "retrieved" => quote! { obs.retrieved(&event.model).await },
@@ -399,7 +399,7 @@ fn emit_cancellable_adapter(
 /// Emit the call expression for a cancellable adapter's `handle` body.
 /// `Saving` / `Creating` / `Updating` carry `Arc<Mutex<Attrs>>` so the
 /// adapter locks, deref-muts, and hands `&mut Attrs` to the trait
-/// method — the one place where the observer's `&mut Attrs` claim is
+/// method - the one place where the observer's `&mut Attrs` claim is
 /// actually honoured.
 fn emit_cancellable_adapter_call(method: &str) -> TokenStream2 {
     match method {
@@ -415,7 +415,7 @@ fn emit_cancellable_adapter_call(method: &str) -> TokenStream2 {
             let mut attrs = event.attrs.lock().await;
             obs.updating(&event.previous, &mut *attrs).await
         },
-        // `Deleting` carries `(model, is_force)` — no mutex, since
+        // `Deleting` carries `(model, is_force)` - no mutex, since
         // there's nothing to mutate before delete.
         "deleting" => quote! { obs.deleting(&event.model, event.is_force).await },
         // `Restoring` carries the model only.
@@ -433,7 +433,7 @@ mod tests {
     //! macro used to accept any `syn::Expr` as the model argument and
     //! then panic at `Ident::new` if the expression wasn't path-shaped
     //! (`observer(123)` → "rustc panicked"). The fix swapped `Expr` for
-    //! `syn::Path` at the entry point — non-path inputs reject cleanly
+    //! `syn::Path` at the entry point - non-path inputs reject cleanly
     //! through syn's parser, and `path_to_snake_module_path` walks
     //! typed segments that are already valid idents.
     //!

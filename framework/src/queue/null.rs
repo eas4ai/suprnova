@@ -1,4 +1,4 @@
-//! Null queue driver — discards every push, returns nothing.
+//! Null queue driver - discards every push, returns nothing.
 //!
 //! Mirrors Laravel's `NullQueue`. Useful for code paths that want to keep
 //! the `Queue::push` call site without firing the side effect (e.g.
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 /// [`QueueDriver`] that drops every push and never returns a
-/// reservation. Mirrors Laravel's `NullQueue` — useful for CI runs
+/// reservation. Mirrors Laravel's `NullQueue` - useful for CI runs
 /// where the queueing side-effect is not under test.
 #[derive(Default)]
 pub struct NullQueueDriver;

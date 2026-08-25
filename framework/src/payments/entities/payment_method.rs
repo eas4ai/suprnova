@@ -10,24 +10,24 @@ use chrono::{DateTime, Utc};
 /// Mirror row for a stored provider-side payment method. `method_type`
 /// classifies the instrument (`"card"`, `"bank_transfer"`, `"mobile_money"`,
 /// etc.); `method_details` carries the display-safe envelope (brand,
-/// last4, expiry — never PAN or CVV). `is_default` flags the customer's
+/// last4, expiry - never PAN or CVV). `is_default` flags the customer's
 /// primary instrument.
 #[suprnova::model(table = "payments_payment_methods", timestamps)]
 pub struct PaymentMethod {
     /// Surrogate primary key.
     pub id: i64,
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.).
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.).
     pub provider: String,
     /// Provider-issued payment-method identifier (e.g. Stripe's `pm_…`).
     pub provider_payment_method_id: String,
     /// FK reference back to the owning provider customer record.
     pub provider_customer_id: String,
-    /// Method classification — `"card"`, `"bank_transfer"`, `"mobile_money"`,
+    /// Method classification - `"card"`, `"bank_transfer"`, `"mobile_money"`,
     /// `"stablecoin"`, `"crypto"`, etc. Matches the [`super::super::dto::PaymentMethod`]
     /// enum variant's wire tag.
     pub method_type: String,
     /// Display-safe envelope (brand, last4, expiry, etc.). Never holds
-    /// the full PAN or CVV — those live exclusively on the provider.
+    /// the full PAN or CVV - those live exclusively on the provider.
     pub method_details: serde_json::Value,
     /// Whether this is the customer's default payment instrument.
     pub is_default: bool,

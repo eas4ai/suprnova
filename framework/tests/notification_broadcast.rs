@@ -1,4 +1,4 @@
-//! BroadcastChannel (production gate #374) — verifies the channel publishes
+//! BroadcastChannel (production gate #374) - verifies the channel publishes
 //! to the container-bound `BroadcastHub`, and fails closed when none is bound.
 //!
 //! Phase 7B shipped the `BroadcastHub`; the channel (formerly a logging stub
@@ -64,7 +64,7 @@ async fn deliver_publishes_to_the_bound_hub() {
 #[tokio::test]
 async fn deliver_fails_closed_when_no_hub_bound() {
     TestContainer::scope(async {
-        // Empty scope — no BroadcastHub bound. The pre-fix stub returned
+        // Empty scope - no BroadcastHub bound. The pre-fix stub returned
         // Ok(()) here, silently dropping the notification; that was the bug.
         let channel = BroadcastChannel::new();
         let err = channel

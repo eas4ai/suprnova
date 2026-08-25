@@ -61,7 +61,7 @@ impl EncryptionKey {
         URL_SAFE_NO_PAD.encode(self.0)
     }
 
-    /// Return the raw 32 bytes — used by the AEAD layer.
+    /// Return the raw 32 bytes - used by the AEAD layer.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -94,10 +94,10 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length() {
-        // 16 bytes encoded — too short
+        // 16 bytes encoded - too short
         let short = URL_SAFE_NO_PAD.encode([0u8; 16]);
         assert!(EncryptionKey::from_base64(&short).is_err());
-        // 64 bytes encoded — too long
+        // 64 bytes encoded - too long
         let long = URL_SAFE_NO_PAD.encode([0u8; 64]);
         assert!(EncryptionKey::from_base64(&long).is_err());
         // Garbage
@@ -150,7 +150,7 @@ mod tests {
         // We can't observe freed memory safely, but `ZeroizeOnDrop` is
         // a marker trait whose presence (and Drop hookup) is the
         // semantic contract we care about. Confirm the trait bound is
-        // satisfied — if the derive is ever removed this fails to
+        // satisfied - if the derive is ever removed this fails to
         // compile.
         fn assert_zod<T: zeroize::ZeroizeOnDrop>() {}
         assert_zod::<EncryptionKey>();

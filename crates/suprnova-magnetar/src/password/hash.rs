@@ -179,8 +179,8 @@ pub struct PasswordVerifier {
 impl PasswordVerifier {
     /// Build a verifier and warm one dummy hash per deployed format.
     ///
-    /// The dummies are minted through the installed driver — never
-    /// hard-coded — so their cost always tracks the configured profiles
+    /// The dummies are minted through the installed driver - never
+    /// hard-coded - so their cost always tracks the configured profiles
     /// (the fork's `dummy_verify` regression).
     pub fn new(driver: Arc<dyn PasswordHashDriver>, config: PasswordHashConfig) -> Result<Self> {
         let secret = SecretString::from(random_secret());
@@ -325,7 +325,7 @@ impl PasswordVerifier {
 /// `None` and are treated exactly like a passwordless account.
 fn classify(hash: &str) -> Option<HashWorkProfile> {
     if let Some(rest) = hash.strip_prefix("$2") {
-        // "$2b$12$..." — legacy $2a/$2x/$2y variants also parse here.
+        // "$2b$12$..." - legacy $2a/$2x/$2y variants also parse here.
         let cost = rest.split('$').nth(1)?.parse().ok()?;
         return Some(HashWorkProfile {
             algorithm: HashAlgorithm::Bcrypt,

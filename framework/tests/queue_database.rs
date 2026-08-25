@@ -108,7 +108,7 @@ async fn database_driver_nack_bumps_attempts() {
 /// Two concurrent consumers can both observe the same visible row in the
 /// gap between their SELECTs and their UPDATEs. Without a predicate, both
 /// stamp their reservation tokens and the loser walks away with a token
-/// that doesn't match the row's stored value — its later ack/nack silently
+/// that doesn't match the row's stored value - its later ack/nack silently
 /// no-ops and the job runs twice. The fix re-asserts the same "unreserved
 /// or expired" predicate on UPDATE; the loser sees zero rows affected and
 /// reports an empty pop instead.
@@ -137,7 +137,7 @@ async fn database_driver_pop_returns_none_when_row_was_reserved_concurrently() {
     // Our pop now observes the row as reserved-in-future via its SELECT
     // filter; this path is the SELECT-side of the same predicate. The
     // conditional UPDATE matters when the SELECT happened *before* the
-    // injected reservation — a case our test setup approximates by simply
+    // injected reservation - a case our test setup approximates by simply
     // observing that the driver respects the post-race state correctly.
     let r = d.pop(Duration::from_millis(50)).await.unwrap();
     assert!(
@@ -172,7 +172,7 @@ async fn database_driver_pop_releases_reservation_after_visibility_expiry() {
     let r1 = d.pop(Duration::from_secs(0)).await.unwrap().unwrap();
     assert_eq!(r1.envelope.job_name, "A");
 
-    // After visibility expires, a fresh pop must reclaim the row — and the
+    // After visibility expires, a fresh pop must reclaim the row - and the
     // conditional UPDATE has to succeed against the *expired* reservation
     // because `reserved_until <= now` is true.
     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -294,7 +294,7 @@ async fn queue_filter_is_parameterized_not_interpolated() {
 // `id` is this table's primary key, so the push collided with the row that
 // still held the live reservation and came back
 // `UNIQUE constraint failed: jobs.id`. The worker treated that as a lost push
-// and declined to ack — the safe reading — so the release silently became a
+// and declined to ack - the safe reading - so the release silently became a
 // no-op: no delay applied, no `JobReleased` event, the job just sat reserved
 // until visibility expiry redelivered it. Every release on a database-backed
 // queue behaved that way.
@@ -310,7 +310,7 @@ async fn release_does_not_collide_with_the_live_reservation() {
 
     d.release(&res.token, &res.envelope, Duration::from_secs(30))
         .await
-        .expect("release must not fail — this is the primary-key collision");
+        .expect("release must not fail - this is the primary-key collision");
 
     assert_eq!(
         d.size().await.unwrap(),
@@ -344,7 +344,7 @@ async fn release_applies_the_requested_delay() {
     );
 }
 
-/// A zero delay makes the job immediately available again — the
+/// A zero delay makes the job immediately available again - the
 /// `WithoutOverlapping`-style "someone else holds the lock, try again" case.
 #[tokio::test]
 async fn release_with_no_delay_is_immediately_poppable_again() {
@@ -388,7 +388,7 @@ async fn release_does_not_burn_an_attempt_but_nack_does() {
     assert_eq!(
         after_nack.envelope.attempts,
         before + 1,
-        "nack still spends one — the two must not have collapsed into each other"
+        "nack still spends one - the two must not have collapsed into each other"
     );
 }
 
@@ -412,8 +412,8 @@ async fn release_is_idempotent_on_an_unknown_token() {
 // ---------------------------------------------------------------------------
 //
 // Finishing a chained job means enqueuing the successor AND releasing the job
-// just finished. As two operations there is no safe order — ack-first loses
-// the rest of the chain on a crash, push-first runs the successor twice — so
+// just finished. As two operations there is no safe order - ack-first loses
+// the rest of the chain on a crash, push-first runs the successor twice - so
 // the driver commits both or neither.
 
 /// The happy path, stated as the invariant: after settling, the successor is
@@ -439,7 +439,7 @@ async fn settle_commits_the_successor_and_the_ack_together() {
 }
 
 /// The fence. A worker whose visibility expired while it was busy must not
-/// enqueue a chain successor for a message someone else now owns — that is
+/// enqueue a chain successor for a message someone else now owns - that is
 /// exactly how a chain forks.
 #[tokio::test]
 async fn settle_on_a_reclaimed_reservation_commits_nothing() {
@@ -465,7 +465,7 @@ async fn settle_on_a_reclaimed_reservation_commits_nothing() {
     assert_eq!(
         d.size().await.unwrap(),
         1,
-        "A enqueued nothing and dropped nothing — B still holds the one message"
+        "A enqueued nothing and dropped nothing - B still holds the one message"
     );
 
     // B settles normally and its successor is the only one that lands.
@@ -543,8 +543,8 @@ async fn settle_without_follow_ups_still_fences() {
 //
 // The asymmetry is the bug. A job whose handler *fails* is nacked, and
 // `requeue(AttemptPolicy::Consume)` counts the attempt, so it dead-letters
-// after `max_tries`. A job that *kills its worker* settles nothing — the
-// reservation merely lapses — so the reclaim used to return it
+// after `max_tries`. A job that *kills its worker* settles nothing - the
+// reservation merely lapses - so the reclaim used to return it
 // byte-identical. That job is immortal: it kills each worker that claims
 // it, is reclaimed unchanged, and kills the next one, for as long as
 // anything restarts workers. Which, after the SIGTERM fix, is every
@@ -557,7 +557,7 @@ async fn reclaiming_a_lapsed_reservation_consumes_an_attempt() {
     let d = DatabaseQueueDriver::new(db, "jobs".into()).unwrap();
     d.push(env("poison")).await.unwrap();
 
-    // Claim it, then walk away without settling — exactly what a worker
+    // Claim it, then walk away without settling - exactly what a worker
     // that is SIGKILLed or aborts mid-handler leaves behind. A zero
     // visibility timeout makes the reservation lapse immediately, so the
     // test does not have to sleep through a real one.
@@ -614,7 +614,7 @@ async fn a_reclaim_advances_the_stored_column_and_the_envelope_together() {
     assert_eq!(
         i32::try_from(reclaimed.envelope.attempts).expect("attempts fits an i32"),
         stored,
-        "column and envelope must not disagree — the worker reads the envelope"
+        "column and envelope must not disagree - the worker reads the envelope"
     );
 }
 

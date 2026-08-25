@@ -1,6 +1,6 @@
 //! Todo actions
 //!
-//! Phase 10A T11 — these actions now go through the migrated
+//! Phase 10A T11 - these actions now go through the migrated
 //! `#[suprnova::model]` `Todo` type. `Todo::create(attrs!{...})` covers
 //! the create path, `Todo::all()` covers the listing path; the old
 //! `EntityExt` / `EntityExtMut` direct entity calls are gone.

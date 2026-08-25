@@ -75,8 +75,8 @@ async fn build_request(builder: hyper::http::request::Builder) -> Request {
 }
 
 /// The default-key signature observed by the test. We mirror what
-/// `ThrottleRequestsMiddleware::with` would inject — `format!("ip:{ip}:path:{}", ...)`
-/// — without exposing the private `default_request_key` symbol.
+/// `ThrottleRequestsMiddleware::with` would inject - `format!("ip:{ip}:path:{}", ...)` -
+/// without exposing the private `default_request_key` symbol.
 fn default_key(req: &Request) -> String {
     let ip = req.ip().unwrap_or_else(|| "unknown".into());
     format!("ip:{ip}:path:{}", req.path())
@@ -91,7 +91,7 @@ async fn default_key_uses_peer_when_xff_untrusted() {
     )
     .await
     .with_peer_addr(IpAddr::from([198, 51, 100, 2]));
-    // Empty allowlist (default) — XFF must NOT be honoured.
+    // Empty allowlist (default) - XFF must NOT be honoured.
     assert_eq!(default_key(&req), "ip:198.51.100.2:path:/api/posts");
 }
 
@@ -113,8 +113,8 @@ async fn default_key_honors_xff_when_peer_is_trusted() {
 #[tokio::test]
 async fn default_key_returns_unknown_when_no_peer() {
     let req = build_request(hyper::Request::builder().uri("/api/posts")).await;
-    // No peer — the literal fallback. Critically, this is NOT a
-    // shared `"anon"` bucket — the path is part of the key so two
+    // No peer - the literal fallback. Critically, this is NOT a
+    // shared `"anon"` bucket - the path is part of the key so two
     // routes don't collide.
     assert_eq!(default_key(&req), "ip:unknown:path:/api/posts");
 }

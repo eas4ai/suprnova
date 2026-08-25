@@ -1,4 +1,4 @@
-//! Failed second-factor attempts feed 05's lockout accounting — the ported
+//! Failed second-factor attempts feed 05's lockout accounting - the ported
 //! cross-provider brute-force integration contract.
 
 #![cfg(all(

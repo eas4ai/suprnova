@@ -1,4 +1,4 @@
-//! Phase 9B — MariaDB vector driver via direct `sqlx`.
+//! Phase 9B - MariaDB vector driver via direct `sqlx`.
 //!
 //! Talks to MariaDB over its MySQL-compatible wire protocol. A thin adapter
 //! that satisfies [`VectorDriver`] while preserving the framework's `String`
@@ -9,7 +9,7 @@
 //! `VECTOR(N)` and `VEC_DISTANCE_*` builtins land in **MariaDB 11.7+**. The
 //! driver runs a `SELECT VERSION()` on first use and rejects anything older
 //! with [`FrameworkError::internal`]. The result is cached in a
-//! [`tokio::sync::OnceCell`] — *definitive* outcomes (verified ≥ 11.7, or
+//! [`tokio::sync::OnceCell`] - *definitive* outcomes (verified ≥ 11.7, or
 //! a parsed pre-11.7 / non-MariaDB version string) stick across calls.
 //! Transient query failures (lazy-connect first-dial timeout, brief
 //! network blip, restart-induced auth gap) are NOT cached, so the next
@@ -28,12 +28,12 @@
 //! ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 //! ```
 //!
-//! Use [`MariaDbVectorDriver::ensure_table_sql`] to emit this string —
+//! Use [`MariaDbVectorDriver::ensure_table_sql`] to emit this string -
 //! paste it into your migration. **The driver does not auto-create
 //! tables**: schema is a migration concern, not a runtime side-effect.
 //!
 //! The index's `DISTANCE=` clause must match the function the driver
-//! uses at query time (set via [`MariaDbVectorDriver::with_distance`]) —
+//! uses at query time (set via [`MariaDbVectorDriver::with_distance`]) -
 //! mismatched pairs silently fall back to a full table scan per the
 //! MariaDB docs. The recommended path is
 //! [`MariaDbVectorDriver::ensure_table_sql_for`], which reads
@@ -43,7 +43,7 @@
 //! generators that haven't built a driver yet, but the caller is
 //! responsible for passing the same distance to both ends.
 //!
-//! # ID mapping — there is none
+//! # ID mapping - there is none
 //!
 //! `VARCHAR(255)` accepts arbitrary strings. [`VectorItem::id`] passes
 //! through unchanged; similarity hits round-trip the same string in
@@ -54,7 +54,7 @@
 //! Store names interpolate directly into `CREATE`/`INSERT`/`SELECT`
 //! statements (sqlx does not parameterize identifiers). The driver
 //! validates names through [`MariaDbVectorDriver::validate_store_name`]
-//! at every entry point — empty / too long / non-`[A-Za-z_][A-Za-z0-9_]*`
+//! at every entry point - empty / too long / non-`[A-Za-z_][A-Za-z0-9_]*`
 //! names are rejected with [`FrameworkError::param`]. All emitted SQL
 //! backtick-quotes the validated name for defense in depth.
 //!
@@ -73,8 +73,8 @@
 //!
 //! # Trapdoor
 //!
-//! When you outgrow the trait surface — additional columns on the same
-//! table, raw `VEC_TOTEXT` reads, batched joins — drop down to
+//! When you outgrow the trait surface - additional columns on the same
+//! table, raw `VEC_TOTEXT` reads, batched joins - drop down to
 //! [`MariaDbVectorDriver::pool`] for the underlying `sqlx::MySqlPool`.
 //! The [`MariaDbVectorDriver::embedding_to_vec_text`],
 //! [`MariaDbVectorDriver::score_from_distance`] and
@@ -107,7 +107,7 @@ const DELETE_BATCH_SIZE: usize = 1000;
 const UPSERT_BATCH_SIZE: usize = 500;
 
 /// Build the `VALUES (?, VEC_FROMTEXT(?), ?), (...) ...` clause used
-/// by the batched upsert. Extracted for pure-fn testability — the
+/// by the batched upsert. Extracted for pure-fn testability - the
 /// template is entirely framework-controlled (no user input), so the
 /// only failure mode is row_count mismatch with caller binds, which
 /// the unit tests pin.
@@ -127,7 +127,7 @@ fn upsert_values_clause(row_count: usize) -> String {
 /// consistent across drivers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MariaDbDistance {
-    /// Cosine distance — `1 - cos(θ)`, range `[0, 2]`.
+    /// Cosine distance - `1 - cos(θ)`, range `[0, 2]`.
     #[default]
     Cosine,
     /// Euclidean (L2) distance, range `[0, ∞)`.
@@ -162,7 +162,7 @@ pub struct MariaDbVectorDriver {
     /// Cached `SELECT VERSION()` result. Populated lazily on first use:
     /// `Ok(())` once verified ≥ 11.7; `Err(msg)` once a pre-11.7 server
     /// (or non-MariaDB) is *definitively* detected (server responded
-    /// with a string we could parse). Definitive results stick — we
+    /// with a string we could parse). Definitive results stick - we
     /// don't keep hammering the server.
     ///
     /// Transient *query* failures (connection refused, timeout,
@@ -196,7 +196,7 @@ impl MariaDbVectorDriver {
 
     /// Build a lazy-connect pool from a MySQL/MariaDB URL. The pool
     /// validates URL syntax but does NOT open a connection until the
-    /// first query — so `Vector::register(...)` at bootstrap is safe
+    /// first query - so `Vector::register(...)` at bootstrap is safe
     /// even before the database is reachable.
     ///
     /// First operation absorbs the connection cost; if the URL points
@@ -262,7 +262,7 @@ impl MariaDbVectorDriver {
 
     /// Emit the `CREATE TABLE IF NOT EXISTS` SQL for a store *using
     /// this driver's configured distance*. The recommended call when
-    /// the driver is already constructed — guarantees the index's
+    /// the driver is already constructed - guarantees the index's
     /// `DISTANCE=` clause matches the function `similar` will use,
     /// because both read from `self.distance`.
     ///
@@ -273,11 +273,11 @@ impl MariaDbVectorDriver {
         Self::ensure_table_sql(table, dim, self.distance)
     }
 
-    /// Static form of [`ensure_table_sql_for`] — emits the
+    /// Static form of [`ensure_table_sql_for`] - emits the
     /// `CREATE TABLE IF NOT EXISTS` SQL when you don't have a driver
     /// in scope (CLI migration generators, build scripts). The
     /// **caller is responsible** for passing the same `MariaDbDistance`
-    /// value they'll later use via [`with_distance`] — MariaDB silently
+    /// value they'll later use via [`with_distance`] - MariaDB silently
     /// falls back to a full table scan when the function used at query
     /// time doesn't match the index's `DISTANCE=` clause. Prefer
     /// [`ensure_table_sql_for`] in code paths where a driver is
@@ -314,7 +314,7 @@ impl MariaDbVectorDriver {
     /// `VEC_FROMTEXT` accepts: `[1,2,3.5,-0.7]`.
     ///
     /// Errors if the embedding is empty or contains any non-finite
-    /// value (`NaN`, `±Infinity`) — JSON does not represent those
+    /// value (`NaN`, `±Infinity`) - JSON does not represent those
     /// and MariaDB would reject them anyway. Finite floats serialize
     /// via `f32`'s `Display` impl, which produces the shortest
     /// round-trippable JSON-number representation.
@@ -345,8 +345,8 @@ impl MariaDbVectorDriver {
     /// score where higher = more similar. See the module docs for the
     /// per-metric formula.
     ///
-    /// Negative inputs (which shouldn't happen — distances are
-    /// non-negative — but float arithmetic can dip below zero) are
+    /// Negative inputs (which shouldn't happen - distances are
+    /// non-negative - but float arithmetic can dip below zero) are
     /// clamped to 0 before conversion.
     pub fn score_from_distance(distance: MariaDbDistance, raw: f32) -> f32 {
         let d = raw.max(0.0);
@@ -358,8 +358,8 @@ impl MariaDbVectorDriver {
 
     /// Run the `SELECT VERSION()` check at most once per driver per
     /// successful execution path. The cell stores the *definitive*
-    /// result — `Ok(())` once verified ≥ 11.7, `Err(msg)` once a
-    /// pre-11.7 server (or non-MariaDB) is identified — and subsequent
+    /// result - `Ok(())` once verified ≥ 11.7, `Err(msg)` once a
+    /// pre-11.7 server (or non-MariaDB) is identified - and subsequent
     /// calls short-circuit through it.
     ///
     /// **Transient failures are not cached.** If the `VERSION()` query
@@ -378,11 +378,11 @@ impl MariaDbVectorDriver {
                     .fetch_one(&*pool)
                     .await
                     .map_err(|e| {
-                        // Transient query failure — bubble out so the
+                        // Transient query failure - bubble out so the
                         // next call retries. Not cached.
                         FrameworkError::internal(format!("mariadb VERSION() query failed: {e}"))
                     })?;
-                // Server responded — the version check itself is
+                // Server responded - the version check itself is
                 // deterministic and its result IS cached, sticky.
                 Ok::<_, FrameworkError>(check_mariadb_117(&row.0))
             })
@@ -395,7 +395,7 @@ impl MariaDbVectorDriver {
 
     /// Verify the table's `VECTOR INDEX ... DISTANCE=<clause>` matches
     /// `self.distance`. MariaDB does not error when a `VEC_DISTANCE_*`
-    /// function disagrees with the index's distance — it silently falls
+    /// function disagrees with the index's distance - it silently falls
     /// back to a full table scan, leaving users with mysteriously slow
     /// queries. This check catches the mismatch at the framework
     /// boundary so the error surfaces clearly instead of as a
@@ -408,7 +408,7 @@ impl MariaDbVectorDriver {
     /// trigger the check.
     ///
     /// The caller must have already validated `store` via
-    /// [`validate_store_name`] — the name is interpolated into the
+    /// [`validate_store_name`] - the name is interpolated into the
     /// emitted SQL.
     ///
     /// [`validate_store_name`]: Self::validate_store_name
@@ -432,7 +432,7 @@ impl MariaDbVectorDriver {
             Some(d) => d,
             None => {
                 return Err(FrameworkError::internal(format!(
-                    "mariadb vector store '{store}' has no VECTOR INDEX — run \
+                    "mariadb vector store '{store}' has no VECTOR INDEX - run \
                      ensure_table_sql_for to emit the canonical CREATE TABLE, \
                      or add `VECTOR INDEX (embedding) DISTANCE={}` to the \
                      table definition.",
@@ -446,7 +446,7 @@ impl MariaDbVectorDriver {
             return Err(FrameworkError::internal(format!(
                 "mariadb vector store '{store}' has VECTOR INDEX DISTANCE={table_distance} \
                  but the driver is configured with_distance({:?}). Mismatched distances \
-                 silently fall back to a full table scan — rebuild the table with \
+                 silently fall back to a full table scan - rebuild the table with \
                  DISTANCE={expected} or reconfigure the driver.",
                 self.distance
             )));
@@ -463,7 +463,7 @@ impl MariaDbVectorDriver {
 /// `VECTOR INDEX` line exists but omits the clause (MariaDB's own
 /// default); returns `None` when there is no `VECTOR INDEX` at all.
 ///
-/// Token-based parse — searches the line for `DISTANCE=cosine` or
+/// Token-based parse - searches the line for `DISTANCE=cosine` or
 /// `DISTANCE=euclidean` substrings, in that order. Both are the only
 /// values MariaDB accepts for the clause as of 11.7, so a future
 /// metric would need an explicit update here anyway.
@@ -476,7 +476,7 @@ fn extract_vector_index_distance(ddl: &str) -> Option<&'static str> {
             if line.contains("DISTANCE=euclidean") {
                 return Some("euclidean");
             }
-            // VECTOR INDEX present without explicit DISTANCE — MariaDB
+            // VECTOR INDEX present without explicit DISTANCE - MariaDB
             // defaults to euclidean per its docs.
             return Some("euclidean");
         }
@@ -488,7 +488,7 @@ fn extract_vector_index_distance(ddl: &str) -> Option<&'static str> {
 ///
 /// MariaDB embeds a legacy `5.5.5-` prefix in many connector contexts
 /// (so MySQL clients see a "fake" 5.5.5 first), with the real version
-/// after — e.g. `"5.5.5-11.7.2-MariaDB-1:11.7.2+maria~ubu2404"`. We
+/// after - e.g. `"5.5.5-11.7.2-MariaDB-1:11.7.2+maria~ubu2404"`. We
 /// strip that prefix when present, then parse `MAJOR.MINOR.*` from the
 /// remainder. Anything without "MariaDB" anywhere in the string is
 /// rejected to keep the driver from running against a regular MySQL.
@@ -496,7 +496,7 @@ fn check_mariadb_117(version: &str) -> Result<(), String> {
     if !version.contains("MariaDB") {
         return Err(format!(
             "mariadb vector driver requires MariaDB 11.7+; \
-             VERSION() returned '{version}' (no 'MariaDB' marker — \
+             VERSION() returned '{version}' (no 'MariaDB' marker - \
              is this a MySQL server?)"
         ));
     }
@@ -519,7 +519,7 @@ fn check_mariadb_117(version: &str) -> Result<(), String> {
 }
 
 /// Validate that a [`VectorItem`]'s metadata is either a JSON object
-/// or `null` — the only shapes the schema's `JSON` column accepts in a
+/// or `null` - the only shapes the schema's `JSON` column accepts in a
 /// way that round-trips through the driver. Other JSON kinds (arrays,
 /// primitives) are rejected with `FrameworkError::param` for parity
 /// with the Qdrant and Pinecone drivers.
@@ -545,11 +545,11 @@ impl VectorDriver for MariaDbVectorDriver {
         }
         self.ensure_version().await?;
 
-        // Batched multi-row INSERT — one statement per chunk of
+        // Batched multi-row INSERT - one statement per chunk of
         // `UPSERT_BATCH_SIZE` rows, all wrapped in a single transaction.
         // Cuts round-trips by ~500x vs per-row INSERTs on bulk loads
         // (1536-dim embedding corpora hitting 100k+ rows). Any per-batch
-        // failure rolls back every preceding batch — the whole call
+        // failure rolls back every preceding batch - the whole call
         // remains atomic.
         let mut tx = self
             .pool
@@ -668,7 +668,7 @@ impl VectorDriver for MariaDbVectorDriver {
         // MariaDB's `max_allowed_packet` (default 64 MiB; reasonable
         // deployments tune it down to 16 MiB). 1000 placeholders per
         // batch keeps the serialized statement comfortably under any
-        // sensible packet ceiling — even worst-case 255-byte VARCHAR
+        // sensible packet ceiling - even worst-case 255-byte VARCHAR
         // ids leave ~250 KiB of overhead. All batches run inside one
         // transaction so the call is atomic: any per-batch failure
         // rolls back every preceding batch.
@@ -732,7 +732,7 @@ mod upsert_clause_tests {
 
     #[test]
     fn zero_rows_produces_empty_string() {
-        // Caller is expected to short-circuit on empty input — but the
+        // Caller is expected to short-circuit on empty input - but the
         // helper itself is total over usize.
         assert_eq!(upsert_values_clause(0), "");
     }
@@ -792,7 +792,7 @@ mod distance_extract_tests {
 
     #[test]
     fn matches_canonical_ensure_table_sql_output() {
-        // Pin parity with our own emitter — if ensure_table_sql ever
+        // Pin parity with our own emitter - if ensure_table_sql ever
         // changes its line format, this test fails first.
         let sql = super::MariaDbVectorDriver::ensure_table_sql(
             "documents",

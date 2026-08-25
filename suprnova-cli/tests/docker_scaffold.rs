@@ -1,4 +1,4 @@
-//! CI-02 — build the image a scaffolded project actually ships with.
+//! CI-02 - build the image a scaffolded project actually ships with.
 //!
 //! `scaffold_snapshot` scaffolds a project, repoints its `suprnova`
 //! dependency at the in-tree framework, and runs `cargo check`. That
@@ -15,7 +15,7 @@
 //!
 //! This test closes that gap: scaffold, build the image with the real
 //! Dockerfile and the real pinned git tag, then run the migrator inside
-//! the resulting container. Nothing is rewritten — the point is to
+//! the resulting container. Nothing is rewritten - the point is to
 //! exercise what a user gets.
 //!
 //! **`#[ignore]`d by default.** It needs Docker, network access, and a
@@ -30,7 +30,7 @@
 //!
 //! Docker cannot `COPY` from outside the build context, so a local-path
 //! dependency would mean vendoring the framework into the project and
-//! editing the generated Dockerfile to copy it — at which point the thing
+//! editing the generated Dockerfile to copy it - at which point the thing
 //! under test is no longer the Dockerfile we ship.
 //!
 //! Resolving the real `tag = "v<version>"` is also the more honest test:
@@ -69,7 +69,7 @@ fn scaffold(tmp: &TempDir, name: &str) -> PathBuf {
     scaffold_with(tmp, name, &[])
 }
 
-/// `suprnova new <name>` with extra flags — `--api` selects the
+/// `suprnova new <name>` with extra flags - `--api` selects the
 /// frontend-free scaffold, whose Docker story is completely different.
 fn scaffold_with(tmp: &TempDir, name: &str, extra: &[&str]) -> PathBuf {
     let output = Command::new(cli_binary())
@@ -90,7 +90,7 @@ fn scaffold_with(tmp: &TempDir, name: &str, extra: &[&str]) -> PathBuf {
     tmp.path().join(name)
 }
 
-/// `suprnova docker:init` — the Dockerfile is not part of `new`'s output,
+/// `suprnova docker:init` - the Dockerfile is not part of `new`'s output,
 /// it is generated on demand into an existing project.
 fn docker_init(project: &Path) {
     let output = Command::new(cli_binary())
@@ -130,7 +130,7 @@ fn docker_rmi(tag: &str) {
 /// The headline gate: a freshly scaffolded project builds into an image,
 /// and the binary in that image runs.
 #[test]
-#[ignore = "needs Docker, network, and a full release build — run with --ignored"]
+#[ignore = "needs Docker, network, and a full release build - run with --ignored"]
 fn a_fresh_scaffold_builds_and_runs_its_image() {
     require_docker();
 
@@ -146,7 +146,7 @@ fn a_fresh_scaffold_builds_and_runs_its_image() {
         "the generated Dockerfile must build a fresh scaffold. Build log:\n{log}"
     );
 
-    // Building is not enough — REL-01b's `default-run` defect produced an
+    // Building is not enough - REL-01b's `default-run` defect produced an
     // image whose binary could not be selected. Run the migrator against
     // the default SQLite URL and require a clean exit.
     let run = Command::new("docker")
@@ -187,7 +187,7 @@ fn a_fresh_scaffold_builds_and_runs_its_image() {
 /// resolving the dependency graph, so this catches the regression in
 /// under a second. It is stronger than the template assertion in
 /// `template_drift` because it runs after `{package_name}` substitution
-/// and after cargo has actually parsed the TOML — a template that emitted
+/// and after cargo has actually parsed the TOML - a template that emitted
 /// the key into a comment, or produced invalid TOML, passes there and
 /// fails here.
 ///
@@ -252,7 +252,7 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
         "a scaffolded project declares {bins:?} and must name a `default-run`, \
          substituted to the package name. Without it `cargo run` refuses to \
          pick, and every `suprnova migrate` / `schedule:work` / `web:run` \
-         wrapper — which shells out to `cargo run` inside the project — fails \
+         wrapper - which shells out to `cargo run` inside the project - fails \
          before doing any work."
     );
 }
@@ -261,8 +261,8 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
 ///
 /// `docker:init` emitted one Dockerfile for every project shape through
 /// v0.7.2, and it was the full-stack one. An API project has no
-/// `frontend/`, so the image's very first instruction —
-/// `COPY frontend/package.json` — failed and `suprnova new --api` +
+/// `frontend/`, so the image's very first instruction -
+/// `COPY frontend/package.json` - failed and `suprnova new --api` +
 /// `docker:init` + `docker build` could not succeed at all.
 ///
 /// The static assertions in `template_drift` check the template does not
@@ -272,7 +272,7 @@ fn a_fresh_scaffold_resolves_a_default_binary() {
 /// made every scaffolded image unbuildable, and only a real build found
 /// them.
 #[test]
-#[ignore = "needs Docker, network, and a full release build — run with --ignored"]
+#[ignore = "needs Docker, network, and a full release build - run with --ignored"]
 fn a_fresh_api_scaffold_builds_its_image() {
     require_docker();
 
@@ -284,12 +284,12 @@ fn a_fresh_api_scaffold_builds_its_image() {
     // otherwise keep passing for the wrong reason.
     assert!(
         !project.join("frontend").exists(),
-        "an --api scaffold must have no frontend/ — if it grew one, the \
+        "an --api scaffold must have no frontend/ - if it grew one, the \
          API Dockerfile needs a frontend stage after all"
     );
     assert!(
         !project.join("cmd").exists(),
-        "an --api scaffold must have no cmd/ — its server bin is src/main.rs"
+        "an --api scaffold must have no cmd/ - its server bin is src/main.rs"
     );
 
     docker_init(&project);
@@ -298,7 +298,7 @@ fn a_fresh_api_scaffold_builds_its_image() {
         .expect("docker:init wrote a Dockerfile");
     // Instructions only. The API template's own header comment explains
     // that an API project has no `frontend/`, so a raw substring check
-    // matches the explanation and fails on a correct file — which is
+    // matches the explanation and fails on a correct file - which is
     // exactly what it did on the first run of this test.
     let instructions: String = dockerfile
         .lines()

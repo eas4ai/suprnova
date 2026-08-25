@@ -37,7 +37,7 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
     http_bytes.extend_from_slice(format!("Content-Length: {content_length}\r\n\r\n").as_bytes());
     http_bytes.extend_from_slice(&body);
 
-    // Duplex buffer must hold the entire request — for oversize-rejection
+    // Duplex buffer must hold the entire request - for oversize-rejection
     // tests (6 MiB body in Task 5) the client writes synchronously before
     // the server can read.
     let (client_io, server_io) = tokio::io::duplex(64 * 1024 + content_length);
@@ -85,13 +85,13 @@ pub async fn request_from_multipart(boundary: &str, body: Bytes) -> Request {
 /// wire payload. The bytes you pass must be a complete HTTP request
 /// (request line, headers, blank line, body). This drives the same
 /// duplex-pipe pattern as `request_from_multipart` but lets the caller
-/// control every header — needed for the body-cap tests, which want
+/// control every header - needed for the body-cap tests, which want
 /// honest, lying, and absent `Content-Length`.
 async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
     let (req_tx, req_rx) = oneshot::channel::<Request>();
     let req_tx = Mutex::new(Some(req_tx));
 
-    // Duplex buffer must fit the whole request — the client writes
+    // Duplex buffer must fit the whole request - the client writes
     // synchronously before the server task gets to read.
     let duplex_cap = http_bytes.len() + 64 * 1024;
     let (client_io, server_io) = tokio::io::duplex(duplex_cap);
@@ -104,7 +104,7 @@ async fn request_from_http_bytes(http_bytes: Vec<u8>) -> Request {
             {
                 let _ = tx.send(wrapped);
             }
-            // Never resolve — see request_from_multipart for the rationale.
+            // Never resolve - see request_from_multipart for the rationale.
             async {
                 std::future::pending::<()>().await;
                 Ok::<_, Infallible>(hyper::Response::new(http_body_util::Empty::<Bytes>::new()))

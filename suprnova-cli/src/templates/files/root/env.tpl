@@ -6,7 +6,7 @@ APP_URL=http://localhost:8765
 # 32-byte AES-256 key (URL-safe base64, no padding) used to encrypt
 # session cookies, pagination cursors, and anything that goes through
 # `suprnova::Crypt`. Generated at scaffold time by `suprnova new`;
-# rotate with `suprnova key:generate`. Required in production —
+# rotate with `suprnova key:generate`. Required in production -
 # Suprnova fails closed on boot when APP_ENV is not local/dev/test
 # and APP_KEY is unset.
 APP_KEY={app_key}
@@ -69,8 +69,8 @@ APP_FALLBACK_LOCALE=en
 # catcher (maildev / mailpit / mailhog, which listen on 1025). Setting
 # exactly one is treated as a misconfiguration and warns at boot.
 #
-# MAIL_SMTP_ENCRYPTION is derived from the credentials when left unset —
-# `starttls` with them, `none` without — so this file works against a
+# MAIL_SMTP_ENCRYPTION is derived from the credentials when left unset -
+# `starttls` with them, `none` without - so this file works against a
 # local catcher as-is. Set it to `tls` for a relay expecting implicit TLS
 # on 465. Production refuses to boot on an unencrypted connection; the
 # escape hatch is MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION=true, which is

@@ -74,7 +74,7 @@ fn match_channel_pattern(pattern: &str, concrete: &str) -> Option<ChannelParams>
     Some(params)
 }
 
-/// Count the literal (non-`{param}`) segments of a pattern — used to rank
+/// Count the literal (non-`{param}`) segments of a pattern - used to rank
 /// competing matches so the most specific pattern wins.
 fn pattern_literal_count(pattern: &str) -> usize {
     pattern
@@ -95,7 +95,7 @@ fn is_pattern(name: &str) -> bool {
 /// [`BroadcastingWsHandler`](crate::broadcasting::BroadcastingWsHandler)
 /// resolves them by name when parsing client envelopes.
 ///
-/// # Default behavior — asymmetric by design
+/// # Default behavior - asymmetric by design
 ///
 /// - [`authorize`](Self::authorize) defaults to `true` (subscribe is
 ///   **public by default**). Most channels accept any subscriber; private
@@ -140,7 +140,7 @@ pub trait Channel: Send + Sync + 'static {
     /// Override to gate by session, role, room membership, etc.
     ///
     /// `params` carries the values captured from a parameterized
-    /// [`name`](Self::name) — e.g. `params.get("id")` for `"orders.{id}"` —
+    /// [`name`](Self::name) - e.g. `params.get("id")` for `"orders.{id}"` -
     /// and is empty for fixed-name channels. `data` is the optional payload
     /// the client sent alongside the subscribe envelope (typically an auth
     /// token or signed channel-bind blob).
@@ -160,7 +160,7 @@ pub trait Channel: Send + Sync + 'static {
     /// server-side broadcasting channels never want client-initiated
     /// events; this default matches that expectation. Note that this
     /// hook only governs `ClientFrame::Publish` received over the
-    /// WebSocket connection — server-side `hub.publish()` calls are
+    /// WebSocket connection - server-side `hub.publish()` calls are
     /// unaffected and bypass this gate entirely.
     ///
     /// `params` carries the captured values from a parameterized
@@ -179,7 +179,7 @@ pub trait Channel: Send + Sync + 'static {
     /// cast as `&dyn PresenceChannel`. Default: `None` (non-presence).
     ///
     /// Implementers of [`PresenceChannel`] must override this to return
-    /// `Some(self)` — this is the detection hook used by
+    /// `Some(self)` - this is the detection hook used by
     /// `BroadcastingWsHandler` at subscribe time (T6).
     ///
     /// # Example
@@ -215,15 +215,15 @@ pub trait Channel: Send + Sync + 'static {
 /// implementing `PrivateChannel`).
 pub trait PrivateChannel: Channel {}
 
-/// Channel with presence semantics — emits `presence.joined` /
+/// Channel with presence semantics - emits `presence.joined` /
 /// `presence.left` events when subscribers attach or detach. T6
 /// wires the actual emission in `BroadcastingWsHandler`.
 ///
-/// # Two-part contract — easy to half-implement
+/// # Two-part contract - easy to half-implement
 ///
 /// Implementing `PresenceChannel` is **not enough** on its own. The
 /// `BroadcastingWsHandler` detects presence by calling
-/// [`Channel::presence_info`] — whose default returns `None`. A channel
+/// [`Channel::presence_info`] - whose default returns `None`. A channel
 /// that implements `PresenceChannel` but forgets to override
 /// `presence_info` is wired as a non-presence channel: subscribes work,
 /// but `presence.joined` / `presence.left` / `presence.here` never fire
@@ -243,7 +243,7 @@ pub trait PrivateChannel: Channel {}
 /// impl Channel for Lobby {
 ///     fn name(&self) -> &'static str { "presence.lobby" }
 ///
-///     // Required for presence semantics to fire — without this override
+///     // Required for presence semantics to fire - without this override
 ///     // `PresenceChannel` is wired but inert.
 ///     fn presence_info(&self) -> Option<&dyn PresenceChannel> {
 ///         Some(self)
@@ -344,11 +344,11 @@ impl ChannelRegistry {
     ///
     /// Resolution order: an **exact** (fixed-name) registration wins outright;
     /// otherwise the concrete name is matched against every registered
-    /// `{param}` pattern and the **most specific** match wins — most literal
+    /// `{param}` pattern and the **most specific** match wins - most literal
     /// segments first, then the lexicographically smallest pattern as a
     /// deterministic tie-break. Returns `None` when nothing matches.
     pub fn resolve(&self, name: &str) -> Option<(BoxedChannel, ChannelParams)> {
-        // Exact match wins — covers every fixed-name channel, and a literal
+        // Exact match wins - covers every fixed-name channel, and a literal
         // registration that competes with a pattern (`chat.lobby` beats
         // `chat.{room}`).
         if let Some(ch) = self.channels.get(name) {
@@ -487,7 +487,7 @@ mod tests {
         r.register(DummyChannel { name: "{a}.{b}" }); // 0 literal segments
         r.register(DummyChannel {
             name: "orders.{id}",
-        }); // 1 literal — more specific
+        }); // 1 literal - more specific
         let (ch, params) = r.resolve("orders.5").expect("match");
         assert_eq!(ch.name(), "orders.{id}");
         assert_eq!(params.get("id"), Some("5"));

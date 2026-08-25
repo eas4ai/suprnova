@@ -1,4 +1,4 @@
-//! Presence channel tests — join broadcasts `presence.joined` to
+//! Presence channel tests - join broadcasts `presence.joined` to
 //! existing subscribers, `presence.here` snapshot to the new one,
 //! and `presence.left` on disconnect.
 
@@ -190,7 +190,7 @@ async fn presence_channel_emits_here_to_new_subscriber() {
         "expected empty members list for first subscriber, got {frame}"
     );
 
-    // Frame 3: presence.joined for Alice herself (hub echo — self-join).
+    // Frame 3: presence.joined for Alice herself (hub echo - self-join).
     let frame = next_frame(&mut alice).await;
     assert_eq!(
         frame["event"], "presence.joined",
@@ -228,7 +228,7 @@ async fn presence_channel_broadcasts_joined_to_existing_subscribers() {
     subscribe(&mut bob, "presence.lobby").await;
     let f = next_frame(&mut bob).await; // subscribed
     assert_eq!(f["action"], "subscribed");
-    let f = next_frame(&mut bob).await; // presence.here — Alice should be listed
+    let f = next_frame(&mut bob).await; // presence.here - Alice should be listed
     assert_eq!(f["event"], "presence.here");
     assert_eq!(
         f["data"]["members"].as_array().unwrap().len(),
@@ -309,7 +309,7 @@ async fn presence_channel_broadcasts_left_on_disconnect() {
     alice.close(None).await.unwrap();
 }
 
-/// Abrupt disconnect — Bob's connection is dropped without a Close
+/// Abrupt disconnect - Bob's connection is dropped without a Close
 /// frame, the way a browser tab close or OS-level RST disconnects.
 /// The teardown loop (untrack_member + `presence.left` publish +
 /// forwarder abort) must still run, so Alice receives `presence.left`
@@ -353,7 +353,7 @@ async fn presence_channel_broadcasts_left_on_abrupt_disconnect() {
 
     // Drop bob WITHOUT calling `close(None).await`. The tokio-tungstenite
     // client's Drop closes the underlying TCP socket without first sending
-    // a WS Close frame — the same way a browser tab close or OS-level RST
+    // a WS Close frame - the same way a browser tab close or OS-level RST
     // does. Teardown must still publish `presence.left` regardless of the
     // exit path the server-side handler observed (`Ok(None)` EOF or an
     // `Err` from recv_text / a pending send to a closed socket).
@@ -377,7 +377,7 @@ async fn presence_channel_broadcasts_left_on_abrupt_disconnect() {
 /// subscription. If teardown doesn't abort it on connection close, the
 /// receiver pins the channel's `receiver_count() > 0` forever and
 /// `sweep_dead_channels` (run on each new subscribe) can never reclaim
-/// it — a per-channel leak across every ungraceful disconnect. After
+/// it - a per-channel leak across every ungraceful disconnect. After
 /// an abrupt drop, the forwarder must be aborted; the hub's
 /// `subscriber_count` then returns to zero once the task winds down.
 #[tokio::test]
@@ -397,7 +397,7 @@ async fn subscriber_count_returns_to_zero_after_abrupt_disconnect() {
         "subscriber count should be 1 while alice is connected"
     );
 
-    // Abrupt disconnect — no Close frame.
+    // Abrupt disconnect - no Close frame.
     drop(alice);
 
     // Poll until subscriber_count drops to 0 or we hit the deadline. The
@@ -413,7 +413,7 @@ async fn subscriber_count_returns_to_zero_after_abrupt_disconnect() {
     assert_eq!(
         current, 0,
         "subscriber_count did not return to 0 within 2s after abrupt disconnect; \
-         the forwarder's broadcast::Receiver was not dropped — teardown never \
+         the forwarder's broadcast::Receiver was not dropped - teardown never \
          called .abort() on the forwarder JoinHandle"
     );
 }

@@ -1,4 +1,4 @@
-//! Phase 10B Task 1 — verifies the `Relation` trait shape + the
+//! Phase 10B Task 1 - verifies the `Relation` trait shape + the
 //! `RelationKind` enum covers every Eloquent relation flavour up-front.
 //!
 //! Concrete relation types (`HasOne`, `HasMany`, ...) land in T2-T7
@@ -33,7 +33,7 @@ fn relation_trait_dispatches_to_kind() {
 #[test]
 fn relation_kind_covers_every_eloquent_relation() {
     // T1 enumerates the full set up-front so T2-T7 only add concrete
-    // impls — they don't extend the enum.
+    // impls - they don't extend the enum.
     let _ = RelationKind::HasOne;
     let _ = RelationKind::BelongsTo;
     let _ = RelationKind::HasMany;

@@ -1,4 +1,4 @@
-//! Queue routing — `Queue::route`, `Job::queue`, and their precedence.
+//! Queue routing - `Queue::route`, `Job::queue`, and their precedence.
 //!
 //! Routing decides which worker pool drains which job, so the failure that
 //! matters is a *silent* one: a job that looks routed but lands on the default
@@ -199,7 +199,7 @@ async fn a_filtered_worker_takes_only_its_own_queue() {
     let got = d.pop_from(Duration::from_secs(60), &billing).await.unwrap();
     assert_eq!(got.expect("billing job").envelope.job_name, "a");
 
-    // Nothing else on `billing` — the reports and unrouted jobs are untouched.
+    // Nothing else on `billing` - the reports and unrouted jobs are untouched.
     assert!(
         d.pop_from(Duration::from_secs(60), &billing)
             .await

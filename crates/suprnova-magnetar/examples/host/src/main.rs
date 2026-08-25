@@ -404,7 +404,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     registry.init().await?;
     step("composed password, email-verification, and password-management plugins");
 
-    // J2.1: register — new email creates the user and mails a verification
+    // J2.1: register - new email creates the user and mails a verification
     // link; the generic response carries no session.
     let reply = split(
         registry
@@ -531,7 +531,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     assert_eq!(forgot.body, absent.body);
     step("forgot-password stayed anti-enumeration");
 
-    // J8.2: reset — token consumed atomically, password rotated, lockout
+    // J8.2: reset - token consumed atomically, password rotated, lockout
     // cleared, all sessions revoked, notification dispatched.
     let token = query_param(
         mail.last("password_reset")["reset_link"]
@@ -607,7 +607,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .expect("reset login established a session")
         .web_binding();
 
-    // J5: magic link — first-time email is a passwordless signup; the
+    // J5: magic link - first-time email is a passwordless signup; the
     // mailed link consumes once and signs in through the gate.
     let magic_email = "casey@example.test";
     let sent = split(

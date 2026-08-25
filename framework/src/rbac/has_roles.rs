@@ -19,7 +19,7 @@ fn int_value(i: i64) -> Value {
 ///
 /// `DB::select_one` / `DB::insert` / `DB::scalar` document that placeholders
 /// are the caller's job and must already match the backend. Every statement
-/// here used `?`, which Postgres rejects outright — so the whole RBAC
+/// here used `?`, which Postgres rejects outright - so the whole RBAC
 /// surface (roles, permissions, and every `has_role` / `has_permission`
 /// check built on it) failed on Postgres, silently unexercised because the
 /// suite is SQLite-only.
@@ -28,7 +28,7 @@ fn int_value(i: i64) -> Value {
 /// and only here: every statement in this module is a static string with
 /// sequential binds, no quoted literals, and no JSONB operators. Postgres
 /// spells three JSON operators `?`, `?|`, and `?&`, so the same shortcut in
-/// `DB`'s public helpers would corrupt a caller's containment query — which
+/// `DB`'s public helpers would corrupt a caller's containment query - which
 /// is why this stays module-local instead of moving up.
 fn render(sql: &str, backend: DatabaseBackend) -> String {
     if backend != DatabaseBackend::Postgres {
@@ -182,7 +182,7 @@ pub async fn give_permission_to_role_on_guard(
 
 /// Assign a role to a model on the default `"web"` guard.
 ///
-/// `model_type` is the model discriminator — for [`HasRoles`] implementors
+/// `model_type` is the model discriminator - for [`HasRoles`] implementors
 /// this is [`HasRoles::rbac_model_type`], which defaults to the
 /// fully-qualified Rust type path.
 pub async fn assign_role_to_model(
@@ -359,14 +359,14 @@ pub async fn has_permission_for_model_on_guard(
 /// The default model discriminator is the fully-qualified Rust type path
 /// (`crate::models::user::User`, not the short leaf `User`). Using the full
 /// path means two distinct authenticatable types that happen to share a leaf
-/// name cannot silently collide on the same `(model_type, model_id)` rows —
+/// name cannot silently collide on the same `(model_type, model_id)` rows -
 /// which would leak one type's roles and permissions onto the other.
 ///
 /// Override [`Self::rbac_model_type`] when an app wants a stable custom
 /// discriminator. Two requirements for any override:
 ///
 /// 1. **It must be globally unique** across every authenticatable type that
-///    shares the same RBAC tables — two types returning the same string will
+///    shares the same RBAC tables - two types returning the same string will
 ///    share roles and permissions for matching ids.
 /// 2. **Prefer an override for any persisted discriminator you depend on.**
 ///    `std::any::type_name` is *not* guaranteed stable across compiler
@@ -483,7 +483,7 @@ mod tests {
         let a = first::Account { id: 7 };
         let b = second::Account { id: 7 };
 
-        // Same leaf name, same id — but the discriminators must differ so
+        // Same leaf name, same id - but the discriminators must differ so
         // the two types cannot share roles/permissions rows.
         assert_ne!(
             a.rbac_model_type(),
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(
             render(sql, DatabaseBackend::Postgres),
             "SELECT id FROM roles WHERE name = $1 AND guard_name = $2 LIMIT 1",
-            "Postgres rejects `?` outright — this is the whole bug"
+            "Postgres rejects `?` outright - this is the whole bug"
         );
         for backend in [DatabaseBackend::Sqlite, DatabaseBackend::MySql] {
             assert_eq!(

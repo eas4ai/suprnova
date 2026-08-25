@@ -10,7 +10,7 @@
 //! # Template syntax
 //!
 //! Templates use [Tera](https://keats.github.io/tera/). The mailable's
-//! serialized fields are the rendering context — every `pub` field on the
+//! serialized fields are the rendering context - every `pub` field on the
 //! struct is reachable as `{{ field_name }}`.
 //!
 //! Autoescape is OFF because mail bodies are typically hand-authored HTML
@@ -45,7 +45,7 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Subject Tera template source. When `Some`, takes precedence over
     /// [`subject`](Self::subject) and is rendered through Tera with the
-    /// mailable's serialized fields as the context — same semantics as
+    /// mailable's serialized fields as the context - same semantics as
     /// [`html_template_source`](Self::html_template_source) and
     /// [`text_template_source`](Self::text_template_source).
     ///
@@ -78,14 +78,14 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
         Vec::new()
     }
 
-    /// Provider tags — matches Laravel `Mailable::tag()`. Postmark `Tag`,
+    /// Provider tags - matches Laravel `Mailable::tag()`. Postmark `Tag`,
     /// SES `Tags`, SendGrid `categories`, Mailgun `o:tag`, Resend `tags`.
     /// Default empty.
     fn tags(&self) -> Vec<String> {
         Vec::new()
     }
 
-    /// Provider metadata — matches Laravel `Mailable::metadata()`.
+    /// Provider metadata - matches Laravel `Mailable::metadata()`.
     /// Postmark `Metadata`, SES `Tags` (k/v), SendGrid `custom_args`,
     /// Mailgun `v:` prefixed variables, Resend headers. Default empty.
     fn metadata(&self) -> BTreeMap<String, String> {
@@ -129,7 +129,7 @@ pub trait Mailable: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Tera-renders that template with `self` as the context; otherwise
     /// returns `subject()` unchanged. The dispatch path
     /// (`MailBuilder::send`, the queue worker, the notification mail
-    /// channel) calls this — so a Tera-templated subject in any of the
+    /// channel) calls this - so a Tera-templated subject in any of the
     /// supported surfaces renders correctly without each call site
     /// reaching into the template source itself.
     fn render_subject(&self) -> Result<String, FrameworkError> {
@@ -179,7 +179,7 @@ fn render_with_self<M: Mailable>(
 /// dead-letters per the envelope's backoff policy.
 ///
 /// Re-registering the same name silently replaces the existing factory
-/// (last-write-wins) — matches the queue worker registry and the
+/// (last-write-wins) - matches the queue worker registry and the
 /// notification dispatcher's channel registration.
 pub fn register_mailable_factory<M: Mailable>() -> Result<(), FrameworkError> {
     crate::mail::mailable_registry::register::<M>()

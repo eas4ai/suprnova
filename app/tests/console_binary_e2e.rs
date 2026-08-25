@@ -3,7 +3,7 @@
 //! Spawns the compiled `console` binary as a subprocess and asserts
 //! on stdout / stderr / exit code. Complements
 //! `app/tests/console_greet.rs` (which calls `dispatch_argv`
-//! directly) by exercising everything around dispatch — the tokio
+//! directly) by exercising everything around dispatch - the tokio
 //! runtime flavor, env loading, ExitCode translation, and the
 //! lazy-bootstrap fast-path for help.
 
@@ -18,7 +18,7 @@ const CONSOLE_BIN: &str = env!("CARGO_BIN_EXE_console");
 #[test]
 fn help_works_without_database_env() {
     // The lazy-bootstrap fast-path means --help should succeed even
-    // when DATABASE_URL is unset — clap's parser short-circuits to
+    // when DATABASE_URL is unset - clap's parser short-circuits to
     // the help-print path before our bootstrap closure runs.
     // Use a temp dir as CWD so dotenvy can't reload DATABASE_URL
     // from the app's .env file.
@@ -90,7 +90,7 @@ fn unknown_command_exits_nonzero_with_clap_formatted_stderr() {
         stderr.contains("does-not-exist") || stderr.contains("unrecognized"),
         "clap formats an error message naming the bad input; got:\n{stderr}"
     );
-    // Single source of stderr — no redundant `error: ...` line
+    // Single source of stderr - no redundant `error: ...` line
     // following clap's formatted block. The unique substring "error:"
     // appears in clap's own output (e.g. "error: unrecognized
     // subcommand"); we assert it shows up at most once.

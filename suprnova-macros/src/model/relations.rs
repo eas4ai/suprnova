@@ -1,4 +1,4 @@
-//! Phase 10B T1 — relation emission for `#[suprnova::model]`.
+//! Phase 10B T1 - relation emission for `#[suprnova::model]`.
 //!
 //! Reads the `relations = { ... }` block parsed by [`super::parse`] and
 //! emits, per model:
@@ -11,7 +11,7 @@
 //! 2. Four dispatcher methods on the user struct (`__eager_load`,
 //!    `__recurse_eager_load`, `__count_relation`,
 //!    `__aggregate_relation`). T1 emits the skeletons with empty
-//!    matches — T2-T7 add arms per concrete relation type.
+//!    matches - T2-T7 add arms per concrete relation type.
 //! 3. The `pivot::<P>()` accessor for reading per-row pivot context
 //!    set by `BelongsToMany` loaders.
 //! 4. Per declared relation: `<rel>_loaded()` / `<rel>_count()`
@@ -39,7 +39,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
     let dispatch_impl = emit_dispatch_impl(struct_ident);
 
     // Build per-relation accessors + relation methods + inventory
-    // submissions. Each lives in its own `impl Self { ... }` block —
+    // submissions. Each lives in its own `impl Self { ... }` block -
     // a subsequent `cargo expand` clearly shows which methods came
     // from which relation declarations.
     let mut relation_methods: Vec<TokenStream> = Vec::new();
@@ -70,7 +70,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
 ///
 /// Also emits the `Sealed` supertrait impl. `EagerLoadDispatch` is
 /// language-sealed in the framework via a `__sealed::Sealed`
-/// supertrait — user code can't write `impl EagerLoadDispatch for X`
+/// supertrait - user code can't write `impl EagerLoadDispatch for X`
 /// because it can't write `impl Sealed for X` (the trait is reachable
 /// only through the doc-hidden `__private_eloquent` path; reaching it
 /// is the explicit "I know what I'm doing" gesture).
@@ -180,7 +180,7 @@ fn emit_dispatch_impl(struct_ident: &syn::Ident) -> TokenStream {
 /// the `HasOne` and `BelongsTo` arms. T3-T7 will keep extending the
 /// per-relation arm lists as more relation kinds land. The
 /// `predicate` parameter on `__eager_load` carries the user's
-/// optional `with_where` closure type-erased — concrete arms downcast
+/// optional `with_where` closure type-erased - concrete arms downcast
 /// it before applying (T9 wires the closure plumbing; T2 only fills
 /// the `HasOne` / `BelongsTo` arms which ignore the predicate for
 /// now).
@@ -219,7 +219,7 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
             /// arm only; relation tasks (T2-T7) extend the match.
             ///
             /// The `predicate` carries a type-erased `with_where`
-            /// closure — concrete arms downcast to the relation's
+            /// closure - concrete arms downcast to the relation's
             /// `Box<dyn FnOnce(Builder<R>) -> Builder<R>>` and apply
             /// before issuing the IN query. T1 ignores it.
             #[doc(hidden)]
@@ -285,8 +285,8 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
             /// Batched sibling of [`Self::__recurse_eager_load`]: recurse
             /// the next path segment across EVERY parent at once. Gathers
             /// all parents' cached children of `relation` into one slice,
-            /// issues a single IN query for the next segment, then recurses
-            /// — so a dotted path stays a constant number of queries
+            /// issues a single IN query for the next segment, then recurses -
+            /// so a dotted path stays a constant number of queries
             /// instead of N+1 per nested level. Used by the eager-load
             /// orchestrator for both `with(...)` and `load_missing(...)`.
             #[doc(hidden)]
@@ -336,7 +336,7 @@ fn emit_dispatchers(input: &ModelInput) -> Result<TokenStream> {
             /// Called by `with_sum(("posts", "views"))` and friends.
             /// T1 emits skeleton; T2-T7 add arms for the kinds that
             /// have a target column (HasMany / BelongsToMany /
-            /// Through / Morph many-to-* — NOT HasOne / BelongsTo).
+            /// Through / Morph many-to-* - NOT HasOne / BelongsTo).
             #[doc(hidden)]
             pub async fn __aggregate_relation(
                 relation: &str,
@@ -384,11 +384,11 @@ fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
             /// the failure mode:
             ///
             /// - If `__pivot` is empty, the row wasn't loaded through
-            ///   the m2m path — call `BelongsToMany::get()` instead of
+            ///   the m2m path - call `BelongsToMany::get()` instead of
             ///   `find()`.
             /// - If `__pivot` is populated but the requested `P` type
             ///   doesn't match what was stored, the call site passed
-            ///   the wrong pivot type — fix the turbofish.
+            ///   the wrong pivot type - fix the turbofish.
             pub fn pivot<P: ::std::any::Any + ::core::marker::Send + ::core::marker::Sync>(&self) -> &P {
                 match self.__pivot.as_ref() {
                     ::core::option::Option::None => ::std::panic!(
@@ -398,7 +398,7 @@ fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
                     ::core::option::Option::Some(arc) => match arc.downcast_ref::<P>() {
                         ::core::option::Option::Some(p) => p,
                         ::core::option::Option::None => ::std::panic!(
-                            "`{}` row's pivot is not of type `{}` — pass the correct pivot type to `pivot::<P>()`",
+                            "`{}` row's pivot is not of type `{}` - pass the correct pivot type to `pivot::<P>()`",
                             ::std::any::type_name::<Self>(),
                             ::std::any::type_name::<P>(),
                         ),
@@ -421,12 +421,12 @@ fn emit_pivot_accessor(struct_ident: &syn::Ident) -> TokenStream {
 /// `<rel>_count()` always returns `u64` and panics with a clear
 /// message when `with_count(["..."])` wasn't called.
 ///
-/// The four aggregate accessors —
+/// The four aggregate accessors -
 /// `<rel>_sum_of(col)` / `<rel>_avg_of(col)` returning `Option<f64>`
 /// and `<rel>_min_of(col)` / `<rel>_max_of(col)` returning
 /// `Option<Option<f64>>` (outer `Option` = "was `with_min`/`with_max`
 /// called?", inner `Option` = "is the result NULL because the group
-/// was empty?") — read the wide `<rel>_<kind>_<col>` cache cells.
+/// was empty?") - read the wide `<rel>_<kind>_<col>` cache cells.
 /// They return `None` when the matching `with_*` call was not made
 /// against the column; reading after the corresponding `with_*` call
 /// returns `Some(value)`.
@@ -454,9 +454,9 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
         _ => &rel.target,
     };
 
-    // The "loaded" accessor — kind-dependent return type.
+    // The "loaded" accessor - kind-dependent return type.
     let loaded = match rel.kind {
-        // Single-value kinds — read via get_one.
+        // Single-value kinds - read via get_one.
         RelationKindAttr::HasOne
         | RelationKindAttr::BelongsTo
         | RelationKindAttr::HasOneThrough
@@ -485,7 +485,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             }
         },
 
-        // Collection kinds — read via get_many; panics if not loaded.
+        // Collection kinds - read via get_many; panics if not loaded.
         RelationKindAttr::HasMany
         | RelationKindAttr::BelongsToMany
         | RelationKindAttr::HasManyThrough
@@ -495,7 +495,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             #[doc = "Read the eager-loaded rows for this relation."]
             #[doc = ""]
             #[doc = "Panics with a clear message if the relation was not \
-                     eager-loaded — call `.with([\"...\"])` on the query \
+                     eager-loaded - call `.with([\"...\"])` on the query \
                      builder before iterating."]
             pub fn #loaded_fn(&self) -> &[#target_ty] {
                 self.__eager.get_many::<#target_ty>(#name_str)
@@ -508,7 +508,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
     // out `Builder<Target>` on the closure parameter because the
     // predicate is type-erased through `Arc<dyn Any>`. The macro knows
     // the target type, so it can emit a typed wrapper that lets
-    // inference do the work. `MorphTo` is skipped — its target is `()`
+    // inference do the work. `MorphTo` is skipped - its target is `()`
     // / a per-family enum at T1, not a single `Model`, so no
     // `Builder<Target>` exists.
     let with_where_block = match rel.kind {
@@ -518,7 +518,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             #[doc = ""]
             #[doc = "Identical to `Self::with_where((\"<rel>\", |q| ...))` but with type \
                      inference picking up the closure parameter type from the method \
-                     signature — users don't need to spell out `Builder<Target>`."]
+                     signature - users don't need to spell out `Builder<Target>`."]
             pub fn #with_where_fn<F>(f: F) -> ::suprnova::Builder<Self>
             where
                 F: ::core::ops::Fn(
@@ -534,7 +534,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
         },
     };
 
-    // NOTE: we deliberately do NOT emit `impl Builder<#struct_ident>` —
+    // NOTE: we deliberately do NOT emit `impl Builder<#struct_ident>` -
     // Rust's orphan rules forbid inherent impls on a foreign generic
     // type even when its parameter is local, and threading a per-relation
     // extension trait into scope would defeat the ergonomic win. Users
@@ -551,7 +551,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
             #[doc = "Read the `with_count(\"...\")` aggregate for this relation."]
             #[doc = ""]
             #[doc = "Panics with a clear message if `with_count` wasn't called \
-                     for this relation — the spec requires loud failures over \
+                     for this relation - the spec requires loud failures over \
                      silent zeros."]
             pub fn #count_fn(&self) -> u64 {
                 self.__eager
@@ -568,7 +568,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                      relation and the given column."]
             #[doc = ""]
             #[doc = "Returns `None` if `with_sum` was not called for \
-                     this relation/column pair (silent miss — multiple \
+                     this relation/column pair (silent miss - multiple \
                      aggregates can compose on the same relation, so we \
                      don't panic on absent reads)."]
             pub fn #sum_of_fn(&self, col: &str) -> ::core::option::Option<f64> {
@@ -598,8 +598,8 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
                      relation and the given column."]
             #[doc = ""]
             #[doc = "Outer `Option` is \"did `with_min` populate this cell?\" \
-                     — `None` means the call was not made. Inner `Option` is \
-                     \"is the result NULL?\" — `Some(None)` means `with_min` \
+                     - `None` means the call was not made. Inner `Option` is \
+                     \"is the result NULL?\" - `Some(None)` means `with_min` \
                      was called but the group was empty (SQL's NULL-on-empty). \
                      `Some(Some(value))` is the populated, non-empty case."]
             pub fn #min_of_fn(
@@ -645,7 +645,7 @@ fn emit_relation_accessors(struct_ident: &syn::Ident, rel: &RelationDecl) -> Tok
 /// enumerate every relation in the binary; the has/where-has engine
 /// reads the join-metadata fields populated below.
 ///
-/// For `MorphTo` declarations the target type is the unit type `()` —
+/// For `MorphTo` declarations the target type is the unit type `()` -
 /// the per-family enum that stands in as the "real" target is
 /// generated locally by T6.
 fn emit_relation_inventory(
@@ -666,13 +666,13 @@ fn emit_relation_inventory(
     };
     let kind_variant = kind_to_runtime(rel.kind);
     // `RelationEntry::target_type_name` is `&'static str`, so we need
-    // a string literal at macro expansion time — `type_name::<T>()`
+    // a string literal at macro expansion time - `type_name::<T>()`
     // isn't a `const fn` and can't be used in an `inventory::submit!`
     // constant initialiser. We render the `syn::Type` via
     // `TokenStream::to_string()` and strip the spaces that `quote`
     // inserts between tokens, so `Vec<Post>` is stored as
     // `"Vec<Post>"` (not `"Vec < Post >"`) and `Option<i64>` as
-    // `"Option<i64>"` — Phase 8 admin renders this in the UI and
+    // `"Option<i64>"` - Phase 8 admin renders this in the UI and
     // the padded form is visually wrong.
     let target_type_lit = format_target_type(target_ty);
     let target_type_name = match rel.kind {
@@ -689,7 +689,7 @@ fn emit_relation_inventory(
     // Each branch computes the four/seven string slots
     // (target_table, foreign_key, parent_key, pivot_*, morph_*)
     // the existence-engine renders into `EXISTS (...)`. We emit
-    // `&'static str` literals — every value is either a parsed
+    // `&'static str` literals - every value is either a parsed
     // attribute string or a `const` accessor on `EloquentModel`,
     // which is const-evaluable inside `inventory::submit!`.
 
@@ -707,7 +707,7 @@ fn emit_relation_inventory(
         },
     };
 
-    // Target primary key — used by the existence engine to render
+    // Target primary key - used by the existence engine to render
     // `pivot.related = target.<pk>` joins. Read from the related model's
     // `const PRIMARY_KEY` so models with `primary_key = "uuid"` join
     // through the correct column. MorphTo has no single target table
@@ -761,11 +761,11 @@ fn emit_relation_inventory(
         // child's FK references (defaults to "id").
         RelationKindAttr::BelongsTo => lk_override(rel).unwrap_or("id").to_string(),
         // MorphTo: parent_key is the PK on the (variable) target
-        // table — Laravel default "id".
+        // table - Laravel default "id".
         RelationKindAttr::MorphTo => "id".to_string(),
     };
 
-    // Foreign key — what the child / pivot / morph row carries.
+    // Foreign key - what the child / pivot / morph row carries.
     let foreign_key_str = match rel.kind {
         RelationKindAttr::HasOne | RelationKindAttr::HasMany => fk_override(rel)
             .map(str::to_string)
@@ -932,7 +932,7 @@ fn emit_relation_inventory(
 }
 
 /// Single emission point for the inventory token. Keeps the kind-arms
-/// in [`emit_relation_inventory`] readable — every branch tail-calls
+/// in [`emit_relation_inventory`] readable - every branch tail-calls
 /// here with the per-kind values.
 #[allow(clippy::too_many_arguments)]
 fn emit_inventory_token(
@@ -1018,7 +1018,7 @@ fn default_has_fk(parent_struct_name: &str) -> String {
 /// `target_type` is the `<P>` in `BelongsTo<P>`. Override via inline
 /// `fk = "..."`.
 fn default_belongs_to_fk(target_ty: &syn::Type) -> String {
-    // Extract the last path segment as a string — covers
+    // Extract the last path segment as a string - covers
     // `Post`, `crate::models::Post`, `super::Post`. Falls back to
     // formatting the whole type if the path is empty.
     let target_name = match target_ty {
@@ -1086,7 +1086,7 @@ fn pivot_related_override(rel: &RelationDecl) -> Option<&str> {
     })
 }
 
-/// Look up the user-declared `related_key = "..."` override — the
+/// Look up the user-declared `related_key = "..."` override - the
 /// related-side primary-key COLUMN name used by `BelongsToMany`'s
 /// `.get()` IN-filter and the aggregate JOIN. Defaults to `"id"` when
 /// omitted (matches SeaORM convention).
@@ -1109,7 +1109,7 @@ fn with_pivot_cols(rel: &RelationDecl) -> &[String] {
 }
 
 /// Look up the user-declared `first_key = "..."` override for
-/// `HasOneThrough` / `HasManyThrough` — the column on the intermediate
+/// `HasOneThrough` / `HasManyThrough` - the column on the intermediate
 /// `B` table that points at the parent `A`. Default:
 /// `<snake(parent_struct)>_id`.
 fn first_key_override(rel: &RelationDecl) -> Option<&str> {
@@ -1120,7 +1120,7 @@ fn first_key_override(rel: &RelationDecl) -> Option<&str> {
 }
 
 /// Look up the user-declared `second_key = "..."` override for
-/// `HasOneThrough` / `HasManyThrough` — the column on the target `C`
+/// `HasOneThrough` / `HasManyThrough` - the column on the target `C`
 /// table that points at the intermediate `B`. Default:
 /// `<snake(through_type)>_id`.
 fn second_key_override(rel: &RelationDecl) -> Option<&str> {
@@ -1131,7 +1131,7 @@ fn second_key_override(rel: &RelationDecl) -> Option<&str> {
 }
 
 /// Look up the user-declared `second_local_key = "..."` override for
-/// `HasOneThrough` / `HasManyThrough` — the column on the intermediate
+/// `HasOneThrough` / `HasManyThrough` - the column on the intermediate
 /// `B` matched by `second_key`. Defaults to `"id"`. Required when the
 /// intermediate model declares `#[model(primary_key = "...")]` with a
 /// non-`id` PK.
@@ -1150,7 +1150,7 @@ fn with_timestamps_flag(rel: &RelationDecl) -> bool {
 }
 
 /// Look up the user-declared `name = "..."` morph-family override.
-/// Defaults to the relation name itself when omitted — e.g. a relation
+/// Defaults to the relation name itself when omitted - e.g. a relation
 /// declared as `commentable: MorphTo { targets = [...] }` derives a
 /// morph-name of `"commentable"` without needing the redundant
 /// `name = "commentable"` option.
@@ -1190,7 +1190,7 @@ fn morph_targets(rel: &RelationDecl) -> Option<&[syn::Type]> {
 
 /// The morph-type string a model registers under. Read from the
 /// model's `morph_type = "..."` attribute when present; defaults to
-/// `to_snake(struct_name)` otherwise (Laravel convention — `Post`
+/// `to_snake(struct_name)` otherwise (Laravel convention - `Post`
 /// becomes `"post"`).
 ///
 /// This is the string the parent puts into the child's
@@ -1208,7 +1208,7 @@ fn morph_type_of(input: &ModelInput) -> String {
 /// Heuristic set of structural morph-type match keys for one target,
 /// used ONLY by parse-time overlap detection. Phase 10B P2 moved the
 /// runtime fetch-helper dispatch onto the T8 `MorphTypeEntry`
-/// inventory (`find_morph_type_by_id`) — the heuristic match-key
+/// inventory (`find_morph_type_by_id`) - the heuristic match-key
 /// surface is no longer authoritative at runtime.
 ///
 /// The macro expanding a `MorphTo` declaration can't see another
@@ -1219,19 +1219,19 @@ fn morph_type_of(input: &ModelInput) -> String {
 /// safety net.
 ///
 /// For a target named `MorphPost`, this yields:
-/// - `"morph_post"` — `to_snake(TargetTypeName)` (the macro default)
-/// - `"morphpost"` — no-underscore form
-/// - `"post"` — Laravel convention (struct name minus a `Morph`
+/// - `"morph_post"` - `to_snake(TargetTypeName)` (the macro default)
+/// - `"morphpost"` - no-underscore form
+/// - `"post"` - Laravel convention (struct name minus a `Morph`
 ///   prefix when one exists; if there's no obvious prefix this falls
 ///   through to the snake form, deduped via `sort + dedup`).
 ///
 /// For a target named `Post` (no prefix), the result collapses to
-/// `["post"]` — `to_snake`, no-underscore, and the no-prefix branch
+/// `["post"]` - `to_snake`, no-underscore, and the no-prefix branch
 /// all produce the same string.
 ///
 /// Exposed to `parse.rs` so the parser can detect overlapping dispatch
 /// keys across a `MorphTo`'s declared targets at declaration time
-/// (e.g. `targets = [MorphPost, Post]` — both produce `"post"` and
+/// (e.g. `targets = [MorphPost, Post]` - both produce `"post"` and
 /// were ambiguous under the old heuristic dispatch; even though P2
 /// now resolves the ambiguity at runtime via the registry, the
 /// parse-time check still catches the obvious cases up front so the
@@ -1287,7 +1287,7 @@ fn last_segment_name(ty: &syn::Type) -> String {
 /// Used by BelongsTo emission to decide between
 /// `Some(serde_json::to_value(&self.<fk>).ok()?)` (non-Option) and
 /// `self.<fk>.as_ref().map(|v| serde_json::to_value(v).ok()).flatten()`
-/// (Option). Looks at the last path segment of the field type — same
+/// (Option). Looks at the last path segment of the field type - same
 /// shape as `classify_datetime` in `parse.rs`.
 fn field_is_optional(input: &ModelInput, field_name: &str) -> bool {
     let fields = match &input.item.fields {
@@ -1337,7 +1337,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 impl #struct_ident {
                     #[doc = "Construct a `HasOne` relation builder for this row."]
                     #[doc = ""]
-                    #[doc = "Chainable — `user.profile().filter(...).first().await?`."]
+                    #[doc = "Chainable - `user.profile().filter(...).first().await?`."]
                     pub fn #method_ident(&self) -> ::suprnova::HasOne<Self, #target_ty> {
                         let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null);
@@ -1412,7 +1412,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
         }
         RelationKindAttr::HasMany => {
             // FK on the child table = <snake(parent_struct)>_id by
-            // default — same default as HasOne. LK = parent's PK by
+            // default - same default as HasOne. LK = parent's PK by
             // default ("id"), configurable via `lk = "..."`.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
@@ -1425,7 +1425,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 impl #struct_ident {
                     #[doc = "Construct a `HasMany` relation builder for this row."]
                     #[doc = ""]
-                    #[doc = "Chainable — `user.posts().latest().take(5).get().await?`."]
+                    #[doc = "Chainable - `user.posts().latest().take(5).get().await?`."]
                     pub fn #method_ident(&self) -> ::suprnova::HasMany<Self, #target_ty> {
                         let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
                             .unwrap_or(::suprnova::serde_json::Value::Null);
@@ -1439,7 +1439,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             })
         }
         RelationKindAttr::BelongsToMany => {
-            // Pivot model — the user wrote `BelongsToMany<R, P>`,
+            // Pivot model - the user wrote `BelongsToMany<R, P>`,
             // parsed into `rel.through`. The parser already validates
             // that BelongsToMany requires a second generic argument,
             // so the `expect` is unreachable on the happy path.
@@ -1458,8 +1458,8 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
-            // pivot_table: either the user-supplied literal, or — at
-            // runtime — `<P as EloquentModel>::TABLE` so the pivot
+            // pivot_table: either the user-supplied literal, or - at
+            // runtime - `<P as EloquentModel>::TABLE` so the pivot
             // struct's own `#[suprnova::model(table = "...")]` declaration
             // is the single source of truth.
             let pivot_table_expr: TokenStream = match pivot_table_override(rel) {
@@ -1532,7 +1532,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // The user wrote `HasManyThrough<B, C>` where `B` is the
             // intermediate model and `C` is the final target. The
             // parser stores generics left-to-right as
-            // `(rel.target, rel.through)` — so for Through kinds, the
+            // `(rel.target, rel.through)` - so for Through kinds, the
             // semantic mapping is:
             //
             //   rel.target  = first generic = B (intermediate)
@@ -1557,8 +1557,8 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             let first_key = first_key_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
-            // second_key default: <snake(last_segment(through_ty))>_id
-            // — column on the FINAL target table pointing at the
+            // second_key default: <snake(last_segment(through_ty))>_id -
+            // column on the FINAL target table pointing at the
             // intermediate.
             let second_key = second_key_override(rel)
                 .map(|s| s.to_string())
@@ -1575,7 +1575,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             } else {
                 quote! { .local_key(#lk) }
             };
-            // Second local key — column on the intermediate `B`
+            // Second local key - column on the intermediate `B`
             // matched by `second_key`. Defaults to `"id"`. Chained as
             // `.second_local_key(...)` so the runtime JOIN reads the
             // right column for intermediates declaring a non-`id` PK.
@@ -1606,7 +1606,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 impl #struct_ident {
                     #[doc = #doc_str]
                     #[doc = ""]
-                    #[doc = "Two-hop traversal via the intermediate model — \
+                    #[doc = "Two-hop traversal via the intermediate model - \
                              `.get()` issues a single `INNER JOIN` query."]
                     pub fn #method_ident(&self) -> ::suprnova::#wrapper<Self, #through_ty, #final_target_ty> {
                         let parent_value = ::suprnova::serde_json::to_value(&self.#pk_ident)
@@ -1633,11 +1633,11 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //
             // Two pieces of metadata flow from the model attributes:
             //
-            // 1. `morph_name` — controls the `<name>_id` /
+            // 1. `morph_name` - controls the `<name>_id` /
             //    `<name>_type` column names on the child table.
             //    Defaults to the relation name itself.
             //
-            // 2. `morph_type_value` — the parent's `morph_type = "..."`
+            // 2. `morph_type_value` - the parent's `morph_type = "..."`
             //    attribute (defaulted to `to_snake(struct_name)`).
             //    This is the string the child's `*_type` column has
             //    to equal for the row to belong to this parent.
@@ -1659,7 +1659,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                 impl #struct_ident {
                     #[doc = #doc_str]
                     #[doc = ""]
-                    #[doc = "Chainable — both `<morph_name>_id` and `<morph_name>_type` \
+                    #[doc = "Chainable - both `<morph_name>_id` and `<morph_name>_type` \
                              predicates are pre-applied. Children pointing at OTHER \
                              parents (different `*_type` values) never appear in \
                              results."]
@@ -1676,7 +1676,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             })
         }
         RelationKindAttr::MorphTo => {
-            // `MorphTo` is the inverse side — the user declared
+            // `MorphTo` is the inverse side - the user declared
             // `commentable: MorphTo { name = "commentable",
             //  targets = [MorphPost, MorphVideo] }` on the morph-table
             // model (Comment). The macro emits THREE things at this
@@ -1701,12 +1701,12 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //     }
             //
             // No runtime `MorphTo<C>` instance is built at the call
-            // site — `MorphTo<C>` is purely metadata for the relation
+            // site - `MorphTo<C>` is purely metadata for the relation
             // registry + a re-export users can name in turbofish.
             let morph_name = morph_name_or_default(rel);
             let id_field = quote::format_ident!("{morph_name}_id");
             let type_field = quote::format_ident!("{morph_name}_type");
-            // Enum + fetch struct names — `commentable` →
+            // Enum + fetch struct names - `commentable` →
             // `CommentableMorph` / `CommentableMorphFetch`.
             let enum_ident = {
                 let s = rel.name.to_string();
@@ -1744,7 +1744,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
 
             // Variant idents = the target's last path segment (e.g.
             // `MorphPost` from `crate::models::MorphPost`). Mechanically
-            // required — enum variants name the user type, not a
+            // required - enum variants name the user type, not a
             // generic placeholder.
             let variant_idents: Vec<syn::Ident> = targets
                 .iter()
@@ -1774,7 +1774,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             //
             // Registry-first is what makes user-declared custom
             // `morph_type` strings dispatch correctly (e.g. a target
-            // named `Post` carrying `morph_type = "blog_post"` —
+            // named `Post` carrying `morph_type = "blog_post"` -
             // none of the structural heuristics on the type name
             // would have matched the runtime `"blog_post"`).
             //
@@ -1782,7 +1782,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
             // `morph_type` attribute, it's absent from the registry
             // (Phase 10B T8's `morph_type_not_registered_for_non_morph_models`
             // pins this). In that case we fall back to comparing
-            // `self.morph_type` against `to_snake(TypeName)` — the
+            // `self.morph_type` against `to_snake(TypeName)` - the
             // same convention the parent's `MorphMany` / `MorphOne`
             // uses to STAMP the type-string into the child column
             // (see `morph_type_of` in this file). Preserves the
@@ -1809,7 +1809,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                         // string via the T8 inventory. When the target
                         // didn't declare `morph_type = "..."`, the
                         // registry returns None and we compare against
-                        // the snake-cased type name — the same default
+                        // the snake-cased type name - the same default
                         // the parent-side MorphMany / MorphOne uses to
                         // write the type-string column.
                         let registered: ::std::option::Option<&'static str> =
@@ -2046,7 +2046,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
                     #[doc = ""]
                     #[doc = "Filters to one specific morph target family per declaration \
                              via `target_morph_type = \"...\"`. `.get()` returns rows of \
-                             that family only — never mixing target families in a single \
+                             that family only - never mixing target families in a single \
                              collection."]
                     pub fn #method_ident(&self)
                         -> ::suprnova::MorphedByMany<Self, #target_ty, #pivot_ty>
@@ -2074,8 +2074,8 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
 /// `predicate: Option<Box<dyn Any>>` parameter.
 ///
 /// The closure shape is
-/// `Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static>`
-/// — exactly what `Builder::with_where` boxes up. On a well-typed
+/// `Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send + Sync + 'static>` -
+/// exactly what `Builder::with_where` boxes up. On a well-typed
 /// program the downcast targets the statically-known `#target_ty` and
 /// succeeds. If the caller spelled the closure's `Builder<T>` parameter
 /// with the WRONG `T` for the named relation (e.g.
@@ -2084,7 +2084,7 @@ fn emit_relation_method(input: &ModelInput, rel: &RelationDecl) -> Result<TokenS
 /// `Box<dyn Any>` with the wrong typed shape and the downcast fails.
 ///
 /// Failing silently here is the bug: the predicate gets dropped and the
-/// eager-load runs UNFILTERED — the user thinks they constrained the
+/// eager-load runs UNFILTERED - the user thinks they constrained the
 /// relation when they didn't. The emitted extractor turns that into a
 /// loud `FrameworkError::internal` that names the relation and the
 /// statically-known target type, so the dispatcher returns `Err` and
@@ -2153,7 +2153,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
-            // Predicate extractor — see HasMany arm for the full
+            // Predicate extractor - see HasMany arm for the full
             // contract. The `with_where(("profile", |q| ...))` user
             // call lands here type-erased; the downcast targets the
             // statically-known `#target_ty`.
@@ -2248,7 +2248,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             };
 
-            // Predicate extractor — see HasMany arm for the full
+            // Predicate extractor - see HasMany arm for the full
             // contract. The `with_where(("user", |q| ...))` user
             // call lands here type-erased; downcast targets
             // `#target_ty`.
@@ -2293,7 +2293,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     for row in parent_rows.into_iter() {
                         // The owner-key column is read out of the parent
                         // target by serialising the whole row to JSON
-                        // and plucking the key — works uniformly for
+                        // and plucking the key - works uniformly for
                         // any field name the user wrote, without
                         // requiring the macro here to know the parent
                         // struct's field layout.
@@ -2317,7 +2317,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         let parent_row: ::core::option::Option<#target_ty> = match &p_fk_json {
                             ::core::option::Option::Some(v) => {
                                 by_pk.get(&v.to_string()).cloned().or_else(|| {
-                                    // Parent missing — invoke
+                                    // Parent missing - invoke
                                     // `with_default` closure if
                                     // installed.
                                     let tmpl: ::suprnova::BelongsTo<Self, #target_ty> =
@@ -2330,7 +2330,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                                 })
                             }
                             ::core::option::Option::None => {
-                                // FK is null — same `with_default` path.
+                                // FK is null - same `with_default` path.
                                 let tmpl: ::suprnova::BelongsTo<Self, #target_ty> =
                                     ::suprnova::BelongsTo::<Self, #target_ty>::__new(
                                         ::core::option::Option::None,
@@ -2347,12 +2347,12 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             }))
         }
         RelationKindAttr::HasMany => {
-            // FK column on the child table — same default as HasOne.
+            // FK column on the child table - same default as HasOne.
             let fk = fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
-            // Predicate extractor — downcasts the dispatcher's
+            // Predicate extractor - downcasts the dispatcher's
             // `predicate` parameter to a typed
             // `FnOnce(Builder<R>) -> Builder<R>` and binds it as
             // `__sn_pred`. The arm body applies it just before
@@ -2360,7 +2360,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
             // Same JSON-pluck FK-reading pattern as HasOne's eager
-            // arm — see the long-form comment there for why we don't
+            // arm - see the long-form comment there for why we don't
             // do field-access on the target struct. The difference is
             // we accumulate into `HashMap<key, Vec<R>>` rather than
             // `HashMap<key, R>`, and stuff via `set_many` instead of
@@ -2440,7 +2440,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // each L's copy must carry its OWN pivot context. The
             // `Model: Clone` supertrait makes this cheap (no new
             // bounds needed on this arm).
-            // Predicate extractor — `with_where(("roles", |q| ...))`
+            // Predicate extractor - `with_where(("roles", |q| ...))`
             // applies its closure to the RELATED-table query (not the
             // pivot scan). The downcast targets `#target_ty`.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
@@ -2577,18 +2577,18 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // existing `Builder<C>` SeaORM deserialisation path):
             //
             // 1. Raw SQL: `SELECT id, {first_key} FROM B WHERE
-            //    {first_key} IN (parent_ids)` — build a map
+            //    {first_key} IN (parent_ids)` - build a map
             //    `b_id -> parent_id`.
             // 2. `<C as Model>::query().filter_in({second_key}, b_ids)
-            //    .get()` — uses the existing model pipeline so C
+            //    .get()` - uses the existing model pipeline so C
             //    deserialises correctly even with casts / accessors.
             // 3. Group C by `row.{second_key}` (which is a B.id) →
             //    look up the parent_id via the map → distribute via
             //    `set_many` (HasManyThrough) or `set_one`
-            //    (HasOneThrough — first row wins per parent).
+            //    (HasOneThrough - first row wins per parent).
             //
             // Type rebinding: for Through kinds the parser stores
-            // `(rel.target, rel.through)` as `(B, C)` — same swap as
+            // `(rel.target, rel.through)` as `(B, C)` - same swap as
             // `emit_relation_accessors`. We shadow the function-scope
             // `target_ty` (which would be `B`) with the final target
             // `C` taken from `rel.through`.
@@ -2625,7 +2625,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // raw `s` rather than the JSON-quoted form, so String PKs
             // line up with the `CAST(... AS TEXT)` column on the
             // `b_to_parent` lookup. The count and aggregate arms use
-            // the same helper for the same reason — the eager arm
+            // the same helper for the same reason - the eager arm
             // previously used `to_value(...).to_string()` directly,
             // which produced `"\"abc\""` for String PKs and silently
             // missed the lookup.
@@ -2654,7 +2654,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             };
 
-            // Predicate extractor — `with_where(("posts", |q| ...))`
+            // Predicate extractor - `with_where(("posts", |q| ...))`
             // applies its closure to the final-target `C` query.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
@@ -2663,7 +2663,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
                     #pred_extractor
 
-                    // Per-parent FK-key derivation — matches the SQL
+                    // Per-parent FK-key derivation - matches the SQL
                     // CAST output of Query 1 below. `Value::String(s)`
                     // unwraps to raw `s` rather than the JSON-quoted
                     // form so the String PK case lines up with the raw
@@ -2685,7 +2685,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -2718,7 +2718,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     let __sn_b_table = <#through_ty as
                         ::suprnova::eloquent::EloquentModel>::TABLE;
 
-                    // Query 1 — pull (b_id, parent_id) mapping. We
+                    // Query 1 - pull (b_id, parent_id) mapping. We
                     // CAST both columns to TEXT/CHAR so the
                     // HashMap key shape lines up regardless of the
                     // underlying integer vs string column type. The
@@ -2753,7 +2753,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     // b_id -> parent_id (both as string keys).
                     let mut b_to_parent: HashMap<::std::string::String, ::std::string::String>
                         = HashMap::new();
-                    // The IN-set of B's `id`s — we re-issue Query 2 on
+                    // The IN-set of B's `id`s - we re-issue Query 2 on
                     // C with these, keeping the existing model-level
                     // typed deserialisation.
                     let mut b_ids: ::std::vec::Vec<::suprnova::serde_json::Value>
@@ -2782,7 +2782,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         ::std::vec::Vec<#target_ty>,
                     > = HashMap::new();
 
-                    // Short-circuit when no intermediate rows match —
+                    // Short-circuit when no intermediate rows match -
                     // every parent gets an empty / None entry so the
                     // loaded accessor doesn't panic on "you forgot
                     // `with([\"...\"])`".
@@ -2791,7 +2791,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         return ::core::result::Result::Ok(());
                     }
 
-                    // Query 2 — pull C rows via the existing
+                    // Query 2 - pull C rows via the existing
                     // Model::query() pipeline. `filter_in` runs the
                     // same bind / placeholder / typed-deserialisation
                     // path the rest of the framework uses.
@@ -2834,7 +2834,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         }
                     }
 
-                    // Distribute — branches on HasOne vs HasMany
+                    // Distribute - branches on HasOne vs HasMany
                     // through the `#distribute` token block above.
                     #distribute
                     return ::core::result::Result::Ok(());
@@ -2850,7 +2850,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // parent is Post) are excluded.
             //
             // The id column on the child = `<morph_name>_id` and the
-            // type column = `<morph_name>_type` — both baked from
+            // type column = `<morph_name>_type` - both baked from
             // `morph_name` (which defaults to the relation name).
             //
             // MorphOne distributes via `set_one` (first row wins per
@@ -2866,7 +2866,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         let key = ::suprnova::serde_json::to_value(&p.#pk_ident)
                             .map(|v| v.to_string())
                             .unwrap_or_default();
-                        // First row wins (per HasOne semantics) — we
+                        // First row wins (per HasOne semantics) - we
                         // sort by id ASC implicitly via the order the
                         // groups were built, but explicit `LIMIT 1`
                         // logic isn't worth a separate dispatch path
@@ -2886,7 +2886,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     }
                 }
             };
-            // Predicate extractor — applies to the child-table query
+            // Predicate extractor - applies to the child-table query
             // before the IN + type filter are issued.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
 
@@ -2923,7 +2923,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                         = HashMap::new();
                     for r in rows.into_iter() {
                         // JSON-pluck the morph-id column off the
-                        // returned row — same pattern as the HasMany
+                        // returned row - same pattern as the HasMany
                         // arm. Avoids requiring the macro at THIS
                         // expansion site to know the target struct's
                         // field layout.
@@ -2941,7 +2941,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             }))
         }
         RelationKindAttr::MorphToMany => {
-            // Polymorphic m2m eager load — same two-query strategy as
+            // Polymorphic m2m eager load - same two-query strategy as
             // BelongsToMany (T4), with the morph `<name>_type` filter
             // layered on top so pivot rows pointing at other morph
             // families are excluded.
@@ -2965,7 +2965,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let pivot_related = pivot_related_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&last_segment_name(target_ty))));
-            // Predicate extractor — `with_where` applies to the
+            // Predicate extractor - `with_where` applies to the
             // RELATED-table query (Step 2), mirroring BelongsToMany.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
             Ok(Some(quote! {
@@ -3100,7 +3100,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // The `<name>_id` column then holds R's primary-key values.
             //
             // Per-attachment cloning + `__pivot` stamping mirrors the
-            // BelongsToMany / MorphToMany contract — the inverse
+            // BelongsToMany / MorphToMany contract - the inverse
             // direction also surfaces pivot context via
             // `tag.posts_loaded()[0].pivot::<Taggable>()`. Even though
             // the UNIQUE constraint on (`<pfk>`, `<id_col>`,
@@ -3126,7 +3126,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             let pivot_fk = pivot_fk_override(rel)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}_id", to_snake(&parent_name)));
-            // Predicate extractor — `with_where` applies to the
+            // Predicate extractor - `with_where` applies to the
             // TARGET-table query (Step 2). Mirrors MorphToMany.
             let pred_extractor = emit_predicate_extractor(target_ty, &name_str);
             Ok(Some(quote! {
@@ -3255,7 +3255,7 @@ fn emit_eager_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             }))
         }
         // MorphTo: flat eager loading through the orchestrator isn't
-        // supported in v1 — the per-family enum surface erases the
+        // supported in v1 - the per-family enum surface erases the
         // concrete child types, so `with(["commentable"])` has nowhere
         // to store the polymorphic children. The user-facing fetch
         // path is the per-relation helper (`comment.<rel>().get()`)
@@ -3298,7 +3298,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
             // Same shape as `__eager_load`: run an IN query, group by
-            // FK (via JSON-pluck — see eager arm for why), store the
+            // FK (via JSON-pluck - see eager arm for why), store the
             // per-parent count via `set_count`.
             Ok(Some(quote! {
                 #name_str => {
@@ -3407,7 +3407,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| default_has_fk(&parent_name));
 
-            // Server-side `GROUP BY` count — one round trip regardless
+            // Server-side `GROUP BY` count - one round trip regardless
             // of fan-out. The previous implementation fetched every
             // child row into memory and counted client-side via a
             // HashMap; at 10K children per parent that's 10K rows over
@@ -3421,7 +3421,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             //
             // and distributes the per-FK counts into each parent's
             // `__eager.set_count(name, n)`. Parents whose PK didn't
-            // appear in any child row get 0 — set explicitly so the
+            // appear in any child row get 0 - set explicitly so the
             // `<rel>_count()` accessor doesn't panic on "you forgot
             // `with_count`".
             //
@@ -3435,8 +3435,8 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             // parent-side key is derived to MATCH that raw form: a
             // `serde_json::Value::String("abc")` is unwrapped to its
             // inner `String` rather than rendered as `"\"abc\""` via
-            // `Value::to_string()`. This is internal to the dispatcher
-            // — the cache key for `set_count` is the relation name,
+            // `Value::to_string()`. This is internal to the dispatcher -
+            // the cache key for `set_count` is the relation name,
             // not the FK key, so internal consistency is all that
             // matters.
             //
@@ -3449,7 +3449,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
 
-                    // Per-parent FK-key derivation — matches the SQL
+                    // Per-parent FK-key derivation - matches the SQL
                     // CAST output below. `Value::String(s)` unwraps to
                     // raw `s` rather than the JSON-quoted form so the
                     // string FK case lines up with the raw CAST result.
@@ -3468,7 +3468,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -3502,7 +3502,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                     }
 
                     // `CAST(... AS CHAR)` on MySQL, `CAST(... AS TEXT)`
-                    // elsewhere — both yield the raw stringified column
+                    // elsewhere - both yield the raw stringified column
                     // value the parent-side key derivation matches.
                     let __sn_cast_kw = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
@@ -3580,7 +3580,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 },
             };
 
-            // Server-side GROUP BY count over the pivot table — one
+            // Server-side GROUP BY count over the pivot table - one
             // round trip regardless of fan-out. Identical pattern to
             // the HasMany count arm, except the GROUP-BY target is the
             // pivot's FK column and the source table is the pivot.
@@ -3605,7 +3605,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -3695,13 +3695,13 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             //    WHERE b.<first_key> IN (?, ?, ...)
             //    GROUP BY b.<first_key>
             //
-            // HasOneThrough reports the real COUNT(*) here — the JOIN
+            // HasOneThrough reports the real COUNT(*) here - the JOIN
             // itself can return multiple C rows per parent if the HasOne
             // contract is violated, and we'd rather surface the real
             // count + let tests catch a malformed dataset than silently
             // truncate at the SQL layer.
             //
-            // Type rebinding: same swap as the eager arm — for
+            // Type rebinding: same swap as the eager arm - for
             // Through kinds the parser stores `(B, C)` as
             // `(rel.target, rel.through)`. Shadow the function-scope
             // `target_ty` with the final target `C`.
@@ -3745,7 +3745,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -3843,11 +3843,11 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
             //    GROUP BY <id_col>
             //
             // Same CAST-as-text key-matching contract as the HasMany
-            // count arm — see that arm for the long-form rationale.
+            // count arm - see that arm for the long-form rationale.
             //
             // MorphOne's count surface is 0-or-1 in practice (the
             // contract says one child per parent), so the real count
-            // is reported here even when violated upstream — tests
+            // is reported here even when violated upstream - tests
             // catch the malformed dataset rather than silently
             // truncating at the SQL layer.
             let morph_name = morph_name_or_default(rel);
@@ -3873,7 +3873,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -3964,7 +3964,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
         }
         RelationKindAttr::MorphToMany => {
             // Server-side GROUP BY count over the polymorphic pivot
-            // table — one round trip regardless of fan-out across the
+            // table - one round trip regardless of fan-out across the
             // parent set. Same shape as BelongsToMany's count arm,
             // with the extra `<name>_type = '<self_morph_type>'`
             // predicate so children of OTHER morph families are
@@ -4014,7 +4014,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -4157,7 +4157,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -4242,7 +4242,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
                 }
             }))
         }
-        // MorphTo: same story as `emit_eager_arm` — the per-family
+        // MorphTo: same story as `emit_eager_arm` - the per-family
         // enum surface erases the concrete child types, so a single
         // `with_count(["commentable"])` has no canonical SQL shape.
         // Emit an explicit error rather than falling through to the
@@ -4264,7 +4264,7 @@ fn emit_count_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Token
 }
 
 /// `__aggregate_relation` arm for HasOne / BelongsTo. Same shape as
-/// count — we run the IN query, then per parent pick a single row (or
+/// count - we run the IN query, then per parent pick a single row (or
 /// none) and apply the SUM/AVG/MIN/MAX, which over 0-or-1 row is
 /// either the column value itself or 0 / null. For T2 the column is
 /// stored as `f64` for SUM/AVG (matching `with_sum`'s usual signature)
@@ -4316,8 +4316,8 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
                         // Each parent's group has 0-or-1 row, so the
-                        // aggregate function is the same on every kind
-                        // — just record the column value.
+                        // aggregate function is the same on every kind -
+                        // just record the column value.
                         by_fk.insert(key, col_val);
                     }
                     // Sum/Avg over an empty group stores 0.0
@@ -4430,7 +4430,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     // Some(value) for Min/Max.
                     //
                     // Cache key is the wide `<rel>_<kind>_<col>` form
-                    // (P1 fix) — see the HasOne arm above.
+                    // (P1 fix) - see the HasOne arm above.
                     let __sn_agg_key: ::std::string::String =
                         ::suprnova::eloquent::relations::aggregate_cache_key(
                             #name_str, kind, column,
@@ -4478,7 +4478,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             // into each parent's `__eager.set_aggregate` cell.
             //
             // The aggregate expression is picked at runtime from the
-            // dispatcher's `kind` arg — Sum/Avg/Min/Max each map to the
+            // dispatcher's `kind` arg - Sum/Avg/Min/Max each map to the
             // corresponding SQL function. Sum/Avg over an empty group
             // store 0.0 (matches the framework's COALESCE behaviour);
             // Min/Max over an empty group store `Option::None` (matches
@@ -4487,7 +4487,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             // for Min/Max.
             //
             // `__sn_agg` is read as `Option<f64>` because AVG over an
-            // empty group is NULL in SQL — and SUM is too, even though
+            // empty group is NULL in SQL - and SUM is too, even though
             // our user-facing default is 0.0; the None vs Some(v)
             // branch below normalises that.
             //
@@ -4499,7 +4499,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 #name_str => {
                     if parents.is_empty() { return ::core::result::Result::Ok(()); }
 
-                    // Per-parent FK-key derivation — matches the SQL
+                    // Per-parent FK-key derivation - matches the SQL
                     // CAST output below. `Value::String(s)` unwraps to
                     // raw `s` rather than the JSON-quoted form so the
                     // string FK case lines up with the raw CAST result.
@@ -4519,7 +4519,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -4553,7 +4553,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                     }
 
                     // `CAST(... AS CHAR)` on MySQL, `CAST(... AS TEXT)`
-                    // elsewhere — both yield the raw stringified column
+                    // elsewhere - both yield the raw stringified column
                     // value the parent-side key derivation matches.
                     let __sn_cast_kw = match db_backend {
                         ::suprnova::sea_orm::DatabaseBackend::MySql => "CHAR",
@@ -4564,7 +4564,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
 
                     // The aggregate expression is selected at runtime
                     // from `kind`. The `column` arg flows untyped into
-                    // SQL — identical concern to `#fk` in the count
+                    // SQL - identical concern to `#fk` in the count
                     // arm; T9's user-facing Builder surface owns column
                     // validation, the dispatcher doesn't widen the
                     // contract.
@@ -4606,8 +4606,8 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
 
                     use ::std::collections::HashMap;
-                    // `Option<f64>` so AVG (and SUM) over zero rows —
-                    // which manifests as SQL NULL — survives the read
+                    // `Option<f64>` so AVG (and SUM) over zero rows -
+                    // which manifests as SQL NULL - survives the read
                     // and falls through the Sum|Avg vs Min|Max branch
                     // at distribution time. For HasMany the row map is
                     // only populated for parents with at least one
@@ -4682,7 +4682,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
         }
         RelationKindAttr::BelongsToMany => {
             // BelongsToMany aggregate is over the RELATED table's
-            // columns (Laravel parity — users typically aggregate over
+            // columns (Laravel parity - users typically aggregate over
             // role.weight, not pivot.assigned_at). The dispatcher JOINs
             // the pivot to the related table and groups by the pivot's
             // FK column.
@@ -4745,7 +4745,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -4899,7 +4899,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             // Option<f64> with None empty default. Matches the
             // HasMany / BelongsToMany contract.
             //
-            // Type rebinding: same swap as the eager + count arms —
+            // Type rebinding: same swap as the eager + count arms -
             // for Through kinds `(rel.target, rel.through)` is
             // `(B, C)`. Shadow the function-scope `target_ty` with
             // the final target `C`.
@@ -4943,7 +4943,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -5099,7 +5099,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
             // Option<f64> with None empty default. Matches the
             // HasMany contract.
             //
-            // MorphOne aggregates work the same way — the per-parent
+            // MorphOne aggregates work the same way - the per-parent
             // group is 0-or-1 row by contract; the server-side GROUP
             // BY collapses to the single row's column value (or NULL
             // when no row matches, which falls through the Sum|Avg vs
@@ -5127,7 +5127,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -5330,7 +5330,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -5541,7 +5541,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                             .unwrap_or(::suprnova::serde_json::Value::Null))
                         .collect();
 
-                    // Phase 10C audit-fix AF1 — resolve through ExecutorChoice so
+                    // Phase 10C audit-fix AF1 - resolve through ExecutorChoice so
                     // raw eager-load SQL honors any ambient CURRENT_TX. Without
                     // this every leaf would run on `DB::connection()` (the pool)
                     // and miss in-tx state under a `DB::transaction` closure.
@@ -5687,7 +5687,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
                 }
             }))
         }
-        // MorphTo: same story as `emit_eager_arm` / `emit_count_arm` —
+        // MorphTo: same story as `emit_eager_arm` / `emit_count_arm` -
         // the per-family enum surface erases the concrete child types,
         // so there's no single SQL shape for a polymorphic aggregate.
         // Emit an explicit error rather than falling through to the
@@ -5708,7 +5708,7 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
     }
 }
 
-/// `__recurse_eager_load` arm — T9 ships nested-path resolution.
+/// `__recurse_eager_load` arm - T9 ships nested-path resolution.
 ///
 /// Each arm walks the already-loaded child rows in `self.__eager`,
 /// peels one segment off `rest`, and recurses into the child type's
@@ -5724,9 +5724,9 @@ fn emit_aggregate_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<T
 /// HasOneThrough): the cache holds `Option<R>`; we take `&mut R` via
 /// `get_one_mut::<R>(name)` if `Some`, build a one-element slice, and
 /// recurse the same way. `None` means "FK was null, nothing to walk
-/// into" — silently return Ok.
+/// into" - silently return Ok.
 ///
-/// MorphTo's nested recursion isn't supported in v1 — the per-family
+/// MorphTo's nested recursion isn't supported in v1 - the per-family
 /// enum type erases the concrete child rows, so the macro emits an
 /// error arm here. Document the restriction in `docs/core/eloquent.md`.
 fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<TokenStream>> {
@@ -5748,7 +5748,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
     let parent_name = &input.item.ident;
 
     match rel.kind {
-        // Collection kinds — `__eager.get_many_mut::<R>(name)` returns
+        // Collection kinds - `__eager.get_many_mut::<R>(name)` returns
         // `Option<&mut Vec<R>>`. None means "relation wasn't loaded";
         // the orchestrator only calls `__recurse_eager_load` after a
         // successful `__eager_load` on the same name, so the None
@@ -5775,7 +5775,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                         // `missing_only` is true, only children without
                         // `head` cached get bulk-loaded; the rest are
                         // already-loaded and stay untouched. This is the
-                        // P3 contract for `Collection::load_missing` —
+                        // P3 contract for `Collection::load_missing` -
                         // partition every level of a dotted path, not
                         // just the top one. The borrow scope ends before
                         // the recursive walk below so the parents slice
@@ -5813,7 +5813,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
             }
         })),
 
-        // Single-value kinds — walk the loaded row through a
+        // Single-value kinds - walk the loaded row through a
         // one-element slice. None means the FK was null / no matching
         // parent; nothing to recurse into, return Ok.
         RelationKindAttr::HasOne
@@ -5848,7 +5848,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
                     }
                     if let ::core::option::Option::Some(more) = tail {
                         // Re-fetch the mut borrow after the dispatcher
-                        // call dropped its slice — the dispatcher only
+                        // call dropped its slice - the dispatcher only
                         // mutates the `__eager` cache on each row, the
                         // row identity is unchanged.
                         let again: ::std::option::Option<&mut #target_ty> =
@@ -5886,7 +5886,7 @@ fn emit_recurse_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Option<Tok
     }
 }
 
-/// `__recurse_eager_load_batched` arm — the collection-wide form of
+/// `__recurse_eager_load_batched` arm - the collection-wide form of
 /// [`emit_recurse_arm`]. Instead of walking a single parent's cached
 /// children, it gathers EVERY parent's children of the relation into one
 /// slice, loads the next path segment with a single IN query, and
@@ -6040,7 +6040,7 @@ fn emit_recurse_batched_arm(input: &ModelInput, rel: &RelationDecl) -> Result<Op
     }
 }
 
-/// Emit `Self::with([...])` — the minimal eager-load entrypoint T2
+/// Emit `Self::with([...])` - the minimal eager-load entrypoint T2
 /// ships so the eager-load test in `eloquent_relations_one_to_one.rs`
 /// can run. T9 will expand this with `with_count` / `with_sum`-`max`
 /// / `with_where` / nested-path resolution. For T2 we only need the
@@ -6061,7 +6061,7 @@ fn emit_with_helper(struct_ident: &syn::Ident) -> TokenStream {
             #[doc = "Open a `Builder<Self>` that eager-loads the listed relations."]
             #[doc = ""]
             #[doc = "Names can be flat (`\"posts\"`) or dotted (`\"posts.comments\"`)."]
-            #[doc = "Dotted paths drive nested-path recursion at fetch time —"]
+            #[doc = "Dotted paths drive nested-path recursion at fetch time - "]
             #[doc = "`User::with([\"posts.comments\"]).get()` runs three queries"]
             #[doc = "(users, posts, comments) and zero N+1 SELECTs."]
             pub fn with<I, S>(relations: I) -> ::suprnova::Builder<Self>
@@ -6142,14 +6142,14 @@ fn emit_with_helper(struct_ident: &syn::Ident) -> TokenStream {
 /// `proc_macro2::TokenStream::to_string()` inserts spaces between
 /// every adjacent token pair, so a type written as `Vec<Post>` round
 /// trips through `quote!(#ty).to_string()` as `"Vec < Post >"`. Phase
-/// 8 admin renders this string in the relation listing UI — the
+/// 8 admin renders this string in the relation listing UI - the
 /// padded form is visually wrong. Stripping every space yields the
 /// compact `"Vec<Post>"` / `"Option<i64>"` form users actually wrote.
 ///
 /// This is correct for the common cases (single idents, generic
 /// applications, qualified paths). The rare case of a function-typed
 /// target (`Box<dyn Fn(i32) -> bool>`) would have its inner spaces
-/// stripped too — but relation targets are model structs, not closure
+/// stripped too - but relation targets are model structs, not closure
 /// types, so the trade-off is fine. If we ever need fancier formatting
 /// we can swap this for a `syn::Type` walker.
 fn format_target_type(ty: &syn::Type) -> String {
@@ -6162,14 +6162,14 @@ mod tests {
 
     #[test]
     fn format_target_type_strips_spaces_around_generics() {
-        // Bare ident — pass-through.
+        // Bare ident - pass-through.
         let ty: syn::Type = syn::parse_str("Post").unwrap();
         assert_eq!(format_target_type(&ty), "Post");
     }
 
     #[test]
     fn format_target_type_vec_target_round_trips_without_spaces() {
-        // `Vec<Post>` is the common collection-of-models shape — must
+        // `Vec<Post>` is the common collection-of-models shape - must
         // never appear as `"Vec < Post >"` in the admin UI.
         let ty: syn::Type = syn::parse_str("Vec<Post>").unwrap();
         assert_eq!(format_target_type(&ty), "Vec<Post>");
@@ -6193,7 +6193,7 @@ mod tests {
 
     #[test]
     fn format_target_type_nested_generics_round_trip_without_spaces() {
-        // Nested generic — pivot models that are themselves generic
+        // Nested generic - pivot models that are themselves generic
         // round-trip cleanly.
         let ty: syn::Type = syn::parse_str("Vec<Option<Post>>").unwrap();
         assert_eq!(format_target_type(&ty), "Vec<Option<Post>>");

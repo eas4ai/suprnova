@@ -51,7 +51,7 @@ impl RequestFieldsetSet {
     }
 
     /// Returns `true` when the request did not request a sparse fieldset
-    /// for any type — meaning every type renders its full attribute set.
+    /// for any type - meaning every type renders its full attribute set.
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty()
     }

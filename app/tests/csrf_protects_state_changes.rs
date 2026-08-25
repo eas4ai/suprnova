@@ -1,19 +1,19 @@
-//! P2-04 — the dogfood shipped without CSRF while its frontend was
+//! P2-04 - the dogfood shipped without CSRF while its frontend was
 //! already sending the token.
 //!
 //! `app/frontend/src/main.ts` subscribes to Inertia's `before` event and
 //! injects `X-CSRF-TOKEN` on every visit. The server never installed
 //! `CsrfMiddleware`, so it validated nothing: the client held up its half
 //! of the protocol and the other half did not exist. The backend scaffold
-//! template installs it directly after `SessionMiddleware`; the dogfood —
-//! the other thing people copy — did not, the same shape as the anonymous
+//! template installs it directly after `SessionMiddleware`; the dogfood -
+//! the other thing people copy - did not, the same shape as the anonymous
 //! `/api/v3/users` defect.
 //!
 //! Worth recording why the suite stayed green when the middleware was
 //! added: every other HTTP test in this crate builds
 //! `MiddlewareRegistry::new()`, an *empty* registry, and never runs
 //! `bootstrap::register()`. No global middleware has ever executed in an
-//! app test — not CSRF, not sessions, not the feature context. These
+//! app test - not CSRF, not sessions, not the feature context. These
 //! tests stand the stack up for real.
 
 use std::convert::Infallible;
@@ -46,7 +46,7 @@ struct TestApp {
 /// `bootstrap::register` installs.
 ///
 /// `csrf_is_installed_after_the_session` is what keeps that mirror
-/// honest — this helper alone would keep passing if bootstrap dropped
+/// honest - this helper alone would keep passing if bootstrap dropped
 /// the middleware again, which is exactly the regression that shipped.
 async fn setup_app() -> TestApp {
     let lock = TEST_LOCK.lock().await;
@@ -131,7 +131,7 @@ async fn post(addr: SocketAddr, path: &str) -> u16 {
 /// refused.
 ///
 /// Asserted as the specific 419 rather than "not 2xx". A `!= 200`
-/// assertion would pass with the middleware removed entirely — the
+/// assertion would pass with the middleware removed entirely - the
 /// toothless shape that has already bitten this repo once.
 #[tokio::test]
 async fn a_state_changing_post_without_a_token_is_refused() {
@@ -149,7 +149,7 @@ async fn a_state_changing_post_without_a_token_is_refused() {
 /// its path starts with `/api`.
 ///
 /// `POST /api/posts` sits behind `SessionAuthMiddleware`, so it is exactly
-/// what CSRF is for. Excepting all of `/api/*` — the tempting shortcut —
+/// what CSRF is for. Excepting all of `/api/*` - the tempting shortcut -
 /// would have left it open.
 #[tokio::test]
 async fn a_cookie_authenticated_api_route_is_still_gated() {
@@ -163,7 +163,7 @@ async fn a_cookie_authenticated_api_route_is_still_gated() {
     );
 }
 
-/// The stateless demo endpoints are excepted deliberately — no session,
+/// The stateless demo endpoints are excepted deliberately - no session,
 /// no cookie, nothing ambient for a cross-site POST to abuse. A 419 here
 /// means the exception list has drifted away from bootstrap.
 #[tokio::test]
@@ -181,7 +181,7 @@ async fn the_excepted_stateless_endpoints_are_not_gated() {
 /// The wiring guard.
 ///
 /// The behavioural tests build the stack themselves, so they would all
-/// still pass if `bootstrap.rs` dropped the middleware — which is the
+/// still pass if `bootstrap.rs` dropped the middleware - which is the
 /// regression that actually shipped. This reads the real file.
 #[test]
 fn csrf_is_installed_after_the_session() {
@@ -201,7 +201,7 @@ fn csrf_is_installed_after_the_session() {
         .find("SessionMiddleware::new")
         .expect("the app must install SessionMiddleware");
     let csrf = code.find("CsrfMiddleware::new").expect(
-        "the app must install CsrfMiddleware — the frontend sends \
+        "the app must install CsrfMiddleware - the frontend sends \
          X-CSRF-TOKEN on every Inertia visit and something has to check it",
     );
 

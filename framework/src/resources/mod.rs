@@ -67,12 +67,12 @@ use trait_def::IncludeResolutionError as IRE;
 /// Type-class for "this field can produce a JSON:API relationship value."
 /// Implemented for `T`, `Option<T>`, and `Vec<T>` where `T: IntoJsonResource`.
 ///
-/// `Prop<T>` is intentionally excluded — it is Inertia-only and does not
+/// `Prop<T>` is intentionally excluded - it is Inertia-only and does not
 /// satisfy JSON:API's requirement that relationship objects carry `(type, id)`
 /// identifiers even when the related resource is not included.
 pub trait AsRelationshipValue {
-    /// Render `self` as a JSON:API relationship value — `Single`,
-    /// `Many`, or `Null` — or `None` if this type cannot supply a
+    /// Render `self` as a JSON:API relationship value - `Single`,
+    /// `Many`, or `Null` - or `None` if this type cannot supply a
     /// relationship at all (e.g. an unloaded `Prop`).
     fn as_relationship_value(&self) -> Option<RelationshipValue>;
 }
@@ -113,7 +113,7 @@ impl<T: IntoJsonResource> AsRelationshipValue for Option<T> {
 ///
 /// `sink` deduplicates by `(type, id)` at push time, so a large
 /// collection that shares relationships across items never materialises
-/// the duplicates — peak memory and CPU stay proportional to the
+/// the duplicates - peak memory and CPU stay proportional to the
 /// distinct included resources, not the relationship fan-in.
 pub trait PushIncluded {
     /// Push the fully-resolved included resource(s) for `self` into

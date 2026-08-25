@@ -4,11 +4,11 @@
 //! Schema mirrors the SeaORM entity defined in
 //! `framework/src/session/driver/database.rs::sessions::Model`:
 //!
-//! - `id`           VARCHAR PK   — session ID (40-char alphanumeric)
-//! - `user_id`      VARCHAR NULL — authenticated user id (string)
-//! - `payload`      TEXT         — JSON-serialised session data map
-//! - `csrf_token`   VARCHAR      — CSRF token for this session
-//! - `last_activity` TIMESTAMP   — last access; used for expiry + GC
+//! - `id`           VARCHAR PK   - session ID (40-char alphanumeric)
+//! - `user_id`      VARCHAR NULL - authenticated user id (string)
+//! - `payload`      TEXT         - JSON-serialised session data map
+//! - `csrf_token`   VARCHAR      - CSRF token for this session
+//! - `last_activity` TIMESTAMP   - last access; used for expiry + GC
 //!
 //! Without this table the database session driver fails every request
 //! the moment `SessionMiddleware` tries to read or write a session, so

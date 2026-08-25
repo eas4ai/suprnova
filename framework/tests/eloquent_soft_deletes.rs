@@ -1,4 +1,4 @@
-//! Phase 10A T10 — Soft deletes + Prunable / MassPrunable + `model:prune`.
+//! Phase 10A T10 - Soft deletes + Prunable / MassPrunable + `model:prune`.
 //!
 //! `#[model(soft_deletes)]` enables tombstone semantics:
 //! - `delete()` → UPDATE `deleted_at = NOW()` (no row removal)
@@ -300,7 +300,7 @@ async fn prune_all_iterates_every_registered_pruner() {
     // End-to-end smoke for `prune_all`. Sets up BOTH tables that have
     // a `#[prunable]` impl registered in this binary so the iteration
     // doesn't fail on a missing table. This is the only test that
-    // exercises `prune_all` — the per-pruner cases above use
+    // exercises `prune_all` - the per-pruner cases above use
     // `prune_one` for isolation.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared(
@@ -356,7 +356,7 @@ pub struct T10AuditLog {
 impl MassPrunable for T10AuditLog {
     fn prunable() -> suprnova::Builder<Self> {
         // Intentionally includes a `.select(...)` to prove the DELETE
-        // renderer ignores SELECT-side state — the old SELECT→DELETE
+        // renderer ignores SELECT-side state - the old SELECT→DELETE
         // string-rewrite trick would have broken on this scope.
         Self::query()
             .filter_op(

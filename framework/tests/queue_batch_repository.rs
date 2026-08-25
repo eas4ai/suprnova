@@ -5,7 +5,7 @@
 //! with a `HashSet` of settled job ids; `DatabaseBatchRepository` derives them
 //! from rows keyed `(batch_id, job_id)`. Two different mechanisms answering one
 //! set of assertions is what keeps a batch behaving the same after an operator
-//! switches to a durable repository — and what would catch either drifting.
+//! switches to a durable repository - and what would catch either drifting.
 
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
@@ -153,7 +153,7 @@ async fn a_redelivered_failure_counts_once_in_both_counters() {
 }
 
 /// A job that succeeded and is then redelivered and fails must not retroactively
-/// fail the batch — its pending slot is already spent.
+/// fail the batch - its pending slot is already spent.
 #[tokio::test]
 async fn a_job_that_settles_both_ways_consumes_one_slot() {
     for (label, repo) in backends().await {
@@ -317,8 +317,8 @@ async fn batch_state_survives_a_new_repository_over_the_same_database() {
         id
     };
 
-    // A fresh repository — standing in for the worker that came back after a
-    // restart — sees exactly what the previous process recorded.
+    // A fresh repository - standing in for the worker that came back after a
+    // restart - sees exactly what the previous process recorded.
     let after = DatabaseBatchRepository::new(db);
     let snap = after.find(&id).await.unwrap().expect("the batch persisted");
     assert_eq!(snap.total_jobs, 3);
@@ -329,7 +329,7 @@ async fn batch_state_survives_a_new_repository_over_the_same_database() {
 }
 
 /// The idempotency guard is the `(batch_id, job_id)` primary key rather than
-/// in-process bookkeeping, so it holds across processes too — the case a
+/// in-process bookkeeping, so it holds across processes too - the case a
 /// `HashSet` cannot cover at all.
 #[tokio::test]
 async fn the_settlement_guard_holds_across_repository_instances() {
@@ -353,7 +353,7 @@ async fn the_settlement_guard_holds_across_repository_instances() {
 }
 
 /// Reusing a batch id after a delete must not inherit the previous batch's
-/// settlements — it would start life already finished.
+/// settlements - it would start life already finished.
 #[tokio::test]
 async fn deleting_a_batch_takes_its_settlement_rows_with_it() {
     let db = fresh_db().await;

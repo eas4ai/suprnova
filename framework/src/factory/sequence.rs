@@ -21,7 +21,7 @@
 //!
 //! `next()` starts at 1 on a fresh Sequence and increments by 1 each
 //! call. `reset()` returns the counter to 0 so the next `next()`
-//! returns 1 again — useful for between-test isolation when a test
+//! returns 1 again - useful for between-test isolation when a test
 //! suite shares a `static Sequence`.
 //!
 //! Backed by `AtomicI64` with `SeqCst` ordering. Calls from concurrent

@@ -1,4 +1,4 @@
-//! Phase 10C T2a — `Observer<M>` trait + auto-registration inventory.
+//! Phase 10C T2a - `Observer<M>` trait + auto-registration inventory.
 //!
 //! Observers are typed listeners that collect a model's 16 lifecycle
 //! callbacks into a single trait impl. A user writes:
@@ -36,11 +36,11 @@
 //!
 //! T2a (this file) ships:
 //! - The [`Observer<M>`] trait with 16 default no-op methods.
-//! - [`ObserverEntry`] — the inventory entry submitted by T2b's
+//! - [`ObserverEntry`] - the inventory entry submitted by T2b's
 //!   macro.
-//! - [`ObserverInstallFuture`] — type alias for the boxed install
+//! - [`ObserverInstallFuture`] - type alias for the boxed install
 //!   future, kept separate so `ObserverEntry::install` reads cleanly.
-//! - [`bootstrap_observers`] — drains the inventory once at boot.
+//! - [`bootstrap_observers`] - drains the inventory once at boot.
 //!
 //! T2b will ship the `#[suprnova::observer(M)]` attribute macro that
 //! emits `inventory::submit!{ObserverEntry { ... }}` entries.
@@ -58,42 +58,42 @@ use async_trait::async_trait;
 ///
 /// Sixteen methods, one per lifecycle event T1 ships:
 ///
-/// **Cancellable (return [`EventResult`])** — `Cancel(reason)` aborts
+/// **Cancellable (return [`EventResult`])** - `Cancel(reason)` aborts
 /// the in-flight operation with
 /// [`FrameworkError::bad_request(reason)`](crate::FrameworkError::bad_request):
 ///
-/// - [`saving`](Self::saving) — fires before both `create` and `save`
+/// - [`saving`](Self::saving) - fires before both `create` and `save`
 ///   with `is_creating: bool` to disambiguate.
-/// - [`creating`](Self::creating) — fires before `create`.
-/// - [`updating`](Self::updating) — fires before `update` / `save` on
+/// - [`creating`](Self::creating) - fires before `create`.
+/// - [`updating`](Self::updating) - fires before `update` / `save` on
 ///   an existing row. Carries the pre-update snapshot.
-/// - [`deleting`](Self::deleting) — fires before `delete` (soft or
+/// - [`deleting`](Self::deleting) - fires before `delete` (soft or
 ///   hard). `is_force` is `true` for `force_delete` on a soft-delete
 ///   model.
-/// - [`restoring`](Self::restoring) — fires before `restore` on a
+/// - [`restoring`](Self::restoring) - fires before `restore` on a
 ///   soft-delete model.
 ///
-/// **Non-cancellable (return `Result<(), FrameworkError>`)** — listener
+/// **Non-cancellable (return `Result<(), FrameworkError>`)** - listener
 /// errors propagate but cannot stop the operation since it has already
 /// happened (or, in the case of `retrieving`, has been initiated):
 ///
 /// - [`retrieving`](Self::retrieving), [`retrieved`](Self::retrieved)
-///   — Builder query lifecycle (T1's `Builder::get` / `first` /
+///   - Builder query lifecycle (T1's `Builder::get` / `first` /
 ///   `first_or_fail` paths).
 /// - [`created`](Self::created), [`updated`](Self::updated),
-///   [`saved`](Self::saved) — fired after the corresponding cancellable
+///   [`saved`](Self::saved) - fired after the corresponding cancellable
 ///   counterpart succeeds.
-/// - [`deleted`](Self::deleted) — fired after `delete`.
+/// - [`deleted`](Self::deleted) - fired after `delete`.
 ///   `is_force` matches the `Deleting` event flag.
-/// - [`trashed`](Self::trashed) — fired ONLY after a soft-delete (not
+/// - [`trashed`](Self::trashed) - fired ONLY after a soft-delete (not
 ///   `force_delete`).
-/// - [`restored`](Self::restored) — fired after `restore`.
-/// - [`replicating`](Self::replicating) — fired during `replicate` /
+/// - [`restored`](Self::restored) - fired after `restore`.
+/// - [`replicating`](Self::replicating) - fired during `replicate` /
 ///   `replicate_except` / `replicate_into` BEFORE the replica is
 ///   returned. Takes `&mut M` so listeners may clear timestamps,
 ///   reset auto-increments, etc.
 /// - [`force_deleting`](Self::force_deleting),
-///   [`force_deleted`](Self::force_deleted) — fired before/after a
+///   [`force_deleted`](Self::force_deleted) - fired before/after a
 ///   `force_delete` on a soft-delete model.
 ///
 /// All defaults are no-ops, so a user implementing the trait writes
@@ -157,7 +157,7 @@ where
 
     /// Fires before both `create` and `save`. Cancellable.
     /// `is_creating` is `true` on the insert path and `false` on the
-    /// update path — a single listener may branch on which is firing.
+    /// update path - a single listener may branch on which is firing.
     async fn saving(&self, _attrs: &mut Attrs, _is_creating: bool) -> EventResult {
         EventResult::ok()
     }
@@ -183,7 +183,7 @@ where
         EventResult::ok()
     }
 
-    /// Fires before `restore` on a soft-delete model. Cancellable —
+    /// Fires before `restore` on a soft-delete model. Cancellable -
     /// a listener may refuse the un-tombstone operation.
     async fn restoring(&self, _model: &M) -> EventResult {
         EventResult::ok()
@@ -208,7 +208,7 @@ where
     }
 
     /// Fires after a successful `delete`. `is_force` matches the
-    /// `Deleting` event flag — `true` for `force_delete` on a
+    /// `Deleting` event flag - `true` for `force_delete` on a
     /// soft-delete model, `false` otherwise.
     async fn deleted(&self, _model: &M, _is_force: bool) -> Result<(), FrameworkError> {
         Ok(())
@@ -228,14 +228,14 @@ where
 
     /// Fires during `replicate` / `replicate_except` / `replicate_into`
     /// BEFORE the replica is returned. `source` is the original;
-    /// `replica` is the freshly built clone — listeners can mutate it
+    /// `replica` is the freshly built clone - listeners can mutate it
     /// in place (clear timestamps, reset flags, regenerate UUIDs, ...).
     async fn replicating(&self, _source: &M, _replica: &mut M) -> Result<(), FrameworkError> {
         Ok(())
     }
 
     /// Fires before `force_delete` on a soft-delete model.
-    /// Non-cancellable — the cancellable hook for force_delete fires
+    /// Non-cancellable - the cancellable hook for force_delete fires
     /// as `Deleting { is_force: true }`. This event is the explicit
     /// after-the-fact pair for users who want to discriminate the
     /// hard-delete code path.
@@ -301,12 +301,12 @@ inventory::collect!(ObserverEntry);
 /// responsible for emitting install closures that guard against
 /// double-registration (`EventFacade::listen` is append-only, so
 /// the macro must use a `OnceLock`/`Once` gate per observer type).
-/// T2a only guarantees that an EMPTY inventory bootstraps cleanly
-/// — which is all that's required for T2a itself, since the macro
+/// T2a only guarantees that an EMPTY inventory bootstraps cleanly -
+/// which is all that's required for T2a itself, since the macro
 /// that submits entries doesn't ship until T2b.
 ///
 /// Returns the first install error encountered. If one observer's
-/// install fails, later observers are NOT installed — the boot is
+/// install fails, later observers are NOT installed - the boot is
 /// already broken.
 pub async fn bootstrap_observers() -> Result<(), FrameworkError> {
     for entry in inventory::iter::<ObserverEntry> {
@@ -321,7 +321,7 @@ pub async fn bootstrap_observers() -> Result<(), FrameworkError> {
 mod tests {
     use super::*;
 
-    // Local smoke test — kept inline so the trait + bootstrap surface
+    // Local smoke test - kept inline so the trait + bootstrap surface
     // is exercised even without the integration test file (which lives
     // at `framework/tests/eloquent_observers.rs` for the cross-crate
     // re-export check).

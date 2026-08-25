@@ -1,7 +1,7 @@
 <script lang="ts">
   import { useForm } from '@inertiajs/svelte'
 
-  // No Rust route renders this component yet — the dogfood app has no
+  // No Rust route renders this component yet - the dogfood app has no
   // registration handler. Its prop shape is therefore declared here rather
   // than imported from `inertia-props.ts`, which `suprnova generate-types`
   // rewrites from the `#[derive(InertiaProps)]` structs that actually

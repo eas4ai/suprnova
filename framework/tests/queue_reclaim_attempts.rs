@@ -1,4 +1,4 @@
-//! F-2 — reclaiming a lapsed reservation counts as a consumed attempt, on
+//! F-2 - reclaiming a lapsed reservation counts as a consumed attempt, on
 //! every driver.
 //!
 //! The database driver's own version of these assertions lives beside its
@@ -10,13 +10,13 @@
 //!
 //! Two settlement paths, and only one used to count.
 //!
-//! A job whose handler *fails* — returns `Err`, or panics into the
-//! framework's boundary — is nacked, and the driver requeues it with the
+//! A job whose handler *fails* - returns `Err`, or panics into the
+//! framework's boundary - is nacked, and the driver requeues it with the
 //! attempt consumed. It exhausts `max_tries` and dead-letters. That always
 //! worked.
 //!
-//! A job that *kills its worker* — OOM, `abort()`, segfault, or the
-//! SIGKILL a supervisor sends when a stop times out — settles nothing. Its
+//! A job that *kills its worker* - OOM, `abort()`, segfault, or the
+//! SIGKILL a supervisor sends when a stop times out - settles nothing. Its
 //! reservation merely lapses. Before this fix every driver redelivered it
 //! byte-identical, so its attempt count never moved and it could never
 //! dead-letter: it killed each worker that claimed it, came back
@@ -71,7 +71,7 @@ async fn memory_reclaim_after_worker_loss_consumes_an_attempt() {
     let d = MemoryQueueDriver::new();
     d.push(env("poison")).await.unwrap();
 
-    // Claim it and drop the reservation without settling — what a
+    // Claim it and drop the reservation without settling - what a
     // SIGKILLed worker leaves behind.
     let first = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
     assert_eq!(
@@ -137,7 +137,7 @@ async fn memory_repeated_worker_loss_exhausts_max_tries() {
 }
 
 // ---------------------------------------------------------------------------
-// Redis driver — live instance required
+// Redis driver - live instance required
 // ---------------------------------------------------------------------------
 //
 // `cargo test -p suprnova --test queue_reclaim_attempts -- --ignored`
@@ -196,13 +196,13 @@ mod redis_driver {
         );
 
         // Walk away without acking, then let a *different* consumer in the
-        // same group claim it — which is what XAUTOCLAIM does for a worker
+        // same group claim it - which is what XAUTOCLAIM does for a worker
         // that died, and the only path that reaches a second delivery.
         //
         // The whole driver goes, not just the reservation: sea-streamer's
         // consumer keeps polling in the background, and every poll resets
         // this consumer's idle time in `XINFO CONSUMERS`. A live consumer
-        // never looks dead, so a reclaim would never trigger — which is
+        // never looks dead, so a reclaim would never trigger - which is
         // correct behaviour, and exactly why the test has to actually stop
         // being alive.
         drop(first);
@@ -222,7 +222,7 @@ mod redis_driver {
         // Comfortably past `2 x visibility_timeout`, which is the bound now
         // that the driver ties sea-streamer's auto-claim *interval* to the
         // configured timeout rather than leaving it at the 30s default.
-        // Before that this same assertion needed a 45s window — the wait
+        // Before that this same assertion needed a 45s window - the wait
         // was the library's fixed polling interval, not anything about the
         // job.
         let reclaimed = other
@@ -269,7 +269,7 @@ mod redis_driver {
 // ---------------------------------------------------------------------------
 //
 // Counting the reclaimed attempt was necessary and not sufficient. Every
-// dead-letter decision in the worker happens *after* the handler returns —
+// dead-letter decision in the worker happens *after* the handler returns -
 // which assumes the handler returns. A job that kills its worker never
 // reaches settlement, so the check never ran for exactly the jobs that
 // most needed it, and the counter climbed forever with nothing acting on
@@ -297,7 +297,7 @@ async fn a_job_past_max_tries_is_not_dispatched_again() {
         .pop(Duration::from_secs(30))
         .await
         .unwrap()
-        .expect("the job is still claimable — the guard lives in the worker");
+        .expect("the job is still claimable - the guard lives in the worker");
 
     // The worker increments its own copy for this dispatch, so the value
     // it tests is one past the stored count. That is the number the guard
@@ -313,7 +313,7 @@ async fn a_job_past_max_tries_is_not_dispatched_again() {
 
 /// The boundary, from the other side. `>=` instead of `>` would satisfy
 /// the test above while silently cutting every configured `max_tries` by
-/// one — a job allowed three attempts would get two.
+/// one - a job allowed three attempts would get two.
 #[tokio::test(start_paused = true)]
 async fn the_last_permitted_attempt_still_runs() {
     let d = MemoryQueueDriver::new();
@@ -352,15 +352,15 @@ async fn the_last_permitted_attempt_still_runs() {
 //
 // `handle_dead_letter` persisted through `deps.failed_store` inside an
 // `if let Some(..)`. With no store bound the arm simply did not match and
-// execution fell through to the ack — the job was deleted with no record
+// execution fell through to the ack - the job was deleted with no record
 // anywhere. Quieter than the failure path right above it, which at least
 // leaves the reservation intact for redelivery: an *absent* store was
 // treated as more successful than a *broken* one.
 //
 // Found in the container harness, where the dogfood app has a
 // `failed_jobs` table and never binds a store: the poison job left the
-// queue on the fourth round with `failed_jobs = 0`. The worker survived —
-// the pre-dispatch guard did its job — and the work evaporated.
+// queue on the fourth round with `failed_jobs = 0`. The worker survived -
+// the pre-dispatch guard did its job - and the work evaporated.
 
 /// The job must leave the queue (it is out of attempts; putting it back is
 /// how a poison job becomes immortal) but its disappearance must be
@@ -386,7 +386,7 @@ async fn an_exhausted_job_leaves_the_queue_even_with_no_failed_store() {
     let payload = claimed
         .envelope
         .to_json()
-        .expect("the envelope must serialise — the log line is the recovery path");
+        .expect("the envelope must serialise - the log line is the recovery path");
     assert!(
         payload.contains("poison"),
         "the logged envelope carries the job name an operator would search for"

@@ -13,8 +13,8 @@ use std::path::{Component, Path};
 
 /// Write `contents` to `path` with mode 0600 on Unix.
 ///
-/// `fs::write` uses `O_CREAT` with mode 0666 masked by the umask — 0644
-/// under the common default — so a file holding a key is world-readable
+/// `fs::write` uses `O_CREAT` with mode 0666 masked by the umask - 0644
+/// under the common default - so a file holding a key is world-readable
 /// on any shared machine or CI runner. Creating with an explicit mode
 /// closes the window entirely rather than writing first and chmod-ing
 /// after, which would leave the secret readable in between.
@@ -50,7 +50,7 @@ pub fn write_private(path: &Path, contents: &str) -> io::Result<()> {
 /// relative directories, and if `src/controllers` is a link to `~/.ssh`
 /// then `make:controller authorized_keys` writes there instead. That
 /// needs prior write access to the project to set up, so it is an
-/// escalation rather than a break-in — but it escalates *out* of the
+/// escalation rather than a break-in - but it escalates *out* of the
 /// project, which is exactly the boundary worth holding.
 ///
 /// Generic over the same bounds as `fs::write`, so call sites change by
@@ -70,7 +70,7 @@ pub fn write_generated<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> 
 ///
 /// - **Traversal.** A generated name like `../../etc/cron.d/x` resolves
 ///   outside the project. Checked lexically, on the joined path, so it
-///   catches the case where the target does not exist yet — which is the
+///   catches the case where the target does not exist yet - which is the
 ///   normal case for a generator.
 /// - **Symlink redirection.** An existing component that is a symlink
 ///   sends the write somewhere else entirely, even though every lexical
@@ -110,7 +110,7 @@ pub fn ensure_contained(root: &Path, candidate: &Path) -> Result<(), String> {
     }
 
     // Symlink check over the existing prefix. Walk down from the root and
-    // stop at the first component that does not exist yet — everything
+    // stop at the first component that does not exist yet - everything
     // past that point is being created by us, so it cannot be a link
     // someone planted.
     let mut walked = root.to_path_buf();
@@ -163,7 +163,7 @@ mod tests {
             .expect("an ordinary relative path must be accepted");
     }
 
-    /// The lexical check alone passes this — every component is a plain
+    /// The lexical check alone passes this - every component is a plain
     /// name. Only the filesystem walk catches it.
     #[cfg(unix)]
     #[test]

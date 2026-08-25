@@ -2,7 +2,7 @@
 //! finding #1).
 //!
 //! `Crypt` is process-global via `OnceLock`, so this scenario lives
-//! in its own test binary — it MUST run with no key installed and
+//! in its own test binary - it MUST run with no key installed and
 //! no key in the environment. If we shared a binary with the
 //! dev-key tests, an earlier test would install Crypt and this
 //! assertion would become unfalsifiable.
@@ -10,7 +10,7 @@
 //! Pure-function coverage of the policy decision is in
 //! `framework/src/crypto/mod.rs::boot_tests::production_without_key_fails_closed`;
 //! this binary's job is to prove the wiring in `Server::from_config`
-//! propagates the error verbatim — not just the policy function.
+//! propagates the error verbatim - not just the policy function.
 
 use suprnova::{Router, Server};
 

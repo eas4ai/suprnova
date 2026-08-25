@@ -1,4 +1,4 @@
-//! Factory definitions for the dogfood app — Phase 6A T7.
+//! Factory definitions for the dogfood app - Phase 6A T7.
 //!
 //! Mirrors Laravel's `database/factories/` directory. Each factory is
 //! a zero-sized marker type with an `impl Factory` that knows how to

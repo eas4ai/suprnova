@@ -1,4 +1,4 @@
-//! Phase 9A — [`VectorDriver`] trait + payload structs.
+//! Phase 9A - [`VectorDriver`] trait + payload structs.
 
 use crate::FrameworkError;
 use async_trait::async_trait;
@@ -37,9 +37,9 @@ pub struct VectorMatch {
     /// the backend's distance metric**:
     ///
     /// - **Cosine / dot-product** (canonical case, Pinecone / Qdrant
-    ///   Cosine / Memory) — higher is more similar (range usually
+    ///   Cosine / Memory) - higher is more similar (range usually
     ///   `[-1, 1]` for cosine, unbounded for dot).
-    /// - **Qdrant Euclid / Manhattan / Chebyshev** — these are
+    /// - **Qdrant Euclid / Manhattan / Chebyshev** - these are
     ///   distance metrics; Qdrant returns the raw distance, so
     ///   **lower is more similar**. `0.0` means identical.
     ///
@@ -62,7 +62,7 @@ pub struct VectorMatch {
 /// app's task pool.
 #[async_trait]
 pub trait VectorDriver: Send + Sync + 'static {
-    /// Insert or update points. Each item's id is the merge key —
+    /// Insert or update points. Each item's id is the merge key -
     /// an existing point with the same id is replaced.
     async fn upsert(&self, store: &str, items: Vec<VectorItem>) -> Result<(), FrameworkError>;
 

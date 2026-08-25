@@ -109,8 +109,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     }
 
     /// Async cross-field validation hook. This is where database-backed
-    /// and other `.await`-ing rules — most notably the built-in
-    /// [`Unique`] rule — participate in automatic request validation.
+    /// and other `.await`-ing rules - most notably the built-in
+    /// [`Unique`] rule - participate in automatic request validation.
     ///
     /// The synchronous [`validate!`] macro cannot weave in `.await`
     /// points, and [`after_validation`] is synchronous, so without this
@@ -140,8 +140,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     ///
     /// # Ordering and bail behavior
     ///
-    /// `extract` runs the stages in order — the derived `validate()`, the
-    /// synchronous [`after_validation`], then this async hook — and
+    /// `extract` runs the stages in order - the derived `validate()`, the
+    /// synchronous [`after_validation`], then this async hook - and
     /// **bails at the first failing stage**. The async hook therefore
     /// only runs once the synchronous rules pass, so a malformed value
     /// (e.g. a syntactically invalid email) never reaches the database
@@ -204,8 +204,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 
         // Detect Precognition envelope BEFORE consuming the body so
         // we know how to short-circuit. The client sends:
-        //   Precognition: true                       — opt into the protocol
-        //   Precognition-Validate-Only: a,b,c        — filter errors to these fields
+        //   Precognition: true                       - opt into the protocol
+        //   Precognition-Validate-Only: a,b,c        - filter errors to these fields
         let is_precognition = req
             .header("Precognition")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -234,7 +234,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 
         // Only two body shapes are understood: form-urlencoded, and JSON
         // (`application/json` or any `application/*+json` suffix type). Every
-        // other content type — including a missing or empty `Content-Type` —
+        // other content type - including a missing or empty `Content-Type` -
         // is rejected with 415 rather than silently parsed as JSON. The check
         // runs BEFORE the body is read so an unsupported request never streams.
         let is_form = media_type.as_deref() == Some("application/x-www-form-urlencoded");
@@ -257,7 +257,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         };
 
         // Run validation. Precognition runs the same validators as a
-        // real submission — we just decide what to do with the result.
+        // real submission - we just decide what to do with the result.
         let validation_result = data.validate();
 
         if is_precognition {
@@ -266,7 +266,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             // cross-field hook, then the async cross-field hook (where
             // `Unique` and other DB-backed rules live). The async stage
             // runs only once the cheaper synchronous stages pass, so a
-            // malformed value never reaches a database `Unique` query —
+            // malformed value never reaches a database `Unique` query -
             // and if a *different* field is malformed, the client's
             // requested field still resolves through the same filter. An
             // empty bag means every stage passed.
@@ -291,12 +291,12 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             ));
         }
 
-        // Per-field rules passed — run the synchronous cross-field hook.
+        // Per-field rules passed - run the synchronous cross-field hook.
         if let Err(errs) = data.after_validation() {
             return Err(FrameworkError::Validation(errs));
         }
 
-        // Synchronous stages passed — run the async cross-field hook
+        // Synchronous stages passed - run the async cross-field hook
         // (DB-backed rules such as `Unique`). This is the final stage.
         if let Err(errs) = data.after_validation_async().await {
             return Err(FrameworkError::Validation(errs));
@@ -311,7 +311,7 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
 /// client supplied a filter), then map an empty result to
 /// [`FrameworkError::PrecognitionSuccess`] (HTTP 204) and a non-empty one
 /// to [`FrameworkError::PrecognitionFailure`] (HTTP 422). An empty input
-/// bag — every validation stage passed — is always success.
+/// bag - every validation stage passed - is always success.
 fn precognition_outcome(bag: ValidationErrors, validate_only: &[String]) -> FrameworkError {
     let filtered = if validate_only.is_empty() {
         bag

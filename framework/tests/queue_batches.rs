@@ -247,7 +247,7 @@ async fn allow_failures_batch_with_late_success_fires_catch_not_then() {
     Queue::set_driver(driver.clone());
 
     // FIFO drain order: failing first, succeeding last. The succeeding
-    // settlement drives `pending_jobs` to 0 — that's the M37 path.
+    // settlement drives `pending_jobs` to 0 - that's the M37 path.
     let batch_id = Queue::batch()
         .name("m37-late-success")
         .add(M37FailingThen { succeed: false })
@@ -340,7 +340,7 @@ async fn multi_job_batch_fires_finally_even_when_first_fails_and_rest_skipped() 
     );
     assert!(snap.finished(), "batch should be marked finished");
     // The cancelled-skip path counts as a deleted settlement, so the
-    // expected runs total is only the failed job's side effects (none) —
+    // expected runs total is only the failed job's side effects (none) -
     // no successful runs because the rest were skipped.
     assert_eq!(BATCHED_RUNS.load(Ordering::SeqCst), 0);
     // `finally` MUST fire even when the batch was cancelled mid-flight.
@@ -444,7 +444,7 @@ mod m38_partial_push {
             "partial push must surface the driver error"
         );
 
-        // `dispatch` errored, so the caller never got the id — but the two
+        // `dispatch` errored, so the caller never got the id - but the two
         // envelopes that DID land carry it, which is exactly the position a
         // worker is in. That is the whole problem with deleting the batch row:
         // these envelopes are real, they are in the queue, and they are
@@ -472,7 +472,7 @@ mod m38_partial_push {
             .find(&batch_id)
             .await
             .unwrap()
-            .expect("the batch must still exist — deleting it orphans these two");
+            .expect("the batch must still exist - deleting it orphans these two");
 
         assert_eq!(
             batch.total_jobs, 5,

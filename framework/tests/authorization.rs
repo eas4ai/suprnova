@@ -164,7 +164,7 @@ fn policy_macro_routes_bool_and_response_returns() {
     // The `-> Response` method allows the owner.
     assert!(Gate::allows("update-article", &owner, &article));
 
-    // It denies a stranger with the rich message + status it returned — proof
+    // It denies a stranger with the rich message + status it returned - proof
     // the method routed to `define_with`, not `define`.
     let denied = Gate::inspect("update-article", &stranger, &article);
     assert!(denied.denied());
@@ -306,7 +306,7 @@ async fn gate_authorize_async_returns_unauthorized_when_denied() {
 /// of which code path called `init_policies()`.
 #[test]
 fn init_policies_registers_gates_without_server_serve() {
-    // Call init_policies directly — no Server::serve, no Application::run.
+    // Call init_policies directly - no Server::serve, no Application::run.
     suprnova::authorization::init_policies();
     // Also safe to call again (idempotent).
     suprnova::authorization::init_policies();
@@ -317,7 +317,7 @@ fn init_policies_registers_gates_without_server_serve() {
     };
     let my_comment = Comment { author_id: 1 };
 
-    // Gate wired up by #[policy(User, Comment)] above — must work.
+    // Gate wired up by #[policy(User, Comment)] above - must work.
     assert!(
         Gate::allows("view-comment", &alice, &my_comment),
         "init_policies() must register #[policy] gates without Server::serve"
@@ -360,7 +360,7 @@ fn gate_has_returns_true_for_registered_action() {
         Gate::has::<User, Post>("publish-post"),
         "has must report registered (action, U, R) tuples"
     );
-    // Distinct U/R or missing action must report `false` — `has`
+    // Distinct U/R or missing action must report `false` - `has`
     // keys on the full tuple, not the action string alone.
     assert!(!Gate::has::<User, Comment>("publish-post"));
     assert!(!Gate::has::<User, Post>("delete-post-permanently"));
@@ -371,7 +371,7 @@ fn gate_abilities_lists_registered_actions_deduped() {
     Gate::define::<User, Post>("archive-post", |u, _| u.is_admin);
     Gate::define::<User, Post>("unarchive-post", |u, _| u.is_admin);
     // Same action against a DIFFERENT resource type should NOT
-    // produce a duplicate in `abilities()` — it dedupes by action
+    // produce a duplicate in `abilities()` - it dedupes by action
     // string the same way Laravel's `Gate::abilities()` does.
     Gate::define::<User, Comment>("archive-post", |u, _| u.is_admin);
 
@@ -503,7 +503,7 @@ async fn gate_any_async_works_with_mixed_sync_and_async_registrations() {
 async fn gate_check_async_short_circuits_on_first_deny() {
     Gate::define::<User, Post>("ca-cheap-deny", |_u, _p| false);
     // This second gate would never be called if check_async
-    // short-circuits — we can't directly assert "wasn't called"
+    // short-circuits - we can't directly assert "wasn't called"
     // without observable side effects, but a passing test confirms
     // the iteration completes (otherwise it would hang forever in
     // a real wait).

@@ -116,7 +116,7 @@ async fn gc_loop_survives_errors() {
     let handle =
         spawn_session_gc_supervisor(store.clone(), Duration::from_millis(50), cancel.clone());
 
-    // Every tick errors but the loop must keep going — 5+ ticks means
+    // Every tick errors but the loop must keep going - 5+ ticks means
     // the err-swallow behaviour holds.
     tokio::time::sleep(Duration::from_millis(320)).await;
     let count = store.gc_calls.load(Ordering::SeqCst);
@@ -143,14 +143,14 @@ async fn middleware_store_accessor_returns_the_bound_store() {
 /// Regression for the L1 finding: the gc supervisor MUST exit cleanly
 /// when the supervisor cancellation token fires. Without `select!` on
 /// `cancel.cancelled()` the loop would keep sleeping forever and the
-/// 5-second shutdown drain would have to force-abort it — defeating
+/// 5-second shutdown drain would have to force-abort it - defeating
 /// the point of bringing the gc loop under the supervisor.
 #[tokio::test(flavor = "current_thread")]
 async fn gc_supervisor_exits_promptly_on_cancellation() {
     let store: Arc<CountingStore> = Arc::new(CountingStore::default());
 
     // 60-second interval so the loop is "stuck" in the sleep arm at the
-    // moment we cancel — if select! wasn't honoured we'd time out.
+    // moment we cancel - if select! wasn't honoured we'd time out.
     let cancel = CancellationToken::new();
     let handle =
         spawn_session_gc_supervisor(store.clone(), Duration::from_secs(60), cancel.clone());

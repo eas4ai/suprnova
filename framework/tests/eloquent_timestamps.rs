@@ -1,4 +1,4 @@
-//! Phase 10A T9 — Auto-managed timestamps + `touch()`.
+//! Phase 10A T9 - Auto-managed timestamps + `touch()`.
 //!
 //! When a model has both `created_at` and `updated_at` fields the
 //! macro auto-detects timestamps and:
@@ -10,7 +10,7 @@
 //! Auto-detect: if the struct has NEITHER column the macro skips
 //! injection silently (Laravel-parity for pivots / join tables /
 //! no-history models). If the struct has EXACTLY ONE of the two
-//! the macro emits a `compile_error!` — almost certainly a typo.
+//! the macro emits a `compile_error!` - almost certainly a typo.
 //!
 //! `#[model(timestamps = false)]` is the explicit opt-out and works
 //! regardless of which columns are on the struct.
@@ -179,7 +179,7 @@ async fn update_attrs_bumps_updated_at_only() {
     // Covers the `Model::update(attrs)` path which routes through
     // `apply_attrs_to_active_model` rather than
     // `into_active_model_for_update`. The injection must catch BOTH
-    // create() and update(attrs) — they share the apply_attrs hook.
+    // create() and update(attrs) - they share the apply_attrs hook.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate_users(&db).await;
 
@@ -322,7 +322,7 @@ async fn seed(db: &TestDatabase) -> (T9Post, T9Video, T9Archive, T9Comment) {
 
 #[tokio::test]
 // The two `HAS_TIMESTAMPS` checks below assert on an associated const
-// pulled through a generic type parameter, not on a literal — clippy's
+// pulled through a generic type parameter, not on a literal - clippy's
 // constant folder still resolves it at lint time and flags it as a
 // no-op assertion. It isn't: this is exactly what proves the macro
 // emitted the right value per model.

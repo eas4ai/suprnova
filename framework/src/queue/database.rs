@@ -4,7 +4,7 @@
 //! attempts. On MySQL / Postgres, uses `SELECT ... FOR UPDATE SKIP LOCKED`.
 //!
 //! Every statement here is hand-written, so its placeholders are rendered
-//! per backend by the crate-internal `database::placeholder` helpers —
+//! per backend by the crate-internal `database::placeholder` helpers -
 //! Postgres rejects the `?` form outright, which made this whole driver a
 //! parse error there.
 
@@ -33,7 +33,7 @@ impl DatabaseQueueDriver {
     ///
     /// The `table` argument is interpolated directly into every SQL
     /// statement (push/pop/ack/nack), so it MUST validate as a SQL
-    /// identifier — operator-controlled env input doesn't excuse the
+    /// identifier - operator-controlled env input doesn't excuse the
     /// composition. Validation happens once, here, rather than on every
     /// query.
     ///
@@ -109,7 +109,7 @@ impl QueueDriver for DatabaseQueueDriver {
     ///
     /// The delete is the fence. It is keyed on `reserved_token`, so a worker
     /// whose reservation expired while it was busy affects zero rows, and the
-    /// whole transaction — including the successor it was about to enqueue —
+    /// whole transaction - including the successor it was about to enqueue -
     /// rolls back. That is the case two-step settlement cannot handle at all:
     /// the stale worker's push succeeds, the new owner's push succeeds too,
     /// and the chain forks.
@@ -125,7 +125,7 @@ impl QueueDriver for DatabaseQueueDriver {
             .map_err(|e| FrameworkError::internal(format!("queue settle txn: {e}")))?;
 
         // The fence runs FIRST. Both statements commit together either way, so
-        // ordering does not affect atomicity — it decides which outcome a
+        // ordering does not affect atomicity - it decides which outcome a
         // stale worker sees. Inserting first, a worker whose job had already
         // been reclaimed and settled by someone else would collide with the
         // successor that owner enqueued and surface a duplicate-key error;
@@ -173,7 +173,7 @@ impl QueueDriver for DatabaseQueueDriver {
         delay: Duration,
     ) -> Result<(), FrameworkError> {
         // The stored row is the source of truth and its `attempts` was never
-        // bumped for this run — only the worker's local copy was — so
+        // bumped for this run - only the worker's local copy was - so
         // requeuing it in place preserves the count without touching `_env`.
         self.requeue(token, delay, AttemptPolicy::Preserve, "release")
             .await
@@ -309,7 +309,7 @@ impl DatabaseQueueDriver {
     ///
     /// Shared by [`QueueDriver::push`] and [`QueueDriver::settle`] so a
     /// follow-up enqueued inside the settlement transaction is written exactly
-    /// the way a directly-pushed one is — a second copy of this statement
+    /// the way a directly-pushed one is - a second copy of this statement
     /// would be free to drift in a column, a placeholder ordinal, or the
     /// NULL-vs-`"default"` queue convention.
     fn insert_statement(
@@ -331,7 +331,7 @@ impl DatabaseQueueDriver {
             vec![
                 sea_orm::Value::from(env.id.to_string()),
                 sea_orm::Value::from(env.job_name.clone()),
-                // NULL, not "default" — an unrouted job stays indistinguishable
+                // NULL, not "default" - an unrouted job stays indistinguishable
                 // from one written before the column existed, so a mixed-version
                 // fleet drains the same rows during a rolling upgrade.
                 sea_orm::Value::from(env.queue.clone()),
@@ -395,7 +395,7 @@ impl DatabaseQueueDriver {
 
         // Step 2: Apply the attempt policy and the new availability in Rust,
         // then write the envelope back so the stored JSON and the columns
-        // never disagree — `pop` decodes the JSON, so a column-only update
+        // never disagree - `pop` decodes the JSON, so a column-only update
         // would hand the next worker a stale `available_at`.
         let mut env = Envelope::from_json(&envelope_json)
             .map_err(|e| FrameworkError::internal(format!("envelope decode: {e}")))?;
@@ -445,7 +445,7 @@ impl DatabaseQueueDriver {
     ///
     /// With an empty `queues` the emitted SQL is byte-identical to the
     /// pre-routing query, so a deployment that never routes anything is
-    /// unaffected — including one whose `jobs` table predates the `queue`
+    /// unaffected - including one whose `jobs` table predates the `queue`
     /// column.
     async fn pop_filtered(
         &self,
@@ -520,7 +520,7 @@ impl DatabaseQueueDriver {
             return Ok(None);
         };
 
-        // Use index-based access — raw SQL column names may not be introspectable.
+        // Use index-based access - raw SQL column names may not be introspectable.
         let id: String = row
             .try_get_by_index::<String>(0)
             .map_err(|e| FrameworkError::internal(format!("queue id col: {e}")))?;
@@ -531,7 +531,7 @@ impl DatabaseQueueDriver {
         // SELECT predicate above admits `reserved_until IS NULL` (never
         // claimed) or `reserved_until <= now` (claimed, and the holder
         // never settled it). So a non-NULL value here means some worker
-        // took this job and did not come back — it died mid-execution.
+        // took this job and did not come back - it died mid-execution.
         //
         // That distinction is the whole fix. A job whose handler *fails*
         // is nacked, and `requeue(AttemptPolicy::Consume)` counts the
@@ -551,7 +551,7 @@ impl DatabaseQueueDriver {
             env.attempts += 1;
         }
 
-        // Conditional UPDATE — re-asserts the same "this row is unreserved or
+        // Conditional UPDATE - re-asserts the same "this row is unreserved or
         // its reservation has expired" predicate the SELECT used. Without the
         // predicate, two consumers that observed the same visible row could
         // both stamp their reservation tokens onto it; the loser would walk
@@ -570,8 +570,8 @@ impl DatabaseQueueDriver {
         // the race would surface as a transient error rather than a
         // double-reservation.
         // The attempt bump and the envelope rewrite are appended only on a
-        // reclaim. A first claim is the hot path — every poll of a busy
-        // queue takes it — and rewriting an identical `envelope_json` on
+        // reclaim. A first claim is the hot path - every poll of a busy
+        // queue takes it - and rewriting an identical `envelope_json` on
         // each one would be a wasted column write per job.
         let mut set_clause = format!(
             "reserved_until = {}, reserved_token = {}",
@@ -587,7 +587,7 @@ impl DatabaseQueueDriver {
             // Column and envelope together, the way `requeue` does it: `pop`
             // decodes the JSON, so bumping only the column would hand the
             // next worker an envelope whose `attempts` disagreed with the
-            // row — and `worker.rs` reads the envelope to decide whether
+            // row - and `worker.rs` reads the envelope to decide whether
             // `max_tries` is exhausted.
             let new_json = env
                 .to_json()

@@ -15,7 +15,7 @@
 //!    `WsConfig::ping_interval` per route). This is a 7B+ concern; v1 applies
 //!    `WsConfig::default()` globally.
 //! 2. A raw TCP client that suppresses the auto-pong behavior (not possible
-//!    with the standard tokio-tungstenite client — the library responds to
+//!    with the standard tokio-tungstenite client - the library responds to
 //!    pings automatically). A raw `tokio::net::TcpStream` + manual WebSocket
 //!    framing or a custom `tungstenite` config with `auto_pong: false` would
 //!    work when that API surface is exposed.
@@ -95,7 +95,7 @@ async fn spawn_test_server() -> u16 {
 
 #[tokio::test]
 async fn pong_responsive_client_stays_connected() {
-    // tokio-tungstenite auto-responds to pings by default — this
+    // tokio-tungstenite auto-responds to pings by default - this
     // test verifies the heartbeat doesn't mistakenly close a healthy
     // connection. Run for 250ms (much longer than the default
     // heartbeat would tick if it were tight, but the default is 30s

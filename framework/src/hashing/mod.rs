@@ -13,13 +13,13 @@
 //! (~80 ms) are intentionally CPU-bound. Calling [`hash`] / [`verify`]
 //! directly from a Tokio request handler blocks the worker thread for the
 //! whole duration. Use the [`hash_async`] / [`verify_async`] siblings
-//! inside `async fn` handlers — they dispatch onto `spawn_blocking` so the
+//! inside `async fn` handlers - they dispatch onto `spawn_blocking` so the
 //! worker stays free for other requests. The sync variants stay for tests,
 //! CLI tools, and other non-async call sites.
 //!
 //! # Algorithm-aware length guard
 //!
-//! Bcrypt's internal block size limits passwords to 72 bytes — the `bcrypt`
+//! Bcrypt's internal block size limits passwords to 72 bytes - the `bcrypt`
 //! crate's `hash` / `verify` functions silently truncate longer inputs,
 //! which means two distinct passphrases sharing their first 72 bytes hash
 //! to the same value (audit HIGH `hashing` #2). When the active driver is
@@ -28,7 +28,7 @@
 //!
 //! - [`hash`] returns `FrameworkError::param("password exceeds … bytes")`.
 //! - [`verify`] returns `Ok(false)` so the calling auth flow surfaces the
-//!   same "invalid credentials" response regardless — no length-based
+//!   same "invalid credentials" response regardless - no length-based
 //!   information disclosure.
 //!
 //! Argon2i / Argon2id have **no such limit** and accept arbitrary-length
@@ -36,7 +36,7 @@
 //!
 //! # Configuration
 //!
-//! Three env vars select and tune the driver — see [`HashConfig`] for the
+//! Three env vars select and tune the driver - see [`HashConfig`] for the
 //! resolved shape:
 //!
 //! | Env var | Default | Range |
@@ -49,7 +49,7 @@
 //! | `HASH_VERIFY` | `false` | when `true`, [`verify`] rejects hashes from a different algorithm |
 //!
 //! Suprnova's argon defaults match the OWASP 2024 recommendation
-//! (`m = 64 MiB, t = 4, p = 1`) — stronger than Laravel's PHP defaults
+//! (`m = 64 MiB, t = 4, p = 1`) - stronger than Laravel's PHP defaults
 //! (`m = 1024 KiB, t = 2, p = 2`) because Rust workers can spend the
 //! memory.
 //!
@@ -101,7 +101,7 @@ pub const MIN_BCRYPT_COST: u32 = 4;
 
 /// Maximum bcrypt cost accepted by [`hash_with_cost`]. Matches the bcrypt
 /// crate's `MAX_COST` and the `HASH_ROUNDS` env-side ceiling. Each
-/// increment doubles CPU time — at cost 31 a single hash takes hours on
+/// increment doubles CPU time - at cost 31 a single hash takes hours on
 /// commodity hardware, which is why route code that flows policy/config
 /// values into [`hash_with_cost`] gets bounds-checked here rather than
 /// relying on the upstream crate's range check.
@@ -110,7 +110,7 @@ pub const MAX_BCRYPT_COST: u32 = 31;
 /// Maximum usable password length when the active driver is bcrypt.
 ///
 /// Bcrypt requires a trailing null byte inside its 72-byte block, so the
-/// usable password limit is 71 bytes — `non_truncating_hash` itself errors
+/// usable password limit is 71 bytes - `non_truncating_hash` itself errors
 /// with `"Expected 72 bytes or fewer; found 73 bytes"` when handed exactly
 /// 72 password bytes. Suprnova rejects up-front to prevent two distinct
 /// passphrases sharing the same first 71 bytes from authenticating as the
@@ -150,7 +150,7 @@ pub fn default_driver() -> Result<&'static dyn Hasher, FrameworkError> {
 /// CLI tools that build the driver programmatically rather than from env.
 ///
 /// Returns `Err(FrameworkError::internal(...))` if the driver was already
-/// initialised — by design, the active driver does not flip mid-process.
+/// initialised - by design, the active driver does not flip mid-process.
 pub fn set_default_driver(driver: Box<dyn Hasher>) -> Result<(), FrameworkError> {
     DEFAULT_DRIVER.set(driver).map_err(|_| {
         FrameworkError::internal(
@@ -161,12 +161,12 @@ pub fn set_default_driver(driver: Box<dyn Hasher>) -> Result<(), FrameworkError>
 
 /// Hash a password using the active driver.
 ///
-/// **Synchronous** — blocks the calling thread for ~250 ms (bcrypt) or
+/// **Synchronous** - blocks the calling thread for ~250 ms (bcrypt) or
 /// ~80 ms (argon2id default). Use [`hash_async`] inside Tokio request
 /// handlers.
 ///
 /// When the active driver is bcrypt, returns `FrameworkError::param` if
-/// `password` exceeds [`MAX_BCRYPT_PASSWORD_BYTES`] — see module docs for
+/// `password` exceeds [`MAX_BCRYPT_PASSWORD_BYTES`] - see module docs for
 /// the rationale.
 pub fn hash(password: &str) -> Result<String, FrameworkError> {
     let driver = default_driver()?;
@@ -184,7 +184,7 @@ pub fn hash_with(driver: &dyn Hasher, password: &str) -> Result<String, Framewor
 /// **Bcrypt-specific.** This bypasses driver selection and uses bcrypt
 /// regardless of `HASH_DRIVER`. Use [`hash`] for the configured driver.
 ///
-/// **Synchronous** — see [`hash_with_cost_async`] for the async-safe
+/// **Synchronous** - see [`hash_with_cost_async`] for the async-safe
 /// variant.
 ///
 /// Rejects `cost` outside [`MIN_BCRYPT_COST`]`..=`[`MAX_BCRYPT_COST`]
@@ -205,18 +205,18 @@ pub fn hash_with_cost(password: &str, cost: u32) -> Result<String, FrameworkErro
 /// Verify a password against a hash.
 ///
 /// **Stored-algorithm-aware.** Dispatch is on the hash's algorithm, not
-/// the configured driver — same shape as PHP's `password_verify`. This is
+/// the configured driver - same shape as PHP's `password_verify`. This is
 /// what enables live migration from bcrypt → argon2id: existing bcrypt
 /// hashes still verify after a `HASH_DRIVER` flip so callers can rotate
 /// them on the next successful login via [`needs_rehash`].
 ///
-/// **Synchronous** — see [`verify_async`] for the async-safe variant.
+/// **Synchronous** - see [`verify_async`] for the async-safe variant.
 /// Uses constant-time comparison (delegated to the underlying crate) to
 /// prevent timing attacks.
 ///
 /// For bcrypt, a password longer than [`MAX_BCRYPT_PASSWORD_BYTES`]
 /// cannot match any hash this module produces, so verify returns
-/// `Ok(false)` rather than an error — keeps the calling auth flow
+/// `Ok(false)` rather than an error - keeps the calling auth flow
 /// returning the same "invalid credentials" response regardless of
 /// length.
 ///
@@ -257,7 +257,7 @@ pub fn verify_with(
     }
 
     // Dispatch on the stored algorithm, not the configured driver.
-    // Within an algorithm family, params come from the hash string —
+    // Within an algorithm family, params come from the hash string -
     // a default-param verifier of the right family suffices because
     // bcrypt::verify reads cost from `$2*$cost$…` and
     // `Argon2::default().verify_password` reads m/t/p from the PHC
@@ -265,7 +265,7 @@ pub fn verify_with(
     match stored.algo {
         info::AlgoName::Bcrypt => {
             // Bcrypt's 72-byte length guard applies on the verify side
-            // too — a >71-byte password cannot match any bcrypt hash
+            // too - a >71-byte password cannot match any bcrypt hash
             // this module produces.
             if password.len() > MAX_BCRYPT_PASSWORD_BYTES {
                 return Ok(false);
@@ -276,7 +276,7 @@ pub fn verify_with(
             verify_argon(password, hash)
         }
         info::AlgoName::Unknown => {
-            // Stored hash is in no recognised algorithm — fall back to
+            // Stored hash is in no recognised algorithm - fall back to
             // the configured driver's verify (which will also return
             // false, but preserves any custom behaviour a user-supplied
             // driver might add).
@@ -293,7 +293,7 @@ fn verify_bcrypt(password: &str, hash: &str) -> Result<bool, FrameworkError> {
         Err(e) => {
             // bcrypt::verify errors on non-bcrypt input. Since
             // `verify_with` already routed by stored algo, we only land
-            // here on a legitimately bcrypt-shaped hash — error means
+            // here on a legitimately bcrypt-shaped hash - error means
             // corrupted hash, not a different algorithm.
             let msg = format!("{e}");
             let lower = msg.to_lowercase();
@@ -392,7 +392,7 @@ pub fn info(hash: &str) -> HashInfo {
 
 /// SHA-256 of `input`, lowercase hex-encoded (64 chars).
 ///
-/// This is a fast cryptographic digest, **not** a password hash — it has
+/// This is a fast cryptographic digest, **not** a password hash - it has
 /// no salt and no work factor. Use it only for high-entropy material where
 /// pre-image/brute-force resistance comes from the input's own entropy
 /// (single-use auth-flow tokens, idempotency keys), never for passwords.
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn hash_with_cost_accepts_endpoints() {
-        // MIN endpoint must work — it's the fastest valid bcrypt cost.
+        // MIN endpoint must work - it's the fastest valid bcrypt cost.
         // (MAX endpoint isn't exercised because cost 31 takes hours.)
         assert!(hash_with_cost("test", MIN_BCRYPT_COST).is_ok());
     }

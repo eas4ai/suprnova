@@ -35,7 +35,7 @@ use crate::events::EventFacade;
 ///     let user_id: String = Auth::id().unwrap();
 /// }
 ///
-/// // Log in by credentials against the default guard — fires Login +
+/// // Log in by credentials against the default guard - fires Login +
 /// // Authenticated and supports remember-me (requires an AuthManager).
 /// Auth::attempt(&Credentials::password(email, password), remember).await?;
 ///
@@ -44,7 +44,7 @@ use crate::events::EventFacade;
 /// // outside a request scope.
 /// Auth::login_id(user_id.to_string())?;
 ///
-/// // Log out — clears the session + request user, revokes remember-me,
+/// // Log out - clears the session + request user, revokes remember-me,
 /// // and fires Logout.
 /// Auth::logout().await?;
 /// # Ok(()) }
@@ -69,14 +69,14 @@ impl Auth {
         !Self::check()
     }
 
-    /// Establish a session for a known user id — the synchronous session
+    /// Establish a session for a known user id - the synchronous session
     /// primitive behind login.
     ///
     /// The Suprnova-native fast path for "I already have a verified user id,
     /// authenticate it": it writes the id into the session without a
     /// [`UserProvider`] lookup, an [`AuthManager`], lifecycle events, or a
-    /// remember-me token. For the Laravel-shaped, guard-backed login — events,
-    /// remember-me, provider resolution — use [`login`](Self::login),
+    /// remember-me token. For the Laravel-shaped, guard-backed login - events,
+    /// remember-me, provider resolution - use [`login`](Self::login),
     /// [`attempt`](Self::attempt), or [`login_using_id`](Self::login_using_id).
     ///
     /// # Errors
@@ -85,8 +85,8 @@ impl Auth {
     /// request scope (no [`SessionMiddleware`](crate::SessionMiddleware) installed,
     /// or a unit test that forgot to wrap the call in
     /// [`crate::session::session_scope_for_test`]). The previous infallible
-    /// signature silently dropped the write — a "successful login" that
-    /// never landed — which the caller had no way to detect.
+    /// signature silently dropped the write - a "successful login" that
+    /// never landed - which the caller had no way to detect.
     ///
     /// # Security
     ///
@@ -128,12 +128,12 @@ impl Auth {
     /// On a future request where the session is missing or expired,
     /// `SessionMiddleware` will verify the cookie's plaintext against
     /// the hashed row, rotate the token (delete + reissue), and
-    /// hydrate the session — the user is logged back in transparently.
+    /// hydrate the session - the user is logged back in transparently.
     ///
     /// # Arguments
     ///
-    /// * `user_id` — the user's ID (string).
-    /// * `ttl_minutes` — token + cookie lifetime in minutes. Pass
+    /// * `user_id` - the user's ID (string).
+    /// * `ttl_minutes` - token + cookie lifetime in minutes. Pass
     ///   `SessionConfig::remember_lifetime` (as minutes) for the
     ///   configured default; pass a smaller value for short-lived
     ///   "stay signed in for an hour" UX.
@@ -143,7 +143,7 @@ impl Auth {
     ) -> Result<(), crate::error::FrameworkError> {
         let user_id = user_id.into();
         // Regular session login (regen session id + CSRF, set user). This
-        // also verifies the session scope is installed — failing loud here
+        // also verifies the session scope is installed - failing loud here
         // before the DB row gets written by `issue_remember_cookie`.
         Self::login_id(user_id.clone())?;
         // Issue the row + queue the cookie.
@@ -164,7 +164,7 @@ impl Auth {
     /// requested remember-me at password-login time.
     ///
     /// For a fresh login flow that has not yet established the session,
-    /// call [`login_remember`](Self::login_remember) instead — it
+    /// call [`login_remember`](Self::login_remember) instead - it
     /// handles session id rotation + CSRF + auth user + remember-me in
     /// one step.
     pub async fn issue_remember_cookie(
@@ -173,7 +173,7 @@ impl Auth {
     ) -> Result<(), crate::error::FrameworkError> {
         // Pre-flight: refuse to insert the DB row when no pending-cookies
         // scope is installed. Otherwise `push_pending_cookie` below would
-        // silently drop the cookie and the row would be orphaned — the
+        // silently drop the cookie and the row would be orphaned - the
         // client receives no durable login state but the database holds
         // a live token. Single task = task-local cannot vanish mid-fn,
         // so no TOCTOU between this check and the push.
@@ -203,7 +203,7 @@ impl Auth {
             };
         // Build + queue the cookie. The cookie's `Max-Age` matches the
         // row's TTL (`ttl_minutes` converted to seconds) so the browser
-        // stops sending the cookie the moment the row expires — the
+        // stops sending the cookie the moment the row expires - the
         // attribute does not "lie" about validity.
         let config = crate::session::middleware::current_session_config();
         let max_age =
@@ -226,7 +226,7 @@ impl Auth {
     /// user AND queue a "clear" cookie on the outgoing response.
     ///
     /// Chained automatically from `Auth::logout`. Also the right hook
-    /// for a "log me out everywhere" account-security button — call
+    /// for a "log me out everywhere" account-security button - call
     /// it without a preceding `logout` to invalidate every device
     /// while keeping the current session active.
     ///
@@ -236,7 +236,7 @@ impl Auth {
         match Self::id() {
             Some(id) => Self::revoke_remember_tokens_for_user(&id).await,
             None => {
-                // No authenticated user — still queue the clear cookie
+                // No authenticated user - still queue the clear cookie
                 // so any stale one in the browser's jar is dropped.
                 Self::queue_remember_clear_cookie();
                 Ok(0)
@@ -259,7 +259,7 @@ impl Auth {
     /// transient revoke failure cannot leave a fully-authed
     /// session bypassing the 2FA gate. With this method, the
     /// challenge demote saves `Auth::id()` to a local, clears
-    /// auth, and only then calls the revoke — a mid-step failure
+    /// auth, and only then calls the revoke - a mid-step failure
     /// can no longer strand the session in an authed-but-pending
     /// state.
     ///
@@ -267,14 +267,14 @@ impl Auth {
     ///
     /// The clear cookie is queued **before** the row-delete query.
     /// If the delete fails (DB transient outage, lock timeout),
-    /// the response still carries the clear-cookie directive — the
+    /// the response still carries the clear-cookie directive - the
     /// browser drops the cookie on the way out and cannot re-
     /// authenticate via remember-me on the next request, even
     /// though the stale row in the database hasn't been removed
     /// yet (a future `prune_expired` sweep will). Reversing the
     /// order would leave a "row alive + cookie alive" window after
     /// a transient revoke error, which the remember-me middleware
-    /// would happily use to log the user back in — defeating the
+    /// would happily use to log the user back in - defeating the
     /// revoke entirely.
     ///
     /// Returns the number of rows deleted (0 if the user had no
@@ -291,7 +291,7 @@ impl Auth {
         // response carries the clear directive.
         Self::queue_remember_clear_cookie();
         // THEN attempt the row delete. A failure here propagates as
-        // Err to the caller — but the browser will drop the cookie
+        // Err to the caller - but the browser will drop the cookie
         // regardless, so the stale DB row cannot be exploited.
         if let Some(engine) = crate::magnetar_integration::optional_password_engine() {
             engine.revoke_remember(user_id).await.map_err(|error| {
@@ -305,14 +305,14 @@ impl Auth {
     }
 
     /// Queue the "forget remember-me" cookie on the outgoing response.
-    /// Internal helper — callers want `revoke_remember_tokens` or
+    /// Internal helper - callers want `revoke_remember_tokens` or
     /// `revoke_remember_tokens_for_user`, which queue the clear cookie
     /// as part of their contract. Centralised here so the cookie
     /// attributes stay in one place.
     fn queue_remember_clear_cookie() {
         let config = crate::session::middleware::current_session_config();
         let clear = crate::session::middleware::create_forget_remember_cookie(&config);
-        // A clear cookie is a defensive add — when there is no scope to push
+        // A clear cookie is a defensive add - when there is no scope to push
         // into (no SessionMiddleware) there is no orphan state to worry about,
         // and the browser simply keeps whatever stale cookie it held. Dropping
         // the result here is intentional, unlike the issue path which gates a
@@ -333,12 +333,12 @@ impl Auth {
     ///
     /// The session-state teardown runs **before** the remember-me revoke.
     /// If the revoke errors (DB transient outage, lock timeout), this
-    /// method still returns `Err` — but the session is already in a
+    /// method still returns `Err` - but the session is already in a
     /// logged-out state, so a stale auth slot cannot survive the failed
     /// logout. Reversing the order would leave a user fully authenticated
     /// when the revoke failed (the original implementation's gap).
     pub(crate) async fn clear_authentication() -> Result<(), crate::error::FrameworkError> {
-        // Capture the authenticated id BEFORE clearing — the revoke
+        // Capture the authenticated id BEFORE clearing - the revoke
         // below needs it, and `Auth::id()` is about to become `None`.
         let saved_id = Self::id();
 
@@ -348,7 +348,7 @@ impl Auth {
         // the session, so a user resolved this request would otherwise
         // survive logout and `Auth::id()` would keep reporting it.
         // Both 2FA pending slots (user-id + remember preference) are
-        // authentication state — a tear-down that drops one but leaves
+        // authentication state - a tear-down that drops one but leaves
         // the other strands the state machine.
         clear_auth_user();
         request_state::clear_current_user();
@@ -360,7 +360,7 @@ impl Auth {
 
         // STEP 2: Revoke remember-me using the saved id. A failure
         // here propagates as `Err` to the caller, but the session is
-        // already in a safe logged-out state — the failed revoke
+        // already in a safe logged-out state - the failed revoke
         // queues the clear cookie first (cookie-first ordering on
         // `revoke_remember_tokens_for_user`), so the browser drops
         // the cookie regardless, and the stale DB row cannot be
@@ -370,7 +370,7 @@ impl Auth {
                 Self::revoke_remember_tokens_for_user(&id).await?;
             }
             None => {
-                // No prior auth — still queue the clear cookie in
+                // No prior auth - still queue the clear cookie in
                 // case the browser holds a stale one from another
                 // session. Matches `revoke_remember_tokens`'s
                 // contract for the no-id branch.
@@ -417,7 +417,7 @@ impl Auth {
         let user_id = Self::id();
 
         // STEP 1: Destroy session + request_state FIRST. Even if the
-        // revoke errors below, the session is already gone — every
+        // revoke errors below, the session is already gone - every
         // bit of auth state is wiped. Reversing the order (revoke
         // first, then flush) leaves a fully-authed session if the
         // revoke fails, defeating the point of `logout_and_invalidate`.
@@ -426,7 +426,7 @@ impl Auth {
         // for plain `logout`: `flush()` clears `data` + `user_id` but
         // leaves `session.id` intact, so without an explicit
         // `regenerate_session_id` the destroyed session and the next
-        // session would share an ID — defeating "complete session
+        // session would share an ID - defeating "complete session
         // destruction." Laravel's `session()->invalidate()` is
         // explicitly `flush()` + `regenerate()`; we match that here.
         regenerate_session_id();
@@ -443,7 +443,7 @@ impl Auth {
         if let Some(ref id) = user_id {
             Self::revoke_remember_tokens_for_user(id).await?;
         } else {
-            // No prior auth — queue the clear cookie defensively.
+            // No prior auth - queue the clear cookie defensively.
             Self::queue_remember_clear_cookie();
         }
 
@@ -483,7 +483,7 @@ impl Auth {
     pub async fn user() -> Result<Option<Arc<dyn Authenticatable>>, crate::error::FrameworkError> {
         // Named-guard system when configured: the default guard checks the
         // request-scoped cache, resolves through the AuthManager's provider, and
-        // caches the result — so this stays consistent with `Auth::attempt` /
+        // caches the result - so this stays consistent with `Auth::attempt` /
         // `Auth::guard("web").user()`. `default_guard()` resolves the provider
         // eagerly, so a registered-but-providerless AuthManager returns `Err`
         // here and falls through to the legacy branch rather than half-resolving.
@@ -520,7 +520,7 @@ impl Auth {
     /// error.
     ///
     /// Mirrors Laravel's `Auth::userOrFail()`. Use this in handlers that
-    /// have already passed an auth middleware — the request is known to be
+    /// have already passed an auth middleware - the request is known to be
     /// authenticated, so resolving the user is expected to succeed, and a
     /// missing user means the precondition was violated rather than that
     /// the handler must branch on a `None`. The `?` operator then turns the
@@ -581,11 +581,11 @@ impl Auth {
     /// # Ok(()) }
     /// ```
     ///
-    /// # Performance — when to prefer the `Arc` sibling
+    /// # Performance - when to prefer the `Arc` sibling
     ///
     /// Each call clones the concrete `T`. Handlers that need the user
-    /// in multiple `tokio::spawn` arms — or look it up several times
-    /// per request — should reach for [`Auth::user_as_arc`] instead and
+    /// in multiple `tokio::spawn` arms - or look it up several times
+    /// per request - should reach for [`Auth::user_as_arc`] instead and
     /// share the `Arc<T>`. The first call still pays the underlying
     /// clone (the trait surface keeps `Arc<dyn Authenticatable>`
     /// internally rather than `Arc<dyn Any>`); subsequent shares are
@@ -602,7 +602,7 @@ impl Auth {
 
     /// `Arc`-returning sibling of [`Auth::user_as`]. Use when the
     /// handler needs to share the user value across multiple spawned
-    /// tasks or borrow it through multiple lookup sites — the
+    /// tasks or borrow it through multiple lookup sites - the
     /// returned `Arc<T>` is the same allocation the request-state
     /// cache already holds, so neither the lookup nor downstream
     /// shares perform a `T` clone.
@@ -712,7 +712,7 @@ impl Auth {
     // application's *default* guard. These mirror that: each resolves the
     // default guard from the container-bound `AuthManager` and forwards the
     // call, so they require a manager (`App::singleton(AuthManager::new(...))`)
-    // and fail loud with that remediation otherwise — the same contract as
+    // and fail loud with that remediation otherwise - the same contract as
     // [`Auth::guard`](Self::guard). The sync session fast paths
     // (`id`/`check`/`guest`/`via_remember`) and the session primitives
     // (`login_id`/`logout`) stay manager-free.
@@ -728,10 +728,10 @@ impl Auth {
     }
 
     /// Validate credentials and, on success, log the user into the default
-    /// guard — optionally issuing a remember-me token. Mirrors Laravel's
+    /// guard - optionally issuing a remember-me token. Mirrors Laravel's
     /// `Auth::attempt($credentials, $remember)`.
     ///
-    /// Returns the resolved user on success (richer than Laravel's `bool` — no
+    /// Returns the resolved user on success (richer than Laravel's `bool` - no
     /// follow-up [`Auth::user`](Self::user) call needed), `Ok(None)` on bad
     /// credentials, and `Err` only on an underlying failure (database, hashing,
     /// or no [`AuthManager`] registered).
@@ -797,21 +797,21 @@ impl Auth {
     /// this request (rather than from an active session). Mirrors Laravel's
     /// `Auth::viaRemember()`.
     ///
-    /// Reads the request-scoped auth state directly, so — like
-    /// [`id`](Self::id) / [`check`](Self::check) — it needs no [`AuthManager`]
+    /// Reads the request-scoped auth state directly, so - like
+    /// [`id`](Self::id) / [`check`](Self::check) - it needs no [`AuthManager`]
     /// and never fails.
     pub fn via_remember() -> bool {
         request_state::via_remember()
     }
 
     /// Set the current user for this request **without** persisting to the
-    /// session — the in-memory equivalent of [`once`](Self::once). Mirrors
+    /// session - the in-memory equivalent of [`once`](Self::once). Mirrors
     /// Laravel's `Auth::setUser($user)`.
     ///
     /// After this call, [`id`](Self::id) / [`check`](Self::check) /
     /// [`user`](Self::user) reflect `user` for the remainder of the request.
     /// The request-scoped current user is shared by every guard, so the facade
-    /// writes it directly — no [`AuthManager`] needed (the same manager-free
+    /// writes it directly - no [`AuthManager`] needed (the same manager-free
     /// fast path as `id`/`check`/`guest`).
     pub fn set_user(user: Arc<dyn Authenticatable>) {
         request_state::set_current_user(user);
@@ -957,7 +957,7 @@ mod tests {
 
     // The facade resolves the container-bound manager, registers a provider
     // through it, and projects both guard contracts. Uses TestContainer
-    // (thread-local) so it stays parallel-safe — never `App::singleton`.
+    // (thread-local) so it stays parallel-safe - never `App::singleton`.
     #[tokio::test]
     async fn facade_registers_provider_and_resolves_named_guards() {
         let _scope = TestContainer::fake();
@@ -1013,7 +1013,7 @@ mod tests {
 
     // `set_user`/`has_user` write+read the request-scoped current user directly
     // (manager-free); `Auth::id` then sees it because it consults request_state
-    // ahead of the session. Needs only a request scope — no manager, no events.
+    // ahead of the session. Needs only a request scope - no manager, no events.
     #[tokio::test]
     async fn set_user_and_has_user_round_trip_in_request_scope() {
         request_state::request_state_scope_for_test(async {
@@ -1028,7 +1028,7 @@ mod tests {
     }
 
     // `Auth::user()` routes through the default guard (the AuthManager provider)
-    // and the request-scoped cache — so `set_user` surfaces and it no longer
+    // and the request-scoped cache - so `set_user` surfaces and it no longer
     // depends on a legacy `bind!(dyn UserProvider)`. Before unification this
     // errored here: the old impl went straight to `App::make`, which has no
     // binding under `TestContainer`.
@@ -1091,7 +1091,7 @@ mod tests {
     // `login_id` writes into the session via the per-request task-local. Inside
     // a session scope it must succeed AND the write must be visible via
     // `Auth::id()`. The audit's "silent no-op" was that the write disappeared
-    // when the scope was absent — that case is the next test.
+    // when the scope was absent - that case is the next test.
     #[tokio::test]
     async fn login_id_succeeds_inside_session_scope() {
         let slot = crate::session::new_session_slot_for_test();
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     // `issue_remember_cookie` writes a DB row AND queues a cookie. With no
-    // pending-cookies scope installed, the cookie would be dropped — the
+    // pending-cookies scope installed, the cookie would be dropped - the
     // audit's orphan-token bug. It must pre-flight and refuse before the
     // row write, so this test only needs a session scope to exercise the
     // pending-cookies absence (we never reach the DB).
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     // `login_remember` is the public entry. It calls `login_id` first, so
-    // the no-session-scope case errors out before the row write — the same
+    // the no-session-scope case errors out before the row write - the same
     // fail-loud guarantee. The pending-cookies path is exercised in
     // `tests/remember_me.rs` against a live DB.
     #[tokio::test]
@@ -1185,7 +1185,7 @@ mod tests {
     }
 
     // Pre-fix, `Auth::user_as_arc::<T>` delegated to
-    // `user_as::<T>().map(Arc::new)` — each call cloned the concrete
+    // `user_as::<T>().map(Arc::new)` - each call cloned the concrete
     // user before wrapping in `Arc`. The trait-surgery fix wires
     // `Authenticatable::into_arc_any` through `Arc::downcast::<T>` so
     // the returned Arc IS the request-state cache entry, not a copy.

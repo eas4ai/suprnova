@@ -1,4 +1,4 @@
-//! Mail boot wiring — covers the env-driven driver-selection matrix.
+//! Mail boot wiring - covers the env-driven driver-selection matrix.
 //!
 //! Every test in this file MUST be `#[serial]` because:
 //!   1. `MAIL_DRIVER` (and provider creds) are process-global env vars.
@@ -106,7 +106,7 @@ async fn boot_memory_driver_binds_in_memory_transport() {
     );
 
     // The capture handle must point at the same transport that's been bound
-    // globally — verify by sending one message and reading it back.
+    // globally - verify by sending one message and reading it back.
     Mail::to("alice@example.org")
         .send(Ping::default())
         .await
@@ -125,7 +125,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
     // Regression: with `OnceLock`, the second `memory` bootstrap would carry
     // the stale Arc from the first. `RwLock<Option<...>>` plus
     // `clear_memory_capture()` at the top of `bootstrap_from_env` must fix
-    // this — verify the captured handle is fresh across switches.
+    // this - verify the captured handle is fresh across switches.
     clear_mail_env();
     let _ = Mail::clear_transport();
 
@@ -141,7 +141,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
         .unwrap();
     assert_eq!(first.captured().len(), 1);
 
-    // Switch to log — capture should clear.
+    // Switch to log - capture should clear.
     unsafe {
         std::env::set_var("MAIL_DRIVER", "log");
     }
@@ -151,7 +151,7 @@ async fn boot_releases_memory_capture_when_switching_drivers() {
         "non-memory driver must clear the capture handle"
     );
 
-    // Second memory bootstrap — a fresh handle (not the stale `first`).
+    // Second memory bootstrap - a fresh handle (not the stale `first`).
     unsafe {
         std::env::set_var("MAIL_DRIVER", "memory");
     }
@@ -197,7 +197,7 @@ async fn boot_smtp_driver_threads_port_into_authenticated_starttls() {
     // proves bootstrap succeeds with a non-standard port.
     //
     // We can't actually open an SMTP session in-test (no live relay), but
-    // building the transport must succeed — the lettre builder validates
+    // building the transport must succeed - the lettre builder validates
     // the host + port shape at construction time.
     clear_mail_env();
     let _ = Mail::clear_transport();
@@ -514,7 +514,7 @@ async fn boot_unknown_driver_falls_back_to_log_with_warning() {
 
 /// Regression pin for the v2 polish: `bootstrap_from_env` MUST be callable
 /// from a non-async context. The signature went from `async fn` to `fn`
-/// because every supported transport's constructor is sync today — if a
+/// because every supported transport's constructor is sync today - if a
 /// future change adds async init and someone flips the signature back to
 /// `async fn` without also updating callers, this test fails to compile.
 ///
@@ -526,7 +526,7 @@ fn bootstrap_from_env_is_callable_from_sync_context() {
     clear_mail_env();
     let _ = Mail::clear_transport();
 
-    // No `.await`, no tokio runtime — proves the signature is synchronous.
+    // No `.await`, no tokio runtime - proves the signature is synchronous.
     suprnova::mail::boot::bootstrap_from_env().unwrap();
 
     let _ = Mail::clear_transport();

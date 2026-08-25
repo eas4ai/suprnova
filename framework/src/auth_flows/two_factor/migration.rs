@@ -2,7 +2,7 @@
 //! by [`crate::auth_flows::TwoFactor`].
 //!
 //! Consumer apps include this migration in their `Migrator`'s
-//! `migrations()` list — the framework owns the schema, the app owns
+//! `migrations()` list - the framework owns the schema, the app owns
 //! when to apply it.
 
 use sea_orm_migration::prelude::*;
@@ -12,7 +12,7 @@ pub struct Migration;
 
 impl MigrationName for Migration {
     // Explicit, file-stable name. `DeriveMigrationName` derives from
-    // the parent module path, which produces just `migration` here —
+    // the parent module path, which produces just `migration` here -
     // not unique enough for the `seaql_migrations` table once a
     // second framework-owned migration lands in another module with
     // the same file name. The date prefix matches the convention the

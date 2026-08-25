@@ -1,4 +1,4 @@
-//! Phase 10C Task 5a — `Collection<T>` generic Laravel surface.
+//! Phase 10C Task 5a - `Collection<T>` generic Laravel surface.
 //!
 //! Covers the ~25 type-parameter-only methods that work for any `T`
 //! (map/filter/reduce/each/group_by_with/chunk/unique/diff/intersect/
@@ -160,7 +160,7 @@ fn collection_pluck_by_borrows_and_extracts() {
     let c = Collection::from_vec(vec![Row { id: 10 }, Row { id: 20 }, Row { id: 30 }]);
     let ids: Vec<i64> = c.pluck_by(|r| r.id).into_vec();
     assert_eq!(ids, vec![10, 20, 30]);
-    // c untouched — pluck_by takes &self
+    // c untouched - pluck_by takes &self
     assert_eq!(c.len(), 3);
 }
 

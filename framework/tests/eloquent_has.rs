@@ -190,7 +190,7 @@ async fn where_belongs_to_renders_direct_fk_eq() {
 
     // Note: HexPost has no explicit BelongsTo declared. We invoke the
     // engine via where_belongs_to which falls back to "1 = 0" for
-    // unknown relations — exercising the safe-fail path.
+    // unknown relations - exercising the safe-fail path.
     let none = HexPost::query()
         .where_belongs_to("author", alice.id)
         .get()
@@ -203,7 +203,7 @@ async fn where_belongs_to_renders_direct_fk_eq() {
 async fn has_engine_postgres_placeholders_are_monotonic() {
     use suprnova::sea_orm::DbBackend;
     // Place a parent WHERE clause before the EXISTS so the inner
-    // subquery numbers $2 onward — verifies the monotonic counter
+    // subquery numbers $2 onward - verifies the monotonic counter
     // threading. The actual placeholder check inspects the rendered
     // SQL string.
     let (sql, _vals) = HexUser::query()
@@ -263,7 +263,7 @@ async fn or_has_combines_via_or() {
 
 // ---- Pivot join honours target's `#[model(primary_key = "...")]` -------
 //
-// Regression — the existence engine used to hardcode the pivot's
+// Regression - the existence engine used to hardcode the pivot's
 // target-side join column to `"id"`. A target model with a renamed
 // primary key (e.g. `uuid`) joined through the wrong column and
 // rendered `pivot.col = target.id` against a target whose PK column
@@ -313,7 +313,7 @@ async fn has_through_pivot_joins_against_targets_custom_primary_key() {
 
 // ---- where_has closure columns are qualified on pivot relations --------
 //
-// Regression — a `where_has` closure term rendered its column unqualified
+// Regression - a `where_has` closure term rendered its column unqualified
 // (`name = $1`). On a pivot-shaped EXISTS (`FROM pivot JOIN target`) a
 // column present on both sides is ambiguous and the database rejects the
 // query. The fix qualifies the closure's inner column with the target
@@ -335,7 +335,7 @@ async fn where_has_qualifies_closure_column_on_pivot_relation() {
 
 // ---- has/where_has auto-applies related soft-delete scope --------------
 //
-// Regression — Laravel's `has`/`where_has` walks the related model's
+// Regression - Laravel's `has`/`where_has` walks the related model's
 // default scope, which includes `deleted_at IS NULL` for soft-deleting
 // models. Before the fix, `User::query().has("posts")` returned users
 // whose only posts were soft-deleted; the EXISTS subquery did not

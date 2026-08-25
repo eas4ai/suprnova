@@ -11,7 +11,7 @@
 //!
 //! Mirrors [`crate::auth::request_state`]: a single [`tokio::task_local!`]
 //! scoped once around request handling, with reads outside any scope (workers,
-//! jobs, unit tests) degrading to `None` — so an off-request broadcast simply
+//! jobs, unit tests) degrading to `None` - so an off-request broadcast simply
 //! reaches everyone.
 
 tokio::task_local! {
@@ -27,7 +27,7 @@ pub(crate) async fn scope<F: std::future::Future>(socket_id: Option<String>, fut
 }
 
 /// The originating connection's socket id for the current request, or `None`
-/// outside a request scope (the safe default — broadcast to everyone).
+/// outside a request scope (the safe default - broadcast to everyone).
 pub(crate) fn current() -> Option<String> {
     REQUEST_SOCKET.try_with(|s| s.clone()).ok().flatten()
 }

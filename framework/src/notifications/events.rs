@@ -2,18 +2,18 @@
 //!
 //! Three events surround every channel delivery:
 //!
-//! - [`NotificationSending`] — dispatched *before* the channel runs. If any
+//! - [`NotificationSending`] - dispatched *before* the channel runs. If any
 //!   listener returns an error, the channel is skipped (the dispatcher treats
 //!   this as a veto rather than a propagated failure). This matches Laravel's
 //!   `NotificationSending` cancellable-event semantics where a listener
 //!   returning `false` short-circuits delivery for that channel.
-//! - [`NotificationSent`] — dispatched after a successful channel delivery.
-//! - [`NotificationFailed`] — dispatched when a channel returns an error.
+//! - [`NotificationSent`] - dispatched after a successful channel delivery.
+//! - [`NotificationFailed`] - dispatched when a channel returns an error.
 //!   The dispatcher then propagates the underlying error per its existing
 //!   first-failure-stops contract.
 //!
-//! Events carry only the notification *name* and JSON *payload* — not the
-//! original `&dyn Notifiable` — because they cross the `Event` trait's
+//! Events carry only the notification *name* and JSON *payload* - not the
+//! original `&dyn Notifiable` - because they cross the `Event` trait's
 //! `Clone + Send + 'static + Debug` bound, which a borrowed dyn trait
 //! object cannot satisfy. The recipient's per-channel `route` is included
 //! verbatim so listeners can correlate without dipping back into the

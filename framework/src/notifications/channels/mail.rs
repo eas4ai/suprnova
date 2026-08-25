@@ -1,4 +1,4 @@
-//! Mail notification channel — delivers via the bound mail transport.
+//! Mail notification channel - delivers via the bound mail transport.
 //!
 //! [`MailChannel`] is stateless. Each notification that wants to be
 //! delivered via mail opts in by implementing [`NotificationMailable`]
@@ -13,8 +13,8 @@
 //!
 //! Empty-body guard: if the renderer returns a rendering with neither
 //! `html` nor `text`, delivery fails fast with a clear error. This
-//! mirrors `MailBuilder::send`'s upstream check on the `Mailable` path
-//! — we refuse to silently dispatch blank emails through any code path.
+//! mirrors `MailBuilder::send`'s upstream check on the `Mailable` path -
+//! we refuse to silently dispatch blank emails through any code path.
 //!
 //! Why a per-Notification trait rather than a single factory closure
 //! at construction time: the closure approach centralized rendering
@@ -33,7 +33,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// What a per-notification renderer must produce — enough to assemble
+/// What a per-notification renderer must produce - enough to assemble
 /// an outgoing message. `subject` is required; at least one of `html` /
 /// `text` must be `Some` or delivery will fail. `from` is optional and
 /// falls back to `noreply@localhost` to match `MailBuilder::send`.
@@ -83,7 +83,7 @@ pub struct MailRendering {
 /// Opt-in trait for Notifications that want to be deliverable via the
 /// mail channel.
 ///
-/// The Notification owns its mail representation — `to_mail` produces
+/// The Notification owns its mail representation - `to_mail` produces
 /// the rendered subject/body content. No `Notifiable` argument: the
 /// queued path loses the original `Notifiable`, so per-recipient
 /// variation must ride through the Notification's `data()` (the
@@ -100,7 +100,7 @@ pub trait NotificationMailable: Notification {
 }
 
 /// Renderer function pointer. v1 uses `fn(...)` rather than
-/// `Arc<dyn Fn>` because registered renderers are stateless — every
+/// `Arc<dyn Fn>` because registered renderers are stateless - every
 /// renderer is the monomorphized closure produced by
 /// [`register_mail_renderer`], which only closes over the type
 /// parameter `N`. Bump to `Arc<dyn Fn>` if a future caller needs to
@@ -114,7 +114,7 @@ static MAIL_RENDERERS: RwLock<Option<HashMap<&'static str, MailRendererFn>>> = R
 /// as the registry key.
 ///
 /// Re-registering the same name silently replaces the existing
-/// renderer (last-write-wins) — matches the notification factory
+/// renderer (last-write-wins) - matches the notification factory
 /// registry and the dispatcher's channel registration.
 pub fn register_mail_renderer<N: NotificationMailable>() -> Result<(), FrameworkError> {
     let renderer: MailRendererFn = |payload| {
@@ -132,29 +132,29 @@ pub fn register_mail_renderer<N: NotificationMailable>() -> Result<(), Framework
 fn renderer_for(name: &str) -> Result<MailRendererFn, FrameworkError> {
     let missing = || {
         FrameworkError::internal(format!(
-            "no mail renderer for notification {name} — register via suprnova::register_mail_renderer::<N>()"
+            "no mail renderer for notification {name} - register via suprnova::register_mail_renderer::<N>()"
         ))
     };
     let g = lock::read(&MAIL_RENDERERS, "notification mail renderers")?;
     // Treat "registry never initialized" identically to "this notification
-    // not registered" — the operator-facing fix is the same.
+    // not registered" - the operator-facing fix is the same.
     let map = g.as_ref().ok_or_else(missing)?;
     map.get(name).copied().ok_or_else(missing)
 }
 
 /// Notification channel that delivers via the bound mail transport.
 ///
-/// Stateless — construction takes no arguments. At dispatch time the
+/// Stateless - construction takes no arguments. At dispatch time the
 /// channel looks up the per-notification renderer in the global
 /// registry populated by [`register_mail_renderer`].
 ///
 /// `cc`, `bcc`, `reply_to`, and `attachments` ride through
-/// [`MailRendering`] — populate any of them in `to_mail` and the
+/// [`MailRendering`] - populate any of them in `to_mail` and the
 /// channel threads them into the outgoing message verbatim.
 pub struct MailChannel;
 
 impl MailChannel {
-    /// Build a new `MailChannel`. Stateless — no arguments needed.
+    /// Build a new `MailChannel`. Stateless - no arguments needed.
     pub fn new() -> Self {
         Self
     }
@@ -180,7 +180,7 @@ impl Channel for MailChannel {
         let renderer = renderer_for(notification.name())?;
         let rendering = renderer(notification.data())?;
 
-        // Empty-body guard — mirror MailBuilder::send's upstream check
+        // Empty-body guard - mirror MailBuilder::send's upstream check
         // so notification dispatch can never silently send a blank
         // email. Runs BEFORE current_transport() so a missing
         // transport doesn't mask a misconfigured renderer.

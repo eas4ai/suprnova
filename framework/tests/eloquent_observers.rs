@@ -1,4 +1,4 @@
-//! Phase 10C T2a — `Observer<M>` trait default no-op smoke test.
+//! Phase 10C T2a - `Observer<M>` trait default no-op smoke test.
 //!
 //! T2a only ships the trait + inventory entry + `bootstrap_observers()`.
 //! The `#[suprnova::observer(M)]` attribute that walks the impl block
@@ -148,13 +148,13 @@ async fn bootstrap_observers_drains_inventory_cleanly() {
     // T2b WILL ship the macro that calls `inventory::submit!`. When
     // T2b's tests land, this test stays valid (the trivially-empty
     // inventory path remains exercised) but it no longer covers all
-    // observed behaviour — T2b adds its own end-to-end install test.
+    // observed behaviour - T2b adds its own end-to-end install test.
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("bootstrap_observers should succeed with no entries");
 
     // T2a does NOT promise idempotency in the presence of real
-    // entries — that's T2b's contract. But the empty-inventory path
+    // entries - that's T2b's contract. But the empty-inventory path
     // IS idempotent because it's just an empty loop.
     suprnova::eloquent::observers::bootstrap_observers()
         .await
@@ -181,7 +181,7 @@ async fn observer_types_reexport_at_crate_root() {
 }
 
 // =========================================================================
-// T2b — `#[suprnova::observer(M)]` attribute macro
+// T2b - `#[suprnova::observer(M)]` attribute macro
 // =========================================================================
 //
 // T2b ships the attribute macro that walks an `impl Observer<M>` block,
@@ -189,7 +189,7 @@ async fn observer_types_reexport_at_crate_root() {
 // adapter listener per overridden method. The adapter listeners are
 // registered through the same `EventFacade::listen` / `listen_cancellable`
 // paths users call by hand, so the macro is a DX layer on top of T1's
-// dispatch surface — nothing about the model's lifecycle path changes.
+// dispatch surface - nothing about the model's lifecycle path changes.
 //
 // The two observers below are the smallest fixture that exercises the
 // "registers what's overridden, ignores the rest" contract:
@@ -241,7 +241,7 @@ impl Observer<T2User> for OnlyUpdatesObserver {
 // All assertions touching `CREATED_OBSERVER_FIRES` /
 // `UPDATED_OBSERVER_FIRES` live in a single test because the binary's
 // `OnceLock<EventDispatcher>` and the cancellable registry are
-// process-global — once listeners install, ANY `T2User::create` call
+// process-global - once listeners install, ANY `T2User::create` call
 // anywhere in this test binary increments the counters. Two separate
 // `#[tokio::test]`s would race each other on the reset → create →
 // assert sequence. Combining them eliminates that race without
@@ -281,7 +281,7 @@ async fn observer_macro_emits_only_overridden_method_adapters() {
     // Reset counters AFTER bootstrap so listeners that installed at
     // boot time (potentially from earlier tests in this binary) don't
     // poison the assertions. Counters were never incremented by
-    // `bootstrap_observers` itself — only by `T2User::create` calls.
+    // `bootstrap_observers` itself - only by `T2User::create` calls.
     CREATED_OBSERVER_FIRES.store(0, Ordering::SeqCst);
     UPDATED_OBSERVER_FIRES.store(0, Ordering::SeqCst);
 
@@ -307,14 +307,14 @@ async fn observer_macro_emits_only_overridden_method_adapters() {
     assert_eq!(
         UPDATED_OBSERVER_FIRES.load(Ordering::SeqCst),
         0,
-        "OnlyUpdatesObserver::updated must NOT fire on create — the \
+        "OnlyUpdatesObserver::updated must NOT fire on create - the \
          macro should only register adapters for methods the user \
          actually overrode"
     );
 }
 
 // =========================================================================
-// T2c — `#[model(observers = [...])]` compile-time validation
+// T2c - `#[model(observers = [...])]` compile-time validation
 // =========================================================================
 //
 // The model-side attribute serves two purposes:
@@ -323,7 +323,7 @@ async fn observer_macro_emits_only_overridden_method_adapters() {
 //   2. Documentation marker: readers of the model declaration can see
 //      which observers attach to it.
 //
-// The actual listener registration is via T2b's inventory pathway — the
+// The actual listener registration is via T2b's inventory pathway - the
 // `#[observer(T2Article)]` attribute on `ModelAttrObserver` is what
 // registers the listener at bootstrap. The `observers = [...]` attribute
 // is independent of the listener install.
@@ -375,7 +375,7 @@ async fn model_attribute_observers_auto_register() {
 }
 
 // =========================================================================
-// T2c — `Model::observe()` manual registration shim
+// T2c - `Model::observe()` manual registration shim
 // =========================================================================
 //
 // Every `#[suprnova::model]` struct gets a per-model `observe<O>(...)`
@@ -384,7 +384,7 @@ async fn model_attribute_observers_auto_register() {
 // for users who can't or don't want the `#[observer(M)]` inventory
 // pathway (e.g. dynamic registration based on config).
 //
-// The shim is independent of the `observers = [...]` attribute — every
+// The shim is independent of the `observers = [...]` attribute - every
 // model has it whether or not it declared any observers. Idempotency
 // is the caller's concern: calling `User::observe(MyObserver)` twice
 // registers two adapter sets, matching Laravel's manual semantics.
@@ -430,7 +430,7 @@ async fn manual_observe_registration_works_without_attribute_macro() {
     .await
     .unwrap();
 
-    // Manual registration — no `#[suprnova::observer]` on
+    // Manual registration - no `#[suprnova::observer]` on
     // `ManualRegisterObs`, so this is the ONLY path by which it can
     // fire. If the shim didn't exist, this line would fail to compile.
     T2ManualUser::observe(ManualRegisterObs).await;
@@ -452,7 +452,7 @@ async fn manual_observe_registration_works_without_attribute_macro() {
 }
 
 // =========================================================================
-// T2c — multi-observer fan-out
+// T2c - multi-observer fan-out
 // =========================================================================
 //
 // Multiple `Observer<M>` impls registered against the same model all
@@ -527,13 +527,13 @@ async fn multiple_observers_all_fire_for_same_event() {
     assert_eq!(
         OBS_B_FIRES.load(Ordering::SeqCst),
         1,
-        "ObsB::created should fire exactly once per T2Comment::create — \
+        "ObsB::created should fire exactly once per T2Comment::create - \
          confirms EventFacade dispatch fan-out covers Observer registration"
     );
 }
 
 // =========================================================================
-// T2c — cancel-from-observer propagates as FrameworkError::bad_request
+// T2c - cancel-from-observer propagates as FrameworkError::bad_request
 // =========================================================================
 //
 // An observer that returns `EventResult::cancel("reason")` from its
@@ -593,7 +593,7 @@ async fn observer_cancel_aborts_create_with_reason() {
         "cancel reason should surface verbatim in the FrameworkError message; got: {msg}",
     );
 
-    // The row never landed in the database — cancel from the observer
+    // The row never landed in the database - cancel from the observer
     // is a true abort, not a "delete after the fact". `T2Subscription::all`
     // should return an empty Vec.
     let rows = T2Subscription::all().await.unwrap();

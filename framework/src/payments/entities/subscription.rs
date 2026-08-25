@@ -21,18 +21,18 @@ use chrono::{DateTime, Utc};
 pub struct Subscription {
     /// Surrogate primary key.
     pub id: i64,
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.).
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.).
     pub provider: String,
     /// Provider-issued subscription identifier (e.g. Stripe's `sub_…`).
     pub provider_subscription_id: String,
     /// FK reference back to the owning provider customer record.
     pub provider_customer_id: String,
-    /// Lifecycle status string mirroring the provider's terminology —
+    /// Lifecycle status string mirroring the provider's terminology -
     /// `"active"`, `"trialing"`, `"past_due"`, `"canceled"`, etc.
     pub status: String,
     /// Start of the currently-billed period.
     pub current_period_start: DateTime<Utc>,
-    /// End of the currently-billed period — invoice generation lands
+    /// End of the currently-billed period - invoice generation lands
     /// at or shortly after this instant.
     pub current_period_end: DateTime<Utc>,
     /// `true` when the subscription is scheduled to terminate at

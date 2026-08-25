@@ -98,7 +98,7 @@ async fn db_seed_propagates_seeder_errors() {
 #[tokio::test]
 async fn db_seed_appears_in_console_registry() {
     // Linking the framework should auto-register the builtin via
-    // inventory::submit! — no opt-in step.
+    // inventory::submit! - no opt-in step.
     let entry = console::find("db:seed").expect("db:seed registered by the framework");
     assert_eq!(entry.name, "db:seed");
     assert_eq!(

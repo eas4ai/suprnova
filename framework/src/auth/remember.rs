@@ -1,24 +1,24 @@
-//! Remember-me tokens — a hardened selector+verifier scheme.
+//! Remember-me tokens - a hardened selector+verifier scheme.
 //!
 //! "Remember me" is the cookie that re-authenticates a user after their
 //! session expires or their browser is closed. Done wrong it is a long-
 //! lived bearer credential sitting in plaintext on a user's disk and in
-//! a database backup — done right it is a rotating, single-use,
+//! a database backup - done right it is a rotating, single-use,
 //! short-fuse re-auth handle with constant-cost verification.
 //!
-//! # Design — selector + verifier scheme
+//! # Design - selector + verifier scheme
 //!
 //! Each issued cookie is a two-part composite plaintext token
 //! `"{selector}.{verifier}"` where:
 //!
-//! - **selector** — 16 random bytes (128 bits), URL-safe base64
+//! - **selector** - 16 random bytes (128 bits), URL-safe base64
 //!   (22 chars, no padding). Stored plaintext on a UNIQUE indexed
-//!   column. The selector is the lookup key — one indexed query
+//!   column. The selector is the lookup key - one indexed query
 //!   identifies the exactly-one candidate row to verify, so
 //!   verification cost is O(1) regardless of how many active tokens
 //!   the table holds.
 //!
-//! - **verifier** — 32 random bytes (256 bits), URL-safe base64
+//! - **verifier** - 32 random bytes (256 bits), URL-safe base64
 //!   (43 chars, no padding). Bcrypt-hashed before storage. The
 //!   plaintext verifier lives only inside the encrypted `remember_me`
 //!   cookie. Verification is exactly one constant-time
@@ -30,18 +30,18 @@
 //!
 //! 1. **Unbounded bcrypt scan on forged cookies.** Each row's bcrypt
 //!    hash is per-row salted, so without a selector we had to scan
-//!    every unexpired row and bcrypt-verify each — O(N) bcrypt work per
+//!    every unexpired row and bcrypt-verify each - O(N) bcrypt work per
 //!    request, attacker-controlled.
 //!
 //! 2. **Non-single-use rotation under concurrency.** Two concurrent
 //!    requests could both load the same row, both pass `bcrypt::verify`,
-//!    and one of the DELETEs would affect zero rows — but both still
+//!    and one of the DELETEs would affect zero rows - but both still
 //!    minted replacement tokens. The selector-keyed atomic-DELETE
 //!    pattern (`DELETE ... WHERE id = ? AND selector = ?`, then check
 //!    `rows_affected`) makes rotation single-use even under concurrency.
 //!
 //! A pure-selector design (no verifier hashed) would mean a DB dump
-//! yields re-authenticating credentials — same standard as why
+//! yields re-authenticating credentials - same standard as why
 //! passwords are hashed. The verifier preserves the "DB dump is not
 //! enough" property.
 //!
@@ -88,7 +88,7 @@ use crate::database::DB;
 use crate::error::FrameworkError;
 use crate::hashing;
 
-/// Width of the selector. 16 bytes = 128 bits — enough collision
+/// Width of the selector. 16 bytes = 128 bits - enough collision
 /// resistance for the lookup key over the lifetime of the deployment.
 /// URL-safe base64 encodes to 22 chars (no padding).
 const SELECTOR_BYTES: usize = 16;
@@ -101,7 +101,7 @@ const VERIFIER_BYTES: usize = 32;
 ///
 /// Exposed as `pub` (rather than `pub(crate)`) so framework integration
 /// tests can probe the cookie by name. `#[doc(hidden)]` keeps it out of
-/// the published API surface — consumers should not reference it
+/// the published API surface - consumers should not reference it
 /// directly; the contract is "the framework owns the remember-me
 /// cookie."
 #[doc(hidden)]
@@ -138,7 +138,7 @@ pub async fn generate_token() -> Result<(String, String, String), FrameworkError
         .map_err(|e| FrameworkError::internal(format!("OS RNG failure (verifier): {e}")))?;
     let verifier_plaintext = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
-    // Audit HIGH `hashing` #1 — bcrypt is CPU-bound (~250ms @ cost 12).
+    // Audit HIGH `hashing` #1 - bcrypt is CPU-bound (~250ms @ cost 12).
     // Use the async variant so the Tokio worker thread isn't blocked
     // while the framework issues a token under request load.
     let verifier_hash = hashing::hash_async(&verifier_plaintext).await?;
@@ -191,7 +191,7 @@ pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkE
 /// # Verification cost
 ///
 /// Exactly one indexed SELECT + at most one `bcrypt::verify` per
-/// request — independent of how many active tokens the table holds.
+/// request - independent of how many active tokens the table holds.
 /// Forged cookies cost only the SELECT (the verifier never matches
 /// because the selector did not, or `expires_at` already passed).
 pub async fn verify_and_rotate(
@@ -221,7 +221,7 @@ pub async fn verify_and_rotate(
         None => return Ok(None),
     };
 
-    // Exactly one `bcrypt::verify` per request — constant-time
+    // Exactly one `bcrypt::verify` per request - constant-time
     // comparison, no scanning. Audit HIGH `hashing` #1: the async
     // variant runs the CPU-bound bcrypt verification on
     // `spawn_blocking` so the request worker thread stays free.
@@ -229,7 +229,7 @@ pub async fn verify_and_rotate(
         return Ok(None);
     }
 
-    // Atomic conditional DELETE — succeeds for exactly one concurrent
+    // Atomic conditional DELETE - succeeds for exactly one concurrent
     // verifier of this token. If two requests both reach this point,
     // exactly one DELETE affects 1 row and the other affects 0. The
     // loser MUST NOT issue a fresh token: that would defeat the
@@ -245,7 +245,7 @@ pub async fn verify_and_rotate(
     if delete_result.rows_affected != 1 {
         // Lost the rotation race. Another concurrent request already
         // deleted this row and minted a fresh one. Treat this attempt
-        // as "no auth" — replay defeated.
+        // as "no auth" - replay defeated.
         return Ok(None);
     }
 
@@ -302,12 +302,12 @@ pub async fn prune_expired() -> Result<u64, FrameworkError> {
 /// and the corresponding CLI scaffolder template):
 ///
 /// - `id`           INTEGER PK auto-increment
-/// - `user_id`      VARCHAR not null — opaque string id (post-Phase-3 String-everywhere)
-/// - `selector`     VARCHAR not null UNIQUE — 22-char URL-safe base64 lookup key
-/// - `token_hash`   VARCHAR not null — bcrypt hash of the verifier plaintext
-/// - `expires_at`   TIMESTAMP not null — token TTL boundary
+/// - `user_id`      VARCHAR not null - opaque string id (post-Phase-3 String-everywhere)
+/// - `selector`     VARCHAR not null UNIQUE - 22-char URL-safe base64 lookup key
+/// - `token_hash`   VARCHAR not null - bcrypt hash of the verifier plaintext
+/// - `expires_at`   TIMESTAMP not null - token TTL boundary
 /// - `created_at`   TIMESTAMP not null
-/// - `last_used_at` TIMESTAMP null — currently informational (rotation deletes the row before update)
+/// - `last_used_at` TIMESTAMP null - currently informational (rotation deletes the row before update)
 pub mod entity {
     use sea_orm::entity::prelude::*;
 
@@ -323,7 +323,7 @@ pub mod entity {
         /// 22-char URL-safe base64 lookup key (the public half of the token).
         #[sea_orm(unique)]
         pub selector: String,
-        /// Bcrypt hash of the verifier — the private half of the token.
+        /// Bcrypt hash of the verifier - the private half of the token.
         pub token_hash: String,
         /// TTL boundary; the cookie is rejected once `now > expires_at`.
         pub expires_at: chrono::NaiveDateTime,
@@ -333,7 +333,7 @@ pub mod entity {
         pub last_used_at: Option<chrono::NaiveDateTime>,
     }
 
-    /// SeaORM relation enum — `remember_tokens` is a leaf table with no
+    /// SeaORM relation enum - `remember_tokens` is a leaf table with no
     /// declared foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}

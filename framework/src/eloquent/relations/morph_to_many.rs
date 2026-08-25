@@ -1,4 +1,4 @@
-//! Polymorphic many-to-many — m2m through a pivot table that
+//! Polymorphic many-to-many - m2m through a pivot table that
 //! distinguishes parent rows by a `*_type` discriminator column.
 //!
 //! Mirrors Laravel's
@@ -30,7 +30,7 @@
 //! - `morph_name` (controls the `<name>_id` + `<name>_type` columns):
 //!   the relation name itself (`"taggable"` from
 //!   `relations = { taggable: ... }`).
-//! - `pivot_table`: `<P as EloquentModel>::TABLE` — the pivot model's
+//! - `pivot_table`: `<P as EloquentModel>::TABLE` - the pivot model's
 //!   own `#[model(table = "...")]` declaration is the single source of
 //!   truth.
 //! - `pivot_related_key` (`MorphToMany`'s pivot column → R): `<snake(R)>_id`.
@@ -38,7 +38,7 @@
 //!   `<snake(L)>_id`.
 //! - `parent_morph_type` (`MorphToMany`): L's `morph_type = "..."`
 //!   attribute, defaulted to `to_snake(struct_name)`.
-//! - `target_morph_type` (`MorphedByMany`): R's `morph_type` — passed
+//! - `target_morph_type` (`MorphedByMany`): R's `morph_type` - passed
 //!   explicitly via the relation declaration's `target_morph_type =
 //!   "..."` option, since the macro at the L-side declaration site
 //!   can't introspect R's `morph_type` attribute (it lives in a
@@ -46,25 +46,25 @@
 //!
 //! Mutators (`MorphToMany` only):
 //!
-//! - [`attach`](MorphToMany::attach) — INSERT a pivot row with the
+//! - [`attach`](MorphToMany::attach) - INSERT a pivot row with the
 //!   `<name>_id` + `<name>_type` + pivot related FK.
-//! - [`attach_with`](MorphToMany::attach_with) — INSERT with extra
+//! - [`attach_with`](MorphToMany::attach_with) - INSERT with extra
 //!   pivot columns (and timestamps if `with_timestamps()` is set).
-//! - [`detach`](MorphToMany::detach) — DELETE matching the parent's id
+//! - [`detach`](MorphToMany::detach) - DELETE matching the parent's id
 //!   + type.
-//! - [`sync`](MorphToMany::sync) — diff-and-apply, transactional via
+//! - [`sync`](MorphToMany::sync) - diff-and-apply, transactional via
 //!   `DatabaseConnection::begin()`.
 //!
 //! Readers (both flavours):
 //!
-//! - `.get()` — JOIN R to pivot with the type filter. Two-query
+//! - `.get()` - JOIN R to pivot with the type filter. Two-query
 //!   strategy filling `__pivot` per row.
-//! - `.first()` — `.get().into_iter().next()`.
-//! - `.count()` — `SELECT COUNT(*) FROM pivot WHERE ... AND
+//! - `.first()` - `.get().into_iter().next()`.
+//! - `.count()` - `SELECT COUNT(*) FROM pivot WHERE ... AND
 //!   <name>_type = ?`.
 //!
 //! Eager loading happens through the parent model's `__eager_load`
-//! match arm — emitted by `#[suprnova::model]` and exercised by
+//! match arm - emitted by `#[suprnova::model]` and exercised by
 //! `MmPost::with(["tags"])`. Same per-attachment clone semantics as
 //! BelongsToMany (each parent gets its own `__pivot` context on every
 //! returned R clone).
@@ -134,7 +134,7 @@ where
     /// `serde_json::to_value(&self.id)` at the call site, matching
     /// [`BelongsToMany`](super::BelongsToMany)'s storage convention.
     parent_key_value: serde_json::Value,
-    /// L's `morph_type = "..."` attribute value — the string the
+    /// L's `morph_type = "..."` attribute value - the string the
     /// pivot's `<morph_name>_type` column has to equal for the pivot
     /// row to belong to this parent. Defaults to `to_snake(L)` at the
     /// macro emission site when the attribute isn't declared.
@@ -145,7 +145,7 @@ where
     /// declared as `taggable: MorphToMany<...>`); overridable via
     /// `name = "..."` (alias `morph_name = "..."`).
     morph_name: String,
-    /// Pivot table name. Defaults to `<P as EloquentModel>::TABLE` —
+    /// Pivot table name. Defaults to `<P as EloquentModel>::TABLE` -
     /// the pivot's own `#[suprnova::model(table = "...")]` declaration
     /// is the single source of truth. Override via the macro's
     /// `pivot_table = "..."` option.
@@ -238,7 +238,7 @@ where
     /// `r.pivot::<P>()`. Mirrors Laravel's `->withPivot([...])`.
     ///
     /// The morph FK + type columns are always loaded; this option is
-    /// for "extras" — `assigned_at`, `notes`, custom payloads.
+    /// for "extras" - `assigned_at`, `notes`, custom payloads.
     pub fn with_pivot<I, S>(mut self, columns: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -311,7 +311,7 @@ where
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
         self.validate_meta()?;
-        // Phase 10C audit-fix AF2 — resolve through ExecutorChoice so the
+        // Phase 10C audit-fix AF2 - resolve through ExecutorChoice so the
         // pivot INSERT lands on the ambient transaction when CURRENT_TX
         // is active.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
@@ -357,7 +357,7 @@ where
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
         self.validate_meta()?;
-        // Phase 10C audit-fix AF2 — see attach_with above.
+        // Phase 10C audit-fix AF2 - see attach_with above.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let id = related_id.into();
@@ -392,7 +392,7 @@ where
     }
 
     /// Replace the parent's full set of attached relations with the
-    /// given IDs. Transactional — partial failure rolls back.
+    /// given IDs. Transactional - partial failure rolls back.
     pub async fn sync<I, V>(self, ids: I) -> Result<(), FrameworkError>
     where
         I: IntoIterator<Item = V>,
@@ -401,7 +401,7 @@ where
         self.validate_meta()?;
         use std::collections::{HashMap, HashSet};
 
-        // Phase 10C audit-fix AF2 — same shape as BelongsToMany::sync —
+        // Phase 10C audit-fix AF2 - same shape as BelongsToMany::sync -
         // route through ExecutorChoice so the SELECT + inner writes
         // honor CURRENT_TX.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
@@ -474,7 +474,7 @@ where
             .collect();
 
         // Atomicity: inherit from CURRENT_TX when active, else open
-        // inner SeaORM tx — same precedence as BelongsToMany::sync.
+        // inner SeaORM tx - same precedence as BelongsToMany::sync.
         match &exec {
             ExecutorChoice::Tx(t, _) => {
                 for related_id in detach_set.iter() {
@@ -558,7 +558,7 @@ where
     /// fetch pivot rows separately and zip via `(parent_id, related_id)`.
     pub async fn get(self) -> Result<Collection<R>, FrameworkError> {
         self.validate_meta()?;
-        // Phase 10C audit-fix AF2 — route the pivot-id SELECT through
+        // Phase 10C audit-fix AF2 - route the pivot-id SELECT through
         // ExecutorChoice so it honors CURRENT_TX. Downstream
         // Model::query() calls already do so via Builder::get.
         let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
@@ -661,7 +661,7 @@ where
         Ok(Collection::from_vec(out))
     }
 
-    /// Convenience over `get()` — drop everything after the first
+    /// Convenience over `get()` - drop everything after the first
     /// related row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
         Ok(self.get().await?.into_vec().into_iter().next())
@@ -671,7 +671,7 @@ where
     /// Returns `i64` to match [`BelongsToMany::count`](super::BelongsToMany::count).
     pub async fn count(self) -> Result<i64, FrameworkError> {
         self.validate_meta()?;
-        // Phase 10C audit-fix AF2 — see attach_with above.
+        // Phase 10C audit-fix AF2 - see attach_with above.
         let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
         let (id_ph, type_ph) = match backend {
@@ -709,7 +709,7 @@ where
 
 /// Soft-delete scope modifiers for `MorphToMany<L, R, P>` when the
 /// related (`R`) side is soft-deletable. Same shape as
-/// [`BelongsToMany`](super::BelongsToMany)'s equivalent block — the
+/// [`BelongsToMany`](super::BelongsToMany)'s equivalent block - the
 /// pivot table itself is never filtered for `deleted_at` (pivots are
 /// a join artefact), only the related rows. The closure captures the
 /// `R: SoftDeletes` bound at construction so [`Self::get`] can call
@@ -800,7 +800,7 @@ where
     }
 
     fn foreign_key(&self) -> &str {
-        // Surface the morph-name root — the actual pivot columns are
+        // Surface the morph-name root - the actual pivot columns are
         // `<morph_name>_id` (FK) and `<morph_name>_type`
         // (discriminator). Admin tooling reading the
         // [`RelationEntry`](super::RelationEntry) surfaces this.
@@ -810,12 +810,12 @@ where
 
 // ---- MorphedByMany ------------------------------------------------------
 
-/// Inverse polymorphic m2m — from the m2m side `L` (e.g. `Tag`) to one
+/// Inverse polymorphic m2m - from the m2m side `L` (e.g. `Tag`) to one
 /// specific morph target family `R` (e.g. `Post` or `Video`) through
 /// polymorphic pivot `P`. Constructed by the macro-emitted relation
 /// method; user code never calls [`MorphedByMany::__new`] directly.
 ///
-/// Each declaration filters one target morph family — so `Tag.posts()`
+/// Each declaration filters one target morph family - so `Tag.posts()`
 /// returns only Post-typed taggables and `Tag.videos()` returns only
 /// Video-typed taggables. The target's morph-type string is declared
 /// explicitly on the relation via `target_morph_type = "..."` because
@@ -855,12 +855,12 @@ where
 {
     /// The m2m side row's key value, JSON-encoded.
     tag_key_value: serde_json::Value,
-    /// R's `morph_type` value — the string the pivot's
+    /// R's `morph_type` value - the string the pivot's
     /// `<morph_name>_type` column has to equal for the pivot row to
     /// point at this morph target family. Declared via the relation's
     /// `target_morph_type = "..."` option.
     target_morph_type: String,
-    /// Morph family name — controls the `<morph_name>_id` /
+    /// Morph family name - controls the `<morph_name>_id` /
     /// `<morph_name>_type` column names on the pivot.
     morph_name: String,
     /// Pivot table name.
@@ -1045,7 +1045,7 @@ where
         Ok(Collection::from_vec(out))
     }
 
-    /// Convenience over `get()` — drop everything after the first row.
+    /// Convenience over `get()` - drop everything after the first row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
         Ok(self.get().await?.into_vec().into_iter().next())
     }
@@ -1053,7 +1053,7 @@ where
     /// `SELECT COUNT(*) FROM pivot WHERE pfk = ? AND <name>_type = ?`.
     pub async fn count(self) -> Result<i64, FrameworkError> {
         self.validate_meta()?;
-        // Phase 10C audit-fix AF2 — route the count through
+        // Phase 10C audit-fix AF2 - route the count through
         // ExecutorChoice so it honors CURRENT_TX.
         let exec = ExecutorChoice::resolve_read(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
@@ -1225,7 +1225,7 @@ async fn morph_attach_one<C: ConnectionTrait>(
             continue;
         }
         // Validate caller-supplied column names before interpolating
-        // them into the INSERT — see `belongs_to_many.rs::attach_one`
+        // them into the INSERT - see `belongs_to_many.rs::attach_one`
         // for the full rationale. Pivot writes share the
         // identifier-injection footgun shape with the regular
         // DbTableBuilder::insert path.

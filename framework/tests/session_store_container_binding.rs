@@ -1,8 +1,8 @@
 //! SEC-02(b) regression: constructing a `SessionMiddleware` must publish
 //! the store it was built with into the application container as
-//! `dyn SessionStore`, so `session::destroy_all_for_user` — and, through
+//! `dyn SessionStore`, so `session::destroy_all_for_user` - and, through
 //! it, `PasswordReset::complete` and any future forced-logout / 2FA-
-//! disable hook — resolves the store the app actually configured
+//! disable hook - resolves the store the app actually configured
 //! instead of silently constructing an unrelated fresh
 //! `DatabaseSessionDriver` that revokes nothing on a custom-store app.
 //!
@@ -12,7 +12,7 @@
 //! the one test in the whole suite that deliberately exercises that
 //! real global write end-to-end. Sharing a process with any other test
 //! that also constructs a `SessionMiddleware` would race for that
-//! global slot — every other session test that cares about a specific
+//! global slot - every other session test that cares about a specific
 //! store instead overrides hermetically via `TestContainer`.
 
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ use suprnova::session::{SessionConfig, SessionData, SessionMiddleware, SessionSt
 
 /// Records the last user id it was asked to revoke and returns a
 /// sentinel row count no real `DatabaseSessionDriver` could ever
-/// produce against an empty/nonexistent table — that sentinel is what
+/// produce against an empty/nonexistent table - that sentinel is what
 /// proves `destroy_all_for_user` reached THIS store rather than falling
 /// back to a fresh default driver.
 struct RecordingStore {
@@ -47,7 +47,7 @@ impl SessionStore for RecordingStore {
         self.revoke_calls.fetch_add(1, Ordering::SeqCst);
         // Sentinel value: a real DatabaseSessionDriver against no
         // matching rows returns 0, and one hitting an uninitialised /
-        // wrong DB errors outright — neither path can produce 4242.
+        // wrong DB errors outright - neither path can produce 4242.
         Ok(4242)
     }
     async fn gc(&self) -> Result<u64, FrameworkError> {
@@ -63,7 +63,7 @@ async fn session_middleware_registers_its_store_for_revocation_resolution() {
     });
 
     // Constructing the middleware with a custom store must publish it
-    // into the container — no separate `App::bind` call required from
+    // into the container - no separate `App::bind` call required from
     // application bootstrap code.
     let _middleware = SessionMiddleware::with_store(SessionConfig::default(), recording.clone());
 

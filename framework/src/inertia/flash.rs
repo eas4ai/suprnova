@@ -1,7 +1,7 @@
 //! Per-request flash data.
 //!
-//! Inertia v3's `page.flash` field carries one-shot data — toasts,
-//! success messages, newly-created IDs — that should appear on the
+//! Inertia v3's `page.flash` field carries one-shot data - toasts,
+//! success messages, newly-created IDs - that should appear on the
 //! current page but not persist across navigations.
 //!
 //! ## Storage model
@@ -44,7 +44,7 @@
 //!
 //! Session flash is shared with the framework's own one-shot signals
 //! (`_old_input` for form repopulation, `_inertia.*` for protocol
-//! flags). Only user-visible keys are surfaced to `page.flash` — keys
+//! flags). Only user-visible keys are surfaced to `page.flash` - keys
 //! prefixed with `_` are filtered out.
 
 use crate::lock;
@@ -82,7 +82,7 @@ pub(crate) fn encrypt_history_flag() -> Option<bool> {
 /// `Mutex` is scoped to a single request and recreated on the next
 /// one, so poison only affects the request that experienced the
 /// upstream panic. On poison the push is dropped silently and a
-/// `tracing::error!` is emitted — the request is already failing,
+/// `tracing::error!` is emitted - the request is already failing,
 /// so silent loss matches the documented "no active scope" no-op.
 pub fn push(key: impl Into<String>, value: Value) {
     let _ = FLASH_BAG.try_with(|bag| match lock::lock(bag, "inertia flash bag") {
@@ -141,7 +141,7 @@ pub(crate) fn new_bag() -> Arc<Mutex<HashMap<String, Value>>> {
 /// object's top-level `flash` field.
 ///
 /// No-op when no session scope is active (e.g. the route is outside
-/// the session middleware) — the values remain in the task-local bag
+/// the session middleware) - the values remain in the task-local bag
 /// and still appear on the *current* response via [`drain`], but they
 /// cannot persist past the redirect because there is no session to
 /// persist them into.

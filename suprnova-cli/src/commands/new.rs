@@ -59,7 +59,7 @@ pub fn run(
         ui::label_value("API", "http://localhost:8765/api");
         ui::br();
         if with_portless {
-            ui::header("portless — HTTPS dev URL");
+            ui::header("portless - HTTPS dev URL");
             ui::hint("Wrote portless.json. For a named https://<name>.localhost URL:");
             ui::command("suprnova dev:tls   # one-time: trust the CA + register the route");
             ui::command("suprnova serve");
@@ -111,7 +111,7 @@ pub fn run(
     ui::label_value("Frontend", "http://localhost:5765");
     ui::br();
     if with_portless {
-        ui::header("portless — HTTPS dev URL");
+        ui::header("portless - HTTPS dev URL");
         ui::hint("Wrote portless.json. For a named https://<name>.localhost URL:");
         ui::command("suprnova dev:tls   # one-time: trust the CA + register the route");
         ui::command("suprnova serve");
@@ -258,7 +258,7 @@ fn to_snake_case(s: &str) -> String {
 const SCAFFOLD_SERVER_PORT: u16 = 8765;
 
 /// Write a `portless.json` at the project root. `name` is the portless
-/// route label — we use the snake_case package name so it matches
+/// route label - we use the snake_case package name so it matches
 /// `suprnova dev:tls`'s default (which reads `[package].name`), giving
 /// one stable URL `https://<package_name>.localhost`.
 fn write_portless_json(project_path: &Path, name: &str, app_port: u16) -> Result<(), String> {
@@ -437,7 +437,7 @@ fn create_project(
     //
     // Written 0600, not with the ambient umask. This file holds the
     // APP_KEY that encrypts session cookies and everything else through
-    // `Crypt`, and a default umask leaves it 0644 — readable by every
+    // `Crypt`, and a default umask leaves it 0644 - readable by every
     // account on the machine, which on a shared box or a CI runner is
     // the whole key.
     let app_key = crate::commands::key_generate::generate_app_key();
@@ -458,7 +458,7 @@ fn create_project(
     )
     .map_err(|e| format!("Failed to write cmd/main.rs: {}", e))?;
 
-    // Write src/bin/console.rs — per-project console binary that
+    // Write src/bin/console.rs - per-project console binary that
     // dispatches argv to `#[command]`-registered handlers.
     fs::write(
         project_path.join("src/bin/console.rs"),
@@ -466,7 +466,7 @@ fn create_project(
     )
     .map_err(|e| format!("Failed to write src/bin/console.rs: {}", e))?;
 
-    // Write src/commands/mod.rs — empty stub for user `#[command]`s.
+    // Write src/commands/mod.rs - empty stub for user `#[command]`s.
     // `suprnova make:command <name>` appends `pub mod <snake>;` lines.
     fs::write(
         project_path.join("src/commands/mod.rs"),
@@ -643,7 +643,7 @@ fn create_project(
     let title = to_title_case(project_name);
     templates::scaffold_frontend(project_path, project_name, &title, frontend)?;
 
-    // portless.json (opt-in via --with-portless) — maps the app's fixed
+    // portless.json (opt-in via --with-portless) - maps the app's fixed
     // backend port to https://<package_name>.localhost for `portless run`.
     if with_portless {
         write_portless_json(project_path, package_name, SCAFFOLD_SERVER_PORT)?;

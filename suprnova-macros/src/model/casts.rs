@@ -4,20 +4,20 @@
 //!
 //! Three responsibilities:
 //!
-//! 1. `apply_arm(...)` — used by `apply_attrs_to_active_model` to
+//! 1. `apply_arm(...)` - used by `apply_attrs_to_active_model` to
 //!    decode incoming JSON into the Runtime type, then route through
 //!    `Cast::to_storage` before assigning to the ActiveModel field.
-//! 2. `from_storage_arm(...)` — used by `From<inner::Model>` to
+//! 2. `from_storage_arm(...)` - used by `From<inner::Model>` to
 //!    decode the inner module's `Storage`-typed field back into the
 //!    user struct's `Runtime` type via `Cast::from_storage`.
-//! 3. `to_storage_arm(...)` — used by `From<UserStruct>` to encode
+//! 3. `to_storage_arm(...)` - used by `From<UserStruct>` to encode
 //!    the user struct's `Runtime`-typed field into the inner module's
 //!    `Storage` type before handing back to SeaORM.
 //!
 //! The cast is fallible in both directions, so the generated arms
 //! propagate via `?` where the surrounding function returns
 //! `Result<_, FrameworkError>`. The two `From<...>` impls aren't
-//! fallible by signature, so they panic on failure — these can only
+//! fallible by signature, so they panic on failure - these can only
 //! fail when the row in the database is corrupt (e.g. a non-RFC-3339
 //! string in an `AsDateTime` column, or a deprecated enum variant
 //! that no longer parses), which is a deployment-time data-integrity
@@ -25,7 +25,7 @@
 //!
 //! Domain 5 audit M-D5-1: panic messages include the offending field
 //! name and the original `FrameworkError` so an operator can locate
-//! which column failed and why directly from the trace — no
+//! which column failed and why directly from the trace - no
 //! spelunking required. Domain 2's middleware safety net translates
 //! the panic to a 500 response with the message in the tracing log.
 
@@ -74,18 +74,18 @@ pub fn apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>) -> Toke
 /// Shape:
 ///
 /// 1. Build a fresh `Self::default()` scratch instance.
-/// 2. Call `scratch.set_<field>(val.clone())?` — the user's body owns
+/// 2. Call `scratch.set_<field>(val.clone())?` - the user's body owns
 ///    the deserialise + transform.
 /// 3. Serialise `scratch.<field>` back into JSON so the rest of the
 ///    write path matches the direct apply (same cast / from_value
 ///    behaviour as a non-mutator field with that name).
-/// 4. Apply the resulting JSON the same way `apply_arm` would have —
+/// 4. Apply the resulting JSON the same way `apply_arm` would have -
 ///    via `Cast::to_storage` if the field also declares a cast,
 ///    otherwise direct `serde_json::from_value` into the storage type.
 ///
 /// T8: mutator fields take precedence over the direct apply path.
 /// A field that's both `mutators = [...]` and `casts = { ... }` keeps
-/// both — the mutator transforms the runtime value, the cast handles
+/// both - the mutator transforms the runtime value, the cast handles
 /// the storage shape.
 pub fn mutator_apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
     let setter = quote::format_ident!("set_{}", ident);
@@ -132,7 +132,7 @@ pub fn mutator_apply_arm(name: &str, ident: &syn::Ident, cast_ty: Option<&Type>)
 ///
 /// Domain 5 audit M-D5-1: panic on cast failure now includes the
 /// field name and the original `FrameworkError`. The behaviour
-/// (panic, not Result) is unchanged — `From` is infallible by
+/// (panic, not Result) is unchanged - `From` is infallible by
 /// signature and changing that to `TryFrom` would break every
 /// row-materialisation call site in the framework. Domain 2's
 /// middleware safety net translates the panic to a 500 response.
@@ -181,7 +181,7 @@ pub fn to_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream
 
 /// Generate the `am.<field> = ...` statement for
 /// `into_active_model_for_update`. Cast fields route through
-/// `Cast::to_storage` (fallible — propagated via `?`); non-cast
+/// `Cast::to_storage` (fallible - propagated via `?`); non-cast
 /// fields use the existing `Set(self.<field>.clone())` shape. PK
 /// fields are emitted by the caller with `ActiveValue::Unchanged`
 /// before this arm runs.
@@ -206,7 +206,7 @@ pub fn active_model_update_stmt(
     }
 }
 
-/// Fallible read-direction arm for `Model::try_from_storage` — the
+/// Fallible read-direction arm for `Model::try_from_storage` - the
 /// `?`-propagating analogue of [`from_storage_arm`]. Cast fields call
 /// `Cast::from_storage` and, on failure, map the error to a
 /// `FrameworkError` that names the offending field (same diagnostic as
@@ -218,7 +218,7 @@ pub fn active_model_update_stmt(
 /// escape hatch. This arm gives the framework's own hydration hot paths
 /// (`find` / `all` / `Builder::get` / ...) a recoverable error so a
 /// corrupt row or a deprecated enum variant in old data does not panic
-/// a queue worker, the scheduler, or a CLI command — none of which sit
+/// a queue worker, the scheduler, or a CLI command - none of which sit
 /// behind the HTTP panic-recovery net.
 pub fn try_from_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> TokenStream {
     match cast_ty {
@@ -238,7 +238,7 @@ pub fn try_from_storage_arm(ident: &syn::Ident, cast_ty: Option<&Type>) -> Token
     }
 }
 
-/// Fallible write-direction arm for `Model::try_into_storage` — the
+/// Fallible write-direction arm for `Model::try_into_storage` - the
 /// `?`-propagating analogue of [`to_storage_arm`]. Reads the runtime
 /// value off `self`, routes it through `Cast::to_storage`, and maps a
 /// failure to a field-named `FrameworkError` instead of panicking.
@@ -283,7 +283,7 @@ mod tests {
         let id = ident("email_verified_at");
         let cast: Type = parse_quote!(AsOptionalDateTime);
         let rendered = from_storage_arm(&id, Some(&cast)).to_string();
-        // Field name appears verbatim — operator can grep this to find the column.
+        // Field name appears verbatim - operator can grep this to find the column.
         assert!(
             rendered.contains("email_verified_at"),
             "panic message must name the field; got: {rendered}"
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn non_cast_field_arms_are_trivial_assignments() {
-        // Sanity: a non-cast field must NOT emit panic-related plumbing —
+        // Sanity: a non-cast field must NOT emit panic-related plumbing -
         // the From arm is a straight field assignment.
         let id = ident("id");
         let rendered_from = from_storage_arm(&id, None).to_string();

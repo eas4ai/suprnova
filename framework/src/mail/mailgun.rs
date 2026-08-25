@@ -2,7 +2,7 @@
 //!
 //! POSTs to `https://api.<region>.mailgun.net/v3/<domain>/messages` with
 //! `Authorization: Basic base64("api:<key>")`. The body is form-encoded when
-//! the message has no attachments and `multipart/form-data` otherwise —
+//! the message has no attachments and `multipart/form-data` otherwise -
 //! Mailgun's form-encoded path doesn't accept file uploads, so attachments
 //! force the multipart switch.
 
@@ -20,7 +20,7 @@ const DEFAULT_ENDPOINT: &str = "https://api.mailgun.net";
 pub struct MailgunMailTransport {
     api_key: String,
     domain: String,
-    /// Base URL (no trailing slash, no `/v3/...` path) — e.g.
+    /// Base URL (no trailing slash, no `/v3/...` path) - e.g.
     /// `https://api.mailgun.net` or `https://api.eu.mailgun.net`.
     endpoint: String,
 }
@@ -79,11 +79,11 @@ fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
 /// drift on field names or order.
 ///
 /// Mailgun field name conventions:
-/// * `o:tag` — tag (repeatable; we send one per tag)
-/// * `o:tracking` etc — option params (not surfaced here)
-/// * `v:<name>` — message variables (Mailgun's metadata mechanism)
-/// * `h:<header-name>` — custom MIME headers
-/// * `h:X-Priority` — used by Mailgun for explicit priority
+/// * `o:tag` - tag (repeatable; we send one per tag)
+/// * `o:tracking` etc - option params (not surfaced here)
+/// * `v:<name>` - message variables (Mailgun's metadata mechanism)
+/// * `h:<header-name>` - custom MIME headers
+/// * `h:X-Priority` - used by Mailgun for explicit priority
 fn build_form_fields(msg: &OutgoingMessage) -> Result<Vec<(String, String)>, FrameworkError> {
     let mut form: Vec<(String, String)> = Vec::with_capacity(32);
     form.push(("from".into(), msg.from.to_string()));

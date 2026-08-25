@@ -1,9 +1,9 @@
-//! `TestResponse` — a fluent wrapper around the `(status, headers,
+//! `TestResponse` - a fluent wrapper around the `(status, headers,
 //! body)` triple every HTTP-test harness in this crate already
 //! produces after driving a request through [`crate::handle_request`]
 //! (see `manual/http-tests.md`). Laravel's
 //! `Illuminate\Testing\TestResponse` equivalent: assertions read the
-//! same way and panic with an expected/actual excerpt on failure —
+//! same way and panic with an expected/actual excerpt on failure -
 //! this is a *testing* surface, so panicking is the contract here, the
 //! same way it is for [`crate::testing::Expect`]. Every assertion
 //! returns `&Self`, so they chain.
@@ -26,9 +26,9 @@ pub struct TestResponse {
 impl TestResponse {
     /// Build a `TestResponse` from a status code, response headers, and
     /// the collected body. `headers` accepts anything iterable as
-    /// `(String, String)` pairs — a `HashMap<String, String>`, a
+    /// `(String, String)` pairs - a `HashMap<String, String>`, a
     /// `Vec<(String, String)>`, or `hyper::HeaderMap::iter()` mapped to
-    /// owned strings — so no existing harness has to change how it
+    /// owned strings - so no existing harness has to change how it
     /// drives a request. Header names are normalized to lowercase for
     /// case-insensitive lookup; multiple values for the same name (two
     /// `Set-Cookie` headers, most commonly) are preserved, not
@@ -97,7 +97,7 @@ impl TestResponse {
             .find_map(|raw| crate::http::parse_cookies(raw).remove(name))
     }
 
-    /// The response body decoded as UTF-8 (lossily — invalid sequences
+    /// The response body decoded as UTF-8 (lossily - invalid sequences
     /// become U+FFFD).
     pub fn body_text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -107,7 +107,7 @@ impl TestResponse {
     ///
     /// # Panics
     ///
-    /// Panics with the raw body attached if it isn't valid JSON — this
+    /// Panics with the raw body attached if it isn't valid JSON - this
     /// is a test-assertion helper, so an invalid body IS the failure.
     pub fn json(&self) -> serde_json::Value {
         serde_json::from_slice(&self.body).unwrap_or_else(|e| {
@@ -167,7 +167,7 @@ impl TestResponse {
     }
 
     /// Assert the JSON body is a superset of `expected`: every key in
-    /// `expected` — recursively, through nested objects — is present in
+    /// `expected` - recursively, through nested objects - is present in
     /// the body with an equal value. Extra keys in the body are
     /// ignored. Arrays compare element-by-element and must match in
     /// length; they are not treated as unordered sets.
@@ -263,11 +263,11 @@ impl TestResponse {
     ///
     /// Requires [`Self::with_session_store`] first. There is no honest
     /// way to read server-side session state from a wire-level response
-    /// alone — the session lives in the store, keyed by the id inside
+    /// alone - the session lives in the store, keyed by the id inside
     /// the (encrypted) session cookie, not in the response body. This
     /// decrypts the cookie with the same [`crate::CryptPurpose::Cookie`]
     /// purpose [`crate::SessionMiddleware`] writes it under, extracts
-    /// the session id, and reads that row from the attached store — the
+    /// the session id, and reads that row from the attached store - the
     /// same lookup the middleware itself performs on the next request.
     ///
     /// # Panics
@@ -282,7 +282,7 @@ impl TestResponse {
     ) -> &Self {
         let Some((store, cookie_name)) = self.session.as_ref() else {
             panic!(
-                "assert_session_has({key:?}, ...) called without a session store — call \
+                "assert_session_has({key:?}, ...) called without a session store - call \
                  .with_session_store(store, cookie_name) first"
             );
         };
@@ -355,7 +355,7 @@ impl TestResponse {
 
 /// Returns `Some(path)` naming the first point of mismatch between
 /// `expected` and `actual`, or `None` if `actual` is a superset of
-/// `expected` — see [`TestResponse::assert_json`].
+/// `expected` - see [`TestResponse::assert_json`].
 fn json_subset_mismatch(
     path: &str,
     expected: &serde_json::Value,
@@ -387,7 +387,7 @@ fn json_subset_mismatch(
     }
 }
 
-/// Resolve a dot-separated path (`"data.items.1.id"`) against `root` —
+/// Resolve a dot-separated path (`"data.items.1.id"`) against `root` -
 /// see [`TestResponse::assert_json_path`].
 fn json_path<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = root;

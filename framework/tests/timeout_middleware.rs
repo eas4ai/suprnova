@@ -119,7 +119,7 @@ async fn fast_handler_passes_through_with_its_real_response() {
 
 /// A handler that exceeds the deadline yields 503 AND is cancelled: the
 /// post-await side effect never runs. The `AtomicBool` is what gives this
-/// teeth — a 503 alone can't prove the handler future was actually dropped
+/// teeth - a 503 alone can't prove the handler future was actually dropped
 /// rather than left running to completion in the background.
 #[tokio::test]
 async fn slow_handler_times_out_with_503_and_is_cancelled() {

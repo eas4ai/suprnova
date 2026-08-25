@@ -5,13 +5,13 @@
 //! not recognise. Both transports render a message and discard it, so a
 //! production deploy that forgot the variable (or typo'd it) reported every
 //! password reset and email verification as sent while nothing left the
-//! process — a silent outage that only surfaces when a locked-out user
+//! process - a silent outage that only surfaces when a locked-out user
 //! complains.
 //!
 //! `Environment::detect()` reads the process-wide `APP_ENV` var and these
-//! tests mutate it alongside `MAIL_DRIVER`, so — like
-//! `inertia_production_fail_closed.rs` and `app_key_production_fail_closed.rs`
-//! — they live in their own test binary and serialise against each other with
+//! tests mutate it alongside `MAIL_DRIVER`, so - like
+//! `inertia_production_fail_closed.rs` and `app_key_production_fail_closed.rs` -
+//! they live in their own test binary and serialise against each other with
 //! `#[serial_test::serial]`. Each `tests/*.rs` file is a separate process, so
 //! no other integration test can interleave with these.
 //!
@@ -155,7 +155,7 @@ async fn production_boot_without_a_mail_driver_fails_closed() {
         "error names the opt-in override: {msg}"
     );
 
-    // Fail closed means no transport was bound either — a later send must
+    // Fail closed means no transport was bound either - a later send must
     // not quietly succeed through a leftover default.
     let send_err = Mail::to("alice@example.org")
         .send(Ping::default())
@@ -207,7 +207,7 @@ fn production_boot_on_the_memory_driver_fails_closed() {
 fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back_to_log() {
     let _guard = EnvGuard::take();
     set("APP_ENV", "production");
-    // Correct driver, wrong case — the exact shape that used to warn once
+    // Correct driver, wrong case - the exact shape that used to warn once
     // and then silently deliver nothing for the life of the deployment.
     set("MAIL_DRIVER", "SMTP");
 
@@ -231,7 +231,7 @@ async fn production_boot_succeeds_with_the_explicit_override() {
     suprnova::mail::boot::bootstrap_from_env()
         .expect("the explicit override must permit a non-delivering driver in production");
 
-    // And the bound transport is usable — the override is a real escape
+    // And the bound transport is usable - the override is a real escape
     // hatch, not a boot that leaves mail unwired.
     Mail::to("alice@example.org")
         .send(Ping::default())
@@ -268,26 +268,26 @@ async fn production_boot_on_a_delivering_driver_is_unaffected() {
     set("MAIL_SMTP_PORT", "2587");
     // Credentials are supplied because P2-03 added a second, orthogonal
     // production requirement: delivering is necessary but no longer
-    // sufficient — the connection must also be encrypted. Without these
+    // sufficient - the connection must also be encrypted. Without these
     // this test would now be exercising the P2-03 refusal rather than the
     // SEC-03 pass-through it is named for.
     set("MAIL_SMTP_USER", "relay-user");
     set("MAIL_SMTP_PASS", "relay-pass");
 
     // No send here: `smtp.example.com` is not reachable and this test must
-    // not depend on the network. Constructing the transport is the assertion
-    // — the SEC-03 gate is upstream of it.
+    // not depend on the network. Constructing the transport is the assertion -
+    // the SEC-03 gate is upstream of it.
     suprnova::mail::boot::bootstrap_from_env()
         .expect("a driver that actually delivers must boot in production untouched");
 }
 
 // ---------------------------------------------------------------------
-// P2-03 — production must not send SMTP in the clear.
+// P2-03 - production must not send SMTP in the clear.
 // ---------------------------------------------------------------------
 
 /// The finding, through the real env-reading path. Three of the four
-/// `(user, pass)` arms used to land on `builder_dangerous` — no TLS, no
-/// certificate check — and the both-unset arm logged a `warn!` in
+/// `(user, pass)` arms used to land on `builder_dangerous` - no TLS, no
+/// certificate check - and the both-unset arm logged a `warn!` in
 /// production and booted plaintext anyway.
 #[tokio::test]
 #[serial(mail_sec03_env)]
@@ -355,7 +355,7 @@ async fn a_non_truthy_insecure_override_keeps_the_guard_armed() {
         let result = suprnova::mail::boot::bootstrap_from_env();
         assert!(
             result.is_err(),
-            "{INSECURE_SMTP_ENV}={value:?} must not count as consent — the \
+            "{INSECURE_SMTP_ENV}={value:?} must not count as consent - the \
              guard stays armed, so boot must still refuse"
         );
     }
@@ -380,7 +380,7 @@ async fn implicit_tls_boots_from_the_environment() {
 }
 
 /// An encrypted mode with no credentials is refused by the *caller*, with
-/// a message about the credentials rather than about encryption — the two
+/// a message about the credentials rather than about encryption - the two
 /// failures must stay distinguishable to whoever is reading the log.
 #[tokio::test]
 #[serial(mail_sec03_env)]

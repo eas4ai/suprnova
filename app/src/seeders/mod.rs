@@ -1,4 +1,4 @@
-//! Database seeders for the dogfood app — Phase 6A T7.
+//! Database seeders for the dogfood app - Phase 6A T7.
 //!
 //! Mirrors Laravel's `database/seeders/` directory. Each seeder is a
 //! zero-sized type implementing `Seeder`; the framework's

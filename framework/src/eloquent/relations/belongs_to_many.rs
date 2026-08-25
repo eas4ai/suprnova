@@ -1,9 +1,9 @@
-//! `BelongsToMany` — many-to-many through a first-class Pivot model.
+//! `BelongsToMany` - many-to-many through a first-class Pivot model.
 //!
 //! Mirrors Laravel's
 //! [`belongsToMany`](https://laravel.com/docs/12.x/eloquent-relationships#many-to-many)
 //! semantics: a join (pivot) table carries one FK to each side. The
-//! pivot in Suprnova is itself a `#[suprnova::model]` struct — own
+//! pivot in Suprnova is itself a `#[suprnova::model]` struct - own
 //! migrations, own accessors, own events. Extra columns and timestamps
 //! are surfaced on the loaded related rows via `__pivot`, accessed
 //! through the macro-emitted `r.pivot::<RoleUserPivot>()` accessor.
@@ -21,25 +21,25 @@
 //!
 //! Mutators:
 //!
-//! - [`attach`](BelongsToMany::attach) — INSERT a single pivot row.
-//! - [`attach_with`](BelongsToMany::attach_with) — INSERT with extra pivot
+//! - [`attach`](BelongsToMany::attach) - INSERT a single pivot row.
+//! - [`attach_with`](BelongsToMany::attach_with) - INSERT with extra pivot
 //!   columns (and timestamps if `with_timestamps()` is set).
-//! - [`detach`](BelongsToMany::detach) — DELETE a single pivot row.
-//! - [`sync`](BelongsToMany::sync) — diff-and-apply against the current pivot
+//! - [`detach`](BelongsToMany::detach) - DELETE a single pivot row.
+//! - [`sync`](BelongsToMany::sync) - diff-and-apply against the current pivot
 //!   set; runs attach + detach inside a `DatabaseTransaction` so a
 //!   partial failure rolls back.
 //!
 //! Readers:
 //!
-//! - [`get`](BelongsToMany::get) — two-query strategy: fetch related rows via
+//! - [`get`](BelongsToMany::get) - two-query strategy: fetch related rows via
 //!   `JOIN`, fetch pivot rows separately, zip via `(parent_id,
 //!   related_id)`, stamp `__pivot` on each clone.
-//! - [`first`](BelongsToMany::first) — `.get().into_iter().next()`.
-//! - [`count`](BelongsToMany::count) — `SELECT COUNT(*) FROM pivot WHERE
+//! - [`first`](BelongsToMany::first) - `.get().into_iter().next()`.
+//! - [`count`](BelongsToMany::count) - `SELECT COUNT(*) FROM pivot WHERE
 //!   pivot_foreign_key = ?`.
 //!
 //! Eager loading happens through the parent model's `__eager_load`
-//! match arm — emitted by `#[suprnova::model]` and exercised by
+//! match arm - emitted by `#[suprnova::model]` and exercised by
 //! `User::with(["roles"])`. The arm clones each loaded R per attached
 //! parent so multiple parents sharing one R each get their own copy
 //! of the pivot context.
@@ -61,8 +61,8 @@ use crate::error::FrameworkError;
 /// Boxed builder-rewrite closure for [`BelongsToMany::with_trashed`] /
 /// [`BelongsToMany::only_trashed`]. Aliased so the field declaration
 /// satisfies clippy's `type_complexity` lint and reads as one type.
-/// Same shape as [`super::belongs_to::ScopeRewrite`][crate::eloquent::relations::belongs_to]
-/// — the soft-delete bound is captured at closure construction time.
+/// Same shape as [`super::belongs_to::ScopeRewrite`][crate::eloquent::relations::belongs_to] -
+/// the soft-delete bound is captured at closure construction time.
 type ScopeRewrite<R> = Box<dyn FnOnce(Builder<R>) -> Builder<R> + Send>;
 
 /// Many-to-many relation from parent `L` to related `R` through pivot
@@ -111,7 +111,7 @@ where
     /// runtime path stays homogeneous regardless of the PK type
     /// (`i64`, `String`, `Uuid`-via-string, ...).
     parent_key_value: serde_json::Value,
-    /// Pivot table name. Defaults to `<P as EloquentModel>::TABLE` —
+    /// Pivot table name. Defaults to `<P as EloquentModel>::TABLE` -
     /// the pivot's own `#[suprnova::model(table = "...")]` declaration
     /// is the single source of truth. Override via the macro's
     /// `pivot_table = "..."` option.
@@ -129,7 +129,7 @@ where
     /// in [`Self::get`].
     related_key: String,
     /// Extra pivot columns to project into `__pivot`. Always includes
-    /// the two FK columns implicitly — `pivot_columns` is for the
+    /// the two FK columns implicitly - `pivot_columns` is for the
     /// "extras" (`assigned_at`, `notes`, custom data).
     pivot_columns: Vec<String>,
     /// When true, the attach path stamps `created_at` / `updated_at`
@@ -215,7 +215,7 @@ where
     /// `r.pivot::<P>()`. Mirrors Laravel's `->withPivot([...])`.
     ///
     /// The two FK columns (`pivot_foreign_key`, `pivot_related_key`)
-    /// are always loaded; this option is for "extras" — `assigned_at`,
+    /// are always loaded; this option is for "extras" - `assigned_at`,
     /// `notes`, custom payloads.
     pub fn with_pivot<I, S>(mut self, columns: I) -> Self
     where
@@ -259,7 +259,7 @@ where
     /// [`Self::get`]'s IN-set filter and the macro-emitted aggregate
     /// JOIN (`__sn_r.<col> = __sn_p.<pivot_related_key>`). Defaults to
     /// `"id"`. Set this when the related model declares a non-`id`
-    /// primary key via `#[model(primary_key = "uuid")]` (or similar) —
+    /// primary key via `#[model(primary_key = "uuid")]` (or similar) -
     /// without it, `.get()` filters on the wrong column and the
     /// aggregate JOIN errors with "no such column: __sn_r.id".
     ///
@@ -287,7 +287,7 @@ where
     /// Equivalent to `attach_with(related_id, Attrs::new())`.
     ///
     /// Mirrors Laravel's `->attach($id)`. Idempotency is not
-    /// guaranteed — if the pivot has a UNIQUE constraint on
+    /// guaranteed - if the pivot has a UNIQUE constraint on
     /// `(parent_id, related_id)`, a second `attach()` of the same
     /// pair returns a database error. Use [`Self::sync`] to set a
     /// full set without duplicate INSERTs.
@@ -304,10 +304,10 @@ where
     ///
     /// # Security
     ///
-    /// Keys of `extra` are pivot column names — they interpolate
+    /// Keys of `extra` are pivot column names - they interpolate
     /// **raw** into the rendered `INSERT INTO pivot (...) VALUES (...)`
     /// SQL (same SQL-identifier contract as
-    /// [`Builder::filter`](crate::eloquent::Builder::filter) — see the
+    /// [`Builder::filter`](crate::eloquent::Builder::filter) - see the
     /// builder module docs). The Fillable / Guarded mass-assignment
     /// guard does NOT apply at this layer. **Never accept the key
     /// names from untrusted input**; hardcode them via the
@@ -324,7 +324,7 @@ where
         // Resolve through ExecutorChoice so the pivot INSERT lands on
         // the ambient transaction connection when CURRENT_TX is active,
         // and so the parent model's `#[model(connection = "...")]`
-        // default routes correctly outside a tx — pivot tables
+        // default routes correctly outside a tx - pivot tables
         // conventionally live on the parent's database.
         let exec = ExecutorChoice::resolve_write(None, None, L::default_connection_name()).await?;
         let backend = exec.backend();
@@ -475,7 +475,7 @@ where
         // matches by the same shape as the input set.
         let mut current_map: HashMap<String, serde_json::Value> = HashMap::new();
         for r in rows.iter() {
-            // The column may come back as i64, String, etc. — try the
+            // The column may come back as i64, String, etc. - try the
             // common shapes; falling back to the textual form covers
             // exotic PKs. The key for the HashMap is always the JSON
             // string form of whatever we recover.
@@ -506,7 +506,7 @@ where
 
         // Transactional attach + detach. Either all rows commit or
         // none do. When we already inherit a tx via `CURRENT_TX` the
-        // ambient one provides atomicity — opening a nested SeaORM
+        // ambient one provides atomicity - opening a nested SeaORM
         // begin() inside a tx connection would silently degrade to a
         // savepoint that the outer rollback would still discard, so we
         // just write directly via the executor. Outside a tx we still
@@ -679,7 +679,7 @@ where
         }
 
         // Stamp the pivot context onto each related row via the
-        // `EagerLoadDispatch::set_pivot_arc` hook — the field
+        // `EagerLoadDispatch::set_pivot_arc` hook - the field
         // (`row.__pivot`) isn't reachable from generic code, but
         // every `#[suprnova::model]` struct ships the setter.
         let mut out: Vec<R> = Vec::with_capacity(related_rows.len());
@@ -698,7 +698,7 @@ where
         Ok(Collection::from_vec(out))
     }
 
-    /// Convenience over `get()` — drop everything after the first
+    /// Convenience over `get()` - drop everything after the first
     /// related row.
     pub async fn first(self) -> Result<Option<R>, FrameworkError> {
         Ok(self.get().await?.into_vec().into_iter().next())
@@ -742,7 +742,7 @@ where
 
 /// Soft-delete scope modifiers for `BelongsToMany<L, R, P>` when the
 /// related (`R`) side is soft-deletable. The pivot table itself is
-/// never filtered for `deleted_at` — pivot rows are a join artefact,
+/// never filtered for `deleted_at` - pivot rows are a join artefact,
 /// not a domain object that gets archived. Matches Laravel's
 /// `withTrashed()` shape: applies to the related table, not the
 /// intermediate. Future tasks can layer a separate

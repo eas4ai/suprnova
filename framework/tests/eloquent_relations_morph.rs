@@ -1,4 +1,4 @@
-//! Phase 10B T6 — `MorphTo` / `MorphOne` / `MorphMany` + per-family
+//! Phase 10B T6 - `MorphTo` / `MorphOne` / `MorphMany` + per-family
 //! enum.
 //!
 //! The polymorphic primitives layer a `<name>_id` + `<name>_type`
@@ -11,34 +11,34 @@
 //!
 //! Coverage matrix:
 //!
-//! - `morph_many_returns_comments_on_post` — basic parent-side query
+//! - `morph_many_returns_comments_on_post` - basic parent-side query
 //!   honours the morph-type filter.
-//! - `morph_to_returns_correct_variant` — inverse-side dispatch lands
+//! - `morph_to_returns_correct_variant` - inverse-side dispatch lands
 //!   in the right enum variant.
-//! - `morph_to_returns_video_variant` — same, against the second
+//! - `morph_to_returns_video_variant` - same, against the second
 //!   declared target.
-//! - `morph_to_unknown_for_unregistered_type` — legacy row with an
+//! - `morph_to_unknown_for_unregistered_type` - legacy row with an
 //!   unmatched `<name>_type` falls through to the `Unknown` variant.
-//! - `morph_many_eager_load` — `Self::with(["comments"])` populates
+//! - `morph_many_eager_load` - `Self::with(["comments"])` populates
 //!   the per-row `__eager` cache (also confirms the morph-type
-//!   predicate is on the eager-load query — see the comments-on-
+//!   predicate is on the eager-load query - see the comments-on-
 //!   different-family assertion below).
-//! - `morph_one_returns_single_morph` — `MorphOne` returns
+//! - `morph_one_returns_single_morph` - `MorphOne` returns
 //!   `Option<R>` from `.first()` with the same morph-type filter.
-//! - `morph_many_count_uses_server_side_group_by` — count dispatcher
+//! - `morph_many_count_uses_server_side_group_by` - count dispatcher
 //!   reports per-parent fan-out without buffering child rows
 //!   client-side.
-//! - `morph_many_aggregate_via_server_side_group_by` — aggregate
+//! - `morph_many_aggregate_via_server_side_group_by` - aggregate
 //!   dispatcher applies SUM over the child column with the morph-type
 //!   predicate honoured.
-//! - `morph_many_count_filters_by_morph_type` — explicit assertion
+//! - `morph_many_count_filters_by_morph_type` - explicit assertion
 //!   that count over Post.comments doesn't include comments on Video,
 //!   even when Video has the same parent PK as Post.
 
 use suprnova::testing::TestDatabase;
 use suprnova::{AggregateKind, Model, attrs, model};
 
-// Comment.commentable is polymorphic — points at MorphPost OR
+// Comment.commentable is polymorphic - points at MorphPost OR
 // MorphVideo. The relation lives on the morph-table side.
 #[model(table = "morph_comments", relations = {
     commentable: MorphTo { name = "commentable", targets = [MorphPost, MorphVideo] },
@@ -128,7 +128,7 @@ async fn morph_many_returns_comments_on_post() {
     })
     .await
     .unwrap();
-    // A comment on a DIFFERENT video — must not appear.
+    // A comment on a DIFFERENT video - must not appear.
     let v = MorphVideo::create(attrs! { url: "u.mp4" }).await.unwrap();
     let _ = MorphComment::create(attrs! {
         commentable_id: v.id,
@@ -177,7 +177,7 @@ async fn morph_to_unknown_for_unregistered_type() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     // Manually insert a comment pointing at a type not in the
-    // morph_to targets list — simulates a legacy row or a renamed
+    // morph_to targets list - simulates a legacy row or a renamed
     // model.
     _db.execute_unprepared(
         "INSERT INTO morph_comments (commentable_id, commentable_type, body) \
@@ -268,7 +268,7 @@ async fn morph_one_returns_single_morph() {
     .await
     .unwrap();
     // A noise image with the SAME imageable_id but a different
-    // morph_type — must not be returned.
+    // morph_type - must not be returned.
     let _ = MorphImage::create(attrs! {
         imageable_id: p.id,
         imageable_type: "video",
@@ -359,7 +359,7 @@ async fn morph_many_eager_load_empty_parent_gets_empty_slice() {
 #[tokio::test]
 async fn morph_many_count_uses_server_side_group_by() {
     // The dispatcher arm issues a single GROUP BY query against the
-    // child table — no client-side row buffering. We can't observe
+    // child table - no client-side row buffering. We can't observe
     // the SQL directly here, but we can confirm the per-parent count
     // is right (including parents with zero children).
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -404,7 +404,7 @@ async fn morph_many_count_uses_server_side_group_by() {
 #[tokio::test]
 async fn morph_many_count_filters_by_morph_type() {
     // The count dispatcher applies the morph-type predicate too.
-    // p1 and v1 share the same PK (1) — Post.comments_count must NOT
+    // p1 and v1 share the same PK (1) - Post.comments_count must NOT
     // include the Video's comment.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -448,7 +448,7 @@ async fn morph_many_count_filters_by_morph_type() {
 
 #[tokio::test]
 async fn morph_many_aggregate_via_server_side_group_by() {
-    // SUM(views) over Post.comments — also confirms the type-filter
+    // SUM(views) over Post.comments - also confirms the type-filter
     // applies to aggregates (video's comments with views=999 must not
     // be in the sum).
     let _db = TestDatabase::sqlite_memory().await.unwrap();

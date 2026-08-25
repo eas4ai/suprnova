@@ -1,4 +1,4 @@
-//! `HasManyThrough` / `HasOneThrough` — two-hop relations.
+//! `HasManyThrough` / `HasOneThrough` - two-hop relations.
 //!
 //! Mirrors Laravel's
 //! [`hasManyThrough`](https://laravel.com/docs/12.x/eloquent-relationships#has-many-through)
@@ -26,7 +26,7 @@
 //! NULL` when those models declare `SoftDeletes`.
 //!
 //! Callers that need to *include* trashed rows in a Through traversal
-//! (the inverse of the default — Laravel's `->withTrashed()`) fall
+//! (the inverse of the default - Laravel's `->withTrashed()`) fall
 //! back to chaining the two relations explicitly:
 //!
 //! ```ignore
@@ -39,7 +39,7 @@
 //!
 //! Laravel example: `Country` has many `User`s and `User` has many
 //! `Post`s. `Country::posts()` is a HasManyThrough that returns every
-//! `Post` belonging to any `User` in that country — a two-hop traversal.
+//! `Post` belonging to any `User` in that country - a two-hop traversal.
 //!
 //! Default key conventions:
 //!
@@ -51,11 +51,11 @@
 //! All four customisable via the macro's `first_key = "..."` /
 //! `second_key = "..."` / `lk = "..."` / `second_local_key = "..."`
 //! options. The chainable [`HasManyThrough::second_local_key`] setter
-//! is also available at runtime — useful for tooling that constructs
+//! is also available at runtime - useful for tooling that constructs
 //! the relation outside the `#[suprnova::model]` declaration.
 //!
 //! The terminal `.get()` / `.first()` / `.count()` issue a single
-//! `INNER JOIN` query — one round trip per call, regardless of fan-out.
+//! `INNER JOIN` query - one round trip per call, regardless of fan-out.
 //! Eager loading is split across two queries (see the macro-emitted
 //! dispatcher arm in `suprnova-macros/src/model/relations.rs`) to keep
 //! the SeaORM deserialisation path homogeneous: the framework
@@ -101,7 +101,7 @@ where
         Send + Into<sea_orm::Value>,
 {
     /// Parent row's local-key value, JSON-encoded. Matches the rest of
-    /// the relation surface — `HasMany`, `HasOne`, `BelongsToMany` all
+    /// the relation surface - `HasMany`, `HasOne`, `BelongsToMany` all
     /// store the parent key as `serde_json::Value` so the runtime path
     /// stays homogeneous regardless of the PK shape (`i64`, `String`,
     /// `Uuid`-via-string). The conversion to `sea_orm::Value` happens
@@ -112,7 +112,7 @@ where
     /// Column on `C` pointing at `B`. Default: `<snake(B)>_id`.
     second_key: String,
     /// Column on `A` matched by `first_key`. Default: `"id"`. Only
-    /// affects the [`Relation::parent_key`] metadata — the runtime
+    /// affects the [`Relation::parent_key`] metadata - the runtime
     /// value was already extracted at construction.
     local_key: String,
     /// Column on `B` matched by `second_key`. Default: `"id"`. Drives
@@ -182,7 +182,7 @@ where
     }
 
     /// Override the column on `A` matched by `first_key`. Only updates
-    /// metadata — the runtime parent value was extracted at
+    /// metadata - the runtime parent value was extracted at
     /// construction. Mirrors the [`crate::eloquent::HasMany::local_key`]
     /// setter shape.
     pub fn local_key(mut self, key: impl Into<String>) -> Self {
@@ -255,7 +255,7 @@ where
         ))
     }
 
-    /// Convenience over `.get()` — drop everything after the first row.
+    /// Convenience over `.get()` - drop everything after the first row.
     pub async fn first(self) -> Result<Option<C>, FrameworkError> {
         Ok(self.get().await?.into_vec().into_iter().next())
     }
@@ -293,7 +293,7 @@ where
     /// Render the SELECT JOIN SQL with backend-aware placeholder and
     /// auto-applied soft-delete filters for `B` and `C`. Extracted
     /// from `get` / `count` so both terminals share the soft-delete
-    /// stitching — appending `AND <tbl>.<col> IS NULL` whenever the
+    /// stitching - appending `AND <tbl>.<col> IS NULL` whenever the
     /// model's `EloquentModel::SOFT_DELETES_COLUMN` is non-empty.
     fn render_select_sql(&self, backend: DatabaseBackend) -> String {
         let ph = match backend {
@@ -324,8 +324,8 @@ where
         sql
     }
 
-    /// Same shape as [`Self::render_select_sql`] but `SELECT COUNT(*)`
-    /// — split so both terminals can append the soft-delete clauses
+    /// Same shape as [`Self::render_select_sql`] but `SELECT COUNT(*)` -
+    /// split so both terminals can append the soft-delete clauses
     /// from one place.
     fn render_count_sql(&self, backend: DatabaseBackend) -> String {
         let ph = match backend {
@@ -476,12 +476,12 @@ where
 
     /// Fetch the first matching `C` row reachable from this parent.
     ///
-    /// Equivalent to `.get()` for HasOne semantics — at most one row.
+    /// Equivalent to `.get()` for HasOne semantics - at most one row.
     pub async fn first(self) -> Result<Option<C>, FrameworkError> {
         self.inner.first().await
     }
 
-    /// Fetch the matching `C` row (HasOne semantics — at most one row).
+    /// Fetch the matching `C` row (HasOne semantics - at most one row).
     /// Returns `None` when no `C` row is reachable.
     pub async fn get(self) -> Result<Option<C>, FrameworkError> {
         Ok(self.inner.get().await?.into_vec().into_iter().next())

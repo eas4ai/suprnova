@@ -23,7 +23,7 @@ fn ensure_key() {
     INSTALLED.get_or_init(|| {
         // Install a deterministic-but-test-only key once.
         let key = EncryptionKey::generate();
-        // Ignore the bool return — another test in another file might
+        // Ignore the bool return - another test in another file might
         // have already installed a key; either way `encrypt_string`
         // works on whatever is installed.
         let _ = suprnova::crypto::_test_install_key(key);
@@ -104,7 +104,7 @@ fn cross_purpose_ciphertext_is_rejected() {
     let _g = TEST_LOCK.lock().unwrap();
     ensure_key();
     let cookie_wire = Crypt::encrypt_string(CryptPurpose::Cookie, "session-id-42").unwrap();
-    // Same wire, every other purpose — must reject.
+    // Same wire, every other purpose - must reject.
     for foreign in [
         CryptPurpose::Cursor,
         CryptPurpose::TwoFactorSecret,
@@ -151,7 +151,7 @@ fn appears_encrypted_matches_real_ciphertext() {
     ensure_key();
     let wire = Crypt::encrypt_string(CryptPurpose::Cookie, "hello").unwrap();
     assert!(Crypt::appears_encrypted(&wire));
-    // Even the empty plaintext, encrypted, is recognised — the
+    // Even the empty plaintext, encrypted, is recognised - the
     // ciphertext still carries nonce + tag.
     let wire_empty = Crypt::encrypt_string(CryptPurpose::Cookie, "").unwrap();
     assert!(Crypt::appears_encrypted(&wire_empty));
@@ -159,12 +159,12 @@ fn appears_encrypted_matches_real_ciphertext() {
 
 #[test]
 fn appears_encrypted_rejects_plaintext_and_short_payloads() {
-    // No Crypt::init required — `appears_encrypted` is a static
+    // No Crypt::init required - `appears_encrypted` is a static
     // shape check, never touches the keyring.
     assert!(!Crypt::appears_encrypted("plain text with spaces"));
     assert!(!Crypt::appears_encrypted(""));
     // Valid base64 but too short to be a nonce+tag (28 bytes min).
-    assert!(!Crypt::appears_encrypted("YWJj")); // "abc" — 3 bytes
+    assert!(!Crypt::appears_encrypted("YWJj")); // "abc" - 3 bytes
     // Non-base64-url characters.
     assert!(!Crypt::appears_encrypted("not/valid+base64="));
 }

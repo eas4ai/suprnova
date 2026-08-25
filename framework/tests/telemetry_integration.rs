@@ -1,6 +1,6 @@
 //! Live-collector smoke test for the OTel export bridge.
 //!
-//! `#[ignore]` by default — the test reaches out to whatever is at
+//! `#[ignore]` by default - the test reaches out to whatever is at
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` and only proves anything if a real
 //! collector is listening. Run manually with:
 //!

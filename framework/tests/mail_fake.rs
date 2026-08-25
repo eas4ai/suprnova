@@ -96,7 +96,7 @@ async fn fake_restores_previously_bound_transport_on_drop() {
         // `fake` drops here.
     }
 
-    // Prior transport is back — a fresh dispatch lands on it.
+    // Prior transport is back - a fresh dispatch lands on it.
     Mail::to("after@example.org")
         .send(Greeting {
             name: "After".into(),
@@ -107,7 +107,7 @@ async fn fake_restores_previously_bound_transport_on_drop() {
     assert_eq!(
         prior_captured.len(),
         2,
-        "prior transport restored — receives the post-fake message"
+        "prior transport restored - receives the post-fake message"
     );
     assert_eq!(prior_captured[1].to[0].email, "after@example.org");
 
@@ -149,7 +149,7 @@ async fn fake_restores_absent_transport_on_drop() {
     // The hint must point at the actually-callable path. Operators
     // copying it into their code should not hit a compile error.
     // `Mail::set_transport` is a real method. `bootstrap_from_env` is
-    // at `suprnova::mail::boot::bootstrap_from_env()` — NOT on the
+    // at `suprnova::mail::boot::bootstrap_from_env()` - NOT on the
     // `Mail` struct directly. Pin both paths so a future hint rewrite
     // can't regress to a non-existent symbol.
     assert!(
@@ -270,7 +270,7 @@ async fn fake_and_real_dispatch_agree_on_the_on_queue_override() {
 #[should_panic(expected = "routed to queue \"emails\"")]
 async fn fake_assert_queued_on_panics_when_the_queue_does_not_match() {
     let fake = Mail::fake();
-    // No `.on_queue(...)` — the snapshot's queue is `None`.
+    // No `.on_queue(...)` - the snapshot's queue is `None`.
     Mail::to("alice@example.org")
         .queue(Digest {})
         .await
@@ -311,7 +311,7 @@ async fn fake_captures_the_on_connection_override() {
 #[should_panic(expected = "routed to connection \"audit\"")]
 async fn fake_assert_queued_on_connection_panics_when_the_connection_does_not_match() {
     let fake = Mail::fake();
-    // No `.on_connection(...)` — the snapshot's connection is `None`.
+    // No `.on_connection(...)` - the snapshot's connection is `None`.
     Mail::to("alice@example.org")
         .queue(Digest {})
         .await

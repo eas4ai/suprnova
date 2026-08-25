@@ -1,4 +1,4 @@
-//! `suprnova migrate:fresh` — drop every table, then re-run all migrations.
+//! `suprnova migrate:fresh` - drop every table, then re-run all migrations.
 //!
 //! This is the only CLI command that destroys data it cannot recover, and it
 //! is one shell-history arrow-up away from `migrate`. In production that
@@ -11,7 +11,7 @@
 //! proves a human is present when it runs. A pasted command line satisfies
 //! the first but not the second, which is exactly the case worth stopping.
 //! That is also why a non-TTY refuses instead of falling back to reading
-//! piped stdin — `echo production | ... --force` in a deploy script would
+//! piped stdin - `echo production | ... --force` in a deploy script would
 //! turn the confirmation back into a flag.
 
 use std::io::IsTerminal;
@@ -23,7 +23,7 @@ use crate::ui;
 /// Everything the guard needs from the outside world.
 ///
 /// Resolved once in [`run`] and injected, so the decision can be tested
-/// without setting environment variables or owning a terminal — and so the
+/// without setting environment variables or owning a terminal - and so the
 /// tests can observe whether the migrator was reached at all.
 struct FreshContext<'a> {
     /// Where the project's migrations live (`src/migrations` in a real run).
@@ -38,8 +38,8 @@ struct FreshContext<'a> {
 
 /// Is this a production environment?
 ///
-/// Mirrors `suprnova::config::Environment::detect` — including the `prod`
-/// alias and the case-insensitive match — because the CLI cannot depend on
+/// Mirrors `suprnova::config::Environment::detect` - including the `prod`
+/// alias and the case-insensitive match - because the CLI cannot depend on
 /// the framework crate. A guard that disagreed with the app about what
 /// "production" means would be worse than no guard.
 fn is_production(app_env: &str) -> bool {
@@ -95,7 +95,7 @@ fn authorize(
     let typed = read_confirmation()?;
     if typed.trim() != expected {
         return Err(
-            "Confirmation did not match — nothing was dropped and no migrations ran.".to_string(),
+            "Confirmation did not match - nothing was dropped and no migrations ran.".to_string(),
         );
     }
 

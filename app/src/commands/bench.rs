@@ -16,7 +16,7 @@ use crate::jobs::bench::{BenchAbort, BenchRecord, BenchSleep};
 #[derive(Parser, Command, Debug)]
 #[console(
     name = "bench:enqueue-sleep",
-    description = "Phase 1.4 — enqueue a job that sleeps, so SIGTERM can land mid-flight"
+    description = "Phase 1.4 - enqueue a job that sleeps, so SIGTERM can land mid-flight"
 )]
 pub struct EnqueueSleep {
     /// How long the job occupies a worker.
@@ -40,7 +40,7 @@ impl TypedCommand for EnqueueSleep {
 #[derive(Parser, Command, Debug)]
 #[console(
     name = "bench:enqueue-abort",
-    description = "Phase 1.3 — enqueue a job whose handler aborts its own process"
+    description = "Phase 1.3 - enqueue a job whose handler aborts its own process"
 )]
 pub struct EnqueueAbort {
     /// Correlates the enqueue with the surviving `jobs` row.
@@ -64,7 +64,7 @@ impl TypedCommand for EnqueueAbort {
 #[derive(Parser, Command, Debug)]
 #[console(
     name = "bench:enqueue-records",
-    description = "Phase 1.5 — enqueue N jobs that each record their id exactly once"
+    description = "Phase 1.5 - enqueue N jobs that each record their id exactly once"
 )]
 pub struct EnqueueRecords {
     #[arg(long, default_value_t = 1000)]
@@ -86,7 +86,7 @@ impl TypedCommand for EnqueueRecords {
 #[derive(Parser, Command, Debug)]
 #[console(
     name = "bench:verify-records",
-    description = "Phase 1.5 — assert N distinct jobs ran, none twice"
+    description = "Phase 1.5 - assert N distinct jobs ran, none twice"
 )]
 pub struct VerifyRecords {
     #[arg(long, default_value_t = 1000)]
@@ -125,13 +125,13 @@ impl TypedCommand for VerifyRecords {
         // being read as the first.
         if total != distinct {
             return Err(FrameworkError::internal(format!(
-                "FAIL: {} rows for {distinct} distinct jobs — a job was claimed more than once",
+                "FAIL: {} rows for {distinct} distinct jobs - a job was claimed more than once",
                 total
             )));
         }
         if distinct != self.expect {
             return Err(FrameworkError::internal(format!(
-                "FAIL: {distinct} distinct jobs ran, expected {} — the rest never executed",
+                "FAIL: {distinct} distinct jobs ran, expected {} - the rest never executed",
                 self.expect
             )));
         }
@@ -174,7 +174,7 @@ impl TypedCommand for VerifyTicks {
 
         if rows.is_empty() {
             return Err(FrameworkError::internal(
-                "FAIL: no ticks recorded at all — the scheduler never ran, so this run \
+                "FAIL: no ticks recorded at all - the scheduler never ran, so this run \
                  proves nothing either way",
             ));
         }
@@ -244,7 +244,7 @@ impl TypedCommand for VerifyTicks {
             return Err(FrameworkError::internal(format!(
                 "FAIL: no interior minute shows the control arm running on all {} \
                  replicas. Either fewer replicas were up than expected or the window \
-                 was too short — either way the elected arm was never actually \
+                 was too short - either way the elected arm was never actually \
                  contended, so a single execution proves nothing.",
                 self.replicas,
             )));
@@ -265,7 +265,7 @@ impl TypedCommand for VerifyTicks {
 /// can authenticate with a known password. That hash has to come from the
 /// framework's configured hasher, not from a hash pasted in from
 /// elsewhere: driver and cost live in config, and a mismatch does not
-/// surface until warmup tries to log in — at the far end of a multi-hour
+/// surface until warmup tries to log in - at the far end of a multi-hour
 /// load, with the whole dataset already written.
 ///
 /// So this verifies its own output before printing. A hash that does not

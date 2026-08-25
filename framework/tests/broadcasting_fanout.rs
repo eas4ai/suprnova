@@ -11,21 +11,21 @@
 //!
 //! Instead we test:
 //!
-//! 1. **Local fanout** — `publish` delivers to local subscribers via the
+//! 1. **Local fanout** - `publish` delivers to local subscribers via the
 //!    in-memory hub immediately.
-//! 2. **Duplicate-delivery guard** — the consumer pump skips messages whose
+//! 2. **Duplicate-delivery guard** - the consumer pump skips messages whose
 //!    `instance_id` matches the hub's own ID; we verify this by confirming
 //!    that a subscriber that was already served by local fanout does NOT
 //!    receive a second copy from the loopback path.
-//! 3. **BroadcastHub trait delegation** — `subscriber_count`, `track_member`,
+//! 3. **BroadcastHub trait delegation** - `subscriber_count`, `track_member`,
 //!    `untrack_member`, `list_members` all delegate correctly.
-//! 4. **Serialization round-trip** — `TaggedEnvelope` is not pub, but we
+//! 4. **Serialization round-trip** - `TaggedEnvelope` is not pub, but we
 //!    indirectly verify that the JSON serialized by `publish()` is accepted
 //!    by the consumer pump by checking that no extra messages arrive.
 //!
 //! The loopback tests use `SeaStreamerBroadcastHub::new_loopback` so that
 //! published messages are fed back through the stdio thread and processed by
-//! the consumer pump — exercising the full codepath.
+//! the consumer pump - exercising the full codepath.
 
 use serde_json::json;
 use std::time::Duration;
@@ -102,7 +102,7 @@ async fn publish_with_no_subscriber_is_silent() {
         .await
         .expect("hub connect");
 
-    // No subscriber — publish should not panic.
+    // No subscriber - publish should not panic.
     hub.publish(envelope("lonely", "Tick", json!({})))
         .await
         .unwrap();
@@ -135,7 +135,7 @@ async fn publish_rejects_reserved_presence_channel() {
         "error must name the reserved prefix; got: {err}"
     );
 
-    // Any other __-prefixed name is equally reserved — the registry
+    // Any other __-prefixed name is equally reserved - the registry
     // forbids registration of the family, not just the one literal.
     let err2 = hub
         .publish(envelope("__rpc__", "ping", json!({})))
@@ -186,7 +186,7 @@ async fn no_duplicate_delivery_via_loopback() {
         .await
         .unwrap();
 
-    // First delivery — from local fanout (immediate).
+    // First delivery - from local fanout (immediate).
     let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
         .await
         .expect("first message within 200ms")
@@ -196,7 +196,7 @@ async fn no_duplicate_delivery_via_loopback() {
     // Wait long enough for loopback to arrive and be processed.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Second recv attempt should time out — duplicate guard dropped it.
+    // Second recv attempt should time out - duplicate guard dropped it.
     let second = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         second.is_err(),
@@ -245,7 +245,7 @@ async fn track_and_list_members() {
 /// Two hub instances sharing the same stream_key (loopback): a message
 /// published on hub1 reaches hub2's subscriber.
 ///
-/// This exercises the deliver branch of the consumer pump — the path that
+/// This exercises the deliver branch of the consumer pump - the path that
 /// calls `local.publish(tagged.envelope)` when the inbound message's
 /// `instance_id` does NOT match the receiving hub's own ID.
 ///
@@ -269,7 +269,7 @@ async fn cross_hub_delivery() {
         .unwrap();
 
     // hub2's subscriber must receive the message (via the consumer pump's
-    // deliver branch, NOT local fanout — hub2 didn't call publish locally).
+    // deliver branch, NOT local fanout - hub2 didn't call publish locally).
     let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
         .expect("hub2 received hub1's message within 1s")
@@ -478,7 +478,7 @@ async fn crashed_hub_members_pruned_via_ttl() {
 
         // Wait until hub_b sees alice (presence event propagated).
         wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
-    } // hub_a dropped here — heartbeat task aborted, alice's last_seen goes stale
+    } // hub_a dropped here - heartbeat task aborted, alice's last_seen goes stale
 
     // Wait until hub_b prunes alice (TTL expired + prune scan fired).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
@@ -497,7 +497,7 @@ async fn crashed_hub_members_pruned_via_ttl() {
 // ── env-gated Redis backend integration ──────────────────────────────────────
 
 /// Two independent `SeaStreamerBroadcastHub` instances pointed at the same
-/// Redis stream MUST exchange envelopes cross-process — this is the whole
+/// Redis stream MUST exchange envelopes cross-process - this is the whole
 /// point of HIGH #208 (the socket-adapter refactor). Subscribers on hub_b
 /// receive events published on hub_a.
 ///

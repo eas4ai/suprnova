@@ -12,7 +12,7 @@
 //! We expose these newtypes publicly so:
 //!
 //! * downstream evaluators (and [`FeatureMiddleware`](crate::features::FeatureMiddleware))
-//!   can populate `Extensions` themselves — anything that stashes a
+//!   can populate `Extensions` themselves - anything that stashes a
 //!   [`UserIdField`] participates in user-scoped flag resolution,
 //!   regardless of which evaluator generated the context.
 //! * consumers who construct contexts programmatically (without the
@@ -25,7 +25,7 @@
 //! use featureflag::evaluator::Evaluator;
 //! use featureflag::fields::Fields;
 //!
-//! // An evaluator receives a `ContextRef` in its `on_new_context` hook —
+//! // An evaluator receives a `ContextRef` in its `on_new_context` hook -
 //! // that's where programmatic field insertion happens (rare; most
 //! // callers use the `context!` macro instead).
 //! struct MyEvaluator;
@@ -41,7 +41,7 @@
 //!
 //! # Why `String`?
 //!
-//! Magnetar (the framework's identity layer) uses opaque string user IDs —
+//! Magnetar (the framework's identity layer) uses opaque string user IDs -
 //! UUID-shaped by default, but ultimately whatever the application wants.
 //! Numeric-only ids would force every UUID-using app to either re-key
 //! their identity model or skip feature-flag scoping entirely. String
@@ -62,8 +62,8 @@
 ///
 /// Carries the application's user identifier as a `String` so opaque
 /// (UUID, ULID) ids and numeric ids coexist behind the same shape.
-/// Set from the `user_id` field of [`context!`](featureflag::context!)
-/// — both string and i64 raw values are accepted; see
+/// Set from the `user_id` field of [`context!`](featureflag::context!) -
+/// both string and i64 raw values are accepted; see
 /// [`DatabaseEvaluator::on_new_context`](crate::features::DatabaseEvaluator).
 /// The [`DatabaseEvaluator`](crate::features::DatabaseEvaluator) reads
 /// this to look up `user:{id}`-scoped flags.
@@ -77,7 +77,7 @@ impl UserIdField {
         Self(id.into())
     }
 
-    /// Construct from a numeric id — the path numeric-keyed apps take
+    /// Construct from a numeric id - the path numeric-keyed apps take
     /// when they don't want to hand-format strings.
     pub fn from_i64(id: i64) -> Self {
         Self(id.to_string())

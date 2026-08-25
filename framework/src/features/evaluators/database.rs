@@ -1,16 +1,16 @@
-//! [`DatabaseEvaluator`] — reads feature-flag state from the
+//! [`DatabaseEvaluator`] - reads feature-flag state from the
 //! `features` SeaORM table and serves it through a synchronous,
 //! in-memory snapshot.
 //!
 //! # Why a snapshot
 //!
-//! featureflag's [`Evaluator::is_enabled`] is **synchronous** — it
+//! featureflag's [`Evaluator::is_enabled`] is **synchronous** - it
 //! sits on the hot request path and cannot block on async I/O. SeaORM
 //! and our backing databases (Postgres / MySQL / SQLite via SQLx) are
 //! async-only. We bridge the two by holding an in-memory snapshot of
 //! the table, refreshed asynchronously via [`DatabaseEvaluator::reload`] and
 //! [`DatabaseEvaluator::set_flag`]. Reads go through an `RwLock` over a
-//! `HashMap<(name, scope_key), enabled>` — lock-free under contention,
+//! `HashMap<(name, scope_key), enabled>` - lock-free under contention,
 //! zero allocation on the hot path beyond the lookup key.
 //!
 //! # Resolution order
@@ -20,10 +20,10 @@
 //! [`Feature`](featureflag::feature::Feature)'s declared default to take over (see
 //! [`Feature::is_enabled_in`](featureflag::feature::Feature::is_enabled_in)).
 //!
-//! 1. `user:{user_id}` — when the context carries a [`UserIdField`]
-//! 2. `team:{team}` — when the context carries a [`TeamField`]
-//! 3. `""` — global
-//! 4. `None` — flag absent entirely
+//! 1. `user:{user_id}` - when the context carries a [`UserIdField`]
+//! 2. `team:{team}` - when the context carries a [`TeamField`]
+//! 3. `""` - global
+//! 4. `None` - flag absent entirely
 //!
 //! Contexts walk their parent chain at lookup time
 //! ([`Context::iter`](featureflag::context::Context::iter)) so a
@@ -85,7 +85,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct DatabaseEvaluator {
     conn: DatabaseConnection,
     flags: RwLock<HashMap<(String, String), bool>>,
-    /// Monotonic write counter — bumped under the snapshot write lock
+    /// Monotonic write counter - bumped under the snapshot write lock
     /// every time [`Self::set_flag`] commits a single-key update.
     ///
     /// [`Self::reload`] uses this to serialize against an in-flight
@@ -94,7 +94,7 @@ pub struct DatabaseEvaluator {
     /// `set_flag`'s upsert (so the SELECT returned the pre-change row
     /// set) would otherwise replace the snapshot, silently reverting
     /// the just-flipped flag. The counter is captured before the
-    /// SELECT, then re-read under the snapshot write lock — if it
+    /// SELECT, then re-read under the snapshot write lock - if it
     /// advanced, the replacement is abandoned and the just-completed
     /// `set_flag`'s in-memory edit stands.
     write_counter: AtomicU64,
@@ -126,7 +126,7 @@ impl DatabaseEvaluator {
 
     /// Construct against a freshly-built in-memory SQLite database
     /// with the `features` schema applied and no rows. Test-only
-    /// helper — does **not** touch [`crate::testing::TestContainer`],
+    /// helper - does **not** touch [`crate::testing::TestContainer`],
     /// so concurrent tests using both `TestDatabase` and
     /// `DatabaseEvaluator::new_in_memory` don't fight over the
     /// container singleton.
@@ -142,8 +142,8 @@ impl DatabaseEvaluator {
 
         // Run the real `CreateFeaturesTable` migration rather than
         // reconstructing the schema from the entity. If the migration
-        // and the entity ever diverge — column added, column type
-        // changed, unique index dropped — the tests must exercise
+        // and the entity ever diverge - column added, column type
+        // changed, unique index dropped - the tests must exercise
         // exactly what production will run. Otherwise the migration
         // can ship broken while the entity-derived in-memory schema
         // keeps every test green.
@@ -172,7 +172,7 @@ impl DatabaseEvaluator {
         // concurrent `set_flag` lands its upsert + snapshot update
         // between this read and the write-lock acquisition below, the
         // counter advances and the recompare-then-replace step bails
-        // out — preserving the just-flipped flag rather than reverting
+        // out - preserving the just-flipped flag rather than reverting
         // it with the pre-change SELECT result. The pre-SELECT capture
         // is load-bearing: capturing after the SELECT leaves a race
         // window where a set_flag commits its upsert (visible to the
@@ -191,7 +191,7 @@ impl DatabaseEvaluator {
         }
 
         let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
-        // Re-read under the write lock — `set_flag` bumps the counter
+        // Re-read under the write lock - `set_flag` bumps the counter
         // *while holding the same write lock*, so a value-unchanged
         // re-read here proves no concurrent single-key update slipped
         // in during the SELECT. Counter advanced ⇒ abandon and keep
@@ -215,7 +215,7 @@ impl DatabaseEvaluator {
     /// `scope_key` is `""` for a global flag, or any
     /// application-defined string for a scoped flag (the framework
     /// reserves `user:` and `team:` prefixes for the built-in
-    /// resolution path — see module docs).
+    /// resolution path - see module docs).
     ///
     /// Fires [`crate::features::sync::notify`] after the snapshot
     /// updates so any [`CachedEvaluator`](super::cached::CachedEvaluator)
@@ -235,7 +235,7 @@ impl DatabaseEvaluator {
         scope_key: &str,
         enabled: bool,
     ) -> Result<(), FrameworkError> {
-        // Phase 10A T11 — the inner SeaORM `Model` carries the storage
+        // Phase 10A T11 - the inner SeaORM `Model` carries the storage
         // shape (RFC-3339 string for `created_at` / `updated_at` since
         // `#[model(timestamps)]` auto-injects the `AsDateTime` cast).
         // Build the ActiveModel by routing through the macro's
@@ -273,7 +273,7 @@ impl DatabaseEvaluator {
         // separate reload() remains available for picking up edits
         // made out-of-band. The write counter is bumped *under the
         // write lock* so a concurrent reload's recompare-then-replace
-        // step sees this update — guarantees that a reload running
+        // step sees this update - guarantees that a reload running
         // alongside a set_flag never reverts the just-flipped value.
         {
             let mut store = lock::write(&self.flags, "feature-flag snapshot")?;
@@ -321,9 +321,9 @@ impl DatabaseEvaluator {
 
 impl Evaluator for DatabaseEvaluator {
     fn is_enabled(&self, feature: &str, context: &Context) -> Option<bool> {
-        // Domain 17 audit D17-A — was
+        // Domain 17 audit D17-A - was
         // `lock::read(...).expect("DatabaseEvaluator flags RwLock poisoned")`.
-        // `is_enabled` is the HOT PATH — every feature-flag check
+        // `is_enabled` is the HOT PATH - every feature-flag check
         // dispatches through it. Returning None on poison means the
         // caller's composite evaluator falls through to the next
         // backend / disabled default; an error log surfaces the poison
@@ -356,7 +356,7 @@ impl Evaluator for DatabaseEvaluator {
     /// get their own chance to handle them.
     ///
     /// `user_id` accepts both string and i64 raw values so apps with
-    /// either id shape interoperate without ceremony — strings pass
+    /// either id shape interoperate without ceremony - strings pass
     /// through; integers stringify via `to_string`.
     fn on_new_context(&self, mut context: ContextRef<'_>, fields: Fields<'_>) {
         if let Some(value) = fields.get("user_id") {
@@ -382,7 +382,7 @@ impl FeatureSync for DatabaseEvaluator {
     /// `(feature, scope_key)`.
     async fn on_flag_changed(&self, _feature: &str, _scope_key: &str) {
         if let Err(err) = self.reload().await {
-            // Reload failures leave the snapshot untouched — the
+            // Reload failures leave the snapshot untouched - the
             // pre-mutation values stay live. Surface the failure so
             // an operator notices the snapshot is now stale relative
             // to the persisted row, but don't propagate (the calling
@@ -415,7 +415,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Snapshot helper — peek at the in-memory map without going
+    /// Snapshot helper - peek at the in-memory map without going
     /// through the public `is_enabled` path so the test can assert on
     /// the (name, scope_key) key directly.
     fn snapshot_value(eval: &DatabaseEvaluator, name: &str, scope_key: &str) -> Option<bool> {
@@ -436,7 +436,7 @@ mod tests {
         //
         // The in-memory SQLite path is fast enough that an unguarded
         // `tokio::join!(reload, set_flag)` would race even with the
-        // counter guard — to *prove* the guard works we manually drive
+        // counter guard - to *prove* the guard works we manually drive
         // the steps reload() goes through and force the interleaving.
 
         let eval = Arc::new(DatabaseEvaluator::new_in_memory().await.unwrap());
@@ -447,7 +447,7 @@ mod tests {
 
         // Step 1: capture counter pre-SELECT (mirrors `reload()`).
         let counter_before = eval.write_counter.load(Ordering::SeqCst);
-        // Step 2: SELECT — at this point alpha is still false on disk.
+        // Step 2: SELECT - at this point alpha is still false on disk.
         let rows = FeatureEntity::find().all(&eval.conn).await.unwrap();
         let mut next = HashMap::with_capacity(rows.len());
         for row in rows {
@@ -461,13 +461,13 @@ mod tests {
             "SELECT captured the pre-flip value as expected"
         );
 
-        // Step 3: concurrent `set_flag` lands BEFORE the replace —
+        // Step 3: concurrent `set_flag` lands BEFORE the replace -
         // bumps the counter under the write lock and updates the
         // snapshot to alpha=true.
         eval.set_flag("alpha", "", true).await.unwrap();
         assert_eq!(snapshot_value(&eval, "alpha", ""), Some(true));
 
-        // Step 4: complete the reload — acquire the write lock,
+        // Step 4: complete the reload - acquire the write lock,
         // re-read the counter, and only replace if unchanged. The
         // counter advanced, so replacement must be abandoned.
         {
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(
             snapshot_value(&eval, "alpha", ""),
             Some(true),
-            "set_flag's in-memory edit must survive a racing reload — \
+            "set_flag's in-memory edit must survive a racing reload - \
              the race was M20's silent flag-revert bug",
         );
     }
@@ -492,8 +492,8 @@ mod tests {
     #[tokio::test]
     async fn reload_still_replaces_when_no_concurrent_write() {
         // Sanity guard: the counter check doesn't accidentally turn
-        // every reload into a no-op. In the steady state — no
-        // concurrent set_flag — reload must replace as before.
+        // every reload into a no-op. In the steady state - no
+        // concurrent set_flag - reload must replace as before.
         let eval = DatabaseEvaluator::new_in_memory().await.unwrap();
         // Seed via a direct insert that bypasses set_flag, so the
         // counter stays at zero and the snapshot stays empty.

@@ -1,4 +1,4 @@
-//! Phase 10A T4 — Model trait CRUD lifecycle.
+//! Phase 10A T4 - Model trait CRUD lifecycle.
 //!
 //! Each test uses an in-memory SQLite database for hermetic isolation. The
 //! `TestDatabase::sqlite_memory()` constructor registers itself in the
@@ -309,7 +309,7 @@ async fn replicate_into_other_model_resets_pk() {
     assert_eq!(draft.name, "Alice");
     assert_eq!(draft.email, "alice@example.com");
 
-    // Unsaved — replicate_into never touches the database.
+    // Unsaved - replicate_into never touches the database.
     assert_eq!(T4UserDraft::all().await.unwrap().len(), 0);
 }
 
@@ -372,7 +372,7 @@ async fn create_rejects_unknown_column() {
 
 // ---- create_or_first narrows on FrameworkError::Database --------------
 //
-// Regression — the original implementation matched `Err(_)`
+// Regression - the original implementation matched `Err(_)`
 // indiscriminately and re-queried by `lookup` for every error. A
 // non-DB failure (validation, listener cancel) had its original
 // error swallowed and the re-query result returned instead. The fix
@@ -418,7 +418,7 @@ async fn create_or_first_propagates_non_database_errors_unchanged() {
     .expect_err("unknown column must surface as a non-DB error");
 
     // Surfaced error must not be the synthetic "row is not present"
-    // internal error — that's the original buggy behaviour.
+    // internal error - that's the original buggy behaviour.
     let msg = err.to_string();
     assert!(
         !msg.contains("row is not present"),

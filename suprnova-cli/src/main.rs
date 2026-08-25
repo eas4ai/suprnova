@@ -87,7 +87,7 @@ enum Commands {
         #[arg(long)]
         skip_types: bool,
 
-        /// Don't respawn a crashed dev process — tear the whole session
+        /// Don't respawn a crashed dev process - tear the whole session
         /// down instead (the pre-restart behaviour).
         #[arg(long)]
         no_restart: bool,
@@ -134,7 +134,7 @@ enum Commands {
 
         /// Skip the interactive confirmation before modifying your browsers'
         /// certificate stores. Does not apply when the CA's fingerprint has
-        /// changed since the last run — that always needs a human.
+        /// changed since the last run - that always needs a human.
         #[arg(long)]
         yes: bool,
     },
@@ -222,7 +222,7 @@ enum Commands {
     #[command(name = "migrate:fresh")]
     MigrateFresh {
         /// Required when APP_ENV is production. Even then the command still
-        /// asks you to type the environment name at an interactive prompt —
+        /// asks you to type the environment name at an interactive prompt -
         /// the flag alone will not drop a production database.
         #[arg(long)]
         force: bool,

@@ -50,7 +50,7 @@ const RECOVERY_CODE_COUNT: usize = 10;
 
 /// Forward-skew window the TOTP construction in [`check_code`] accepts
 /// (`skew=1`). The replay-claim stamp uses `current + TOTP_SKEW_STEPS`
-/// so the next-timestep replay of the same code is rejected — a bare
+/// so the next-timestep replay of the same code is rejected - a bare
 /// `current` stamp leaves a one-step gap where the captured code still
 /// validates and the predicate `current_step <= last` does not yet
 /// fire. See [`TwoFactor::verify`]'s replay-protection comment.
@@ -84,7 +84,7 @@ pub struct EnrollmentResponse {
 impl std::fmt::Debug for EnrollmentResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The otpauth URL embeds the shared secret in its query
-        // string — treat the whole URL as opaque, just like the
+        // string - treat the whole URL as opaque, just like the
         // recovery codes. The QR-code SVG is derived from the same
         // secret and equally sensitive, so it gets the same redacting
         // treatment (length is non-secret and useful for debugging
@@ -123,7 +123,7 @@ impl TwoFactor {
     /// SVG, and the plaintext recovery codes (shown to the user once).
     ///
     /// The user must call [`Self::confirm`] with a valid TOTP code
-    /// before 2FA actually gates logins — until then
+    /// before 2FA actually gates logins - until then
     /// [`Self::is_enabled`] returns `false` and [`Self::verify`]
     /// short-circuits to `Ok(false)`.
     ///
@@ -136,7 +136,7 @@ impl TwoFactor {
     /// have 2FA on this account." Call [`Self::re_enroll`] with a
     /// valid TOTP code or recovery code as proof.
     ///
-    /// Re-enrolling on an unconfirmed (pending) row is allowed — the
+    /// Re-enrolling on an unconfirmed (pending) row is allowed - the
     /// prior enrollment never became authoritative.
     pub async fn enroll<U: TwoFactorUser>(user: &U) -> Result<EnrollmentResponse, FrameworkError> {
         if Self::is_enabled(user).await? {
@@ -163,7 +163,7 @@ impl TwoFactor {
     ///   neither a TOTP code (current or within the replay-protected
     ///   window) nor a recovery code.
     /// - `FrameworkError::domain(.., 400)` when no confirmed
-    ///   enrollment exists — call [`Self::enroll`] instead.
+    ///   enrollment exists - call [`Self::enroll`] instead.
     pub async fn re_enroll<U: TwoFactorUser>(
         user: &U,
         proof: &str,
@@ -176,14 +176,14 @@ impl TwoFactor {
         }
 
         // Reject early if the account is locked by brute-force
-        // throttling — symmetric with [`Self::complete_challenge`]'s
+        // throttling - symmetric with [`Self::complete_challenge`]'s
         // gate. Without it, an attacker who tripped lockout via
         // wrong proof codes could still rotate the secret by
         // submitting the right one (since `verify_internal` itself
         // doesn't consult lockout state). Best-effort: when Magnetar
         // isn't initialised (test / dev configs that exercise the
         // 2FA primitives without booting Magnetar), the gate
-        // short-circuits to "not locked" — same posture as the
+        // short-circuits to "not locked" - same posture as the
         // other brute-force interactions in this module.
         if is_locked_best_effort(user.email()).await {
             return Err(FrameworkError::domain(
@@ -215,7 +215,7 @@ impl TwoFactor {
         Self::write_new_enrollment(user).await
     }
 
-    /// Internal helper — generate + persist a fresh secret. Used by
+    /// Internal helper - generate + persist a fresh secret. Used by
     /// [`Self::enroll`] (no prior state) and [`Self::re_enroll`]
     /// (after proof). Overwrites any existing row's secret, recovery
     /// codes, and `confirmed_at` (re-confirmation required against
@@ -338,7 +338,7 @@ impl TwoFactor {
     /// accept the same code in that window.
     ///
     /// The legitimate cost is that a user who needs to 2FA twice across
-    /// the same skew window must wait until the next one — for the
+    /// the same skew window must wait until the next one - for the
     /// typical "verify once per login" flow this is invisible.
     ///
     /// The timestep claim is atomic. The stamp is written with a
@@ -348,8 +348,8 @@ impl TwoFactor {
     /// verifies in the same timestep therefore cannot both win: the
     /// first flips the column, the second's predicate no longer
     /// matches and it is treated as a replay. A plain read-modify-write
-    /// would be a TOCTOU race — both verifies read the pre-stamp row,
-    /// both validate the same code, both stamp — that silently defeats
+    /// would be a TOCTOU race - both verifies read the pre-stamp row,
+    /// both validate the same code, both stamp - that silently defeats
     /// the guard under concurrency.
     ///
     /// # Brute-force throttling
@@ -358,7 +358,7 @@ impl TwoFactor {
     /// `crate::auth_flows::BruteForce::record_failed_attempt`.
     /// Crossing the configured threshold locks the account from
     /// **both** 2FA and password login until an admin unlocks it or
-    /// the lockout window expires — defense in depth against online
+    /// the lockout window expires - defense in depth against online
     /// brute-force of the TOTP search space. Successful verifies
     /// reset the failed-attempt counter via
     /// `crate::auth_flows::BruteForce::reset_attempts`.
@@ -382,10 +382,10 @@ impl TwoFactor {
             // Fast-path replay rejection: this user already verified at
             // or after the current timestep, so refuse ANY code without
             // even decrypting the secret. This is an optimization and a
-            // UX nicety, NOT the authoritative guard — under concurrency
+            // UX nicety, NOT the authoritative guard - under concurrency
             // two verifies can both read the pre-stamp row and pass here.
             // The atomic claim below is what actually closes the race.
-            // Counted as a failed attempt — replays from an observer
+            // Counted as a failed attempt - replays from an observer
             // should trip the lockout.
             record_2fa_failure(user.email()).await;
             return Ok(false);
@@ -403,14 +403,14 @@ impl TwoFactor {
         // given timestep flips `last_used_timestep` to `claim_to`, and
         // any concurrent verify's predicate no longer matches, so it
         // affects zero rows. This is what makes the replay guard hold
-        // under concurrency — the previous read-modify-write let two
+        // under concurrency - the previous read-modify-write let two
         // racing verifies both stamp and both succeed (a TOCTOU race).
         //
         // `claim_to` is the *forward* edge of the TOTP skew window
         // (`current + TOTP_SKEW_STEPS`). Stamping the bare `current`
         // would leave the same code replayable at the next timestep,
         // because `check_code` accepts codes for [T-1, T, T+1] at server
-        // time T — a captured code from T is still in [T, T+1, T+2] at
+        // time T - a captured code from T is still in [T, T+1, T+2] at
         // T+1, and a bare-current stamp would not block it.
         let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
@@ -444,7 +444,7 @@ impl TwoFactor {
     ///
     /// Recovery codes are a backup for an **active** 2FA enrollment,
     /// so this method short-circuits to `Ok(false)` while
-    /// `confirmed_at` is NULL — matching [`Self::verify`]'s symmetry.
+    /// `confirmed_at` is NULL - matching [`Self::verify`]'s symmetry.
     /// Without this gate, an attacker who triggered enrollment on a
     /// victim account (or any flow that creates the row without
     /// confirming) could authenticate using only a fresh recovery
@@ -457,7 +457,7 @@ impl TwoFactor {
             return Ok(false);
         }
         let consumed = recovery::consume(user.user_id(), code).await?;
-        // Same brute-force throttling as TwoFactor::verify — a wrong
+        // Same brute-force throttling as TwoFactor::verify - a wrong
         // recovery code counts as a failed attempt against the user's
         // email, so an attacker can't grind the 40-bit code space.
         if consumed {
@@ -476,7 +476,7 @@ impl TwoFactor {
     /// counting a single failed attempt as two against the BF
     /// counter.
     ///
-    /// Returns `Ok(false)` for any rejection — no-row, not-confirmed,
+    /// Returns `Ok(false)` for any rejection - no-row, not-confirmed,
     /// replay, mismatch, or race lost. Callers that need to
     /// distinguish "not enabled" from "wrong code" can re-check
     /// [`Self::is_enabled`] (a single DB read).
@@ -509,7 +509,7 @@ impl TwoFactor {
             return Ok(false);
         }
 
-        // Stamp the forward edge of the skew window — see
+        // Stamp the forward edge of the skew window - see
         // [`Self::verify`]'s comment block for the full reasoning.
         let claim_to = current_timestep + TOTP_SKEW_STEPS;
         let claim = entity::Entity::update_many()
@@ -571,9 +571,9 @@ impl TwoFactor {
     /// remember-me tokens, clear the fully-authenticated session slot
     /// (if any), stash `user_id` as the pending user, and remember
     /// whether the user opted into remember-me at password-login
-    /// time. The caller — typically a password-login handler that
+    /// time. The caller - typically a password-login handler that
     /// just resolved a user for whom [`Self::is_enabled_by_id`]
-    /// returned `true` — should then redirect to the challenge page.
+    /// returned `true` - should then redirect to the challenge page.
     /// The session remains in pending state until
     /// `Self::complete_challenge` succeeds (promoting pending →
     /// authed) or the user explicitly cancels via
@@ -589,13 +589,13 @@ impl TwoFactor {
     ///
     /// # Arguments
     ///
-    /// * `user_id` — the id of the user whose password verified.
-    /// * `remember` — whether the original login form requested
+    /// * `user_id` - the id of the user whose password verified.
+    /// * `remember` - whether the original login form requested
     ///   remember-me. The preference is stashed in the session and
     ///   consumed by `Self::complete_challenge`, which re-issues
     ///   the remember-me cookie on a successful challenge. Pass the
     ///   exact `remember` value the caller received from the login
-    ///   form — `false` if the form had no remember-me checkbox.
+    ///   form - `false` if the form had no remember-me checkbox.
     ///
     /// # Why revoke remember-me
     ///
@@ -613,11 +613,11 @@ impl TwoFactor {
     /// auth slot, **then** revoke remember-me against the saved id
     /// via the auth guard's remember-token revoke API. The reordering
     /// matters: if the revoke errors (DB transient failure, lock
-    /// timeout), `start_challenge` returns `Err` — but the session
+    /// timeout), `start_challenge` returns `Err` - but the session
     /// is already in a safe state (`auth_user_id` cleared, pending
     /// set), so `AuthMiddleware` kicks the user to `/login` rather
     /// than letting them through as fully authenticated. An earlier
-    /// implementation ran revoke first, then cleared auth — a
+    /// implementation ran revoke first, then cleared auth - a
     /// transient revoke failure there left the session
     /// fully-authed bypassing the 2FA gate.
     ///
@@ -633,13 +633,13 @@ impl TwoFactor {
     ) -> Result<(), FrameworkError> {
         let user_id = user_id.into();
         // Capture the currently-authenticated id (if any) BEFORE we
-        // tear down the auth slot — the revoke needs it to identify
+        // tear down the auth slot - the revoke needs it to identify
         // whose remember-me rows to delete, but the slot has to go
         // first for fail-closed safety.
         let saved_id = crate::auth::Auth::id();
 
         // STEP 1: Tear down auth state. Pending and authed are
-        // mutually exclusive — clear the auth slot, the request-
+        // mutually exclusive - clear the auth slot, the request-
         // scoped current user, and install the pending slot. If any
         // subsequent step errors, the session is now in a safe
         // state (no `auth_user_id` → `AuthMiddleware` kicks to
@@ -651,13 +651,13 @@ impl TwoFactor {
 
         // STEP 2: Revoke remember-me using the saved id. `Auth::id()`
         // is now `None` (we just cleared the slot), which is why we
-        // can't use the bare `Auth::revoke_remember_tokens()` here —
+        // can't use the bare `Auth::revoke_remember_tokens()` here -
         // it would no-op on the missing id and leave the row in
         // place. `_for_user` takes the id explicitly.
         if let Some(id) = saved_id {
             crate::auth::Auth::revoke_remember_tokens_for_user(&id).await?;
         } else {
-            // No prior auth — queue a clear cookie anyway in case
+            // No prior auth - queue a clear cookie anyway in case
             // the browser still holds a stale one from another
             // session. The cookie attributes match
             // `revoke_remember_tokens` so behaviour is symmetric.
@@ -680,7 +680,7 @@ impl TwoFactor {
         crate::session::middleware::two_factor_pending_user_id()
     }
 
-    /// Cancel a pending 2FA challenge — clears both pending slots
+    /// Cancel a pending 2FA challenge - clears both pending slots
     /// (user-id + remember preference) from the session without
     /// authenticating anyone. Typical use is a "back to login"
     /// button on the challenge page.
@@ -711,12 +711,12 @@ impl TwoFactor {
     /// On a bad code, dispatches
     /// [`crate::auth_flows::events::TwoFactorChallengeFailed`] and
     /// records exactly one failed attempt against the brute-force
-    /// counter — single-attempt accounting even though both TOTP and
+    /// counter - single-attempt accounting even though both TOTP and
     /// recovery-code paths are tried. Returns the full
     /// [`crate::magnetar_integration::User`] on success so the caller
     /// can branch the post-login redirect on user attributes.
     ///
-    /// Accepts either a current TOTP code or an unused recovery code —
+    /// Accepts either a current TOTP code or an unused recovery code -
     /// the recovery-code path matches Fortify's challenge controller,
     /// which lets users fall back to a recovery code if they've lost
     /// their authenticator. Recovery codes are consumed single-use on
@@ -731,9 +731,9 @@ impl TwoFactor {
     /// account cannot bypass the lockout by submitting the right
     /// code: a 429 fires before any code is checked. (Composing
     /// `LoginThrottleMiddleware` in front of the challenge route is
-    /// also fine — both gates are idempotent.) Failed submissions
+    /// also fine - both gates are idempotent.) Failed submissions
     /// increment the counter exactly once even though both the TOTP
-    /// and recovery-code paths are tried — the silent
+    /// and recovery-code paths are tried - the silent
     /// `verify_internal` / `consume_recovery_internal` cores skip BF
     /// interaction so this method can record the single canonical
     /// attempt itself.
@@ -754,7 +754,7 @@ impl TwoFactor {
     /// # Errors
     ///
     /// - [`FrameworkError::domain`] with status `400` if no challenge
-    ///   is pending — the caller must invoke [`Self::start_challenge`]
+    ///   is pending - the caller must invoke [`Self::start_challenge`]
     ///   (typically from a password-login handler) before
     ///   `complete_challenge` is meaningful.
     /// - [`FrameworkError::domain`] with status `401` if the pending
@@ -792,7 +792,7 @@ impl TwoFactor {
         // Reject early if the account is locked by brute-force
         // throttling. Without this gate, an attacker who tripped
         // lockout via wrong codes could still get in by submitting
-        // the right code — the BF counter is keyed on the user's
+        // the right code - the BF counter is keyed on the user's
         // email but `verify_internal` itself doesn't consult it, so
         // the lockout would be advisory. The password path's
         // `LoginThrottleMiddleware` enforces this at the route layer;
@@ -810,7 +810,7 @@ impl TwoFactor {
         }
 
         // Adapter so we can call the existing TwoFactorUser-keyed
-        // primitives — the silent variants don't thread the email
+        // primitives - the silent variants don't thread the email
         // through to brute-force (the wrapper layer below does that),
         // but the trait still wants both.
         struct ChallengeAdapter<'a> {
@@ -857,12 +857,12 @@ impl TwoFactor {
         reset_2fa_failures(&user.email).await;
 
         // Read the remember-me preference the user supplied at
-        // password-login time BEFORE clearing the pending bag — the
+        // password-login time BEFORE clearing the pending bag - the
         // bag is about to be torn down as part of the promotion.
         let remember = crate::session::middleware::two_factor_pending_remember();
 
         // Promote: pending → authed. Mirrors `Auth::login_id`'s
-        // contract — rotate the session id to defeat session
+        // contract - rotate the session id to defeat session
         // fixation, set the user, clear pending state, rotate CSRF.
         // A planted pre-challenge session id cannot ride the
         // post-challenge auth.
@@ -891,14 +891,14 @@ impl TwoFactor {
         // Standard login lifecycle events first so listeners that
         // hook `Login` / `Authenticated` (last-login timestamps,
         // audit logs, post-login redirects) fire on the 2FA path
-        // too — they cannot rely on `Auth::attempt` having fired
+        // too - they cannot rely on `Auth::attempt` having fired
         // them, because attempt completed before 2FA gating
         // demoted the session. Then the 2FA-specific event for
         // code that wants to distinguish "logged in via challenge"
         // from "logged in via password alone."
         //
         // Dispatch errors are intentionally swallowed (logged by
-        // the dispatcher) — the promotion has already committed; a
+        // the dispatcher) - the promotion has already committed; a
         // listener failure must not surface here.
         let guard = crate::auth::Auth::default_guard_name();
         let _ = crate::events::EventFacade::dispatch(crate::auth::events::Login {
@@ -923,14 +923,14 @@ impl TwoFactor {
     /// Rotate the recovery codes for an active 2FA enrollment.
     ///
     /// Replaces the stored recovery-codes column with a fresh set of
-    /// 10 codes. The plaintext codes are returned for one-time display
-    /// — there is no API for retrieving them again. The secret and
+    /// 10 codes. The plaintext codes are returned for one-time display -
+    /// there is no API for retrieving them again. The secret and
     /// `confirmed_at` are left untouched (only the recovery-codes
     /// column rotates), so the user's existing authenticator app
     /// continues to work without re-pairing.
     ///
     /// Requires either a current TOTP code or an unused recovery code
-    /// as proof of possession — same model as [`Self::re_enroll`]. A
+    /// as proof of possession - same model as [`Self::re_enroll`]. A
     /// session-hijacked attacker that can reach this endpoint without
     /// proof would otherwise blow away the legitimate user's recovery
     /// codes (a denial-of-service against account recovery).
@@ -938,7 +938,7 @@ impl TwoFactor {
     /// # Errors
     ///
     /// - [`FrameworkError::domain`] with status `400` when no
-    ///   confirmed enrollment exists — call [`Self::enroll`] /
+    ///   confirmed enrollment exists - call [`Self::enroll`] /
     ///   [`Self::confirm`] first.
     /// - [`FrameworkError::domain`] with status `401` when `proof`
     ///   validates as neither a current TOTP code nor an unused
@@ -955,7 +955,7 @@ impl TwoFactor {
         }
 
         // Reject early if the account is locked by brute-force
-        // throttling — symmetric with [`Self::complete_challenge`]'s
+        // throttling - symmetric with [`Self::complete_challenge`]'s
         // and [`Self::re_enroll`]'s gates. A session-hijacked
         // attacker who tripped lockout cannot blow away the
         // legitimate user's recovery codes by guessing the right
@@ -1064,7 +1064,7 @@ async fn upsert_row(
         active.secret = Set(encrypted_secret);
         active.confirmed_at = Set(confirmed_at);
         active.recovery_codes = Set(encrypted_recovery);
-        // Re-enrollment generates a fresh secret — any timestep
+        // Re-enrollment generates a fresh secret - any timestep
         // remembered against the old secret is meaningless.
         active.last_used_timestep = Set(None);
         active.updated_at = Set(now);
@@ -1078,7 +1078,7 @@ async fn upsert_row(
             secret: Set(encrypted_secret),
             confirmed_at: Set(confirmed_at),
             recovery_codes: Set(encrypted_recovery),
-            // Fresh enrollment — no prior verification timestep to
+            // Fresh enrollment - no prior verification timestep to
             // guard against replay yet.
             last_used_timestep: Set(None),
             created_at: Set(now),
@@ -1128,7 +1128,7 @@ async fn load_secret(user_id: &str) -> Result<Option<String>, FrameworkError> {
 }
 
 /// Current server-side TOTP timestep. Used by [`TwoFactor::verify`]
-/// for replay protection — a successful verify stamps the row with
+/// for replay protection - a successful verify stamps the row with
 /// this value, and subsequent verifies at the same or earlier
 /// timestep are refused even when the code itself would structurally
 /// validate. 30-second step matches the TOTP construction in
@@ -1138,11 +1138,11 @@ fn current_totp_timestep() -> i64 {
 }
 
 /// Best-effort record of a failed 2FA attempt against
-/// `BruteForce::record_failed_attempt`. Logs and swallows errors —
+/// `BruteForce::record_failed_attempt`. Logs and swallows errors -
 /// the throttling layer must never break the auth check it's
 /// supplementing. This includes the "Magnetar not initialised" case
 /// (test environments that don't boot Magnetar get no throttling, which
-/// is acceptable — production deployments always init Magnetar when 2FA
+/// is acceptable - production deployments always init Magnetar when 2FA
 /// is in play).
 #[cfg(any(
     feature = "database-sqlite",
@@ -1186,7 +1186,7 @@ async fn reset_2fa_failures(email: &str) {
 async fn reset_2fa_failures(_email: &str) {}
 
 /// Best-effort lockout check. Returns `false` (= not locked) if Magnetar
-/// isn't initialised — same posture as [`record_2fa_failure`]: the
+/// isn't initialised - same posture as [`record_2fa_failure`]: the
 /// throttling layer is opt-in, so an environment without Magnetar sees
 /// no lockout gating, not a hard error. Production deployments
 /// running 2FA always init Magnetar, so the `false` fallback is purely

@@ -1,6 +1,6 @@
 //! Pin macro hygiene: `#[handler]`, `#[derive(FormRequest)]`, and the
 //! `#[request]` attribute macro all emit fully-qualified `::suprnova::…`
-//! paths. The historical bug — bare `suprnova::…` — broke any consumer
+//! paths. The historical bug - bare `suprnova::…` - broke any consumer
 //! that vendored or renamed the framework crate AND any module that
 //! happened to declare a local `mod suprnova { … }` that shadowed the
 //! top-level path.
@@ -24,7 +24,7 @@ mod hygiene_inside_shadow {
     use ::suprnova::FormRequestDerive;
     use ::suprnova::{HttpResponse, handler, json_response, model, request};
 
-    // Eloquent macro — exercises `#[suprnova::model]` macro hygiene
+    // Eloquent macro - exercises `#[suprnova::model]` macro hygiene
     // (the table-side path emission). The macro emits inventory
     // entries and trait impls referencing ::suprnova::… across many
     // sites.
@@ -34,7 +34,7 @@ mod hygiene_inside_shadow {
         pub name: String,
     }
 
-    // FormRequest derive — exercises the bare `suprnova::FormRequest`
+    // FormRequest derive - exercises the bare `suprnova::FormRequest`
     // emission this finding originally flagged. The macro also emits
     // the bare `serde::Deserialize` / `validator::Validate` derive
     // names in the `#[request]` attribute path; both are pulled
@@ -53,7 +53,7 @@ mod hygiene_inside_shadow {
         pub name: String,
     }
 
-    // Handler — exercises bare `suprnova::Request` / `FrameworkError`
+    // Handler - exercises bare `suprnova::Request` / `FrameworkError`
     // / `FromParam` / `AutoRouteBinding` / `FromRequest` emissions
     // (the seven sites the synthesis flagged). The `i64` parameter
     // routes through `FromParam`; the form-request parameter routes
@@ -74,6 +74,6 @@ fn macros_emit_fully_qualified_paths_under_shadowed_suprnova_mod() {
     // The compilation IS the assertion. If macros regressed to bare
     // `suprnova::…` paths, the `mod suprnova { pub struct Stub; }`
     // shadow above would resolve first and macro expansion would fail
-    // with "could not find Request in suprnova" — this file would
+    // with "could not find Request in suprnova" - this file would
     // refuse to compile and the test binary would never link.
 }

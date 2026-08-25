@@ -546,7 +546,7 @@ pub fn generate_typescript(routes: &[GeneratedRoute]) -> String {
             // Generate unique function name for duplicate handlers
             let base_fn_name = &route.definition.handler_fn;
             let fn_name = if let Some(count) = used_names.get(base_fn_name) {
-                // Duplicate handler in this module — derive a unique key from the
+                // Duplicate handler in this module - derive a unique key from the
                 // route name or path, then sanitize it to a valid TS identifier.
                 let raw = if let Some(name) = &route.definition.name {
                     // Use the last part of the route name: "home" from "home", "protected" from name

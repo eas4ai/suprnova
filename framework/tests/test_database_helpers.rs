@@ -7,7 +7,7 @@ use suprnova::testing::TestDatabase;
 #[tokio::test]
 async fn sqlite_memory_connects_and_registers_in_container() {
     let _db = TestDatabase::sqlite_memory().await.expect("connect");
-    // DB::connection() must resolve to the test DB — proves container reg.
+    // DB::connection() must resolve to the test DB - proves container reg.
     let _resolved = suprnova::DB::connection().expect("resolved from container");
 }
 

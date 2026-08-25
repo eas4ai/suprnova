@@ -10,7 +10,7 @@ use crate::error::FrameworkError;
 ///
 /// Production code uses [`crate::http::Request`] (which implements this
 /// trait via the blanket impl below). Tests provide a tiny mock without
-/// having to construct a real `hyper::Request<hyper::body::Incoming>` —
+/// having to construct a real `hyper::Request<hyper::body::Incoming>` -
 /// `Incoming` cannot be built outside hyper's connection internals.
 pub trait InertiaRequestExt: Send + Sync {
     /// Path component of the request URI (no query string).
@@ -99,7 +99,7 @@ impl<T: InertiaRequestExt + ?Sized> InertiaRequestExt for &T {
 /// Backs every closure-resolved [`Prop`]. Resolvers can do async work
 /// (DB queries, HTTP calls) because we're under Tokio. Errors are
 /// surfaced through [`FrameworkError`] so they become 500 responses just
-/// like any other handler failure — unless the prop is deferred and
+/// like any other handler failure - unless the prop is deferred and
 /// carries [`Prop::rescue`].
 pub type PropFuture = Pin<Box<dyn Future<Output = Result<Value, FrameworkError>> + Send>>;
 
@@ -156,7 +156,7 @@ impl DeferOptions {
 /// `match_on` is `Option<Vec<String>>` rather than a bare `Vec<String>` so
 /// `None` keeps meaning "no dedupe field at all" without also overloading
 /// an empty vec with that meaning. Build the field list with
-/// [`MatchOnFields::into_match_on_fields`] — `Some(["id",
+/// [`MatchOnFields::into_match_on_fields`] - `Some(["id",
 /// "slug"].into_match_on_fields())` names two fields the same way
 /// `Prop::match_on(["id", "slug"])` does; `Some("id".into_match_on_fields())`
 /// or `Some(vec!["id".to_string()])` names one. Before this type widened,
@@ -245,21 +245,21 @@ impl ScrollMetadata {
 /// The three built-in paginators (`LengthAwarePaginator`, `Paginator`,
 /// `CursorPaginator`) implement this in `framework/src/pagination/inertia.rs`
 /// instead of building [`ScrollMetadata`] field by field. Implement it for a
-/// paginator this crate doesn't know about — a third-party crate's cursor
-/// type, a hand-rolled repository result — the same way, then call
+/// paginator this crate doesn't know about - a third-party crate's cursor
+/// type, a hand-rolled repository result - the same way, then call
 /// [`scroll_metadata`](Self::scroll_metadata) to build the value
 /// [`InertiaResponse::scroll`](crate::InertiaResponse::scroll) /
 /// [`Prop::scroll`] expects.
 ///
 /// That gets you `.scroll` / `Prop::scroll`, not
 /// [`InertiaResponse::paginate`](crate::InertiaResponse::paginate) /
-/// [`Inertia::paginate`](crate::Inertia::paginate) — those take `impl
+/// [`Inertia::paginate`](crate::Inertia::paginate) - those take `impl
 /// [`IntoInertiaScroll`](crate::IntoInertiaScroll)<T>`, a separate trait
 /// this one does not imply. There is no blanket bridge from one to the
 /// other: the three built-in paginators above already implement both
 /// traits, so a blanket `impl<P: ProvidesScrollMetadata> IntoInertiaScroll<T>
 /// for P` would conflict (`E0119`) with their existing, concrete
-/// `IntoInertiaScroll` impls — and even without that conflict, this
+/// `IntoInertiaScroll` impls - and even without that conflict, this
 /// trait alone has no way to hand back the `Vec<T>` of rows
 /// `into_inertia_scroll` needs. Implement [`IntoInertiaScroll`](crate::IntoInertiaScroll)
 /// directly, alongside this trait, for a type that should also work with
@@ -344,7 +344,7 @@ pub(crate) enum PropSource {
     Resolver(PropResolver),
     /// Absent sentinel. `when_loaded!` produces this when the named
     /// relation is not preloaded on the source entity: the key is left
-    /// out of the response entirely — no null, no error.
+    /// out of the response entirely - no null, no error.
     Absent,
 }
 
@@ -403,7 +403,7 @@ pub enum Visibility {
 /// partial reload delivers under `mergeProps`. That is the same
 /// composition the PHP adapter expresses by implementing several
 /// interfaces on one class rather than by choosing one of several
-/// classes — `DeferProp implements Deferrable, IgnoreFirstLoad,
+/// classes - `DeferProp implements Deferrable, IgnoreFirstLoad,
 /// Mergeable, Onceable` (`inertia-laravel-2.0.25/src/DeferProp.php:5`).
 /// A closed enum could not spell it, which is why this is a struct.
 ///
@@ -459,7 +459,7 @@ impl std::fmt::Debug for Prop {
         // whenever it was actually *set* too, not only when it applies.
         // Both are stored unconditionally by `.group(...)`/`.rescue()`
         // regardless of call order relative to `.defer()`, so a prop that
-        // never ended up deferred can still be carrying one — and that is
+        // never ended up deferred can still be carrying one - and that is
         // exactly the case someone staring at a `{:?}` dump to find out
         // "why didn't my rescue/group apply" needs to see, not have
         // hidden because the flag looks inapplicable at a glance.
@@ -487,7 +487,7 @@ impl std::fmt::Debug for Prop {
             s.field("scroll_page_name", &meta.page_name);
         }
         // Shown whenever `.scroll_wrap(...)` was called, not only when
-        // `.scroll(...)` was also set — the same reasoning as `group`/
+        // `.scroll(...)` was also set - the same reasoning as `group`/
         // `rescue` above: a wrap key set on a prop that never got a
         // `scroll(...)` call is read by nothing, and that silence is
         // precisely what needs to be visible when debugging it.
@@ -498,7 +498,7 @@ impl std::fmt::Debug for Prop {
     }
 }
 
-/// One or more `matchOn` field names — what [`Prop::match_on`] accepts.
+/// One or more `matchOn` field names - what [`Prop::match_on`] accepts.
 ///
 /// A single string names one field (`.match_on("id")`); an array or
 /// `Vec` names several in one call (`.match_on(["id", "slug"])`),
@@ -574,7 +574,7 @@ impl Prop {
     /// The absent sentinel: a prop that never reaches the response.
     ///
     /// `when_loaded!` produces this when the named relation was not
-    /// preloaded on the source entity. The key is omitted entirely — no
+    /// preloaded on the source entity. The key is omitted entirely - no
     /// `null`, no error, and no page-object metadata even if flags are
     /// set on it.
     pub fn absent() -> Self {
@@ -583,7 +583,7 @@ impl Prop {
 
     /// A prop backed by an already-boxed [`PropResolver`].
     ///
-    /// Use this when you built the resolver yourself — an
+    /// Use this when you built the resolver yourself - an
     /// [`InertiaSharedData`](crate::InertiaSharedData) implementation
     /// that needs a fallible closure, for instance. [`lazy`](Self::lazy)
     /// is the shorthand for an infallible one.
@@ -656,7 +656,7 @@ impl Prop {
     /// `rescuedProps` so the client can render its `rescue` slot.
     ///
     /// Read only when the prop is deferred. On any other prop a resolver
-    /// error still propagates as a 500 — a prop the page renders on the
+    /// error still propagates as a 500 - a prop the page renders on the
     /// first paint has no rescue slot to fall back to.
     pub fn rescue(mut self) -> Self {
         self.rescue = true;
@@ -688,26 +688,26 @@ impl Prop {
 
     /// Merge into a nested path within this prop's value instead of the
     /// root. Maps to Laravel's `Inertia::merge($value)->append('data')`
-    /// / `->prepend('data')` — the path form of `append`/`prepend`
+    /// / `->prepend('data')` - the path form of `append`/`prepend`
     /// (`inertia-laravel-2.0.25/src/MergesProps.php:136-173`).
     ///
     /// Calls accumulate, so a prop with two mergeable fields can name
     /// each independently: `.merge().merge_with_path("data").merge_with_path("meta")`
     /// emits `mergeProps: ["<key>.data", "<key>.meta"]`. Naming any path
-    /// also suppresses the plain root-level entry for this prop — a
+    /// also suppresses the plain root-level entry for this prop - a
     /// path-merging prop never also merges its whole value, matching
     /// `MergesProps::mergesAtRoot` (`MergesProps.php:126-129`).
     ///
     /// Read only when [`merge`](Self::merge), [`prepend`](Self::prepend),
     /// or [`merge_strategy`](Self::merge_strategy) sets an
     /// [`Append`](MergeMode::Append) or [`Prepend`](MergeMode::Prepend)
-    /// mode. [`deep_merge`](Self::deep_merge) ignores it — a deep merge
+    /// mode. [`deep_merge`](Self::deep_merge) ignores it - a deep merge
     /// already recurses into every nested field, so there is nothing a
     /// path narrows (Laravel excludes deep-merge props from the
     /// root/path partition entirely, `Response.php:590`, `:610`).
     ///
     /// To dedupe array elements at that nested path too, include the
-    /// path in the [`match_on`](Self::match_on) field name yourself —
+    /// path in the [`match_on`](Self::match_on) field name yourself -
     /// `.merge_with_path("data").match_on("data.id")` emits
     /// `matchPropsOn: ["<key>.data.id"]`. This does not infer the prefix
     /// for you, unlike Laravel's two-argument `append('data', 'id')`.
@@ -729,7 +729,7 @@ impl Prop {
     /// in place rather than appending copies. Emitted as `matchPropsOn`.
     ///
     /// Takes one field (`.match_on("id")`) or several in one call
-    /// (`.match_on(["id", "slug"])`) — see [`MatchOnFields`]. Calls also
+    /// (`.match_on(["id", "slug"])`) - see [`MatchOnFields`]. Calls also
     /// accumulate, so `.match_on("id").match_on("slug")` and
     /// `.match_on(["id", "slug"])` emit the same `matchPropsOn`. The
     /// client uses the **first** entry whose path prefix matches a given
@@ -740,7 +740,7 @@ impl Prop {
         self
     }
 
-    /// Apply a [`MergeStrategy`] — mode plus optional match field(s) — in
+    /// Apply a [`MergeStrategy`] - mode plus optional match field(s) - in
     /// one call. Backs
     /// [`InertiaResponse::merge_with`](crate::InertiaResponse::merge_with).
     pub fn merge_strategy(self, strategy: MergeStrategy) -> Self {
@@ -825,8 +825,8 @@ impl Prop {
     /// also set; on any other prop it's stored and ignored, the same way
     /// [`group`](Self::group) is ignored on a non-deferred prop.
     ///
-    /// Reach for this when the prop's value is itself an envelope —
-    /// `{ data: [...], meta: {...} }` — and only the array inside should
+    /// Reach for this when the prop's value is itself an envelope -
+    /// `{ data: [...], meta: {...} }` - and only the array inside should
     /// fold into what the client already holds. Laravel's `ScrollProp`
     /// wraps under `"data"` unconditionally
     /// (`inertia-laravel-2.0.25/src/ScrollProp.php:58-64`); Suprnova's
@@ -836,7 +836,7 @@ impl Prop {
     ///
     /// Ignored when the prop also carries [`deep_merge`](Self::deep_merge):
     /// deep merge already recurses through the entire value, so there is
-    /// no nested path left for a wrapper to narrow — the same reason the
+    /// no nested path left for a wrapper to narrow - the same reason the
     /// general merge block ignores [`merge_with_path`](Self::merge_with_path)
     /// under [`MergeMode::Deep`].
     pub fn scroll_wrap(mut self, wrap_key: impl Into<String>) -> Self {
@@ -872,7 +872,7 @@ impl Prop {
         matches!(self.source, PropSource::Absent)
     }
 
-    /// True for a resolver-backed prop carrying no flags at all — what
+    /// True for a resolver-backed prop carrying no flags at all - what
     /// `.lazy(...)` and `#[derive(Data)]`'s plain lazy fields produce.
     /// Says nothing about the `?include=` allowlist gate, which
     /// [`resolve_with_owner`](Self::resolve_with_owner) applies to every
@@ -960,7 +960,7 @@ impl Prop {
     }
 
     /// Consume the prop and hand back its source. Read every flag you
-    /// need first — this is the last thing `resolve_props` does with a
+    /// need first - this is the last thing `resolve_props` does with a
     /// prop.
     pub(crate) fn into_source(self) -> PropSource {
         self.source
@@ -970,9 +970,9 @@ impl Prop {
 
     /// Produce this prop's value, awaiting the resolver if it has one.
     ///
-    /// The request-aware materialization — which props resolve at all,
+    /// The request-aware materialization - which props resolve at all,
     /// and the `deferredProps` / `mergeProps` / `onceProps` /
-    /// `scrollProps` metadata — lives in `InertiaResponse::resolve` and
+    /// `scrollProps` metadata - lives in `InertiaResponse::resolve` and
     /// uses this method internally.
     pub async fn resolve(self) -> Result<Value, FrameworkError> {
         match self.source {
@@ -993,7 +993,7 @@ impl Prop {
     /// - If `field` is NOT in the request's include set: returns
     ///   `Ok(None)` (caller omits the field from the response).
     /// - If `field` IS in the include set but NOT in the DTO's allowlist:
-    ///   returns `Err` with status 400 — the `IncludeError::UnknownInclude`
+    ///   returns `Err` with status 400 - the `IncludeError::UnknownInclude`
     ///   message body lists the field and the allowed includes.
     /// - If `field` IS in both: invokes the closure and returns
     ///   `Ok(Some(value))`.
@@ -1003,7 +1003,7 @@ impl Prop {
     ///
     /// Flags on the prop make no difference. A `#[data(lazy(deferred))]`
     /// field is `Visibility::Deferred`, so [`is_lazy`](Self::is_lazy) is
-    /// false for it — gating on that predicate handed every flagged
+    /// false for it - gating on that predicate handed every flagged
     /// owner-tagged prop a free pass around the allowlist.
     pub async fn resolve_with_owner(
         self,
@@ -1019,14 +1019,14 @@ impl Prop {
     /// The `?include=` + allowlist decision behind
     /// [`resolve_with_owner`](Self::resolve_with_owner), split out so
     /// `resolve_props` can apply it to a *flagged* owner-tagged prop
-    /// without also taking over that prop's resolution — a deferred prop
+    /// without also taking over that prop's resolution - a deferred prop
     /// still needs the announce path, and one carrying `.rescue()` still
     /// needs its rescue-aware resolver arm.
     ///
     /// `Ok(false)` means "omit this field from the response entirely":
     /// the absent sentinel, or a field the request never opted into.
     /// `Err` is the 400 an out-of-allowlist `?include=` earns, and the
-    /// caller must let it propagate rather than swallow it — the whole
+    /// caller must let it propagate rather than swallow it - the whole
     /// point of running this gate ahead of partial-reload filtering.
     pub(crate) fn passes_include_gate(
         &self,
@@ -1035,7 +1035,7 @@ impl Prop {
     ) -> Result<bool, FrameworkError> {
         use crate::data::{IncludeError, current_include_set, registry};
 
-        // Absent sentinel — relation was not preloaded; silently skip.
+        // Absent sentinel - relation was not preloaded; silently skip.
         if self.is_absent() {
             return Ok(false);
         }
@@ -1066,7 +1066,7 @@ impl Prop {
 ///
 /// - If `X-Inertia-Partial-Component` is absent or does not match the
 ///   response's component, the filter is inactive (treat as a standard
-///   visit — no filtering applied).
+///   visit - no filtering applied).
 /// - If `X-Inertia-Partial-Data` is set, treat it as a whitelist.
 /// - If `X-Inertia-Partial-Except` is set, treat it as a blacklist that
 ///   takes precedence over the whitelist on conflicts.
@@ -1139,7 +1139,7 @@ impl PartialFilter {
     /// `except` is dot-aware in one direction only. A dotted except
     /// entry (`"user.email"`) prunes a field out of an otherwise-included
     /// `user`, it does not drop `user` altogether. A bare entry, or one
-    /// naming an ancestor of `key`, drops the prop outright — Laravel's
+    /// naming an ancestor of `key`, drops the prop outright - Laravel's
     /// `Arr::forget($props, 'auth')` takes the whole `auth` subtree with
     /// it, `auth.user` included
     /// (`inertia-laravel-2.0.25/src/Response.php:292-294`).
@@ -1171,7 +1171,7 @@ impl PartialFilter {
     /// Dot-aware the same way
     /// [`should_include_eager`](Self::should_include_eager) is:
     /// `"permissions.read"` in `only` counts as an explicit request for
-    /// `"permissions"`, narrowed later by [`narrow`](Self::narrow) — this
+    /// `"permissions"`, narrowed later by [`narrow`](Self::narrow) - this
     /// is what lets a dotted request against a
     /// `Defer`/`Optional` prop actually trigger its resolver. The
     /// ancestor form works here too, so a lazily shared `auth.user`
@@ -1204,7 +1204,7 @@ impl PartialFilter {
     /// only/except rules. The absent sentinel is never included.
     ///
     /// This answers "does the value ship". It deliberately does **not**
-    /// answer "does this prop's metadata ship" — merge, once, and
+    /// answer "does this prop's metadata ship" - merge, once, and
     /// deferred metadata are gated by
     /// [`should_include_eager`](Self::should_include_eager) alone, the
     /// way Laravel gates them (`inertia-laravel-2.0.25/src/Response.php:553-560`),
@@ -1229,7 +1229,7 @@ impl PartialFilter {
     /// often-closure-backed prop bag
     /// (`inertia-laravel-2.0.25/src/Response.php:273-297`,
     /// `Arr::get`/`Arr::set`). Suprnova resolves every prop's value
-    /// first — necessarily, since resolvers are async — and narrows the
+    /// first - necessarily, since resolvers are async - and narrows the
     /// already-materialized [`Value`] afterward. The shape this produces
     /// is exactly what `only=user.name` is documented to mean:
     /// `{"user": {"name": ...}}`. The client reconstructs the full
@@ -1237,9 +1237,9 @@ impl PartialFilter {
     /// for `user`
     /// (`inertia-3.6.1/packages/core/src/response.ts:414-425`).
     ///
-    /// A path that doesn't resolve against `value` — an unknown field,
+    /// A path that doesn't resolve against `value` - an unknown field,
     /// or one that drills through a scalar or an array instead of an
-    /// object — contributes nothing for that path and does not affect
+    /// object - contributes nothing for that path and does not affect
     /// any other requested path. This is a deliberate divergence from
     /// Laravel's `Arr::get`, whose missing-key default is `null`: a
     /// stray `null` here would overwrite a field the client's own
@@ -1248,7 +1248,7 @@ impl PartialFilter {
     ///
     /// Only called for a key that has already passed
     /// [`should_include`](Self::should_include) or
-    /// [`should_include_eager`](Self::should_include_eager) — this
+    /// [`should_include_eager`](Self::should_include_eager) - this
     /// method decides shape, not inclusion. The caller must not call it
     /// for an `Always` prop: Laravel's `resolveAlways` re-injects an
     /// `AlwaysProp`'s raw, unfiltered value
@@ -1258,7 +1258,7 @@ impl PartialFilter {
     /// Public alongside [`should_include_eager`](Self::should_include_eager)
     /// and [`should_include_optional`](Self::should_include_optional): a
     /// caller building its own `InertiaResponse`-like surface on top of
-    /// this type — a custom adapter, a test harness — gets `true` from
+    /// this type - a custom adapter, a test harness - gets `true` from
     /// `should_include_eager("user")` under `only=["user.name"]`, but has
     /// no way to reproduce the narrowing that makes that `true` correct
     /// without this method, and would ship `user` whole instead.
@@ -1273,7 +1273,7 @@ impl PartialFilter {
             for entry in list {
                 // An exact match asks for the whole prop; so does an
                 // entry naming an ancestor of a dotted prop key
-                // (`only=auth` against the key `auth.user`) — the
+                // (`only=auth` against the key `auth.user`) - the
                 // requested root contains this prop entire, so there is
                 // no nested path left to trim to.
                 if entry == key || dotted_ancestor(entry, key) {
@@ -1306,10 +1306,10 @@ impl PartialFilter {
     }
 }
 
-/// `Some(rest)` when `entry` names a dotted path *inside* `key` — `key`
+/// `Some(rest)` when `entry` names a dotted path *inside* `key` - `key`
 /// followed by `.` and at least one more segment. `None` for an exact
 /// match (`entry == key`, handled separately by callers) and for an
-/// unrelated key that merely shares a prefix — `"userAgent"` must not
+/// unrelated key that merely shares a prefix - `"userAgent"` must not
 /// match `key = "user"`, which a plain [`str::starts_with`] would
 /// wrongly allow.
 fn dotted_child<'a>(entry: &'a str, key: &str) -> Option<&'a str> {
@@ -1319,7 +1319,7 @@ fn dotted_child<'a>(entry: &'a str, key: &str) -> Option<&'a str> {
         .filter(|rest| !rest.is_empty())
 }
 
-/// True when `entry` names a strict *ancestor* of `key` — the mirror of
+/// True when `entry` names a strict *ancestor* of `key` - the mirror of
 /// [`dotted_child`], asking the same question with the two arguments
 /// swapped. `entry = "auth"` against `key = "auth.user"` is an ancestor;
 /// `"authAgent"` is not, and neither is an exact match (callers handle
@@ -1341,9 +1341,9 @@ fn entry_selects_key(entry: &str, key: &str) -> bool {
 }
 
 /// Build a fresh JSON object containing only the requested nested
-/// `paths` out of `value`. A path that does not resolve — an unknown
+/// `paths` out of `value`. A path that does not resolve - an unknown
 /// key, or a segment that walks into a scalar or an array rather than
-/// an object — contributes nothing and does not affect any other
+/// an object - contributes nothing and does not affect any other
 /// requested path.
 fn narrow_to_paths(value: &Value, paths: &[Vec<&str>]) -> Value {
     let mut result = Value::Object(serde_json::Map::new());
@@ -1357,7 +1357,7 @@ fn narrow_to_paths(value: &Value, paths: &[Vec<&str>]) -> Value {
 
 /// Walk `path` through `value`'s object nesting, returning the value at
 /// the end. `None` the instant a segment is missing or the current
-/// value is not a JSON object — a dotted path into a scalar or an array
+/// value is not a JSON object - a dotted path into a scalar or an array
 /// has nothing to find, and is treated exactly like an unknown key.
 fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = value;
@@ -1369,7 +1369,7 @@ fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 
 /// Write `leaf` into `target` at the nested `path`, creating
 /// intermediate objects as needed. Only ever called with a `target`
-/// that is (or becomes) an object at every level along `path` —
+/// that is (or becomes) an object at every level along `path` -
 /// [`narrow_to_paths`] always starts from an empty object, so there is
 /// never a pre-existing non-object value to reconcile with.
 ///
@@ -1378,14 +1378,14 @@ fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 /// though both are dot-notation walkers over `serde_json::Value`.
 /// `arr_get` checks for an *exact*, undotted key first
 /// (`object.get(key)` before ever splitting on `.`), mirroring Laravel's
-/// `Arr::get`'s `static::exists($array, $key)` short-circuit — correct at
+/// `Arr::get`'s `static::exists($array, $key)` short-circuit - correct at
 /// the *props-array* level, where a literal dotted key like
 /// `"user.name"` can legitimately be one whole top-level prop key rather
 /// than a path. `narrow` operates one level below that: inside an
 /// already-resolved prop's own JSON *value*, where the dotted `only`/
 /// `except` entry is always a path to walk, never a literal key to
 /// match first. Reusing `arr_get` here would silently import the wrong
-/// semantics — a value shaped like `{"a.b": 1}` would match on
+/// semantics - a value shaped like `{"a.b": 1}` would match on
 /// `only=["a.b"]` as an exact key instead of failing to resolve `a` then
 /// `b` as a path, which is what this task's dot-notation contract
 /// requires. If a future refactor is tempted to unify these two
@@ -1410,7 +1410,7 @@ fn set_path(target: &mut Value, path: &[&str], leaf: Value) {
 }
 
 /// Delete the value at the nested `path` inside `target`, if present. A
-/// no-op when any intermediate segment is missing or is not an object —
+/// no-op when any intermediate segment is missing or is not an object -
 /// removing something that was never there is not an error.
 fn remove_path(target: &mut Value, path: &[&str]) {
     match path.split_first() {
@@ -1497,7 +1497,7 @@ mod tests {
 
     #[test]
     fn optional_excluded_when_only_unset_on_partial() {
-        // Matched filter, no `only` list — optional must remain excluded
+        // Matched filter, no `only` list - optional must remain excluded
         // because it requires explicit listing.
         let filter = PartialFilter {
             matched: true,
@@ -1628,7 +1628,7 @@ mod tests {
             .merge_with_path("meta");
         assert_eq!(p.merge_paths(), ["data".to_string(), "meta".to_string()]);
 
-        // Stored unconditionally, like `group()`/`rescue()` — read only
+        // Stored unconditionally, like `group()`/`rescue()` - read only
         // when a merge mode is set. See the `merge_with_path_alone_…`
         // integration test in `inertia_merge_paths.rs` for the wire-level
         // proof that it has no effect here.
@@ -1659,7 +1659,7 @@ mod tests {
     /// Pins the widening this task exists for: `MergeStrategy` used to
     /// carry `match_on: Option<String>`, so a builder shortcut like
     /// `InertiaResponse::merge_with` could express at most one dedupe
-    /// field — strictly less than `.prop(k, Prop::eager(v).match_on([...]))`
+    /// field - strictly less than `.prop(k, Prop::eager(v).match_on([...]))`
     /// could already do. `match_on: Option<Vec<String>>` closes that gap;
     /// this proves a `MergeStrategy` can carry more than one field name
     /// and `merge_strategy` forwards all of them in order, matching what
@@ -1848,7 +1848,7 @@ mod tests {
     /// below never satisfies, so every one of these three calls is a
     /// silent no-op. `{:?}` is exactly where someone debugging "why
     /// didn't my group/rescue/wrap apply" looks first, so all three must
-    /// show up regardless — hiding them because they look inapplicable
+    /// show up regardless - hiding them because they look inapplicable
     /// is what made them hard to debug in the first place.
     #[test]
     fn debug_shows_group_rescue_and_scroll_wrap_even_when_stored_but_ignored() {
@@ -1900,7 +1900,7 @@ mod tests {
             only: None,
             except: Some(vec!["user.email".into()]),
         };
-        // A dotted except entry prunes a field later, via `narrow` — it
+        // A dotted except entry prunes a field later, via `narrow` - it
         // must not drop the whole key here. Only a bare except entry does.
         assert!(filter.should_include_eager("user"));
     }
@@ -2022,7 +2022,7 @@ mod tests {
     #[test]
     fn narrow_builds_a_three_segment_nested_object_from_a_dotted_only_entry() {
         // Pins the recursive arm of `set_path`/`get_path` beyond one
-        // nested level — every other `only` test in this module bottoms
+        // nested level - every other `only` test in this module bottoms
         // out after a single segment, so this is the only coverage for
         // `Some((head, rest))` actually recursing instead of just
         // terminating on `Some((head, []))`.
@@ -2122,7 +2122,7 @@ mod tests {
     #[test]
     fn narrow_ships_a_dotted_prop_key_whole_for_an_ancestor_only_entry() {
         // The caller asked for `auth`, and `auth.user` is one whole prop
-        // *inside* that root — there is nothing left to narrow, so the
+        // *inside* that root - there is nothing left to narrow, so the
         // value ships as-is and `unpack_map` nests it afterwards.
         let filter = PartialFilter {
             matched: true,

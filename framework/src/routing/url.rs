@@ -2,21 +2,21 @@
 //!
 //! Laravel's `URL` facade (`Illuminate/Routing/UrlGenerator.php`) backs
 //! `url()`, `url()->to()`, `url()->current()`, `url()->previous()`,
-//! `url()->signedRoute()`. Suprnova ships a deliberately smaller surface
-//! — the heavy `asset()`/`secureAsset()` family is handled by Vite +
+//! `url()->signedRoute()`. Suprnova ships a deliberately smaller surface -
+//! the heavy `asset()`/`secureAsset()` family is handled by Vite +
 //! the filesystem disks, and the controller-action `action()` helper
 //! has no Rust analogue because handlers are functions, not controller
 //! strings.
 //!
 //! What does land here is the user-facing shape consumers reach for:
 //!
-//! - [`to`] / [`secure`] — build an absolute URL from a path against
+//! - [`to`] / [`secure`] - build an absolute URL from a path against
 //!   the configured `APP_URL`.
-//! - [`current`] / [`full`] / [`previous`] — read the current request's
+//! - [`current`] / [`full`] / [`previous`] - read the current request's
 //!   URL, full URL, and the previous URL recorded in the session.
-//! - [`signed_route`] / [`temporary_signed_route`] — sign a named route
+//! - [`signed_route`] / [`temporary_signed_route`] - sign a named route
 //!   for HMAC-verified delivery.
-//! - [`has_valid_signature`] / [`signature_verdict`] — verify a signed URL
+//! - [`has_valid_signature`] / [`signature_verdict`] - verify a signed URL
 //!   coming in on a request; the latter tells `Expired` from `Invalid`.
 //!
 //! All helpers are free functions in the `crate::routing::url` namespace,
@@ -96,7 +96,7 @@ pub fn current(request: &Request) -> String {
     }
 }
 
-/// Full absolute URL of the current request — `APP_URL` host +
+/// Full absolute URL of the current request - `APP_URL` host +
 /// [`current`]. Mirrors Laravel's `url()->full()`.
 pub fn full(request: &Request) -> String {
     to(&current(request))
@@ -118,7 +118,7 @@ pub fn previous(fallback: &str) -> String {
 /// [`crate::routing::signed::sign_route`].
 ///
 /// Mirrors Laravel's `URL::signedRoute($name, $parameters, $expiration)`
-/// without an `$expiration` argument — for the timed variant use
+/// without an `$expiration` argument - for the timed variant use
 /// [`temporary_signed_route`].
 pub fn signed_route(name: &str, params: &[(&str, &str)]) -> Result<String, FrameworkError> {
     do_sign_route(name, params, None)
@@ -182,7 +182,7 @@ pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
 /// no answer derived from it means anything before the signature checks out.
 ///
 /// Requiring validity is what closes that, and it collapses this function
-/// into [`has_valid_signature`] — necessarily so. Under a three-state verdict
+/// into [`has_valid_signature`] - necessarily so. Under a three-state verdict
 /// there is no "not expired" a boolean can report honestly except `Valid`;
 /// the old function was only distinct *because* it trusted unauthenticated
 /// input. The genuine three-way distinction lives in [`signature_verdict`],
@@ -192,12 +192,12 @@ pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
 /// ```rust,ignore
 /// match url::signature_verdict(&req)? {
 ///     SignatureVerdict::Valid   => grant_access(),
-///     SignatureVerdict::Expired => render("this link has expired — request a new one"),
+///     SignatureVerdict::Expired => render("this link has expired - request a new one"),
 ///     SignatureVerdict::Invalid => render("this link is not valid"),
 /// }
 /// ```
 ///
-/// A missing `expires` value still counts as "not expired", as in Laravel —
+/// A missing `expires` value still counts as "not expired", as in Laravel -
 /// an unexpiring signed URL is a valid one.
 #[deprecated(
     since = "0.7.4",
@@ -210,7 +210,7 @@ pub fn signature_has_not_expired(request: &Request) -> Result<bool, FrameworkErr
 
 /// Return the full [`SignatureVerdict`] for the inbound request. Lets
 /// callers branch on `Valid`/`Expired`/`Invalid` to render distinct UX
-/// (e.g. "this link has expired — request a new one").
+/// (e.g. "this link has expired - request a new one").
 pub fn signature_verdict(request: &Request) -> Result<SignatureVerdict, FrameworkError> {
     verdict_for_request(request)
 }
@@ -241,7 +241,7 @@ fn is_absolute(path: &str) -> bool {
 /// the first place, and re-checked again on every read by
 /// [`SessionData::previous_url`](crate::session::SessionData::previous_url)
 /// via this same function. A write-time guard alone would leave any
-/// session cookie that predates it — or one written by a future bug —
+/// session cookie that predates it - or one written by a future bug -
 /// trusted forever once stored; the read-time re-check makes such a
 /// session self-heal instead: a stored value that now fails the check
 /// reads back as `None`, so the caller's own fallback takes over instead
@@ -252,8 +252,8 @@ fn is_absolute(path: &str) -> bool {
 /// different origin from what a byte-for-byte check on the original
 /// string sees:
 ///
-/// - A leading `//` — protocol-relative, read as absolute.
-/// - A leading `/\` — the same bypass in disguise: the WHATWG URL
+/// - A leading `//` - protocol-relative, read as absolute.
+/// - A leading `/\` - the same bypass in disguise: the WHATWG URL
 ///   parser treats `\` as `/` for special schemes, so `/\evil.test`
 ///   becomes `//evil.test` once the browser normalizes it.
 /// - Any ASCII control byte anywhere in the string, not only right
@@ -282,8 +282,8 @@ pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
 }
 
 /// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
-/// DEL (`0x7F`). Covers tab and newline — the two the URL parser strips
-/// before comparing origins — without having to name them individually.
+/// DEL (`0x7F`). Covers tab and newline - the two the URL parser strips
+/// before comparing origins - without having to name them individually.
 pub(crate) fn has_control_byte(s: &str) -> bool {
     s.bytes().any(|b| b.is_ascii_control())
 }
@@ -354,13 +354,13 @@ mod tests {
         let not_expired = signature_has_not_expired(&req).expect("expiry helper");
         assert!(
             !not_expired,
-            "an unverifiable URL must not report 'has not expired' — `expires` \
+            "an unverifiable URL must not report 'has not expired' - `expires` \
              is attacker-supplied until the HMAC says otherwise"
         );
     }
 
     /// `has_valid_signature` is the guard handlers are told to reach for, and
-    /// until this existed nothing drove it with a tampered request — the whole
+    /// until this existed nothing drove it with a tampered request - the whole
     /// framework suite passed with its body replaced by `!is_expired()`, the
     /// exact defect SEC-04 describes. A guard with no adversarial test is a
     /// guard nobody has checked.
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             signature_verdict(&req).expect("verdict"),
             SignatureVerdict::Expired,
-            "the verdict still distinguishes expired from invalid — that is \
+            "the verdict still distinguishes expired from invalid - that is \
              where the three-way answer lives now"
         );
         #[allow(deprecated)]
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn to_prepends_app_url_for_relative_path() {
         // SAFETY: tests in this crate single-thread env mutation via
-        // `serial_test::serial(env_app_url)` — see the test below.
+        // `serial_test::serial(env_app_url)` - see the test below.
         unsafe {
             std::env::set_var("APP_URL", "https://example.test");
         }
@@ -496,9 +496,9 @@ mod tests {
 
     #[test]
     fn root_relative_or_none_rejects_protocol_relative_and_backslash_forms() {
-        // `//evil.test` — read as absolute by a browser.
+        // `//evil.test` - read as absolute by a browser.
         assert_eq!(root_relative_or_none("//evil.test/x"), None);
-        // `/\evil.test` — the WHATWG URL parser folds `\` into `/` for
+        // `/\evil.test` - the WHATWG URL parser folds `\` into `/` for
         // special schemes, so this is `//evil.test` in disguise.
         assert_eq!(root_relative_or_none("/\\evil.test"), None);
     }
@@ -535,8 +535,8 @@ mod tests {
 
         // Reach the verifier through a synthetic request to mirror how
         // a real handler will use `has_valid_signature`.
-        // The URL on the signed string is `/secret/42?signature=...`
-        // — we feed exactly that path+query to the verifier.
+        // The URL on the signed string is `/secret/42?signature=...` -
+        // we feed exactly that path+query to the verifier.
         let now = chrono::Utc::now().timestamp();
         let verdict = crate::routing::signed::verify_signature(&signed, now).expect("verify");
         assert_eq!(verdict, SignatureVerdict::Valid);

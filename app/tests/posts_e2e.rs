@@ -2,7 +2,7 @@
 //! `/api/posts*` endpoints (codex review finding #17).
 //!
 //! The dogfood `app/src/models/posts.rs` previously returned hardcoded
-//! data — these tests prove the model now hits a real database and
+//! data - these tests prove the model now hits a real database and
 //! that the controllers behave correctly under `SessionAuthMiddleware`
 //! + `PostPolicy` Gate authorization.
 //!
@@ -155,7 +155,7 @@ async fn setup_app() -> TestApp {
 /// `suprnova_session=<value>` Cookie header.
 /// A seeded session: the encrypted cookie value plus the CSRF token held
 /// in that session. Both are needed on a state-changing request now that
-/// the real `CsrfMiddleware` runs — the cookie alone gets a 419.
+/// the real `CsrfMiddleware` runs - the cookie alone gets a 419.
 struct SeededSession {
     cookie: String,
     csrf: String,
@@ -418,7 +418,7 @@ async fn show_post_runs_view_gate_and_rejects_private() {
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let id = created["id"].as_i64().unwrap();
 
-    // Hit GET /api/posts/{id} — PostPolicy::view returns false on
+    // Hit GET /api/posts/{id} - PostPolicy::view returns false on
     // !is_public, so Gate::authorize emits 403.
     let (status, _) = send_request(
         app.addr,
@@ -457,7 +457,7 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let id = created["id"].as_i64().unwrap();
 
-    // Delete it — owner passes the `delete-post` gate.
+    // Delete it - owner passes the `delete-post` gate.
     let (s_del, _) = send_request(
         app.addr,
         "DELETE",
@@ -478,7 +478,7 @@ async fn delete_post_runs_delete_gate_and_removes_row() {
 /// `GET /api/posts` is unauthenticated and used to call
 /// `Post::all_public()`, which has no `LIMIT` and materialises every
 /// matching row into a `Vec`. Against the benchmark's seeded table that
-/// is roughly 42 million rows and tens of gigabytes in one response — so
+/// is roughly 42 million rows and tens of gigabytes in one response - so
 /// a single anonymous request would take the process down. At the
 /// fixture sizes this suite used before, nothing ever exceeded one page,
 /// which is exactly why it went unnoticed.

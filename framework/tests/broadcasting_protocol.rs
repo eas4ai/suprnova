@@ -1,5 +1,5 @@
 //! ClientFrame + ServerFrame serde round-trips. Pins the wire
-//! protocol shape — JS / native clients must serialize/deserialize
+//! protocol shape - JS / native clients must serialize/deserialize
 //! to exactly this JSON.
 
 use serde_json::json;

@@ -8,7 +8,7 @@
 //! trait rather than `suprnova::Request` directly.
 //!
 //! Tier 1 shared-data tests use `TestContainer::fake()` for per-test
-//! isolation — the container's Inertia registry is scoped to the
+//! isolation - the container's Inertia registry is scoped to the
 //! guard's lifetime, so tests run in parallel without seeing each
 //! other's registrations.
 
@@ -100,7 +100,7 @@ async fn initial_html_visit_returns_shell_with_embedded_page_object() {
     assert!(body.contains("<title>Suprnova</title>"));
     // Inertia 3 contract: the initial page lives in a sibling
     // <script type="application/json" data-page="app"> alongside an empty
-    // <div id="app"></div> mount node — read by getInitialPageFromDOM.
+    // <div id="app"></div> mount node - read by getInitialPageFromDOM.
     assert!(body.contains(r#"<script type="application/json" data-page="app">"#));
     assert!(body.contains(r#"<div id="app"></div>"#));
     assert!(body.contains(r#"<div id="app"></div>"#));
@@ -215,7 +215,7 @@ async fn partial_reload_except_takes_precedence_over_only() {
 #[tokio::test]
 async fn partial_reload_for_different_component_returns_all_props() {
     // Component mismatch: client says it's on "Posts", server is rendering "Users".
-    // The filter is inactive — all props returned.
+    // The filter is inactive - all props returned.
     let req = MockReq::new("/users")
         .inertia()
         .header("X-Inertia-Partial-Component", "Posts")
@@ -255,7 +255,7 @@ async fn always_props_bypass_partial_reload_filter() {
 
     let props = page["props"].as_object().unwrap();
     assert!(props.contains_key("users"));
-    // `flash` is Always — appears despite not being in partial-data.
+    // `flash` is Always - appears despite not being in partial-data.
     assert!(props.contains_key("flash"));
 }
 
@@ -285,7 +285,7 @@ async fn partial_data_dot_notation_returns_only_the_nested_key() {
 
 #[tokio::test]
 async fn partial_except_dot_notation_prunes_a_nested_key_without_only() {
-    // No X-Inertia-Partial-Data — this is what `router.reload({ except:
+    // No X-Inertia-Partial-Data - this is what `router.reload({ except:
     // [...] })` sends: everything except one nested field, no whitelist.
     let req = MockReq::new("/users")
         .inertia()
@@ -328,7 +328,7 @@ async fn partial_except_dot_notation_wins_over_only_on_the_same_path() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // "user" still participates (only named it), but the one path both
-    // headers agree on is gone — except wins, leaving an empty object
+    // headers agree on is gone - except wins, leaving an empty object
     // rather than dropping "user" from props altogether.
     let props = page["props"].as_object().unwrap();
     assert!(props.contains_key("user"));
@@ -354,7 +354,7 @@ async fn partial_data_unknown_nested_path_yields_nothing_for_that_key_without_dr
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // "bogus" doesn't exist on `user` — it contributes nothing, but its
+    // "bogus" doesn't exist on `user` - it contributes nothing, but its
     // siblings in the same request ("name", "email") still land.
     assert_eq!(
         page["props"]["user"],
@@ -432,7 +432,7 @@ async fn always_prop_ignores_dotted_only_and_ships_whole_value() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
     // Always bypasses partial-reload filtering entirely, dot notation
-    // included — Laravel's `resolveAlways` re-injects the raw, unfiltered
+    // included - Laravel's `resolveAlways` re-injects the raw, unfiltered
     // value (`inertia-laravel-2.0.25/src/Response.php:406-416`).
     assert_eq!(
         page["props"]["user"],
@@ -600,7 +600,7 @@ async fn production_html_shell_falls_back_to_legacy_paths_when_manifest_missing(
     // When no manifest.json exists on disk, the framework falls back to the
     // pre-manifest hardcoded `/{assets_base_url}/main.{js,css}` shape so apps
     // produced before D20-B keep booting. A tracing::warn! fires once on
-    // first read inside `InertiaConfig::vite_manifest` (not asserted here —
+    // first read inside `InertiaConfig::vite_manifest` (not asserted here -
     // requires tracing capture).
     let cfg = InertiaConfig::new()
         .production()
@@ -944,7 +944,7 @@ async fn shared_props_field_omitted_when_registry_empty() {
 #[tokio::test]
 async fn shared_props_includes_key_even_when_user_overrides() {
     // Per the Inertia v3 client contract, sharedProps is just a key
-    // list — the client reads values from `props`. Overriding a
+    // list - the client reads values from `props`. Overriding a
     // shared key with `.with()` doesn't remove the key from
     // sharedProps; the override wins in `props` and that's what the
     // client sees. Verifies the override-still-in-sharedProps contract.
@@ -979,7 +979,7 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
 
     // Unique key so we don't collide with other concurrent tests that
     // might have left state in the static registry despite SHARED_LOCK
-    // (e.g. across cargo's parallel test binaries — unlikely but cheap
+    // (e.g. across cargo's parallel test binaries - unlikely but cheap
     // to guard against).
     let key = "expensive_lazy_test";
 
@@ -991,13 +991,13 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
         }
     });
 
-    // Standard visit — resolver should run (Lazy is included on standard visits).
+    // Standard visit - resolver should run (Lazy is included on standard visits).
     let req = MockReq::new("/").inertia();
     let _ = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let after_step_1 = call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(after_step_1, 1, "standard visit should resolve lazy once");
 
-    // Partial reload excluding the key — resolver should NOT run.
+    // Partial reload excluding the key - resolver should NOT run.
     let req = MockReq::new("/")
         .inertia()
         .header("X-Inertia-Partial-Component", "Home")
@@ -1009,7 +1009,7 @@ async fn lazy_shared_resolves_only_when_partial_includes_key() {
         "partial reload excluding the key must not invoke the resolver"
     );
 
-    // Partial reload that explicitly requests the key — resolver runs.
+    // Partial reload that explicitly requests the key - resolver runs.
     let req = MockReq::new("/")
         .inertia()
         .header("X-Inertia-Partial-Component", "Home")
@@ -1085,14 +1085,14 @@ async fn trait_share_overrides_static_share_but_user_overrides_both() {
     }
     suprnova::App::register_inertia_shared(std::sync::Arc::new(Trait));
 
-    // No user override — trait wins over static.
+    // No user override - trait wins over static.
     let req = MockReq::new("/").inertia();
     let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["props"]["layer"], "trait");
 
-    // User override — user wins.
+    // User override - user wins.
     let resp = InertiaResponse::new("Home")
         .with("layer", "user")
         .resolve(&req)
@@ -1402,9 +1402,9 @@ async fn defer_rescue_catches_resolver_error() {
 
 /// The ErrorOccurred event must be dispatched on the rescue path so observability
 /// listeners (Sentry, Pagerduty, custom shippers) see the rescued resolver error.
-/// The dispatch is **spawned**, not awaited — mirroring the http/response.rs
+/// The dispatch is **spawned**, not awaited - mirroring the http/response.rs
 /// pattern and the documented `events::builtins::ErrorOccurred` best-effort
-/// contract — so the Inertia partial-response collector never blocks on listener
+/// contract - so the Inertia partial-response collector never blocks on listener
 /// execution.
 #[tokio::test]
 async fn defer_rescue_dispatches_error_occurred_event() {
@@ -1426,14 +1426,14 @@ async fn defer_rescue_dispatches_error_occurred_event() {
         .await
         .unwrap();
 
-    // The response itself still resolves cleanly with the rescued marker —
+    // The response itself still resolves cleanly with the rescued marker -
     // proving the inline path returned promptly and did not hang on the
     // spawned event dispatch.
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["rescuedProps"], serde_json::json!(["permissions"]));
 
-    // The spawn happens on the current Tokio runtime — yield + a short
+    // The spawn happens on the current Tokio runtime - yield + a short
     // sleep so the spawned dispatcher task lands its record. Mirrors the
     // pattern in tests/events.rs::server_error_dispatches_error_occurred.
     tokio::task::yield_now().await;
@@ -1582,7 +1582,7 @@ async fn once_second_visit_skips_resolver_via_except_header() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // Resolver skipped — client claims to have it cached.
+    // Resolver skipped - client claims to have it cached.
     assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     // Value NOT in props.
     assert!(!page["props"].as_object().unwrap().contains_key("plans"));
@@ -1665,7 +1665,7 @@ async fn once_with_until_emits_expires_at() {
 
 #[tokio::test]
 async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
-    // D20-C regression — ChatGPT MODULE_REVIEW_NOTES ## inertia HIGH #2.
+    // D20-C regression - ChatGPT MODULE_REVIEW_NOTES ## inertia HIGH #2.
     //
     // The client sends `X-Inertia-Except-Once-Props: rates` claiming it
     // has `rates` cached. Without server-side expiry enforcement the
@@ -1716,7 +1716,7 @@ async fn once_with_expired_until_forces_resolver_despite_client_cache_header() {
 
 #[tokio::test]
 async fn dev_head_html_escapes_vite_dev_server_and_entry_point() {
-    // D20-G regression — ChatGPT MODULE_REVIEW_NOTES ## inertia LOW
+    // D20-G regression - ChatGPT MODULE_REVIEW_NOTES ## inertia LOW
     // #1. Dev-server URLs are normally trusted config values, but a
     // misconfigured env / dotfile shouldn't be able to inject markup
     // into the dev HTML shell.
@@ -1753,7 +1753,7 @@ async fn dev_head_html_escapes_vite_dev_server_and_entry_point() {
 
 #[tokio::test]
 async fn lazy_resolver_fanout_is_bounded_by_max_concurrent_resolvers() {
-    // D20-E regression — ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
+    // D20-E regression - ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
     // #4. Without a cap a page with many lazy props would fire all
     // resolvers in parallel via `try_join_all`. Now the response
     // pipeline routes them through `stream.buffered(N)` so at most N
@@ -1798,13 +1798,13 @@ async fn lazy_resolver_fanout_is_bounded_by_max_concurrent_resolvers() {
     assert!(
         peak >= 2,
         "with 20 resolvers and a 3-cap we should observe at least some concurrency; \
-         observed {peak} — buffered(N) may have degenerated to serial"
+         observed {peak} - buffered(N) may have degenerated to serial"
     );
 }
 
 #[tokio::test]
 async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
-    // D20-D regression — ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
+    // D20-D regression - ChatGPT MODULE_REVIEW_NOTES ## inertia MEDIUM
     // #3. The SSR client now reads through http_body_util::Limited,
     // capping the worker's response body at `max_response_bytes`. When
     // exceeded, render() either falls back to CSR (default) or
@@ -1827,7 +1827,7 @@ async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
             // Drain request just enough to unblock the client.
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await;
-            // Write a 1 MiB response — well above our 64 KiB cap.
+            // Write a 1 MiB response - well above our 64 KiB cap.
             let body = vec![b'A'; 1_000_000];
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
@@ -1842,7 +1842,7 @@ async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
     let cfg = InertiaConfig::new()
         .ssr(format!("http://{local}"))
         .ssr_max_response_bytes(64 * 1024)
-        // Don't throw — exercise the fallback path explicitly.
+        // Don't throw - exercise the fallback path explicitly.
         .ssr_throw_on_error(false);
 
     let req = MockReq::new("/dashboard");
@@ -1854,7 +1854,7 @@ async fn ssr_response_body_cap_falls_back_to_csr_when_exceeded() {
 
     server.await.ok();
 
-    // CSR fallback — no `data-server-rendered="true"` attribute.
+    // CSR fallback - no `data-server-rendered="true"` attribute.
     let body = body_to_string(resp.into_hyper().into_body());
     assert!(
         !body.contains("data-server-rendered=\"true\""),
@@ -2038,7 +2038,7 @@ async fn inertia_location_returns_409_with_x_inertia_location() {
 // ---- Tier 3.1: fragment preservation ----
 //
 // `preserveFragment` is a page-object flag set on the *destination*
-// response of a redirect — the client (which knows its own URL hash)
+// response of a redirect - the client (which knows its own URL hash)
 // carries the fragment over to the new URL when this flag is true.
 // `InertiaResponse::redirect(url)` is the X-Inertia-Redirect mechanism
 // for soft Inertia redirects whose target URL may carry a `#fragment`.
@@ -2090,7 +2090,7 @@ async fn inertia_redirect_returns_409_with_x_inertia_redirect() {
         hyper_resp.headers().get("X-Inertia-Redirect").unwrap(),
         "/article/new#section"
     );
-    // X-Inertia-Redirect is distinct from X-Inertia-Location — only
+    // X-Inertia-Redirect is distinct from X-Inertia-Location - only
     // one of the two should be present, per the protocol.
     assert!(hyper_resp.headers().get("X-Inertia-Location").is_none());
 }
@@ -2160,7 +2160,7 @@ async fn preserve_fragment_survives_partial_reload_filter() {
 // ---- Tier 4: SSR ----
 //
 // These tests spawn a tiny localhost HTTP server that mimics the
-// `@inertiajs/{...}/server` SSR worker — accepts `POST /render` with
+// `@inertiajs/{...}/server` SSR worker - accepts `POST /render` with
 // the page object, returns `{head, body}`. We then resolve an Inertia
 // response with SSR enabled pointed at this worker and inspect the
 // generated HTML shell.
@@ -2177,7 +2177,7 @@ mod ssr_tests {
     use suprnova::{InertiaConfig, InertiaResponse};
 
     /// Spawn a one-shot SSR worker bound to 127.0.0.1:0. The worker
-    /// returns a `body` matching the real Inertia 3 contract — what
+    /// returns a `body` matching the real Inertia 3 contract - what
     /// `@inertiajs/core::buildSSRBody` produces: a `<script
     /// type="application/json" data-page="app">` element holding the
     /// page JSON, followed by `<div data-server-rendered="true"
@@ -2312,7 +2312,7 @@ mod ssr_tests {
 
     #[tokio::test]
     async fn ssr_xhr_request_does_not_invoke_worker() {
-        // For Inertia XHRs we return JSON, not HTML — SSR is irrelevant.
+        // For Inertia XHRs we return JSON, not HTML - SSR is irrelevant.
         // We bind a worker that would PANIC if called; if SSR is invoked
         // erroneously, the request stalls or errors.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2344,8 +2344,8 @@ mod ssr_tests {
 
 // ---- Infinite scroll: Inertia::scroll() + scrollProps + merge intent ----
 //
-// A scroll prop always carries merge metadata — unlike a plain merge
-// prop it needs no explicit `.merge()` — defaulting to append and
+// A scroll prop always carries merge metadata - unlike a plain merge
+// prop it needs no explicit `.merge()` - defaulting to append and
 // switching to prepend only when the client sends
 // `X-Inertia-Infinite-Scroll-Merge-Intent: prepend`. `reset` reads
 // `X-Inertia-Reset` independently of that header. Both match Laravel's
@@ -2358,8 +2358,8 @@ use suprnova::{Prop, ScrollMetadata};
 #[tokio::test]
 async fn scroll_fresh_visit_emits_reset_false_and_append_merge_metadata() {
     // No merge-intent header, no reset header: Laravel still emits the
-    // append merge instruction on this very response — it isn't held
-    // back for a follow-up fetch — and `reset` is false because the
+    // append merge instruction on this very response - it isn't held
+    // back for a follow-up fetch - and `reset` is false because the
     // client never asked to start over.
     let req = MockReq::new("/users").inertia();
     let resp = InertiaResponse::new("Users/Index")
@@ -2455,7 +2455,7 @@ async fn scroll_prepend_intent_emits_prepend_props_no_reset() {
 #[tokio::test]
 async fn scroll_unknown_intent_falls_back_to_append_default() {
     // Only "append" / "prepend" are meaningful intent values, so the
-    // header parser collapses anything else to `None` — the same state
+    // header parser collapses anything else to `None` - the same state
     // as no header at all, which now means "append", not "reset".
     let req = MockReq::new("/users")
         .inertia()
@@ -2524,7 +2524,7 @@ async fn scroll_props_field_omitted_when_no_scroll_props() {
 #[tokio::test]
 async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
     // Laravel-identical `reset` semantics: it comes from `X-Inertia-Reset`
-    // alone, not from the merge-intent header — so a client that sends
+    // alone, not from the merge-intent header - so a client that sends
     // BOTH still gets `reset: true` and no merge instruction for the key.
     let req = MockReq::new("/users")
         .inertia()
@@ -2562,7 +2562,7 @@ async fn scroll_reset_header_sets_reset_true_and_excludes_merge_metadata() {
 
 #[tokio::test]
 async fn scroll_reset_header_excludes_from_prepend_props_too() {
-    // Same exclusion, prepend direction — reset wins regardless of which
+    // Same exclusion, prepend direction - reset wins regardless of which
     // way the intent header points.
     let req = MockReq::new("/users")
         .inertia()
@@ -2688,7 +2688,7 @@ async fn scroll_with_wrapped_resolver_runs_closure_and_wraps_the_prepend_path() 
 #[tokio::test]
 async fn scroll_match_on_emits_match_props_on_keyed_to_the_bare_prop_name() {
     // An unwrapped scroll prop merges at its own key, so its `match_on`
-    // fields key off that same bare name — Laravel's
+    // fields key off that same bare name - Laravel's
     // `resolveMergeMatchingKeys` folds a `ScrollProp`'s `matchesOn()` in
     // exactly like any other `Mergeable`, no scroll exclusion
     // (`Response.php:558,641-652`).
@@ -2715,7 +2715,7 @@ async fn scroll_match_on_emits_match_props_on_keyed_to_the_bare_prop_name() {
 
 #[tokio::test]
 async fn scroll_wrapped_match_on_emits_match_props_on_keyed_to_the_wrap_path() {
-    // A wrapped scroll prop merges at `key.wrap_key`, not `key` — so its
+    // A wrapped scroll prop merges at `key.wrap_key`, not `key` - so its
     // `match_on` field must key off that same nested path, or the
     // client's prefix-matching `mergeOrMatchItems` can never find it
     // (`inertia-3.6.1/packages/core/src/response.ts:524-546`).
@@ -2748,7 +2748,7 @@ async fn scroll_always_prop_outside_only_list_emits_no_merge_metadata() {
     // block on it (rather than on `passes_lists`, the same gate the
     // once/merge blocks use) let an Always+scroll prop outside a
     // partial reload's `only` list emit a merge instruction for a
-    // value that already shipped whole — the client would then append
+    // value that already shipped whole - the client would then append
     // the same rows on top of themselves. Laravel narrows both
     // `resolveMergeProps` and `resolveScrollProps` by `only`/`except`
     // (`Response.php:553-560`, `:700-716`), independent of `Always`
@@ -2774,7 +2774,7 @@ async fn scroll_always_prop_outside_only_list_emits_no_merge_metadata() {
     let body = body_to_string(resp.into_hyper().into_body());
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // The value still ships — Always bypasses the value filter.
+    // The value still ships - Always bypasses the value filter.
     assert_eq!(page["props"]["users"][0]["id"], 1);
     let obj = page.as_object().unwrap();
     let merge_props = obj
@@ -2801,7 +2801,7 @@ async fn scroll_always_prop_outside_only_list_emits_no_merge_metadata() {
 async fn scroll_deep_merge_emits_deep_merge_props_not_merge_props() {
     // I4: Laravel's `ScrollProp` constructor already sets `merge = true`
     // (`ScrollProp.php:60`), so a caller's own `->merge()`/`->prepend()`
-    // has nothing left to change — but `->deepMerge()` routes the prop
+    // has nothing left to change - but `->deepMerge()` routes the prop
     // through `resolveDeepMergeProps` instead, a completely separate
     // list ahead of the append/prepend computation
     // (`Response.php:590,610`). `.deep_merge()` on a scroll prop must
@@ -2943,7 +2943,7 @@ async fn errors_scoped_under_named_bag_when_header_set() {
 async fn error_bag_wraps_handler_injected_errors() {
     // Regression test: previously the bag scoping was done at the
     // start of resolve_props with an empty object, then user props
-    // could overwrite it — silently losing the bag wrapping. The fix
+    // could overwrite it - silently losing the bag wrapping. The fix
     // moves scoping to after all props resolve.
     let req = MockReq::new("/")
         .inertia()
@@ -3137,7 +3137,7 @@ async fn flashed_default_bag_errors_seed_flat_not_bag_keyed() {
 
         // The receiving page (no X-Inertia-Error-Bag header) must surface
         // errors FLAT (`errors.email`), not nested under the bag name
-        // (`errors.default.email`) — otherwise the Inertia client's
+        // (`errors.default.email`) - otherwise the Inertia client's
         // `$errors.email` binding comes up undefined.
         let req = MockReq::new("/").inertia();
         let resp = InertiaResponse::new("Login").resolve(&req).await.unwrap();
@@ -3278,7 +3278,7 @@ async fn redirect_preserve_fragment_flashes_session_flag() {
 async fn redirect_route_preserve_fragment_flashes_session_flag() {
     // The `RedirectRouteBuilder::From<...>` impl has a separate code
     // path (it can short-circuit on missing route). Ensure
-    // `.preserve_fragment()` flashes on the happy path too — they
+    // `.preserve_fragment()` flashes on the happy path too - they
     // share a helper but the helper must actually be called from both.
     use suprnova::Redirect;
     use suprnova::routing::register_route_name;
@@ -3311,7 +3311,7 @@ async fn redirect_route_preserve_fragment_flashes_session_flag() {
 #[tokio::test]
 async fn redirect_route_missing_does_not_flash() {
     // When the route doesn't exist, From<RedirectRouteBuilder> returns
-    // a 500 Err. Skipping the flash is intentional — otherwise a stray
+    // a 500 Err. Skipping the flash is intentional - otherwise a stray
     // `_inertia.preserve_fragment` would attach to whatever page the
     // user navigates to next.
     use suprnova::Redirect;
@@ -3618,7 +3618,7 @@ mod version_mw {
 
     #[tokio::test]
     async fn mismatched_version_on_inertia_post_passes_through() {
-        // Per spec, only GET mismatches trigger 409 — other methods rely on
+        // Per spec, only GET mismatches trigger 409 - other methods rely on
         // their post-action GET redirect to surface the mismatch.
         let mw = InertiaVersionMiddleware::new("v2");
         let resp = drive(mw, request("POST", Some("v1"), true)).await;
@@ -3655,7 +3655,7 @@ mod version_mw {
 
     #[tokio::test]
     async fn mismatched_version_preserves_query_string_in_location() {
-        // Asset-version 409 must redirect back to the SAME URL — the
+        // Asset-version 409 must redirect back to the SAME URL - the
         // query string carries pagination cursors, search terms, and
         // form-submitted GET params. Dropping it on every mismatch
         // silently kicks users to page 1 / empty search after every
@@ -3682,7 +3682,7 @@ mod version_mw {
     /// Boot a one-shot HTTP server that resolves an `InertiaResponse`
     /// against a REAL `crate::http::Request` for the given URI, and
     /// return the page object's `url` field. Mirrors `drive`'s server
-    /// plumbing — a real `hyper::body::Incoming` can only be constructed
+    /// plumbing - a real `hyper::body::Incoming` can only be constructed
     /// through hyper's own connection machinery, so this is the only way
     /// to exercise `InertiaRequestExt::path_and_query`'s `Request` impl
     /// (rather than `MockReq`'s hand-written stand-in) from a test.
@@ -3770,7 +3770,7 @@ mod version_mw {
 // bag into the session, the receiving request's session ages it into
 // `_flash.old.*`, and `InertiaResponse::resolve` merges it into the
 // page object's top-level `flash` field. Without the session bridge
-// the flash would only appear on the *current* response — the
+// the flash would only appear on the *current* response - the
 // finding's "silently no-ops outside the task-local request bag"
 // premise.
 
@@ -3881,7 +3881,7 @@ async fn app_flash_no_redirect_does_not_leak_to_next_request() {
         s.age_flash_data();
         assert!(
             !s.has("_flash.old.toast"),
-            "App::flash without redirect must not bleed into session — \
+            "App::flash without redirect must not bleed into session - \
              otherwise it would appear on every subsequent unrelated request"
         );
     }
@@ -3907,8 +3907,8 @@ async fn app_flash_no_redirect_does_not_leak_to_next_request() {
 #[tokio::test]
 async fn redirect_with_flash_surfaces_in_destination_page() {
     // `Redirect::with(...)` already wrote to the session in
-    // `drain_flash`. The complementary half — `InertiaResponse::resolve`
-    // reading session `_flash.old.*` — must now surface it.
+    // `drain_flash`. The complementary half - `InertiaResponse::resolve`
+    // reading session `_flash.old.*` - must now surface it.
     use suprnova::Redirect;
     use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
 
@@ -3921,7 +3921,7 @@ async fn redirect_with_flash_surfaces_in_destination_page() {
     })
     .await;
 
-    // Age — emulating the receiving request's SessionMiddleware.
+    // Age - emulating the receiving request's SessionMiddleware.
     {
         let mut g = slot.lock().unwrap();
         let s = g.as_mut().unwrap();
@@ -4010,7 +4010,7 @@ async fn same_request_flash_wins_over_session_flash_on_collision() {
     let bag = suprnova::inertia::flash_new_bag_for_test();
     let page: serde_json::Value = session_scope_for_test(slot.clone(), async move {
         suprnova::inertia::flash_scope_for_test(bag, async move {
-            // Same-key flash on the destination handler — should win.
+            // Same-key flash on the destination handler - should win.
             let resp = InertiaResponse::new("Dashboard")
                 .flash("status", serde_json::json!("overridden"))
                 .resolve(&req)
@@ -4043,7 +4043,7 @@ async fn app_flash_without_session_scope_stays_one_shot() {
     })
     .await;
 
-    // A fresh request after the redirect — no session anywhere — must
+    // A fresh request after the redirect - no session anywhere - must
     // not see the value.
     let req = MockReq::new("/x").inertia();
     let bag2 = suprnova::inertia::flash_new_bag_for_test();
@@ -4055,7 +4055,7 @@ async fn app_flash_without_session_scope_stays_one_shot() {
     .await;
     assert!(
         !page.as_object().unwrap().contains_key("flash"),
-        "without a session scope, App::flash can't cross a redirect — \
+        "without a session scope, App::flash can't cross a redirect - \
          destination must not see it"
     );
 }
@@ -4066,7 +4066,7 @@ async fn app_flash_without_session_scope_stays_one_shot() {
 async fn page_url_keeps_the_query_string() {
     // Without the query string the client's history entry, back/forward
     // navigation, and `router.reload()` all replay `/users` instead of
-    // `/users?page=2&sort=name` — pagination and filters silently reset.
+    // `/users?page=2&sort=name` - pagination and filters silently reset.
     let req = MockReq::new("/users").query("page=2&sort=name").inertia();
     let resp = InertiaResponse::new("Users")
         .with("users", serde_json::json!([]))
@@ -4110,9 +4110,9 @@ fn mock_req_path_and_query_matches_hyper_uris_derivation() {
     // confirms `MockReq::path_and_query()` builds the same string
     // `hyper::Uri::path_and_query()` would for the same URI, so the
     // MockReq-based tests above are exercising a faithful stand-in.
-    // The real pin — that `InertiaVersionMiddleware`'s `X-Inertia-Location`
+    // The real pin - that `InertiaVersionMiddleware`'s `X-Inertia-Location`
     // and `InertiaResponse::resolve`'s `page.url` agree byte-for-byte
-    // through a REAL `crate::http::Request` — lives in
+    // through a REAL `crate::http::Request` - lives in
     // `version_mw::page_url_and_the_version_bounce_url_agree_on_a_real_request`,
     // since both now derive their string through the single
     // `InertiaRequestExt::path_and_query` implementation on `Request`
@@ -4145,7 +4145,7 @@ async fn location_for_returns_409_on_an_inertia_request() {
 #[tokio::test]
 async fn location_for_returns_302_on_a_plain_browser_request() {
     // A hard navigation into an OAuth / SSO bounce has no X-Inertia
-    // header. A bare 409 with no Location header is a dead end for it —
+    // header. A bare 409 with no Location header is a dead end for it -
     // the browser has nowhere to go.
     let req = MockReq::new("/billing");
     let resp = InertiaResponse::location_for(&req, "https://billing.example/checkout");
@@ -4175,7 +4175,7 @@ async fn clear_history_flashed_by_a_previous_request_reaches_the_next_page() {
     // The logout flow: the handler calls `App::clear_history()` and
     // redirects. The redirect's own response is discarded by the browser;
     // the LOGIN page is the one that renders, and it is the page that has
-    // to carry `clearHistory: true` — otherwise the previous session's
+    // to carry `clearHistory: true` - otherwise the previous session's
     // encrypted history entries stay decryptable.
     use suprnova::session::{new_session_slot_for_test, session_scope_for_test};
 
@@ -4685,7 +4685,7 @@ fn manifest_version_falls_back_when_the_file_is_missing() {
     assert_eq!(
         resolver.resolve(),
         "1.0",
-        "a missing manifest must not error — dev has no build"
+        "a missing manifest must not error - dev has no build"
     );
 }
 

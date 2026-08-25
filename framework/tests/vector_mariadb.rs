@@ -1,18 +1,18 @@
 #![cfg(feature = "vector-mariadb")]
 
-//! Phase 9B — MariaDB vector driver tests.
+//! Phase 9B - MariaDB vector driver tests.
 //!
 //! Two layers:
 //!
-//! 1. **Pure-function tests** (no `#[ignore]`) — always run; cover
+//! 1. **Pure-function tests** (no `#[ignore]`) - always run; cover
 //!    embedding formatting, store-name validation, score normalization,
 //!    `ensure_table_sql` output, short-circuit paths, and metadata
 //!    rejection. Construction uses
 //!    [`MariaDbVectorDriver::from_url`] against a never-reachable
-//!    address — the lazy pool never connects, so these tests don't need
+//!    address - the lazy pool never connects, so these tests don't need
 //!    a live MariaDB.
 //!
-//! 2. **Integration tests** (`#[ignore]`) — exercise the driver against
+//! 2. **Integration tests** (`#[ignore]`) - exercise the driver against
 //!    a real MariaDB 11.7+. Skipped by default; run via:
 //!
 //!    ```bash
@@ -60,7 +60,7 @@ async fn drop_table(driver: &MariaDbVectorDriver, table: &str) {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — distance enum surface
+// Pure-function tests - distance enum surface
 // ---------------------------------------------------------------------
 
 #[test]
@@ -98,7 +98,7 @@ async fn default_driver_uses_cosine() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — store name validation
+// Pure-function tests - store name validation
 // ---------------------------------------------------------------------
 
 #[test]
@@ -150,7 +150,7 @@ fn validate_store_name_rejects_dash() {
 
 #[test]
 fn validate_store_name_rejects_dot() {
-    // Avoids "db.table" two-component identifiers — keep it single-name.
+    // Avoids "db.table" two-component identifiers - keep it single-name.
     assert!(MariaDbVectorDriver::validate_store_name("db.docs").is_err());
 }
 
@@ -168,7 +168,7 @@ fn validate_store_name_accepts_64_chars() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — embedding to VEC_FROMTEXT format
+// Pure-function tests - embedding to VEC_FROMTEXT format
 // ---------------------------------------------------------------------
 
 #[test]
@@ -251,7 +251,7 @@ fn embedding_to_vec_text_output_is_valid_json_array() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — score normalization
+// Pure-function tests - score normalization
 // ---------------------------------------------------------------------
 
 #[test]
@@ -352,7 +352,7 @@ fn score_is_monotone_decreasing_in_distance() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — ensure_table_sql shape
+// Pure-function tests - ensure_table_sql shape
 // ---------------------------------------------------------------------
 
 #[test]
@@ -431,7 +431,7 @@ async fn ensure_table_sql_for_validates_name_and_dim() {
 #[tokio::test]
 async fn upsert_empty_items_is_noop() {
     let driver = unreachable_driver();
-    // No version check, no SQL — short-circuits before either.
+    // No version check, no SQL - short-circuits before either.
     driver
         .upsert("documents", vec![])
         .await
@@ -543,7 +543,7 @@ async fn integration_version_check_passes_on_117() {
     let out = driver
         .count("does_not_exist_table_used_to_trigger_version_check")
         .await;
-    // We expect failure because the table doesn't exist — but the
+    // We expect failure because the table doesn't exist - but the
     // error must be a SQL error, NOT a version-rejection error. If
     // the server is < 11.7 the test would fail here with the
     // version-rejection message instead.
@@ -551,7 +551,7 @@ async fn integration_version_check_passes_on_117() {
     let msg = err.to_string();
     assert!(
         !msg.contains("requires MariaDB 11.7+"),
-        "MariaDB version is < 11.7 — bump the test fixture: {msg}"
+        "MariaDB version is < 11.7 - bump the test fixture: {msg}"
     );
 }
 
@@ -894,7 +894,7 @@ async fn integration_vec_fromtext_accepts_our_format() {
     ];
     for v in cases {
         let text = MariaDbVectorDriver::embedding_to_vec_text(v).unwrap();
-        // SELECT VEC_TOTEXT(VEC_FROMTEXT(?)) — if MariaDB can parse our
+        // SELECT VEC_TOTEXT(VEC_FROMTEXT(?)) - if MariaDB can parse our
         // text into a vector, this returns the round-trip text.
         let row: Result<(String,), _> = sqlx::query_as("SELECT VEC_TOTEXT(VEC_FROMTEXT(?)) AS t")
             .bind(&text)
@@ -918,8 +918,8 @@ async fn integration_vec_fromtext_accepts_our_format() {
 async fn integration_similar_errors_on_distance_mismatch() {
     // Create the table with DISTANCE=cosine, then configure the
     // driver for Euclidean and call similar(). The framework's
-    // per-store check must surface the mismatch as a clear error
-    // — MariaDB would otherwise silently degrade to a full table
+    // per-store check must surface the mismatch as a clear error -
+    // MariaDB would otherwise silently degrade to a full table
     // scan.
     let url = match mariadb_url_or_skip("integration_similar_errors_on_distance_mismatch") {
         Some(u) => u,
@@ -931,7 +931,7 @@ async fn integration_similar_errors_on_distance_mismatch() {
     let table = unique_table("mismatch");
     drop_table(&driver, &table).await;
 
-    // Table built with DISTANCE=cosine — deliberately different from the driver.
+    // Table built with DISTANCE=cosine - deliberately different from the driver.
     let create_sql =
         MariaDbVectorDriver::ensure_table_sql(&table, 3, MariaDbDistance::Cosine).unwrap();
     sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
@@ -939,7 +939,7 @@ async fn integration_similar_errors_on_distance_mismatch() {
         .await
         .expect("CREATE TABLE");
 
-    // upsert/count don't engage the vector index — these must still succeed.
+    // upsert/count don't engage the vector index - these must still succeed.
     driver
         .upsert(
             &table,
@@ -953,7 +953,7 @@ async fn integration_similar_errors_on_distance_mismatch() {
         .expect("upsert succeeds even on mismatched-index table");
     assert_eq!(driver.count(&table).await.unwrap(), 1);
 
-    // similar() is where the mismatch silently degrades — the framework
+    // similar() is where the mismatch silently degrades - the framework
     // catches it here.
     let err = driver
         .similar(&table, vec![1.0, 0.0, 0.0], 1)
@@ -979,7 +979,7 @@ async fn integration_similar_errors_on_distance_mismatch() {
 #[tokio::test]
 #[ignore]
 async fn integration_similar_passes_distance_match_caches_after_first_call() {
-    // Matching distance on both ends — first similar() runs the
+    // Matching distance on both ends - first similar() runs the
     // SHOW CREATE TABLE check, subsequent calls hit the cache. We
     // can't directly assert the second call skipped the check, but
     // we can prove correctness end-to-end by querying twice and
@@ -1050,7 +1050,7 @@ async fn integration_delete_chunks_across_multiple_batches() {
         .await
         .expect("CREATE TABLE");
 
-    // 1500 items — comfortably above 1000, low enough that the test
+    // 1500 items - comfortably above 1000, low enough that the test
     // stays under a couple seconds even with HNSW index updates.
     const N: usize = 1500;
     let items: Vec<VectorItem> = (0..N)

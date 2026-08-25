@@ -18,8 +18,8 @@ use subtle::ConstantTimeEq;
 /// timing side channel an attacker can use to forge a valid signature
 /// byte by byte.
 ///
-/// Backed by [`subtle::ConstantTimeEq`] — the same reviewed primitive
-/// the CSRF and crypto layers use — so the comparison runs in time
+/// Backed by [`subtle::ConstantTimeEq`] - the same reviewed primitive
+/// the CSRF and crypto layers use - so the comparison runs in time
 /// independent of where the inputs diverge. A length mismatch returns
 /// `false` immediately; for fixed-length digests (HMAC-SHA256 is always
 /// 32 bytes) this is a structural reject, not a timing oracle for a
@@ -42,7 +42,7 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Webhook handling surface implemented by every payment provider.
 ///
 /// The framework's webhook route ([`super::super::webhook_route::webhook_routes`])
-/// calls [`Self::verify`] before anything else — a verification failure
+/// calls [`Self::verify`] before anything else - a verification failure
 /// aborts the request before the payload is touched. Once verified the
 /// route calls [`Self::parse_event`] and dispatches downstream.
 #[async_trait]
@@ -54,7 +54,7 @@ pub trait WebhookHandler: Send + Sync {
     ///
     /// Implementations that compare an HMAC / digest against a
     /// header-supplied signature MUST use [`constant_time_eq`] (or another
-    /// constant-time primitive) for that comparison — a byte-wise `==`
+    /// constant-time primitive) for that comparison - a byte-wise `==`
     /// leaks the mismatch position as a timing side channel and lets an
     /// attacker forge a signature byte by byte.
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()>;
@@ -67,7 +67,7 @@ pub trait WebhookHandler: Send + Sync {
     /// framework can hydrate mirror tables. Providers override per their
     /// payload shape (Stripe uses `data.object.*`, Paddle uses `data.*`).
     ///
-    /// Default impl returns no IDs — the audit row is still recorded but no
+    /// Default impl returns no IDs - the audit row is still recorded but no
     /// mirror rows are touched.
     fn extract_payload_ids(&self, _event: &WebhookEvent) -> PayloadIds {
         PayloadIds::default()
@@ -87,7 +87,7 @@ pub trait WebhookHandler: Send + Sync {
     /// `email` plus a metadata blob).
     ///
     /// Returning `None` causes `update_customer_mirror` to skip the
-    /// email/metadata refresh — it still bumps `updated_at` on the existing
+    /// email/metadata refresh - it still bumps `updated_at` on the existing
     /// row so the operator can see the event was received.
     fn extract_customer_snapshot(&self, _event: &WebhookEvent) -> Option<CustomerSnapshot> {
         None
@@ -114,10 +114,10 @@ pub struct PayloadIds {
 /// Paddle Transaction, etc).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PaymentSnapshot {
-    /// Provider transaction / payment identifier — natural key on
+    /// Provider transaction / payment identifier - natural key on
     /// `payments_transactions`.
     pub provider_transaction_id: String,
-    /// Provider customer identifier — FK back to `payments_customers`.
+    /// Provider customer identifier - FK back to `payments_customers`.
     pub provider_customer_id: String,
     /// Provider subscription identifier when this transaction is a
     /// subscription invoice; `None` for one-off charges.
@@ -142,11 +142,11 @@ pub struct PaymentSnapshot {
 /// Customer fields extracted from a customer-event webhook payload. Built
 /// by `WebhookHandler::extract_customer_snapshot`. The framework uses this
 /// to refresh the `payments_customers` mirror row's `email` and
-/// `provider_metadata` columns — `user_id` and `provider_customer_id` are
+/// `provider_metadata` columns - `user_id` and `provider_customer_id` are
 /// load-bearing keys that the webhook path never modifies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustomerSnapshot {
-    /// Provider customer identifier — natural key on
+    /// Provider customer identifier - natural key on
     /// `payments_customers`. The webhook path never writes this column;
     /// it is supplied here so the mirror lookup can locate the row.
     pub provider_customer_id: String,

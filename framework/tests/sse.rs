@@ -50,7 +50,7 @@ async fn spawn_sse_server() -> SocketAddr {
 
 /// Open a client connection, GET `/`, and return the response with a
 /// fully collected body. Streaming bodies are valid input to
-/// `BodyExt::collect` — the test just blocks until the producing
+/// `BodyExt::collect` - the test just blocks until the producing
 /// stream ends.
 async fn fetch(addr: SocketAddr) -> hyper::Response<Bytes> {
     let stream_tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -123,7 +123,7 @@ data: second line\n\
 async fn sse_response_emits_each_event_on_its_own_frame() {
     // Stricter check: split the body on blank lines (the SSE event
     // separator) and verify each non-empty frame has the expected
-    // shape — guards against a regression where frame boundaries
+    // shape - guards against a regression where frame boundaries
     // collapse (which browsers tolerate for `data:`-only frames but
     // breaks `event:` and `id:` dispatch).
     let addr = spawn_sse_server().await;

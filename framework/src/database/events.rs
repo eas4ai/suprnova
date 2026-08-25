@@ -9,19 +9,19 @@
 //!
 //! These events are fired automatically by the framework:
 //!
-//! - [`ConnectionEstablished`] — once per
+//! - [`ConnectionEstablished`] - once per
 //!   [`DbConnection::connect`](crate::DbConnection::connect).
-//! - [`QueryExecuted`] — once per query that runs through the
+//! - [`QueryExecuted`] - once per query that runs through the
 //!   instrumented [`ExecutorChoice`](crate::database::transaction::ExecutorChoice)
 //!   helpers. Covers the [`DB`](crate::DB) raw escapes
 //!   (`select`/`select_one`/`scalar`/`insert`/`update`/`delete`/
 //!   `statement`/`affecting_statement`/`unprepared`) and the model-less
 //!   [`DbTableBuilder`](crate::DbTableBuilder). The Eloquent execution
 //!   path matches `ExecutorChoice` arms directly today; adopting the
-//!   helpers — and therefore the QueryExecuted hook — is tracked in the
+//!   helpers - and therefore the QueryExecuted hook - is tracked in the
 //!   Eloquent module.
 //! - [`TransactionBeginning`] / [`TransactionCommitted`] /
-//!   [`TransactionRolledBack`] — fired by the closure form
+//!   [`TransactionRolledBack`] - fired by the closure form
 //!   ([`DB::transaction`](crate::DB::transaction)),
 //!   [`DB::transaction_with_attempts`](crate::DB::transaction_with_attempts),
 //!   and the manual handles ([`DB::begin_transaction`](crate::DB::begin_transaction)
@@ -36,14 +36,14 @@
 //! "log-to-DB listener → emits event → log-to-DB → ..." loop.
 //!
 //! Listeners run through [`EventFacade::dispatch_best_effort`](crate::EventFacade::dispatch_best_effort):
-//! a failing listener does NOT fail the query — the query already
+//! a failing listener does NOT fail the query - the query already
 //! succeeded. The listener's error is logged but never propagated.
 
 use crate::Event;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Connection opened — fired once per
+/// Connection opened - fired once per
 /// [`DbConnection::connect`](crate::DbConnection::connect).
 ///
 /// Carries the connection's logical name. The default pool is
@@ -64,7 +64,7 @@ impl Event for ConnectionEstablished {
 
 /// A single query was executed against the database.
 ///
-/// Fires AFTER the query completes (successfully OR with an error —
+/// Fires AFTER the query completes (successfully OR with an error -
 /// see [`QueryExecuted::result`]). The wall-clock duration in
 /// [`QueryExecuted::time`] measures the dispatch-to-completion window
 /// inside the [`ExecutorChoice`](crate::database::transaction::ExecutorChoice)
@@ -88,7 +88,7 @@ pub struct QueryExecuted {
     pub read_write_type: Option<ReadWriteType>,
     /// Outcome of the underlying SeaORM call. `Ok(())` on success,
     /// `Err(message)` when the call failed. Listeners observe the
-    /// failure but the query error still propagates to the caller —
+    /// failure but the query error still propagates to the caller -
     /// see the [module docs](self) for the listener contract.
     pub result: Result<(), String>,
 }
@@ -98,17 +98,17 @@ pub struct QueryExecuted {
 /// `QueryExecuted::$readWriteType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadWriteType {
-    /// Read-shape op — SELECT, COUNT, etc. Routed through
+    /// Read-shape op - SELECT, COUNT, etc. Routed through
     /// [`ExecutorChoice::resolve_read`](crate::database::transaction::ExecutorChoice::resolve_read).
     Read,
-    /// Write-shape op — INSERT, UPDATE, DELETE, DDL. Routed through
+    /// Write-shape op - INSERT, UPDATE, DELETE, DDL. Routed through
     /// [`ExecutorChoice::resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write).
     Write,
 }
 
 impl QueryExecuted {
     /// Render the SQL with bindings inlined. Lossy convenience for
-    /// log messages — escaping is debug-format (`{:?}`), NOT SQL-safe.
+    /// log messages - escaping is debug-format (`{:?}`), NOT SQL-safe.
     /// Mirrors Laravel's `QueryExecuted::toRawSql()` shape.
     ///
     /// Placeholders are substituted left-to-right by lexical
@@ -121,7 +121,7 @@ impl QueryExecuted {
             //
             // Iterate highest-index-first so longer placeholder needles
             // are substituted before their prefixes. Otherwise replacing
-            // `$1` first globally corrupts `$10`, `$11`, ... — turning
+            // `$1` first globally corrupts `$10`, `$11`, ... - turning
             // `WHERE id = $10` into `<value-of-$1>0`.
             let mut rendered = self.sql.clone();
             for (i, b) in self.bindings.iter().enumerate().rev() {
@@ -187,7 +187,7 @@ impl Event for TransactionCommitted {
 /// ([`Transaction::rollback`](crate::Transaction::rollback)) and
 /// closure-error rollbacks inside [`DB::transaction`](crate::DB::transaction).
 /// Does NOT fire for an implicit Drop-rollback of a leaked manual
-/// transaction handle — SeaORM's `Drop` impl is synchronous and
+/// transaction handle - SeaORM's `Drop` impl is synchronous and
 /// can't reach the async event dispatcher.
 #[derive(Debug, Clone)]
 pub struct TransactionRolledBack {
@@ -284,7 +284,7 @@ pub(crate) fn listeners() -> &'static std::sync::RwLock<ListenerRegistry> {
 /// True when at least one source of [`QueryExecuted`] observation is
 /// active: a direct `DB::listen` callback, an `EventFacade::listen`
 /// listener, OR the query log is enabled. The executor helpers consult
-/// this on every call — when nobody is listening the entire emission
+/// this on every call - when nobody is listening the entire emission
 /// path short-circuits and pays zero overhead.
 pub(crate) fn query_observation_active() -> bool {
     if let Ok(reg) = listeners().read()
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn to_raw_sql_postgres_placeholder_in_arbitrary_order() {
         // Mixed placeholder ordering with double-digit indices interleaved
-        // among single-digit ones — the substitution must still be index-
+        // among single-digit ones - the substitution must still be index-
         // correct regardless of textual position.
         let bindings: Vec<String> = (1..=11).map(|n| format!("b{n}")).collect();
         let q = QueryExecuted {

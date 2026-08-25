@@ -6,13 +6,13 @@ use std::sync::{Arc, RwLock};
 
 use super::Response;
 
-// A sync gate closure, type-erased. Returns a rich `Response` — bool gates are
+// A sync gate closure, type-erased. Returns a rich `Response` - bool gates are
 // wrapped into a bare allow/deny at registration time.
 type SyncGateFn = Box<dyn Fn(&dyn Any, &dyn Any) -> Response + Send + Sync>;
 
 // An async gate closure, type-erased.
 // The closure returns an owned, boxed future (no borrowed references in the
-// output) — this sidesteps lifetime issues with `for<'a>` HRTBs on trait
+// output) - this sidesteps lifetime issues with `for<'a>` HRTBs on trait
 // objects. Callers clone/copy the user and resource values into the closure.
 type AsyncGateFn =
     Box<dyn Fn(&dyn Any, &dyn Any) -> Pin<Box<dyn Future<Output = Response> + Send>> + Send + Sync>;
@@ -20,11 +20,11 @@ type AsyncGateFn =
 // A before-hook: receives the (type-erased) user + the action name, returns
 // `Some(decision)` to short-circuit the gate or `None` to continue. Keyed by
 // the user's `TypeId` (a hook is about the *user's* global privileges, so it is
-// resource-agnostic — put resource-specific logic in the gate itself).
+// resource-agnostic - put resource-specific logic in the gate itself).
 type BeforeFn = dyn Fn(&dyn Any, &str) -> Option<bool> + Send + Sync;
 
 // An after-hook: receives the user, the action name, and the running decision
-// (`None` while still undecided). Mirrors Laravel's `??=` semantic — an after
+// (`None` while still undecided). Mirrors Laravel's `??=` semantic - an after
 // hook can only *fill in* an undecided result, never override an existing one.
 // All after hooks still run (so they can log) regardless of the result.
 type AfterFn = dyn Fn(&dyn Any, &str, Option<bool>) -> Option<bool> + Send + Sync;
@@ -42,7 +42,7 @@ enum GateEntry {
 // `(action, TypeId::of::<U>(), TypeId::of::<R>())` and only invoked through
 // `invoke` / `invoke_async`, which look the entry up by that exact tuple. The
 // `None` arm exists so a corrupted dispatch fails **closed** (deny) instead of
-// panicking — the request-path panic→500 net would catch a panic, but failing
+// panicking - the request-path panic→500 net would catch a panic, but failing
 // closed keeps the authorization posture end-to-end.
 fn downcast_pair<'a, U: 'static, R: 'static>(
     u: &'a dyn Any,
@@ -55,7 +55,7 @@ pub(crate) struct GateRegistry {
     gates: RwLock<HashMap<(String, TypeId, TypeId), GateEntry>>,
     // before/after hooks are stored behind `Arc` so the evaluation path can
     // clone the hook list out under a short read lock and invoke the user
-    // closures *outside* the lock — a before hook that itself calls
+    // closures *outside* the lock - a before hook that itself calls
     // `Gate::allows` re-enters this registry, and holding the read lock across
     // that nested call could deadlock a non-reentrant `RwLock`.
     before: RwLock<HashMap<TypeId, Vec<Arc<BeforeFn>>>>,
@@ -102,7 +102,7 @@ impl GateRegistry {
 
     /// Register an async gate.
     ///
-    /// The closure must produce an *owned* future — it cannot borrow `user` or
+    /// The closure must produce an *owned* future - it cannot borrow `user` or
     /// `resource` because the type-erased `&dyn Any` references cannot outlive
     /// the `GateRegistry`. Callers are expected to clone / copy any data they
     /// need inside the closure body before returning the future.
@@ -153,7 +153,7 @@ impl GateRegistry {
     // Last-writer-wins on duplicate `(action, U, R)` matches Laravel's
     // `Gate::define` semantic (PHP overwrites the abilities map entry), so
     // re-registering an ability replaces the previous closure. That's the
-    // right default — tests, hot reload, and intentional overrides all rely
+    // right default - tests, hot reload, and intentional overrides all rely
     // on it. But silent replacement in a process-global registry makes
     // accidental duplicates (two policies, two bootstrap closures, an
     // inventory + an explicit call) impossible to audit. Emit a
@@ -207,7 +207,7 @@ impl GateRegistry {
         let erased: Arc<BeforeFn> = Arc::new(move |u: &dyn Any, action: &str| {
             // Type-erased downcast mismatch is unreachable in normal dispatch
             // (hooks are keyed by `TypeId::of::<U>()` and only invoked for that
-            // user type). Fail safe by abstaining — `None` lets evaluation
+            // user type). Fail safe by abstaining - `None` lets evaluation
             // continue to the gate, which defaults to deny.
             match u.downcast_ref::<U>() {
                 Some(u) => f(u, action),
@@ -233,7 +233,7 @@ impl GateRegistry {
             Arc::new(move |u: &dyn Any, action: &str, current: Option<bool>| {
                 // Type-erased downcast mismatch is unreachable in normal
                 // dispatch (hooks are keyed by `TypeId::of::<U>()`). Fail
-                // safe by abstaining — an after hook can only *fill* an
+                // safe by abstaining - an after hook can only *fill* an
                 // undecided result, so `None` leaves the decision untouched.
                 match u.downcast_ref::<U>() {
                     Some(u) => f(u, action, current),
@@ -279,7 +279,7 @@ impl GateRegistry {
     /// (caller must use `invoke_async`).
     ///
     /// Hitting the async-registered branch via the sync path is almost always
-    /// a caller bug — silently denying would hide it, so we emit a
+    /// a caller bug - silently denying would hide it, so we emit a
     /// `tracing::warn!` and the caller can spot it in logs.
     pub(crate) fn invoke<U: 'static, R: 'static>(
         &self,
@@ -308,7 +308,7 @@ impl GateRegistry {
                     action = %action,
                     user_type = std::any::type_name::<U>(),
                     resource_type = std::any::type_name::<R>(),
-                    "Gate::allows/denies/authorize called on an async-registered gate — \
+                    "Gate::allows/denies/authorize called on an async-registered gate - \
                      defaulting to deny. Use Gate::allows_async/denies_async/authorize_async instead.",
                 );
                 Some(Response::deny())
@@ -330,7 +330,7 @@ impl GateRegistry {
 
         let key = (action.to_string(), TypeId::of::<U>(), TypeId::of::<R>());
         // We hold the read lock only long enough to clone the result or start
-        // the async dispatch — we must NOT hold it across an `.await`.
+        // the async dispatch - we must NOT hold it across an `.await`.
         //
         // Degrade to None on poison; caller's `Gate::authorize_async`
         // returns Err(Unauthorized) (safe-deny).
@@ -363,7 +363,7 @@ impl GateRegistry {
     /// Evaluate `(action, U, R)` through the full Laravel pipeline: before
     /// hooks (first `Some` wins), then the gate, then after hooks (fill-only).
     /// Returns `None` when nothing decided (no before hook, no gate, no after
-    /// hook) — callers normalize that to a default deny.
+    /// hook) - callers normalize that to a default deny.
     pub(crate) fn raw<U: 'static, R: 'static>(
         &self,
         action: &str,
@@ -405,7 +405,7 @@ impl GateRegistry {
     }
 
     // Run all after hooks (so they can log), filling the result only while it
-    // is still undecided — Laravel's `$result ??= $afterResult`.
+    // is still undecided - Laravel's `$result ??= $afterResult`.
     fn run_after(
         &self,
         tid: TypeId,
@@ -435,13 +435,13 @@ impl GateRegistry {
         match self.gates.read() {
             Ok(gates) => gates.contains_key(&key),
             // Poisoned lock: same safe-deny posture as the invoke
-            // paths — pretend the gate is absent rather than panic.
+            // paths - pretend the gate is absent rather than panic.
             Err(_) => false,
         }
     }
 
     /// Distinct action names across every registered (action, U, R)
-    /// tuple. Used by [`crate::Gate::abilities`] — mirrors Laravel's
+    /// tuple. Used by [`crate::Gate::abilities`] - mirrors Laravel's
     /// `Gate::abilities()` (which also dedupes by action name).
     /// Returns an empty vec on lock poison (same safe-deny shape).
     pub(crate) fn abilities(&self) -> Vec<String> {
@@ -473,7 +473,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn re_registering_overwrites_with_last_writer_and_warns() {
-        // Each test owns a fresh registry — the production global is shared
+        // Each test owns a fresh registry - the production global is shared
         // across the process, and we don't want bleed-over from other tests
         // that may also register a gate named "duplicate-probe".
         let registry = GateRegistry::new();

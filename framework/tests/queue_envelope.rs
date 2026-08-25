@@ -46,8 +46,8 @@ fn envelope_round_trips_through_json() {
 
 #[test]
 fn envelope_accepts_legacy_v1_payloads() {
-    // v1 payloads (no batch_id / chain_remaining fields) must still decode
-    // — both fields land on serde defaults so older queue rows from before
+    // v1 payloads (no batch_id / chain_remaining fields) must still decode -
+    // both fields land on serde defaults so older queue rows from before
     // the v2 bump keep working without a wipe.
     let json = r#"{"schema_version":1,"id":"550e8400-e29b-41d4-a716-446655440000","job_name":"Legacy","payload":{},"dispatched_at":"2026-05-16T12:34:56Z","available_at":"2026-05-16T12:34:56Z","attempts":0,"max_tries":3,"backoff":{"kind":"exponential","base_secs":2,"cap_secs":300,"jitter_ratio":0.25},"timeout_secs":null,"fail_on_timeout":false,"idempotency_key":null}"#;
     let env = Envelope::from_json(json).expect("v1 must decode");
@@ -71,7 +71,7 @@ fn envelope_rejects_malformed_json() {
 
 #[test]
 fn envelope_wire_format_is_frozen() {
-    // FROZEN v2 layout — every field, every name, every type.
+    // FROZEN v2 layout - every field, every name, every type.
     // Any test failure here means we either need a schema_version bump
     // OR a revert. Never silently update the expected string.
     let id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();

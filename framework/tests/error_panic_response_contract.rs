@@ -1,8 +1,8 @@
-//! Regression: HIGH audit finding `error` #1 — request panics used to
+//! Regression: HIGH audit finding `error` #1 - request panics used to
 //! short-circuit the framework's standard error-response pipeline.
 //! `execute_chain_safely` would catch the panic, log it via `tracing`,
-//! and return `HttpResponse::text("Internal Server Error").status(500)`
-//! — a plain-text body with no `request_id`, no JSON shape, and no
+//! and return `HttpResponse::text("Internal Server Error").status(500)` -
+//! a plain-text body with no `request_id`, no JSON shape, and no
 //! `ErrorOccurred` event dispatch. That meant a panic in production
 //! produced a different response contract from any returned 5xx error,
 //! and observability listeners that watched 5xx error events (Sentry
@@ -14,7 +14,7 @@
 //!   - The sanitised `{"message":"Internal Server Error", ...}` JSON
 //!     body (panic payload stays in tracing logs, NEVER in the wire).
 //!   - `request_id` injection so clients and operators can correlate.
-//!   - `ErrorOccurred` event dispatch — listeners that fire on 5xx
+//!   - `ErrorOccurred` event dispatch - listeners that fire on 5xx
 //!     errors now also fire on panics.
 //!
 //! These tests assert the full contract via a real hyper TCP server.
@@ -106,7 +106,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (hyper::http::StatusCode, Byt
 #[tokio::test]
 async fn panicking_handler_emits_json_body_with_sanitised_message() {
     let router = Router::new().get("/panic-json", |_req: Request| async {
-        panic!("DB connection refused at 127.0.0.1:5432 — should NOT leak to wire");
+        panic!("DB connection refused at 127.0.0.1:5432 - should NOT leak to wire");
         #[allow(unreachable_code)]
         text("unreachable")
     });
@@ -125,7 +125,7 @@ async fn panicking_handler_emits_json_body_with_sanitised_message() {
     // The `debug_message` field is only populated when APP_DEBUG=true
     // and is allowed to carry the panic detail for development
     // visibility (frontends MUST NOT key on `debug_message`). The
-    // `message` field stays generic in both modes — that's the
+    // `message` field stays generic in both modes - that's the
     // contract this test enforces.
     let msg_value = parsed["message"].as_str().unwrap_or("");
     assert!(
@@ -147,7 +147,7 @@ async fn panicking_handler_dispatches_error_occurred_event() {
     EventFacade::listen::<ErrorOccurred, _>(Arc::new(CountErrorOccurred)).await;
 
     let router = Router::new().get("/panic-event", |_req: Request| async {
-        panic!("intentional test panic — must fire ErrorOccurred");
+        panic!("intentional test panic - must fire ErrorOccurred");
         #[allow(unreachable_code)]
         text("unreachable")
     });
@@ -157,7 +157,7 @@ async fn panicking_handler_dispatches_error_occurred_event() {
     assert_eq!(status.as_u16(), 500);
 
     // The From<FrameworkError> for HttpResponse path spawns the
-    // dispatch via Handle::try_current — give it a tick to land
+    // dispatch via Handle::try_current - give it a tick to land
     // before we assert.
     for _ in 0..50 {
         if ERROR_EVENT_FIRED.load(Ordering::SeqCst) >= 1 {
@@ -167,7 +167,7 @@ async fn panicking_handler_dispatches_error_occurred_event() {
     }
     assert!(
         ERROR_EVENT_FIRED.load(Ordering::SeqCst) >= 1,
-        "panic must dispatch ErrorOccurred — listeners that observe 5xx \
+        "panic must dispatch ErrorOccurred - listeners that observe 5xx \
          errors otherwise wouldn't see panics in production"
     );
 }

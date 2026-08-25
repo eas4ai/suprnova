@@ -1,4 +1,4 @@
-//! In-process BroadcastHub tests — publish + subscribe round-trip,
+//! In-process BroadcastHub tests - publish + subscribe round-trip,
 //! multiple subscribers, channel isolation, unsubscribe.
 
 use serde_json::json;

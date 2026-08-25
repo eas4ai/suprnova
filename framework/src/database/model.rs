@@ -1,7 +1,7 @@
-//! Entity-trait extensions (legacy surface — superseded by the Eloquent `Model` trait in `eloquent::Model`).
+//! Entity-trait extensions (legacy surface - superseded by the Eloquent `Model` trait in `eloquent::Model`).
 //!
 //! Provides Laravel-like active record convenience methods over SeaORM
-//! entities via two extension traits — [`EntityExt`] (read) and
+//! entities via two extension traits - [`EntityExt`] (read) and
 //! [`EntityExtMut`] (write). These are blanket-friendly add-ons on
 //! `EntityTrait`; the new full Eloquent `Model` trait shipped in Phase 10A
 //! is the modern surface and reserves the bare `Model` name.
@@ -14,7 +14,7 @@
 //! [`DB::transaction`](crate::DB::transaction), then per-call routing,
 //! then `__read_replica__` for reads, then the primary pool. Crucially,
 //! writes inside a `DB::transaction` closure are now part of the
-//! transaction — previously they silently bypassed it and survived
+//! transaction - previously they silently bypassed it and survived
 //! rollbacks.
 
 use async_trait::async_trait;

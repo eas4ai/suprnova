@@ -10,7 +10,7 @@
 //! * `description` is operator-facing context for the admin UI.
 //! * `updated_by` is a nullable audit pointer to the user who last
 //!   toggled the flag (NULL for system-initiated changes). String-typed
-//!   to carry Magnetar's opaque (UUID / ULID) user ids — numeric-keyed apps
+//!   to carry Magnetar's opaque (UUID / ULID) user ids - numeric-keyed apps
 //!   round-trip via `Option<String>` without loss.
 //!
 //! Schema lives in [`crate::features::migrations::CreateFeaturesTable`].

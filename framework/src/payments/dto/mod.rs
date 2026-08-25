@@ -3,7 +3,7 @@
 //! These types are the wire format the framework hands to providers
 //! (e.g. [`StartSessionRequest`], [`ChargeRequest`]) and the shapes
 //! providers hand back (e.g. [`SessionPayload`], [`ChargeResult`]).
-//! They are deliberately provider-agnostic — every concrete provider
+//! They are deliberately provider-agnostic - every concrete provider
 //! adapter translates between its own SDK and these types so that
 //! application code stays portable across rails.
 

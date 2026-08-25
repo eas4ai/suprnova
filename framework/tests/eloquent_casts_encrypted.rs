@@ -1,4 +1,4 @@
-//! Phase 10A T7c — Encrypted + hashed casts.
+//! Phase 10A T7c - Encrypted + hashed casts.
 //!
 //! Same model-hoisting convention as T7a / T7b: models live at module
 //! scope so the `#[model]` macro's inner module (which only sees the
@@ -14,11 +14,11 @@
 //! 5. `AsHashed` creates a bcrypt hash on write; read returns the hash
 //! 6. Corrupt ciphertext yields a clear decrypt error (proves the decrypt
 //!    path actually runs)
-//! 7. `AsHashed` is idempotent across re-saves — loading then saving a
+//! 7. `AsHashed` is idempotent across re-saves - loading then saving a
 //!    model does NOT re-hash the already-hashed value. Without this
 //!    guard, `User::find().save()` would bcrypt the existing hash and
 //!    break login (Laravel's `hashed` cast skips rehashing for the same
-//!    reason — see `Hash::info()->algoName`).
+//!    reason - see `Hash::info()->algoName`).
 
 use serde::{Deserialize, Serialize};
 use suprnova::testing::TestDatabase;
@@ -121,7 +121,7 @@ async fn setup_db() -> TestDatabase {
 }
 
 /// Install the deterministic test encryption key + return a fresh in-memory
-/// SQLite. Idempotent — the underlying `Crypt` facade is `OnceLock`-backed
+/// SQLite. Idempotent - the underlying `Crypt` facade is `OnceLock`-backed
 /// so the second call is a no-op (the helper itself ignores the return).
 #[cfg(feature = "testing")]
 async fn setup_db_with_key() -> TestDatabase {
@@ -176,7 +176,7 @@ async fn as_encrypted_array_round_trips() {
     .unwrap();
 
     // Tokens are long on purpose. This test used to store "t1"/"t2"/"t3"
-    // and assert the ciphertext did not contain "t1" — but the ciphertext
+    // and assert the ciphertext did not contain "t1" - but the ciphertext
     // is base64 over a 64-symbol alphabet, so any given two-character
     // needle turns up by chance roughly once per 4096 positions. Against
     // ~100 characters of ciphertext that is a couple of percent per run:
@@ -287,7 +287,7 @@ async fn as_hashed_writes_bcrypt_and_does_not_decrypt() {
         .await
         .unwrap();
 
-    // Both the in-memory value and the stored value are the bcrypt hash —
+    // Both the in-memory value and the stored value are the bcrypt hash -
     // AsHashed is one-way (Laravel matches this).
     assert!(
         made.password.starts_with("$2b$") || made.password.starts_with("$2a$"),
@@ -295,7 +295,7 @@ async fn as_hashed_writes_bcrypt_and_does_not_decrypt() {
         made.password
     );
 
-    // Verify the hash actually verifies the original plaintext — proves
+    // Verify the hash actually verifies the original plaintext - proves
     // the cast called the real `hashing::hash` and didn't, say, store
     // the literal "plain-secret" with a `$2b$` prefix.
     assert!(
@@ -313,7 +313,7 @@ async fn as_hashed_writes_bcrypt_and_does_not_decrypt() {
 #[cfg(feature = "testing")]
 #[tokio::test]
 async fn corrupt_ciphertext_yields_clear_error() {
-    // Proves the decrypt path actually runs and surfaces errors —
+    // Proves the decrypt path actually runs and surfaces errors -
     // without depending on a "remove the key after install" API that
     // doesn't exist on Crypt (its global state is OnceLock-backed).
     // Insert a value that isn't valid AES-GCM ciphertext directly via
@@ -330,7 +330,7 @@ async fn corrupt_ciphertext_yields_clear_error() {
 
     // #380 (Augment): `find` routes hydration through the fallible
     // `Model::try_from_storage`, so a corrupt ciphertext surfaces as a
-    // recoverable `Err(FrameworkError)` from `find()` — NOT a panic.
+    // recoverable `Err(FrameworkError)` from `find()` - NOT a panic.
     // This is the contract that keeps a corrupt row from tearing down a
     // queue worker, the scheduler, or a CLI command that has no
     // panic-recovery net. (The infallible `From<inner::Model>` escape
@@ -376,7 +376,7 @@ async fn as_hashed_is_idempotent_across_re_saves() {
     let reloaded = HashIdemModel::find(made.id).await.unwrap().unwrap();
     assert_eq!(reloaded.password, hash_after_create);
 
-    // Save again — same hash in memory, the update path walks every
+    // Save again - same hash in memory, the update path walks every
     // cast field and re-runs `to_storage`. With the idempotence guard
     // in AsHashed, the stored value stays equal.
     reloaded.save().await.unwrap();

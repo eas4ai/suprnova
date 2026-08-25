@@ -4,11 +4,11 @@
 //! [`crate::web_push::WebPushClient`]. The route returned by
 //! `Notifiable::route_for("webpush")` MUST be a JSON-encoded
 //! [`SubscriptionInfo`] (`{"endpoint": "...", "keys": {"p256dh": "...",
-//! "auth": "..."}}`) — this matches the shape browsers hand back from
+//! "auth": "..."}}`) - this matches the shape browsers hand back from
 //! `PushSubscription.toJSON()`, so callers can store the subscription
 //! verbatim and return it untouched. Subscriptions that the push service
 //! has invalidated (HTTP 404/410) are logged at WARN and skipped, not
-//! propagated as errors — Phase 5B stops short of automatic cleanup but
+//! propagated as errors - Phase 5B stops short of automatic cleanup but
 //! the warn log gives operators a paper trail to act on.
 //!
 //! ## Why `Arc<WebPushClient>`
@@ -32,7 +32,7 @@ use std::sync::Arc;
 /// Construct with an `Arc<WebPushClient>` so a single VAPID-signing
 /// client can be shared across channel registrations and concurrent
 /// fan-out without re-constructing the signer (which is not `Clone`).
-/// `ttl_secs` is forwarded as the `TTL` header — the push service caps
+/// `ttl_secs` is forwarded as the `TTL` header - the push service caps
 /// this and discards undelivered messages after that window.
 pub struct WebPushChannel {
     client: Arc<WebPushClient>,
@@ -78,7 +78,7 @@ impl Channel for WebPushChannel {
             Ok(_) => Ok(()),
             Err(WebPushError::SubscriptionGone) => {
                 // The push service told us this subscription is dead (404/410).
-                // Surface a structured warn — callers should remove the stored
+                // Surface a structured warn - callers should remove the stored
                 // subscription, but we don't fail dispatch over it because the
                 // notification "succeeded" in the only sense available: it
                 // reached a terminal state with no recipient to retry against.

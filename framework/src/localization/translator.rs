@@ -5,7 +5,7 @@ use crate::error::FrameworkError;
 use crate::validation::message::TranslateArgs;
 use std::sync::Arc;
 
-/// A locale's merged catalog source and its content hash — consumed by
+/// A locale's merged catalog source and its content hash - consumed by
 /// the `/_suprnova/lang/<locale>.ftl` endpoint and the Inertia share.
 #[derive(Debug, Clone)]
 pub struct CatalogSource {
@@ -21,7 +21,7 @@ pub struct CatalogSource {
 /// A message translator. One driver ships ([`FluentTranslator`](super::FluentTranslator));
 /// the trait is the extension seam for alternative backends.
 pub trait Translator: Send + Sync {
-    /// Translate `key` for `locale`. Missing key or locale is an `Err` —
+    /// Translate `key` for `locale`. Missing key or locale is an `Err` -
     /// the *fallback chain* (current → configured parents
     /// (`APP_LOCALE_PARENTS`) → fallback → key) belongs to the `Lang`
     /// facade, not to drivers.
@@ -39,7 +39,7 @@ pub trait Translator: Send + Sync {
     fn available_locales(&self) -> Vec<Locale>;
 
     /// The merged catalog for `locale`, if loaded. Custom drivers should
-    /// return chain-complete text — the framework's own driver serves
+    /// return chain-complete text - the framework's own driver serves
     /// catalogs already flattened across the locale's parent chain; a
     /// driver that hands back only the locale's own keys leaves the
     /// browser unable to resolve any key the served locale inherits rather
@@ -50,7 +50,7 @@ pub trait Translator: Send + Sync {
     fn reload(&self) -> Result<(), FrameworkError>;
 
     /// Re-read catalogs from disk only if they changed since the last
-    /// load — the dev-mode hot-reload hook `LocaleMiddleware` calls on
+    /// load - the dev-mode hot-reload hook `LocaleMiddleware` calls on
     /// every request in `Local`/`Development`. Defaults to `Ok(false)`
     /// (never stale, nothing reloaded) so a custom driver only needs to
     /// implement staleness detection if it wants the hook to do

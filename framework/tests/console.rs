@@ -10,7 +10,7 @@
 //!   - `list()` returns entries sorted by name
 //!
 //! `inventory` registrations are link-time and cannot be cleared
-//! between tests — fixtures here use distinct command names to
+//! between tests - fixtures here use distinct command names to
 //! avoid collisions with other tests in the binary.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,7 +106,7 @@ async fn dispatch_returns_err_for_unknown_command() {
 
     // Clap printed the formatted error to stderr inside dispatch
     // (with "did you mean ..." suggestions). The returned Err
-    // carries no message — main must not double-print.
+    // carries no message - main must not double-print.
     assert!(
         err.is_silent(),
         "clap-reported errors are silent so main doesn't double-print"
@@ -217,7 +217,7 @@ async fn dispatch_with_real_subcommand_runs_lazy_init() {
     // Use test:fail so this test doesn't touch the shared GREET_INVOCATIONS
     // counter that dispatch_invokes_registered_handler_with_trailing_args
     // resets and checks. The lazy-init contract only requires that init
-    // fires once for any real subcommand — which command doesn't matter.
+    // fires once for any real subcommand - which command doesn't matter.
     let argv = vec!["console".to_string(), "test:fail".to_string()];
     let _ = console::dispatch_argv_with_init(argv, move || {
         let counter = init_calls_inner.clone();
@@ -226,7 +226,7 @@ async fn dispatch_with_real_subcommand_runs_lazy_init() {
         }
     })
     .await;
-    // test:fail returns Err — that's expected; we only care about init count.
+    // test:fail returns Err - that's expected; we only care about init count.
 
     assert_eq!(
         init_calls.load(std::sync::atomic::Ordering::SeqCst),

@@ -1,7 +1,7 @@
 //! Smoke test: `suprnova new` must scaffold a non-empty `APP_KEY`
 //! into the generated `.env` (codex review finding #1).
 //!
-//! Both starter flavors are covered — the default Inertia starter
+//! Both starter flavors are covered - the default Inertia starter
 //! (which writes `.env` via `templates::env`) and the `--api` starter
 //! (which writes `.env` via `templates::api::env`). A scaffolded app
 //! must boot out-of-the-box without the operator having to mint a

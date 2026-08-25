@@ -1,9 +1,9 @@
-//! The token guard — Laravel's `TokenGuard`, for stateless API auth.
+//! The token guard - Laravel's `TokenGuard`, for stateless API auth.
 //!
 //! Unlike [`SessionGuard`](super::SessionGuard), `TokenGuard` is
 //! **read-only**: it implements [`Guard`] but **not**
 //! [`StatefulGuard`](super::StatefulGuard), because a bearer-token API
-//! has no "login" or "logout" — the token *is* the credential. This
+//! has no "login" or "logout" - the token *is* the credential. This
 //! type-level distinction is the point: `Auth::stateful_guard("api")`
 //! fails fast rather than letting a caller persist a session-cookie
 //! login through a token-named guard.
@@ -12,7 +12,7 @@
 //!
 //! `TokenGuard` reads the authenticated id from the per-request session
 //! scope (`session::auth_user_id`). It does **not** parse the
-//! `Authorization` header itself — that is
+//! `Authorization` header itself - that is
 //! `crate::magnetar_integration::middleware::BearerTokenMiddleware`'s job:
 //! it validates the `Authorization: Bearer <token>` header against the
 //! Magnetar session store and binds the resolved `user_id` into the request

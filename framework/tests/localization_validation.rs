@@ -184,8 +184,8 @@ async fn derive_length_bounds_select_the_right_phrasing() {
     let tmp = tempfile::tempdir().unwrap();
     bind_translator(tmp.path());
 
-    // One-sided `#[validate(length(min = 2))]` — the shape the scaffold
-    // templates use — must still resolve, not fall back.
+    // One-sided `#[validate(length(min = 2))]` - the shape the scaffold
+    // templates use - must still resolve, not fall back.
     let mut ve = validator::ValidationErrors::new();
     let mut err = validator::ValidationError::new("length");
     err.add_param("min".into(), &2);
@@ -224,7 +224,7 @@ async fn author_supplied_message_beats_the_catalog() {
     );
     bind_translator(tmp.path());
 
-    // `#[validate(length(min = 1, message = "Password is required"))]` —
+    // `#[validate(length(min = 1, message = "Password is required"))]` -
     // the shape the scaffold templates use.
     let mut ve = validator::ValidationErrors::new();
     let mut err = validator::ValidationError::new("length");
@@ -338,11 +338,11 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
     .await;
 }
 
-/// I2 — `Lang::has` is documented as chain-aware: true when `key`
+/// I2 - `Lang::has` is documented as chain-aware: true when `key`
 /// resolves in the *current* locale's catalog **or** the fallback's
 /// (mirroring `Lang::get`/`try_get`, which also retry the fallback on a
 /// miss). Every other `has`/`to_json` test in this file defines the
-/// asserted key in the current locale — `every_builtin_key_resolves_in_
+/// asserted key in the current locale - `every_builtin_key_resolves_in_
 /// the_embedded_catalog` scopes `en` and checks the `en`-embedded
 /// catalog, `builtin_rule_message_translates_per_locale` scopes `es`
 /// and defines its key in `es`, and so on. A regression from

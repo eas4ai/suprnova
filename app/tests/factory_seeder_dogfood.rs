@@ -1,4 +1,4 @@
-//! Phase 6A T7 — Factory + Seeder dogfood integration test.
+//! Phase 6A T7 - Factory + Seeder dogfood integration test.
 //!
 //! Stands up a fresh `sqlite::memory:` connection with the dogfood
 //! app's migrations applied, registers the application's
@@ -31,8 +31,8 @@ async fn base_seeder_creates_50_users_and_200_posts() {
     seed::clear();
 
     // Bind a fresh sqlite::memory: connection through the TestContainer
-    // so any code calling `DB::connection()` — including the framework's
-    // blanket `Persistable` impl — sees it.
+    // so any code calling `DB::connection()` - including the framework's
+    // blanket `Persistable` impl - sees it.
     let _guard = TestContainer::fake();
     let conn = Database::connect("sqlite::memory:").await.unwrap();
     app::migrations::Migrator::up(&conn, None)
@@ -66,7 +66,7 @@ async fn base_seeder_creates_50_users_and_200_posts() {
         "PostFactory.count(200).create_many() produced 200 rows"
     );
 
-    // A post sample carries non-empty title/body — the fake
+    // A post sample carries non-empty title/body - the fake
     // generators populated them.
     let sample = app::models::posts::Entity::find()
         .one(&conn)

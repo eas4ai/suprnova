@@ -1,4 +1,4 @@
-//! Phase 10B T5 — `HasOneThrough` / `HasManyThrough` + key inference.
+//! Phase 10B T5 - `HasOneThrough` / `HasManyThrough` + key inference.
 //!
 //! Two-hop relations: `A -> B -> C` traversed in a single `INNER JOIN`
 //! query. Mirrors Laravel's `hasManyThrough` / `hasOneThrough` shape;
@@ -10,16 +10,16 @@
 //!
 //! - Default key inference (`country_id` on the intermediate, plus
 //!   the target's own FK to the intermediate).
-//! - Per-parent isolation — a parent through one intermediate set
+//! - Per-parent isolation - a parent through one intermediate set
 //!   must not pull rows reachable from a different parent.
-//! - HasOneThrough — single-row semantics over the same JOIN.
+//! - HasOneThrough - single-row semantics over the same JOIN.
 //! - Custom keys via `first_key = "..."` / `second_key = "..."`.
 //! - Server-side `GROUP BY` for `__count_relation` (one round trip,
-//!   one row per parent) — matches the T3/T4 contract.
+//!   one row per parent) - matches the T3/T4 contract.
 //! - Server-side `GROUP BY` for `__aggregate_relation` (Sum/Avg → f64,
 //!   Min/Max → Option<f64>, both with the empty-group defaults from
 //!   the T3/T4 quality-fix commits).
-//! - Eager-load distribution — `Self::with(["..."])` populates each
+//! - Eager-load distribution - `Self::with(["..."])` populates each
 //!   parent's `__eager` cache; `<rel>_loaded()` reads back the right
 //!   per-parent group.
 //!
@@ -122,7 +122,7 @@ async fn has_many_through_returns_all_grandchildren() {
 async fn has_many_through_filters_by_intermediate_country() {
     // Two countries, each owning one user, each user owning one post.
     // The relation must return only the posts whose user belongs to
-    // the requested country — the JOIN's `WHERE b.first_key = ?` is
+    // the requested country - the JOIN's `WHERE b.first_key = ?` is
     // what enforces isolation between parents.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -166,7 +166,7 @@ async fn has_many_through_first_returns_one_or_none() {
     assert!(first.is_some());
     assert_eq!(first.unwrap().title, "p");
 
-    // Empty case — different country with no users.
+    // Empty case - different country with no users.
     let c2 = ThCountry::create(attrs! { name: "Empty" }).await.unwrap();
     let none = c2.posts().first().await.unwrap();
     assert!(none.is_none());
@@ -220,7 +220,7 @@ pub struct CkArticle {
 #[tokio::test]
 async fn has_many_through_custom_keys() {
     // Schema renames the FK columns away from the snake-case defaults
-    // (`ck_author_id`, `ck_owner_id`) — the relation only works if
+    // (`ck_author_id`, `ck_owner_id`) - the relation only works if
     // the macro honours `first_key = "owner_uid"` / `second_key =
     // "author_uid"`. The hop chain otherwise has no `*_id` columns to
     // fall back on.
@@ -334,12 +334,12 @@ async fn has_one_through_returns_single() {
     assert!(profile.is_some(), "HasOneThrough must traverse two hops");
     assert_eq!(profile.unwrap().bio, "Hello");
 
-    // `.first()` is the alias for `.get()` on HasOneThrough — both
+    // `.first()` is the alias for `.get()` on HasOneThrough - both
     // collapse to the first row from the JOIN.
     let via_first = u.profile().first().await.unwrap();
     assert!(via_first.is_some());
 
-    // Empty case — second user with no membership row.
+    // Empty case - second user with no membership row.
     let u2 = HoUser::create(attrs! { name: "Bob" }).await.unwrap();
     let none = u2.profile().get().await.unwrap();
     assert!(none.is_none(), "no membership chain => None");
@@ -408,7 +408,7 @@ async fn has_many_through_count_uses_server_side_group_by() {
 async fn has_many_through_aggregate_via_server_side_group_by() {
     // Verify the four aggregate kinds round-trip via the JOIN +
     // GROUP BY path. Sum/Avg → f64 with 0.0 empty default; Min/Max →
-    // Option<f64> with None empty default — matches T3 (HasMany) and
+    // Option<f64> with None empty default - matches T3 (HasMany) and
     // T4 (BelongsToMany).
     //
     // Driven through the dispatcher directly (Builder::with_sum etc.
@@ -544,9 +544,9 @@ async fn has_many_through_aggregate_via_server_side_group_by() {
 async fn has_many_through_eager_load_distributes_by_parent() {
     // The two-query eager-load strategy must group C rows back to
     // the right parent via the b_to_parent map. Two countries, each
-    // with their own users + posts — no rows from one should leak
+    // with their own users + posts - no rows from one should leak
     // into the other's `<rel>_loaded()` slice. Third country has
-    // zero users (and thus zero posts) — its loaded slice must be
+    // zero users (and thus zero posts) - its loaded slice must be
     // empty, not panic.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -627,7 +627,7 @@ pub struct SlkDevice {
 
 #[tokio::test]
 async fn has_many_through_honours_second_local_key() {
-    // Intermediate `SlkOffice` declares `primary_key = "uid"` —
+    // Intermediate `SlkOffice` declares `primary_key = "uid"` -
     // without `second_local_key = "uid"` the dispatcher's JOIN reads
     // `__sn_b.id` (which doesn't exist on this table) and silently
     // produces empty results. This test pins the override flow
@@ -724,7 +724,7 @@ async fn has_many_through_honours_second_local_key() {
 
 #[tokio::test]
 async fn has_one_through_eager_load_distributes_single_row() {
-    // HasOneThrough eager-load must distribute via `set_one` — each
+    // HasOneThrough eager-load must distribute via `set_one` - each
     // parent gets `Option<C>`, not a slice. Different from
     // HasManyThrough where `set_many` distributes `Vec<C>`.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -778,7 +778,7 @@ async fn has_one_through_eager_load_distributes_single_row() {
 //
 // Regression: the Through `__eager_load` distribute block previously built
 // the per-parent lookup key as `serde_json::to_value(&p.pk).to_string()`.
-// For `i64` PKs that produces `"42"` — matches the `CAST(parent_id AS TEXT)`
+// For `i64` PKs that produces `"42"` - matches the `CAST(parent_id AS TEXT)`
 // result on the b->parent map. For `String` PKs like `"A1"` it produced the
 // JSON-quoted `"\"A1\""` while the SQL CAST result was the raw `"A1"`. The
 // HashMap lookup missed → every parent silently received an empty
@@ -841,7 +841,7 @@ async fn migrate_str_through(db: &TestDatabase) {
 
 #[tokio::test]
 async fn has_many_through_eager_load_with_string_parent_pk() {
-    // Raw-SQL setup — the String-PK `create()` path is orthogonal to the
+    // Raw-SQL setup - the String-PK `create()` path is orthogonal to the
     // bug under test; `ThStrOwner::all()` then `query().with(...).get()`
     // exercise the Builder + `__eager_load` path that does the lookup.
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -891,7 +891,7 @@ async fn has_many_through_eager_load_with_string_parent_pk() {
     assert_eq!(
         a1_posts.len(),
         2,
-        "String-PK parent must receive its grandchildren — \
+        "String-PK parent must receive its grandchildren - \
          if this regresses to 0, the distribute-key shape no longer \
          matches the b_to_parent CAST output (bug pre-T5-audit-fix)"
     );

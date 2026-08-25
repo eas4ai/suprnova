@@ -7,7 +7,7 @@
 //! decrypted under a previous key, or when a key has been compromised.
 //! The middleware must gate the id through
 //! `super::store::is_valid_session_id` (40 lowercase-alphanumeric) and
-//! mint a fresh id when the shape does not match — never let an
+//! mint a fresh id when the shape does not match - never let an
 //! arbitrary string reach `SessionStore::read`.
 
 use async_trait::async_trait;
@@ -164,7 +164,7 @@ async fn invalid_shape_id_never_reaches_store_or_causes_a_synthetic_miss() {
 
     // Construct a cookie carrying a plainly-invalid id (wrong length,
     // wrong charset). Cookie::encrypted produces a real GCM-authenticated
-    // wire — the middleware will successfully DECRYPT it, but the
+    // wire - the middleware will successfully DECRYPT it, but the
     // shape gate must then reject the plaintext and mint a fresh id.
     let bad_id = "FOO";
     let cookie = Cookie::encrypted("suprnova_session", bad_id).unwrap();
@@ -186,7 +186,7 @@ async fn invalid_shape_id_never_reaches_store_or_causes_a_synthetic_miss() {
 }
 
 /// A cookie carrying a SHAPE-VALID id must pass straight through to
-/// the store — the validation gate is for malformed ids only.
+/// the store - the validation gate is for malformed ids only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_shape_id_is_forwarded_to_store_untouched() {
     use suprnova::HttpResponse;

@@ -1,8 +1,8 @@
-//! Phase 10A T7a — Primitive + temporal casts.
+//! Phase 10A T7a - Primitive + temporal casts.
 //!
 //! Each test declares a model at module scope (the `#[model]` macro
 //! emits an inner module whose `use super::*;` only sees the test
-//! file's top-level imports — putting models inside test functions
+//! file's top-level imports - putting models inside test functions
 //! breaks cast-type resolution). The cast round-trips are asserted
 //! via `Model::create` + `Model::find`; the `as_bool_round_trips`
 //! test additionally asserts the storage shape with `db.fetch_one`.
@@ -145,7 +145,7 @@ async fn as_bool_round_trips() {
     let read = OnlyBool::find(made.id).await.unwrap().unwrap();
     assert!(read.flag);
 
-    // Verify storage shape — boolean came back as integer 1.
+    // Verify storage shape - boolean came back as integer 1.
     let raw = db
         .fetch_one(
             "SELECT flag FROM t7a_bool_only WHERE id = ?",
@@ -178,8 +178,8 @@ async fn as_float_round_trips() {
     )
     .await
     .unwrap();
-    // 2.5 picked deliberately to dodge clippy's `approx_constant` (3.14 ≈ π)
-    // — the cast is a no-op pass-through; the value just needs to be a
+    // 2.5 picked deliberately to dodge clippy's `approx_constant` (3.14 ≈ π) -
+    // the cast is a no-op pass-through; the value just needs to be a
     // representable f64 that survives binary round-trip.
     let made = OnlyFloat::create(attrs! { x: 2.5_f64 }).await.unwrap();
     let read = OnlyFloat::find(made.id).await.unwrap().unwrap();

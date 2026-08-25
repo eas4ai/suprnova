@@ -1,7 +1,7 @@
 use sea_orm_migration::prelude::*;
 
 /// Creates the `auth_flow_tokens` table that backs single-use email-
-/// verification and password-reset links. The framework owns the schema —
+/// verification and password-reset links. The framework owns the schema -
 /// this migration just applies the table builder it exposes so the columns,
 /// indexes, and UNIQUE constraints stay in lockstep with the framework's
 /// token store.

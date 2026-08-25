@@ -1,4 +1,4 @@
-//! Coverage for `Notify::fake()` — the in-memory recorder that captures
+//! Coverage for `Notify::fake()` - the in-memory recorder that captures
 //! dispatches without invoking channels.
 
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,7 @@ async fn notify_fake_skips_channels_with_no_route() {
     )
     .await
     .unwrap();
-    // database has no route — only one channel recorded.
+    // database has no route - only one channel recorded.
     assert_count(1);
     assert_sent_to_on("x@example.com", "mail", "OrderShipped");
 }
@@ -157,7 +157,7 @@ async fn notify_fake_assert_nothing_sent_on_clean_slate() {
 #[serial]
 async fn notify_fake_works_for_queue_too() {
     let _g = Notify::fake();
-    // Queue::push would require a bound queue driver — under Notify::fake the
+    // Queue::push would require a bound queue driver - under Notify::fake the
     // job is recorded and the queue is never consulted.
     let u = User {
         id: 3,

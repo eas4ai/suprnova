@@ -9,7 +9,7 @@
 //! > explicitly changed to a `GET` request.
 //!
 //! Without this conversion, browsers may re-submit the original method
-//! to the redirect target — breaking form-create-then-redirect flows.
+//! to the redirect target - breaking form-create-then-redirect flows.
 //! Laravel's Inertia adapter ships this conversion inside its own
 //! middleware; Suprnova ships it as an opt-in via `global_middleware!`.
 
@@ -22,7 +22,7 @@ use async_trait::async_trait;
 pub struct Inertia303Middleware;
 
 impl Inertia303Middleware {
-    /// Build a new `Inertia303Middleware`. Stateless — no arguments needed.
+    /// Build a new `Inertia303Middleware`. Stateless - no arguments needed.
     pub fn new() -> Self {
         Self
     }
@@ -46,7 +46,7 @@ impl Middleware for Inertia303Middleware {
         // Only act when an Inertia PUT / PATCH / DELETE produced a 302
         // redirect. Per the Inertia v3 protocol
         // (`core-concepts/redirects.mdx`), the conversion is narrowed
-        // to the *unsafe idempotent verbs* — POST redirects keep the
+        // to the *unsafe idempotent verbs* - POST redirects keep the
         // browser default of 302, mirroring Laravel's standard
         // post-redirect-get pattern. The previous "any non-GET" gate
         // accidentally swept POST too, breaking apps that rely on

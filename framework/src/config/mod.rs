@@ -175,7 +175,7 @@ impl Config {
     ///
     /// Resolution order: a programmatically-registered `AppConfig` wins;
     /// otherwise we fall back to `AppConfig::from_env()`, which reads
-    /// `APP_DEBUG` and — if that env var is also unset — applies the
+    /// `APP_DEBUG` and - if that env var is also unset - applies the
     /// env-aware default (true in Local/Development/Testing, false
     /// elsewhere). This keeps loud-by-default DX on the
     /// repository-not-yet-seeded boot/test path while staying fail-closed
@@ -190,7 +190,7 @@ impl Config {
 
     /// Deserialize the current process's environment into a typed
     /// config struct via [`envy`]. Field names map to env vars
-    /// UPPER_SNAKE — `pub mail_host: String` reads `MAIL_HOST`. Use
+    /// UPPER_SNAKE - `pub mail_host: String` reads `MAIL_HOST`. Use
     /// `#[serde(default = "...")]` for fallbacks and
     /// `#[serde(rename = "...")]` to override the env-var name.
     ///

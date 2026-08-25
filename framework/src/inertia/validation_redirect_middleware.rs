@@ -2,7 +2,7 @@
 //!
 //! The Inertia client treats a response with no `X-Inertia` header as
 //! non-Inertia (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`)
-//! and hands it to `dialog.show(...)` — the full-screen error modal
+//! and hands it to `dialog.show(...)` - the full-screen error modal
 //! (`response.ts:168-169`). A `422` body therefore never reaches
 //! `form.errors`, so a failed `useForm().post()` shows a crash screen
 //! unless the handler redirects by hand.
@@ -24,7 +24,7 @@ use async_trait::async_trait;
 pub struct InertiaValidationRedirectMiddleware;
 
 impl InertiaValidationRedirectMiddleware {
-    /// Build a new `InertiaValidationRedirectMiddleware`. Stateless — no
+    /// Build a new `InertiaValidationRedirectMiddleware`. Stateless - no
     /// arguments needed.
     pub fn new() -> Self {
         Self
@@ -88,7 +88,7 @@ impl Middleware for InertiaValidationRedirectMiddleware {
     }
 }
 
-/// The request's own path plus query — the last-resort redirect target.
+/// The request's own path plus query - the last-resort redirect target.
 fn current_path_and_query(request: &Request) -> String {
     match request.query() {
         Some(q) if !q.is_empty() => format!("{}?{}", request.path(), q),
@@ -100,11 +100,11 @@ fn current_path_and_query(request: &Request) -> String {
 ///
 /// Mirrors Laravel's `UrlGenerator::previous()`: `Referer` first, the
 /// session's recorded previous URL second. [`Redirect::back`] cannot be
-/// used — it consults only the session, and `SessionMiddleware` writes
+/// used - it consults only the session, and `SessionMiddleware` writes
 /// `_previous.url` for non-Inertia GETs only, so in a pure Inertia SPA
 /// that value is whatever page was last hard-loaded rather than the form
-/// just submitted. The final fallback is the failing request's own URL —
-/// exactly right for the common `GET /login` + `POST /login` pair — run
+/// just submitted. The final fallback is the failing request's own URL -
+/// exactly right for the common `GET /login` + `POST /login` pair - run
 /// through the same [`root_relative_or_none`] guard as the `Referer` leg
 /// and falling back to `/` if even that somehow fails it (an origin-form
 /// HTTP request-target is technically free to start with `//`, so this
@@ -197,7 +197,7 @@ mod tests {
     fn a_control_byte_anywhere_in_the_referer_is_rejected() {
         // The URL parser strips ASCII tab/newline from its whole input
         // before comparing origins, so `/<TAB>/evil.test` is `//evil.test`
-        // by the time a browser navigates it — confirmed working bypass
+        // by the time a browser navigates it - confirmed working bypass
         // against a version of this guard that only inspected the single
         // character right after the leading `/`.
         assert_eq!(same_origin_path("/\t/evil.test", Some("app.test")), None);
@@ -206,7 +206,7 @@ mod tests {
         // defect and this pins the contract regardless of reachability.
         assert_eq!(same_origin_path("/\n/evil.test", Some("app.test")), None);
         assert_eq!(same_origin_path("/\r/evil.test", Some("app.test")), None);
-        // Not just right after the leading slash — anywhere in the
+        // Not just right after the leading slash - anywhere in the
         // candidate, since the parser strips the whole input, not a
         // prefix of it.
         assert_eq!(
@@ -234,7 +234,7 @@ mod tests {
     fn an_unsanitary_current_url_falls_back_to_root_instead_of_being_trusted() {
         // `current` is normally the router's own matched path, but an
         // origin-form HTTP request-target is syntactically free to start
-        // with `//` — a raw client or a non-normalizing proxy can hand
+        // with `//` - a raw client or a non-normalizing proxy can hand
         // the framework `path() == "//evil.test/register"`. The final
         // fallback must not trust it verbatim.
         assert_eq!(

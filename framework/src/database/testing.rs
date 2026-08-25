@@ -146,7 +146,7 @@ impl TestDatabase {
     ///
     /// Companion to [`Self::fresh`] for tests that build their own ad-hoc tables
     /// via [`Self::execute_unprepared`]. Same container registration semantics
-    /// as `fresh` — any code calling `DB::connection()` resolves to this DB.
+    /// as `fresh` - any code calling `DB::connection()` resolves to this DB.
     ///
     /// Use `fresh::<M>()` for end-to-end tests with a real migrator; use
     /// `sqlite_memory()` for unit tests that need precise column-shape control.

@@ -208,7 +208,7 @@ async fn notification_short_circuits_on_first_channel_error() {
 
     // OrderShipped declares channels in order ["mail", "database"]. With mail
     // failing first, the dispatcher must surface the mail error AND must not
-    // invoke the database channel — that's the documented contract.
+    // invoke the database channel - that's the documented contract.
     let dispatcher = NotificationDispatcher::new()
         .register_channel(Arc::new(FailingMailChannel))
         .register_channel(Arc::new(DbChannelStub));

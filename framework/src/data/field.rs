@@ -6,9 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Three-state field for partial-update payloads.
 ///
-/// - `Absent` — key was not present in the input JSON.
-/// - `Null` — key was present with an explicit `null` value.
-/// - `Value(T)` — key was present with a typed value.
+/// - `Absent` - key was not present in the input JSON.
+/// - `Null` - key was present with an explicit `null` value.
+/// - `Value(T)` - key was present with a typed value.
 ///
 /// Pair with `#[serde(default, skip_serializing_if = "Field::is_absent")]`
 /// on the struct field to wire absent-detection on deserialize and
@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// Stacking `Field` over `Option` collapses one state during a JSON
 /// round-trip. `Field::Value(None)` serializes to `null` and deserializes
-/// back to `Field::Null` — the `Value(None)` distinction is lost. For
+/// back to `Field::Null` - the `Value(None)` distinction is lost. For
 /// "absent vs explicit null" semantics over an inner-nullable column,
 /// model the column as `T` and let `Field::Null` carry the "clear it"
 /// signal directly.
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(
             back.x,
             Field::Null,
-            "Value(None) round-trips through JSON as Null — known limitation"
+            "Value(None) round-trips through JSON as Null - known limitation"
         );
     }
 }

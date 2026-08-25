@@ -123,7 +123,7 @@ async fn middleware_enforces_per_route_quota_and_returns_429_with_retry_after() 
 }
 
 /// A static key function ("global") puts all routes in the same bucket.
-/// After the quota is exhausted any path returns 429 — verifying that
+/// After the quota is exhausted any path returns 429 - verifying that
 /// the key closure drives bucket selection independently of routing.
 #[tokio::test]
 async fn middleware_key_fn_drives_bucket_selection() {
@@ -151,7 +151,7 @@ async fn middleware_key_fn_drives_bucket_selection() {
     assert!(retry.is_some(), "429 must carry Retry-After");
 }
 
-/// A `RateLimiter` whose backend always errors — models Redis being
+/// A `RateLimiter` whose backend always errors - models Redis being
 /// unreachable. Used to exercise the `BackendErrorPolicy` branches, which are
 /// distinct from the over-quota (429) path.
 struct FailingLimiter;
@@ -200,7 +200,7 @@ where
 
 /// Default policy is fail-open: when the backend errors the request is passed
 /// through to the handler. The handler flips a shared flag, so the test proves
-/// the request actually reached it — a 200 alone could come from anywhere.
+/// the request actually reached it - a 200 alone could come from anywhere.
 #[tokio::test]
 async fn backend_error_fails_open_by_default_and_runs_handler() {
     let limiter: Arc<dyn RateLimiterDriver> = Arc::new(FailingLimiter);
@@ -208,7 +208,7 @@ async fn backend_error_fails_open_by_default_and_runs_handler() {
         max_requests: 2,
         window: Duration::from_secs(60),
     };
-    // No .on_backend_error(...) — exercise the default.
+    // No .on_backend_error(...) - exercise the default.
     let mw = RateLimitMiddleware::new(limiter, cfg, |_req| "global".to_string());
 
     let handler_ran = Arc::new(AtomicBool::new(false));

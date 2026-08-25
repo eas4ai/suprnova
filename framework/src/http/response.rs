@@ -8,7 +8,7 @@ use std::convert::Infallible;
 
 /// The body of an [`HttpResponse`].
 ///
-/// Static bodies are the common case — fully buffered `Bytes` produced
+/// Static bodies are the common case - fully buffered `Bytes` produced
 /// by `HttpResponse::text` / `json` / `html`. Streaming bodies back
 /// SSE, chunked downloads, and any other long-lived response surface
 /// (added in Task 16/17 of the observability foundation work). Both
@@ -22,7 +22,7 @@ pub enum Body {
     /// wrapped into `http_body::Frame::data(...)` at send time. We use
     /// `Infallible` for the error type because every chunk producer in
     /// the framework is responsible for turning its own errors into a
-    /// terminal SSE/stream message before the stream ends — there is
+    /// terminal SSE/stream message before the stream ends - there is
     /// no place to surface a transport-level error to the client mid-
     /// response, so the body must be infallible.
     Stream(BoxBody<Bytes, Infallible>),
@@ -99,10 +99,10 @@ impl HttpResponse {
     /// [`SseEvent`](crate::sse::SseEvent) values.
     ///
     /// Sets the four headers an SSE response must carry:
-    /// - `Content-Type: text/event-stream` — the spec'd MIME
-    /// - `Cache-Control: no-cache` — proxies must not cache event streams
-    /// - `Connection: keep-alive` — explicit even on HTTP/1.1 default
-    /// - `X-Accel-Buffering: no` — nginx-specific, disables proxy
+    /// - `Content-Type: text/event-stream` - the spec'd MIME
+    /// - `Cache-Control: no-cache` - proxies must not cache event streams
+    /// - `Connection: keep-alive` - explicit even on HTTP/1.1 default
+    /// - `X-Accel-Buffering: no` - nginx-specific, disables proxy
     ///   buffering so events flush to the client immediately. Harmless
     ///   on non-nginx; nginx defaults break SSE without it.
     ///
@@ -123,7 +123,7 @@ impl HttpResponse {
             .header("X-Accel-Buffering", "no")
     }
 
-    /// Build an `event_stream` response — Laravel's
+    /// Build an `event_stream` response - Laravel's
     /// `ResponseFactory::eventStream`. Frames every `StreamedEvent` as
     /// `event: update` unless it names its own event, then appends one
     /// terminal frame per `end` (Laravel's `$endStreamWith`). Built
@@ -164,7 +164,7 @@ impl HttpResponse {
     /// way. Used by [`HttpResponse::sse`] and any future chunked
     /// response surface.
     ///
-    /// The stream's error type is `Infallible` by design — see
+    /// The stream's error type is `Infallible` by design - see
     /// `Body::Stream` for rationale.
     ///
     /// `Sync` is required because `BoxBody` is a shared trait object;
@@ -185,7 +185,7 @@ impl HttpResponse {
         }
     }
 
-    /// Build a `stream_json` response — Laravel's
+    /// Build a `stream_json` response - Laravel's
     /// `ResponseFactory::streamJson` / `StreamedJsonResponse`: any
     /// `Stream<Item = impl Serialize>` flushed as one incrementally
     /// built JSON array (`Content-Type: application/json`) instead of
@@ -267,8 +267,8 @@ impl HttpResponse {
     /// response because there is nothing buffered to hand back, so
     /// "`body().is_empty()`" cannot distinguish "no body" from "a body
     /// that hasn't been produced yet". Anything that reacts to an empty
-    /// body — [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware)
-    /// substituting a redirect, for one — has to check this first.
+    /// body - [`InertiaHeadersMiddleware`](crate::InertiaHeadersMiddleware)
+    /// substituting a redirect, for one - has to check this first.
     pub fn is_streaming(&self) -> bool {
         matches!(self.body, Body::Stream(_))
     }
@@ -283,7 +283,7 @@ impl HttpResponse {
     /// `Response::withHeaders($headers)`. The iterator may be any
     /// `IntoIterator` over `(K, V)` pairs (e.g. a `HashMap`,
     /// `Vec<(&str, &str)>`, or an array literal). Existing headers are
-    /// not deduplicated — append-only, matching Laravel's `setCookie`
+    /// not deduplicated - append-only, matching Laravel's `setCookie`
     /// plus `set('X-Foo', ...)` semantics that allow same-name repeats
     /// for `Set-Cookie`.
     pub fn with_headers<I, K, V>(mut self, headers: I) -> Self
@@ -305,7 +305,7 @@ impl HttpResponse {
         self
     }
 
-    /// Read a header value off this response (FIRST occurrence —
+    /// Read a header value off this response (FIRST occurrence -
     /// matches the typical Laravel test assertion `response()->headers->get(...)`).
     /// Returns `None` if no such header was set.
     pub fn header_value(&self, name: &str) -> Option<&str> {
@@ -320,7 +320,7 @@ impl HttpResponse {
     ///
     /// [`header_value`](Self::header_value) only ever sees the first line,
     /// which is correct for singleton headers but silently blind to a
-    /// header repeated across several lines — `Set-Cookie` always is, and
+    /// header repeated across several lines - `Set-Cookie` always is, and
     /// `Vary` legitimately can be when more than one middleware appends to
     /// it. A caller that needs to know whether a token is present
     /// *anywhere* in a multi-valued header (e.g. `X-Inertia` inside a
@@ -329,7 +329,7 @@ impl HttpResponse {
     ///
     /// The name is copied into the returned iterator rather than borrowed,
     /// so the iterator borrows only the response. A caller can build it
-    /// from a temporary — `response.header_values(&format!("X-{n}"))` —
+    /// from a temporary - `response.header_values(&format!("X-{n}"))` -
     /// and still hold it for as long as the response itself lives.
     pub fn header_values<'a>(&'a self, name: &str) -> impl Iterator<Item = &'a str> + 'a {
         let name = name.to_ascii_lowercase();
@@ -365,7 +365,7 @@ impl HttpResponse {
 
     /// Attach multiple cookies in one call. Mirrors Laravel's
     /// `Response::withCookies([...])`. Each cookie becomes its own
-    /// `Set-Cookie` header — same wire shape as repeated `.cookie()`
+    /// `Set-Cookie` header - same wire shape as repeated `.cookie()`
     /// calls.
     pub fn with_cookies<I>(mut self, cookies: I) -> Self
     where
@@ -409,23 +409,23 @@ impl HttpResponse {
 
     /// Convert to hyper response. The body is always a
     /// `BoxBody<Bytes, Infallible>` so the server can hand any
-    /// `HttpResponse` — static or streaming — to `hyper` without
+    /// `HttpResponse` - static or streaming - to `hyper` without
     /// branching on the body shape.
     ///
     /// Headers are validated per-entry via `HeaderName::try_from` and
     /// `HeaderValue::try_from`. Any header rejected by hyper (CRLF
     /// injection attempts, invalid characters, oversize values) is
     /// **dropped** with a `tracing::warn!` and the response is built
-    /// without it. The alternative — accumulating builder errors and
-    /// panicking at `.body()` — would tear down the per-connection task
+    /// without it. The alternative - accumulating builder errors and
+    /// panicking at `.body()` - would tear down the per-connection task
     /// on attacker-controlled input that any reflection-style
     /// middleware would forward into a header (CORS allow-headers,
     /// `X-Forwarded-*`, custom debug headers).
     ///
     /// The status code is constrained to the IANA HTTP status range
-    /// `100..=599`. Anything outside that range — `Hyper`'s own
+    /// `100..=599`. Anything outside that range - `Hyper`'s own
     /// `from_u16` is more permissive (it accepts the full `100..=999`
-    /// space, including the unassigned `6xx`-`9xx` block) — downgrades
+    /// space, including the unassigned `6xx`-`9xx` block) - downgrades
     /// to `500 Internal Server Error` with a `tracing::warn!` rather
     /// than reaching the wire. This catches `AppError::status(700)` /
     /// `FrameworkError::domain(_, 800)` typos before a client sees a
@@ -436,7 +436,7 @@ impl HttpResponse {
                 Ok(s) => s,
                 Err(_) => {
                     // Hyper rejected a value inside our nominal range
-                    // (shouldn't happen — `from_u16` accepts all
+                    // (shouldn't happen - `from_u16` accepts all
                     // 100..=999). Fall through to the 500 fallback.
                     tracing::warn!(
                         status = self.status,
@@ -490,7 +490,7 @@ impl HttpResponse {
         };
 
         // After per-header validation above, the only way `.body()` can
-        // fail is an internal hyper invariant violation — which would
+        // fail is an internal hyper invariant violation - which would
         // be a hyper bug, not user input. Panic in that case is the
         // right move because there's no meaningful recovery.
         builder
@@ -673,8 +673,8 @@ impl Redirect {
     }
 
     /// Redirect to an absolute external URL. Behaviour-identical to
-    /// [`Self::to`] but the name signals "this is going off-site"
-    /// — handy when reviewers want to spot external-redirect sinks
+    /// [`Self::to`] but the name signals "this is going off-site" -
+    /// handy when reviewers want to spot external-redirect sinks
     /// for open-redirect audits.
     ///
     /// Mirrors Laravel's `redirect()->away($path, $status, $headers)`
@@ -687,14 +687,14 @@ impl Redirect {
     ///
     /// Mirrors Laravel's `redirect()->refresh($status, $headers)` from
     /// `Illuminate/Routing/Redirector.php:57`. Useful after a POST that
-    /// mutates state on the current page — refreshing avoids the
+    /// mutates state on the current page - refreshing avoids the
     /// "browser asks to resubmit POST" warning.
     ///
     /// Resolves the current URL from the active request scope. Pass an
     /// explicit `Request` reference via [`Self::refresh_for`] when no
     /// scope is active.
     pub fn refresh() -> Self {
-        // The previous URL doubles as "what page were we on" — the
+        // The previous URL doubles as "what page were we on" - the
         // session middleware writes it before the handler runs.
         let dest = crate::session::session()
             .and_then(|s| s.previous_url())
@@ -829,7 +829,7 @@ impl Redirect {
                 )
             })
             .collect();
-        // Use the OLD_INPUT_KEY constant indirectly via flash_input —
+        // Use the OLD_INPUT_KEY constant indirectly via flash_input -
         // session's API guards the canonical key.
         self.flash.push((
             "__suprnova_input_flash".into(),
@@ -1034,7 +1034,7 @@ where
 /// redirect's preserve-fragment flag is set. Shared between the
 /// `From<Redirect>` and `From<RedirectRouteBuilder>` impls so they
 /// can't drift on flash behavior. No-op outside a `SessionMiddleware`
-/// scope (silently dropped — by design, for tests / partial setups).
+/// scope (silently dropped - by design, for tests / partial setups).
 fn flash_preserve_fragment_if_set(preserve: bool) {
     if preserve {
         crate::session::session_mut(|s| {
@@ -1067,7 +1067,7 @@ fn apply_fragment(mut url: String, strip: bool, replace: Option<&str>) -> String
 
 /// Drain a `Redirect`'s pending flash bag into the live session.
 /// Splits the input-bag entry off so it lands under the canonical
-/// `_old_input` key Laravel's `Store::flashInput` writes — that's how
+/// `_old_input` key Laravel's `Store::flashInput` writes - that's how
 /// the receiving page reads it back via `Session::getOldInput`.
 fn drain_flash(flash: Vec<(String, serde_json::Value)>) {
     if flash.is_empty() {
@@ -1095,7 +1095,7 @@ fn drain_flash(flash: Vec<(String, serde_json::Value)>) {
 impl From<Redirect> for Response {
     fn from(redirect: Redirect) -> Response {
         // Resolve the URL first while `redirect` is fully owned and
-        // borrow-clean — `build_url` reads `location`, `query_params`,
+        // borrow-clean - `build_url` reads `location`, `query_params`,
         // and `fragment`. Subsequent `drain_flash` moves the flash bag
         // out, so the URL must be computed before that.
         let url = redirect.build_url();
@@ -1128,7 +1128,7 @@ pub struct RedirectRouteBuilder {
     status: u16,
     preserve_fragment: bool,
     /// Flash payload to write into the session when this redirect is
-    /// converted to a Response. Mirrors [`Redirect`]'s field — kept
+    /// converted to a Response. Mirrors [`Redirect`]'s field - kept
     /// separate so both builder paths can use the same flash API
     /// (`with`, `with_input`, `with_errors`) without sharing a struct.
     flash: Vec<(String, serde_json::Value)>,
@@ -1169,7 +1169,7 @@ impl RedirectRouteBuilder {
     /// Flash a single key/value into the session for one more request.
     /// Mirrors Laravel's `RedirectResponse::with`. Distinct from
     /// `with` (the route-param builder), which lives at the
-    /// route-parameter level — use `flash` here for session flashes.
+    /// route-parameter level - use `flash` here for session flashes.
     pub fn flash(mut self, key: impl Into<String>, value: impl serde::Serialize) -> Self {
         let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
         self.flash.push((key.into(), value));
@@ -1323,7 +1323,7 @@ impl From<RedirectRouteBuilder> for Response {
     fn from(redirect: RedirectRouteBuilder) -> Response {
         // Route lookup runs first; if the named route is missing OR if
         // any required path parameter is absent, we return a 500 and
-        // intentionally skip the flash — otherwise a stray
+        // intentionally skip the flash - otherwise a stray
         // `_inertia.preserve_fragment` would land on whatever page the
         // user navigates to next, and a `Location` header containing
         // a raw `{placeholder}` is unsafe to ship to a browser.
@@ -1392,7 +1392,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
             crate::error::FrameworkError::AlreadyReported => {
                 // AlreadyReported is a CLI sentinel produced by
                 // `FrameworkError::silent()` for the console dispatcher.
-                // It has no HTTP meaning — its message is empty and its
+                // It has no HTTP meaning - its message is empty and its
                 // status would otherwise fall through as 500 with a
                 // blank "framework error" log line. If it ever reaches
                 // an HTTP path it indicates a controller/extractor
@@ -1437,7 +1437,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
             // so this `From` impl is safe to call from sync contexts that
             // happen to be outside a Tokio runtime (e.g. unit tests that
             // exercise error paths without `#[tokio::test]`). Outside a
-            // runtime the dispatch is silently dropped — same effect as
+            // runtime the dispatch is silently dropped - same effect as
             // having no listeners.
             let evt = crate::events::ErrorOccurred {
                 error_message: logged.clone(),
@@ -1467,7 +1467,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         // original detail still flows into logs + ErrorOccurred above.
         // When APP_DEBUG=true (false by default outside local/dev/test)
         // we additionally include a `debug_message` field for development
-        // visibility — frontends
+        // visibility - frontends
         // MUST NOT key on this field, which is why `message` stays
         // generic in both modes.
         let mut body = match &err {
@@ -1499,7 +1499,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
                 })
             }
             _ if status >= 500 => {
-                // Generic body — never the raw err.to_string().
+                // Generic body - never the raw err.to_string().
                 serde_json::json!({
                     "message": "Internal Server Error",
                 })
@@ -1513,7 +1513,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         };
         // Inject the request_id into every error body so frontends and
         // operators can correlate a client error to the structured log.
-        // Absent during early boot / tests with no request scope —
+        // Absent during early boot / tests with no request scope -
         // serializes as `null` in JSON, still a stable shape.
         if let Some(obj) = body.as_object_mut() {
             obj.insert(
@@ -1525,7 +1525,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
             );
             // Dev-only detail. Gated behind the registered AppConfig's
             // debug flag (falling back to env-derived AppConfig if the
-            // repository isn't seeded yet — `Config::is_debug` handles
+            // repository isn't seeded yet - `Config::is_debug` handles
             // that resolution). The `message` field stays generic in
             // both modes; this is strictly additive for developers,
             // never to be parsed by production clients.
@@ -1541,7 +1541,7 @@ impl From<crate::error::FrameworkError> for HttpResponse {
         // `retry_after` through `?` so handlers and integration
         // boundaries (rate_limit middleware, web_push, downstream
         // HTTP clients) don't strip the wire-level retry hint. Emit
-        // it as a `Retry-After` header in delta-seconds — the form
+        // it as a `Retry-After` header in delta-seconds - the form
         // every browser, proxy, and HTTP client library parses.
         if let crate::error::FrameworkError::RateLimited {
             retry_after: Some(d),
@@ -1600,7 +1600,7 @@ mod error_to_response_tests {
     }
 
     /// Sanity check: client errors (4xx) don't trigger the spawn
-    /// path at all, so they were never affected — but verify the
+    /// path at all, so they were never affected - but verify the
     /// conversion still works outside a runtime.
     #[test]
     fn param_error_converts_outside_tokio_runtime() {
@@ -1620,7 +1620,7 @@ mod error_to_response_tests {
         // The response body is the JSON we built; HttpResponse::json
         // sets Content-Type and stores the serialized payload in
         // `body`. Read it back through the body field via a String
-        // conversion — works because Body::Static wraps Bytes.
+        // conversion - works because Body::Static wraps Bytes.
     }
 
     #[test]
@@ -1801,8 +1801,8 @@ mod header_validation_tests {
     /// Out-of-range status codes downgrade to 500 rather than panic.
     /// Before any fix, the body builder's `.unwrap()` would panic.
     /// Today the wire boundary is constrained to `100..=599`: anything
-    /// outside that range — including the 6xx/7xx/8xx/9xx block hyper
-    /// would otherwise accept — downgrades to 500.
+    /// outside that range - including the 6xx/7xx/8xx/9xx block hyper
+    /// would otherwise accept - downgrades to 500.
     #[test]
     fn invalid_status_code_falls_back_to_500() {
         // 0 and 9999 are both outside the HTTP status range.
@@ -1829,7 +1829,7 @@ mod header_validation_tests {
         }
     }
 
-    /// Boundary check — valid codes flow through untouched.
+    /// Boundary check - valid codes flow through untouched.
     #[test]
     fn boundary_status_codes_in_range_flow_through() {
         for code in [100, 200, 204, 301, 404, 422, 500, 599] {
@@ -1895,7 +1895,7 @@ mod rate_limited_retry_after_tests {
 
     /// Sub-second durations are documented to render as their `as_secs()`
     /// value (delta-seconds is the wire-level format every browser /
-    /// proxy / HTTP library parses) — a 500ms hint truncates to 0,
+    /// proxy / HTTP library parses) - a 500ms hint truncates to 0,
     /// matching how the `http_client` retry path already coerces.
     #[test]
     fn rate_limited_sub_second_hint_truncates_to_seconds() {
@@ -1905,7 +1905,7 @@ mod rate_limited_retry_after_tests {
         assert_eq!(resp.header_value("Retry-After"), Some("0"));
     }
 
-    /// When the variant omits the hint (`None`), no header is emitted —
+    /// When the variant omits the hint (`None`), no header is emitted -
     /// callers downstream that key on `Retry-After.is_some()` to decide
     /// "honour pacing vs back off with my own policy" must see absence,
     /// not a stray `0`.

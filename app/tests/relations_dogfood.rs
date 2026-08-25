@@ -1,28 +1,28 @@
-//! Phase 10B T10 — End-to-end coverage for every relation kind against
+//! Phase 10B T10 - End-to-end coverage for every relation kind against
 //! the example app's real `Migrator` schema.
 //!
-//! Uses `TestDatabase::fresh::<Migrator>()` — same fresh-DB pattern Phase
-//! 10A's `eloquent_dogfood.rs` established — so the schema the relations
+//! Uses `TestDatabase::fresh::<Migrator>()` - same fresh-DB pattern Phase
+//! 10A's `eloquent_dogfood.rs` established - so the schema the relations
 //! resolve against can never drift from the migrator the dev DB actually
 //! runs. Every test gets its own connection (the macro-emitted relation
 //! method goes through `DB::connection()`, which `TestDatabase::fresh`
 //! installs as the request-local override).
 //!
-//! Coverage matrix — one or more tests per relation kind:
+//! Coverage matrix - one or more tests per relation kind:
 //!
-//! - `HasMany` — `User.posts()` count + get
-//! - `BelongsToMany` + `Pivot` accessor — `User.roles()` attach_with +
+//! - `HasMany` - `User.posts()` count + get
+//! - `BelongsToMany` + `Pivot` accessor - `User.roles()` attach_with +
 //!   `.pivot::<RoleUser>()` reads pivot's `assigned_at`
-//! - `MorphMany` on Post + Video — comments filter by `commentable_type`
-//! - `MorphTo` returning the per-family `CommentableMorph` enum —
+//! - `MorphMany` on Post + Video - comments filter by `commentable_type`
+//! - `MorphTo` returning the per-family `CommentableMorph` enum -
 //!   Post variant, Video variant, Unknown variant
-//! - `MorphToMany` on `Post.tags()` + `Video.tags()` — independent
+//! - `MorphToMany` on `Post.tags()` + `Video.tags()` - independent
 //!   attaches against the shared `taggables` pivot
-//! - `MorphedByMany` on `Tag.posts()` + `Tag.videos()` — cross-family
+//! - `MorphedByMany` on `Tag.posts()` + `Tag.videos()` - cross-family
 //!   isolation by `taggable_type`
-//! - Eager `with(["posts", "roles"])` on User — no N+1
-//! - Nested eager `with(["posts.comments"])` — three queries
-//! - `with_count(["posts"])` — `posts_count()` reads server-side COUNT
+//! - Eager `with(["posts", "roles"])` on User - no N+1
+//! - Nested eager `with(["posts.comments"])` - three queries
+//! - `with_count(["posts"])` - `posts_count()` reads server-side COUNT
 //!
 //! The schema lives in `app/src/migrations/m_2026_05_19_phase_10b_relations_schema.rs`;
 //! the models in `app/src/models/{users,posts,roles,role_user,comments,videos,tags,taggables}.rs`.
@@ -70,7 +70,7 @@ async fn has_many_user_posts_count_and_get() {
         .unwrap();
     }
 
-    // A second user with a single post — keeps the FK filter honest.
+    // A second user with a single post - keeps the FK filter honest.
     let other = make_user("hm_bob").await;
     Post::create(attrs! {
         title: "bob-post",
@@ -91,7 +91,7 @@ async fn has_many_user_posts_count_and_get() {
 
 // ---- HasOne: User.profile() -------------------------------------------
 //
-// Phase 10B P5 — closes the closeout self-audit gap. The Phase 10B T10
+// Phase 10B P5 - closes the closeout self-audit gap. The Phase 10B T10
 // dogfood exercised every relation kind EXCEPT HasOne; the existing
 // models had no natural one-to-one shape. The Profile model
 // (`app/src/models/profiles.rs`) + `m_2026_05_20_phase_10b_profiles`
@@ -124,7 +124,7 @@ async fn has_one_user_profile_returns_some_when_present() {
 async fn has_one_user_profile_returns_none_when_absent() {
     let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
     let u = make_user("ho_lonely").await;
-    // No `Profile::create` — the FK row simply doesn't exist. HasOne's
+    // No `Profile::create` - the FK row simply doesn't exist. HasOne's
     // `.first()` is `Option<T>` (NOT `Result<Option<T>, _>` unwrap-then-
     // unwrap), and the bare connection must return `Ok(None)` rather
     // than erroring on the empty scan.
@@ -144,7 +144,7 @@ async fn has_one_user_profile_eager_load_populates_loaded_accessor() {
     })
     .await
     .unwrap();
-    // u2 has no profile — the per-parent cache must distinguish
+    // u2 has no profile - the per-parent cache must distinguish
     // "present" from "absent" rather than collapsing both to None.
 
     let users = User::with(["profile"]).get().await.unwrap();
@@ -164,7 +164,7 @@ async fn has_one_user_profile_eager_load_populates_loaded_accessor() {
     assert_eq!(u1_profile.bio, "u1 bio");
     assert!(
         u2_loaded.profile_loaded().is_none(),
-        "u2 had no profile row — eager-load must surface None on the parent, \
+        "u2 had no profile row - eager-load must surface None on the parent, \
          NOT borrow another user's profile",
     );
 }
@@ -189,7 +189,7 @@ async fn belongs_to_many_user_roles_attach_with_pivot_data() {
     assert_eq!(roles.len(), 2);
 
     // Find the admin row and read pivot data through the `.pivot::<P>()`
-    // accessor — confirms `with_pivot = ["assigned_at"]` was included
+    // accessor - confirms `with_pivot = ["assigned_at"]` was included
     // in the join and the type-erased Arc downcasts cleanly to RoleUser.
     let admin_row = roles
         .iter()
@@ -204,7 +204,7 @@ async fn belongs_to_many_user_roles_attach_with_pivot_data() {
         "assigned_at must round-trip via the pivot row",
     );
 
-    // The editor row had no `assigned_at` — pivot read should still
+    // The editor row had no `assigned_at` - pivot read should still
     // return a populated pivot (the column is nullable on the schema).
     let editor_row = roles
         .iter()
@@ -329,12 +329,12 @@ async fn morph_to_returns_video_variant() {
 async fn morph_to_unknown_for_unregistered_type() {
     // Insert a row manually so the morph_type can hold a value that no
     // registered target matches. `Comment::create` would go through the
-    // fillable filter — direct SQL is the safer path for this legacy
+    // fillable filter - direct SQL is the safer path for this legacy
     // shape (mirrors framework/tests/eloquent_relations_morph.rs).
     let db = TestDatabase::fresh::<Migrator>().await.unwrap();
     // Direct INSERT bypasses the `fillable` allow-list so the row can
     // carry an unregistered morph_type. Stamps `created_at` /
-    // `updated_at` in an RFC-3339 shape — SQLite's default
+    // `updated_at` in an RFC-3339 shape - SQLite's default
     // `CURRENT_TIMESTAMP` writes a space-separated form the framework's
     // `AsDateTime` cast can't parse on read.
     db.execute_unprepared(
@@ -380,7 +380,7 @@ async fn morph_to_many_post_and_video_tags_independent_attach() {
         .await
         .unwrap();
 
-    // ONE tag attached to BOTH parents — two pivot rows, distinct by
+    // ONE tag attached to BOTH parents - two pivot rows, distinct by
     // `taggable_type`. Confirms the polymorphic m2m surface lets a
     // single related row span families.
     let t = Tag::create(attrs! { name: "shared" }).await.unwrap();
@@ -402,7 +402,7 @@ async fn morphed_by_many_cross_family_isolation() {
     let _db = TestDatabase::fresh::<Migrator>().await.unwrap();
     let u = make_user("mbm_alice").await;
 
-    // Two posts and one video — all attached to the same tag. Inverse
+    // Two posts and one video - all attached to the same tag. Inverse
     // side (`Tag.posts()` / `Tag.videos()`) must split by morph type:
     // posts gets 2, videos gets 1.
     let p1 = Post::create(attrs! {
@@ -644,7 +644,7 @@ async fn with_min_posts_id_returns_smallest() {
         .iter()
         .find(|x| x.id == u.id)
         .expect("user must surface");
-    // Min stores as Option<f64> — None on empty group; here the group
+    // Min stores as Option<f64> - None on empty group; here the group
     // is non-empty so the smallest of {p1.id, p2.id} must round-trip.
     let min: &Option<f64> = loaded
         .__eager
@@ -659,7 +659,7 @@ async fn with_min_posts_id_returns_smallest() {
 // relations. The app's real schema has no natural three-table chain
 // (User -> Post is two tables; Comment is polymorphic), so we declare
 // an inline test-only schema the same way the framework's Through
-// tests do — `TestDatabase::sqlite_memory()` + raw `execute_unprepared`
+// tests do - `TestDatabase::sqlite_memory()` + raw `execute_unprepared`
 // table creation. This is just a smoke test against the macro-emitted
 // dispatcher arms in an app-binary context. Exhaustive semantics
 // (custom keys, GROUP BY aggregates, eager distribution, String-PK

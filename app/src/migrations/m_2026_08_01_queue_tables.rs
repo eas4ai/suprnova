@@ -1,4 +1,4 @@
-//! `jobs` and `failed_jobs` — the schema `QUEUE_DRIVER=database` expects.
+//! `jobs` and `failed_jobs` - the schema `QUEUE_DRIVER=database` expects.
 //!
 //! The framework ships the driver but no migration for the tables it
 //! reads, so today the schema exists only in `framework/tests/
@@ -10,14 +10,14 @@
 //! also the argument that the framework should own it: a driver whose
 //! storage nobody can provision is a driver most people will not reach.
 //!
-//! Column choices are the driver's, not ours — `available_at`,
+//! Column choices are the driver's, not ours - `available_at`,
 //! `reserved_until` and `created_at` are epoch integers rather than
 //! timestamps because that is what `DatabaseQueueDriver` reads and writes.
 //!
 //! `failed_jobs` matches `DatabaseFailedJobStore`'s INSERT exactly, which
 //! this got wrong on the first attempt: the `connection` column was
 //! missing and `queue` was nullable. The store names all seven columns, so
-//! a mismatch is not a degraded write — it is a hard error on every
+//! a mismatch is not a degraded write - it is a hard error on every
 //! dead-letter, and because the worker refuses to ack a record it could
 //! not persist, the job comes straight back on visibility expiry and does
 //! it again. The symptom is an attempt count climbing without bound
@@ -72,7 +72,7 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Jobs::Table)
                     .if_not_exists()
-                    // The envelope's UUID, stored as text — the driver
+                    // The envelope's UUID, stored as text - the driver
                     // generates it, so this is not auto-increment.
                     .col(ColumnDef::new(Jobs::Id).string().not_null().primary_key())
                     .col(ColumnDef::new(Jobs::JobName).string().not_null())
@@ -116,7 +116,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    // `connection` is not optional — `DatabaseFailedJobStore`
+                    // `connection` is not optional - `DatabaseFailedJobStore`
                     // names all seven columns in its INSERT, and omitting one
                     // makes every dead-letter fail rather than fall back.
                     .col(ColumnDef::new(FailedJobs::Connection).string().not_null())

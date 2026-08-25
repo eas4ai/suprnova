@@ -37,7 +37,7 @@
 //! // `Auth::attempt(&creds, remember).await?` / `Auth::login(user, remember).await?`.
 //! Auth::login_id(user.id.to_string())?;
 //!
-//! // Logout (async — also revokes remember-me tokens for the user)
+//! // Logout (async - also revokes remember-me tokens for the user)
 //! Auth::logout().await?;
 //!
 //! // In routes
@@ -87,7 +87,7 @@ pub use types::{LockoutStatus, Session, SessionBuilder, SessionToken, User, User
 
 use std::sync::Arc;
 
-/// Resolve the active [`UserProvider`] for the request — the same provider
+/// Resolve the active [`UserProvider`] for the request - the same provider
 /// [`Auth::user`] would resolve against, minus the guard's request-scoped
 /// user cache.
 ///

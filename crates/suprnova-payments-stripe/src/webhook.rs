@@ -37,11 +37,11 @@ impl WebhookHandler for StripeProvider {
     fn verify(&self, ctx: &WebhookContext<'_>) -> PaymentResult<()> {
         // A blank signing secret is an empty-key HMAC, which any caller can
         // forge. `from_env` refuses to construct one, but `new` takes the
-        // secret verbatim, so guard the boundary that actually decides trust —
+        // secret verbatim, so guard the boundary that actually decides trust -
         // that covers every construction path, not just the documented one.
         if self.webhook_signing_secret().trim().is_empty() {
             return Err(PaymentError::WebhookSignature(
-                "stripe webhook signing secret is empty — refusing to verify against an \
+                "stripe webhook signing secret is empty - refusing to verify against an \
                  empty-key HMAC"
                     .into(),
             ));
@@ -228,7 +228,7 @@ impl WebhookHandler for StripeProvider {
             | NeutralEventKind::PaymentFailed
             | NeutralEventKind::PaymentRefunded
             | NeutralEventKind::PaymentDisputed => {
-                // PaymentIntent or Charge — both expose amount + currency at the top level.
+                // PaymentIntent or Charge - both expose amount + currency at the top level.
                 let amount_total_minor = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
                 let currency = obj
                     .get("currency")
@@ -306,7 +306,7 @@ impl WebhookHandler for StripeProvider {
 
     /// Build a [`CustomerSnapshot`] from Stripe `customer.created` /
     /// `customer.updated` payloads. Stripe puts the full Customer object at
-    /// `data.object` — we pull `id` + `email` and keep the rest in
+    /// `data.object` - we pull `id` + `email` and keep the rest in
     /// `provider_metadata` for downstream readers.
     fn extract_customer_snapshot(&self, event: &WebhookEvent) -> Option<CustomerSnapshot> {
         match event.neutral? {
@@ -336,7 +336,7 @@ impl WebhookHandler for StripeProvider {
 mod tests {
     use super::*;
 
-    /// Install the rustls ring CryptoProvider exactly once — `StripeProvider::new`
+    /// Install the rustls ring CryptoProvider exactly once - `StripeProvider::new`
     /// constructs a hyper-rustls client which panics at TLS init when both
     /// `aws-lc-rs` and `ring` are in the dep graph (as they are via async-stripe).
     fn install_crypto_provider() {
@@ -356,7 +356,7 @@ mod tests {
         // `new` accepts the secret verbatim, so a config path that reads a
         // set-but-empty `STRIPE_WEBHOOK_SIGNING_SECRET` can still build a
         // provider whose HMAC key is empty. Verification must refuse it
-        // outright rather than compare against a forgeable digest — and it
+        // outright rather than compare against a forgeable digest - and it
         // must refuse before parsing the header, so a well-formed signature
         // over an empty key never reaches the comparison.
         install_crypto_provider();
@@ -382,12 +382,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // CI-06 — signature verification, positive and negative
+    // CI-06 - signature verification, positive and negative
     // ---------------------------------------------------------------
     //
     // Until these landed, `verify()` had exactly one test: the blank-secret
     // refusal. Nothing ever constructed a VALID signature, which means the
-    // success path was unproven and — far worse — so was every rejection
+    // success path was unproven and - far worse - so was every rejection
     // that depends on reaching the HMAC comparison. A regression that made
     // `verify()` accept anything would have passed the suite, because no
     // test could tell "correctly rejected" apart from "rejected because the
@@ -435,7 +435,7 @@ mod tests {
             remote_addr: None,
         })
         .expect(
-            "a correctly signed payload must verify — without this the negatives prove nothing",
+            "a correctly signed payload must verify - without this the negatives prove nothing",
         );
     }
 
@@ -748,7 +748,7 @@ mod tests {
         NeutralEventKind::CustomerUpdated,
     ];
 
-    /// CI-06 — a signature-valid event whose *body* is hostile must never
+    /// CI-06 - a signature-valid event whose *body* is hostile must never
     /// panic the endpoint.
     ///
     /// Signature verification only proves the sender holds the key. It says
@@ -756,7 +756,7 @@ mod tests {
     /// a payload shape without warning. Every extractor here reads through
     /// `and_then` / `unwrap_or` / `?` rather than indexing, so the intent is
     /// already right; nothing pinned it, so a later `[...]` or `.unwrap()`
-    /// would have turned a surprising payload into a 500 — or a panic that
+    /// would have turned a surprising payload into a 500 - or a panic that
     /// takes the worker down, since these run inside the webhook handler.
     ///
     /// `catch_unwind` rather than a plain call: the claim is specifically
@@ -769,7 +769,7 @@ mod tests {
         // Two tiers, and the second is the one that matters.
         //
         // Shallow payloads exercise the early `?` guards but bail out long
-        // before any value conversion — a test built only from those passes
+        // before any value conversion - a test built only from those passes
         // even with a `.unwrap()` planted in the parsing, which is exactly
         // what the first draft of the sibling Paddle test did.
         //

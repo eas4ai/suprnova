@@ -143,7 +143,7 @@ async fn streaming_copy_errors_on_missing_source_disk() {
 }
 
 // ---------------------------------------------------------------------------
-// `register_<driver>_with` — opendal layer composition.
+// `register_<driver>_with` - opendal layer composition.
 // ---------------------------------------------------------------------------
 //
 // These tests prove that the closure passed to `register_<driver>_with`
@@ -209,7 +209,7 @@ async fn register_memory_with_layer_composes() {
 async fn register_s3_with_layer_compiles_and_registers() {
     let _guard = Storage::fake();
 
-    // Build construction never touches the network — opendal validates the
+    // Build construction never touches the network - opendal validates the
     // config and produces an `Operator` lazily, so this must succeed even
     // without live credentials. We don't drive a real read/write here.
     let result = Storage::register_s3_with(
@@ -265,7 +265,7 @@ async fn register_s3_unchanged_still_works() {
 // These tests prove the layer features in `framework/Cargo.toml` resolve and
 // that the layer types are reachable to consumers through the `register_*_with`
 // entry points. We compose each layer onto a memory disk and round-trip a
-// write/read — the assertions are that registration succeeds AND that the
+// write/read - the assertions are that registration succeeds AND that the
 // layered operator is functionally indistinguishable from an unlayered one for
 // happy-path operations.
 
@@ -336,7 +336,7 @@ async fn register_with_prometheus_client_layer_composes_and_round_trips() {
     // `PrometheusClientLayer::builder` registers histograms + counters into
     // the registry; constructing it proves the feature flag works and the
     // crate's API is reachable. Different opendal 0.56 patch releases shape
-    // this slightly differently — the builder pattern is the stable surface.
+    // this slightly differently - the builder pattern is the stable surface.
     let layer = PrometheusClientLayer::builder().register(&mut registry);
     Storage::register_memory_with("metered", move |op| op.layer(layer));
 
@@ -353,8 +353,8 @@ async fn register_with_prometheus_client_layer_composes_and_round_trips() {
 
 #[tokio::test]
 async fn register_with_full_production_layer_stack_round_trips() {
-    // Compose the recommended production stack — retry, timeout, logging,
-    // tracing — in the documented order. The test proves the full
+    // Compose the recommended production stack - retry, timeout, logging,
+    // tracing - in the documented order. The test proves the full
     // composition produces a working operator and doesn't conflict between
     // layers.
     use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer, TracingLayer};
@@ -380,7 +380,7 @@ async fn register_with_full_production_layer_stack_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// Registration input validation — required fields are rejected early with a
+// Registration input validation - required fields are rejected early with a
 // clear error instead of failing late on first I/O.
 // ---------------------------------------------------------------------------
 
@@ -505,7 +505,7 @@ fn s3_config_debug_redacts_secret_access_key() {
         rendered.contains("[REDACTED]"),
         "S3Config Debug must mark the secret as [REDACTED], got: {rendered}"
     );
-    // Non-secret fields must still be visible — debug remains useful.
+    // Non-secret fields must still be visible - debug remains useful.
     assert!(rendered.contains("my-bucket"));
     assert!(rendered.contains("us-east-1"));
     assert!(rendered.contains("AKIA-not-secret"));
@@ -514,7 +514,7 @@ fn s3_config_debug_redacts_secret_access_key() {
 #[test]
 fn s3_config_debug_renders_none_when_secret_unset() {
     // The redacted Debug must distinguish "set but redacted" from
-    // "absent" — otherwise an operator scanning logs can't tell
+    // "absent" - otherwise an operator scanning logs can't tell
     // whether credentials are configured.
     let cfg = S3Config {
         bucket: "b".into(),
@@ -576,7 +576,7 @@ fn gcs_config_debug_redacts_credential() {
         "GcsConfig Debug must NOT leak inline credential, got: {rendered}"
     );
     assert!(rendered.contains("[REDACTED]"));
-    // credential_path is a filesystem path, not the credential itself —
+    // credential_path is a filesystem path, not the credential itself -
     // remains visible so an operator can audit where the SA key lives.
     assert!(rendered.contains("/etc/gcs.json"));
 }

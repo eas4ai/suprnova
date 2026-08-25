@@ -5,7 +5,7 @@
     container_name: {project_name}_minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
-    # Loopback only — see the note on the postgres service.
+    # Loopback only - see the note on the postgres service.
     ports:
       - "${MINIO_HOST_BIND:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"     # S3 API
       - "${MINIO_HOST_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"  # Console UI

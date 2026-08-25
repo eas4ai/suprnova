@@ -7,7 +7,7 @@
 //! 2. Resets the registry on construction and on drop, leaving the suite in a
 //!    clean state for whichever test runs next.
 //!
-//! The mutex is intentionally held for the entire test body — this serializes
+//! The mutex is intentionally held for the entire test body - this serializes
 //! storage tests against each other, which is the price for a single global
 //! disk registry. Other test categories are unaffected.
 //!
@@ -89,7 +89,7 @@ pub trait DiskAssertExt {
     ) -> impl Future<Output = ()> + Send + 'a;
 
     /// Assert that `directory` has no entries (no files, no subdirectories).
-    /// Recursive — every descendant counts. Panics if any entry exists.
+    /// Recursive - every descendant counts. Panics if any entry exists.
     fn assert_directory_empty<'a>(
         &'a self,
         directory: &'a str,

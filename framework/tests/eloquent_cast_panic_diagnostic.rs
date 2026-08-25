@@ -12,7 +12,7 @@
 //! #380 (Augment) ADDED the fallible `Model::try_from_storage` /
 //! `Model::try_into_storage` siblings and routed the framework's own
 //! hydration/dehydration hot paths (`find`, `all`, `Builder::get`,
-//! `save`, `update`, `delete`, ...) through them — so a corrupt row or
+//! `save`, `update`, `delete`, ...) through them - so a corrupt row or
 //! a bad runtime value becomes a recoverable `FrameworkError` rather
 //! than a panic off the HTTP path (queue workers, the scheduler, and
 //! CLI commands have no panic-recovery net).
@@ -66,8 +66,8 @@ pub struct CastPanicCanary {
 /// panic emitted via `panic!(format!(...))` (String payload) or
 /// `panic!("literal")` (&'static str payload). The macro emits via
 /// `panic!("...{}...", #field_name, __cast_err)` which produces a
-/// String payload, but the runtime payload type is technically opaque
-/// — covering both branches keeps the assertion robust.
+/// String payload, but the runtime payload type is technically opaque -
+/// covering both branches keeps the assertion robust.
 fn panic_message_of(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
@@ -83,7 +83,7 @@ fn from_storage_panic_includes_field_name_and_source_error() {
     // Build the inner SeaORM Model directly with an arbitrary storage
     // value. The cast's `from_storage` will return Err when the
     // generated `From<cast_panic_canary::Model> for CastPanicCanary`
-    // tries to inflate the field — the panic that translates that Err
+    // tries to inflate the field - the panic that translates that Err
     // is the path we're asserting against.
     let inner = cast_panic_canary::Model {
         id: 1,
@@ -114,10 +114,10 @@ fn from_storage_panic_includes_field_name_and_source_error() {
 fn to_storage_panic_includes_field_name_and_source_error() {
     // Construct the user struct directly. The macro auto-injects
     // `__eager` and `__pivot` runtime-scratch fields on the user
-    // struct — `..Default::default()` fills them with the empty cache
+    // struct - `..Default::default()` fills them with the empty cache
     // and `None` respectively. The generated
     // `From<CastPanicCanary> for cast_panic_canary::Model` calls
-    // `<AlwaysFails as Cast>::to_storage(&s.payload)`, which Errs —
+    // `<AlwaysFails as Cast>::to_storage(&s.payload)`, which Errs -
     // the From impl is infallible by signature so the Err translates
     // to a panic carrying the new diagnostic.
     let user = CastPanicCanary {
@@ -150,7 +150,7 @@ fn to_storage_panic_includes_field_name_and_source_error() {
 fn pre_audit_panic_message_no_longer_present() {
     // Smoke-test guard against accidental reversion to the pre-audit
     // diagnostic. The old text was:
-    //   "cast from_storage failed — corrupt data in database column"
+    //   "cast from_storage failed - corrupt data in database column"
     // (no field name, no source error). If someone reverts the patch,
     // this test fails with a clear pointer to the audit.
     let inner = cast_panic_canary::Model {
@@ -161,13 +161,13 @@ fn pre_audit_panic_message_no_longer_present() {
     let msg = panic_message_of(result.expect_err("must panic"));
     assert!(
         !msg.contains("corrupt data in database column\""),
-        "pre-audit panic message detected — Domain 5 M-D5-1 regression; got: {msg}",
+        "pre-audit panic message detected - Domain 5 M-D5-1 regression; got: {msg}",
     );
     // Sanity: the same path must not silently swallow the failure.
     assert!(!msg.is_empty(), "panic payload must not be empty",);
 }
 
-// ---- #380 (Augment) — fallible siblings -------------------------------
+// ---- #380 (Augment) - fallible siblings -------------------------------
 //
 // The framework's own CRUD hot paths route through these, so a cast
 // failure becomes a recoverable `FrameworkError` (NOT a panic) even off

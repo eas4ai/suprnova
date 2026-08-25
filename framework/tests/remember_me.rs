@@ -2,21 +2,21 @@
 //!
 //! Covers:
 //!
-//! 1. `login_remember_issues_cookie_and_persists_token` — issuing a
+//! 1. `login_remember_issues_cookie_and_persists_token` - issuing a
 //!    token writes a hashed row and the middleware emits an encrypted
 //!    `remember_me` cookie.
-//! 2. `remember_cookie_authenticates_after_session_expiry` — when the
+//! 2. `remember_cookie_authenticates_after_session_expiry` - when the
 //!    session cookie is absent, a valid `remember_me` cookie hydrates
 //!    the session through verify_and_rotate.
-//! 3. `remember_cookie_rotates_on_use` — a successful verify deletes
+//! 3. `remember_cookie_rotates_on_use` - a successful verify deletes
 //!    the matched row and issues a fresh one; the old cookie cannot
 //!    authenticate twice.
-//! 4. `revoke_remember_tokens_clears_all_rows_for_user` — calling the
+//! 4. `revoke_remember_tokens_clears_all_rows_for_user` - calling the
 //!    revoke helper deletes every row for the user (multi-device
 //!    "log out everywhere").
-//! 5. `expired_token_rejected_and_cleaned_up_by_prune` — `expires_at`
+//! 5. `expired_token_rejected_and_cleaned_up_by_prune` - `expires_at`
 //!    in the past never authenticates and is removed by `prune_expired`.
-//! 6. `forged_cookie_does_not_authenticate` — a random plaintext does
+//! 6. `forged_cookie_does_not_authenticate` - a random plaintext does
 //!    not match any hashed row; verify returns None.
 //!
 //! # Harness
@@ -25,7 +25,7 @@
 //!   pool is bound to the runtime that created it (mirrors
 //!   `magnetar_integration.rs`).
 //! - `LocalMigrator` materialises only the `remember_tokens` and
-//!   `sessions` tables — `Auth::login_remember` writes to one and the
+//!   `sessions` tables - `Auth::login_remember` writes to one and the
 //!   middleware reads from the other. We do not need users/magnetar to
 //!   exercise the remember-me path; remember-me operates on an opaque
 //!   `user_id: String`.
@@ -44,7 +44,7 @@ use suprnova::Auth;
 use suprnova::http::cookie::Cookie;
 use suprnova::session::SessionConfig;
 
-/// Shared runtime — SQLx pools die with their creating runtime.
+/// Shared runtime - SQLx pools die with their creating runtime.
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
 /// One-shot setup: install Crypt, build a shared in-memory SQLite
@@ -61,7 +61,7 @@ static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 /// connection visible to all worker threads.
 static SETUP: Lazy<()> = Lazy::new(|| {
     // Install Crypt with a fresh key. `_test_install_key` is
-    // idempotent — returns false if a key already exists, which is
+    // idempotent - returns false if a key already exists, which is
     // fine.
     #[cfg(feature = "testing")]
     {
@@ -79,7 +79,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
         let conn = suprnova::database::DbConnection::connect(&config)
             .await
             .expect("connect in-memory sqlite");
-        // Migrate before publishing — every test reads through
+        // Migrate before publishing - every test reads through
         // `DB::connection()` and assumes the tables already exist.
         LocalMigrator::up(conn.inner(), None)
             .await
@@ -277,7 +277,7 @@ where
 
 /// Extract the encrypted plaintext from a `remember_me` cookie that
 /// `Auth::login_remember` queued. Panics if no such cookie was queued
-/// or if it does not decrypt — the test should have placed one.
+/// or if it does not decrypt - the test should have placed one.
 #[cfg(feature = "testing")]
 fn decode_remember_cookie(cookies: &[Cookie]) -> String {
     let cookie = cookies
@@ -290,7 +290,7 @@ fn decode_remember_cookie(cookies: &[Cookie]) -> String {
 
 /// Insert a raw row directly into `remember_tokens` (bypassing
 /// `issue`). Used for the expired-token scenario where we need a row
-/// whose `expires_at` is in the past — `issue` always generates fresh
+/// whose `expires_at` is in the past - `issue` always generates fresh
 /// future-expiring rows.
 async fn insert_raw_token(
     user_id: &str,
@@ -360,7 +360,7 @@ fn login_remember_issues_cookie_and_persists_token() {
             .find(|c| c.name() == "remember_me")
             .expect("remember_me cookie queued");
 
-        // Wire-format value must NOT equal the plaintext — that would
+        // Wire-format value must NOT equal the plaintext - that would
         // mean we stored a bearer credential in cleartext.
         assert_ne!(
             cookie.value(),
@@ -371,7 +371,7 @@ fn login_remember_issues_cookie_and_persists_token() {
         let header = cookie.to_header_value();
         assert!(header.contains("HttpOnly"), "cookie must be HttpOnly");
         assert!(header.contains("SameSite=Lax"), "default SameSite=Lax");
-        // Cookie's Max-Age must MATCH the row's TTL — codex finding
+        // Cookie's Max-Age must MATCH the row's TTL - codex finding
         // #13 required "expires-at matches token expiration." 1 day
         // = 86400 s.
         let expected_max_age = (ttl_minutes as u64) * 60;
@@ -394,14 +394,14 @@ fn remember_cookie_authenticates_after_session_expiry() {
         let user_id = "test-user-reauth";
         let ttl_minutes: i64 = 60 * 24;
 
-        // Step 1: issue a token directly (no session — simulating the
+        // Step 1: issue a token directly (no session - simulating the
         // server-side state right after the original login_remember).
         let plaintext = suprnova::auth::remember::issue(user_id, ttl_minutes)
             .await
             .expect("issue token");
         assert_eq!(count_tokens_for(user_id).await, 1);
 
-        // Step 2: drive the middleware path — verify_and_rotate is
+        // Step 2: drive the middleware path - verify_and_rotate is
         // what the middleware calls when the session is missing.
         let result = suprnova::auth::remember::verify_and_rotate(&plaintext, ttl_minutes)
             .await
@@ -530,7 +530,7 @@ fn expired_token_rejected_and_cleaned_up_by_prune() {
         assert_eq!(count_tokens_for(user_id).await, 1);
 
         // Verify rejects expired rows up front (the WHERE expires_at > now
-        // filter excludes them — they never reach the bcrypt compare).
+        // filter excludes them - they never reach the bcrypt compare).
         let result = suprnova::auth::remember::verify_and_rotate(&composite, ttl_minutes)
             .await
             .expect("verify expired");
@@ -587,14 +587,14 @@ fn forged_cookie_does_not_authenticate() {
             .expect("verify malformed");
         assert!(result.is_none(), "malformed token must not authenticate");
 
-        // Row count unchanged — verify on a non-match must not mutate.
+        // Row count unchanged - verify on a non-match must not mutate.
         assert_eq!(count_tokens_for(user_id).await, before);
     });
 }
 
 /// Test 6b (concurrency invariant): two concurrent verifications of
 /// the SAME captured token must result in exactly one successful
-/// rotation and one None. This proves the audit-fix is real — the
+/// rotation and one None. This proves the audit-fix is real - the
 /// previous design could mint two replacement tokens for one captured
 /// cookie (ChatGPT audit `auth` HIGH #1: "remember-me token rotation
 /// is not single-use under concurrency").
@@ -615,7 +615,7 @@ fn verify_and_rotate_is_single_use_under_concurrency() {
 
         // Race: two concurrent verify_and_rotate calls against the same
         // plaintext. Whichever wins the DELETE rotates; the loser must
-        // see rows_affected == 0 and return None — NOT mint a second
+        // see rows_affected == 0 and return None - NOT mint a second
         // replacement.
         let c1 = captured.clone();
         let c2 = captured.clone();
@@ -630,7 +630,7 @@ fn verify_and_rotate_is_single_use_under_concurrency() {
         let success_count = [r1.is_some(), r2.is_some()].iter().filter(|x| **x).count();
         assert_eq!(
             success_count, 1,
-            "exactly one racer must succeed; the other must return None — got r1={r1:?} r2={r2:?}"
+            "exactly one racer must succeed; the other must return None - got r1={r1:?} r2={r2:?}"
         );
 
         // After the race, exactly ONE row exists for the user: the
@@ -646,7 +646,7 @@ fn verify_and_rotate_is_single_use_under_concurrency() {
 
 /// Test 7: the middleware helper `create_forget_remember_cookie`
 /// produces a Max-Age=0 cookie. Wired as a unit test here rather than
-/// the e2e suite because it exercises the helper directly — no DB
+/// the e2e suite because it exercises the helper directly - no DB
 /// needed.
 #[test]
 fn forget_remember_cookie_clears_the_cookie() {
@@ -661,7 +661,7 @@ fn forget_remember_cookie_clears_the_cookie() {
 }
 
 /// Test 8: `create_remember_cookie` respects
-/// `SessionConfig::cookie_secure` — when secure=true the Set-Cookie
+/// `SessionConfig::cookie_secure` - when secure=true the Set-Cookie
 /// header carries the `Secure` attribute; when secure=false (local
 /// dev), it doesn't.
 #[cfg(feature = "testing")]
@@ -796,7 +796,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         }
         let request = req_rx.await.expect("server received request");
 
-        // Step 3: build a tiny handler that captures `Auth::id()` —
+        // Step 3: build a tiny handler that captures `Auth::id()` -
         // proof that the middleware hydrated the session before
         // calling next.
         let observed = Arc::new(std::sync::Mutex::new(None::<String>));
@@ -827,7 +827,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
             "middleware must hydrate the session BEFORE calling next"
         );
 
-        // Step 6: rotation invariant — still exactly one row for the
+        // Step 6: rotation invariant - still exactly one row for the
         // user (old row deleted, new row inserted).
         assert_eq!(
             count_tokens_for(user_id).await,
@@ -838,7 +838,7 @@ fn middleware_without_magnetar_engine_uses_legacy_remember_fallback() {
         // Step 7: response carries a fresh remember_me cookie whose
         // ciphertext is different from the inbound one (verifying we
         // rotated, not just echoed the input back). `HttpResponse`
-        // does not expose its headers directly — go through
+        // does not expose its headers directly - go through
         // `into_hyper()` which gives access to `hyper::HeaderMap`.
         let response = match response {
             Ok(r) => r,
@@ -916,7 +916,7 @@ fn middleware_clears_forged_remember_cookie() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // A forged plaintext encrypted under the legitimate key — ciphertext
+        // A forged plaintext encrypted under the legitimate key - ciphertext
         // valid, but no matching hashed row.
         //
         // Compat-window regression: this still uses v1 wire-format minting; middleware
@@ -976,7 +976,7 @@ fn middleware_clears_forged_remember_cookie() {
         let middleware = suprnova::SessionMiddleware::new(config);
         let response = middleware.handle(request, next).await;
 
-        // Handler must NOT have seen a user — the cookie didn't match.
+        // Handler must NOT have seen a user - the cookie didn't match.
         let captured = observed.lock().unwrap().clone();
         assert_eq!(captured, None, "forged cookie must not authenticate");
 

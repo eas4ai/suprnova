@@ -15,13 +15,13 @@ export default defineConfig(({ isSsrBuild }) => ({
   build: isSsrBuild
     ? {
         // `vite build --ssr src/ssr.ts` lands here, not in
-        // `public/assets` alongside the client bundle — `suprnova
+        // `public/assets` alongside the client bundle - `suprnova
         // ssr:start` looks for `frontend/bootstrap/ssr/ssr.js` by
         // default (see `suprnova-cli/src/commands/ssr_start.rs`).
         outDir: 'bootstrap/ssr',
         rollupOptions: {
           output: {
-            // Pin the filename — Vite's default naming for an SSR entry
+            // Pin the filename - Vite's default naming for an SSR entry
             // is not a contract `ssr:start`'s bundle-path default can
             // rely on.
             entryFileNames: 'ssr.js',

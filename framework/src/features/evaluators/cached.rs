@@ -1,11 +1,11 @@
-//! [`CachedEvaluator`] — TTL-bounded memoization in front of any
+//! [`CachedEvaluator`] - TTL-bounded memoization in front of any
 //! [`Evaluator`].
 //!
 //! Wraps an inner evaluator (typically [`DatabaseEvaluator`](super::database::DatabaseEvaluator))
 //! with a process-local [`DashMap`] cache keyed by
 //! `(feature, user_id, team)`. The cache's lookup path is fully
-//! synchronous — matching featureflag's [`Evaluator::is_enabled`]
-//! contract — so the hot path stays lock-free for concurrent
+//! synchronous - matching featureflag's [`Evaluator::is_enabled`]
+//! contract - so the hot path stays lock-free for concurrent
 //! readers and never blocks on an async runtime.
 //!
 //! # When to use this
@@ -15,14 +15,14 @@
 //! aren't a concern. `CachedEvaluator` exists to memoize the result
 //! of the **scope-resolution walk** (build candidate keys, look each
 //! up, fall back to global) when that walk's cost ever becomes
-//! material — e.g. an evaluator chain whose links are not all
+//! material - e.g. an evaluator chain whose links are not all
 //! `DatabaseEvaluator`, or a custom evaluator whose `is_enabled`
 //! computation is non-trivial.
 //!
 //! # Cross-replica coherence
 //!
 //! The cache is per-process. Flag changes on one replica are visible
-//! to other replicas as soon as their inner evaluator reloads — there
+//! to other replicas as soon as their inner evaluator reloads - there
 //! is no cross-cluster cache-coherence protocol in v1. The cache TTL
 //! therefore bounds the worst-case staleness across the cluster.
 //! Callers who need millisecond propagation should either:
@@ -30,18 +30,18 @@
 //! * lower the TTL toward zero (and accept the cost of skipping the
 //!   memoization), or
 //! * call [`CachedEvaluator::invalidate`] from the admin-CRUD path
-//!   that mutated the flag (Phase 13 Task 6 — admin handlers will
+//!   that mutated the flag (Phase 13 Task 6 - admin handlers will
 //!   wire this).
 //!
 //! # Why DashMap + manual TTL (not our Cache facade)
 //!
-//! The `Cache` facade is async by design — it has to be, to support
+//! The `Cache` facade is async by design - it has to be, to support
 //! Redis as a backend. featureflag's `Evaluator::is_enabled` is sync.
 //! Bridging the two via `block_on` inside `is_enabled` would tank
 //! request throughput. The right reconciliation is two layers: a
 //! sync per-process cache (this struct) for hot reads, and a
 //! background invalidator that subscribes to a cross-process channel
-//! and clears local entries — the invalidator is out of scope for
+//! and clears local entries - the invalidator is out of scope for
 //! v1 since flag changes are operator-initiated, infrequent, and
 //! already bounded by the TTL.
 
@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 /// never reclaim them, since expired entries are only overwritten when
 /// their exact key is re-read.
 ///
-/// The sweep is amortised — it runs only on the miss/expiry insert
+/// The sweep is amortised - it runs only on the miss/expiry insert
 /// path once the map has grown past the threshold, mirroring the
 /// brute-force dedup map's bounded eviction. Sized so a normally-scoped
 /// workload (a bounded set of users/teams) never trips it, while a
@@ -91,7 +91,7 @@ struct CacheEntry {
 
 impl CachedEvaluator {
     /// Construct a new cached evaluator with the given TTL. A TTL of
-    /// zero degenerates to "no caching" — every call falls through
+    /// zero degenerates to "no caching" - every call falls through
     /// to `inner`. A very long TTL bounds the cross-replica staleness
     /// window; tune to taste.
     pub fn new(inner: Arc<dyn Evaluator + Send + Sync>, ttl: Duration) -> Self {
@@ -118,7 +118,7 @@ impl CachedEvaluator {
         self.cache.retain(|key, _| !key.starts_with(&prefix));
     }
 
-    /// Drop every cached entry. Use sparingly — typically only on a
+    /// Drop every cached entry. Use sparingly - typically only on a
     /// bulk admin reload or in tests.
     pub fn invalidate_all(&self) {
         self.cache.clear();
@@ -153,7 +153,7 @@ impl CachedEvaluator {
 #[async_trait]
 impl FeatureSync for CachedEvaluator {
     /// Drops every cached entry for `feature` (all scopes). The
-    /// `scope_key` argument is currently ignored — entries are keyed
+    /// `scope_key` argument is currently ignored - entries are keyed
     /// by `(feature, user, team)` and the user/team scope isn't
     /// derivable from the bare `scope_key` string, so we invalidate
     /// the whole feature prefix. For per-scope invalidation, an app
@@ -181,7 +181,7 @@ impl Evaluator for CachedEvaluator {
             return entry.value;
         }
 
-        // Miss or expired — consult inner and store the result. We
+        // Miss or expired - consult inner and store the result. We
         // store None values too: "feature not configured" is itself
         // a stable answer worth caching to avoid re-walking the
         // scope chain on every request.
@@ -197,7 +197,7 @@ impl Evaluator for CachedEvaluator {
 
         // Bounded-growth backstop: once the map crosses the threshold,
         // drop every entry that is already past its TTL (those are
-        // dead weight — a read would re-fetch them anyway). This keeps
+        // dead weight - a read would re-fetch them anyway). This keeps
         // a high-cardinality scope stream from growing the cache
         // without bound. Amortised: it runs only on this insert path,
         // and only after the size trips the threshold.
@@ -386,7 +386,7 @@ mod tests {
             // Fill to one short of the threshold with distinct scopes.
             // The sweep condition is `len() >= SWEEP_THRESHOLD`, so it
             // can never fire during this phase regardless of how long the
-            // fill takes — the map grows one entry per distinct scope.
+            // fill takes - the map grows one entry per distinct scope.
             for i in 0..SWEEP_THRESHOLD - 1 {
                 let ctx = ctx_for_user(i);
                 cached.is_enabled("flag", &ctx);
@@ -399,8 +399,8 @@ mod tests {
 
             // Age every entry past the TTL, then insert one more. That
             // insert takes the map to SWEEP_THRESHOLD, trips the sweep,
-            // and drops every entry older than the TTL — all the
-            // pre-existing ones — leaving only the entry just written.
+            // and drops every entry older than the TTL - all the
+            // pre-existing ones - leaving only the entry just written.
             std::thread::sleep(Duration::from_millis(120));
             let ctx = ctx_for_user(SWEEP_THRESHOLD);
             cached.is_enabled("flag", &ctx);
@@ -429,8 +429,8 @@ mod tests {
         });
     }
 
-    /// Stand-in evaluator for the `with_default(...)` scope-default
-    /// — featureflag panics if a `Context::root()`-derived context
+    /// Stand-in evaluator for the `with_default(...)` scope-default -
+    /// featureflag panics if a `Context::root()`-derived context
     /// is used while no global default is installed, so the tests
     /// thread a no-op default through their scope.
     struct NoopEvaluator;

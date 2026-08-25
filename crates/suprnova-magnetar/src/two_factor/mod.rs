@@ -148,7 +148,7 @@ impl TwoFactorService {
 
     /// Begin enrollment: mint a secret and ten recovery codes, persist
     /// them encrypted, and return the one-time artifacts. Refused when a
-    /// confirmed enrollment already exists — a session-hijacked attacker
+    /// confirmed enrollment already exists - a session-hijacked attacker
     /// must not pivot from "I have a session" to "I own 2FA"; rotation
     /// goes through [`TwoFactorService::re_enroll`] with proof.
     pub async fn enroll(&self, actor: &CredentialActor) -> Result<EnrollmentResponse> {
@@ -247,7 +247,7 @@ impl TwoFactorService {
     }
 
     /// Silent matched-step verification: no lockout accounting. The claim
-    /// and the success result are one atomic decision — the conditional
+    /// and the success result are one atomic decision - the conditional
     /// timestep write is the authority, so a code matched at any window
     /// edge can never be accepted again once its step is claimed.
     pub async fn verify(&self, user_id: &str, code: &str) -> Result<bool> {
@@ -322,7 +322,7 @@ impl TwoFactorService {
 
     /// Rotate the recovery codes of a confirmed enrollment; the secret and
     /// confirmation stay untouched. Requires proof of possession and an
-    /// unlocked account — without proof, a hijacked session could destroy
+    /// unlocked account - without proof, a hijacked session could destroy
     /// the legitimate user's recovery path.
     pub async fn regenerate_recovery_codes(
         &self,

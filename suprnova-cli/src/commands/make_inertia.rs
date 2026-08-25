@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::templates::{self, Frontend};
 use crate::ui;
 
-const DATA_TEMPLATE: &str = r#"//! {name} — unified inbound + outbound DTO.
+const DATA_TEMPLATE: &str = r#"//! {name} - unified inbound + outbound DTO.
 
 use suprnova::Data;
 use validator::Validate;
@@ -16,9 +16,9 @@ pub struct {name} {{
     // Add fields here.
     //
     // Available field attributes:
-    //   #[data(input_only)]     — accepted on Deserialize, omitted from Serialize
-    //   #[data(output_only)]    — rejected on Deserialize, included in Serialize
-    //   #[data(allow_include)]  — registers as ?include=-eligible (default-deny)
+    //   #[data(input_only)]     - accepted on Deserialize, omitted from Serialize
+    //   #[data(output_only)]    - rejected on Deserialize, included in Serialize
+    //   #[data(allow_include)]  - registers as ?include=-eligible (default-deny)
     //
     // For PATCH endpoints, use suprnova::data::Field<T> to distinguish
     // absent from null. For lazy outbound fields, use suprnova::inertia::Prop<T>.
@@ -47,7 +47,7 @@ fn run_data_struct(name: String) {
 
     // Create the props directory if it doesn't exist. Warn on
     // first-time creation so the user remembers to add the module
-    // declaration to `src/lib.rs` — the file is otherwise orphaned
+    // declaration to `src/lib.rs` - the file is otherwise orphaned
     // and the new Data struct is invisible to the rest of the crate.
     let first_time = !props_dir.exists();
     if first_time && let Err(e) = fs::create_dir_all(props_dir) {

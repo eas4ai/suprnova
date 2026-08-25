@@ -1,4 +1,4 @@
-//! Hashing configuration — env-driven driver selection + per-algo params.
+//! Hashing configuration - env-driven driver selection + per-algo params.
 //!
 //! Mirrors Laravel's `config/hashing.php` shape on the Rust side. The
 //! resolved [`HashConfig`] feeds [`crate::hashing::driver::build`] which
@@ -13,13 +13,13 @@ use std::env;
 /// (Argon2i), `argon2id`. Case-insensitive on the env-var side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Algorithm {
-    /// bcrypt — Laravel's default. Block-cipher-based, has the 72-byte
+    /// bcrypt - Laravel's default. Block-cipher-based, has the 72-byte
     /// password ceiling. Output: `$2b$<cost>$<salt><digest>`.
     Bcrypt,
-    /// Argon2i — memory-hard, side-channel-resistant. Output:
+    /// Argon2i - memory-hard, side-channel-resistant. Output:
     /// `$argon2i$v=19$m=…,t=…,p=…$<salt>$<digest>`.
     Argon2i,
-    /// Argon2id — hybrid (i + d), the OWASP 2024 recommendation for
+    /// Argon2id - hybrid (i + d), the OWASP 2024 recommendation for
     /// password hashing. Output: `$argon2id$v=19$m=…,t=…,p=…$<salt>$<digest>`.
     Argon2id,
 }
@@ -36,8 +36,8 @@ impl Algorithm {
         }
     }
 
-    /// Parse an env-side label. Accepts Laravel's spellings — `bcrypt`,
-    /// `argon` (alias for `argon2i` — matches `HashManager::createArgonDriver`),
+    /// Parse an env-side label. Accepts Laravel's spellings - `bcrypt`,
+    /// `argon` (alias for `argon2i` - matches `HashManager::createArgonDriver`),
     /// `argon2i`, `argon2id`. Case-insensitive.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -68,7 +68,7 @@ pub struct HashConfig {
     pub threads: u32,
     /// When true, `verify()` rejects hashes from a different algorithm
     /// (returns `Ok(false)`). Mirrors Laravel's `HASH_VERIFY` env.
-    /// Default: false — so legacy bcrypt hashes still verify after a
+    /// Default: false - so legacy bcrypt hashes still verify after a
     /// driver flip until they're rotated.
     pub verify_algorithm: bool,
 }
@@ -176,7 +176,7 @@ fn parse_bool(name: &str, s: &str) -> Result<bool, FrameworkError> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    //! Env-driven tests — serialised through `ENV_LOCK` because env mutation
+    //! Env-driven tests - serialised through `ENV_LOCK` because env mutation
     //! is process-wide. Same pattern as `crypto/key.rs`'s `ENV_LOCK`.
 
     use super::*;

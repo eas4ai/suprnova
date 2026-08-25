@@ -7,12 +7,12 @@
 //! 1. **Passwordless-account login oracle.** When `retrieve_by_credentials`
 //!    matches a user whose `get_auth_password()` is `None` and a password
 //!    was supplied, `EloquentUserProvider::validate_credentials` must run
-//!    the same fixed-cost dummy verify the unknown-user path runs — so an
+//!    the same fixed-cost dummy verify the unknown-user path runs - so an
 //!    attacker can't fingerprint "account exists but is passwordless" by
 //!    the absence of hash work.
 //!
 //! 2. **dummy_verify driver coupling.** The default `dummy_verify` must
-//!    drive the *configured* hasher, not a hard-coded bcrypt-cost-12 hash —
+//!    drive the *configured* hasher, not a hard-coded bcrypt-cost-12 hash -
 //!    otherwise under `HASH_DRIVER=argon2id` the dummy (bcrypt) and the real
 //!    (argon2) verify cost diverge and enumeration is re-enabled.
 //!
@@ -38,7 +38,7 @@ use suprnova::{
 /// verification back through *this* driver's `verify` (rather than the
 /// built-in bcrypt/argon dispatch). That routing is what lets the test
 /// count, deterministically, how many times the configured driver does
-/// hash / verify work — the observable stand-in for "did the dummy-verify
+/// hash / verify work - the observable stand-in for "did the dummy-verify
 /// path run, and did it use the configured hasher?".
 struct SpyHasher {
     hashes: Arc<AtomicUsize>,
@@ -171,7 +171,7 @@ async fn setup() -> TestDatabase {
     db
 }
 
-// MED — passwordless account: a supplied password against a matched
+// MED - passwordless account: a supplied password against a matched
 // passwordless user must run the SAME dummy verify the unknown-user path
 // runs, not short-circuit with zero hash work. Observed via the spy's
 // verify counter: without the fix the `(Some, None)` arm returns `Ok(false)`
@@ -210,7 +210,7 @@ async fn passwordless_login_runs_dummy_verify_like_unknown_user() {
     );
 }
 
-// MED control — when NO password is supplied there is nothing to equalise
+// MED control - when NO password is supplied there is nothing to equalise
 // against a real verify, so no dummy work should run (avoids a gratuitous
 // hash op on, e.g., a remember-me-only credential set).
 #[tokio::test]
@@ -243,11 +243,11 @@ async fn passwordless_with_no_password_does_no_dummy_work() {
     );
 }
 
-// LOW — the default dummy_verify must drive the CONFIGURED hasher. Under a
+// LOW - the default dummy_verify must drive the CONFIGURED hasher. Under a
 // non-bcrypt driver, the dummy hash is minted by that driver (spy `hash`)
 // and verified through that driver (spy `verify`). The old implementation
 // hard-coded a bcrypt-cost-12 hash, which would route `verify_with` to the
-// built-in bcrypt verify and never touch the configured driver — so both
+// built-in bcrypt verify and never touch the configured driver - so both
 // spy counters staying at zero would prove the regression.
 #[tokio::test]
 async fn dummy_verify_uses_configured_hasher_under_non_bcrypt_driver() {

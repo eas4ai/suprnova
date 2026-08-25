@@ -20,14 +20,14 @@
 //!    through to the previous list and emit a `tracing::warn!` per
 //!    decrypt so an operator-side re-encrypt job can be scheduled.
 //! 4. Run a re-encrypt job that reads + saves every model with an
-//!    encrypted cast — `Cast::to_storage` always uses the current key,
+//!    encrypted cast - `Cast::to_storage` always uses the current key,
 //!    so a no-op `find(); save()` migrates the row.
 //! 5. Remove `APP_KEY_PREVIOUS` after the job finishes.
 //!
 //! Encryption *always* uses the current key. Decryption tries current
 //! first; if that fails, each previous key is tried in order. On a
 //! previous-key hit, a `tracing::warn!` is emitted (no plaintext or
-//! ciphertext in the log payload — just the fact + an opaque
+//! ciphertext in the log payload - just the fact + an opaque
 //! "re-encrypt to remove APP_KEY_PREVIOUS dependency" hint) so admins
 //! know to schedule a re-encrypt pass.
 //!
@@ -44,7 +44,7 @@
 //! 1. They are `#[doc(hidden)]` and prefixed `_test_` so application
 //!    code can't reach them without going out of its way.
 //! 2. `Server::from_config` validates `APP_KEY` *on every boot*, not
-//!    only when the key ring is uninitialized — so a hypothetical
+//!    only when the key ring is uninitialized - so a hypothetical
 //!    test-hook install in production would still fail boot if
 //!    `APP_KEY` is missing or malformed. The validation is the
 //!    load-bearing defense; the cfg gate is defense in depth.
@@ -52,13 +52,13 @@
 //! Operators who want the test hooks entirely absent from production
 //! artifacts should depend on `suprnova` with `default-features = false`
 //! and explicitly enable only what they ship. The defense-in-depth
-//! posture above means this is a tightening, not a fix — the boot
+//! posture above means this is a tightening, not a fix - the boot
 //! validation closes the actual exploit either way.
 //!
 //! `_test_force_next_encrypt_failure` is gated the same way but is not
 //! covered by defense 2: it doesn't touch key installation, so a
 //! post-boot `APP_KEY` re-validation has nothing to catch. It carries
-//! its own, different mitigation instead — see that function's doc
+//! its own, different mitigation instead - see that function's doc
 //! comment for why it self-clears after one use rather than staying on
 //! until explicitly turned off.
 //!
@@ -66,7 +66,7 @@
 //!
 //! `CryptPurpose`'s v1 AAD binds one static label per surface, which
 //! stops cross-surface replay but leaves ciphertext *within* a surface
-//! interchangeable — any cookie's ciphertext decrypts as any other
+//! interchangeable - any cookie's ciphertext decrypts as any other
 //! cookie. The v2 AAD additionally binds a caller-supplied *logical*
 //! context (e.g. the cookie name) into the AAD, so
 //! [`Crypt::encrypt_string_for`] / [`Crypt::decrypt_string_for`] close
@@ -75,7 +75,7 @@
 //! first, then falls back to the un-contexted v1 label, so ciphertext
 //! written before a surface adopted name-bound AAD keeps decrypting.
 //! [`DecryptOrigin`] reports both the key-ring axis and this AAD axis
-//! independently, because they can be stale at the same time — a value
+//! independently, because they can be stale at the same time - a value
 //! can be both mid-key-rotation *and* legacy-AAD.
 
 pub(crate) mod aead;
@@ -97,14 +97,14 @@ use crate::config::Environment;
 /// cursors, 2FA secrets, recovery codes, and column-level cast values.
 /// Without domain separation, a ciphertext produced for one surface
 /// could be replayed into another that happens to accept the same
-/// plaintext shape — the crypto layer would not catch the mismatch.
+/// plaintext shape - the crypto layer would not catch the mismatch.
 ///
 /// Each variant maps to a stable label (e.g. `b"suprnova:cookie:v1"`)
 /// that is passed as AAD to AES-256-GCM. GCM mixes the AAD into the
 /// authentication tag without including it in the wire bytes, so:
 ///
 /// - Encrypting with `Cookie` and decrypting with `Cursor` fails the
-///   tag check — replay across surfaces is rejected at the crypto
+///   tag check - replay across surfaces is rejected at the crypto
 ///   layer, before any post-decrypt parsing.
 /// - The on-wire format is unchanged: still
 ///   `base64(nonce || ciphertext || tag)`. AAD is an authentication
@@ -148,7 +148,7 @@ pub enum CryptPurpose {
     MagnetarSessionGrant,
     /// Column values produced by the `AsEncrypted*` casts in
     /// [`crate::eloquent::casts`]. One label covers all four cast
-    /// variants — within-cast replay across columns requires a DB
+    /// variants - within-cast replay across columns requires a DB
     /// write, at which point the attacker already has access to the
     /// stored ciphertext.
     Cast,
@@ -214,7 +214,7 @@ impl CryptPurpose {
 /// `current` is used for every encrypt; decrypt tries `current` first,
 /// then each entry in `previous` in order. The ring is sealed for the
 /// lifetime of the process after [`Crypt::init`] /
-/// [`Crypt::init_with_keyring`] is called — to "rotate" you redeploy
+/// [`Crypt::init_with_keyring`] is called - to "rotate" you redeploy
 /// with new env vars.
 pub(crate) struct KeyRing {
     pub(crate) current: EncryptionKey,
@@ -281,7 +281,7 @@ pub struct DecryptOrigin {
 ///
 /// `encrypt_string` and `encrypt` return URL-safe base64 (no padding)
 /// over `nonce || ciphertext_with_tag`. Each call gets a fresh random
-/// nonce. **The wire format does not carry the purpose / AAD label** —
+/// nonce. **The wire format does not carry the purpose / AAD label** -
 /// callers supply the same [`CryptPurpose`] on encrypt and decrypt by
 /// independent agreement; the GCM authentication tag detects a
 /// mismatch.
@@ -300,7 +300,7 @@ impl Crypt {
     /// Install a single-key ring (no previous keys). Back-compat shim
     /// for callers that pre-date the rotation API.
     ///
-    /// Subsequent calls are a no-op and emit a `tracing::warn!` — the
+    /// Subsequent calls are a no-op and emit a `tracing::warn!` - the
     /// ring is sealed for the lifetime of the process.
     pub fn init(key: EncryptionKey) {
         Self::init_with_keyring(key, Vec::new());
@@ -309,7 +309,7 @@ impl Crypt {
     /// Install a rotation-aware key ring. `current` encrypts; `previous`
     /// are tried in order on decrypt fallback (older entries first by
     /// convention, but the ring tries them all so order only matters
-    /// for which fallback fires first when more than one would work —
+    /// for which fallback fires first when more than one would work -
     /// extremely unlikely with random 256-bit keys).
     ///
     /// Subsequent calls are a no-op and emit a `tracing::warn!`.
@@ -326,7 +326,7 @@ impl Crypt {
 
     fn ring() -> Result<&'static KeyRing, FrameworkError> {
         CRYPT_RING.get().ok_or_else(|| {
-            FrameworkError::internal("Crypt is not initialized — set APP_KEY before serving")
+            FrameworkError::internal("Crypt is not initialized - set APP_KEY before serving")
         })
     }
 
@@ -334,7 +334,7 @@ impl Crypt {
     /// over `nonce || ciphertext_with_tag`. Always uses the current
     /// key.
     ///
-    /// The `purpose` is bound as AEAD associated data — see
+    /// The `purpose` is bound as AEAD associated data - see
     /// [`CryptPurpose`]. The returned wire is rejected by any decrypt
     /// call that supplies a different purpose.
     ///
@@ -370,7 +370,7 @@ impl Crypt {
     /// cookie's encrypt (a `_for` call since the name-bound AAD change)
     /// tripping it.
     fn encrypt_with_aad(aad: &[u8], plaintext: &str) -> Result<String, FrameworkError> {
-        // Test-only, self-clearing forced-failure hook — see
+        // Test-only, self-clearing forced-failure hook - see
         // `_test_force_next_encrypt_failure` below. `swap(false, ..)`
         // both reads and clears the flag in one atomic step, so at
         // most the *next* encrypt call anywhere in the process fails;
@@ -392,7 +392,7 @@ impl Crypt {
     /// previous key. On a previous-key hit, emits a `tracing::warn!`.
     ///
     /// The `purpose` must match the value supplied at encrypt time, or
-    /// the GCM authentication tag check fails — see [`CryptPurpose`].
+    /// the GCM authentication tag check fails - see [`CryptPurpose`].
     pub fn decrypt_string(purpose: CryptPurpose, wire: &str) -> Result<String, FrameworkError> {
         let (plain, origin) = Self::decrypt_string_inner(purpose, wire)?;
         Self::log_rotation_warning(origin);
@@ -438,7 +438,7 @@ impl Crypt {
     /// Encrypt any `Serialize` value by JSON-encoding then encrypting
     /// under `purpose`. Always uses the current key.
     ///
-    /// The `purpose` is bound as AEAD associated data — see
+    /// The `purpose` is bound as AEAD associated data - see
     /// [`CryptPurpose`].
     pub fn encrypt<T: Serialize>(
         purpose: CryptPurpose,
@@ -466,12 +466,12 @@ impl Crypt {
     }
 
     /// Heuristic check that `value` *looks like* a payload produced by
-    /// [`Self::encrypt_string`] or [`Self::encrypt`] — URL-safe base64
+    /// [`Self::encrypt_string`] or [`Self::encrypt`] - URL-safe base64
     /// (no padding) over at least `nonce || tag` bytes.
     ///
     /// Mirrors Laravel's `Encrypter::appearsEncrypted`, which their
     /// `EncryptCookies` middleware uses to skip already-encrypted
-    /// cookies on the egress pass. **This is not a tamper check** — it
+    /// cookies on the egress pass. **This is not a tamper check** - it
     /// never calls into AES-GCM, so it cannot distinguish a valid
     /// ciphertext from random bytes of the right shape. Callers that
     /// need authentication must call [`Self::decrypt_string`] /
@@ -495,7 +495,7 @@ impl Crypt {
     ///
     /// Mirrors the *cardinality* of Laravel's
     /// `Encrypter::getPreviousKeys()`. We deliberately do NOT expose
-    /// the key bytes themselves — `EncryptionKey`'s `Debug` impl
+    /// the key bytes themselves - `EncryptionKey`'s `Debug` impl
     /// redacts (see `key.rs:67`) so the keyring stays opaque from
     /// every safe surface.
     pub fn previous_key_count() -> usize {
@@ -511,10 +511,10 @@ impl Crypt {
 
     /// Return the raw 32 bytes of the currently-active encryption key,
     /// or `None` when `Crypt` is uninitialized. Internal hook for
-    /// derive-key consumers within the framework — signed-URL HMAC,
+    /// derive-key consumers within the framework - signed-URL HMAC,
     /// password-reset token HMAC, future SDK signing helpers.
     ///
-    /// **Not exported.** The bytes are sensitive — callers must treat
+    /// **Not exported.** The bytes are sensitive - callers must treat
     /// them as material for an HMAC or KDF, never log or expose them.
     /// `EncryptionKey` keeps its `Debug` redacted; this accessor does
     /// the same by returning a `Vec<u8>` that holds no `Debug` trace
@@ -525,7 +525,7 @@ impl Crypt {
     }
 
     /// Raw 32-byte payloads for every `APP_KEY_PREVIOUS` entry, in
-    /// rotation order (oldest first by convention — the same order
+    /// rotation order (oldest first by convention - the same order
     /// `decrypt_with_ring` walks).
     ///
     /// Internal hook for derive-key consumers that need to verify
@@ -603,7 +603,7 @@ impl Crypt {
     fn log_rotation_warning(origin: DecryptOrigin) {
         if let KeyOrigin::Previous(index) = origin.key {
             // The log payload deliberately does NOT carry the
-            // plaintext or the ciphertext — both are sensitive. We log
+            // plaintext or the ciphertext - both are sensitive. We log
             // the fact + an actionable hint so an operator running a
             // log search for "APP_KEY_PREVIOUS" lands on every value
             // that still depends on an old key.
@@ -628,7 +628,7 @@ impl Crypt {
 /// into the GCM tag check. Current first, then each previous in order.
 /// Returns `(plain_bytes, origin)` on the first success; if every key
 /// fails returns the error from the *current* key (the most likely
-/// useful diagnostic — a previous-key failure would always be "wrong
+/// useful diagnostic - a previous-key failure would always be "wrong
 /// key" since previous keys typically can't decrypt new data).
 fn decrypt_with_ring(
     ring: &KeyRing,
@@ -644,7 +644,7 @@ fn decrypt_with_ring(
                 }
             }
             // All keys failed. Surface the current-key error since
-            // that's the one operators care about — the previous keys
+            // that's the one operators care about - the previous keys
             // are best-effort fallbacks.
             Err(current_err)
         }
@@ -682,7 +682,7 @@ pub(crate) fn decrypt_string_for_with_ring(
             ),
             // Surface the v2 error. Both branches produce a
             // byte-identical opaque "AEAD decrypt failed" today, so the
-            // choice is unobservable right now — but v2 is the path
+            // choice is unobservable right now - but v2 is the path
             // current writes take, so if decrypt errors ever gain more
             // detail, this is the one that should surface it.
             Err(_) => return Err(v2_err),
@@ -694,7 +694,7 @@ pub(crate) fn decrypt_string_for_with_ring(
 }
 
 /// Boot-time policy decision: given the runtime environment and the raw
-/// value of `APP_KEY` (`None` if unset, `Some("")` if set-but-empty —
+/// value of `APP_KEY` (`None` if unset, `Some("")` if set-but-empty -
 /// callers may pass either), decide which [`EncryptionKey`] to install.
 ///
 /// This is the legacy single-key resolver. New callers should prefer
@@ -710,14 +710,14 @@ pub(crate) fn decrypt_string_for_with_ring(
 ///
 /// - Production / Staging / Custom env without a valid key
 /// - Any environment with a malformed `APP_KEY` (wrong length, bad
-///   base64) — bad keys never fall through to a generated dev key
+///   base64) - bad keys never fall through to a generated dev key
 ///   because that would silently mask a misconfigured production
 ///   deployment.
 pub fn resolve_boot_key(
     environment: &Environment,
     app_key: Option<&str>,
 ) -> Result<BootKey, FrameworkError> {
-    // Treat empty string the same as unset — both mean "no key
+    // Treat empty string the same as unset - both mean "no key
     // configured." Strips trailing whitespace too so a `APP_KEY=` line
     // with a stray space doesn't accidentally parse.
     let supplied = app_key.map(str::trim).filter(|s| !s.is_empty());
@@ -725,7 +725,7 @@ pub fn resolve_boot_key(
     match (environment, supplied) {
         (_, Some(raw)) => {
             // Explicit key always wins. A malformed key is an error in
-            // every environment — never fall back to a generated dev
+            // every environment - never fall back to a generated dev
             // key because that would mask a typo in production.
             let key = EncryptionKey::from_base64(raw).map_err(|e| {
                 FrameworkError::internal(format!(
@@ -738,7 +738,7 @@ pub fn resolve_boot_key(
         }
         (Environment::Local | Environment::Development | Environment::Testing, None) => {
             // Dev environments still need a key for sessions and
-            // cursors to work — we just don't require the operator
+            // cursors to work - we just don't require the operator
             // to set one up before `cargo run`. Generated transient
             // keys reset on every restart, which is a feature in
             // development (no stale-session weirdness) but the
@@ -770,7 +770,7 @@ pub fn resolve_boot_key(
 ///
 /// - Any error that [`resolve_boot_key`] would return on the current
 ///   key.
-/// - Any entry in `APP_KEY_PREVIOUS` is malformed — a half-rotated
+/// - Any entry in `APP_KEY_PREVIOUS` is malformed - a half-rotated
 ///   secret should fail loudly at boot, not silently drop a fallback
 ///   key and leave columns undecryptable.
 pub fn resolve_boot_keyring(
@@ -787,7 +787,7 @@ pub fn resolve_boot_keyring(
 ///
 /// A realistic rotation chain is 1-3 entries (one in-flight roll, maybe
 /// one stalled prior roll the operator hasn't cleaned up). 8 leaves
-/// generous headroom — nobody is running 8 simultaneous rotations — and
+/// generous headroom - nobody is running 8 simultaneous rotations - and
 /// gives the trial-decrypt loop in `decrypt_with_ring` (the internal
 /// helper that walks the key ring on a decrypt miss) a known upper
 /// bound on work per failed decrypt.
@@ -796,7 +796,7 @@ pub fn resolve_boot_keyring(
 /// runaway `APP_KEY_PREVIOUS` is almost always a config-templating
 /// accident (duplicated lines, merged secret stores) and the operator
 /// needs to know rather than have the framework discard keys behind
-/// their back — which would leave columns undecryptable with no
+/// their back - which would leave columns undecryptable with no
 /// diagnostic.
 pub const MAX_PREVIOUS_KEYS: usize = 8;
 
@@ -804,7 +804,7 @@ pub const MAX_PREVIOUS_KEYS: usize = 8;
 /// keys) into a vector of [`EncryptionKey`]. Empty / whitespace
 /// entries are skipped; the empty-string-overall case yields `Vec::new()`.
 ///
-/// Any malformed entry is an error — see [`resolve_boot_keyring`]. The
+/// Any malformed entry is an error - see [`resolve_boot_keyring`]. The
 /// list is also capped at [`MAX_PREVIOUS_KEYS`]; exceeding the cap
 /// fails boot with an actionable diagnostic.
 fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, FrameworkError> {
@@ -819,7 +819,7 @@ fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, Framewor
     for (i, entry) in trimmed.split(',').enumerate() {
         let entry = entry.trim();
         if entry.is_empty() {
-            // Tolerate `APP_KEY_PREVIOUS=a,,b` and trailing commas —
+            // Tolerate `APP_KEY_PREVIOUS=a,,b` and trailing commas -
             // the operator may use a templated config that leaves an
             // empty slot during a partial rotation.
             continue;
@@ -838,7 +838,7 @@ fn parse_previous_keys(raw: Option<&str>) -> Result<Vec<EncryptionKey>, Framewor
     if out.len() > MAX_PREVIOUS_KEYS {
         return Err(FrameworkError::internal(format!(
             "APP_KEY_PREVIOUS holds {} keys; the maximum is {MAX_PREVIOUS_KEYS}. \
-             A realistic rotation chain is 1-3 entries — a longer list is \
+             A realistic rotation chain is 1-3 entries - a longer list is \
              almost always a config-templating accident. Trim the list to the \
              keys still needed for in-flight rotation; once a re-encrypt job \
              has migrated every row off an old key, drop that entry.",
@@ -857,7 +857,7 @@ pub enum BootKey {
     /// Operator supplied a valid `APP_KEY` in the environment.
     Configured(EncryptionKey),
     /// No `APP_KEY` set and the environment permits a transient dev
-    /// key. The boot path generated a fresh random key on the spot —
+    /// key. The boot path generated a fresh random key on the spot -
     /// it will not survive a restart.
     GeneratedTransient(EncryptionKey),
 }
@@ -884,7 +884,7 @@ impl BootKey {
 /// ring via [`Crypt::init_with_keyring`].
 #[derive(Debug)]
 pub struct BootKeyRing {
-    /// The current key — used for encrypt + decrypted-first.
+    /// The current key - used for encrypt + decrypted-first.
     pub current: BootKey,
     /// Previous keys in declared order. Empty if `APP_KEY_PREVIOUS`
     /// is unset or contains only whitespace / empty entries.
@@ -916,7 +916,7 @@ impl BootKeyRing {
 // `Server::from_config`, bypassing the APP_KEY validation that the
 // server runs only when `Crypt` is uninitialized.
 //
-// They are now gated behind `cfg(any(test, feature = "testing"))` —
+// They are now gated behind `cfg(any(test, feature = "testing"))` -
 // when a downstream consumer disables `default-features`, these
 // functions vanish from the binary entirely. The complementary fix in
 // `Server::from_config` (always run APP_KEY validation, not just when
@@ -933,7 +933,7 @@ impl BootKeyRing {
 /// Tests must serialize themselves via a `Mutex<()>` because the global
 /// `CRYPT_RING` is shared.
 ///
-/// **Test-only — do not call from production code.** Compiled out when
+/// **Test-only - do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -954,7 +954,7 @@ pub fn _test_install_key(key: EncryptionKey) -> bool {
 /// Returns `true` if the ring was actually installed, `false` if a
 /// ring was already present.
 ///
-/// **Test-only — do not call from production code.** Compiled out when
+/// **Test-only - do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -967,8 +967,8 @@ pub fn _test_install_keyring(current: EncryptionKey, previous: Vec<EncryptionKey
 /// under a key that isn't the current `APP_KEY` so rotation tests can
 /// simulate "this column was written when the old key was current."
 ///
-/// `purpose` must match the AAD the eventual decrypt path will supply
-/// — e.g. to simulate a row written by an `AsEncrypted` cast, pass
+/// `purpose` must match the AAD the eventual decrypt path will supply -
+/// e.g. to simulate a row written by an `AsEncrypted` cast, pass
 /// [`CryptPurpose::Cast`]; the cast's `from_storage` decrypt will then
 /// authenticate the wire under the same AAD.
 ///
@@ -977,7 +977,7 @@ pub fn _test_install_keyring(current: EncryptionKey, previous: Vec<EncryptionKey
 /// for-byte indistinguishable from a normal `Crypt::encrypt_string`
 /// output produced under `key` for the same `purpose`.
 ///
-/// **Test-only — do not call from production code.** Compiled out when
+/// **Test-only - do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -1020,9 +1020,9 @@ static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
 /// [`Crypt::encrypt_string_for`]) anywhere in the process to fail,
 /// without a real key, ring, or AEAD failure. Exists because nothing
 /// in this module gives an integration test a way to make
-/// `aead::encrypt` itself fail — every input it takes (a real
-/// installed key, the AAD label the caller resolved — a static v1
-/// label or a contexted v2 string — and caller-controlled plaintext
+/// `aead::encrypt` itself fail - every input it takes (a real
+/// installed key, the AAD label the caller resolved - a static v1
+/// label or a contexted v2 string - and caller-controlled plaintext
 /// bytes) always succeeds. Used
 /// by `framework/tests/cookie_queue.rs` to drive
 /// `SessionMiddleware::create_session_cookie`'s encryption-failure
@@ -1032,7 +1032,7 @@ static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
 /// # Why self-clearing, unlike the sticky on/off hooks above
 ///
 /// `_test_install_key` and friends are effectively inert once a real
-/// server has booted — `CRYPT_RING` is a sealed `OnceLock`, so calling
+/// server has booted - `CRYPT_RING` is a sealed `OnceLock`, so calling
 /// them again after `Crypt::init` is a no-op, and `Server::from_config`
 /// re-validates `APP_KEY` on every boot regardless. Neither defense
 /// applies here: this hook doesn't touch key installation, and it is
@@ -1042,14 +1042,14 @@ static CRYPT_FORCE_NEXT_ENCRYPT_FAILURE: std::sync::atomic::AtomicBool =
 /// from any code compiled into a default-featured build for as long as
 /// the process runs. `swap`-and-clear bounds the damage to *one*
 /// subsequent encrypt call, chosen by whichever caller reaches
-/// `encrypt_with_aad` next — a caller that needs the failure to land on
+/// `encrypt_with_aad` next - a caller that needs the failure to land on
 /// a *specific* call, not merely the next one system-wide, must
 /// additionally serialize with any other `Crypt`-touching code in the
 /// same test binary (a `Mutex<()>`, the same discipline already
-/// required around `CRYPT_RING` — see the module-level "Production
+/// required around `CRYPT_RING` - see the module-level "Production
 /// hardening" section).
 ///
-/// **Test-only — do not call from production code.** Compiled out when
+/// **Test-only - do not call from production code.** Compiled out when
 /// the `testing` feature is disabled.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -1060,7 +1060,7 @@ pub fn _test_force_next_encrypt_failure() {
 #[cfg(test)]
 mod boot_tests {
     //! Tests for [`resolve_boot_key`] and [`resolve_boot_keyring`].
-    //! These do NOT touch the global `CRYPT_RING` `OnceLock` — they
+    //! These do NOT touch the global `CRYPT_RING` `OnceLock` - they
     //! exercise the pure decision functions. End-to-end Crypt
     //! installation is covered by
     //! `framework/tests/app_key_enforcement.rs` (one scenario per
@@ -1084,7 +1084,7 @@ mod boot_tests {
 
     #[test]
     fn production_with_empty_key_fails_closed() {
-        // Empty string and whitespace-only count as "unset" — the
+        // Empty string and whitespace-only count as "unset" - the
         // operator likely has `APP_KEY=` with nothing after the equals.
         assert!(resolve_boot_key(&Environment::Production, Some("")).is_err());
         assert!(resolve_boot_key(&Environment::Production, Some("   ")).is_err());
@@ -1097,7 +1097,7 @@ mod boot_tests {
 
     #[test]
     fn custom_env_without_key_fails_closed() {
-        // Unknown environments are treated production-like — anything
+        // Unknown environments are treated production-like - anything
         // we don't explicitly recognize as a dev environment must not
         // silently downgrade.
         assert!(resolve_boot_key(&Environment::Custom("k8s".into()), None).is_err());
@@ -1112,7 +1112,7 @@ mod boot_tests {
 
     #[test]
     fn production_with_malformed_key_errors_even_with_value() {
-        // A bad key in production must error — never fall back to a
+        // A bad key in production must error - never fall back to a
         // generated key, because that would mask a typo or a
         // half-rotated secret.
         let err =
@@ -1146,7 +1146,7 @@ mod boot_tests {
 
     #[test]
     fn dev_env_with_malformed_key_still_errors() {
-        // Even in local, an explicit-but-bad key is an error — better
+        // Even in local, an explicit-but-bad key is an error - better
         // to fail at boot than silently mask a typo.
         let err = resolve_boot_key(&Environment::Local, Some("not-valid-base64!!!")).unwrap_err();
         assert!(format!("{err}").contains("APP_KEY is set but invalid"));
@@ -1165,7 +1165,7 @@ mod boot_tests {
     #[test]
     fn keyring_with_empty_previous_string_is_empty_vec() {
         // `APP_KEY_PREVIOUS=` and `APP_KEY_PREVIOUS=   ` both mean
-        // "no previous keys" — same way `APP_KEY=` means unset.
+        // "no previous keys" - same way `APP_KEY=` means unset.
         let app_key = EncryptionKey::generate().to_base64();
         for raw in ["", "   ", "  \t  "] {
             let ring = resolve_boot_keyring(&Environment::Production, Some(&app_key), Some(raw))
@@ -1202,7 +1202,7 @@ mod boot_tests {
     fn keyring_skips_empty_entries_in_list() {
         // Templated config files sometimes leave gaps like
         // `APP_KEY_PREVIOUS=a,,b` during a partial rotation. The
-        // empty entries are tolerated as "no key in this slot" — not
+        // empty entries are tolerated as "no key in this slot" - not
         // an error.
         let app_key = EncryptionKey::generate().to_base64();
         let k1 = EncryptionKey::generate().to_base64();
@@ -1234,7 +1234,7 @@ mod boot_tests {
     fn keyring_propagates_missing_app_key_error_in_production() {
         // The keyring resolver delegates current-key validation to
         // `resolve_boot_key`. Production without APP_KEY must still
-        // fail closed even if APP_KEY_PREVIOUS is set — that's a
+        // fail closed even if APP_KEY_PREVIOUS is set - that's a
         // common misconfiguration during a botched rotation.
         let prev = EncryptionKey::generate().to_base64();
         let err = resolve_boot_keyring(&Environment::Production, None, Some(&prev))
@@ -1244,7 +1244,7 @@ mod boot_tests {
 
     #[test]
     fn keyring_accepts_previous_list_at_cap() {
-        // The MAX_PREVIOUS_KEYS cap is inclusive — an operator running
+        // The MAX_PREVIOUS_KEYS cap is inclusive - an operator running
         // exactly the maximum number of in-flight rotations must still
         // boot.
         let app_key = EncryptionKey::generate().to_base64();
@@ -1262,7 +1262,7 @@ mod boot_tests {
         // Past the cap, fail loudly with an actionable diagnostic
         // naming both the count and the cap. Silent truncation would
         // drop a key the operator may still depend on for an in-flight
-        // re-encrypt job — better to fail boot and let them prune the
+        // re-encrypt job - better to fail boot and let them prune the
         // list intentionally.
         let app_key = EncryptionKey::generate().to_base64();
         let entries: Vec<String> = (0..MAX_PREVIOUS_KEYS + 1)
@@ -1288,7 +1288,7 @@ mod boot_tests {
         // templated config with extra commas (e.g.
         // `APP_KEY_PREVIOUS=,,,a,,,b,,,`) still parses to just the
         // non-empty entries and stays under the cap on the real key
-        // count — not the comma count.
+        // count - not the comma count.
         let app_key = EncryptionKey::generate().to_base64();
         let k1 = EncryptionKey::generate().to_base64();
         let k2 = EncryptionKey::generate().to_base64();
@@ -1302,7 +1302,7 @@ mod boot_tests {
     #[test]
     fn keyring_dev_with_no_app_key_generates_transient_current() {
         // Dev environments with only APP_KEY_PREVIOUS set still get
-        // a generated transient current key — the dev workflow
+        // a generated transient current key - the dev workflow
         // shouldn't break just because the operator left
         // APP_KEY_PREVIOUS pointing at the last production key.
         let prev = EncryptionKey::generate().to_base64();
@@ -1381,7 +1381,7 @@ mod boot_tests {
         let err = decrypt_with_ring(&ring, TEST_AAD, &wire).unwrap_err();
         // The surfaced error is whatever `aead::decrypt` returned
         // for the current key (most useful diagnostic for the
-        // operator — a previous-key fail is expected for new data).
+        // operator - a previous-key fail is expected for new data).
         assert!(format!("{err}").contains("AEAD decrypt failed"));
     }
 
@@ -1408,7 +1408,7 @@ mod boot_tests {
 
     // ---- Name-contexted v2 AAD coverage ---------------------------------
 
-    /// Deterministic key for the tests below — every byte is `n`, so
+    /// Deterministic key for the tests below - every byte is `n`, so
     /// each call is reproducible without touching the OS RNG. There is
     /// no existing deterministic-key helper in this module (the tests
     /// above all use `EncryptionKey::generate()`), so this derives one
@@ -1513,7 +1513,7 @@ mod boot_tests {
         // with name-bound (v2) AAD under the key that was current at
         // the time, decrypted after an `APP_KEY` rotation moved that
         // key into `previous`. This is the mainline rotation path once
-        // callers adopt `_for` — every v2 cookie written before a flip
+        // callers adopt `_for` - every v2 cookie written before a flip
         // must keep decrypting, not fall through to the legacy-AAD
         // window (which would spuriously flag it for re-issue) or fail
         // outright (which would log the user out mid-rotation).

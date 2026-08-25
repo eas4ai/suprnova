@@ -1,4 +1,4 @@
-//! #381b — `suprnova new`, run interactively in a non-interactive shell
+//! #381b - `suprnova new`, run interactively in a non-interactive shell
 //! (stdin not a TTY / EOF), reports a clean user-facing error
 //! (`ui::error` + exit 1) instead of panicking on the `dialoguer`
 //! `.interact*()` unwrap.

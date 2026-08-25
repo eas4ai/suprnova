@@ -1,4 +1,4 @@
-//! Laravel-13 parity — database observability surface.
+//! Laravel-13 parity - database observability surface.
 //!
 //! Covers:
 //!
@@ -75,7 +75,7 @@ async fn db_listen_fires_for_raw_select() {
 
 /// Discriminator: prove the listener fires for a path the dispatch
 /// wasn't hand-wired into. `DB::table(...).get()` goes through
-/// `DbTableBuilder::get` → `ExecutorChoice::query_all` — the only
+/// `DbTableBuilder::get` → `ExecutorChoice::query_all` - the only
 /// place QueryExecuted is constructed for prepared statements. A
 /// listener that fires here proves the chokepoint is real.
 #[tokio::test]
@@ -148,8 +148,8 @@ async fn db_listen_captures_read_write_type_classification() {
 #[serial]
 async fn db_listen_swallows_failing_listeners_via_event_facade() {
     let _db = setup().await;
-    // Direct callback panics? No — we don't propagate panics, listeners
-    // are Fn. But best-effort path uses EventFacade — verify a listener
+    // Direct callback panics? No - we don't propagate panics, listeners
+    // are Fn. But best-effort path uses EventFacade - verify a listener
     // returning Err does NOT fail the query.
     // (covered by the EventFacade path below)
     let count = Arc::new(AtomicUsize::new(0));
@@ -261,7 +261,7 @@ async fn event_facade_listen_fires_for_queries() {
         "EventFacade listener must observe QueryExecuted",
     );
 
-    // Cleanup — forget the listener so other tests are isolated.
+    // Cleanup - forget the listener so other tests are isolated.
     EventFacade::forget::<QueryExecuted>();
 }
 
@@ -303,7 +303,7 @@ async fn re_entrant_query_inside_listener_does_not_loop() {
         // guard must short-circuit and NOT fire QueryExecuted again.
         if n == 0 {
             // Use a sync block + tokio::task::block_in_place isn't
-            // possible in a Fn; do the simpler thing — spawn no
+            // possible in a Fn; do the simpler thing - spawn no
             // sub-query, just observe that the guard suppresses the
             // automatic re-emission path. The guarantee under test:
             // the listener body itself isn't re-invoked transitively.
@@ -346,7 +346,7 @@ async fn re_entrant_async_query_inside_event_facade_listener_does_not_loop() {
     // Wait for best-effort dispatch to land.
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-    // EXACTLY ONE — the outer query fires QueryExecuted (1); the
+    // EXACTLY ONE - the outer query fires QueryExecuted (1); the
     // inner query inside the listener fires no follow-up event.
     assert_eq!(
         outer_count.load(Ordering::SeqCst),
@@ -599,7 +599,7 @@ async fn captured_query_to_raw_sql_inlines_bindings() {
 // ---- connection_name threading ----------------------------------------
 
 /// Regression: `QueryExecuted::connection_name` must reflect the actual
-/// connection a query ran against — not the `__primary__` sentinel that
+/// connection a query ran against - not the `__primary__` sentinel that
 /// every event used to carry before the executor threaded the name
 /// through.
 #[tokio::test]
@@ -661,8 +661,8 @@ async fn query_executed_carries_primary_on_default_pool() {
 
 /// Regression: transaction-lifecycle events must also carry the real
 /// connection name (was `__primary__` everywhere). The closure form
-/// opens against the default pool today, so the event is `__primary__`
-/// — pin that explicitly so a future `transaction_on(name)` patch
+/// opens against the default pool today, so the event is `__primary__` -
+/// pin that explicitly so a future `transaction_on(name)` patch
 /// doesn't silently revert observability.
 #[tokio::test]
 #[serial]
@@ -759,7 +759,7 @@ async fn connection_established_carries_registered_name() {
 
 /// Regression: a panicking `DB::listen` callback MUST NOT discard a
 /// successful query result. The query already completed by the time
-/// listeners fire — the executor must catch the panic and continue
+/// listeners fire - the executor must catch the panic and continue
 /// returning the row data to the caller.
 #[tokio::test]
 #[serial]

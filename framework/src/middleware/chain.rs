@@ -14,8 +14,8 @@ use std::sync::Arc;
 ///    route's `(method, pattern)` middleware (see
 ///    `routing::group::GroupBuilder::try_finalize`), so by execution time
 ///    it is indistinguishable from middleware attached to the route
-///    directly. Runtime behavior is correct — group middleware still runs
-///    ahead of route middleware because it is registered first — but
+///    directly. Runtime behavior is correct - group middleware still runs
+///    ahead of route middleware because it is registered first - but
 ///    introspection cannot tell group from route middleware apart.
 /// 3. The actual route handler (innermost)
 pub struct MiddlewareChain {
@@ -70,9 +70,9 @@ impl MiddlewareChain {
     /// middleware or in the handler unwinds straight out of `execute`,
     /// exactly like any other async fn. The request-path safety net that
     /// converts a panic into a sanitized 500 (plus the structured log and
-    /// the `ErrorOccurred` dispatch) lives at the server boundary —
+    /// the `ErrorOccurred` dispatch) lives at the server boundary -
     /// `server::execute_chain_safely` for HTTP, `handle_ws_upgrade` for
-    /// WebSocket upgrades — so that standardized handling happens exactly
+    /// WebSocket upgrades - so that standardized handling happens exactly
     /// once, where the request lifecycle owns it, rather than being
     /// duplicated inside this layer-agnostic primitive. The end-to-end
     /// behavior is locked by `tests/middleware_panic_safety.rs`. A consumer

@@ -65,7 +65,7 @@ fn exponential_out_of_range_jitter_is_pinned_safely() {
         cap_secs: 100,
         jitter_ratio: f32::NAN,
     };
-    // NaN collapses to 0 — no jitter, plain capped delay.
+    // NaN collapses to 0 - no jitter, plain capped delay.
     assert_eq!(
         next_delay(&nan_sched, 10, Some(1.0)),
         Duration::from_secs(100)

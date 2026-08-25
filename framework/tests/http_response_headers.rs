@@ -74,7 +74,7 @@ fn without_cookie_emits_max_age_zero_forget() {
     assert!(sc.contains("Max-Age=0"), "got: {sc}");
 }
 
-// ResponseExt trait mirrors — chainable on `Response = Result<..>`.
+// ResponseExt trait mirrors - chainable on `Response = Result<..>`.
 
 #[test]
 fn response_ext_with_headers_chains() {

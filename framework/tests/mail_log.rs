@@ -122,7 +122,7 @@ async fn log_transport_emits_the_envelope_and_the_body() {
     assert!(logs_contain("ping"), "subject");
     assert!(
         logs_contain("pong"),
-        "the rendered body is the whole point of this driver — Laravel's \
+        "the rendered body is the whole point of this driver - Laravel's \
          log mailer writes the full message and so does ours"
     );
 }
@@ -131,7 +131,7 @@ async fn log_transport_emits_the_envelope_and_the_body() {
 /// requests a reset, and reads the link off the console. Hiding it would
 /// mean nobody could complete a password-reset flow locally.
 ///
-/// This is safe because the driver cannot reach production —
+/// This is safe because the driver cannot reach production -
 /// `bootstrap_from_env` refuses to boot there on `MAIL_DRIVER=log`. That
 /// refusal is pinned separately in `mail_production_fail_closed.rs`; if it
 /// is ever relaxed, this test is the reason it must not be.
@@ -151,7 +151,7 @@ async fn log_transport_emits_the_reset_link_so_a_developer_can_use_it() {
     );
     assert!(
         logs_contain(RESET_URL_BASE),
-        "the reset URL must be readable — that is what a developer needs"
+        "the reset URL must be readable - that is what a developer needs"
     );
     assert!(
         logs_contain(RESET_TOKEN),
@@ -178,7 +178,7 @@ async fn log_transport_emits_the_subject_verbatim() {
 
     assert!(
         logs_contain(RESET_TOKEN),
-        "a link in the subject is logged like any other text — no rewriting"
+        "a link in the subject is logged like any other text - no rewriting"
     );
 }
 

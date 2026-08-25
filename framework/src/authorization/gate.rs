@@ -23,7 +23,7 @@ use crate::FrameworkError;
 ///
 /// Laravel's `Gate::forUser($user)->allows(...)` rebinds the gate's *implicit*
 /// current-user resolver to a different user. Suprnova's gate takes the user
-/// **explicitly** on every call — `Gate::allows(action, &user, &resource)` —
+/// **explicitly** on every call - `Gate::allows(action, &user, &resource)` -
 /// so "check as a different user" is just passing that user. There is no
 /// implicit resolver to rebind, which makes `forUser` redundant rather than
 /// missing: the explicit API is strictly more general.
@@ -41,7 +41,7 @@ impl Gate {
     }
 
     /// Define a synchronous gate whose closure returns a rich [`Response`]
-    /// rather than a bare `bool` — so a denial can carry a message, code, and
+    /// rather than a bare `bool` - so a denial can carry a message, code, and
     /// HTTP status that [`inspect`](Self::inspect) and [`Self::authorize`](Self::authorize)
     /// surface.
     ///
@@ -85,8 +85,8 @@ impl Gate {
     /// Authorize the action, returning the denial as an error.
     ///
     /// A bare denial maps to `FrameworkError::Unauthorized` (403). A rich
-    /// denial — from a [`define_with`](Self::define_with) gate that returned a
-    /// `Response` with a custom message/status — maps to
+    /// denial - from a [`define_with`](Self::define_with) gate that returned a
+    /// `Response` with a custom message/status - maps to
     /// `FrameworkError::Domain` carrying that message and status (e.g. 404 from
     /// `Response::deny_as_not_found()`).
     pub fn authorize<U: 'static, R: 'static>(
@@ -103,7 +103,7 @@ impl Gate {
 
     /// Define an asynchronous authorization closure for a given action.
     ///
-    /// The closure must produce an *owned* future — references to `user` and
+    /// The closure must produce an *owned* future - references to `user` and
     /// `resource` cannot be held past the closure return. Copy or clone any
     /// data needed inside the future body before returning it.
     ///
@@ -167,7 +167,7 @@ impl Gate {
 
     // ── Rich decisions: inspect / raw + before / after hooks ────────────────
 
-    /// Evaluate the action and return the rich [`Response`] — the
+    /// Evaluate the action and return the rich [`Response`] - the
     /// allow/deny decision plus any message, code, and HTTP status. Mirrors
     /// Laravel's `Gate::inspect`. An undefined ability (no gate, no hook
     /// decision) yields a default deny.
@@ -196,7 +196,7 @@ impl Gate {
     /// The raw evaluation result, preserving the *undefined* case as `None`.
     ///
     /// Unlike [`inspect`](Self::inspect) (which normalizes `None` to a default
-    /// deny), `raw` returns `None` when nothing decided — no `before` hook
+    /// deny), `raw` returns `None` when nothing decided - no `before` hook
     /// fired, no gate is registered for `(action, U, R)`, and no `after` hook
     /// filled in. This distinguishes "explicitly denied" from "no rule
     /// defined", mirroring Laravel's `Gate::raw`.
@@ -227,7 +227,7 @@ impl Gate {
     /// ```
     ///
     /// Hooks are keyed by the **user type** (`U`), not by resource, so a hook
-    /// fires for every `(action, U, R)` regardless of resource — put
+    /// fires for every `(action, U, R)` regardless of resource - put
     /// resource-specific logic in the gate. Hooks are synchronous predicates;
     /// for async authorization logic use [`define_async`](Self::define_async)
     /// or [`define_async_with`](Self::define_async_with). They apply to the
@@ -241,7 +241,7 @@ impl Gate {
     /// Every after hook runs (so it can log the outcome), receiving the running
     /// decision as `Option<bool>` (`None` while still undecided). Following
     /// Laravel's `$result ??= $afterResult` semantic, an after hook can only
-    /// **fill in** an undecided result — it cannot override an allow or deny
+    /// **fill in** an undecided result - it cannot override an allow or deny
     /// that a before hook or gate already produced. Return `None` to record a
     /// no-op.
     ///
@@ -262,7 +262,7 @@ impl Gate {
     // ── Introspection ─────────────────────────────────────────────────────────
 
     /// `true` iff a gate (sync **or** async) is registered for the
-    /// `(action, U, R)` tuple. Mirrors Laravel's `Gate::has` — handy
+    /// `(action, U, R)` tuple. Mirrors Laravel's `Gate::has` - handy
     /// for diagnostic UIs ("is this ability defined?") and for
     /// frontend Inertia props that ship the user's full ability map.
     ///
@@ -286,7 +286,7 @@ impl Gate {
     /// `true` iff **any** of the supplied actions allow against the
     /// same `(user, resource)`. Mirrors Laravel's
     /// `Gate::any($abilities, $arguments)`. Short-circuits on the
-    /// first allow — does not evaluate later actions.
+    /// first allow - does not evaluate later actions.
     ///
     /// A missing gate among `actions` is treated as deny (matches
     /// the single-action [`Self::allows`] semantic).
@@ -307,7 +307,7 @@ impl Gate {
     /// `Gate::check([abilities], $arguments)`. Short-circuits on
     /// the first deny.
     ///
-    /// An empty `actions` slice returns `true` (vacuously) —
+    /// An empty `actions` slice returns `true` (vacuously) -
     /// matches the standard `Iterator::all` semantic.
     pub fn check<U: 'static, R: 'static>(actions: &[&str], user: &U, resource: &R) -> bool {
         actions.iter().all(|a| Self::allows(a, user, resource))

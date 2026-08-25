@@ -1,4 +1,4 @@
-//! Database seeders — process-global registry of ordered fixture
+//! Database seeders - process-global registry of ordered fixture
 //! runners.
 //!
 //! Each seeder is a zero-sized type that implements [`Seeder`]; the
@@ -41,7 +41,7 @@
 //! Matches the Phase 5B registries (`register_mailable_factory`,
 //! `register_notification_factory`, `register_mail_renderer`):
 //!
-//! - Backing store is `RwLock<Option<IndexMap<String, SeederFn>>>` —
+//! - Backing store is `RwLock<Option<IndexMap<String, SeederFn>>>` -
 //!   lazily initialized, kept in registration order, last-write-wins
 //!   on the seeder name (re-registering the same name silently
 //!   replaces the function pointer so tests can swap stubs).
@@ -55,7 +55,7 @@
 //!
 //! [`run_one`] looks up a single registered seeder by its stable
 //! `name()` and runs it without running its peers. This is the
-//! engine for `db:seed --class=<Name>` — the Laravel-side
+//! engine for `db:seed --class=<Name>` - the Laravel-side
 //! `php artisan db:seed --class=UserSeeder` ergonomic. Lookup misses
 //! return `Err(FrameworkError::not_found(...))` so the CLI surfaces
 //! "no seeder registered for X" rather than silently succeeding.
@@ -68,7 +68,7 @@
 //! [`crate::eloquent::events::dispatch_cancellable`] check the flag
 //! and short-circuit to `Ok(())` when it is set. That single check
 //! at each chokepoint covers every model lifecycle event (both
-//! cancellable and non-cancellable). The effect is task-scoped —
+//! cancellable and non-cancellable). The effect is task-scoped -
 //! only seeders that opt in are affected, and the application's
 //! own HTTP request paths continue to fire events normally. Nested
 //! calls compose (the inner future inherits the outer flag).
@@ -76,7 +76,7 @@
 //! **Note:** this only matters for code that goes through the
 //! `Model` trait (`Model::create`, `Model::save`, etc.). Factories
 //! persist via `ActiveModelTrait::insert` and bypass the model-
-//! event dispatch path entirely — there's nothing to mute in that
+//! event dispatch path entirely - there's nothing to mute in that
 //! path. See [`without_events`]'s rustdoc for the full
 //! when-is-this-useful breakdown.
 
@@ -102,19 +102,19 @@ tokio::task_local! {
     pub(crate) static EVENTS_MUTED: bool;
 }
 
-/// A database seeder — runs once via [`run_all`] to populate fixture
+/// A database seeder - runs once via [`run_all`] to populate fixture
 /// data. Seeders carry no per-instance state; the trait surface is a
 /// stable name + an async run method that returns a Result.
 #[async_trait]
 pub trait Seeder: Send + Sync {
     /// Stable name used as the registry key. Re-registering the same
-    /// name silently replaces the prior seeder (last-write-wins) —
+    /// name silently replaces the prior seeder (last-write-wins) -
     /// matches the Phase 5B factory registries' contract.
     fn name() -> &'static str
     where
         Self: Sized;
 
-    /// Run the seeder. Idempotency is the seeder's responsibility —
+    /// Run the seeder. Idempotency is the seeder's responsibility -
     /// `run_all` does not snapshot or roll back, so a seeder that
     /// inserts unconditionally will produce duplicates on re-run.
     async fn run() -> Result<(), FrameworkError>
@@ -123,7 +123,7 @@ pub trait Seeder: Send + Sync {
 }
 
 /// Register a seeder type. Inserts it into the global registry under
-/// its `name()`. Order matters — `run_all` visits seeders in the
+/// its `name()`. Order matters - `run_all` visits seeders in the
 /// order they were registered. Re-registering a name replaces the
 /// prior function pointer in-place (IndexMap preserves the original
 /// position, so test stubs slot in cleanly).
@@ -144,7 +144,7 @@ pub fn register<S: Seeder + 'static>() {
 }
 
 /// Run every registered seeder in registration order. Stops on the
-/// first error — seeders that already ran are NOT rolled back. The
+/// first error - seeders that already ran are NOT rolled back. The
 /// `db:seed` console command is the typical caller; tests can also
 /// drive this directly after registering seeders.
 pub async fn run_all() -> Result<(), FrameworkError> {
@@ -172,7 +172,7 @@ pub async fn run_all() -> Result<(), FrameworkError> {
 ///   registered for {name}"))`. The CLI surfaces this as a non-zero
 ///   exit and a helpful error message rather than silently no-oping.
 ///
-/// Calling `run_one` does NOT also call other seeders — unlike
+/// Calling `run_one` does NOT also call other seeders - unlike
 /// `run_all`, this is targeted execution. Laravel's
 /// `db:seed --class=UserSeeder` does the same.
 pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
@@ -194,7 +194,7 @@ pub async fn run_one(name: &str) -> Result<(), FrameworkError> {
 /// Number of currently-registered seeders. Useful for tests asserting
 /// "the bootstrap registered all expected seeders."
 ///
-/// Returns `0` on registry-lock poison after logging an error —
+/// Returns `0` on registry-lock poison after logging an error -
 /// matches the "treat poison as empty" pattern used by the
 /// registration path.
 pub fn count() -> usize {
@@ -227,13 +227,13 @@ pub fn is_registered(name: &str) -> bool {
 /// The Laravel-`WithoutModelEvents` analogue. While the future is
 /// awaiting, both [`crate::eloquent::events::dispatch_after`] and
 /// [`crate::eloquent::events::dispatch_cancellable`] short-circuit
-/// to `Ok(())` — covering every model lifecycle event (both
+/// to `Ok(())` - covering every model lifecycle event (both
 /// cancellable and non-cancellable) at its single chokepoint.
 ///
 /// The effect is **task-scoped**: only the work performed inside
 /// `fut` is muted; concurrent work on other tasks (HTTP request
 /// handlers, other seeders, queue workers) continues to fire
-/// events normally. Nested calls compose — the inner future
+/// events normally. Nested calls compose - the inner future
 /// inherits the outer flag.
 ///
 /// # When is this useful?
@@ -243,7 +243,7 @@ pub fn is_registered(name: &str) -> bool {
 /// row, which invokes any registered `Observer<User>` and any
 /// queued broadcast listeners. Wrapping that loop in
 /// `seed::without_events` skips both the per-row cancellable veto
-/// path and the per-row after-event fanout — handy for bulk seeds
+/// path and the per-row after-event fanout - handy for bulk seeds
 /// that don't want to wake the broadcaster or trigger downstream
 /// jobs.
 ///
@@ -271,7 +271,7 @@ pub fn is_registered(name: &str) -> bool {
 ///     fn name() -> &'static str { "UsersSeeder" }
 ///     async fn run() -> Result<(), FrameworkError> {
 ///         seed::without_events(async {
-///             // Loop of Model::create calls — each would normally
+///             // Loop of Model::create calls - each would normally
 ///             // fire Creating/Saving/Created/Saved. Muted here.
 ///             for i in 0..50 {
 ///                 User::create(User {
@@ -296,14 +296,14 @@ where
 /// Used by the Eloquent event dispatch sites
 /// ([`crate::eloquent::events::dispatch_after`] and
 /// [`crate::eloquent::events::dispatch_cancellable`]) to decide
-/// whether to short-circuit. Not exposed at the crate root — user
+/// whether to short-circuit. Not exposed at the crate root - user
 /// code should never need to check this directly; opting into
 /// [`without_events`] is the public surface.
 pub(crate) fn events_muted() -> bool {
     EVENTS_MUTED.try_with(|m| *m).unwrap_or(false)
 }
 
-/// Clear every registered seeder. Test-only helper — production code
+/// Clear every registered seeder. Test-only helper - production code
 /// should never need to call this because the registry is built once
 /// at boot.
 ///

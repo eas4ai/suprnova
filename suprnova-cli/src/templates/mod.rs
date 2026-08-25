@@ -95,7 +95,7 @@ pub fn middleware_logging() -> &'static str {
 ///
 /// Emits a real, working middleware skeleton: it logs the inbound method,
 /// path, and per-request id, runs the inner handler, and logs completion
-/// time once the response is in hand. Production-safe out of the box —
+/// time once the response is in hand. Production-safe out of the box -
 /// users replace the body with whatever they actually need (auth checks,
 /// CORS, tracing context, etc).
 pub fn middleware_template(name: &str, struct_name: &str) -> String {
@@ -196,7 +196,7 @@ impl {struct_name} {{
     ///
     /// Returns a status string by default so the skeleton compiles and
     /// runs immediately. Swap the body for the real workflow when you
-    /// implement the feature — typically wrap fallible work in
+    /// implement the feature - typically wrap fallible work in
     /// `?` and return the produced value.
     pub async fn execute(&self) -> Result<String, FrameworkError> {{
         Ok("{struct_name} executed".to_string())
@@ -216,7 +216,7 @@ impl {struct_name} {{
 /// argv, the user fills in real behavior, the scaffold compiles
 /// immediately so the `make:command` → `cargo run` loop is fast.
 ///
-/// The TODO marker in the body is intentional — it's a starting
+/// The TODO marker in the body is intentional - it's a starting
 /// point, not deferred framework work.
 pub fn command_template(struct_name: &str, command_name: &str) -> String {
     format!(
@@ -447,7 +447,7 @@ impl Frontend {
 
     /// Read the frontend choice from the `SUPRNOVA_FRONTEND` env var,
     /// honoring any `.env` already loaded into the process. Defaults to
-    /// Svelte when unset or unparseable — matches the framework's
+    /// Svelte when unset or unparseable - matches the framework's
     /// `InertiaConfig::default()` behavior.
     pub fn detect_from_env() -> Self {
         match std::env::var("SUPRNOVA_FRONTEND") {
@@ -508,7 +508,7 @@ pub mod react {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/react/src/types/inertia-props.ts.tpl")
     }
-    /// `LangProvider` / `useLang()` — the React localization wrapper.
+    /// `LangProvider` / `useLang()` - the React localization wrapper.
     pub fn lang() -> &'static str {
         include_str!("files/frontend/react/src/lib/lang.ts.tpl")
     }
@@ -565,7 +565,7 @@ pub mod svelte {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/svelte/src/types/inertia-props.ts.tpl")
     }
-    /// `$state`-based localization module — `.svelte.ts` extension is
+    /// `$state`-based localization module - `.svelte.ts` extension is
     /// required for runes outside a component.
     pub fn lang() -> &'static str {
         include_str!("files/frontend/svelte/src/lib/lang.svelte.ts.tpl")
@@ -609,7 +609,7 @@ pub mod vue {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/vue/src/types/inertia-props.ts.tpl")
     }
-    /// `useLang()` composable — the Vue localization wrapper.
+    /// `useLang()` composable - the Vue localization wrapper.
     pub fn lang() -> &'static str {
         include_str!("files/frontend/vue/src/lib/lang.ts.tpl")
     }
@@ -988,7 +988,7 @@ pub fn lang_app_ftl() -> &'static str {
 
 /// Starter `frontend/<kit>/src/types/lang-keys.ts`, shipped so the
 /// `t(key: MessageKey, ...)` wrappers type-check before a user ever runs
-/// `suprnova generate-types` — same rationale as `inertia_props_types()`
+/// `suprnova generate-types` - same rationale as `inertia_props_types()`
 /// per kit below. Its content is exactly what `generate-types` itself
 /// would produce by scanning the starter `lang_app_ftl()` catalog above
 /// (one message id, `welcome`), so the first real generation is a no-op
@@ -1003,7 +1003,7 @@ pub fn lang_keys_starter() -> &'static str {
 ///
 /// `entity_template` drops the table name into `#[sea_orm(table_name = "…")]`,
 /// and that name came from the database. `db:sync` already refuses names that
-/// aren't bare identifiers, so in practice nothing here needs escaping — but
+/// aren't bare identifiers, so in practice nothing here needs escaping - but
 /// this is the last place a name becomes *source code*, and a generator that
 /// trusts its caller to have sanitised the input is exactly how injections
 /// survive a refactor. Control characters are escaped rather than passed
@@ -1579,7 +1579,7 @@ pub fn dockerignore_template() -> &'static str {
 /// A rendered `docker-compose.yml` plus the credentials minted for it.
 ///
 /// The caller needs the passwords back so it can print a `DATABASE_URL`
-/// that actually works — they are generated per project and exist
+/// that actually works - they are generated per project and exist
 /// nowhere else.
 pub struct GeneratedCompose {
     /// The rendered `docker-compose.yml` contents.
@@ -1743,7 +1743,7 @@ mod tests {
         let hostile = r#"users")] pub struct Evil; #[sea_orm(table_name = "x"#;
         let escaped = escape_rust_string(hostile);
         // Every `"` that survives must be preceded by an odd number of
-        // backslashes — i.e. none of them can terminate the literal.
+        // backslashes - i.e. none of them can terminate the literal.
         let mut backslashes = 0usize;
         for c in escaped.chars() {
             match c {

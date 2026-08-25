@@ -21,7 +21,7 @@ pub enum BackoffSchedule {
         /// First-retry delay in seconds; doubles on each subsequent attempt.
         base_secs: u64,
         /// Strict maximum delay in seconds. The final delay (after
-        /// jitter) cannot exceed this value — jitter that lands above
+        /// jitter) cannot exceed this value - jitter that lands above
         /// the cap is pinned down to the cap.
         cap_secs: u64,
         /// Symmetric jitter applied to the computed delay. Clamped to
@@ -29,7 +29,7 @@ pub enum BackoffSchedule {
         /// pinned. NaN collapses to 0.0. `0.0` disables jitter. The
         /// strict `cap_secs` ceiling means jitter effectively spreads
         /// delays *downward* from `cap` once the exponential schedule
-        /// has saturated — this is how production retry libraries
+        /// has saturated - this is how production retry libraries
         /// (e.g. AWS SDK, GCP client) treat backoff caps.
         jitter_ratio: f32,
     },
@@ -77,7 +77,7 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// This method's default, along with [`Job::timeout`],
     /// [`Job::fail_on_timeout`], [`Job::max_tries`], and [`Job::backoff`]
     /// below, is kept numerically equal to
-    /// `crate::notifications::Notification`'s matching defaults — guarded
+    /// `crate::notifications::Notification`'s matching defaults - guarded
     /// by `notification_defaults_match_send_notification_jobs_job_defaults`
     /// in `framework/tests/notification_queue.rs`.
     fn queue() -> Option<&'static str>
@@ -94,8 +94,8 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// One process-global driver currently receives every push: the resolved
     /// name is carried on the `JobQueueing` / `JobQueued` lifecycle events so
     /// listeners can attribute dispatches, but it does not select a different
-    /// driver. Declaring it is forward-compatible — when per-connection
-    /// drivers land, this is the name that will pick one — not behavioral
+    /// driver. Declaring it is forward-compatible - when per-connection
+    /// drivers land, this is the name that will pick one - not behavioral
     /// today. Contrast [`Job::queue`], which is honored end to end.
     fn connection() -> Option<&'static str>
     where
@@ -110,10 +110,10 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// available immediately. Mirrors Laravel's `$job->delay`, with one
     /// difference: this is a class-level default (no `&self`), like
     /// [`Self::queue`] and [`Self::max_tries`], not a per-instance
-    /// property — a dispatch needing a delay from the job's own data
+    /// property - a dispatch needing a delay from the job's own data
     /// should use [`Queue::later`](crate::queue::Queue::later) /
     /// [`Queue::push_later`](crate::queue::Queue::push_later) instead,
-    /// which always outrank this method — it is not consulted for either.
+    /// which always outrank this method - it is not consulted for either.
     fn delay() -> Option<Duration>
     where
         Self: Sized,
@@ -173,7 +173,7 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Dedupe TTL for [`Self::unique_id`]. The dedupe key is held for this
     /// long after a successful enqueue; a later `push_unique` for the same
     /// (job_name, unique_id) within the window returns "duplicate" and does
-    /// NOT enqueue. Default: 5 minutes — long enough to cover typical
+    /// NOT enqueue. Default: 5 minutes - long enough to cover typical
     /// worker-side processing windows, short enough not to block legitimate
     /// re-submissions long after the original ran.
     fn unique_for() -> Duration
@@ -184,7 +184,7 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Middleware pipeline wrapping the handler. Returned in order, outermost
-    /// first — i.e. `vec![Throttle, RateLimit]` runs `Throttle` first, then
+    /// first - i.e. `vec![Throttle, RateLimit]` runs `Throttle` first, then
     /// `RateLimit`, then the handler. Mirrors Laravel's `$job->middleware()`.
     /// Default: empty pipeline (handler runs directly).
     fn middleware() -> Vec<std::sync::Arc<dyn crate::queue::middleware::JobMiddleware>>

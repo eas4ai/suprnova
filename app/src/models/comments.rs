@@ -1,4 +1,4 @@
-//! Comment — Phase 10B T10 dogfood for `MorphTo`.
+//! Comment - Phase 10B T10 dogfood for `MorphTo`.
 //!
 //! Sits on the "child" side of the polymorphic relation: each Comment
 //! row carries a (`commentable_id`, `commentable_type`) pair that
@@ -9,8 +9,8 @@
 //! `commentable_type` value doesn't match any registered target.
 //!
 //! `Comment::commentable()` returns a `CommentableMorphFetch` whose
-//! `.get().await?` resolves the parent and yields the per-family enum
-//! — callers `match` on the enum to recover the concrete target.
+//! `.get().await?` resolves the parent and yields the per-family enum -
+//! callers `match` on the enum to recover the concrete target.
 
 use chrono::{DateTime, Utc};
 use suprnova::model;

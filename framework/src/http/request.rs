@@ -7,7 +7,7 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
-/// State of the request body — either still streaming from the wire,
+/// State of the request body - either still streaming from the wire,
 /// already buffered into memory, or fully consumed.
 ///
 /// Buffering happens when middleware needs to inspect the body and
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// `body_bytes` / `form` / `json` reads return the cached bytes without
 /// touching the underlying stream.
 pub enum BodyState {
-    /// Body has not been read yet — still a streaming hyper body.
+    /// Body has not been read yet - still a streaming hyper body.
     Streaming(hyper::body::Incoming),
     /// Body was collected into memory. Subsequent reads return these bytes.
     Buffered(Bytes),
@@ -49,7 +49,7 @@ pub struct Request {
     /// accessors ([`Request::ip`], [`Request::secure`], [`Request::host`],
     /// [`Request::http_host`], [`Request::port`], [`Request::ips`]).
     ///
-    /// Defaults to an empty config — proxy headers ignored. The server
+    /// Defaults to an empty config - proxy headers ignored. The server
     /// installs the [`AppConfig`](crate::config::AppConfig)-derived
     /// allowlist via [`Request::with_trusted_proxies`] in
     /// `handle_request_with_peer`; in-process tests can install one
@@ -145,7 +145,7 @@ impl Request {
     /// Build a `Request` for tests, with no live connection behind it.
     ///
     /// [`Request::new`] takes a `hyper::body::Incoming`, which cannot be
-    /// constructed outside hyper — so until this existed there was no way
+    /// constructed outside hyper - so until this existed there was no way
     /// to exercise anything taking a `&Request` without standing up a
     /// server. That is why WebSocket channel `authorize` implementations
     /// had no unit tests: the only way to reach one was a real upgrade.
@@ -174,7 +174,7 @@ impl Request {
 
     /// The authenticated user id carried on this request, if any.
     ///
-    /// This is the identity the session/auth middleware resolved — it is
+    /// This is the identity the session/auth middleware resolved - it is
     /// not derived from anything the client sent in a message body, so a
     /// handler can trust it as far as it trusts the session.
     ///
@@ -340,8 +340,8 @@ impl Request {
         self.parts.method.as_str().eq_ignore_ascii_case(method)
     }
 
-    /// Convenience: returns `true` when this is an XHR / AJAX request
-    /// — the standard `X-Requested-With: XMLHttpRequest` header set by
+    /// Convenience: returns `true` when this is an XHR / AJAX request -
+    /// the standard `X-Requested-With: XMLHttpRequest` header set by
     /// every browser XHR library. Mirrors Laravel's `Request::ajax()` /
     /// `Symfony Request::isXmlHttpRequest()`.
     pub fn ajax(&self) -> bool {
@@ -362,7 +362,7 @@ impl Request {
         }
     }
 
-    /// Returns `true` when the request is a prefetch hint — covers the
+    /// Returns `true` when the request is a prefetch hint - covers the
     /// Mozilla legacy `X-Moz: prefetch` and the modern `Purpose` /
     /// `Sec-Purpose: prefetch` family. Mirrors Laravel's
     /// `Request::prefetch()`.
@@ -382,9 +382,9 @@ impl Request {
     /// 1. URI scheme on the request line (set by hyper when TLS is
     ///    terminated in-process).
     /// 2. `X-Forwarded-Proto` (single-value or first comma-split
-    ///    value, case-insensitive) — only honoured when the TCP peer
+    ///    value, case-insensitive) - only honoured when the TCP peer
     ///    matches the [trusted-proxy allowlist](TrustedProxiesConfig).
-    /// 3. `X-Forwarded-Ssl: on` — older proxies (nginx legacy default),
+    /// 3. `X-Forwarded-Ssl: on` - older proxies (nginx legacy default),
     ///    same trusted-proxy gating.
     ///
     /// Mirrors Laravel's `Request::secure()` /
@@ -392,12 +392,12 @@ impl Request {
     ///
     /// # Security note
     ///
-    /// Default behaviour ignores proxy headers — the TCP peer is
+    /// Default behaviour ignores proxy headers - the TCP peer is
     /// untrusted until the operator opts in via
     /// `APP_TRUSTED_PROXIES` (or
     /// [`AppConfigBuilder::trusted_proxies`](crate::config::AppConfigBuilder::trusted_proxies)).
     /// Without that opt-in, a client behind a terminating TLS proxy
-    /// will read as `secure() == false` here — the framework cannot
+    /// will read as `secure() == false` here - the framework cannot
     /// distinguish a real proxy hop from a spoofed `X-Forwarded-Proto`
     /// without an allowlist.
     pub fn secure(&self) -> bool {
@@ -432,11 +432,11 @@ impl Request {
     /// Get the connecting peer IP address.
     ///
     /// Resolution order:
-    /// 1. `X-Forwarded-For` — first non-empty comma-split value (only
+    /// 1. `X-Forwarded-For` - first non-empty comma-split value (only
     ///    when the TCP peer is in the trusted-proxy allowlist).
-    /// 2. `X-Real-IP` — single value (same trusted-proxy gating).
+    /// 2. `X-Real-IP` - single value (same trusted-proxy gating).
     /// 3. The TCP peer address recorded by the server
-    ///    ([`Request::with_peer_addr`]) — the fail-safe fallback used
+    ///    ([`Request::with_peer_addr`]) - the fail-safe fallback used
     ///    whenever the proxy headers are absent or the peer is not a
     ///    trusted proxy.
     ///
@@ -448,8 +448,8 @@ impl Request {
     ///
     /// # Security note
     ///
-    /// `X-Forwarded-For` and `X-Real-IP` are client-controlled headers
-    /// — any inbound request can carry them. They are honoured only
+    /// `X-Forwarded-For` and `X-Real-IP` are client-controlled headers -
+    /// any inbound request can carry them. They are honoured only
     /// when the TCP peer matches an address listed in
     /// [`AppConfig::trusted_proxies`](crate::config::AppConfig::trusted_proxies)
     /// (configurable via `APP_TRUSTED_PROXIES`). With the default
@@ -484,7 +484,7 @@ impl Request {
     /// `Symfony Request::getClientIps()`.
     ///
     /// `X-Forwarded-For` / `X-Real-IP` contribute to the chain only
-    /// when the TCP peer matches the trusted-proxy allowlist — see
+    /// when the TCP peer matches the trusted-proxy allowlist - see
     /// [`Request::ip`] for the security rationale. The peer address
     /// itself is always appended (it is the only authoritative hop).
     pub fn ips(&self) -> Vec<String> {
@@ -545,7 +545,7 @@ impl Request {
         self.parts.uri.host().map(|s| s.to_string())
     }
 
-    /// The HTTP host being requested — host plus port when the port is
+    /// The HTTP host being requested - host plus port when the port is
     /// non-default for the scheme. Mirrors Symfony's `getHttpHost()`.
     pub fn http_host(&self) -> Option<String> {
         let host = self.host()?;
@@ -578,7 +578,7 @@ impl Request {
     /// default).
     ///
     /// `X-Forwarded-Host` / `X-Forwarded-Port` are honoured only when
-    /// the TCP peer is in the trusted-proxy allowlist — see
+    /// the TCP peer is in the trusted-proxy allowlist - see
     /// [`Request::ip`] for the security rationale.
     pub fn port(&self) -> Option<u16> {
         let trusted = self.peer_is_trusted_proxy();
@@ -920,7 +920,7 @@ impl Request {
             let prefix = actual_split[0];
             let suffix = actual_split[1];
             // e.g. actual = application/json, ty = application/foo+json
-            // should match — checking ty matches pattern `<prefix>/.+\+<suffix>`
+            // should match - checking ty matches pattern `<prefix>/.+\+<suffix>`
             if let Some((ty_prefix, ty_rest)) = ty.split_once('/')
                 && ty_prefix == prefix
                 && let Some((_, ty_suffix)) = ty_rest.rsplit_once('+')
@@ -1011,7 +1011,7 @@ impl Request {
             BodyState::Consumed => {
                 return Err(FrameworkError::internal(
                     "Request body has already been consumed and was not buffered. \
-                     This is a framework bug — middleware that drains the body \
+                     This is a framework bug - middleware that drains the body \
                      must call Request::buffer_body before passing the request \
                      downstream.",
                 ));
@@ -1080,7 +1080,7 @@ impl Request {
     /// content type is not form-urlencoded, or when the field is absent.
     ///
     /// This exists because [`Request::form`] consumes `self`, which
-    /// middleware cannot do — it has to hand the request onward. The
+    /// middleware cannot do - it has to hand the request onward. The
     /// caller must have run [`Request::buffer_body`] first; see
     /// [`RateLimitMiddleware::key_reads_body`](crate::rate_limit::RateLimitMiddleware::key_reads_body)
     /// for the path that does.
@@ -1170,7 +1170,7 @@ impl Request {
     ///
     /// This is used internally by the handler macro for FormRequest
     /// extraction and by the multipart upload code. Callers must
-    /// pattern-match on [`BodyState`] — the body may be a streaming
+    /// pattern-match on [`BodyState`] - the body may be a streaming
     /// hyper body, an already-buffered `Bytes`, or fully consumed.
     pub fn into_parts(self) -> (RequestParts, BodyState) {
         let content_type = self
@@ -1284,8 +1284,8 @@ fn parse_accept(raw: &str) -> Vec<String> {
 }
 
 /// Simple `*`-wildcard pattern match used by [`Request::is`] and
-/// [`Request::route_is`]. Mirrors Laravel's `Str::is($pattern, $value)`
-/// — `*` matches any sequence (including empty). No `?` single-char or
+/// [`Request::route_is`]. Mirrors Laravel's `Str::is($pattern, $value)` -
+/// `*` matches any sequence (including empty). No `?` single-char or
 /// regex semantics; Laravel doesn't either.
 fn glob_match(pattern: &str, value: &str) -> bool {
     if pattern == value || pattern == "*" {
@@ -1310,7 +1310,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
                 return false;
             }
         } else if part.is_empty() {
-            // Consecutive `**` collapses — no-op.
+            // Consecutive `**` collapses - no-op.
             continue;
         } else {
             match value[idx..].find(part) {
@@ -1322,7 +1322,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     true
 }
 
-// `Request::for_test` is gated on the `testing` feature, so these are too —
+// `Request::for_test` is gated on the `testing` feature, so these are too -
 // otherwise `--no-default-features --tests` cannot compile the crate, which
 // only the release gate's feature-matrix check ever tries.
 #[cfg(all(test, feature = "testing"))]
@@ -1334,8 +1334,8 @@ mod query_accessor_tests {
     }
 
     /// The invariant SEC-04 was made of. Three accessors read the query
-    /// string — `query_param`, `query_params`, and `Context::query_param`
-    /// (fed from `query_params`) — and for a repeated key they must agree.
+    /// string - `query_param`, `query_params`, and `Context::query_param`
+    /// (fed from `query_params`) - and for a repeated key they must agree.
     /// They did not: this one returned the first value while the other two
     /// returned the last, so signed-URL verification and handler execution
     /// could resolve `?user=attacker&user=victim` differently.
@@ -1350,7 +1350,7 @@ mod query_accessor_tests {
         assert_eq!(
             req.query_param("user"),
             req.query_params().get("user").cloned(),
-            "the singular and plural accessors must never disagree — that \
+            "the singular and plural accessors must never disagree - that \
              disagreement is what let a signed URL verify as one value and \
              execute as another"
         );
@@ -1427,7 +1427,7 @@ mod url_helper_tests {
     /// A malformed `q` weight above the RFC 7231 ceiling must not invert
     /// content negotiation. A bare `q=5` should be clamped to 1.0 and so
     /// tie (not outrank) a legitimate `q=1.0` type, with source order
-    /// breaking the tie — the over-limit weight gains no priority.
+    /// breaking the tie - the over-limit weight gains no priority.
     #[test]
     fn parse_accept_clamps_q_above_one() {
         let parsed = parse_accept("application/json;q=1.0, text/html;q=5");
@@ -1459,7 +1459,7 @@ mod url_helper_tests {
     /// A pre-buffered body (typical of CSRF-buffered form requests) must
     /// still honor a tighter per-request cap. A FormRequest overriding
     /// `max_body_bytes` below the buffering middleware's limit must see
-    /// the over-limit 413, identical to the streaming arm — the cap is
+    /// the over-limit 413, identical to the streaming arm - the cap is
     /// not silently lost just because the bytes are already in memory.
     #[tokio::test]
     async fn buffered_body_over_cap_is_rejected() {
@@ -1491,7 +1491,7 @@ mod url_helper_tests {
     }
 
     /// A pre-buffered body within the cap returns its cached bytes
-    /// unchanged — the cap check only rejects, it never truncates.
+    /// unchanged - the cap check only rejects, it never truncates.
     #[tokio::test]
     async fn buffered_body_within_cap_passes_through() {
         let parts = hyper::Request::builder()
@@ -1557,7 +1557,7 @@ mod url_helper_tests {
             auth_user_id: None,
         };
 
-        // The bogus middle hop is dropped — only parseable IPs (plus the
+        // The bogus middle hop is dropped - only parseable IPs (plus the
         // authoritative peer) survive. A spoofed token can't inject an
         // arbitrary string into the chain a consumer might render or log.
         assert_eq!(
@@ -1595,7 +1595,7 @@ mod url_helper_tests {
             auth_user_id: None,
         };
 
-        // A junk-only forwarded chain can't rotate rate-limit buckets — `ip()`
+        // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`
         // falls through to the authoritative TCP peer instead of echoing junk.
         assert_eq!(req.ip().as_deref(), Some("10.0.0.9"));
         assert_eq!(req.ips(), vec!["10.0.0.9".to_string()]);

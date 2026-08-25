@@ -1,4 +1,4 @@
-//! Abort helpers — Laravel-style early-exit for handlers and middleware.
+//! Abort helpers - Laravel-style early-exit for handlers and middleware.
 //!
 //! Laravel's `abort($code, $message)` throws an `HttpException` to
 //! short-circuit a controller. PHP has unwinding exceptions; Rust does
@@ -32,7 +32,7 @@ use crate::error::FrameworkError;
 /// `status` must be a real HTTP status code (100..=599). Values out of
 /// range are coerced to 500 by the response renderer's status
 /// validation (same behavior as
-/// `HttpResponse::into_hyper`'s status fallback) — so callers don't
+/// `HttpResponse::into_hyper`'s status fallback) - so callers don't
 /// need to defend against bad input here.
 pub fn abort(status: u16, message: impl Into<String>) -> Result<(), FrameworkError> {
     Err(FrameworkError::Domain {

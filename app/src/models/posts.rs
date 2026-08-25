@@ -1,4 +1,4 @@
-//! Post model — migrated to `#[suprnova::model]` in Phase 10A T11.
+//! Post model - migrated to `#[suprnova::model]` in Phase 10A T11.
 //!
 //! Dogfoods the framework's Eloquent surface against a real DB-backed
 //! entity used by `/api/posts` endpoints and the `PostPolicy`
@@ -12,7 +12,7 @@ use suprnova::model;
     table = "posts",
     fillable = ["title", "body", "is_public", "author_id"],
     timestamps,
-    // Phase 10B T10 — Post is the first branch of the polymorphic
+    // Phase 10B T10 - Post is the first branch of the polymorphic
     // Comment family. `morph_type = "post"` registers the type with
     // the framework's morph registry so `MorphTo` targets that name
     // Post resolve via the type-string column on the polymorphic
@@ -56,7 +56,7 @@ pub struct Post {
 }
 
 // Re-export the SeaORM types the macro emits inside the per-model
-// inner module — see `users.rs` for rationale.
+// inner module - see `users.rs` for rationale.
 pub use post::{ActiveModel, Column, Entity};
 
 impl Post {
@@ -82,7 +82,7 @@ impl Post {
     ///
     /// **Unbounded, and it materialises.** An earlier version of this
     /// comment said the listing could "stream the visible subset",
-    /// which the implementation has never done — `.get().into_vec()`
+    /// which the implementation has never done - `.get().into_vec()`
     /// loads every matching row into memory. Against a seeded 50M-row
     /// table that is roughly 42M rows and tens of gigabytes in a single
     /// response, so the process dies before it answers.
@@ -103,7 +103,7 @@ impl Post {
     ///
     /// `simple_paginate` rather than `paginate` on purpose. The
     /// length-aware paginator issues a `COUNT` beside the page query,
-    /// and counting 42M matching rows costs seconds per request — a
+    /// and counting 42M matching rows costs seconds per request - a
     /// listing endpoint would then be measuring Postgres counting
     /// rather than the framework serving. Laravel's `simplePaginate()`
     /// makes the same trade, so the comparison stays like for like.

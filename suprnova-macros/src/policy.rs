@@ -1,4 +1,4 @@
-//! `#[policy(UserTy, ResourceTy)]` — registers each method of the impl block
+//! `#[policy(UserTy, ResourceTy)]` - registers each method of the impl block
 //! as a Gate action via `inventory::submit!`.
 //!
 //! The action name is derived from the method name + resource kind:
@@ -8,7 +8,7 @@
 //! to `Gate::define`, and `-> Response` (the authorization `Response`, also
 //! reachable as the crate-root alias `GateResponse`) routes to
 //! `Gate::define_with` so a denial can carry a message, code, and HTTP status.
-//! Any other return type — including a missing one — is a compile error.
+//! Any other return type - including a missing one - is a compile error.
 //!
 //! Because `inventory::submit!` requires `'static` constants, we emit free-
 //! function shims that delegate to the impl methods, then reference those by
@@ -48,7 +48,7 @@ enum PolicyReturn {
 /// Classify a policy method's return type by its final path segment, so
 /// `bool`, `Response`, `GateResponse`, and the fully-qualified
 /// `suprnova::authorization::Response` all resolve. Returns `None` for an
-/// unsupported or missing return type — the caller turns that into a spanned
+/// unsupported or missing return type - the caller turns that into a spanned
 /// compile error.
 fn classify_return(output: &ReturnType) -> Option<PolicyReturn> {
     let ReturnType::Type(_, ty) = output else {

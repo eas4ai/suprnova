@@ -1,7 +1,7 @@
 //! SeaORM mirror entity for `payments_transactions`.
 //!
-//! One row per money movement — one-off charges, subscription invoices,
-//! refunds — recorded after a provider webhook confirms the outcome.
+//! One row per money movement - one-off charges, subscription invoices,
+//! refunds - recorded after a provider webhook confirms the outcome.
 //! `provider_transaction_id` + `provider` are the natural key; the
 //! `provider_metadata` blob preserves the full provider payload so
 //! downstream consumers can read fields the mirror schema doesn't
@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 pub struct Transaction {
     /// Surrogate primary key.
     pub id: i64,
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.).
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.).
     pub provider: String,
     /// Provider-issued transaction / payment identifier (e.g. Stripe's
     /// `pi_…` or `ch_…`). Natural key with `provider`.

@@ -1,6 +1,6 @@
 //! `TestResponse` unit tests. Constructed directly from an
 //! already-captured `(status, headers, body)` triple, so most of these
-//! don't need a loopback HTTP harness at all — see
+//! don't need a loopback HTTP harness at all - see
 //! `framework/src/testing/response.rs` for the type itself and
 //! `framework/tests/cors_middleware.rs` for it wired to a real
 //! `handle_request` round trip.
@@ -9,7 +9,7 @@
 //! one assertion: it needs a real `SessionStore` and a cookie that
 //! really decrypts to that store's session id, so they seed an
 //! in-memory store and mint the cookie under the same `Crypt` purpose
-//! `SessionMiddleware` uses — mirroring the fake-store pattern in
+//! `SessionMiddleware` uses - mirroring the fake-store pattern in
 //! `framework/tests/session_lazy_persistence.rs`.
 
 use std::collections::HashMap;
@@ -140,7 +140,7 @@ fn assert_cookie_panics_when_no_matching_set_cookie_header() {
     .assert_cookie("suprnova_session");
 }
 
-// ── `assert_session_has` — needs a real session store ───────────────
+// ── `assert_session_has` - needs a real session store ───────────────
 
 fn ensure_crypt() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -180,7 +180,7 @@ impl SessionStore for InMemoryStore {
 
 /// Mint a `Set-Cookie` header carrying `session_id`, encrypted the same
 /// way `SessionMiddleware::create_session_cookie` does
-/// (`framework/src/session/middleware.rs:340-371`) — id + `.` + a
+/// (`framework/src/session/middleware.rs:340-371`) - id + `.` + a
 /// touched-at timestamp, under `CryptPurpose::Cookie`.
 ///
 /// Compat-window regression: this intentionally mints a v1, name-unbound

@@ -36,7 +36,7 @@
 //! # }
 //! ```
 //!
-//! The pipeline is a thin owned-state wrapper around [`MiddlewareChain`] —
+//! The pipeline is a thin owned-state wrapper around [`MiddlewareChain`] -
 //! the chain remains the execution primitive, the pipeline adds the
 //! ergonomic builder Laravel users reach for. `then`, `then_return`, and
 //! `finally_with` all funnel through `MiddlewareChain::execute`.
@@ -60,7 +60,7 @@ use std::sync::Arc;
 /// The Laravel-side names (`send`, `through`, `pipe`, `then`, `then_return`,
 /// `finally_with`) are first-class. Rust-side aliases (`with_request`,
 /// `with_middleware`, `push`, `execute`, `on_finally`) ship for callers who
-/// prefer them — see the impl block.
+/// prefer them - see the impl block.
 pub struct Pipeline {
     /// The list of middleware in execution order (first added runs first).
     pipes: Vec<BoxedMiddleware>,
@@ -69,7 +69,7 @@ pub struct Pipeline {
     /// destination closure or build the request later via [`Pipeline::send`].
     passable: Option<Request>,
     /// Optional `finally` hook. Runs after the destination completes,
-    /// regardless of how the chain resolved (no panic-catching — see
+    /// regardless of how the chain resolved (no panic-catching - see
     /// [`MiddlewareChain::execute`] for the panic policy).
     finally: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
@@ -187,11 +187,11 @@ impl Pipeline {
         let request = self
             .passable
             .take()
-            .expect("Pipeline::then requires a request — call .send(request) first");
+            .expect("Pipeline::then requires a request - call .send(request) first");
         self.then_with(request, destination).await
     }
 
-    /// Fallible sibling of [`Self::then`] — returns
+    /// Fallible sibling of [`Self::then`] - returns
     /// `Err(FrameworkError::internal(...))` instead of panicking when
     /// the pipeline was assembled without a [`Pipeline::send`] call.
     ///
@@ -208,7 +208,7 @@ impl Pipeline {
     {
         let request = self.passable.take().ok_or_else(|| {
             crate::FrameworkError::internal(
-                "Pipeline::try_then requires a request — call .send(request) first, \
+                "Pipeline::try_then requires a request - call .send(request) first, \
                  or use Pipeline::then_with to pass the request inline",
             )
         })?;
@@ -233,14 +233,14 @@ impl Pipeline {
 
     /// Run the pipeline with the request as the final value (Laravel's
     /// `thenReturn`). The terminal step echoes the request back as the
-    /// pipeline result — useful when the pipeline is used purely for
+    /// pipeline result - useful when the pipeline is used purely for
     /// side effects.
     ///
     /// Because Suprnova pipelines yield a [`Response`] (the only thing
     /// HTTP handlers can return), this surface materialises a 204
     /// No Content response after the chain runs. The "thenReturn"
-    /// semantics are preserved at the side-effect level — every
-    /// middleware ran, every `finally` fired — without forcing the
+    /// semantics are preserved at the side-effect level - every
+    /// middleware ran, every `finally` fired - without forcing the
     /// caller to invent a destination.
     pub async fn then_return(self) -> Response {
         self.then(|_req| async { Ok(crate::http::HttpResponse::new().status(204)) })
@@ -313,7 +313,7 @@ mod tests {
             .pipe(NoopMw);
         assert_eq!(p.len(), 4);
 
-        // through replaces — even after pipes have been pushed
+        // through replaces - even after pipes have been pushed
         let p = p.through([NoopMw]);
         assert_eq!(p.len(), 1);
     }

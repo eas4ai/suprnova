@@ -38,7 +38,7 @@ async fn restart_signal_breaks_worker_loop() {
     });
 
     // Issue the restart signal AFTER the worker boots (so worker_started_at
-    // < signal_ts) — the worker observes the signal on its next loop pass
+    // < signal_ts) - the worker observes the signal on its next loop pass
     // and exits cleanly.
     tokio::time::sleep(Duration::from_millis(50)).await;
     Queue::restart().await.unwrap();
