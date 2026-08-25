@@ -37,7 +37,7 @@ const GRANT_CLAIM_KEYS: [&str; 10] = [
 /// Closed reason for rejecting upload identity or transfer authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UploadErrorKind {
-    /// The upload handle was malformed, noncanonical, nil, or not UUIDv4.
+    /// The upload handle was malformed, noncanonical, nil, or not UUIDv4/v7.
     InvalidHandle,
     /// The bearer grant token was malformed or exceeded its fixed bound.
     InvalidGrantEncoding,
@@ -103,12 +103,16 @@ impl Error for UploadError {}
 pub struct UploadHandle(Uuid);
 
 impl UploadHandle {
-    /// Parses a canonical lowercase hyphenated, non-nil UUIDv4 handle.
+    /// Parses a canonical lowercase hyphenated, non-nil UUIDv4 or UUIDv7 handle.
     pub fn parse(value: &str) -> Result<Self, UploadError> {
         let uuid =
             Uuid::parse_str(value).map_err(|_| UploadError::new(UploadErrorKind::InvalidHandle))?;
         let canonical = uuid.hyphenated().to_string();
-        if canonical != value || uuid.is_nil() || uuid.get_version() != Some(Version::Random) {
+        let server_generated = matches!(
+            uuid.get_version(),
+            Some(Version::Random | Version::SortRand)
+        );
+        if canonical != value || uuid.is_nil() || !server_generated {
             return Err(UploadError::new(UploadErrorKind::InvalidHandle));
         }
         Ok(Self(uuid))
