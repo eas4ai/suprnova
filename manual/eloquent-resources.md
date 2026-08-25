@@ -239,6 +239,35 @@ pub struct PostResource {
 A request that names an include path not on this resource's allowlist
 gets a JSON:API 400 errors envelope.
 
+### Depth cap
+
+An include path may carry at most five segments. `?include=a.b.c.d.e.f` is
+truncated to `a.b.c.d.e` before anything walks it, matching Laravel's
+`JsonApiResource::$maxRelationshipDepth`. Change the ceiling once at boot:
+
+```rust
+// In bootstrap::register()
+suprnova::max_relationship_depth(3);
+```
+
+The cap matters because a relationship graph can be cyclic:
+`?include=author.posts.author.posts...` costs more work with every segment
+a client types, and nothing else bounds it but the length of the query
+string. Truncation only removes segments, never adds them, and every level
+still checks its own allowlist before descending - so a truncated path can
+never reach data the full path could not.
+
+One consequence is worth knowing: a segment past the cap is dropped before
+the allowlist sees it. At a cap of 2, `?include=author.posts.secrets`
+returns 200 with `author` and `posts` included rather than the 400 the full
+path would earn, because `secrets` no longer exists by the time anything
+validates it.
+
+`max_relationship_depth(0)` turns includes off entirely. Laravel's 0 still
+emits the first hop, because its clamp only ever applies to the tail after
+the leading segment has been split off; Suprnova's 0 means no
+relationships at all.
+
 ### Why Suprnova diverges
 
 Two visible divergences from Laravel's `JsonApiResource`:

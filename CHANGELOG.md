@@ -8,6 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **The database pool now has liveness knobs.** `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`, `DB_TEST_BEFORE_ACQUIRE`, and `DB_PING_AFTER_IDLE` control when the pool closes, recycles, and pings a connection, with matching `DatabaseConfig::builder()` setters. Each is unset by default, so an existing deployment's pool behaves exactly as it did. Use them when a NAT gateway or firewall drops idle connections: sqlx exposes no libpq `keepalives_*` equivalent, so pool recycling is the mechanism.
 - **`db:seed <Class>` reports its progress.** A targeted run prints a `RUNNING` line before the seeder and an elapsed-milliseconds `DONE` line after it. A bare `db:seed` stays silent. The formatter, `suprnova::two_column_detail`, is available to your own `#[command]` handlers.
 - **Many-to-many relations now filter on pivot columns.** `where_pivot`, `where_pivot_op`, `where_pivot_in`, `where_pivot_not_in`, `where_pivot_null`, `where_pivot_not_null`, `where_pivot_between`, `where_pivot_not_between`, `where_pivot_group`, and their `or_` twins constrain `get`, `first`, and `count` on `BelongsToMany`, `MorphToMany`, and `MorphedByMany`. `where_pivot_group` takes a closure and renders one parenthesised group, so it stays atomic inside a following `or_where_pivot`. Pivot filters apply to reads only: `attach`, `attach_with`, `detach`, and `sync` return an error while one is set, and eager loading does not carry them.
@@ -19,6 +20,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **An include path longer than five segments now returns its first five relationships instead of all of them.** Nothing outside a resource's allowlist was ever reachable, so no response gains data; a deep path loses its tail. Raise the ceiling with `suprnova::max_relationship_depth(n)` if your API documents paths longer than that.
 - **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behaviour.
 
 ## 1.3.2 - 2026-08-25

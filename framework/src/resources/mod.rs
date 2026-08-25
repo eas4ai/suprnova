@@ -52,7 +52,10 @@ pub mod trait_def;
 
 pub use builder::{IncludedSink, JsonApiBuilder, render_resource_object};
 pub use fieldset::{REQUEST_FIELDSET, RequestFieldsetSet, current_fieldset, scope_fieldset};
-pub use include_tree::IncludeTree;
+pub use include_tree::{
+    DEFAULT_MAX_RELATIONSHIP_DEPTH, IncludeTree, current_max_relationship_depth,
+    max_relationship_depth,
+};
 pub use jsonapi_info::JsonApiInfo;
 pub use maybe::{Maybe, MissingValue, insert_maybe, strip_missing_values};
 pub use response::{JsonApi, JsonApiResponse, Resource};
