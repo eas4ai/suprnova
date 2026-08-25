@@ -250,6 +250,12 @@ production feature or public convenience constructor.
   age/volume/outcome/retry/orphan values and made observers non-authoritative.
   Cleanup leases bind exact ledger revision while opaque handle, lease, scope,
   path, principal, grant, and raw-error values remain outside metric labels.
+- 2026-08-25 -- Bound subscription descriptors to full registered event
+  contracts and the mounted component-contract digest. Issue, connect, and
+  renewal re-resolve current registry authority, and separate zeroizing
+  credentials bind the exact descriptor, subscription scope, exclusive expiry,
+  and Connect or Renew operation. Trusted mount-topic parameters and all
+  credential-bearing debug surfaces are bounded and redacted.
 - 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
   pre-upgrade `Origin` validation for cookie-authorized transports. Explicit
   cross-origin use requires a non-wildcard allowlist plus separate credential

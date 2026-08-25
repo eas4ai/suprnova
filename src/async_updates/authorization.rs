@@ -1,5 +1,6 @@
 //! Current host authorization and descriptor-scoped transport credentials.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -14,11 +15,16 @@ use crate::identity::{ComponentName, ContentDigest, UnixMillis};
 use crate::metadata::ComponentMetadata;
 
 use super::{
-    ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedTopics, CapabilityVersion,
-    PollFallbackPolicy, StreamName, StreamPosition, SubscriptionClaims, SubscriptionDescriptor,
-    SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind, SubscriptionMetadata,
-    TransportCredential, VerifiedSubscriptionDescriptor,
+    ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, BoundedTopics,
+    CapabilityVersion, PollFallbackPolicy, ReconnectPolicy, StreamName, StreamPosition,
+    SubscriptionClaims, SubscriptionDescriptor, SubscriptionDescriptorCodec, SubscriptionError,
+    SubscriptionErrorKind, SubscriptionEventContract, SubscriptionMetadata, TransportCredential,
+    VerifiedSubscriptionDescriptor,
 };
+
+const MAX_TRUSTED_MOUNT_PARAMETERS: usize = 32;
+const MAX_TOPIC_PARAMETER_NAME_BYTES: usize = 64;
+const MAX_TOPIC_PARAMETER_VALUE_BYTES: usize = 128;
 
 /// Executor-neutral future returned by host subscription ports.
 pub type SubscriptionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -74,6 +80,72 @@ impl SubscriptionBinding {
 impl fmt::Debug for SubscriptionBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<SubscriptionBinding>")
+    }
+}
+
+/// Exact non-secret subscription scope additionally bound into one transport credential.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SubscriptionCredentialScope {
+    component: ComponentName,
+    component_contract: ContentDigest,
+    authorization_memo: AuthorizationMemo,
+    stream: StreamName,
+    topics: BoundedTopics,
+    events: BoundedEventContracts,
+}
+
+impl SubscriptionCredentialScope {
+    fn from_current(context: &TrustedLiveRequestContext, claims: &SubscriptionClaims) -> Self {
+        Self {
+            component: context.mount().component().clone(),
+            component_contract: context.mount().contract_digest().clone(),
+            authorization_memo: claims.authorization_memo().clone(),
+            stream: claims.stream().clone(),
+            topics: claims.topics().clone(),
+            events: claims.events().clone(),
+        }
+    }
+
+    /// Returns the registry component identity.
+    #[must_use]
+    pub const fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
+    /// Returns the canonical component contract digest.
+    #[must_use]
+    pub const fn component_contract(&self) -> &ContentDigest {
+        &self.component_contract
+    }
+
+    /// Returns the signed current-identity authorization memo.
+    #[must_use]
+    pub const fn authorization_memo(&self) -> &AuthorizationMemo {
+        &self.authorization_memo
+    }
+
+    /// Returns the registered stream identity.
+    #[must_use]
+    pub const fn stream(&self) -> &StreamName {
+        &self.stream
+    }
+
+    /// Returns exact resolved topic scope.
+    #[must_use]
+    pub const fn topics(&self) -> &BoundedTopics {
+        &self.topics
+    }
+
+    /// Returns full registered event contracts.
+    #[must_use]
+    pub const fn events(&self) -> &BoundedEventContracts {
+        &self.events
+    }
+}
+
+impl fmt::Debug for SubscriptionCredentialScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<SubscriptionCredentialScope:redacted>")
     }
 }
 
@@ -164,12 +236,192 @@ pub trait SubscriptionAuthorizationPort: Send + Sync {
     ) -> SubscriptionFuture<'a, Result<SubscriptionAuthorizationDecision, SubscriptionError>>;
 }
 
+/// Bounded canonical mount parameters obtained only through the trusted host registry port.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TrustedMountParameters(BTreeMap<String, String>);
+
+impl TrustedMountParameters {
+    /// Validates stable parameter names and single-topic-segment values before storage.
+    pub fn new(values: Vec<(String, String)>) -> Result<Self, SubscriptionError> {
+        if values.len() > MAX_TRUSTED_MOUNT_PARAMETERS {
+            return Err(SubscriptionError::new(
+                SubscriptionErrorKind::UnregisteredSubscription,
+            ));
+        }
+        let mut parameters = BTreeMap::new();
+        for (name, value) in values {
+            if !valid_topic_parameter(&name, MAX_TOPIC_PARAMETER_NAME_BYTES)
+                || !valid_topic_parameter(&value, MAX_TOPIC_PARAMETER_VALUE_BYTES)
+                || parameters.insert(name, value).is_some()
+            {
+                return Err(SubscriptionError::new(
+                    SubscriptionErrorKind::UnregisteredSubscription,
+                ));
+            }
+        }
+        Ok(Self(parameters))
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+}
+
+impl fmt::Debug for TrustedMountParameters {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<TrustedMountParameters:redacted>")
+    }
+}
+
+/// Current registry-owned subscription contract after trusted topic resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurrentSubscriptionRegistration {
+    component: ComponentName,
+    component_contract: ContentDigest,
+    stream: StreamName,
+    topics: BoundedTopics,
+    events: BoundedEventContracts,
+    reconnect: ReconnectPolicy,
+}
+
+impl CurrentSubscriptionRegistration {
+    /// Resolves one current stream from component metadata and trusted mount parameters.
+    pub fn from_registered(
+        component: &ComponentMetadata,
+        stream: &StreamName,
+        mount_parameters: &TrustedMountParameters,
+    ) -> Result<Self, SubscriptionError> {
+        let metadata = component
+            .subscriptions()
+            .iter()
+            .find(|metadata| metadata.stream() == stream)
+            .ok_or_else(|| {
+                SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
+            })?;
+        Ok(Self {
+            component: component.identity().clone(),
+            component_contract: component.contract_digest().clone(),
+            stream: metadata.stream().clone(),
+            topics: resolve_topics(metadata.topics(), mount_parameters)?,
+            events: registered_event_contracts(component, metadata)?,
+            reconnect: metadata.reconnect(),
+        })
+    }
+
+    /// Returns the current registry component identity.
+    #[must_use]
+    pub const fn component(&self) -> &ComponentName {
+        &self.component
+    }
+
+    /// Returns the current canonical component contract digest.
+    #[must_use]
+    pub const fn component_contract(&self) -> &ContentDigest {
+        &self.component_contract
+    }
+
+    /// Returns the current registered stream identity.
+    #[must_use]
+    pub const fn stream(&self) -> &StreamName {
+        &self.stream
+    }
+
+    /// Returns topics resolved only from registered templates and trusted parameters.
+    #[must_use]
+    pub const fn topics(&self) -> &BoundedTopics {
+        &self.topics
+    }
+
+    /// Returns current full registered event contracts.
+    #[must_use]
+    pub const fn events(&self) -> &BoundedEventContracts {
+        &self.events
+    }
+
+    /// Returns current registered reconnect behavior.
+    #[must_use]
+    pub const fn reconnect(&self) -> ReconnectPolicy {
+        self.reconnect
+    }
+}
+
+/// Exact current registry lookup requested by the subscription service.
+#[derive(Clone, Copy)]
+pub struct SubscriptionRegistryRequest<'a> {
+    operation: SubscriptionAuthorizationOperation,
+    component: &'a ComponentName,
+    component_contract: &'a ContentDigest,
+    stream: &'a StreamName,
+}
+
+impl<'a> SubscriptionRegistryRequest<'a> {
+    fn new(
+        operation: SubscriptionAuthorizationOperation,
+        context: &'a TrustedLiveRequestContext,
+        stream: &'a StreamName,
+    ) -> Self {
+        Self {
+            operation,
+            component: context.mount().component(),
+            component_contract: context.mount().contract_digest(),
+            stream,
+        }
+    }
+
+    /// Returns the current lifecycle boundary.
+    #[must_use]
+    pub const fn operation(self) -> SubscriptionAuthorizationOperation {
+        self.operation
+    }
+
+    /// Returns the validated mounted component identity.
+    #[must_use]
+    pub const fn component(self) -> &'a ComponentName {
+        self.component
+    }
+
+    /// Returns the validated mounted component contract digest.
+    #[must_use]
+    pub const fn component_contract(self) -> &'a ContentDigest {
+        self.component_contract
+    }
+
+    /// Returns the signed or requested registered stream identity.
+    #[must_use]
+    pub const fn stream(self) -> &'a StreamName {
+        self.stream
+    }
+}
+
+impl fmt::Debug for SubscriptionRegistryRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubscriptionRegistryRequest")
+            .field("operation", &self.operation)
+            .field("component", &self.component.as_str())
+            .field("component_contract", &self.component_contract)
+            .field("stream", &self.stream.as_str())
+            .finish()
+    }
+}
+
+/// Host-owned current component registry and trusted mount-parameter resolver.
+pub trait SubscriptionRegistryPort: Send + Sync {
+    /// Re-resolves one current subscription contract for every lifecycle boundary.
+    fn resolve<'a>(
+        &'a self,
+        request: SubscriptionRegistryRequest<'a>,
+    ) -> SubscriptionFuture<'a, Result<CurrentSubscriptionRegistration, SubscriptionError>>;
+}
+
 /// Exact descriptor binding supplied to the separate credential provider.
 #[derive(Clone, Copy)]
 pub struct SubscriptionCredentialRequest<'a> {
     operation: SubscriptionAuthorizationOperation,
     binding: &'a SubscriptionBinding,
+    scope: &'a SubscriptionCredentialScope,
     expires_at: UnixMillis,
+    now: UnixMillis,
     presented: Option<&'a TransportCredential>,
 }
 
@@ -177,12 +429,16 @@ impl<'a> SubscriptionCredentialRequest<'a> {
     fn issue(
         operation: SubscriptionAuthorizationOperation,
         binding: &'a SubscriptionBinding,
+        scope: &'a SubscriptionCredentialScope,
         expires_at: UnixMillis,
+        now: UnixMillis,
     ) -> Self {
         Self {
             operation,
             binding,
+            scope,
             expires_at,
+            now,
             presented: None,
         }
     }
@@ -190,13 +446,17 @@ impl<'a> SubscriptionCredentialRequest<'a> {
     fn verify(
         operation: SubscriptionAuthorizationOperation,
         binding: &'a SubscriptionBinding,
+        scope: &'a SubscriptionCredentialScope,
         expires_at: UnixMillis,
+        now: UnixMillis,
         presented: &'a TransportCredential,
     ) -> Self {
         Self {
             operation,
             binding,
+            scope,
             expires_at,
+            now,
             presented: Some(presented),
         }
     }
@@ -213,10 +473,22 @@ impl<'a> SubscriptionCredentialRequest<'a> {
         self.binding
     }
 
+    /// Returns the exact current subscription scope.
+    #[must_use]
+    pub const fn scope(self) -> &'a SubscriptionCredentialScope {
+        self.scope
+    }
+
     /// Returns the descriptor's exclusive expiry.
     #[must_use]
     pub const fn expires_at(self) -> UnixMillis {
         self.expires_at
+    }
+
+    /// Returns the current host time used for exclusive credential expiry.
+    #[must_use]
+    pub const fn now(self) -> UnixMillis {
+        self.now
     }
 
     /// Returns the separately presented bearer only at verification boundaries.
@@ -232,7 +504,9 @@ impl fmt::Debug for SubscriptionCredentialRequest<'_> {
             .debug_struct("SubscriptionCredentialRequest")
             .field("operation", &self.operation)
             .field("binding", &self.binding)
+            .field("scope", &self.scope)
             .field("expires_at", &self.expires_at)
+            .field("now", &self.now)
             .field("presented", &self.presented.map(|_| "<redacted>"))
             .finish()
     }
@@ -253,12 +527,10 @@ pub trait SubscriptionCredentialPort: Send + Sync {
     ) -> SubscriptionFuture<'a, Result<SubscriptionCredentialDecision, SubscriptionError>>;
 }
 
-/// Trusted registry-selected inputs for initial descriptor issuance.
+/// Non-authoritative bounded inputs selecting one current registered stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionIssueRequest {
-    component: ComponentName,
-    component_contract: ContentDigest,
-    metadata: SubscriptionMetadata,
+    stream: StreamName,
     capability: CapabilityVersion,
     baseline: StreamPosition,
     expires_at: UnixMillis,
@@ -266,36 +538,22 @@ pub struct SubscriptionIssueRequest {
 }
 
 impl SubscriptionIssueRequest {
-    /// Selects one stream from registry-digested component metadata.
-    ///
-    /// The service compares the retained digest and component identity to the
-    /// validated mount before signing, so standalone directive-created metadata
-    /// cannot become descriptor authority.
-    pub fn from_registered(
-        component: &ComponentMetadata,
-        stream: &StreamName,
+    /// Selects a stream; the service independently re-resolves current registry authority.
+    #[must_use]
+    pub const fn new(
+        stream: StreamName,
         capability: CapabilityVersion,
         baseline: StreamPosition,
         expires_at: UnixMillis,
         fallback_poll: PollFallbackPolicy,
-    ) -> Result<Self, SubscriptionError> {
-        let metadata = component
-            .subscriptions()
-            .iter()
-            .find(|metadata| metadata.stream() == stream)
-            .cloned()
-            .ok_or_else(|| {
-                SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
-            })?;
-        Ok(Self {
-            component: component.identity().clone(),
-            component_contract: component.contract_digest().clone(),
-            metadata,
+    ) -> Self {
+        Self {
+            stream,
             capability,
             baseline,
             expires_at,
             fallback_poll,
-        })
+        }
     }
 }
 
@@ -332,10 +590,10 @@ impl fmt::Debug for IssuedSubscription {
     }
 }
 
-/// Connect-authorized subscription retaining only verified public claims.
-#[derive(Clone, Eq, PartialEq)]
+/// Connect-authorized subscription with a separate operation-scoped renewal credential.
 pub struct AuthorizedSubscription {
     verified: VerifiedSubscriptionDescriptor,
+    renewal_credential: TransportCredential,
 }
 
 impl AuthorizedSubscription {
@@ -343,6 +601,12 @@ impl AuthorizedSubscription {
     #[must_use]
     pub const fn verified(&self) -> &VerifiedSubscriptionDescriptor {
         &self.verified
+    }
+
+    /// Returns the separate secret accepted only at the renewal boundary.
+    #[must_use]
+    pub const fn renewal_credential(&self) -> &TransportCredential {
+        &self.renewal_credential
     }
 }
 
@@ -374,24 +638,23 @@ impl SubscriptionService {
         now: UnixMillis,
     ) -> Result<IssuedSubscription, SubscriptionError> {
         ensure_current_context(context, now)?;
-        if request.component != *context.mount().component()
-            || request.component_contract != *context.mount().contract_digest()
-        {
-            return Err(SubscriptionError::new(
-                SubscriptionErrorKind::UnregisteredSubscription,
-            ));
-        }
+        let registration = resolve_current(
+            context,
+            SubscriptionAuthorizationOperation::Issue,
+            &request.stream,
+        )
+        .await?;
         let memo = authorization_memo(context)?;
         let claims = SubscriptionClaims::new(
-            request.metadata.stream().clone(),
+            registration.stream().clone(),
             ASYNC_SUBSCRIPTION_PROTOCOL_V1,
             request.capability,
-            request.metadata.topics().clone(),
-            request.metadata.events().clone(),
+            registration.topics().clone(),
+            registration.events().clone(),
             memo,
             request.baseline,
             request.expires_at,
-            request.metadata.reconnect(),
+            registration.reconnect(),
             request.fallback_poll,
         )?;
         let descriptor = self.codec.sign(&claims, now)?;
@@ -406,15 +669,18 @@ impl SubscriptionService {
             ),
         )
         .await?;
+        let credential_scope = SubscriptionCredentialScope::from_current(context, &claims);
         let credentials = context
             .capabilities()
             .subscription_credentials()
             .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
         let credential = credentials
             .issue(SubscriptionCredentialRequest::issue(
-                SubscriptionAuthorizationOperation::Issue,
+                SubscriptionAuthorizationOperation::Connect,
                 &binding,
+                &credential_scope,
                 claims.expires_at(),
+                now,
             ))
             .await?;
         Ok(IssuedSubscription {
@@ -430,15 +696,25 @@ impl SubscriptionService {
         context: &TrustedLiveRequestContext,
         descriptor: &SubscriptionDescriptor,
         credential: &TransportCredential,
-        expected: &SubscriptionMetadata,
         now: UnixMillis,
     ) -> Result<AuthorizedSubscription, SubscriptionError> {
-        let (verified, binding) = self.verify_current(context, descriptor, expected, now)?;
+        let (verified, binding) = self
+            .verify_current(
+                context,
+                descriptor,
+                SubscriptionAuthorizationOperation::Connect,
+                now,
+            )
+            .await?;
+        let credential_scope =
+            SubscriptionCredentialScope::from_current(context, verified.claims());
         verify_credential(
             context,
             SubscriptionAuthorizationOperation::Connect,
             &binding,
+            &credential_scope,
             verified.expires_at(),
+            now,
             credential,
         )
         .await?;
@@ -452,7 +728,23 @@ impl SubscriptionService {
             ),
         )
         .await?;
-        Ok(AuthorizedSubscription { verified })
+        let credentials = context
+            .capabilities()
+            .subscription_credentials()
+            .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
+        let renewal_credential = credentials
+            .issue(SubscriptionCredentialRequest::issue(
+                SubscriptionAuthorizationOperation::Renew,
+                &binding,
+                &credential_scope,
+                verified.expires_at(),
+                now,
+            ))
+            .await?;
+        Ok(AuthorizedSubscription {
+            verified,
+            renewal_credential,
+        })
     }
 
     /// Reauthorizes and rotates both descriptor expiry and separate credential.
@@ -465,16 +757,25 @@ impl SubscriptionService {
         context: &TrustedLiveRequestContext,
         descriptor: &SubscriptionDescriptor,
         credential: &TransportCredential,
-        expected: &SubscriptionMetadata,
         expires_at: UnixMillis,
         now: UnixMillis,
     ) -> Result<IssuedSubscription, SubscriptionError> {
-        let (verified, old_binding) = self.verify_current(context, descriptor, expected, now)?;
+        let (verified, old_binding) = self
+            .verify_current(
+                context,
+                descriptor,
+                SubscriptionAuthorizationOperation::Renew,
+                now,
+            )
+            .await?;
+        let old_scope = SubscriptionCredentialScope::from_current(context, verified.claims());
         verify_credential(
             context,
             SubscriptionAuthorizationOperation::Renew,
             &old_binding,
+            &old_scope,
             verified.expires_at(),
+            now,
             credential,
         )
         .await?;
@@ -503,15 +804,18 @@ impl SubscriptionService {
         )?;
         let descriptor = self.codec.sign(&claims, now)?;
         let binding = SubscriptionBinding::from_descriptor(&descriptor)?;
+        let credential_scope = SubscriptionCredentialScope::from_current(context, &claims);
         let credentials = context
             .capabilities()
             .subscription_credentials()
             .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
         let credential = credentials
             .issue(SubscriptionCredentialRequest::issue(
-                SubscriptionAuthorizationOperation::Renew,
+                SubscriptionAuthorizationOperation::Connect,
                 &binding,
+                &credential_scope,
                 expires_at,
+                now,
             ))
             .await?;
         Ok(IssuedSubscription {
@@ -521,26 +825,119 @@ impl SubscriptionService {
         })
     }
 
-    fn verify_current(
+    async fn verify_current(
         &self,
         context: &TrustedLiveRequestContext,
         descriptor: &SubscriptionDescriptor,
-        expected: &SubscriptionMetadata,
+        operation: SubscriptionAuthorizationOperation,
         now: UnixMillis,
     ) -> Result<(VerifiedSubscriptionDescriptor, SubscriptionBinding), SubscriptionError> {
         ensure_current_context(context, now)?;
         let verified = self.codec.verify(descriptor, now)?;
         let claims = verified.claims();
-        if claims.stream() != expected.stream()
-            || claims.topics() != expected.topics()
-            || claims.events() != expected.events()
-            || claims.reconnect() != expected.reconnect()
+        let registration = resolve_current(context, operation, claims.stream()).await?;
+        if claims.topics() != registration.topics()
+            || claims.events() != registration.events()
+            || claims.reconnect() != registration.reconnect()
             || claims.authorization_memo() != &authorization_memo(context)?
         {
             return Err(SubscriptionError::new(SubscriptionErrorKind::ScopeMismatch));
         }
         Ok((verified, SubscriptionBinding::from_descriptor(descriptor)?))
     }
+}
+
+async fn resolve_current(
+    context: &TrustedLiveRequestContext,
+    operation: SubscriptionAuthorizationOperation,
+    stream: &StreamName,
+) -> Result<CurrentSubscriptionRegistration, SubscriptionError> {
+    let registry = context
+        .capabilities()
+        .subscription_registry()
+        .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::AuthorizationUnavailable))?;
+    let registration = registry
+        .resolve(SubscriptionRegistryRequest::new(operation, context, stream))
+        .await?;
+    if registration.component() != context.mount().component()
+        || registration.component_contract() != context.mount().contract_digest()
+        || registration.stream() != stream
+    {
+        return Err(SubscriptionError::new(SubscriptionErrorKind::ScopeMismatch));
+    }
+    Ok(registration)
+}
+
+fn registered_event_contracts(
+    component: &ComponentMetadata,
+    subscription: &SubscriptionMetadata,
+) -> Result<BoundedEventContracts, SubscriptionError> {
+    let events = subscription
+        .events()
+        .as_slice()
+        .iter()
+        .map(|name| {
+            component
+                .events()
+                .iter()
+                .find(|event| event.name() == name)
+                .ok_or_else(|| {
+                    SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
+                })
+                .and_then(SubscriptionEventContract::from_registered)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    BoundedEventContracts::new(events)
+}
+
+fn resolve_topics(
+    registered: &BoundedTopics,
+    parameters: &TrustedMountParameters,
+) -> Result<BoundedTopics, SubscriptionError> {
+    let topics = registered
+        .as_slice()
+        .iter()
+        .map(|topic| {
+            let mut resolved = String::with_capacity(topic.as_str().len());
+            for (index, segment) in topic.as_str().split('/').enumerate() {
+                if index != 0 {
+                    resolved.push('/');
+                }
+                if let Some(parameter) = segment.strip_prefix(':') {
+                    if parameter.is_empty()
+                        || !valid_topic_parameter(parameter, MAX_TOPIC_PARAMETER_NAME_BYTES)
+                    {
+                        return Err(SubscriptionError::new(
+                            SubscriptionErrorKind::UnregisteredSubscription,
+                        ));
+                    }
+                    resolved.push_str(parameters.get(parameter).ok_or_else(|| {
+                        SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
+                    })?);
+                } else {
+                    resolved.push_str(segment);
+                }
+                if resolved.len() > 256 {
+                    return Err(SubscriptionError::new(
+                        SubscriptionErrorKind::UnregisteredSubscription,
+                    ));
+                }
+            }
+            super::TopicName::parse(&resolved).map_err(|_| {
+                SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    BoundedTopics::new(topics)
+        .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription))
+}
+
+fn valid_topic_parameter(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_bytes
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 impl fmt::Debug for SubscriptionService {
@@ -569,7 +966,9 @@ async fn verify_credential(
     context: &TrustedLiveRequestContext,
     operation: SubscriptionAuthorizationOperation,
     binding: &SubscriptionBinding,
+    scope: &SubscriptionCredentialScope,
     expires_at: UnixMillis,
+    now: UnixMillis,
     credential: &TransportCredential,
 ) -> Result<(), SubscriptionError> {
     let credentials = context
@@ -578,7 +977,7 @@ async fn verify_credential(
         .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
     match credentials
         .verify(SubscriptionCredentialRequest::verify(
-            operation, binding, expires_at, credential,
+            operation, binding, scope, expires_at, now, credential,
         ))
         .await?
     {
@@ -608,6 +1007,7 @@ fn authorization_memo(
     let mut digest = Sha256::new();
     digest.update(b"suprnova-live/async-authorization-memo/v1\0");
     hash_part(&mut digest, context.mount().component().as_str().as_bytes());
+    hash_part(&mut digest, context.mount().contract_digest().as_bytes());
     let scope = context.host_scope_facts();
     hash_part(&mut digest, scope.scope().as_bytes());
     hash_optional_digest(

@@ -372,10 +372,12 @@ _Avoid_: permanent leak, dropped retry, browser-owned cleanup, failed upload sta
 **Subscription descriptor**:
 A signed, expiring, non-secret server-issued integrity authority memo for one
 permitted asynchronous subscription, including registered stream identity,
-capabilities, topics, typed events, authorization-context memo, authoritative
-baseline epoch/sequence, reconnect policy, and bounded hybrid fallback. It is
-not proof of current authorization. Transport credentials remain separately
-secret and descriptor-scoped when required.
+capabilities, resolved topics, full typed-event contracts,
+authorization-context memo, authoritative baseline epoch/sequence, reconnect
+policy, and bounded hybrid fallback. It is not proof of current authorization;
+the current component contract and stream registration are re-resolved at each
+boundary. Transport credentials remain separately secret, descriptor-scoped,
+operation-scoped, and expiring when required.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
 
 **Document transport**:

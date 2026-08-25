@@ -5,6 +5,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use suprnova_live::async_updates::{
     AuthorizationMemo, SubscriptionErrorKind, TopicName, TransportCredential,
+    TrustedMountParameters,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing, SnapshotPurpose};
 use suprnova_live::identity::{KeyId, UnixMillis};
@@ -150,10 +151,34 @@ fn directive_interpolation_cannot_construct_topics_or_authorization_memos() {
         );
     }
 
+    for untrusted in ["${principal}", "7/orders", "{tenant}", ""] {
+        assert!(
+            TrustedMountParameters::new(vec![("tenant".to_owned(), untrusted.to_owned())]).is_err(),
+            "trusted topic parameters must be one validated canonical segment: {untrusted}"
+        );
+    }
+    assert!(
+        TrustedMountParameters::new(vec![
+            ("tenant".to_owned(), "7".to_owned()),
+            ("tenant".to_owned(), "8".to_owned()),
+        ])
+        .is_err(),
+        "duplicate trusted mount parameter names are ambiguous"
+    );
+
     assert_eq!(
         AuthorizationMemo::parse(&"m".repeat(513))
             .expect_err("authorization memo must be bounded")
             .kind(),
         SubscriptionErrorKind::InvalidAuthorizationMemo
     );
+}
+
+#[test]
+fn trusted_mount_topic_parameters_are_redacted_from_debug() {
+    let sentinel = "private-tenant-parameter-sentinel";
+    let parameters = TrustedMountParameters::new(vec![("tenant".to_owned(), sentinel.to_owned())])
+        .expect("trusted mount parameter");
+
+    assert!(!format!("{parameters:?}").contains(sentinel));
 }

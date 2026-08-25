@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::num::{NonZeroU8, NonZeroU16};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -10,10 +11,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::canonical::{CanonicalValue, parse_canonical_value, to_canonical_bytes};
 use crate::crypto::{SnapshotKeyRing, SnapshotPurpose, SnapshotSignature};
-use crate::identity::{BrowserOperationName, KeyId, UnixMillis};
+use crate::identity::{BrowserOperationName, IslandSlot, KeyId, UnixMillis};
 use crate::limits::InputLimits;
+use crate::metadata::{EventMetadata, PayloadContractIdentity};
 
-use super::{BoundedEventNames, BoundedTopics, ReconnectPolicy, StreamName, TopicName};
+use super::{
+    BoundedTargets, BoundedTopics, BrowserPayloadSchema, EventCyclePolicy, EventOrder, EventSource,
+    EventTarget, MAX_EVENT_FANOUT, MAX_SUBSCRIPTION_EVENTS, ReconnectPolicy, StreamName, TopicName,
+};
 
 /// Independently versioned asynchronous subscription protocol implemented here.
 pub const ASYNC_SUBSCRIPTION_PROTOCOL_V1: u16 = 1;
@@ -30,9 +35,9 @@ pub const MAX_SUBSCRIPTION_LIFETIME_MS: u64 = 300_000;
 
 const DESCRIPTOR_VERSION: &str = "as1";
 const DESCRIPTOR_SCHEMA_VERSION: u16 = 1;
-const MAX_DESCRIPTOR_BYTES: usize = 16_384;
-const MAX_ENCODED_CLAIMS_BYTES: usize = 12_000;
-const MAX_CLAIMS_BYTES: usize = 8_192;
+const MAX_DESCRIPTOR_BYTES: usize = 131_072;
+const MAX_ENCODED_CLAIMS_BYTES: usize = 100_000;
+const MAX_CLAIMS_BYTES: usize = 65_536;
 const MAX_AUTHORIZATION_MEMO_BYTES: usize = 512;
 const MIN_TRANSPORT_CREDENTIAL_BYTES: usize = 16;
 const MAX_TRANSPORT_CREDENTIAL_BYTES: usize = 1_024;
@@ -67,7 +72,7 @@ pub enum SubscriptionErrorKind {
     InvalidPollFallback,
     /// The reconnect policy exceeds its hard attempt bound.
     InvalidReconnectPolicy,
-    /// Verified claims do not match current principal, tenant, component, stream, or topics.
+    /// Verified claims do not match current identity, component contract, stream, topics, or events.
     ScopeMismatch,
     /// Current host authorization was unavailable.
     AuthorizationUnavailable,
@@ -281,6 +286,159 @@ pub struct PollFallbackPolicy {
     visibility: PollVisibilityPolicy,
 }
 
+/// Security- and compatibility-significant fields of one registered stream event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionEventContract {
+    name: BrowserOperationName,
+    version: u16,
+    payload_contract: PayloadContractIdentity,
+    schema: BrowserPayloadSchema,
+    source: EventSource,
+    targets: BoundedTargets,
+    order: EventOrder,
+    cycle: EventCyclePolicy,
+    maximum_fanout: NonZeroU16,
+}
+
+impl SubscriptionEventContract {
+    /// Copies the stable wire contract from current registry metadata.
+    pub fn from_registered(metadata: &EventMetadata) -> Result<Self, SubscriptionError> {
+        Self::new(
+            metadata.name().clone(),
+            metadata.version(),
+            metadata.payload_contract().clone(),
+            metadata.schema(),
+            metadata.source(),
+            metadata.targets().clone(),
+            metadata.order(),
+            metadata.cycle(),
+            metadata.maximum_fanout(),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the event field set is the signed compatibility contract"
+    )]
+    fn new(
+        name: BrowserOperationName,
+        version: u16,
+        payload_contract: PayloadContractIdentity,
+        schema: BrowserPayloadSchema,
+        source: EventSource,
+        targets: BoundedTargets,
+        order: EventOrder,
+        cycle: EventCyclePolicy,
+        maximum_fanout: NonZeroU16,
+    ) -> Result<Self, SubscriptionError> {
+        if version == 0
+            || source != EventSource::Stream
+            || maximum_fanout.get() > MAX_EVENT_FANOUT
+            || usize::from(maximum_fanout.get()) < targets.as_slice().len()
+        {
+            return Err(SubscriptionError::new(
+                SubscriptionErrorKind::InvalidDescriptor,
+            ));
+        }
+        Ok(Self {
+            name,
+            version,
+            payload_contract,
+            schema,
+            source,
+            targets,
+            order,
+            cycle,
+            maximum_fanout,
+        })
+    }
+
+    /// Returns the registered browser event identity.
+    #[must_use]
+    pub const fn name(&self) -> &BrowserOperationName {
+        &self.name
+    }
+
+    /// Returns the payload contract version.
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Returns the stable payload contract identity.
+    #[must_use]
+    pub const fn payload_contract(&self) -> &PayloadContractIdentity {
+        &self.payload_contract
+    }
+
+    /// Returns the browser payload root schema.
+    #[must_use]
+    pub const fn schema(&self) -> BrowserPayloadSchema {
+        self.schema
+    }
+
+    /// Returns the trusted event source.
+    #[must_use]
+    pub const fn source(&self) -> EventSource {
+        self.source
+    }
+
+    /// Returns the canonical propagation targets.
+    #[must_use]
+    pub const fn targets(&self) -> &BoundedTargets {
+        &self.targets
+    }
+
+    /// Returns the delivery ordering contract.
+    #[must_use]
+    pub const fn order(&self) -> EventOrder {
+        self.order
+    }
+
+    /// Returns the delivery cycle-prevention contract.
+    #[must_use]
+    pub const fn cycle(&self) -> EventCyclePolicy {
+        self.cycle
+    }
+
+    /// Returns the maximum event delivery fanout.
+    #[must_use]
+    pub const fn maximum_fanout(&self) -> NonZeroU16 {
+        self.maximum_fanout
+    }
+}
+
+/// Canonically sorted, duplicate-free full stream event contracts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundedEventContracts(Vec<SubscriptionEventContract>);
+
+impl BoundedEventContracts {
+    /// Sorts and validates the bounded full contract set.
+    pub fn new(mut events: Vec<SubscriptionEventContract>) -> Result<Self, SubscriptionError> {
+        if events.is_empty() || events.len() > MAX_SUBSCRIPTION_EVENTS {
+            return Err(SubscriptionError::new(
+                SubscriptionErrorKind::InvalidDescriptor,
+            ));
+        }
+        events.sort_by(|left, right| left.name().cmp(right.name()));
+        if events
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(SubscriptionError::new(
+                SubscriptionErrorKind::InvalidDescriptor,
+            ));
+        }
+        Ok(Self(events))
+    }
+
+    /// Returns full contracts in canonical event-name order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[SubscriptionEventContract] {
+        &self.0
+    }
+}
+
 impl PollFallbackPolicy {
     /// Creates a fallback policy within fixed interval and jitter bounds.
     pub fn new(
@@ -336,7 +494,7 @@ pub struct SubscriptionClaims {
     protocol: u16,
     capability: CapabilityVersion,
     topics: BoundedTopics,
-    events: BoundedEventNames,
+    events: BoundedEventContracts,
     authorization_memo: AuthorizationMemo,
     baseline: StreamPosition,
     expires_at: UnixMillis,
@@ -355,7 +513,7 @@ impl SubscriptionClaims {
         protocol: u16,
         capability: CapabilityVersion,
         topics: BoundedTopics,
-        events: BoundedEventNames,
+        events: BoundedEventContracts,
         authorization_memo: AuthorizationMemo,
         baseline: StreamPosition,
         expires_at: UnixMillis,
@@ -403,7 +561,7 @@ impl SubscriptionClaims {
 
     /// Returns registered typed event contracts.
     #[must_use]
-    pub const fn events(&self) -> &BoundedEventNames {
+    pub const fn events(&self) -> &BoundedEventContracts {
         &self.events
     }
 
@@ -603,7 +761,7 @@ struct ClaimsWire {
     authorization_memo: String,
     baseline: PositionWire,
     capability: u16,
-    events: Vec<String>,
+    events: Vec<EventContractWire>,
     expires_at: String,
     fallback_poll: PollWire,
     protocol: u16,
@@ -611,6 +769,34 @@ struct ClaimsWire {
     stream: String,
     topics: Vec<String>,
     v: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EventContractWire {
+    cycle: EventCycleWire,
+    maximum_fanout: u16,
+    name: String,
+    order: String,
+    payload_contract: String,
+    schema: String,
+    source: String,
+    targets: Vec<EventTargetWire>,
+    version: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EventCycleWire {
+    kind: String,
+    maximum_hops: Option<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EventTargetWire {
+    kind: String,
+    value: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -659,7 +845,7 @@ impl ClaimsWire {
                 .events
                 .as_slice()
                 .iter()
-                .map(|event| event.as_str().to_owned())
+                .map(EventContractWire::from_contract)
                 .collect(),
             expires_at: claims.expires_at.get().to_string(),
             fallback_poll: PollWire {
@@ -731,10 +917,9 @@ impl ClaimsWire {
         };
         let events = self
             .events
-            .iter()
-            .map(|event| BrowserOperationName::parse(event))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?;
+            .into_iter()
+            .map(EventContractWire::into_contract)
+            .collect::<Result<Vec<_>, _>>()?;
         let topics = self
             .topics
             .iter()
@@ -748,8 +933,7 @@ impl ClaimsWire {
             CapabilityVersion::new(self.capability)?,
             BoundedTopics::new(topics)
                 .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?,
-            BoundedEventNames::new(events)
-                .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?,
+            BoundedEventContracts::new(events)?,
             AuthorizationMemo::parse(&self.authorization_memo)?,
             StreamPosition::new(
                 StreamEpoch::new(parse_counter(&self.baseline.epoch)?),
@@ -766,6 +950,148 @@ impl ClaimsWire {
             )?,
         )
     }
+}
+
+impl EventContractWire {
+    fn from_contract(contract: &SubscriptionEventContract) -> Self {
+        Self {
+            cycle: match contract.cycle() {
+                EventCyclePolicy::ForbidRepeatedIsland => EventCycleWire {
+                    kind: "forbid_repeated_island".to_owned(),
+                    maximum_hops: None,
+                },
+                EventCyclePolicy::MaximumHops(maximum_hops) => EventCycleWire {
+                    kind: "maximum_hops".to_owned(),
+                    maximum_hops: Some(maximum_hops.get()),
+                },
+            },
+            maximum_fanout: contract.maximum_fanout().get(),
+            name: contract.name().as_str().to_owned(),
+            order: match contract.order() {
+                EventOrder::PerSourceSequence => "per_source_sequence",
+            }
+            .to_owned(),
+            payload_contract: contract.payload_contract().as_str().to_owned(),
+            schema: schema_name(contract.schema()).to_owned(),
+            source: match contract.source() {
+                EventSource::Component => "component",
+                EventSource::Stream => "stream",
+            }
+            .to_owned(),
+            targets: contract
+                .targets()
+                .as_slice()
+                .iter()
+                .map(EventTargetWire::from_target)
+                .collect(),
+            version: contract.version(),
+        }
+    }
+
+    fn into_contract(self) -> Result<SubscriptionEventContract, SubscriptionError> {
+        let schema = match self.schema.as_str() {
+            "json" => BrowserPayloadSchema::Json,
+            "null" => BrowserPayloadSchema::Null,
+            "boolean" => BrowserPayloadSchema::Boolean,
+            "i64" => BrowserPayloadSchema::I64,
+            "u64" => BrowserPayloadSchema::U64,
+            "f64" => BrowserPayloadSchema::F64,
+            "string" => BrowserPayloadSchema::String,
+            _ => return Err(invalid_descriptor()),
+        };
+        let source = match self.source.as_str() {
+            "component" => EventSource::Component,
+            "stream" => EventSource::Stream,
+            _ => return Err(invalid_descriptor()),
+        };
+        let order = match self.order.as_str() {
+            "per_source_sequence" => EventOrder::PerSourceSequence,
+            _ => return Err(invalid_descriptor()),
+        };
+        let cycle = match (self.cycle.kind.as_str(), self.cycle.maximum_hops) {
+            ("forbid_repeated_island", None) => EventCyclePolicy::ForbidRepeatedIsland,
+            ("maximum_hops", Some(maximum_hops)) => EventCyclePolicy::MaximumHops(
+                NonZeroU8::new(maximum_hops).ok_or_else(invalid_descriptor)?,
+            ),
+            _ => return Err(invalid_descriptor()),
+        };
+        let targets = self
+            .targets
+            .into_iter()
+            .map(EventTargetWire::into_target)
+            .collect::<Result<Vec<_>, _>>()?;
+        SubscriptionEventContract::new(
+            BrowserOperationName::parse(&self.name).map_err(|_| invalid_descriptor())?,
+            self.version,
+            PayloadContractIdentity::parse(&self.payload_contract)
+                .map_err(|_| invalid_descriptor())?,
+            schema,
+            source,
+            BoundedTargets::new(targets).map_err(|_| invalid_descriptor())?,
+            order,
+            cycle,
+            NonZeroU16::new(self.maximum_fanout).ok_or_else(invalid_descriptor)?,
+        )
+    }
+}
+
+impl EventTargetWire {
+    fn from_target(target: &EventTarget) -> Self {
+        match target {
+            EventTarget::SelfIsland => Self::without_value("self_island"),
+            EventTarget::Parent => Self::without_value("parent"),
+            EventTarget::Child => Self::without_value("child"),
+            EventTarget::NamedIsland(slot) => Self::with_value("named_island", slot.as_str()),
+            EventTarget::Document => Self::without_value("document"),
+            EventTarget::Browser(listener) => Self::with_value("browser", listener.as_str()),
+        }
+    }
+
+    fn without_value(kind: &str) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            value: None,
+        }
+    }
+
+    fn with_value(kind: &str, value: &str) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            value: Some(value.to_owned()),
+        }
+    }
+
+    fn into_target(self) -> Result<EventTarget, SubscriptionError> {
+        match (self.kind.as_str(), self.value) {
+            ("self_island", None) => Ok(EventTarget::SelfIsland),
+            ("parent", None) => Ok(EventTarget::Parent),
+            ("child", None) => Ok(EventTarget::Child),
+            ("named_island", Some(value)) => IslandSlot::parse(&value)
+                .map(EventTarget::NamedIsland)
+                .map_err(|_| invalid_descriptor()),
+            ("document", None) => Ok(EventTarget::Document),
+            ("browser", Some(value)) => BrowserOperationName::parse(&value)
+                .map(EventTarget::Browser)
+                .map_err(|_| invalid_descriptor()),
+            _ => Err(invalid_descriptor()),
+        }
+    }
+}
+
+const fn schema_name(schema: BrowserPayloadSchema) -> &'static str {
+    match schema {
+        BrowserPayloadSchema::Json => "json",
+        BrowserPayloadSchema::Null => "null",
+        BrowserPayloadSchema::Boolean => "boolean",
+        BrowserPayloadSchema::I64 => "i64",
+        BrowserPayloadSchema::U64 => "u64",
+        BrowserPayloadSchema::F64 => "f64",
+        BrowserPayloadSchema::String => "string",
+    }
+}
+
+const fn invalid_descriptor() -> SubscriptionError {
+    SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor)
 }
 
 struct DescriptorEnvelope<'a> {
@@ -816,7 +1142,7 @@ fn parse_envelope(value: &str) -> Result<DescriptorEnvelope<'_>, SubscriptionErr
 }
 
 fn claims_limits() -> Result<InputLimits, SubscriptionError> {
-    InputLimits::new(MAX_CLAIMS_BYTES, 6, 256, 512)
+    InputLimits::new(MAX_CLAIMS_BYTES, 8, 4_096, 8_192)
         .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))
 }
 
@@ -866,7 +1192,13 @@ fn decode_claims(body: &[u8]) -> Result<SubscriptionClaims, SubscriptionError> {
         .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?;
     let wire: ClaimsWire = serde_json::from_value(serde_value)
         .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))?;
-    wire.into_claims()
+    let claims = wire.into_claims()?;
+    if encode_claims(&claims)? != body {
+        return Err(SubscriptionError::new(
+            SubscriptionErrorKind::InvalidDescriptor,
+        ));
+    }
+    Ok(claims)
 }
 
 fn validate_claims_at(

@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::action::ActionAuthorizationPort;
-use crate::async_updates::{SubscriptionAuthorizationPort, SubscriptionCredentialPort};
+use crate::async_updates::{
+    SubscriptionAuthorizationPort, SubscriptionCredentialPort, SubscriptionRegistryPort,
+};
 use crate::identity::{ContentDigest, IdentityError, ScopeFingerprint};
 use crate::upload::UploadAuthorizationPort;
 
@@ -115,6 +117,7 @@ pub struct HostCapabilities {
     upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
     subscription_authorization: Option<Arc<dyn SubscriptionAuthorizationPort>>,
     subscription_credentials: Option<Arc<dyn SubscriptionCredentialPort>>,
+    subscription_registry: Option<Arc<dyn SubscriptionRegistryPort>>,
 }
 
 impl HostCapabilities {
@@ -127,6 +130,7 @@ impl HostCapabilities {
             upload_authorization: None,
             subscription_authorization: None,
             subscription_credentials: None,
+            subscription_registry: None,
         }
     }
 
@@ -170,6 +174,16 @@ impl HostCapabilities {
         self
     }
 
+    /// Installs current registry authority and trusted mount-topic resolution.
+    #[must_use]
+    pub fn with_subscription_registry(
+        mut self,
+        registry: Arc<dyn SubscriptionRegistryPort>,
+    ) -> Self {
+        self.subscription_registry = Some(registry);
+        self
+    }
+
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
         &self.scope
     }
@@ -188,6 +202,10 @@ impl HostCapabilities {
 
     pub(crate) fn subscription_credentials(&self) -> Option<&dyn SubscriptionCredentialPort> {
         self.subscription_credentials.as_deref()
+    }
+
+    pub(crate) fn subscription_registry(&self) -> Option<&dyn SubscriptionRegistryPort> {
+        self.subscription_registry.as_deref()
     }
 }
 

@@ -51,12 +51,15 @@ validation. The server emits a signed bounded subscription descriptor rather
 than allowing directives to construct endpoints or channel names.
 
 Acceptance criteria:
-- Channel names and parameters derive from trusted server metadata rather than
-  arbitrary directive interpolation.
+- Channel names and parameters derive from current registered server metadata
+  plus bounded validated mount parameters rather than arbitrary directive
+  interpolation. Registered topic templates may substitute only an exact
+  `:parameter` path segment from that trusted parameter set.
 - The descriptor binds registered stream identity, protocol/capabilities,
-  topics, allowed typed events, authorization-context memo, authoritative
-  baseline epoch/sequence, expiry, reconnect policy, and a bounded default
-  hybrid poll fallback.
+  topics, full allowed typed-event contracts (name, version, stable payload
+  identity, schema, source, propagation targets, ordering, cycle policy, and
+  fanout), authorization-context memo, authoritative baseline epoch/sequence,
+  expiry, reconnect policy, and a bounded default hybrid poll fallback.
 - Private and presence subscriptions reauthorize the current principal.
 - Subscription tokens are scoped, expiring, non-loggable secrets when required.
 - Cross-process fanout preserves tenant and channel isolation.
@@ -209,10 +212,13 @@ UX flow:
 - 2026-08-25 -- Implemented the canonical subscription-v1 descriptor with the
   exact `suprnova-live/async-subscription/v1` HKDF purpose, bounded exact-key
   claims, overlapping key-ID verification, exclusive expiry, and a
-  principal/session/tenant/component context memo. Connect and renewal verify
-  current registered stream/topic scope before host policy, while a separate
-  zeroizing host credential is issued and verified against the exact descriptor
-  binding.
+  principal/session/tenant/component-contract context memo. Full event
+  contracts are signed rather than event names alone. Issue, connect, and renew
+  independently re-resolve the current component contract, stream, event
+  contracts, and topics; topic templates accept only bounded trusted mount
+  parameters. A separate zeroizing credential binds the exact descriptor,
+  current subscription scope, expiry, and Connect or Renew operation, and
+  rotates at each successful boundary.
 - 2026-08-24 -- Multiplexed compatible subscriptions over one document transport,
   made subscription identity explicit in every envelope, and required strict
   WebSocket `Origin` validation. Polling is fresh-render-only; signed descriptors
