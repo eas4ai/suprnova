@@ -116,7 +116,8 @@ Connection URL and sqlx pool tuning. `DATABASE_URL` is required for
 any subcommand that touches the database (`migrate*`, `db:sync`,
 `db:seed`, `queue:work` with `QUEUE_DRIVER=database`, `workflow:work`,
 the session DB store) and for `serve` when the app has migrations
-registered.
+registered. The five liveness knobs are how you survive a network that
+drops idle connections - see [Pool liveness](database.md#pool-liveness).
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
@@ -125,6 +126,11 @@ registered.
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | sqlx pool floor (kept warm). |
 | `DB_CONNECT_TIMEOUT` | `30` (seconds) | `u32` | How long sqlx will wait for an initial connection before erroring. |
 | `DB_LOGGING` | `false` | `bool` | When true, sqlx logs every statement (use sparingly in production - chatty). |
+| `DB_IDLE_TIMEOUT` | unset (sqlx uses 600 seconds) | `u64` (seconds) | How long a pooled connection may sit idle before the pool closes it. `0` disables idle reaping. |
+| `DB_MAX_LIFETIME` | unset (sqlx uses 1800 seconds) | `u64` (seconds) | How long a pooled connection may live before the pool recycles it. `0` disables lifetime recycling. |
+| `DB_ACQUIRE_TIMEOUT` | unset (falls back to `DB_CONNECT_TIMEOUT`) | `u64` (seconds) | How long a caller waits for a free pooled connection. Overrides `DB_CONNECT_TIMEOUT` for the checkout wait; set one or the other, not both. Zero is rejected at boot. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Ping a pooled connection before handing it out. Leave it on unless you have measured the per-checkout round trip and `DB_PING_AFTER_IDLE` is not enough. |
+| `DB_PING_AFTER_IDLE` | unset | `u64` (seconds) | Ping a pooled connection only after it has been idle this long. Setting it turns `DB_TEST_BEFORE_ACQUIRE` off, so hot connections are handed out untouched. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
 
 ## Session

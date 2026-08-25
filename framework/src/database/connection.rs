@@ -88,6 +88,38 @@ impl DbConnection {
             .connect_timeout(Duration::from_secs(config.connect_timeout))
             .sqlx_logging(config.logging);
 
+        // Pool liveness. libpq's `keepalives_*` DSN options are not
+        // reachable through sqlx 0.9 - its Postgres URL parser knows
+        // only sslmode / application_name / options / the statement
+        // cache, and neither sqlx-postgres nor sqlx-core carries a TCP
+        // keepalive setter. So the answer to "a middlebox killed an idle
+        // connection and the pool handed it out anyway" is recycling and
+        // pinging, not keeping the socket warm.
+        //
+        // Each knob is applied only when the operator set it: SeaORM
+        // leaving a field `None` means "let sqlx choose", and sqlx's
+        // choice (600s idle, 1800s lifetime) is not the same as SeaORM's
+        // field default. Setting them unconditionally would silently
+        // change every existing deployment's pool.
+        if let Some(secs) = config.idle_timeout {
+            opt.idle_timeout(nonzero_duration(secs));
+        }
+        if let Some(secs) = config.max_lifetime {
+            opt.max_lifetime(nonzero_duration(secs));
+        }
+        if let Some(secs) = config.acquire_timeout {
+            opt.acquire_timeout(Duration::from_secs(secs));
+        }
+        // Order matters: `test_before_acquire_if_idle_for` sets
+        // `test_before_acquire` to false as a documented side effect, so
+        // that the threshold ping is not shadowed by a ping on every
+        // acquire. Applying the explicit flag first and the threshold
+        // second is what preserves that.
+        opt.test_before_acquire(config.test_before_acquire);
+        if let Some(secs) = config.ping_after_idle {
+            opt.test_before_acquire_if_idle_for(Duration::from_secs(secs));
+        }
+
         let conn = Database::connect(opt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
@@ -158,6 +190,17 @@ impl DbConnection {
     pub fn conn(&self) -> &DatabaseConnection {
         &self.inner
     }
+}
+
+/// Map a seconds value onto the `Option<Duration>` sqlx wants for the
+/// two connection-reaping knobs.
+///
+/// sqlx spells "never reap" as `None`, and the environment reader that
+/// produces these values cannot express a nested option, so `0` is the
+/// disable signal - documented on `DB_IDLE_TIMEOUT` and
+/// `DB_MAX_LIFETIME`.
+fn nonzero_duration(seconds: u64) -> Option<Duration> {
+    (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
 /// Normalize a `sqlite://` URL into `(file_path, connect_url)`.

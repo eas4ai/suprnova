@@ -35,6 +35,17 @@ DB_MIN_CONNECTIONS=1
 DB_CONNECT_TIMEOUT=30
 DB_LOGGING=false
 
+# Pool liveness. Unset means sqlx's defaults: connections are closed
+# after 600 idle seconds, recycled after 1800 seconds, and pinged before
+# every checkout. Raise the ping threshold instead of pinging on every
+# acquire when checkout latency matters. Set an idle or lifetime value to
+# 0 to disable that form of reaping.
+# DB_IDLE_TIMEOUT=600
+# DB_MAX_LIFETIME=1800
+# DB_ACQUIRE_TIMEOUT=30
+# DB_TEST_BEFORE_ACQUIRE=true
+# DB_PING_AFTER_IDLE=30
+
 # Session
 SESSION_LIFETIME=120
 SESSION_COOKIE=suprnova_session

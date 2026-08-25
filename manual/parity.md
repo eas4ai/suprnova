@@ -170,6 +170,7 @@ gaps as of the shipped framework.
 | Query events | `QueryListener` + `QueryExecuted` event | shipped | `DB::listen(\|q\| { ... })` |
 | Raw expressions | `DB::raw("...")`, `DB::select("...", &[...])` | shipped | Parameter binding required (no string interpolation) |
 | Postgres / MySQL / SQLite | All three first-class via SeaORM | shipped | URL detection in `database::config::database_type()` |
+| Postgres `keepalives_*` DSN options | `DB_IDLE_TIMEOUT` / `DB_MAX_LIFETIME` / `DB_ACQUIRE_TIMEOUT` / `DB_TEST_BEFORE_ACQUIRE` / `DB_PING_AFTER_IDLE` pool liveness | diverged | sqlx exposes no TCP keepalive setter, so Suprnova recycles and pings pooled connections instead. [Database](database.md#pool-liveness) |
 | MariaDB | First-class as its own option (vector + JSON + temporal) | diverged | Treated separately because of multi-paradigm features Laravel ships as Postgres-only |
 | Redis | Used by drivers (cache/queue/rate-limit) - no separate `Redis::*` facade | diverged | Reach for `redis` crate directly when you need ad-hoc commands; cache/queue/rate-limit cover 95% of typical use |
 | MongoDB | No first-party adapter yet | not yet | Use `mongodb` crate directly via `App::bind` |

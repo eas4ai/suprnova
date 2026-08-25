@@ -39,6 +39,68 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
+### Pool liveness
+
+A NAT gateway, a load balancer, or a firewall will silently drop a TCP
+connection that has been idle too long. The pool does not find out. The
+next query on that connection fails, and it fails on a request that had
+nothing to do with the outage.
+
+Laravel answers this with libpq's `keepalives`, `keepalives_idle`,
+`keepalives_interval` and `keepalives_count` DSN options, which keep the
+socket warm. **Those are not reachable from Suprnova.** sqlx 0.9 parses
+only `sslmode`, `application_name`, `options` and the statement-cache
+size out of a Postgres URL, and carries no TCP keepalive setter at any
+layer, so there is nowhere to forward them to.
+
+What Suprnova gives you instead is the pool-side answer: stop trusting
+old connections.
+
+```bash
+# Close a connection that has been idle for two minutes.
+DB_IDLE_TIMEOUT=120
+# Recycle every connection after fifteen minutes regardless.
+DB_MAX_LIFETIME=900
+# Ping a connection before handing it out, but only once it has been
+# idle for thirty seconds. Hot connections skip the round trip.
+DB_PING_AFTER_IDLE=30
+```
+
+Or programmatically:
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+Every knob is unset by default, which means the pool keeps sqlx's own
+defaults: connections close after 600 idle seconds, recycle after 1800
+seconds, and are pinged before every checkout. Set
+`DB_IDLE_TIMEOUT=0` or `DB_MAX_LIFETIME=0` to turn off that form of
+reaping entirely.
+
+`DB_PING_AFTER_IDLE` and `DB_TEST_BEFORE_ACQUIRE` are alternatives, not
+a pair: setting a threshold turns the per-checkout ping off, because
+running both would ping on every acquire and make the threshold
+meaningless.
+
+### Why Suprnova diverges: pool recycling instead of TCP keepalives
+
+Keepalives and pool recycling solve the same failure from opposite
+ends. Keepalives keep a middlebox from expiring the connection;
+recycling accepts that it will and makes sure the pool never hands out
+a connection old enough to have been expired. The second is what the
+driver stack exposes, and it also covers failures keepalives do not -
+a failed-over replica, a rotated credential, a server-side idle
+disconnect. If you need the libpq options specifically, that is a
+change to sqlx, not to Suprnova.
+
 ## Raw queries
 
 The `DB` facade ships the full Laravel 13 raw escape surface. Every
@@ -587,5 +649,5 @@ collide.
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
 | `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |

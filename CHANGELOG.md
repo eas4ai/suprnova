@@ -8,6 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **The database pool now has liveness knobs.** `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`, `DB_TEST_BEFORE_ACQUIRE`, and `DB_PING_AFTER_IDLE` control when the pool closes, recycles, and pings a connection, with matching `DatabaseConfig::builder()` setters. Each is unset by default, so an existing deployment's pool behaves exactly as it did. Use them when a NAT gateway or firewall drops idle connections: sqlx exposes no libpq `keepalives_*` equivalent, so pool recycling is the mechanism.
 - **`db:seed <Class>` reports its progress.** A targeted run prints a `RUNNING` line before the seeder and an elapsed-milliseconds `DONE` line after it. A bare `db:seed` stays silent. The formatter, `suprnova::two_column_detail`, is available to your own `#[command]` handlers.
 - **Many-to-many relations now filter on pivot columns.** `where_pivot`, `where_pivot_op`, `where_pivot_in`, `where_pivot_not_in`, `where_pivot_null`, `where_pivot_not_null`, `where_pivot_between`, `where_pivot_not_between`, `where_pivot_group`, and their `or_` twins constrain `get`, `first`, and `count` on `BelongsToMany`, `MorphToMany`, and `MorphedByMany`. `where_pivot_group` takes a closure and renders one parenthesised group, so it stays atomic inside a following `or_where_pivot`. Pivot filters apply to reads only: `attach`, `attach_with`, `detach`, and `sync` return an error while one is set, and eager loading does not carry them.
 - **`where_binary` compares column values byte for byte.** The family (`where_binary`, `or_where_binary`, `where_not_binary`, `or_where_not_binary`) ships on `Builder<M>`, and `where_binary` and `where_not_binary` ship on `DB::table(...)`. MySQL and MariaDB emit `= binary`; Postgres and SQLite return an error when the query renders, rather than falling back to a collation-dependent match.
@@ -15,6 +16,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`Model::refresh_for_update` reloads a row under a `FOR UPDATE` lock.** Call it inside a transaction when you need the row's current state and the exclusive lock in one statement. SQLite has no row-level locking, so the lock clause is a no-op there.
 - **`Builder::or_where_key` and `Builder::or_where_key_not` add primary-key filters as a disjunction.** Both fold into the preceding `WHERE` clause the same way `or_where` does, and both ship `or_filter_key` and `or_filter_key_not` aliases.
 - **`Builder::in_order_of` sorts rows into an explicit sequence.** Pass a column and the values in the order you want them; rows whose value is not in the list sort last. The values bind as parameters, so they are safe to take from request data.
+
+### Upgrading
+
+- **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behaviour.
 
 ## 1.3.2 - 2026-08-25
 
