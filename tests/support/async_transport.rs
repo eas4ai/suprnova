@@ -334,7 +334,7 @@ pub struct MembershipRegistry {
     subscriptions: Mutex<Vec<SubscriptionId>>,
     stream: StreamName,
     topics: BoundedTopics,
-    events: BoundedEventContracts,
+    events: Mutex<BoundedEventContracts>,
     signals: Mutex<BoundedPresentationSignalContracts>,
     modes: Mutex<SubscriptionModes>,
     authorization_memo: Mutex<suprnova_live::async_updates::AuthorizationMemo>,
@@ -345,6 +345,36 @@ pub struct MembershipRegistry {
     authority_observations: Mutex<Vec<AuthorityObservation>>,
     resolved_event_fanout: AtomicUsize,
     resolved_target_scope: Mutex<ContentDigest>,
+    delivery_validation_calls: AtomicUsize,
+    delivery_drift_call: AtomicUsize,
+    delivery_drift: Mutex<Option<DeliveryAuthorityDrift>>,
+    expected_delivery_binding: Mutex<Option<SubscriptionBinding>>,
+}
+
+/// Deterministic authority mutation applied after one successful delivery validation.
+#[allow(
+    dead_code,
+    reason = "the shared fixture exposes delivery drift variants only to Task 5 tests"
+)]
+pub enum DeliveryAuthorityDrift {
+    /// Revokes every host membership.
+    Revoke,
+    /// Advances the exclusive clock to the descriptor expiry boundary.
+    Expire(UnixMillis),
+    /// Removes one exact logical membership from the host registry.
+    RemoveSubscription(SubscriptionId),
+    /// Replaces the current full event contract set.
+    EventContracts(BoundedEventContracts),
+    /// Replaces the trusted resolved recipient count.
+    TargetCount(usize),
+    /// Replaces the trusted resolved target-set digest.
+    TargetScope(ContentDigest),
+    /// Requires a different exact signed-descriptor binding.
+    Binding(SubscriptionBinding),
+    /// Changes principal/session/tenant/component authorization facts.
+    AuthorizationScope,
+    /// Changes the connection-level document scope.
+    DocumentScope,
 }
 
 impl MembershipRegistry {
@@ -364,6 +394,27 @@ impl MembershipRegistry {
     /// Advances deterministic transport time without sleeping.
     pub fn set_now(&self, now: UnixMillis) {
         self.now.store(now.get(), Ordering::Release);
+    }
+
+    /// Applies one deterministic authority drift after the selected delivery validation.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes delivery drift only to Task 5 tests"
+    )]
+    pub fn drift_after_delivery_validation(&self, call: usize, drift: DeliveryAuthorityDrift) {
+        assert!(call > 0, "delivery validation call is one-based");
+        self.delivery_validation_calls.store(0, Ordering::Release);
+        self.delivery_drift_call.store(call, Ordering::Release);
+        *self.delivery_drift.lock().expect("delivery drift lock") = Some(drift);
+    }
+
+    /// Returns the current full event contract set for deterministic drift setup.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes contract drift only to Task 5 tests"
+    )]
+    pub fn event_contracts(&self) -> BoundedEventContracts {
+        self.events.lock().expect("event contracts lock").clone()
     }
 
     /// Replaces the same-name current registration's canonical transport modes.
@@ -454,6 +505,39 @@ impl MembershipRegistry {
     fn modes(&self) -> SubscriptionModes {
         self.modes.lock().expect("membership mode lock").clone()
     }
+
+    fn apply_delivery_drift(&self, drift: DeliveryAuthorityDrift) {
+        match drift {
+            DeliveryAuthorityDrift::Revoke => self.revoke(),
+            DeliveryAuthorityDrift::Expire(now) => self.set_now(now),
+            DeliveryAuthorityDrift::RemoveSubscription(subscription) => {
+                self.subscriptions
+                    .lock()
+                    .expect("membership registry lock")
+                    .retain(|candidate| candidate != &subscription);
+            }
+            DeliveryAuthorityDrift::EventContracts(events) => {
+                *self.events.lock().expect("event contracts lock") = events;
+            }
+            DeliveryAuthorityDrift::TargetCount(recipients) => {
+                self.set_resolved_event_fanout(recipients);
+            }
+            DeliveryAuthorityDrift::TargetScope(scope) => {
+                *self
+                    .resolved_target_scope
+                    .lock()
+                    .expect("resolved target scope lock") = scope;
+            }
+            DeliveryAuthorityDrift::Binding(binding) => {
+                *self
+                    .expected_delivery_binding
+                    .lock()
+                    .expect("expected delivery binding lock") = Some(binding);
+            }
+            DeliveryAuthorityDrift::AuthorizationScope => self.change_authorization_scope(),
+            DeliveryAuthorityDrift::DocumentScope => self.change_document_scope(),
+        }
+    }
 }
 
 impl AsyncMembershipRegistryPort for MembershipRegistry {
@@ -462,7 +546,15 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
         request: AsyncMembershipRequest<'_>,
         validation: &mut AsyncMembershipValidation<'_>,
     ) {
+        let exact_binding = request.binding().is_none_or(|binding| {
+            self.expected_delivery_binding
+                .lock()
+                .expect("expected delivery binding lock")
+                .as_ref()
+                .is_none_or(|expected| expected == binding)
+        });
         let active = self.active.load(Ordering::Acquire)
+            && exact_binding
             && self
                 .subscriptions
                 .lock()
@@ -471,6 +563,7 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                 .any(|subscription| subscription == request.subscription());
         if active {
             let signals = self.signals.lock().expect("presentation signal lock");
+            let events = self.events.lock().expect("event contracts lock");
             if request.envelope().is_some() {
                 let resolved = match request.envelope().map(AsyncEnvelope::payload) {
                     Some(AsyncPayload::BrowserEvent(_)) => NonZeroU16::new(
@@ -490,7 +583,7 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                 };
                 validation.accept_delivery_current(
                     &self.stream,
-                    &self.events,
+                    &events,
                     &signals,
                     &self
                         .authorization_memo
@@ -503,7 +596,22 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                     resolved,
                 );
             } else {
-                validation.accept_current(&self.stream, &self.events, &signals);
+                validation.accept_current(&self.stream, &events, &signals);
+            }
+        }
+        if request.envelope().is_some() {
+            let call = self
+                .delivery_validation_calls
+                .fetch_add(1, Ordering::AcqRel)
+                + 1;
+            if call == self.delivery_drift_call.load(Ordering::Acquire)
+                && let Some(drift) = self
+                    .delivery_drift
+                    .lock()
+                    .expect("delivery drift lock")
+                    .take()
+            {
+                self.apply_delivery_drift(drift);
             }
         }
     }
@@ -571,7 +679,7 @@ impl AsyncTransportAuthorityPort for MembershipRegistry {
                         .expect("authorization memo lock"),
                     &self.stream,
                     &self.topics,
-                    &self.events,
+                    &self.events.lock().expect("event contracts lock"),
                     &self.modes(),
                 );
                 if self.accept_twice.load(Ordering::Acquire) {
@@ -586,7 +694,7 @@ impl AsyncTransportAuthorityPort for MembershipRegistry {
                             .expect("authorization memo lock"),
                         &self.stream,
                         &self.topics,
-                        &self.events,
+                        &self.events.lock().expect("event contracts lock"),
                         &self.modes(),
                     );
                 }
@@ -776,7 +884,7 @@ impl TransportFixture {
             subscriptions: Mutex::new(Vec::new()),
             stream: stream(),
             topics: authorized.verified().claims().topics().clone(),
-            events: authorized.verified().claims().events().clone(),
+            events: Mutex::new(authorized.verified().claims().events().clone()),
             signals: Mutex::new(
                 BoundedPresentationSignalContracts::new(Vec::new()).expect("empty signals"),
             ),
@@ -793,6 +901,10 @@ impl TransportFixture {
             resolved_target_scope: Mutex::new(
                 ContentDigest::from_bytes(&[0xf1; 32]).expect("resolved target scope"),
             ),
+            delivery_validation_calls: AtomicUsize::new(0),
+            delivery_drift_call: AtomicUsize::new(usize::MAX),
+            delivery_drift: Mutex::new(None),
+            expected_delivery_binding: Mutex::new(None),
         });
         Self {
             authorized,

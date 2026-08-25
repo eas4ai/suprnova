@@ -177,7 +177,14 @@ Acceptance criteria:
   fresh exact document membership, signed-descriptor binding, current
   authorization memo/registry, expiry, revocation, event contract, and trusted
   resolved-target checks. Browser values and buffer callers cannot supply
-  recipient counts, target-set scope, or reusable admission authority.
+  recipient counts, target-set scope, or reusable admission authority. Raw
+  entries and offer/replay methods are not public capabilities: one
+  document-owned operation performs final current-host revalidation and
+  synchronous queue commit without an await or caller callback between them.
+  Dequeued work remains inside a non-cloneable RAII lease; the document, not a
+  caller, selects the exact binding's existing sequence machine and invokes the
+  registered dispatcher. Denial, cancellation, dispatch failure, or unresolved
+  drop cannot be reported as successful delivery.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Upload cleanup metrics are limited to closed age, retained-volume, outcome,
   retry, and orphan buckets. They never carry upload handles, lease identities,
@@ -259,6 +266,11 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Removed the public seal-to-offer and pop-to-success trust gaps
+  from async delivery. Only the document owner may perform final admission and
+  closed registered dispatch; raw sealed entries, offers, and delivery leases
+  remain private, and every unresolved lease degrades continuity while releasing
+  its shared permit.
 - 2026-08-25 -- Made physical transport membership a fresh host-authority
   boundary rather than a retained descriptor check. The framework owns the
   comparison sink, independently checks exclusive expiry before and after each

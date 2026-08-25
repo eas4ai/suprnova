@@ -21,9 +21,11 @@ pub use authorization::{
     SubscriptionIssueRequest, SubscriptionRegistryPort, SubscriptionRegistryRequest,
     SubscriptionService, TrustedMountParameters,
 };
+pub(crate) use backpressure::{
+    AsyncBackpressure, AsyncBufferEntry, AuthorizedAsyncBufferEntry, LeaseDispatchError,
+};
 pub use backpressure::{
-    AsyncBackpressure, AsyncBackpressureError, AsyncBufferEntry, AsyncCloseCode, AsyncDelivery,
-    AsyncPolicy, AuthorizedAsyncBufferEntry, BufferDisposition, MAX_ASYNC_BUFFER_BYTES,
+    AsyncBackpressureError, AsyncCloseCode, AsyncPolicy, BufferDisposition, MAX_ASYNC_BUFFER_BYTES,
     MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
 };
 pub use envelope::{
@@ -62,9 +64,9 @@ pub use subscription::{
 };
 pub use telemetry::{AsyncTelemetryCounter, AsyncTelemetrySnapshot};
 pub use transport::{
-    AsyncEventSession, AsyncEventSource, AsyncTransportAuthorityPort,
-    AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
-    AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportAdd,
+    AsyncDeliveryError, AsyncDeliveryErrorKind, AsyncEventSession, AsyncEventSource,
+    AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation,
+    AsyncTransportError, AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportAdd,
     AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EstablishingTransportAdd,

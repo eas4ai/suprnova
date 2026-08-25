@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::identity::{BrowserOperationName, ContentDigest};
 use crate::resource::{
@@ -81,7 +83,7 @@ pub struct AsyncPolicy {
 }
 
 /// Opaque value retained only by the shared resource queue.
-pub struct AsyncBufferEntry {
+pub(crate) struct AsyncBufferEntry {
     authorized: AuthorizedAsyncBufferEntry,
 }
 
@@ -114,11 +116,12 @@ enum CoalescingKey {
 }
 
 /// Sealed current-authority proof accepted by one document delivery queue.
-pub struct AuthorizedAsyncBufferEntry {
+pub(crate) struct AuthorizedAsyncBufferEntry {
     membership: OwnedActiveAsyncMembershipGuard,
     binding: SubscriptionBinding,
     document_scope: DocumentAuthorizationScope,
     component_memo: AuthorizationMemo,
+    document_generation: u64,
     resolved_fanout: usize,
     _resolved_target_scope: Option<ContentDigest>,
     terminal: bool,
@@ -130,6 +133,7 @@ impl AuthorizedAsyncBufferEntry {
         binding: SubscriptionBinding,
         document_scope: DocumentAuthorizationScope,
         component_memo: AuthorizationMemo,
+        document_generation: u64,
         resolved_fanout: usize,
         terminal: bool,
     ) -> Self {
@@ -141,13 +145,14 @@ impl AuthorizedAsyncBufferEntry {
             binding,
             document_scope,
             component_memo,
+            document_generation,
             resolved_fanout,
             _resolved_target_scope: resolved_target_scope,
             terminal,
         }
     }
 
-    const fn envelope(&self) -> &AsyncEnvelope {
+    pub(crate) const fn envelope(&self) -> &AsyncEnvelope {
         self.membership.envelope()
     }
 
@@ -157,6 +162,51 @@ impl AuthorizedAsyncBufferEntry {
 
     pub(crate) const fn terminal(&self) -> bool {
         self.terminal
+    }
+
+    pub(crate) const fn document_generation(&self) -> u64 {
+        self.document_generation
+    }
+
+    pub(crate) fn is_current_at(&self, now: crate::identity::UnixMillis) -> bool {
+        self.membership.as_active().is_current_at(now)
+    }
+
+    pub(crate) fn matches_authorization(
+        &self,
+        binding: &SubscriptionBinding,
+        document_scope: &DocumentAuthorizationScope,
+        component_memo: &AuthorizationMemo,
+        context: &super::AsyncEnvelopeContext,
+    ) -> bool {
+        &self.binding == binding
+            && &self.document_scope == document_scope
+            && &self.component_memo == component_memo
+            && self.membership.as_active().context() == context
+    }
+
+    pub(crate) fn replace_membership(&mut self, membership: OwnedActiveAsyncMembershipGuard) {
+        self.resolved_fanout = membership
+            .resolved_event()
+            .map_or(1, |resolved| usize::from(resolved.recipients().get()));
+        self._resolved_target_scope = membership
+            .resolved_event()
+            .map(|resolved| resolved.target_scope().clone());
+        self.membership = membership;
+    }
+
+    pub(crate) fn current_resolution_matches(
+        &self,
+        membership: &OwnedActiveAsyncMembershipGuard,
+    ) -> bool {
+        let resolved_fanout = membership
+            .resolved_event()
+            .map_or(1, |resolved| usize::from(resolved.recipients().get()));
+        let resolved_target_scope = membership
+            .resolved_event()
+            .map(|resolved| resolved.target_scope());
+        self.resolved_fanout == resolved_fanout
+            && self._resolved_target_scope.as_ref() == resolved_target_scope
     }
 }
 
@@ -195,15 +245,23 @@ impl fmt::Debug for AsyncBackpressureError {
 impl Error for AsyncBackpressureError {}
 
 /// One dequeued envelope holding exactly one shared active-delivery permit.
-pub struct AsyncDelivery {
+pub(crate) struct AsyncDeliveryLease {
     entry: AsyncBufferEntry,
     _permit: Permit,
+    cancellation: crate::resource::CancellationFlag,
+    continuity_degraded: Arc<AtomicBool>,
+    resolved: bool,
 }
 
-impl AsyncDelivery {
+pub(crate) enum LeaseDispatchError {
+    Retired,
+    Sequence(SequenceError),
+}
+
+impl AsyncDeliveryLease {
     /// Returns the registered envelope while this bounded delivery owns its permit.
     #[must_use]
-    pub const fn envelope(&self) -> &AsyncEnvelope {
+    pub(crate) const fn envelope(&self) -> &AsyncEnvelope {
         self.entry.authorized.envelope()
     }
 
@@ -211,37 +269,72 @@ impl AsyncDelivery {
         self.entry.authorized.binding()
     }
 
-    pub(crate) const fn terminal(&self) -> bool {
-        self.entry.authorized.terminal()
+    pub(crate) fn authorized_mut(&mut self) -> &mut AuthorizedAsyncBufferEntry {
+        &mut self.entry.authorized
     }
 
-    /// Consumes this exact admitted proof through the caller-owned sequence authority.
-    pub fn dispatch(
-        self,
+    pub(crate) fn is_canceled(&self) -> bool {
+        self.cancellation.is_canceled()
+    }
+
+    /// Consumes this exact admitted proof through the document-owned sequence authority.
+    pub(crate) fn dispatch(
+        mut self,
         sequence: &mut SequenceMachine,
         now: crate::identity::UnixMillis,
         dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
-    ) -> Result<SequenceDisposition, SequenceError> {
-        sequence.dispatch(
+    ) -> Result<SequenceDisposition, LeaseDispatchError> {
+        if self.cancellation.is_canceled() {
+            return Err(LeaseDispatchError::Retired);
+        }
+        let outcome = sequence.dispatch(
             self.entry.authorized.membership.as_active(),
             now,
             dispatcher,
-        )
+        );
+        match outcome {
+            Ok(
+                disposition @ (SequenceDisposition::Apply
+                | SequenceDisposition::IgnoreDuplicate
+                | SequenceDisposition::IgnoreStaleEpoch),
+            ) => {
+                self.resolved = true;
+                Ok(disposition)
+            }
+            Ok(disposition) => {
+                self.continuity_degraded.store(true, Ordering::Release);
+                self.resolved = true;
+                Ok(disposition)
+            }
+            Err(error) => {
+                self.continuity_degraded.store(true, Ordering::Release);
+                self.resolved = true;
+                Err(LeaseDispatchError::Sequence(error))
+            }
+        }
     }
 }
 
-impl fmt::Debug for AsyncDelivery {
+impl Drop for AsyncDeliveryLease {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.continuity_degraded.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl fmt::Debug for AsyncDeliveryLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<AsyncDelivery:redacted>")
+        formatter.write_str("<AsyncDeliveryLease:redacted>")
     }
 }
 
 /// Policy wrapper over the shared owner, queue, permit pool, and cancellation flag.
-pub struct AsyncBackpressure {
+pub(crate) struct AsyncBackpressure {
     owner: ResourceOwner<AsyncBufferEntry>,
     permits: PermitPool,
     policy: AsyncPolicy,
-    degraded: bool,
+    degraded: Arc<AtomicBool>,
     closed: Option<AsyncCloseCode>,
     telemetry: AsyncTelemetry,
 }
@@ -253,7 +346,7 @@ impl fmt::Debug for AsyncBackpressure {
             .field("retained_events", &self.retained_events())
             .field("retained_bytes", &self.retained_bytes())
             .field("active_permits", &self.active_permits())
-            .field("degraded", &self.degraded)
+            .field("degraded", &self.is_degraded())
             .field("closed", &self.closed)
             .finish()
     }
@@ -261,7 +354,7 @@ impl fmt::Debug for AsyncBackpressure {
 
 impl AsyncBackpressure {
     /// Creates one bounded delivery scope without allocating a second queue.
-    pub fn new(
+    pub(crate) fn new(
         owner: ResourceOwner<AsyncBufferEntry>,
         permits: PermitPool,
         policy: AsyncPolicy,
@@ -281,14 +374,14 @@ impl AsyncBackpressure {
             owner,
             permits,
             policy,
-            degraded: false,
+            degraded: Arc::new(AtomicBool::new(false)),
             closed: None,
             telemetry: AsyncTelemetry::default(),
         })
     }
 
     /// Offers one entry sealed by current document and membership authority.
-    pub fn offer(
+    pub(crate) fn offer(
         &mut self,
         authorized: AuthorizedAsyncBufferEntry,
     ) -> Result<BufferDisposition, AsyncBackpressureError> {
@@ -337,11 +430,11 @@ impl AsyncBackpressure {
         match admitted {
             Ok(TailAdmissionOutcome::Appended) => Ok(self.finish(BufferDisposition::Queued)),
             Ok(TailAdmissionOutcome::Replaced) => {
-                self.degraded = true;
+                self.mark_degraded();
                 Ok(self.finish(BufferDisposition::Coalesced))
             }
             Ok(TailAdmissionOutcome::Rejected) => {
-                self.degraded = true;
+                self.mark_degraded();
                 Ok(self.finish(BufferDisposition::Degraded))
             }
             Err(ResourceError::Retired) => {
@@ -352,7 +445,7 @@ impl AsyncBackpressure {
                 | ResourceError::BytesExceeded
                 | ResourceError::PermitsExceeded,
             ) => {
-                self.degraded = true;
+                self.mark_degraded();
                 Ok(self.finish(BufferDisposition::Degraded))
             }
         }
@@ -363,7 +456,7 @@ impl AsyncBackpressure {
     /// Empty, over-count, or aggregate-overflow transcripts degrade without
     /// partially changing the queue. Replay entries never coalesce because
     /// Task 3 requires their exact ordered sequence evidence.
-    pub fn offer_replay(
+    pub(crate) fn offer_replay(
         &mut self,
         transcript: Vec<AuthorizedAsyncBufferEntry>,
     ) -> Result<BufferDisposition, AsyncBackpressureError> {
@@ -374,7 +467,7 @@ impl AsyncBackpressure {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
         }
         if transcript.is_empty() || transcript.len() > self.policy.max_replay_events.get() {
-            self.degraded = true;
+            self.mark_degraded();
             return Ok(self.finish(BufferDisposition::Degraded));
         }
         if transcript.windows(2).any(|pair| {
@@ -390,13 +483,13 @@ impl AsyncBackpressure {
                     .checked_add(1)
                     != Some(next.envelope().position().sequence().get())
         }) {
-            self.degraded = true;
+            self.mark_degraded();
             return Ok(self.finish(BufferDisposition::Degraded));
         }
         let bounds = self.owner.queue().bounds();
         let available_items = bounds.max_items().saturating_sub(self.owner.queue().len());
         if transcript.len() > available_items {
-            self.degraded = true;
+            self.mark_degraded();
             return Ok(self.finish(BufferDisposition::Degraded));
         }
 
@@ -433,7 +526,7 @@ impl AsyncBackpressure {
             total_bytes = match total_bytes.checked_add(encoded.len()) {
                 Some(total) => total,
                 None => {
-                    self.degraded = true;
+                    self.mark_degraded();
                     return Ok(self.finish(BufferDisposition::Degraded));
                 }
             };
@@ -443,7 +536,7 @@ impl AsyncBackpressure {
             .max_bytes()
             .saturating_sub(self.owner.queue().retained_bytes());
         if total_bytes > available_bytes {
-            self.degraded = true;
+            self.mark_degraded();
             return Ok(self.finish(BufferDisposition::Degraded));
         }
 
@@ -457,7 +550,7 @@ impl AsyncBackpressure {
                 | ResourceError::BytesExceeded
                 | ResourceError::PermitsExceeded,
             ) => {
-                self.degraded = true;
+                self.mark_degraded();
                 return Ok(self.finish(BufferDisposition::Degraded));
             }
         }
@@ -466,36 +559,40 @@ impl AsyncBackpressure {
 
     /// Returns the exact number of retained queue entries.
     #[must_use]
-    pub fn retained_events(&self) -> usize {
+    pub(crate) fn retained_events(&self) -> usize {
         self.owner.queue().len()
     }
 
     /// Returns the exact canonical envelope bytes retained by the shared queue.
     #[must_use]
-    pub fn retained_bytes(&self) -> usize {
+    pub(crate) fn retained_bytes(&self) -> usize {
         self.owner.queue().retained_bytes()
     }
 
     /// Returns the number of delivery-work permits currently held.
     #[must_use]
-    pub fn active_permits(&self) -> usize {
+    pub(crate) fn active_permits(&self) -> usize {
         self.permits.active()
     }
 
     /// Returns whether pressure made exact sequence continuity uncertain.
     #[must_use]
-    pub const fn is_degraded(&self) -> bool {
-        self.degraded
+    pub(crate) fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_delivery_loss(&mut self) {
+        self.finish(BufferDisposition::Degraded);
     }
 
     /// Returns one bounded low-cardinality telemetry snapshot.
     #[must_use]
-    pub const fn telemetry_snapshot(&self) -> AsyncTelemetrySnapshot {
+    pub(crate) const fn telemetry_snapshot(&self) -> AsyncTelemetrySnapshot {
         self.telemetry.snapshot()
     }
 
     /// Starts one bounded delivery or leaves the queue untouched when saturated.
-    pub fn try_start_delivery(&mut self) -> Option<AsyncDelivery> {
+    pub(crate) fn try_start_delivery(&mut self) -> Option<AsyncDeliveryLease> {
         if self.closed.is_some() || self.owner.cancellation().is_canceled() {
             if self.closed.is_none() {
                 self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired));
@@ -507,14 +604,17 @@ impl AsyncBackpressure {
             drop(permit);
             return None;
         };
-        Some(AsyncDelivery {
+        Some(AsyncDeliveryLease {
             entry,
             _permit: permit,
+            cancellation: self.owner.cancellation(),
+            continuity_degraded: Arc::clone(&self.degraded),
+            resolved: false,
         })
     }
 
     /// Cancels this scope and drains every retained envelope exactly once.
-    pub fn retire(&mut self) -> Retirement {
+    pub(crate) fn retire(&mut self) -> Retirement {
         let first_retirement = self.closed.is_none();
         if first_retirement {
             self.closed = Some(AsyncCloseCode::Retired);
@@ -553,6 +653,7 @@ impl AsyncBackpressure {
                 )
         });
         if removed.0 > 0 {
+            self.mark_degraded();
             self.telemetry.increment(AsyncTelemetryCounter::Cleanup);
         }
         removed
@@ -570,6 +671,12 @@ impl AsyncBackpressure {
     }
 
     fn finish(&mut self, disposition: BufferDisposition) -> BufferDisposition {
+        if matches!(
+            disposition,
+            BufferDisposition::Coalesced | BufferDisposition::Degraded
+        ) {
+            self.mark_degraded();
+        }
         let counter = match disposition {
             BufferDisposition::Queued => AsyncTelemetryCounter::Queued,
             BufferDisposition::Coalesced => AsyncTelemetryCounter::Coalesced,
@@ -596,6 +703,10 @@ impl AsyncBackpressure {
         };
         self.telemetry.increment(counter);
         disposition
+    }
+
+    fn mark_degraded(&self) {
+        self.degraded.store(true, Ordering::Release);
     }
 }
 

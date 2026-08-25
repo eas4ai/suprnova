@@ -15,14 +15,16 @@ use sha2::{Digest as _, Sha256};
 
 use crate::host::HostScopeFacts;
 use crate::identity::{ContentDigest, UnixMillis};
-use crate::resource::{PermitPool, ResourceOwner, Retirement};
+use crate::resource::{PermitPool, ResourceBounds, ResourceOwner, Retirement};
 
 use super::{
     AsyncBackpressure, AsyncBackpressureError, AsyncBufferEntry, AsyncEnvelope,
-    AsyncEnvelopeContext, AsyncMembershipRegistryPort, AsyncPayload, AsyncPolicy,
-    AuthorizationMemo, AuthorizedAsyncBufferEntry, AuthorizedSubscription, BoundedEventContracts,
-    BoundedTopics, BufferDisposition, StreamName, StreamPosition, SubscriptionBinding,
-    SubscriptionId, SubscriptionMode, SubscriptionModes, VerifiedSubscriptionDescriptor,
+    AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, AsyncMembershipRegistryPort, AsyncPayload,
+    AsyncPolicy, AsyncTelemetrySnapshot, AuthorizationMemo, AuthorizedAsyncBufferEntry,
+    AuthorizedSubscription, BoundedEventContracts, BoundedTopics, BufferDisposition,
+    LeaseDispatchError, SequenceDisposition, SequenceErrorKind, SequenceMachine, StreamName,
+    StreamPosition, SubscriptionBinding, SubscriptionId, SubscriptionMode, SubscriptionModes,
+    VerifiedSubscriptionDescriptor,
 };
 
 const MIN_DOCUMENT_HANDLE_BYTES: usize = 16;
@@ -187,6 +189,55 @@ impl fmt::Display for AsyncTransportError {
 }
 
 impl Error for AsyncTransportError {}
+
+/// Closed failure returned by document-owned bounded delivery dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AsyncDeliveryErrorKind {
+    /// The document delivery owner was canceled or retired.
+    Retired,
+    /// Exact current logical membership or host authority was lost.
+    AuthorizationLost,
+    /// Task 3 rejected dispatch with its closed sequence failure kind.
+    Sequence(SequenceErrorKind),
+}
+
+/// Redacted error from one document-owned delivery attempt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AsyncDeliveryError {
+    kind: AsyncDeliveryErrorKind,
+}
+
+impl AsyncDeliveryError {
+    const fn new(kind: AsyncDeliveryErrorKind) -> Self {
+        Self { kind }
+    }
+
+    /// Returns the stable closed failure category.
+    #[must_use]
+    pub const fn kind(self) -> AsyncDeliveryErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for AsyncDeliveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            AsyncDeliveryErrorKind::Retired => formatter.write_str("async_delivery_retired"),
+            AsyncDeliveryErrorKind::AuthorizationLost => {
+                formatter.write_str("async_delivery_authorization_lost")
+            }
+            AsyncDeliveryErrorKind::Sequence(kind) => formatter.write_str(kind.as_str()),
+        }
+    }
+}
+
+impl fmt::Debug for AsyncDeliveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl Error for AsyncDeliveryError {}
 
 /// Canonical HTTP(S) origin proven free of path, query, fragment, or userinfo.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -1030,7 +1081,7 @@ pub struct DocumentTransportSession {
     pending_controls: Arc<PendingControlCapacity>,
     memberships: Vec<LogicalTransportSession>,
     retiring: Vec<RetiringTransportSession>,
-    completed_drains: Vec<(SubscriptionId, SubscriptionBinding)>,
+    completed_drains: Vec<AuthorizedTransportSubscription>,
     cursor: usize,
     cleanup_cursor: usize,
     last_cleanup_error: Option<AsyncTransportErrorKind>,
@@ -1113,17 +1164,6 @@ impl DocumentTransportSession {
             .any(|logical| logical.authorization.subscription() == subscription)
     }
 
-    /// Seals one envelope only for an exact active document membership.
-    pub fn authorize_async_delivery(
-        &self,
-        authorization: &AuthorizedTransportSubscription,
-        envelope: AsyncEnvelope,
-        registry: &dyn AsyncMembershipRegistryPort,
-        now: UnixMillis,
-    ) -> Result<AuthorizedAsyncBufferEntry, AsyncTransportError> {
-        self.seal_async_delivery(authorization, envelope, registry, now, false, true)
-    }
-
     fn seal_async_delivery(
         &self,
         authorization: &AuthorizedTransportSubscription,
@@ -1166,9 +1206,65 @@ impl DocumentTransportSession {
             authorization.binding.clone(),
             authorization.document_scope.clone(),
             authorization.verified.claims().authorization_memo().clone(),
+            self.control_generation,
             resolved_fanout,
             terminal,
         ))
+    }
+
+    fn revalidate_async_delivery(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+        authorized: &mut AuthorizedAsyncBufferEntry,
+        registry: &dyn AsyncMembershipRegistryPort,
+        now: UnixMillis,
+        require_active: bool,
+    ) -> Result<(), AsyncTransportError> {
+        self.validate_common(authorization)?;
+        if require_active {
+            let logical = self
+                .memberships
+                .iter()
+                .find(|logical| {
+                    logical.authorization.subscription() == authorization.subscription()
+                })
+                .ok_or_else(|| {
+                    AsyncTransportError::new(AsyncTransportErrorKind::UnknownMembership)
+                })?;
+            if logical.authorization.binding() != authorization.binding() {
+                return Err(AsyncTransportError::new(
+                    AsyncTransportErrorKind::DescriptorMismatch,
+                ));
+            }
+        }
+        let component_memo = authorization.verified.claims().authorization_memo();
+        if !authorized.matches_authorization(
+            authorization.binding(),
+            authorization.document_scope(),
+            component_memo,
+            authorization.context(),
+        ) {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::DescriptorMismatch,
+            ));
+        }
+        let fresh = authorization
+            .context
+            .admit_owned(
+                authorized.envelope().clone(),
+                authorization.binding(),
+                authorization.document_scope(),
+                registry,
+                now,
+            )
+            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::AuthorizationLost))?;
+        if !authorized.current_resolution_matches(&fresh) {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ));
+        }
+        authorized.replace_membership(fresh);
+        Ok(())
     }
 
     /// Snapshots one descriptor-bound admission without borrowing this document across await.
@@ -1526,10 +1622,7 @@ impl DocumentTransportSession {
                 }
                 Ok(None) => {
                     let authorization = self.memberships[index].authorization.clone();
-                    self.completed_drains.push((
-                        authorization.subscription().clone(),
-                        authorization.binding().clone(),
-                    ));
+                    self.completed_drains.push(authorization);
                     let retirement = self.detach_membership(index);
                     self.poll_retirement_at(retirement, task);
                     return Poll::Ready(Ok(DocumentPoll::Retired));
@@ -1594,24 +1687,62 @@ impl fmt::Debug for DocumentTransportSession {
 /// shared bounded queue. The wrapper owns no ingress staging buffer; buffering
 /// performed inside a host-native source remains outside the transport trait's
 /// framework-owned memory contract.
+///
+/// Raw admission capabilities are intentionally not part of the public API:
+///
+/// ```compile_fail
+/// use suprnova_live::async_updates::{AsyncBackpressure, AuthorizedAsyncBufferEntry};
+/// ```
 pub struct BoundedDocumentTransportSession {
     transport: DocumentTransportSession,
     pressure: AsyncBackpressure,
-    terminal_drains: Vec<(SubscriptionId, SubscriptionBinding)>,
+    terminal_drains: Vec<AuthorizedTransportSubscription>,
+    sequence_lanes: Vec<DocumentSequenceLane>,
+}
+
+struct DocumentSequenceLane {
+    subscription: SubscriptionId,
+    binding: SubscriptionBinding,
+    machine: SequenceMachine,
+}
+
+impl DocumentSequenceLane {
+    fn new(authorization: &AuthorizedTransportSubscription) -> Self {
+        Self {
+            subscription: authorization.subscription().clone(),
+            binding: authorization.binding().clone(),
+            machine: SequenceMachine::new(authorization.context()),
+        }
+    }
+
+    fn matches(&self, authorization: &AuthorizedTransportSubscription) -> bool {
+        self.subscription == *authorization.subscription()
+            && self.binding == *authorization.binding()
+    }
 }
 
 impl BoundedDocumentTransportSession {
     /// Composes Task 4 fair fan-in with one Task 5 queue and shared permit pool.
     pub fn new(
         transport: DocumentTransportSession,
-        owner: ResourceOwner<AsyncBufferEntry>,
+        bounds: ResourceBounds,
         permits: PermitPool,
         policy: AsyncPolicy,
     ) -> Result<Self, AsyncBackpressureError> {
+        let sequence_lanes = transport
+            .memberships
+            .iter()
+            .map(|logical| DocumentSequenceLane::new(&logical.authorization))
+            .collect();
         Ok(Self {
             transport,
-            pressure: AsyncBackpressure::new(owner, permits, policy)?,
+            pressure: AsyncBackpressure::new(
+                ResourceOwner::<AsyncBufferEntry>::new(bounds),
+                permits,
+                policy,
+            )?,
             terminal_drains: Vec::new(),
+            sequence_lanes,
         })
     }
 
@@ -1625,15 +1756,16 @@ impl BoundedDocumentTransportSession {
     pub async fn pump_next(
         &mut self,
         registry: &dyn AsyncMembershipRegistryPort,
-        now: UnixMillis,
     ) -> Result<Option<BufferDisposition>, AsyncTransportError> {
         let candidate_result = self.transport.next_delivery_candidate().await;
         for completed in std::mem::take(&mut self.transport.completed_drains) {
-            if !self.terminal_drains.contains(&completed) {
+            if !self.terminal_drains.iter().any(|drain| {
+                drain.subscription() == completed.subscription()
+                    && drain.binding() == completed.binding()
+            }) {
                 self.terminal_drains.push(completed);
             }
         }
-        self.prune_empty_terminal_drains();
         let candidate = match candidate_result {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
@@ -1646,57 +1778,206 @@ impl BoundedDocumentTransportSession {
             }
         };
         let terminal = candidate.terminal;
-        if terminal {
-            let terminal_drain = (
-                candidate.authorization.subscription().clone(),
-                candidate.authorization.binding().clone(),
-            );
-            if !self.terminal_drains.contains(&terminal_drain) {
-                self.terminal_drains.push(terminal_drain);
-            }
+        if terminal
+            && !self.terminal_drains.iter().any(|drain| {
+                drain.subscription() == candidate.authorization.subscription()
+                    && drain.binding() == candidate.authorization.binding()
+            })
+        {
+            self.terminal_drains.push(candidate.authorization.clone());
         }
-        let authorized = self.transport.seal_async_delivery(
+        let now = candidate.authorization.authority.now();
+        let mut authorized = match self.transport.seal_async_delivery(
             &candidate.authorization,
             candidate.envelope,
             registry,
             now,
             terminal,
             !terminal,
-        )?;
-        let disposition = self
-            .pressure
-            .offer(authorized)
-            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        ) {
+            Ok(authorized) => authorized,
+            Err(error) => return Err(self.reject_pulled_delivery(terminal, error)),
+        };
+        let final_now = candidate.authorization.authority.now();
+        if let Err(error) = self.transport.revalidate_async_delivery(
+            &candidate.authorization,
+            &mut authorized,
+            registry,
+            final_now,
+            !terminal,
+        ) {
+            return Err(self.reject_pulled_delivery(terminal, error));
+        }
+        if authorized.document_generation() != self.transport.control_generation {
+            let error = AsyncTransportError::new(AsyncTransportErrorKind::StaleControl);
+            return Err(self.reject_pulled_delivery(terminal, error));
+        }
+        let commit_now = candidate.authorization.authority.now();
+        if !authorized.is_current_at(commit_now) {
+            let error = AsyncTransportError::new(AsyncTransportErrorKind::AuthorizationLost);
+            return Err(self.reject_pulled_delivery(terminal, error));
+        }
+        let disposition = match self.pressure.offer(authorized) {
+            Ok(disposition) => disposition,
+            Err(_) => {
+                let error = AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope);
+                return Err(self.reject_pulled_delivery(terminal, error));
+            }
+        };
         if terminal {
             self.prune_empty_terminal_drains();
         }
         Ok(Some(disposition))
     }
 
-    /// Returns one deliverable entry, skipping entries whose exact membership retired.
-    pub fn try_start_delivery(&mut self) -> Option<super::AsyncDelivery> {
-        loop {
-            let delivery = self.pressure.try_start_delivery()?;
-            let active = self.transport.memberships.iter().any(|logical| {
+    /// Seals and atomically admits one complete replay for an exact active membership.
+    pub fn admit_replay(
+        &mut self,
+        authorization: &AuthorizedTransportSubscription,
+        transcript: Vec<AsyncEnvelope>,
+        registry: &dyn AsyncMembershipRegistryPort,
+    ) -> Result<BufferDisposition, AsyncTransportError> {
+        let mut sealed = Vec::with_capacity(transcript.len());
+        for envelope in transcript {
+            let now = authorization.authority.now();
+            sealed.push(self.transport.seal_async_delivery(
+                authorization,
+                envelope,
+                registry,
+                now,
+                false,
+                true,
+            )?);
+        }
+        for authorized in &mut sealed {
+            let now = authorization.authority.now();
+            self.transport.revalidate_async_delivery(
+                authorization,
+                authorized,
+                registry,
+                now,
+                true,
+            )?;
+            if authorized.document_generation() != self.transport.control_generation {
+                return Err(AsyncTransportError::new(
+                    AsyncTransportErrorKind::StaleControl,
+                ));
+            }
+        }
+        let commit_now = authorization.authority.now();
+        if sealed
+            .iter()
+            .any(|authorized| !authorized.is_current_at(commit_now))
+        {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ));
+        }
+        self.pressure
+            .offer_replay(sealed)
+            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))
+    }
+
+    /// Dispatches one leased queue head through Task 3 without exposing the lease.
+    pub fn dispatch_next(
+        &mut self,
+        registry: &dyn AsyncMembershipRegistryPort,
+        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+    ) -> Result<Option<SequenceDisposition>, AsyncDeliveryError> {
+        let Some(mut delivery) = self.pressure.try_start_delivery() else {
+            return Ok(None);
+        };
+        if delivery.is_canceled() {
+            self.prune_empty_terminal_drains();
+            return Err(AsyncDeliveryError::new(AsyncDeliveryErrorKind::Retired));
+        }
+
+        let active = self
+            .transport
+            .memberships
+            .iter()
+            .find(|logical| {
                 logical.authorization.subscription() == delivery.envelope().subscription()
                     && logical.authorization.binding() == delivery.binding()
-            });
-            let terminal_drain = self.terminal_drains.iter().any(|(subscription, binding)| {
-                subscription == delivery.envelope().subscription() && binding == delivery.binding()
-            });
-            let has_more = self
-                .pressure
-                .has_membership_entries(delivery.envelope().subscription(), delivery.binding());
-            if delivery.terminal() || (terminal_drain && !has_more) {
-                self.terminal_drains.retain(|(subscription, binding)| {
-                    subscription != delivery.envelope().subscription()
-                        || binding != delivery.binding()
-                });
-                return Some(delivery);
+            })
+            .map(|logical| logical.authorization.clone());
+        let terminal = self
+            .terminal_drains
+            .iter()
+            .find(|authorization| {
+                authorization.subscription() == delivery.envelope().subscription()
+                    && authorization.binding() == delivery.binding()
+            })
+            .cloned();
+        let (authorization, require_active) = match (active, terminal) {
+            (Some(authorization), _) => (authorization, true),
+            (None, Some(authorization)) => (authorization, false),
+            (None, None) => {
+                self.prune_empty_terminal_drains();
+                return Err(AsyncDeliveryError::new(
+                    AsyncDeliveryErrorKind::AuthorizationLost,
+                ));
             }
-            if active || terminal_drain {
-                return Some(delivery);
+        };
+        let now = authorization.authority.now();
+        if self
+            .transport
+            .revalidate_async_delivery(
+                &authorization,
+                delivery.authorized_mut(),
+                registry,
+                now,
+                require_active,
+            )
+            .is_err()
+        {
+            self.prune_empty_terminal_drains();
+            return Err(AsyncDeliveryError::new(
+                AsyncDeliveryErrorKind::AuthorizationLost,
+            ));
+        }
+        let final_now = authorization.authority.now();
+        if self
+            .transport
+            .revalidate_async_delivery(
+                &authorization,
+                delivery.authorized_mut(),
+                registry,
+                final_now,
+                require_active,
+            )
+            .is_err()
+        {
+            self.prune_empty_terminal_drains();
+            return Err(AsyncDeliveryError::new(
+                AsyncDeliveryErrorKind::AuthorizationLost,
+            ));
+        }
+        if delivery.is_canceled() {
+            self.prune_empty_terminal_drains();
+            return Err(AsyncDeliveryError::new(AsyncDeliveryErrorKind::Retired));
+        }
+
+        let Some(sequence) = self.sequence_lanes.iter_mut().find(|lane| {
+            lane.subscription == *delivery.envelope().subscription()
+                && lane.binding == *delivery.binding()
+        }) else {
+            self.prune_empty_terminal_drains();
+            return Err(AsyncDeliveryError::new(
+                AsyncDeliveryErrorKind::AuthorizationLost,
+            ));
+        };
+        let dispatch_now = authorization.authority.now();
+        let outcome = delivery.dispatch(&mut sequence.machine, dispatch_now, dispatcher);
+        self.prune_empty_terminal_drains();
+        match outcome {
+            Ok(disposition) => Ok(Some(disposition)),
+            Err(LeaseDispatchError::Retired) => {
+                Err(AsyncDeliveryError::new(AsyncDeliveryErrorKind::Retired))
             }
+            Err(LeaseDispatchError::Sequence(error)) => Err(AsyncDeliveryError::new(
+                AsyncDeliveryErrorKind::Sequence(error.kind()),
+            )),
         }
     }
 
@@ -1710,6 +1991,36 @@ impl BoundedDocumentTransportSession {
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.pressure.retained_bytes()
+    }
+
+    /// Returns the number of active document delivery permits.
+    #[must_use]
+    pub fn active_permits(&self) -> usize {
+        self.pressure.active_permits()
+    }
+
+    /// Returns whether queue or delivery loss requires continuity recovery.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        self.pressure.is_degraded()
+    }
+
+    /// Returns one bounded low-cardinality pressure snapshot.
+    #[must_use]
+    pub const fn telemetry_snapshot(&self) -> AsyncTelemetrySnapshot {
+        self.pressure.telemetry_snapshot()
+    }
+
+    /// Returns the Task 3 position owned by one exact logical membership.
+    #[must_use]
+    pub fn sequence_position(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+    ) -> Option<StreamPosition> {
+        self.sequence_lanes
+            .iter()
+            .find(|lane| lane.matches(authorization))
+            .map(|lane| lane.machine.current())
     }
 
     /// Starts a typed add using the underlying Task 4 authority protocol.
@@ -1730,7 +2041,10 @@ impl BoundedDocumentTransportSession {
 
     /// Commits one established logical membership.
     pub fn commit_add(&mut self, ready: ReadyTransportAdd) -> Result<(), AsyncTransportError> {
-        self.transport.commit_add(ready)
+        let sequence = DocumentSequenceLane::new(&ready.authorization);
+        self.transport.commit_add(ready)?;
+        self.sequence_lanes.push(sequence);
+        Ok(())
     }
 
     /// Starts a typed removal using the underlying Task 4 authority protocol.
@@ -1751,6 +2065,8 @@ impl BoundedDocumentTransportSession {
         let disposition = self.transport.commit_remove(ready)?;
         if disposition == CloseDisposition::Closed {
             self.pressure.retire_membership(&subscription, &binding);
+            self.sequence_lanes
+                .retain(|lane| lane.subscription != subscription || lane.binding != binding);
         }
         Ok(disposition)
     }
@@ -1758,6 +2074,7 @@ impl BoundedDocumentTransportSession {
     /// Retires aggregate delivery and closes every logical provider session.
     pub async fn close(&mut self) -> Result<CloseDisposition, AsyncTransportError> {
         self.terminal_drains.clear();
+        self.sequence_lanes.clear();
         self.pressure.retire();
         self.transport.close().await
     }
@@ -1765,6 +2082,7 @@ impl BoundedDocumentTransportSession {
     /// Retires and drains the aggregate delivery queue exactly once.
     pub fn retire_delivery(&mut self) -> Retirement {
         self.terminal_drains.clear();
+        self.sequence_lanes.clear();
         self.pressure.retire()
     }
 
@@ -1776,22 +2094,50 @@ impl BoundedDocumentTransportSession {
                 memberships.iter().any(|logical| {
                     logical.authorization.subscription() == subscription
                         && logical.authorization.binding() == binding
-                }) || terminal_drains
-                    .iter()
-                    .any(|(terminal_subscription, terminal_binding)| {
-                        terminal_subscription == subscription && terminal_binding == binding
-                    })
+                }) || terminal_drains.iter().any(|authorization| {
+                    authorization.subscription() == subscription
+                        && authorization.binding() == binding
+                })
             });
+        self.prune_sequence_lanes();
+    }
+
+    fn reject_pulled_delivery(
+        &mut self,
+        terminal: bool,
+        error: AsyncTransportError,
+    ) -> AsyncTransportError {
+        self.pressure.record_delivery_loss();
+        if terminal {
+            self.prune_empty_terminal_drains();
+        }
+        error
     }
 
     fn prune_empty_terminal_drains(&mut self) {
         let drains = std::mem::take(&mut self.terminal_drains);
         self.terminal_drains = drains
             .into_iter()
-            .filter(|(subscription, binding)| {
-                self.pressure.has_membership_entries(subscription, binding)
+            .filter(|authorization| {
+                self.pressure
+                    .has_membership_entries(authorization.subscription(), authorization.binding())
             })
             .collect();
+        self.prune_sequence_lanes();
+    }
+
+    fn prune_sequence_lanes(&mut self) {
+        let memberships = &self.transport.memberships;
+        let terminal_drains = &self.terminal_drains;
+        self.sequence_lanes.retain(|lane| {
+            memberships.iter().any(|logical| {
+                logical.authorization.subscription() == &lane.subscription
+                    && logical.authorization.binding() == &lane.binding
+            }) || terminal_drains.iter().any(|authorization| {
+                authorization.subscription() == &lane.subscription
+                    && authorization.binding() == &lane.binding
+            })
+        });
     }
 }
 

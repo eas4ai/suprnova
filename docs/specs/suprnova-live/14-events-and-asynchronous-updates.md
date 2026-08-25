@@ -246,14 +246,27 @@ Acceptance criteria:
   logical source fairly and immediately offers that one item; Live owns no
   hidden per-membership ingress buffer in front of the aggregate queue. A host
   provider's native internal buffers are outside this trait contract.
-- The delivery queue accepts only a sealed authorized async buffer entry minted
-  from the exact active document membership. Minting rechecks exclusive
+- The document-owned delivery operation alone may create a private sealed async
+  buffer entry from the exact active document membership. Neither application
+  code nor an external buffer caller can mint, retain, or later offer that
+  proof. The operation first seals bounded facts, then immediately revalidates
+  them against the current document generation and host authority before one
+  synchronous queue mutation; no await, callback, or public capability occurs
+  between final acceptance and commit. Admission rechecks exclusive
   descriptor expiry, exact subscription binding, document authorization scope,
   component authorization memo, active logical routing membership, registry
   and revocation state, the full current event/signal contract, and the exact
-  envelope scope. The queued entry owns the one-use Task 3 membership guard;
-  dequeuing consumes that same proof through the island's existing sequence
-  machine and never creates a second sequence authority.
+  envelope scope. The queued entry owns the one-use Task 3 membership guard.
+  Dequeuing creates a private non-cloneable delivery lease that retains that
+  proof, its shared permit/cancellation state, exact membership scope, and the
+  document pressure-continuity tracker. The document owns exactly one Task 3
+  sequence machine lane for each exact logical subscription binding and selects
+  that lane itself; callers cannot provide a different machine or report
+  success. Final current authority and descriptor expiry are rechecked after
+  dequeue immediately before registered dispatch. Successful apply, duplicate,
+  and stale-epoch outcomes resolve truthfully. Authority loss, cancellation,
+  gaps, epoch change, dispatcher failure, or an unresolved lease drop mark
+  pressure continuity degraded and never advance sequence falsely.
 - For a browser event, the trusted host registry supplies the current resolved
   nonzero recipient count and an exact target-set scope digest. The browser and
   buffer caller cannot propose fanout. Admission rejects target-count, target,
@@ -340,6 +353,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Closed the final Task 5 authority-lifetime gaps. Raw sealed
+  entries, buffer offer/replay, and delivery leases are private implementation
+  values; the public document owner performs prevalidation, final current-host
+  validation, exclusive commit-time expiry checking, and synchronous queue
+  mutation without exposing a seal-to-offer window. It also owns one existing
+  Task 3 sequence lane per exact logical binding and provides the only closed
+  dequeue-and-dispatch operation. Its non-cloneable RAII lease holds the exact
+  guard, shared permit/cancellation state, membership scope, and continuity
+  tracker through registered dispatch; denial, failure, panic/drop, gaps, and
+  cancellation degrade truthfully, while apply/duplicate/stale resolve without
+  inventing currentness. Terminal lanes survive Task 4 detachment only through
+  their bounded drain, and provider-failure purges degrade lost continuity.
 - 2026-08-25 -- Hardened Task 5 around sealed current authority and one real
   document queue. `AsyncBackpressure` no longer accepts an envelope plus a
   caller-supplied fanout count; only the exact Task 4 document membership may

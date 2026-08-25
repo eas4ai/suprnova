@@ -499,18 +499,32 @@ retirement lane nor a second sequence or lifecycle authority.
 _Avoid_: private async queue, event bus, replay authority, transport retirement lane
 
 **Authorized async buffer entry**:
-A non-forgeable one-use delivery value minted only after the exact active Task 4
-document membership and Task 3 current registry authority validate descriptor
-expiry/binding, document and component scope, revocation, the complete payload
-contract, and host-resolved event recipients/target-set scope. It owns the same
-membership guard later consumed by the island's existing sequence machine.
+A private non-forgeable one-use delivery value created only inside the
+document-owned admission operation after the exact active Task 4 membership and
+Task 3 current registry authority validate descriptor expiry/binding, document
+and component scope, revocation, the complete payload contract, and host-resolved
+event recipients/target-set scope. It cannot escape as an application-held
+seal or later buffer offer. It owns the same membership guard later consumed by
+the exact logical binding's existing sequence machine.
 _Avoid_: envelope plus fanout count, browser delivery claim, reusable membership proof
+
+**Async delivery lease**:
+The private non-cloneable RAII value created when the document owner removes one
+buffer entry for immediate closed dispatch. It retains the exact authorized
+entry, shared permit and cancellation state, membership binding/scope, and
+pressure-continuity tracker until the document revalidates current authority and
+invokes the registered Task 3 dispatcher. An unresolved drop, denial,
+cancellation, or dispatcher failure releases the permit and degrades continuity;
+callers cannot mark it successful.
+_Avoid_: public pop result, caller acknowledgment token, detached delivery future
 
 **Bounded document transport session**:
 The cohesive server owner that composes one Task 4 round-robin physical document
 transport with one aggregate Task 5 queue and shared delivery permits. It pulls
-at most one provider item per pump and owns no hidden per-island ingress buffer.
-_Avoid_: per-island backpressure queue, second event bus, document work arbiter
+at most one provider item per pump, owns no hidden per-island ingress buffer, and
+owns exactly one Task 3 sequence lane per exact logical subscription binding so
+the caller cannot inject another sequence authority.
+_Avoid_: per-island backpressure queue, caller-supplied sequence machine, second event bus, document work arbiter
 
 **Buffer disposition**:
 The closed outcome of one server delivery admission: `Queued`, `Coalesced`,

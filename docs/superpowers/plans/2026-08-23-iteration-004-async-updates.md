@@ -420,6 +420,12 @@
   fair fan-in was not composed with one document-owned delivery queue. Shared
   cloned-handle tests also proved batch admission, predicate removal, and
   identity-aware tail mutation were absent.
+- [x] Record the second correction REDs: a public sealed entry could outlive its
+  final authority check before `offer`, dequeue exposed a pop-and-forget result,
+  and document dispatch accepted a caller-selected sequence machine. Public API
+  tests failed before the document owner combined final current validation,
+  synchronous queue mutation, exact sequence-lane selection, and registered
+  dispatch.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -466,6 +472,15 @@
   queue and shared permits, owns no hidden framework ingress buffer, purges an
   exact removed/failed binding, and preserves graceful predecessors through one
   terminal drain without creating another sequence machine.
+- [x] Close admission and delivery as document-owned operations. Raw authorized
+  entries, offer/replay, and delivery leases are crate-private. Pump and replay
+  prevalidate, then recheck exact host facts/document generation and exclusive
+  expiry immediately before synchronous atomic queue mutation. Dispatch owns a
+  non-cloneable RAII lease and selects the exact binding's one Task 3 sequence
+  lane internally; callers cannot supply a machine or acknowledge success.
+  Post-pop authority loss, cancellation, gap/epoch degradation, dispatcher
+  error, panic, or unresolved drop releases the permit and degrades continuity
+  without false sequence advancement.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,
