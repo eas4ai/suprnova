@@ -21,6 +21,9 @@
 //! [`crate::console::two_column_detail`]. A bare `db:seed` stays silent
 //! so a full seed does not bury its own output. The `tracing::info!` in
 //! `seed::run_one` remains the machine channel; this is the human one.
+//! The name is resolved before anything prints - an unknown class fails
+//! with the not-found error and no progress line at all, matching
+//! Laravel's own resolve-then-report order.
 
 use std::time::Instant;
 
@@ -48,6 +51,15 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
 
     match class {
         Some(name) => {
+            // Laravel resolves the seeder before it reports progress
+            // (`SeedCommand.php:71` runs before the `:79-83` RUNNING
+            // line) - an unknown class fails before any progress line
+            // prints. Match that here: bail out through `run_one` (the
+            // single owner of the not-found error text) before printing
+            // RUNNING, rather than duplicating the message.
+            if !seed::is_registered(&name) {
+                return seed::run_one(&name).await;
+            }
             // Laravel reports progress only for a targeted run - its
             // `--class` option defaults to the root seeder's class name,
             // so the effective rule there is "did the operator name a

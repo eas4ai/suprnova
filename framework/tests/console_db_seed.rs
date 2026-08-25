@@ -244,8 +244,10 @@ async fn targeted_run_that_fails_still_propagates_the_error() {
 #[tokio::test]
 #[serial]
 async fn an_unknown_targeted_class_still_reports_not_found() {
-    // The RUNNING line prints before the lookup, but the not-found error
-    // must still be what the caller sees.
+    // The name is resolved before anything prints, so an unknown class
+    // never prints a RUNNING line - the not-found error is the only
+    // thing the caller sees, matching Laravel's resolve-then-report
+    // order.
     seed::clear();
     seed::register::<RecordingSeeder>();
 
