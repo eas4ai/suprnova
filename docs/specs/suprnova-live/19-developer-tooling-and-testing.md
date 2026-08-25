@@ -330,10 +330,12 @@ integration drift.
 Iteration 004 extends the host-neutral Rust harness with revisioned temporary
 uploads, a quarantined reverse-proxy/file provider, a provider-neutral
 direct-storage conformance adapter, signed subscription descriptors, and
-controlled SSE, WebSocket, and polling transports. Clocks, randomness, ports,
-network order, chunk/message delivery, provider failures, scanning, replay, and
-shutdown are injectable. Host adapters are conformance apparatus and do not
-claim active Suprnova storage or broadcasting registration.
+controlled multiplexed SSE, WebSocket, and polling transports. A thin Rust
+binary in test support is the browser-facing dynamic reference host; Node serves
+only static production artifacts and deterministic scenario pages. Clocks,
+randomness, ports, network order, chunk/message delivery, provider failures,
+scanning, replay, and shutdown are injectable. Host adapters are conformance
+apparatus and do not claim active Suprnova storage or broadcasting registration.
 
 The shared manifest-driven corpus advances to `fixtures/v4/` for promoted
 `live:upload`, `live:progress`, `live:poll`, and `live:stream` grammar,
@@ -353,8 +355,10 @@ Browser end-to-end tests serve
 `browser/dist/suprnova-live.assets.json` exactly as produced by the deterministic
 release build. The reference host exercises actual chunked HTTP, the direct
 provider contract, authorized SSE/WebSocket, fallback polling, and verified
-Live refresh. Source modules, dev-server transforms, and test-only bundles may
-support unit diagnosis but cannot satisfy browser release evidence.
+  Live refresh. Source modules, dev-server transforms, and test-only bundles may
+  support unit diagnosis but cannot satisfy browser release evidence. JavaScript
+  never reimplements upload state, grants, quarantine, stream authorization,
+  sequence, or continuity to satisfy a Rust-owned requirement.
 
 Upload and asynchronous-update adversarial suites cover quota exhaustion,
 forged handles, transfer-grant sentinel leaks, chunk/finalization races,
@@ -370,9 +374,11 @@ queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
 bytes for each core variant without an unsupported absolute ceiling, enforces 20
 KiB for each upload variant and 16 KiB for each async variant, and rejects a stale
 exact-artifact browser baseline. Runtime workloads enforce the formula, count, and
-latency caps in the overview and the existing 15-percent regression policy. A larger application
-upload limit may increase stored file bytes but may not authorize unbounded
-framework memory, queues, connections, or diagnostic retention.
+latency caps in the overview and the existing 15-percent regression policy.
+Reduced deterministic budget cases run on every ordinary gate; the full-scale
+workloads run under explicit release qualification on pinned `S1`/`B1`. A larger
+application upload limit may increase stored file bytes but may not authorize
+unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Acceptance criteria
 
@@ -389,6 +395,12 @@ framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Assigned dynamic upload and asynchronous reference behavior to a
+  thin Rust test-support host, leaving Node with static artifacts/scenario pages.
+  `E100/1K` now proves 100 subscriptions over one multiplexed document transport,
+  while `R100` separates its one document reconnect from the eight-handshake
+  multi-document origin cap. Reduced workloads run on ordinary gates; full
+  `U4/16`, `E100/1K`, and `R100` are explicit release qualification.
 - 2026-08-24 -- Removed the arbitrary 45 KiB absolute core transfer gate while
   retaining per-build ESM/classic measurements and exact-artifact benchmark
   rebaselining. Optional-artifact ceilings and all measured runtime/resource

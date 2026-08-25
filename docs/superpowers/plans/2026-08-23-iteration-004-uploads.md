@@ -4,16 +4,18 @@
 
 **Goal:** Deliver secure, resumable-within-the-current-document Live uploads with opaque handles, secret grants, bounded chunk transfer, quarantine/validation/scanning, deliberate authorized finalization, accessible browser controls, and provider-neutral direct-transfer conformance.
 
-**Architecture:** Keep upload control authority on the server and file bytes out of Live snapshots. A revisioned upload record owns the state machine and idempotency outcomes. The reference reverse-proxy provider writes bounded chunks to quarantined files; a provider-neutral direct-transfer trait and in-memory conformance adapter prove the alternate contract without claiming a vendor integration. The optional browser artifact owns selected `File` objects, grants, chunks, progress, interruption, and keyed-morph continuity only for the current document. Finalization is an explicit Live action boundary and never an automatic consequence of transfer completion.
+**Architecture:** Keep upload control authority on the server and file bytes out of Live snapshots. A revisioned upload record owns the state machine and idempotency outcomes. The engine's reference reverse-proxy provider owns path policy, hashing, and state while delegating raw asynchronous quarantine I/O through `QuarantineStore`; test support supplies the Tokio filesystem adapter. A provider-neutral direct-transfer trait and in-memory conformance adapter prove the alternate contract without claiming a vendor integration. The optional browser artifact owns selected `File` objects, grants, chunks, progress, interruption, and keyed-morph continuity only for the current document. Finalization is an explicit Live action boundary and never an automatic consequence of transfer completion.
 
-**Tech Stack:** Rust 1.91.1, serde/serde_json canonical codecs, HMAC/HKDF purpose-separated signing, bytes 1.11.1, tokio test utilities, strict TypeScript 6.0.3, native File/Blob/fetch/AbortController APIs, Vitest/fast-check, Playwright, deterministic file-system and provider test doubles.
+**Tech Stack:** Rust 1.91.1, serde/serde_json canonical codecs, HMAC/HKDF purpose-separated signing, bytes 1.11.1, exact `imagesize` 0.15.0 with only PNG/JPEG/GIF/WebP features, Tokio in test support only, strict TypeScript 6.0.3, native File/Blob/fetch/AbortController APIs, Vitest/fast-check, Playwright, deterministic filesystem and provider test doubles.
 
 ---
 
 ## Dependencies and execution rules
 
 - This is Plan 2 of 4. Complete `2026-08-23-iteration-004-shared-foundation.md` first.
-- Plan 3 may run independently after Plan 1; Plan 4 begins only after Plans 2 and 3 pass.
+- Execute this plan before Plan 3 in the shared Iteration 004 worktree. The plans
+  touch common metadata, host, lifecycle, fixture, package, and test-support files
+  and must not run concurrently. Plan 4 begins only after both pass in order.
 - Work only in `/home/shawn/workspace2/suprnova-live/.worktrees/iteration-004-uploads-async` and never push without explicit authorization.
 - Start every shell command with `rtk`; use `apply_patch` for hand edits; do not use blanket `-D warnings`.
 - Use test-owned temporary directories and injected clocks/randomness. Never recursively remove an unresolved or broad path.
@@ -29,7 +31,7 @@
 - `src/upload/state.rs`
 - `src/upload/ledger.rs`
 - `src/upload/provider.rs`
-- `src/upload/file_provider.rs`
+- `src/upload/quarantine.rs`
 - `src/upload/direct_provider.rs`
 - `src/upload/validation.rs`
 - `src/upload/finalize.rs`
@@ -60,6 +62,8 @@
 - `browser/e2e/uploads.spec.ts`
 - `fuzz/fuzz_targets/upload_control.rs`
 - `fuzz/fuzz_targets/upload_transition.rs`
+- `fuzz/fuzz_targets/upload_media_header.rs`
+- `crates/suprnova-live-test-support/src/file_quarantine_store.rs`
 
 ### Modify
 
@@ -71,6 +75,10 @@
 - `src/metadata/field.rs`
 - `src/metadata/digest.rs`
 - `src/metadata/component.rs`
+- `src/resource/{cancel,owner,queue}.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `THIRD_PARTY_LICENSES.md`
 - `browser/src/entry-uploads-esm.ts`
 - `browser/src/entry-uploads-classic.ts`
 - `browser/src/runtime/diagnostics.ts`
@@ -81,6 +89,7 @@
 - `browser/test-host/scenarios.mjs`
 - `crates/suprnova-live-test-support/src/lib.rs`
 - `crates/suprnova-live-test-support/src/host.rs`
+- `crates/suprnova-live-test-support/Cargo.toml`
 - `fuzz/Cargo.toml`
 
 ## Task 1: Define opaque upload identity and secret transfer grants
@@ -128,7 +137,7 @@
 
 ## Task 2: Implement bounded upload codecs and the revisioned state machine
 
-**Files:** `src/upload/{protocol,state}.rs`, `src/limits.rs`, `src/error.rs`, protocol/state tests, v4 upload fixtures
+**Files:** `src/upload/{protocol,state}.rs`, `src/limits.rs`, `src/error.rs`, protocol/state tests, existing v4 upload fixtures
 
 - [ ] Add failing fixture/property tests for every operation and state, duplicate keys, unknown major versions, malformed transitions, cross-handle chunks, oversize fields, and reordered/duplicate calls:
 
@@ -178,9 +187,38 @@
       Cancel(CancelUpload),
       Reacquire(ReacquireUpload),
   }
+
+  pub enum UploadTransition {
+      Queue,
+      BeginTransfer,
+      PutChunk(AcceptedChunk),
+      Complete,
+      Accept,
+      BeginFinalize,
+      CommitFinalize,
+      Cancel,
+      Reject,
+      Expire,
+  }
   ```
 
-  Decode through a bounded JSON object walker before constructing commands. Every mutating command carries expected revision plus idempotency key; terminal duplicates return the stored outcome, stale alternatives return `UploadConflict`, and no operation can transition backward.
+  `UploadOperation` is the independently versioned external wire vocabulary in
+  `operations`/`codec_cases`; `UploadTransition` is the internal ledger
+  vocabulary in `transition_cases`. Preserve all checked-in fixture bytes. Bind
+  them through one exhaustive service mapping: create establishes `Created` then
+  queues; first chunk begins transfer then records `PutChunk`; complete enters
+  verifying and later validation chooses `Accept` or `Reject`; cancel maps to
+  `Cancel`; status and reacquire do not transition. Finalize actions map to
+  `BeginFinalize` and `CommitFinalize`; cleanup maps to `Expire`. A compile-time
+  exhaustive match and fixture test fail when either layer gains an unmapped
+  variant.
+
+  Decode through a bounded JSON object walker before constructing commands.
+  Every mutating command carries expected revision plus idempotency key; terminal
+  duplicates return the stored outcome, stale alternatives return
+  `UploadConflict`, and no operation can transition backward. `Reacquire` remains
+  a server-side service operation invoked by an authenticated application route;
+  it does not authorize or register a reserved Live endpoint.
 
 - [ ] Add upload-specific limits for counts, per-file/aggregate/chunk/in-flight bytes, concurrency, rates, retries, age, validation/scanning time, storage, and cleanup batches. Run fixtures, properties, security tests, and protocol v1/v2 regression suites.
 - [ ] Commit: `feat(upload): add bounded protocol and state machine`.
@@ -216,14 +254,22 @@
   }
   ```
 
-  Add the port to trusted host capabilities. `UploadService` verifies request authenticity, grant, scope, expiry, current principal/policy, limits, transition, and idempotency in that order; expensive provider work begins only after admission.
+  Add the port to trusted host capabilities. `UploadService` verifies request
+  authenticity, grant, scope, expiry, current principal/policy, limits,
+  transition, and idempotency in that order; expensive provider work begins only
+  after admission. Service lifetime and queued work use the shared
+  `ResourceOwner`/`ResourceQueue`; concurrent transfer admission uses
+  `PermitPool`; cancellation uses `CancellationFlag`. Extend those foundation
+  types only when a missing primitive is proved by a failing foundation test.
 
 - [ ] Implement a complete in-memory/reference ledger in test support and run state/service concurrency plus hostile-context suites.
 - [ ] Commit: `feat(upload): add conditional control authority`.
 
 ## Task 4: Stream chunks into the quarantined file provider
 
-**Files:** `src/upload/{provider,file_provider}.rs`, provider tests, test-support fixtures
+**Files:** `src/upload/{provider,quarantine}.rs`, `src/resource/*`,
+`crates/suprnova-live-test-support/{Cargo.toml,src/file_quarantine_store.rs}`,
+provider tests and test-support fixtures
 
 - [ ] Add failing tests using test-owned temporary roots for short reads/writes, duplicate chunks, checksum mismatch, interrupted streams, descriptor limits, process recovery, disk-full/provider failure, shutdown, and path traversal:
 
@@ -240,20 +286,58 @@
   ```
 
 - [ ] Run `rtk cargo test --test upload_file_provider`; record failure because no provider exists.
-- [ ] Define streaming provider ports and a safe file implementation:
+  - [ ] Define the executor-neutral streaming provider and raw quarantine I/O
+  capability:
 
-  ```rust
-  pub trait UploadProvider: Send + Sync {
-      fn prepare<'a>(&'a self, request: PrepareTransfer<'a>) -> UploadFuture<'a, Result<TransferPlan, UploadError>>;
+    ```rust
+    pub trait QuarantineStore: Send + Sync {
+        fn create_exclusive<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn write_at<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+            offset: u64,
+            bytes: &'a [u8],
+        ) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn sync<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn read_prefix<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+            maximum_bytes: usize,
+        ) -> UploadFuture<'a, Result<Bytes, UploadError>>;
+        fn remove<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>>;
+    }
+
+    pub trait UploadProvider: Send + Sync {
+        fn prepare<'a>(&'a self, request: PrepareTransfer<'a>) -> UploadFuture<'a, Result<TransferPlan, UploadError>>;
       fn write_chunk<'a>(&'a self, request: WriteChunk<'a>, body: &'a mut dyn ChunkBody)
           -> UploadFuture<'a, Result<ChunkReceipt, UploadError>>;
       fn verify<'a>(&'a self, request: VerifyTransfer<'a>) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>>;
       fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
       fn cleanup<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
-  }
-  ```
+    }
+    ```
 
-  The file provider creates server-generated directory/file names beneath a pre-opened quarantine root, uses exclusive create, bounded descriptors and two chunk buffers per active transfer, verifies chunk and whole-file hashes, fsyncs before readiness, and never exposes quarantine as a serving root.
+    `QuarantinedFileProvider<S: QuarantineStore>` stays in the engine. It creates
+    server-random `QuarantineObject` names, owns path policy, chunk/whole-file
+    hashing, revision state, a shared `ResourceOwner`, descriptor/chunk
+    `PermitPool`s, `CancellationFlag`, and at most two chunk buffers per active
+    transfer. It calls `sync` before readiness and never exposes a filesystem path
+    or serving root. No engine code calls blocking `std::fs` or depends on Tokio.
+
+    `TokioFileQuarantineStore` lives only in `suprnova-live-test-support`, maps
+    opaque objects beneath one pre-opened test-owned root, uses `create_new`,
+    bounded `tokio::fs::File` handles, positional writes, `sync_data`, prefix
+    reads, and idempotent removal. Add exact Tokio 1.53.1 `fs`/`io-util` features
+    to the test-support crate, not the production engine.
 
 - [ ] Run provider tests under controlled shutdown/fault schedules, security boundaries, and file-descriptor/memory limit assertions.
 - [ ] Commit: `feat(upload): add quarantined file transfer provider`.
@@ -296,7 +380,9 @@
 
 ## Task 6: Validate, scan, and deliberately finalize uploads
 
-**Files:** `src/upload/{validation,finalize}.rs`, metadata modules, validation/finalization tests
+**Files:** `src/upload/{validation,finalize}.rs`, metadata modules,
+`Cargo.toml`, `Cargo.lock`, `THIRD_PARTY_LICENSES.md`,
+`fuzz/fuzz_targets/upload_media_header.rs`, validation/finalization tests
 
 - [ ] Add failing tests for filename/MIME/extension disagreement, actual byte size/hash, bounded image/media headers, application rules, scan allow/reject/timeout/unavailable policy, unauthorized finalize, provider/database failures, retry, compensation, and reconciliation:
 
@@ -310,8 +396,24 @@
   }
   ```
 
-- [ ] Run validation/finalization tests; record failure because verification/finalization services are absent.
-- [ ] Implement validation and scanning ports over authoritative quarantined bytes:
+  - [ ] Run validation/finalization tests; record failure because verification/finalization services are absent.
+  - [ ] Add the exact production dependency with the reviewed minimal feature set:
+
+    ```toml
+    imagesize = { version = "=0.15.0", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+    ```
+
+    Provenance reviewed 2026-08-24: upstream is
+    `https://github.com/Roughsketch/imagesize`; published 0.15.0 is MIT licensed,
+    has no normal transitive dependencies, and exposes format features so unused
+    parsers stay out. No matching RustSec advisory was found in the official
+    advisory database at review time. Confirm the checked package checksum through
+    `Cargo.lock`, run `rtk cargo tree -e normal -i imagesize`, regenerate
+    `THIRD_PARTY_LICENSES.md` with
+    `rtk node scripts/generate-license-inventory.mjs`, and prove the repository
+    MSRV before acceptance. Point-in-time advisory absence is not a substitute for
+    the repository's release audit.
+  - [ ] Implement validation and scanning ports over authoritative quarantined bytes:
 
   ```rust
   pub trait UploadScanner: Send + Sync {
@@ -320,16 +422,29 @@
 
   pub enum ScanDisposition { Clean, Rejected(ScanReason), Unavailable }
 
-  pub trait UploadFinalizer: Send + Sync {
+    pub trait UploadFinalizer: Send + Sync {
       fn prepare<'a>(&'a self, request: FinalizeRequest<'a>) -> UploadFuture<'a, Result<PreparedFinalize, UploadError>>;
       fn commit<'a>(&'a self, prepared: PreparedFinalize) -> UploadFuture<'a, Result<DurableUpload, UploadError>>;
       fn compensate<'a>(&'a self, failed: FailedFinalize) -> UploadFuture<'a, Result<(), UploadError>>;
-  }
-  ```
+    }
+    ```
+
+    Add a dimension-only `MediaHeaderProbe` over `QuarantineStore::read_prefix`.
+    PNG reads at most 32 bytes, GIF 16 bytes, WebP 64 bytes, and JPEG 256 KiB;
+    larger or truncated headers fail closed as `MediaHeaderUnproved`. Call
+    `imagesize::blob_size` only after magic-byte classification and the applicable
+    prefix cap, then reject zero dimensions, integer overflow, and declared
+    width/height/pixel limits. Never decode pixels in the engine.
 
   Finalize rechecks principal/session/tenant/component/field/policy/revision/readiness, records one logical idempotency outcome, and exposes reconciliation for partially committed provider/database work. Documentation and errors promise neither distributed atomicity nor exactly-once external effects.
 
-- [ ] Add digest-significant upload field metadata for count, replacement, accepted types, limits, scan policy, and finalize action. Run metadata, validation, finalization, and action-regression tests.
+  - [ ] Add `upload_media_header.rs` fuzzing arbitrary capped bytes across the four
+  enabled formats with no panic, allocation escape, loop escape, or dimension
+  overflow. Persist malformed JPEG marker chains and truncated WebP/PNG/GIF
+  regressions. Add digest-significant upload field metadata for count,
+  replacement, accepted types, dimension/pixel limits, scan policy, and finalize
+  action. Run metadata, validation, finalization, fuzz-build, license, MSRV, and
+  action-regression tests.
 - [ ] Commit: `feat(upload): validate and finalize quarantined content`.
 
 ## Task 7: Implement race-safe expiry and cleanup
@@ -368,7 +483,12 @@
   }
   ```
 
-  Provider deletion and ledger terminalization are idempotent. Browser cooperation is never required. Metrics contain buckets and outcomes only, never handles, filenames, paths, topics, principals, grants, or raw errors.
+  Provider deletion and ledger terminalization are idempotent. Cleanup batches
+  use the shared `BoundedQueue`/`ResourceQueue`, cancellation uses
+  `CancellationFlag`, and concurrent deletion is admitted through the shared
+  `PermitPool`; do not introduce an upload-private queue or semaphore. Browser
+  cooperation is never required. Metrics contain buckets and outcomes only,
+  never handles, filenames, paths, topics, principals, grants, or raw errors.
 
 - [ ] Run cleanup, concurrency, security, telemetry-cardinality, and controlled-shutdown tests.
 - [ ] Commit: `feat(upload): add bounded cleanup reconciliation`.
@@ -377,7 +497,7 @@
 
 **Files:** `browser/src/uploads/{types,feature,manager,transfer,resume}.ts`, upload entry points, browser unit tests
 
-- [ ] Add failing tests for single/multiple selection, multiple fields, replacement, repeated selection, zero-byte files, directory/path oddities, offline interruption, bounded concurrency/chunks, cancel/retry/remove, and no browser persistence calls:
+- [ ] Add failing tests for single/multiple selection, multiple fields, replacement, repeated selection, zero-byte files, directory/path oddities, offline interruption, bounded concurrency/chunks, cancel/retry/remove, typed upload-handle proposal/clear, application-owned reacquisition, and no browser persistence calls:
 
   ```ts
   it("retains file and grant only inside the current document owner", async () => {
@@ -411,16 +531,39 @@
     readonly abort: AbortController;
   }
 
-  export class UploadManager {
+    export class UploadManager {
     readonly #owner = new BoundedOwner<QueuedUpload>({
       maxItems: 64,
       maxBytes: 256 * 1024,
       maxActive: 4,
     });
-  }
-  ```
+    }
 
-  Slice at configured 256 KiB, retain at most two chunk buffers per active transfer, use injected transport/connectivity/randomness, and send grants only in authorization headers or bodies that never enter URL/history/diagnostics. Reload has no resume state. `reacquire(handle)` uses an explicit authenticated route and still requires the user-held `File` to match authoritative identity.
+    export interface UploadApplicationPort {
+      reacquire(request: Readonly<{
+        field: string;
+        fileIdentity: UploadFileIdentity;
+        handle: UploadHandle;
+      }>): Promise<ReacquiredUpload>;
+    }
+    ```
+
+    Build the manager on the shared browser `BoundedOwner`; do not introduce a
+    second queue/permit implementation. Slice at configured 256 KiB, retain at
+    most two chunk buffers per active transfer, use injected
+    transport/connectivity/randomness, and send grants only in authorization
+    headers or bodies that never enter URL/history/diagnostics. After create,
+    call `island.proposeUploadHandle(field, handle)`; after remove, cancel, expiry,
+    or rejected replacement, call it with `null`. Core rejects undeclared fields,
+    malformed handles, cross-island use, and retired islands, and the next
+    deliberate Live action obtains the proposal through the existing model batch.
+
+    Reload has no resume state. `reacquire(handle)` exists only through the
+    optional `UploadApplicationPort` supplied by application bootstrap and still
+    requires the user-held `File` to match authoritative identity. The feature
+    contains no fixed reacquisition URL and registers no `/__live/` reacquire
+    route; the reference application demonstrates an authenticated route outside
+    that namespace.
 
 - [ ] Register the real feature from both upload entry points. Run manager/transfer/resume, lifecycle, diagnostics, and optional-artifact budget tests.
 - [ ] Commit: `feat(browser): transfer bounded current-document uploads`.
@@ -429,16 +572,18 @@
 
 **Files:** `browser/src/uploads/{progress,morph}.ts`, feedback/signals/morph hooks, progress/morph tests, Playwright upload spec
 
-- [ ] Add failing DOM tests for every visible state, numeric bounds, announcement throttling, keyboard controls, error association, reduced motion, compatible keyed preservation, rekey/removal/navigation/bfcache disposal, and inability to assign file/path:
+- [ ] Add failing DOM tests for every visible state, numeric bounds, announcement throttling, keyboard controls, error association, reduced motion, compatible keyed preservation, rekey/removal/navigation/bfcache disposal, empty-string clearing, and inability to assign a non-empty file value, `files`, or path:
 
   ```ts
   expect(progressRoot.getAttribute("data-live-upload-state")).toBe("verifying");
   expect(progressRoot.getAttribute("aria-busy")).toBe("true");
   expect(progressRoot.getAttribute("aria-valuenow")).toBe("100");
-  expect(input.files?.item(0)).toBe(selectedFile);
-  morphWithDifferentUploadKey();
-  expect(input.files?.length).toBe(0);
-  expect(transfer.disposeCount).toBe(1);
+    expect(input.files?.item(0)).toBe(selectedFile);
+    const writes = observeFileInputWrites(input);
+    morphWithDifferentUploadKey();
+    expect(input.files?.length).toBe(0);
+    expect(writes).toEqual([{ property: "value", value: "" }]);
+    expect(transfer.disposeCount).toBe(1);
   ```
 
 - [ ] Run focused Vitest and Chromium Playwright upload tests; record missing progress/morph behavior.
@@ -465,7 +610,12 @@
   }
   ```
 
-  Preserve only when island identity, upload field, keyed input, active handle, and progress/control roots are compatible. Never assign `input.value`, `input.files`, path text, or ownership to a replacement island. Announce state changes at a bounded cadence while controls remain keyboard-native.
+  Preserve only when island identity, upload field, keyed input, active handle,
+  and progress/control roots are compatible. Removal or replacement may assign
+  only `input.value = ""` to clear the retired native selection. Never assign a
+  non-empty `input.value`, `input.files`, path text, or ownership to a replacement
+  island. Announce state changes at a bounded cadence while controls remain
+  keyboard-native.
 
 - [ ] Run upload unit tests and Playwright Chromium/Firefox/WebKit with accessibility/CSP checks and deterministic lifecycle events.
 - [ ] Commit: `feat(browser): preserve accessible upload continuity`.
@@ -474,16 +624,21 @@
 
 **Files:** upload fuzz targets and every upload file
 
-- [ ] Add fuzz targets that decode arbitrary bytes under strict limits and apply arbitrary transition sequences without panic, allocation escape, state regression, or cross-handle acceptance:
+- [ ] Add fuzz targets that decode arbitrary bytes under strict limits, apply arbitrary transition sequences, and probe capped PNG/JPEG/GIF/WebP headers without panic, allocation/loop escape, dimension overflow, state regression, or cross-handle acceptance:
 
   ```rust
-  fuzz_target!(|input: &[u8]| {
+    fuzz_target!(|input: &[u8]| {
       let limits = UploadCodecLimits::hostile_test();
       if let Ok(command) = decode_upload_command(input, limits) {
           assert!(command.encoded_len() <= limits.max_bytes());
       }
-  });
-  ```
+    });
+
+    fuzz_target!(|input: &[u8]| {
+        let capped = &input[..input.len().min(MAX_MEDIA_HEADER_BYTES)];
+        let _ = MediaHeaderProbe::hostile_test().probe(capped);
+    });
+    ```
 
 - [ ] Run the complete upload gate:
 
@@ -491,7 +646,8 @@
   rtk cargo fmt --all -- --check
   rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features
   rtk env CARGO_INCREMENTAL=0 cargo test --test upload_identity --test upload_protocol --test upload_state --test upload_file_provider --test upload_direct_provider --test upload_validation --test upload_finalization --test upload_cleanup --test upload_security
-  rtk cargo +nightly fuzz build
+    rtk cargo +nightly fuzz build
+    rtk cargo +nightly fuzz run upload_media_header -- -runs=1000
   rtk npm --prefix browser run format:check
   rtk npm --prefix browser run lint
   rtk npm --prefix browser run typecheck

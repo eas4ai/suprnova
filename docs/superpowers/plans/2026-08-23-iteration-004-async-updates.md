@@ -4,7 +4,7 @@
 
 **Goal:** Deliver authorized typed asynchronous updates over polling, SSE, and WebSocket with bounded continuity, backpressure, reconnect, scheduler-mediated refresh, registered presentation events/signals, and no second rendering or action protocol.
 
-**Architecture:** Component metadata declares typed events and subscription capabilities. The server signs bounded subscription descriptors that bind authorization context, topics, event schemas, baseline epoch/sequence, expiry, and reconnect policy; transport tokens remain separate secrets. SSE and WebSocket adapt one independent async envelope. The optional browser artifact maintains a bounded per-document connection pool and per-island subscription state machine. Push may enqueue an existing fresh render, dispatch a registered browser event, or set a declared presentation-only signal. Polling is complete by itself; hybrid mode pauses it only when continuity is proved.
+**Architecture:** Component metadata declares typed events and subscription capabilities. The server signs bounded subscription descriptors that bind authorization context, topics, event schemas, baseline epoch/sequence, expiry, reconnect policy, and the default hybrid fallback interval; transport tokens remain separate secrets. SSE and WebSocket adapt one independent async envelope. One bounded physical document transport multiplexes compatible logical subscriptions, while each island keeps an independent continuity state machine. Push may enqueue an existing fresh render, dispatch a registered browser event through the typed feature port, or set a declared presentation-only signal. Polling is complete by itself; hybrid mode pauses it only when continuity is proved.
 
 **Tech Stack:** Rust 1.91.1, serde canonical codecs, existing HMAC/HKDF infrastructure, strict TypeScript 6.0.3, native EventSource/WebSocket/fetch/visibility/connectivity APIs behind injected ports, Vitest/fast-check, Playwright, deterministic fake streams and controlled clocks.
 
@@ -13,7 +13,7 @@
 ## Dependencies and execution rules
 
 - This is Plan 3 of 4. Complete `2026-08-23-iteration-004-shared-foundation.md` first.
-- This plan may proceed independently of the upload plan after the shared foundation. Plan 4 requires both.
+- Complete Plan 2, `2026-08-23-iteration-004-uploads.md`, before this plan in the shared worktree. Plans 2 and 3 are logically separable but must not execute concurrently against one checkout. Plan 4 requires both.
 - Work only in `/home/shawn/workspace2/suprnova-live/.worktrees/iteration-004-uploads-async`; never push without explicit authorization.
 - Start every shell command with `rtk`; use `apply_patch` for hand edits; do not use blanket `-D warnings`.
 - All time, randomness, transport, visibility, online state, and lifecycle behavior must be injectable. Correctness tests use no elapsed sleeps.
@@ -34,6 +34,9 @@
 - `src/async_updates/websocket.rs`
 - `src/async_updates/backpressure.rs`
 - `src/async_updates/telemetry.rs`
+- `src/resource/cancel.rs` (modify only if Plan 2 proves an async requirement the shared foundation does not satisfy)
+- `src/resource/owner.rs` (modify only under the same rule)
+- `src/resource/queue.rs` (modify only under the same rule)
 - `tests/async_metadata.rs`
 - `tests/async_envelope.rs`
 - `tests/async_subscription.rs`
@@ -68,6 +71,7 @@
 - `src/metadata/digest.rs`
 - `src/host/capabilities.rs`
 - `src/host/context.rs`
+- `src/resource/mod.rs` (only for a proved shared-foundation extension)
 - `src/error.rs`
 - `browser/src/entry-async-esm.ts`
 - `browser/src/entry-async-classic.ts`
@@ -165,13 +169,21 @@
       baseline: StreamPosition,
       expires_at: UnixMillis,
       reconnect: ReconnectPolicy,
+      fallback_poll: PollFallbackPolicy,
   }
 
   #[derive(Zeroize, ZeroizeOnDrop)]
   pub struct TransportCredential(Zeroizing<Vec<u8>>);
   ```
 
-  Derive the descriptor key with HKDF purpose `suprnova-live/async-subscription/v1`. The authorization port rechecks current principal/session/tenant/component/stream/topic at connect and renewal. Topics come only from registered server metadata and trusted mount parameters; directive interpolation cannot select endpoints or topics.
+  `PollFallbackPolicy` carries a bounded interval, jitter, initial behavior, and
+  visibility policy. It is the authoritative default for hybrid subscriptions;
+  a legal empty-valued `live:poll` may override it, while `push-only` plus
+  `live:poll` is a directive conflict. Derive the descriptor key with HKDF
+  purpose `suprnova-live/async-subscription/v1`. The authorization port rechecks
+  current principal/session/tenant/component/stream/topic at connect and
+  renewal. Topics come only from registered server metadata and trusted mount
+  parameters; directive interpolation cannot select endpoints or topics.
 
 - [ ] Run authorization-loss, expiry/renewal, redaction, snapshot/HTML/URL/history sentinel, and hostile-context tests.
 - [ ] Commit: `feat(async): sign authorized subscription descriptors`.
@@ -213,22 +225,29 @@
 
   pub struct AsyncEnvelope {
       protocol: u16,
+      subscription: SubscriptionId,
       stream: StreamName,
       position: StreamPosition,
       payload: AsyncPayload,
   }
   ```
 
-  Decode with exact-key/size/depth/entry/string limits before payload allocation. `SequenceMachine` ignores duplicates, applies only the next sequence in the current epoch, degrades on gaps, and requires replay proof or authoritative refresh before adopting a new baseline.
+  `subscription` is required because compatible logical subscriptions share a
+  physical document transport; it is validated against that transport's active
+  membership before sequence observation or dispatch. Decode with
+  exact-key/size/depth/entry/string limits before payload allocation.
+  `SequenceMachine` ignores duplicates, applies only the next sequence in the
+  current epoch, degrades on gaps, and requires replay proof or authoritative
+  refresh before adopting a new baseline.
 
 - [ ] Add both fuzz targets, run fixtures/properties/security, and prove Live action/morph versions remain `[1, 2]`.
 - [ ] Commit: `feat(async): add bounded event envelope and sequence model`.
 
-## Task 4: Build transport-neutral SSE and WebSocket sessions
+## Task 4: Build transport-neutral logical sessions and multiplexed document transports
 
 **Files:** `src/async_updates/{transport,sse,websocket}.rs`, transport conformance tests, test support
 
-- [ ] Add a shared failing conformance suite for connect/baseline/replay, ordered delivery, duplicates, gaps, heartbeat, completion, typed errors, cancellation, auth loss, limits, slow clients, and shutdown:
+- [ ] Add a shared failing conformance suite for connect/baseline/replay, ordered delivery, subscription routing, duplicates, gaps, heartbeat, completion, typed errors, cancellation, auth loss, strict WebSocket origin validation, logical membership, limits, slow clients, and shutdown:
 
   ```rust
   pub async fn assert_async_transport(factory: impl AsyncTransportFactory) {
@@ -256,11 +275,34 @@
       fn next<'a>(&'a mut self) -> AsyncFuture<'a, Result<Option<AsyncEnvelope>, AsyncError>>;
       fn close<'a>(&'a mut self) -> AsyncFuture<'a, Result<CloseDisposition, AsyncError>>;
   }
+
+  pub struct DocumentTransportSession {
+      origin: VerifiedOrigin,
+      memberships: BoundedSubscriptionMemberships,
+      sessions: BoundedLogicalSessions,
+  }
   ```
 
-  `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus heartbeat comments. `WebSocketCodec` emits one canonical text frame per envelope and rejects binary/fragment/oversize violations according to the host adapter contract. Both consume the same verified descriptor and sequence semantics.
+  `AsyncEventSource` and `AsyncEventSession` remain the host-neutral interfaces
+  for one authorized logical subscription. `DocumentTransportSession` is the
+  bounded fan-in layer: it routes each envelope by signed `SubscriptionId` and
+  never merges logical sequence authority.
 
-- [ ] Run shared conformance against both transports plus ordinary HTTP endpoint regression tests and controlled shutdown.
+  `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus
+  heartbeat comments. SSE membership changes use authenticated same-origin
+  control requests and a non-authoritative document transport handle.
+  `WebSocketCodec` emits canonical text frames for envelopes and bounded
+  subscribe/unsubscribe control records, and rejects binary, fragmentation,
+  unknown membership, and oversize violations. Before upgrade, the host must
+  validate `Origin` against the application origin; cross-origin WebSockets
+  require an explicit allowlist and a separate non-cookie credential. A missing,
+  malformed, wildcard-authorized, or unapproved origin is rejected before any
+  subscription credential is accepted. Both adapters consume the same verified
+  descriptor and sequence semantics.
+
+- [ ] Run shared conformance against both transports, cross-site WebSocket
+  hijacking cases, membership add/remove/replay cases, ordinary HTTP endpoint
+  regression tests, and controlled shutdown.
 - [ ] Commit: `feat(async): add SSE and WebSocket transport sessions`.
 
 ## Task 5: Enforce server-side fanout and backpressure bounds
@@ -272,7 +314,9 @@
   ```rust
   #[test]
   fn presentation_pressure_coalesces_but_sequence_gap_degrades() {
-      let mut buffer = AsyncBuffer::new(AsyncBounds { max_events: 64, max_bytes: 256 * KIB, max_fanout: 100 });
+      let owner = ResourceOwner::new(ResourceBounds::new(64, 256 * KIB).unwrap());
+      let permits = PermitPool::new(8).unwrap();
+      let mut buffer = AsyncBackpressure::new(owner, permits, AsyncPolicy { max_fanout: 100 });
       for event in repeated_signal_events(1_000) { buffer.offer(event).unwrap(); }
       assert!(buffer.retained_events() <= 64);
       assert!(buffer.retained_bytes() <= 256 * KIB);
@@ -291,17 +335,23 @@
       Closed(AsyncCloseCode),
   }
 
-  pub struct AsyncBounds {
-      pub max_subscriptions: NonZeroUsize,
-      pub max_events: NonZeroUsize,
-      pub max_bytes: NonZeroUsize,
+  pub struct AsyncPolicy {
       pub max_payload_bytes: NonZeroUsize,
       pub max_replay_events: NonZeroUsize,
       pub max_fanout: NonZeroUsize,
   }
   ```
 
-  Coalesce only semantically replaceable presentation signals/refresh requests. Never coalesce across event names, targets, epochs, or required ordered browser events. Queue overflow degrades or closes with a typed code; it never drops a required event and claims continuity.
+  `AsyncBackpressure` is a policy wrapper around the shared
+  `ResourceOwner`/`BoundedQueue`, `PermitPool`, and `CancellationFlag`; it must
+  not implement a second private queue, permit counter, cancellation primitive,
+  or lifecycle owner. Extend the shared foundation only when a failing
+  cross-feature test proves a missing primitive, then rerun both upload and async
+  resource tests. Coalesce only semantically replaceable presentation
+  signals/refresh requests. Never coalesce across subscription IDs, event names,
+  targets, epochs, or required ordered browser events. Queue overflow degrades
+  or closes with a typed code; it never drops a required event and claims
+  continuity.
 
 - [ ] Run fanout, slow-client, outage, memory-bound, and telemetry tests.
 - [ ] Commit: `feat(async): bound fanout and stream backpressure`.
@@ -310,7 +360,7 @@
 
 **Files:** `browser/src/async-updates/{types,envelope,subscription,connections,continuity}.ts`, async entry points, browser tests
 
-- [ ] Add failing fake-transport tests for authoritative initial baseline, replay proof, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, and at most eight handshakes per origin:
+- [ ] Add failing fake-transport tests for authoritative initial baseline, replay proof, subscription routing, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, 100 logical subscriptions sharing one document transport, and at most eight concurrent handshakes per origin across multiple documents:
 
   ```ts
   it("cannot claim current on initial connect without proof", () => {
@@ -338,12 +388,33 @@
     | "closed";
 
   export interface AsyncTransportPorts {
-    eventSource(connect: EventSourceRequest): EventSourcePort;
-    webSocket(connect: WebSocketRequest): WebSocketPort;
+    eventSource(connect: DocumentEventSourceRequest): EventSourcePort;
+    webSocket(connect: DocumentWebSocketRequest): WebSocketPort;
+  }
+
+  export interface DocumentTransportPort {
+    subscribe(subscription: AuthorizedLogicalSubscription): void;
+    unsubscribe(subscriptionId: string): void;
+    close(reason: DocumentTransportCloseReason): void;
   }
   ```
 
-  The connection pool keys only by approved origin/transport/auth scope, enforces eight simultaneous handshakes per origin, applies full-jitter bounded backoff from injected randomness, and validates every envelope before queue admission. Native EventSource is used only with the scoped session-cookie authorization contract; a separately issued bearer credential uses a bounded fetch-stream SSE adapter so the secret never enters a URL. Suspend closes or pauses by policy; resume reauthorizes and reestablishes currentness before applying late data.
+  `DocumentTransportKey` contains only approved origin, transport, and auth
+  scope. One physical port per key multiplexes its bounded logical membership;
+  islands retain independent descriptor, sequence, and continuity state. The
+  scheduler enforces at most eight concurrent handshakes per origin across
+  document transports and applies full-jitter bounded backoff from injected
+  randomness. E100/1K must show that 100 logical subscriptions use exactly one
+  physical connection.
+
+  Validate the envelope and its active subscription membership before queue
+  admission. Native EventSource is used only with the scoped session-cookie
+  authorization contract; a separately issued bearer credential uses a bounded
+  fetch-stream SSE adapter so the secret never enters a URL. A persisted
+  `pagehide` closes physical transports and timers rather than merely pausing
+  them. `pageshow` after bfcache restoration obtains current authorization,
+  establishes a new physical transport, and proves continuity before accepting
+  late data.
 
 - [ ] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
 - [ ] Commit: `feat(browser): establish bounded subscription continuity`.
@@ -352,7 +423,7 @@
 
 **Files:** `browser/src/async-updates/poll.ts`, poll/continuity tests, directive fixtures
 
-- [ ] Add failing controlled-clock tests for interval bounds, jitter, initial/immediate, visibility, offline, overlap, stale status, cancel/retire, failure backoff, poll-only completeness, push-only degradation, and hybrid activation after continuity loss:
+- [ ] Add failing controlled-clock tests for interval bounds, jitter, initial/immediate, visibility, offline, overlap, stale status, cancel/retire, failure backoff, empty directive value enforcement, poll-only completeness, push-only degradation, descriptor-default hybrid fallback, legal poll override, directive conflict, and hybrid activation after continuity loss:
 
   ```ts
   it("hybrid pauses polling only while continuity is proved", () => {
@@ -379,7 +450,22 @@
   }
   ```
 
-  Poll refreshes enter `enqueueFreshRender("poll")`; overlap permits at most one queued plus one in-flight refresh per island. Hidden/offline/failed states use bounded full jitter and no synchronized catch-up burst. Push-only exposes degraded state; it never silently starts polling.
+  Consume the v4 generated freshness-combination table created in Plan 1; do
+  not duplicate its rules in handwritten parser branches. `live:poll` has an
+  empty value and can only configure a fresh-render timer:
+
+  - poll without a stream is `poll_only` and uses the poll interval;
+  - hybrid stream without poll uses the signed descriptor interval;
+  - hybrid stream plus poll uses the poll interval as an override;
+  - push-only without poll never falls back;
+  - push-only plus poll is `directive_conflict`;
+  - a stream with no explicit mode modifier is hybrid.
+
+  Poll refreshes enter `enqueueFreshRender("poll")`; they never carry an action,
+  effect, or arbitrary operation name. Overlap permits at most one queued plus
+  one in-flight refresh per island. Hidden/offline/failed states use bounded
+  full jitter and no synchronized catch-up burst. Push-only exposes degraded
+  state; it never silently starts polling.
 
 - [ ] Run poll, scheduler, connectivity, visibility, bfcache, and 100-subscription storm tests.
 - [ ] Commit: `feat(browser): add complete polling and hybrid fallback`.
@@ -418,9 +504,13 @@
         case "refresh":
           return this.#island.enqueueFreshRender("stream");
         case "browser_event":
-          return this.#events.dispatchRegistered(envelope.payload.event);
+          return this.#island.dispatchRegisteredEvent(envelope.payload.event);
         case "presentation_signal":
-          return this.#signals.setFromStream(envelope.payload.signal);
+          return this.#island.writePresentationSignal(
+            envelope.payload.signal.element,
+            envelope.payload.signal.name,
+            envelope.payload.signal.value,
+          );
         case "heartbeat":
           return "observed";
         case "complete":
@@ -432,7 +522,17 @@
   }
   ```
 
-  Refresh uses `createFreshRenderIntent` and existing response validation/morph/commit-after-morph/fresh-render recovery. Add a semantic coalescing key so each island retains at most one queued plus one in-flight async refresh. EventRouter validates registered schema/source/target/scope/fanout/cycle before DOM dispatch; SignalRuntime accepts declared presentation-only signals only.
+  The optional artifact receives only `RuntimeFeatureIslandPort`; it cannot reach
+  private event or signal routers. Core validates every
+  `RegisteredBrowserEventCandidate` against registered schema, source, target,
+  scope, fanout, and cycle before DOM dispatch. Core likewise accepts only
+  declared presentation-signal writes through the existing typed method. Do not
+  add a generic dispatch, invoke, action, effect, or state-write seam.
+
+  Refresh uses `createFreshRenderIntent` and existing response
+  validation/morph/commit-after-morph/fresh-render recovery. Add a semantic
+  coalescing key so each island retains at most one queued plus one in-flight
+  async refresh.
 
 - [ ] Run dispatch, scheduler, response-ordering, morph failure, event ownership, signal, and security suites.
 - [ ] Commit: `feat(async): dispatch bounded presentation updates`.
@@ -449,15 +549,17 @@
     "data-live-stream-state",
     "current",
   );
-  await page.evaluate(() => window.__liveScenario.freeze());
-  await page.evaluate(() => window.__liveScenario.resume());
+  await page.goto("/plain");
+  await page.goBack();
+  await expect.poll(() => page.evaluate(() => window.__liveScenario.lastPageShowPersisted)).toBe(true);
   await expect
     .poll(() => connectionCounts(page))
     .toEqual({ streams: 1, polls: 0, timers: 1 });
   ```
 
 - [ ] Run focused Chromium Playwright; record failure because real async scenarios are absent.
-- [ ] Project state through existing semantic feedback/local signals, throttle live-region announcements, keep native controls/routes/actions usable, and bind every connection/timer/listener/buffer to the island/document resource ledger. Implement deterministic test-host endpoints for SSE, WebSocket, and poll with injected schedules; production artifacts only are served.
+- [ ] Project state through existing semantic feedback/local signals, throttle live-region announcements, keep native controls/routes/actions usable, and bind every connection/timer/listener/buffer to the island/document resource ledger. On every persisted `pagehide`, close physical transports, cancel timers, and retire listeners/buffers exactly once. On persisted `pageshow`, reauthorize, create a new transport, and prove continuity before applying data. The Playwright scenario must observe `PageTransitionEvent.persisted === true`; a synthetic freeze/resume call is supplementary evidence, not bfcache proof.
+- [ ] Add deterministic static scenario descriptions and fault schedules for Plan 4's thin Rust reference host. Node serves only static scenario pages/assets and never implements subscription authority, SSE/WebSocket state, continuity, or polling semantics. Production artifacts only are served.
 - [ ] Run Vitest plus Chromium/Firefox/WebKit async specs, axe checks, CSP, lifecycle, bfcache, and leak assertions.
 - [ ] Commit: `test(browser): prove async lifecycle and accessibility`.
 
@@ -509,6 +611,12 @@
 - [ ] Initial connect and reconnect cannot claim current without descriptor baseline plus replay proof or authoritative refresh.
 - [ ] Stream credentials are secret and separate from signed descriptors.
 - [ ] Poll-only is complete; push-only reports degradation; hybrid fallback is continuity-aware and jittered.
+- [ ] `live:poll` carries no action value; the signed descriptor supplies hybrid fallback and a legal poll directive only overrides its interval policy.
 - [ ] Push has exactly three productive effects: registered refresh, registered browser event, or declared presentation signal.
+- [ ] Browser-event dispatch crosses the typed core feature port and is validated there; no optional artifact receives a generic authority-writing seam.
 - [ ] Refresh uses the existing scheduler and protocol v2 response machine; no streamed HTML or second snapshot protocol exists.
+- [ ] WebSocket upgrade rejects missing or unapproved origins before credentials; approved cross-origin use requires an explicit allowlist and separate non-cookie credential.
+- [ ] Async policy wraps the shared bounded-resource foundation rather than implementing a second queue, owner, permit pool, or cancellation model.
+- [ ] One document transport multiplexes compatible logical subscriptions; E100/1K uses one physical connection, R100 performs one reconnect handshake, and a separate multi-document test proves the eight-per-origin handshake bound.
+- [ ] Persisted pagehide always closes transports and timers; persisted pageshow reauthorizes and reestablishes continuity without duplicate resources.
 - [ ] Buffers, fanout, handshakes, timers, connections, payloads, replay, and retained bytes have hard tested bounds.

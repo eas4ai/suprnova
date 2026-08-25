@@ -346,9 +346,10 @@ not become the current contract until promoted through `/next-iteration`.
 - Cargo and npm lockfiles are ground truth for exact transitive versions.
   Overview versions identify intentional architecture lines, not an alternative
   dependency inventory.
-- Askama, Idiomorph, Stimulus, Tailwind CSS, canonicalization, and cryptographic
-  changes require upstream changelog/license/security review plus Live
-  conformance, bundle-size, and migration evidence.
+- Askama, Idiomorph, Stimulus, Tailwind CSS, `imagesize`, canonicalization, and
+  cryptographic changes require upstream changelog/license/security review plus
+  Live conformance, artifact/dependency-size, fuzz, and migration evidence as
+  applicable.
 - Idiomorph is vendored or locked into the shipped runtime artifact. Application
   package resolution cannot silently replace it with an incompatible version.
 - The oldest supported browser matrix moves only in a dated normative revision.
@@ -412,7 +413,13 @@ CARGO_INCREMENTAL=0 cargo test --all-targets --all-features --no-fail-fast
 Before any push from the dedicated workspace:
 
 ```bash
-CARGO_INCREMENTAL=0 scripts/gate.sh
+SUPRNOVA_LIVE_RELEASE=0 CARGO_INCREMENTAL=0 scripts/gate.sh
+```
+
+Before a release or when upload/provider/stream/resource-budget behavior changes:
+
+```bash
+SUPRNOVA_LIVE_RELEASE=1 CARGO_INCREMENTAL=0 scripts/gate.sh
 ```
 
 ### Suprnova integration workspace: `/home/shawn/workspace2/suprnova`
@@ -493,6 +500,17 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Approved exact `imagesize` 0.15.0 with default features disabled
+  and only PNG/JPEG/GIF/WebP dimension probes enabled. The 2026-08-24 provenance
+  review recorded MIT licensing, no normal transitive dependencies, upstream
+  source/docs, and no matching RustSec advisory found at review time; lockfile,
+  license inventory, MSRV, hostile-regression, and dedicated fuzz checks remain
+  required before acceptance.
+- 2026-08-24 -- Split Iteration 004 performance execution by purpose: ordinary
+  unattended gates run reduced deterministic workload proofs, while explicit
+  release mode runs the full qualified `U4/16`, `E100/1K`, and `R100` matrices.
+  Both paths remain mechanical and release mode cannot silently substitute smoke
+  evidence for pinned `S1`/`B1` qualification.
 - 2026-08-24 -- Replaced the arbitrary absolute core-runtime transfer cap with
   deterministic ESM/classic size reporting and exact-artifact benchmark
   rebaselining. Optional artifact ceilings remain enforced; a future core ceiling

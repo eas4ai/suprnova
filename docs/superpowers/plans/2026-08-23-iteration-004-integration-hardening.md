@@ -4,9 +4,9 @@
 
 **Goal:** Integrate uploads and asynchronous updates through the reference host, checker, fixtures, browser matrix, adversarial suites, hard performance budgets, implementation documentation, and one unattended Iteration 004 gate while preserving every Iteration 001–003 guarantee.
 
-**Architecture:** Exercise only production-built core/Stimulus/upload/async artifacts against deterministic real HTTP chunk, direct-transfer, SSE, WebSocket, and poll scenarios. Cross-language fixtures and the Askama checker remain the authoring authority; the reference host is explicitly test infrastructure, not Suprnova product integration. Benchmark upload control separately from provider/file/scanner/application time, measure browser work in pinned environments, and gate hard caps plus the existing 15-percent regression rule. One root gate composes all earlier and new checks without blanket warning denial.
+**Architecture:** Exercise only production-built core/Stimulus/upload/async artifacts against a thin Rust reference host that calls the actual engine services for deterministic HTTP chunk, direct-transfer, SSE, WebSocket, and poll scenarios. Node owns static scenario pages, assets, launcher orchestration, and assertions only; it never reimplements upload, quarantine, authorization, continuity, or stream semantics. Cross-language fixtures and the Askama checker remain the authoring authority; the host is explicitly test infrastructure, not Suprnova product integration. Benchmark upload control separately from provider/file/scanner/application time, measure browser work in pinned environments, and gate hard caps plus the existing 15-percent regression rule. One root gate composes all earlier and new checks without blanket warning denial.
 
-**Tech Stack:** Rust 1.91.1, existing benchmark harnesses and test-support crate, strict TypeScript 6.0.3, Node test host, `ws` 8.18.3 as an exact test-only dependency, Playwright 1.62.1 Chromium/Firefox/WebKit, axe-core 4.13.0, browser performance/heap instrumentation, deterministic clocks/randomness/network schedules.
+**Tech Stack:** Rust 1.91.1, existing benchmark harnesses and test-support crate, exact test-support dependencies Axum 0.7.9, Tokio 1.53.1, and futures-util 0.3.34, strict TypeScript 6.0.3, Node static-scenario launcher, Playwright 1.62.1 Chromium/Firefox/WebKit, axe-core 4.13.0, browser performance/heap instrumentation, deterministic clocks/randomness/network schedules.
 
 ---
 
@@ -15,7 +15,7 @@
 - This is Plan 4 of 4. Complete and verify the shared foundation, upload, and async-update plans first.
 - Work only in `/home/shawn/workspace2/suprnova-live/.worktrees/iteration-004-uploads-async`; never push without explicit developer authorization.
 - Start every shell command with `rtk`; use `apply_patch` for hand edits; do not use blanket `-D warnings`.
-- Keep benchmark B1/S1 environments and qualification rules exactly aligned with `docs/specs/suprnova-live/19-performance-compatibility-and-operations.md` and Iteration 004.
+- Keep benchmark B1/S1 environments and qualification rules exactly aligned with `docs/specs/suprnova-live/19-developer-tooling-and-testing.md` and Iteration 004.
 - Browser automation tools may diagnose behavior, but checked-in Playwright and benchmark evidence are the release authority.
 - Do not modify Suprnova or Magnetar. Do not present reference host/adapters as product integration.
 - Before Task 1, record the read-only `git status --short`, branch, and HEAD for Suprnova and Magnetar. Compare those baselines during Task 9 so unrelated work already in progress is preserved and never misattributed to Iteration 004.
@@ -24,9 +24,14 @@
 
 ### Create
 
-- `browser/test-host/uploads.mjs`
-- `browser/test-host/async-updates.mjs`
 - `browser/test-host/faults.mjs`
+- `crates/suprnova-live-test-support/src/reference_host/mod.rs`
+- `crates/suprnova-live-test-support/src/reference_host/artifacts.rs`
+- `crates/suprnova-live-test-support/src/reference_host/uploads.rs`
+- `crates/suprnova-live-test-support/src/reference_host/async_updates.rs`
+- `crates/suprnova-live-test-support/src/reference_host/faults.rs`
+- `crates/suprnova-live-test-support/src/bin/suprnova-live-reference-host.rs`
+- `crates/suprnova-live-test-support/tests/reference_host.rs`
 - `browser/e2e/iteration-004-integration.spec.ts`
 - `browser/e2e/iteration-004-adversarial.spec.ts`
 - `browser/e2e/iteration-004-lifecycle.spec.ts`
@@ -51,8 +56,12 @@
 ### Modify
 
 - `Cargo.toml`
+- `Cargo.lock`
+- `crates/suprnova-live-test-support/Cargo.toml`
+- `crates/suprnova-live-test-support/src/lib.rs`
+- `crates/suprnova-live-test-support/src/host.rs`
+- `THIRD_PARTY_LICENSES.md`
 - `browser/package.json`
-- `browser/package-lock.json`
 - `browser/playwright.config.ts`
 - `browser/test-host/server.mjs`
 - `browser/test-host/scenarios.mjs`
@@ -67,7 +76,6 @@
 - `scripts/check-implementation-docs.mjs`
 - `scripts/gate.sh`
 - `README.md`
-- `docs/implementation/README.md`
 - `docs/specs/suprnova-live/conventions.md`
 
 ## Task 1: Serve exact production artifacts and deterministic real transports
@@ -92,29 +100,64 @@
   ```
 
 - [ ] Run the test-host/package/build suite; record failure because Iteration 004 routes and optional artifacts are not wired.
-- [ ] Install the exact test-only WebSocket server dependency and implement closed route modules:
+- [ ] Add exact test-support-only dependencies, with the standard provenance,
+  license, lockfile, feature, and MSRV review. Reuse the versions already pinned
+  by the read-only Suprnova workspace where applicable:
 
-  ```bash
-  rtk npm --prefix browser install --save-dev --save-exact ws@8.18.3
+  ```toml
+  axum = { version = "=0.7.9", features = ["ws"] }
+  futures-util = { version = "=0.3.34", features = ["sink"] }
+  http-body-util = "=0.1.3"
+  hyper = { version = "=1.9.0", features = ["client", "http1"] }
+  hyper-util = { version = "=0.1.20", features = ["client-legacy", "http1", "tokio"] }
+  tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
   ```
 
-  ```js
-  export const ITERATION_004_ROUTES = Object.freeze({
-    createUpload: "/__live/uploads",
-    uploadChunk: "/__live/uploads/:handle/chunks/:part",
-    uploadStatus: "/__live/uploads/:handle",
-    uploadComplete: "/__live/uploads/:handle/complete",
-    uploadCancel: "/__live/uploads/:handle/cancel",
-    uploadReacquire: "/__live/uploads/:handle/reacquire",
-    poll: "/__live/async/poll/:subscription",
-    sse: "/__live/async/sse/:subscription",
-    websocket: "/__live/async/ws/:subscription",
-  });
+  Keep these dependencies inside `suprnova-live-test-support`; the engine gains
+  no executor, HTTP server, filesystem, or WebSocket dependency.
+
+- [ ] Implement the browser-facing Rust host with a closed route table:
+
+  ```rust
+  pub const CREATE_UPLOAD: &str = "/__live/uploads";
+  pub const UPLOAD_CHUNK: &str = "/__live/uploads/:handle/chunks/:part";
+  pub const UPLOAD_STATUS: &str = "/__live/uploads/:handle";
+  pub const UPLOAD_COMPLETE: &str = "/__live/uploads/:handle/complete";
+  pub const UPLOAD_CANCEL: &str = "/__live/uploads/:handle/cancel";
+  pub const EXAMPLE_REACQUIRE: &str = "/example/uploads/:handle/reacquire";
+  pub const POLL: &str = "/__live/async/poll";
+  pub const TRANSPORT_CREATE: &str = "/__live/async/transports";
+  pub const TRANSPORT_MEMBERSHIP: &str =
+      "/__live/async/transports/:transport/subscriptions/:subscription";
+  pub const SSE: &str = "/__live/async/sse/:transport";
+  pub const WEBSOCKET: &str = "/__live/async/ws";
   ```
 
-  Stream request chunks incrementally into a test-owned quarantine directory with configured byte/part limits. Direct-provider scenarios return constrained reference instructions. SSE and WebSocket use the same v4 envelope fixtures and deterministic schedules. Faults are selected by server-owned scenario IDs, never arbitrary paths/commands from query parameters.
+  The reacquisition example is an authenticated application-owned route outside
+  `/__live/`. Poll always invokes ordinary fresh render; it never names an
+  action. SSE uses authenticated membership control plus one physical document
+  stream. WebSocket accepts bounded subscribe/unsubscribe control frames on one
+  physical document connection and performs strict Origin validation before
+  upgrade.
 
-- [ ] Validate the artifact manifest before serving, bind deterministic ports, close sockets/files/timers on teardown, and expose inspection counters that contain no grants/tokens/raw payloads.
+- [ ] Route every dynamic request into the actual Rust upload/authorization/
+  sequence/continuity services and test-support adapters from Plans 2 and 3.
+  Stream request chunks through `TokioFileQuarantineStore` with configured
+  byte/part limits. Direct-provider scenarios return constrained reference
+  instructions. SSE and WebSocket encode the actual async envelope over
+  deterministic engine-backed event sources. The host may select only compiled
+  server-owned fault schedules; query parameters never select paths, commands,
+  credentials, or arbitrary payloads.
+
+- [ ] Keep Node limited to the static production artifacts and deterministic
+  scenario pages it already serves. The Rust host is the browser-facing origin
+  for dynamic routes and may reverse-proxy allowlisted static GET/HEAD requests
+  to Node. JavaScript must not implement upload state, grants, quarantine,
+  authorization, sequence, continuity, or dynamic response fixtures.
+
+- [ ] Validate the artifact manifest before proxying, bind deterministic ports,
+  close sockets/files/timers on teardown, and expose inspection counters that
+  contain no grants/tokens/raw payloads.
 - [ ] Run host, artifact, shutdown, and production-source exclusion tests; commit `test(host): serve iteration 004 production scenarios`.
 
 ## Task 2: Close Askama checker and cross-language conformance gaps
@@ -130,7 +173,7 @@
           <input type="file" live:upload="avatar" multiple>
           <div live:progress="avatar" role="progressbar"></div>
           <button live:upload.cancel="avatar">Cancel</button>
-          <section live:stream="orders" live:poll.visible.30s="refresh"></section>
+          <section live:stream="orders" live:poll.visible.30s></section>
       "#);
   }
 
@@ -142,7 +185,7 @@
 
 - [ ] Run checker and golden fixture suites; record the first missing semantic rule or parity failure.
 - [ ] Implement only checker rules generated or derived from v4 contracts. Require file input for `live:upload`, scoped progress/control ownership, accessible progress naming, declared upload field/subscription/event/signal metadata, legal poll/stream mode combinations, and static capability compatibility. Keep dynamic markup explicitly unproved.
-- [ ] Add one cross-language conformance test that loads every v4 case through Rust and TypeScript codecs/parsers and compares canonical disposition/code/state/position. Run generation drift, checker suites, fixtures, and protocol v1/v2 compatibility.
+- [ ] Add one cross-language conformance test that loads every v4 case through Rust and TypeScript codecs/parsers and compares canonical disposition/code/state/position. Preserve the fixture's separation between wire `operations`/`codec_cases` and internal `transition_cases`; add an exhaustive typed mapping rather than exposing internal transition names on the wire. Run generation drift, checker suites, fixtures, and protocol v1/v2 compatibility.
 - [ ] Commit: `test: close iteration 004 authoring conformance`.
 
 ## Task 3: Build the real-browser functional and lifecycle matrix
@@ -166,14 +209,16 @@
       );
       expect(await resourceCounts(page)).toMatchObject({
         upload: 1,
-        stream: 1,
+        documentTransports: 1,
+        logicalSubscriptions: 1,
       });
     });
   }
   ```
 
 - [ ] Run Chromium integration/lifecycle specs; record failures for every unwired scenario.
-- [ ] Implement deterministic scenarios for native selection/transfer/finalize, direct conformance transfer, SSE, WebSocket, polling, hybrid gaps, ordinary action during transfer/outage, morph preservation/replacement, navigation, offline, pagehide/freeze/resume/pageshow/bfcache, and shutdown. Assert no correctness sleep; drive controlled clocks/network steps through host/test ports.
+- [ ] Implement deterministic scenarios for native selection/transfer/finalize, direct conformance transfer, SSE, WebSocket, polling, hybrid gaps, ordinary action during transfer/outage, morph preservation/replacement, navigation, offline, pagehide/freeze/resume/pageshow/bfcache, and shutdown. Include multiple islands sharing one document transport, logical membership removal without physical teardown, and transport-wide reconnect. Assert no correctness sleep; drive controlled clocks/network steps through host/test ports.
+- [ ] Prove real bfcache restoration with `PageTransitionEvent.persisted === true`: persisted `pagehide` closes every physical transport and timer, persisted `pageshow` obtains current authorization and opens a new transport, and no old buffered event may apply. Synthetic lifecycle hooks remain useful unit evidence but cannot satisfy this browser requirement.
 - [ ] Add accessible-name, keyboard, focus, error association, throttled live-region, reduced-motion, and axe checks. Run Chromium/Firefox/WebKit for ESM/classic and missing/incompatible optional artifacts.
 - [ ] Commit: `test(browser): integrate uploads and async updates`.
 
@@ -197,7 +242,7 @@
   ```
 
 - [ ] Run adversarial/exhaustion suites; record the first missing typed disposition.
-- [ ] Cover forged/cross-scope handles, grant/token sentinel leaks, oversized/truncated/reordered chunks/messages, duplicate completion, cancel/finalize, expire/finalize, scan timeout, provider partial failure, replay overflow, revoked authorization, fanout pressure, reconnect storms, late events, and retirement. Every fault maps to a closed error/recovery code; unknown failures fail the dependent feature closed while normal routes/actions continue.
+- [ ] Cover forged/cross-scope handles, grant/token sentinel leaks, oversized/truncated/reordered chunks/messages, malformed and adversarial media headers, duplicate completion, cancel/finalize, expire/finalize, scan timeout, provider partial failure, replay overflow, revoked authorization, cross-site WebSocket attempts, missing/malformed/wildcard/unapproved Origin headers, fanout pressure, reconnect storms, late events, and retirement. Every fault maps to a closed error/recovery code; unknown failures fail the dependent feature closed while normal routes/actions continue.
 - [ ] Run security boundaries, hostile context, error redaction, upload/async adversarial suites, and browser CSP/leak tests.
 - [ ] Commit: `test(security): harden iteration 004 boundaries`.
 
@@ -232,6 +277,7 @@
   ```ts
   export const E100_1K = Object.freeze({
     subscriptions: 100,
+    documentTransports: 1,
     events: 1_000,
     payloadBytes: 1_024,
     durationMs: 10_000,
@@ -244,14 +290,16 @@
 
   export const R100 = Object.freeze({
     subscriptions: 100,
+    reconnectHandshakes: 1,
     maxConcurrentHandshakesPerOrigin: 8,
     maxRetainedBytesAfterCurrent: 12 * 1024,
   });
   ```
 
 - [ ] Run async budget scripts; record failure because workloads/baselines are absent.
-- [ ] Implement E100/1K with 100 island subscriptions, 1,000 ordered 1 KiB presentation events in a controlled ten-second timeline, and exactly 100 refresh invalidations. Require `<= 8 KiB` retained per subscription excluding native transport/DOM/current payload, document queue `<= 64` events and `<= 256 KiB`, dispatch p95 `<= 8 ms` on B1, and per-island refresh `<= one queued + one in-flight`.
-- [ ] Implement R100 by simultaneously removing continuity from all subscriptions. Record handshake concurrency, reconnect jitter distribution, poll firing buckets, time to authoritative currentness, and retained bytes after currentness. Require `<= 8` handshakes/origin, no same-tick synchronized poll burst, and return within the existing 12 KiB retained-runtime/island cap.
+- [ ] Implement E100/1K with 100 island subscriptions multiplexed over exactly one physical document transport, 1,000 ordered 1 KiB presentation events in a controlled ten-second timeline, and exactly 100 refresh invalidations. Require `<= 8 KiB` retained per subscription excluding native transport/DOM/current payload, document queue `<= 64` events and `<= 256 KiB`, dispatch p95 `<= 8 ms` on B1, and per-island refresh `<= one queued + one in-flight`.
+- [ ] Implement R100 by simultaneously removing continuity from all 100 subscriptions on that document. Record exactly one reconnect handshake, reconnect jitter, poll firing buckets, time to authoritative currentness, and retained bytes after currentness. Require no same-tick synchronized poll burst and return within the existing 12 KiB retained-runtime/island cap.
+- [ ] Add a separate deterministic multi-document scheduler test that attempts more than eight simultaneous document-transport handshakes for one origin and proves the global active count never exceeds eight. Do not describe this as 100 physical connections or use it as the R100 topology.
 - [ ] Add browser/Rust baselines, artifact hash/environment/sample metadata, hard caps, 15-percent regression checks, and release qualification. Run both workloads and commit `perf: gate async continuity workloads`.
 
 ## Task 7: Document authoring, policy, operations, and integration boundaries
@@ -300,14 +348,14 @@
 
 - [ ] Run `rtk proxy tests/documentation_contract.sh` and `rtk node scripts/check-implementation-docs.mjs`; record failure because Iteration 004 docs are absent.
 - [ ] Write complete authoring examples using Askama-compatible HTML and Rust metadata. Explain handle versus grant, quotas, file/direct-provider semantics, quarantine/validation/scanning policies, explicit finalization/compensation, current-document resume/reacquisition, cleanup, typed events, signed subscriptions, poll/push/hybrid continuity, degraded states, backpressure, artifact selection, testing, and observability. State explicitly that the reference host and direct adapter are conformance tools, not Suprnova/vendor integration.
-- [ ] Update implementation indexes and conventions with Iteration 004 artifact/protocol versions and the no-blanket-`-D warnings` rule. Run docs checks, link checks already in the gate, and spec checker.
+- [ ] Update the root README implementation-document links and conventions with Iteration 004 artifact/protocol versions and the no-blanket-`-D warnings` rule. Run docs checks, link checks already in the gate, and spec checker. Do not invent `docs/implementation/README.md`; that index does not exist.
 - [ ] Commit: `docs: explain uploads and asynchronous updates`.
 
 ## Task 8: Compose the unattended Iteration 004 gate
 
 **Files:** `scripts/gate.sh`, gate-contract tests, package/Cargo scripts
 
-- [ ] Add a failing shell contract that requires every unaffected old phase plus the new fixture, upload, async, reference-host, browser-matrix, fuzz-build, and budget phases, and rejects blanket warning denial:
+- [ ] Add a failing shell contract that requires every unaffected old phase plus the new fixture, upload, async, reference-host, browser-matrix, fuzz-build, and reduced deterministic budget phases in ordinary mode; requires full qualified U4/16, E100/1K, and R100 only in release mode; and rejects blanket warning denial:
 
   ```bash
   rtk proxy tests/gate_contract.sh
@@ -323,15 +371,20 @@
       --test iteration_004_adversarial \
       --test iteration_004_exhaustion
 
-  phase "U4/16 upload budget"
-  rtk env CARGO_INCREMENTAL=0 scripts/run-upload-budget.sh
+  phase "iteration 004 reduced deterministic budgets"
+  rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
+  rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
 
-  phase "E100/1K and R100 async budgets"
-  rtk npm --prefix browser run budget:async
-  rtk env CARGO_INCREMENTAL=0 scripts/run-async-budget.sh
+  if [[ "${SUPRNOVA_LIVE_RELEASE:-0}" == "1" ]]; then
+      phase "U4/16 qualified upload budget"
+      rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-upload-budget.sh
+
+      phase "E100/1K and R100 qualified async budgets"
+      rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh
+  fi
   ```
 
-  Keep `cargo clippy --workspace --all-targets --all-features` without `-D warnings`; continue reviewing emitted warnings. Release mode rejects unqualified B1/S1 evidence. Local mode returns the existing explicit unqualified status rather than pretending qualification.
+  Keep `cargo clippy --workspace --all-targets --all-features` without `-D warnings`; continue reviewing emitted warnings. Ordinary mode mechanically verifies the same bounds and topology at a reduced deterministic scale. Release mode rejects unqualified B1/S1 evidence and cannot substitute reduced results for full qualification.
 
 - [ ] Run gate contract, documentation contract, script syntax, package script tests, and `rtk git diff --check`.
 - [ ] Commit: `ci: compose iteration 004 unattended gate`.
@@ -343,10 +396,15 @@
 - [ ] Run the exact full gate without skipping phases:
 
   ```bash
-  rtk env SUPRNOVA_LIVE_RELEASE=0 scripts/gate.sh
+  rtk env SUPRNOVA_LIVE_RELEASE=1 CARGO_INCREMENTAL=0 scripts/gate.sh
   ```
 
-  Record the final exit status and every explicitly unqualified environment result. Do not claim B1/S1 qualification unless the pinned environments actually ran and passed.
+  Iteration 004 changes upload/provider/stream/resource-budget behavior, so its
+  completion gate uses release mode. Record the final exit status and every
+  explicitly unqualified environment result. Do not claim B1/S1 qualification
+  unless the pinned environments actually ran and passed; an unavailable pinned
+  environment leaves release qualification incomplete rather than falling back
+  to reduced evidence.
 
 - [ ] Run final repository checks:
 
@@ -385,10 +443,13 @@
 ## Plan self-review checklist
 
 - [ ] Every DOD item maps to a named test, workload, document, or gate phase.
-- [ ] The reference host serves exact built artifacts and performs real network I/O; it never imports production TypeScript source.
+- [ ] The thin Rust host owns every dynamic route and state machine and performs real network I/O; Node serves only static scenario pages/assets, and neither imports production TypeScript source.
+- [ ] Upload handle reacquisition is demonstrated on an authenticated application route outside `/__live/`; no reserved Live reacquisition route exists.
+- [ ] WebSocket Origin is rejected before upgrade unless same-origin or explicitly allowlisted with a separate non-cookie credential.
 - [ ] Browser matrices cover core-only, each optional feature alone, both together, ESM/classic, strict CSP, missing/incompatible features, all three engines, accessibility, lifecycle, and bfcache.
 - [ ] U4/16 excludes provider/file/scan/application time by construction and hard-gates both memory and p95 limits.
-- [ ] E100/1K and R100 hard-gate retention, queue, dispatch, refresh, handshake, jitter/storm, and recovery limits.
+- [ ] E100/1K uses exactly one document transport for 100 logical subscriptions; R100 performs exactly one reconnect handshake; a separate multi-document test hard-gates the eight-per-origin handshake cap.
+- [ ] Ordinary gates run reduced deterministic budget proofs; release mode alone runs and requires full qualified U4/16, E100/1K, and R100 evidence.
 - [ ] Earlier iteration gates remain enabled and no blanket warning denial appears.
 - [ ] Documentation distinguishes specifications, reference conformance infrastructure, eventual internal-crate integration, and explicitly deferred work.
 - [ ] Final status is local-only and Suprnova/Magnetar remain read-only.

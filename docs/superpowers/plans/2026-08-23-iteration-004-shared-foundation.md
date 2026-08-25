@@ -160,7 +160,7 @@
 
   ```ts
   expect(
-    parseDirective("live:poll.visible.30s", "refresh").diagnostic,
+    parseDirective("live:poll.visible.30s", "").diagnostic,
   ).toBeNull();
   expect(parseDirective("live:upload.stream", "avatar").diagnostic?.code).toBe(
     "unsupported_modifier",
@@ -193,8 +193,26 @@
     conflicts: readonly string[],
     fallback: 0 | 1 | 2,
     capability: "uploads@1" | "async@1" | null,
-  ];
+    ];
+    ```
+
+  Lock `poll.value` to `empty`; a poll can enqueue only fresh render and never
+  names an action. Add one generated freshness-combination table to the v4
+  grammar and consume it from both checker and runtime:
+
+  ```json
+  [
+    {"stream":null,"poll":"present","mode":"poll_only","interval":"poll"},
+    {"stream":"hybrid","poll":null,"mode":"hybrid","interval":"descriptor"},
+    {"stream":"hybrid","poll":"present","mode":"hybrid","interval":"poll_override"},
+    {"stream":"push-only","poll":null,"mode":"push_only","interval":null},
+    {"stream":"push-only","poll":"present","diagnostic":"directive_conflict"}
+  ]
   ```
+
+  Absence of a `stream` modifier means `hybrid`. The generator rejects any
+  unlisted combination so the fixture, checker, and optional async runtime cannot
+  invent different fallback semantics.
 
 - [ ] Run `rtk npm --prefix browser run generate`, then `generate:check`, checker suites, parser properties, format, and `rtk git diff --check`.
 - [ ] Commit: `feat(checker): generate iteration 004 directives`.
@@ -362,7 +380,7 @@ This replaces the illustrative raw-object construction and direct per-feature
 core registration below; its behavioral assertions remain binding at the
 driver/optional-registry boundary.
 
-- [ ] Add failing tests proving duplicate registration is idempotent only for the same object/version, classic registration works both before and after core boot, incompatible features fail closed, one island gets one feature owner, retirement disposes once, and feature code cannot queue actions:
+- [ ] Add failing tests proving duplicate registration is idempotent only for the same object/version, classic registration works both before and after core boot, incompatible features fail closed, one island gets one feature owner, retirement disposes once, feature code cannot queue actions, upload handles can reach only their declared upload field, and pushed events can reach only a registered event target:
 
   ```ts
   const feature = defineUploadsFeature({
@@ -374,14 +392,38 @@ driver/optional-registry boundary.
     },
   });
   expect(host.register(feature)).toBe("registered");
-  expect(host.register(feature)).toBe("already_registered");
-  expect("enqueueAction" in capturedContext).toBe(false);
-  ```
+    expect(host.register(feature)).toBe("already_registered");
+    expect("enqueueAction" in capturedContext).toBe(false);
+    expect(capturedIsland.proposeUploadHandle("avatar", "upl_0123456789abcdef")).toBe(
+      "accepted",
+    );
+    expect(capturedIsland.proposeUploadHandle("display_name", "upl_0123456789abcdef")).toBe(
+      "rejected",
+    );
+    expect(
+      capturedIsland.dispatchRegisteredEvent({
+        name: "orders.updated",
+        payload: { order_id: 42 },
+        target: { kind: "self" },
+        version: 1,
+      }),
+    ).toBe("dispatched");
+    ```
 
 - [ ] Run `rtk npm --prefix browser test -- feature-host.test.ts`; record failure because the feature host is absent.
 - [ ] Define the narrow driver contract and wire it into `SuprnovaLiveRuntime`, `DocumentRuntime.#connect`, `IslandRecord.onDispose`, suspend/resume, and document disposal:
 
   ```ts
+  export interface RegisteredBrowserEventCandidate {
+    readonly name: string;
+    readonly payload: JsonValue;
+    readonly target: Readonly<{
+      kind: "self" | "parent" | "child" | "named" | "document" | "browser";
+      name?: string;
+    }>;
+    readonly version: number;
+  }
+
   export interface RuntimeFeatureIslandPort {
     readonly element: Element;
     readonly identity: IslandExtensionIdentity;
@@ -389,6 +431,21 @@ driver/optional-registry boundary.
       reason: "poll" | "stream",
     ): "queued" | "coalesced" | "retired";
     onDispose(dispose: () => void): void;
+    queryDirectiveOwnership(
+      parser: RuntimeFeatureDirectiveParser,
+    ): readonly RuntimeFeatureDirectiveOwnership[];
+    proposeUploadHandle(
+      field: string,
+      handle: string | null,
+    ): "accepted" | "unchanged" | "rejected" | "retired";
+    dispatchRegisteredEvent(
+      event: RegisteredBrowserEventCandidate,
+    ): "dispatched" | "no_target" | "rejected" | "retired";
+    writePresentationSignal(
+      element: Element,
+      name: string,
+      value: JsonValue,
+    ): JsonValue;
   }
 
   export interface RuntimeFeatureDefinition {
@@ -404,17 +461,22 @@ driver/optional-registry boundary.
     // Opaque normalized registration; construct through a closed producer.
   }
 
-  export function defineUploadsFeature(
-    definition: RuntimeFeatureDefinition,
-  ): RuntimeFeature;
+    export function defineUploadsFeature(
+      definition: RuntimeFeatureDefinition,
+    ): RuntimeFeature;
   ```
 
   Core exposes only frozen validated-island identity, scheduler-mediated fresh
-  rendering, presentation-signal writes after current ownership validation,
-  and bounded lifecycle edges. Optional code scans directives within the
-  validated root and owns feature/controller resources. Neither side exposes
-  action construction, response commit, raw snapshot mutation, HTML
-  replacement, effect lookup, endpoints, or arbitrary JavaScript lookup.
+  rendering, upload-handle proposal to a currently owned declared upload field,
+  registered typed browser-event dispatch, presentation-signal writes after
+  current ownership validation, and bounded lifecycle edges. It validates handle
+  syntax/size, field metadata, event schema/source/target/scope/fanout, island
+  ownership, and retirement before mutating model proposal or dispatch state.
+  Optional code scans directives within the validated root and owns
+  feature/controller resources. Neither side exposes generic model writes,
+  generic event dispatch, action construction, response commit, raw snapshot
+  mutation, HTML replacement, effect lookup, endpoints, or arbitrary JavaScript
+  lookup.
 
 - [ ] Implement the shared ESM/classic optional driver surface through
   `Symbol.for("suprnova.live.features.v1")` with one exact driver attachment and

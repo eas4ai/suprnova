@@ -278,12 +278,26 @@ runtime memory and never enters snapshots, HTML, URLs, history, action/model
 envelopes, logs, traces, or diagnostics.
 _Avoid_: upload handle, signed snapshot, session token, resumable public URL
 
+**Quarantine store**:
+A host-supplied asynchronous byte-I/O capability for exclusively creating,
+writing, syncing, reading, and removing non-public temporary upload objects. It
+keeps executor and filesystem choice outside the engine while server-generated
+identity, hashing, lifecycle, and policy remain Live-owned.
+_Avoid_: public storage, client path, blocking engine filesystem, upload ledger
+
 **Subscription descriptor**:
 A signed, expiring server-issued declaration of one permitted asynchronous
 subscription, including registered stream identity, capabilities, topics, typed
-events, authorization-context memo, authoritative baseline epoch/sequence, and
-reconnect policy. Transport credentials remain separately secret when required.
+events, authorization-context memo, authoritative baseline epoch/sequence,
+reconnect policy, and bounded hybrid fallback. Transport credentials remain
+separately secret when required.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
+
+**Document transport**:
+One physical SSE or WebSocket connection owned by a browser document for a
+compatible origin, transport kind, and authorization scope. It multiplexes
+bounded subscription identities; it is not one connection per Live island.
+_Avoid_: island socket, global shared socket, subscription authority, event bus
 
 **Stream continuity**:
 Proof that every required typed event after an authoritative baseline has been
@@ -419,9 +433,10 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
 - A selected browser file creates a temporary upload. The upload handle may
   enter typed Live state, while its transfer grant stays outside all snapshots
   and markup until the application finalizes or abandons the upload.
-- A subscription descriptor authorizes one asynchronous connection contract;
-  stream continuity or authoritative refresh determines whether its material
-  freshness can be called current.
+- A subscription descriptor authorizes one asynchronous subscription contract;
+  compatible subscriptions share a document transport, while stream continuity
+  or authoritative refresh determines whether material freshness can be called
+  current.
 - Dependency generations, cache variance, and the coherence policy jointly
   determine whether a RenderCache representation remains valid.
 - During opted-in rendering, the dependency collector records generations from

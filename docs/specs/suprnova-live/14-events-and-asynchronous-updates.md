@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -31,6 +31,10 @@ Acceptance criteria:
 - Event listeners that perform server-authoritative work invoke registered
   action/lifecycle paths.
 - Browser events use safe structured data and never executable code strings.
+- Pushed browser events enter through a core-validated registered-event
+  capability that verifies current island, event schema, source, target, scope,
+  fanout, and lifecycle before dispatch. The optional transport artifact cannot
+  become a second event registry or global event bus.
 - Event cycles and fanout are bounded.
 
 UX flow:
@@ -51,7 +55,8 @@ Acceptance criteria:
   arbitrary directive interpolation.
 - The descriptor binds registered stream identity, protocol/capabilities,
   topics, allowed typed events, authorization-context memo, authoritative
-  baseline epoch/sequence, expiry, and reconnect policy.
+  baseline epoch/sequence, expiry, reconnect policy, and a bounded default
+  hybrid poll fallback.
 - Private and presence subscriptions reauthorize the current principal.
 - Subscription tokens are scoped, expiring, non-loggable secrets when required.
 - Cross-process fanout preserves tenant and channel isolation.
@@ -99,7 +104,7 @@ mechanism according to policy.
 
 Acceptance criteria:
 - Interval limits, jitter, visibility behavior, immediate/initial behavior, and
-  target action are explicit.
+  fresh-render target are explicit. Polling never names or invokes a Live action.
 - Poll requests enter the island scheduler and never overlap unsafely by default.
 - Polling stops when its scope is removed or unauthorized.
 - Server cache and conditional mechanisms may avoid unchanged render work.
@@ -107,6 +112,9 @@ Acceptance criteria:
 - Applications may select polling-only, push-only, or hybrid policy. Under the
   default hybrid policy polling pauses only while push continuity is proved and
   resumes with bounded jitter whenever continuity is uncertain.
+- The signed subscription descriptor supplies the default hybrid fallback
+  interval. A legal `live:poll` on the same island may override it; `push-only`
+  conflicts with `live:poll`.
 
 UX flow:
 1. Poll interval elapses in an eligible document -> runtime requests the
@@ -125,8 +133,18 @@ Acceptance criteria:
 - Stream setup authenticates and authorizes its principal, tenant, component,
   and topic.
 - Messages carry epoch/sequence, stream identity, size limits, and typed
-  payloads. A signed server baseline binds initial SSR state to the first
-  required event; absent replay from that position requires refresh.
+  payloads plus a bounded subscription identity. A signed server baseline binds
+  initial SSR state to the first required event; absent replay from that
+  position requires refresh.
+- The browser owns one physical document transport per compatible `(origin,
+  transport, authorization scope)` and multiplexes island subscriptions through
+  it. SSE uses an authenticated same-origin membership control path around a
+  non-authority document-transport handle; WebSocket uses bounded
+  subscribe/unsubscribe frames.
+- A cookie-authorized WebSocket upgrade rejects missing, null, or unapproved
+  `Origin` before accepting the connection. Explicit cross-origin deployment
+  requires a configured non-wildcard allowlist and separate credential contract;
+  wildcard origin acceptance is forbidden.
 - SSE and WebSocket share one independently versioned event-envelope schema;
   transport choice cannot change message authority or continuity semantics.
 - An invalidation or authoritative change enters the normal island scheduler and
@@ -143,6 +161,9 @@ Acceptance criteria:
   observable and bounded.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
+- Persisted `pagehide` closes long-lived transports and transport timers before
+  bfcache. `pageshow` reauthorizes and establishes a new physical connection
+  before currentness may be reclaimed.
 
 UX flow:
 1. Application starts a declared stream -> the region exposes connected and
@@ -185,6 +206,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Multiplexed compatible subscriptions over one document transport,
+  made subscription identity explicit in every envelope, and required strict
+  WebSocket `Origin` validation. Polling is fresh-render-only; signed descriptors
+  provide hybrid fallback defaults, with a legal `live:poll` override and a
+  `push-only` conflict. Pushed browser events cross only the core-validated
+  registered-event port, and persisted pagehide closes transports before bfcache.
 - 2026-08-23 -- Locked Iteration 004 asynchronous updates to independently
   versioned typed SSE/WebSocket envelopes, signed subscription descriptors, and
   polling-only, push-only, or continuity-aware hybrid freshness. Push may queue

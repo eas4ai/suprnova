@@ -1,7 +1,7 @@
 # Suprnova Live -- 08 File Uploads
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -10,9 +10,11 @@ identity, progress, validation, cancellation, retry/resume, cleanup, and final
 action attachment. It depends on state binding, wire transport, security, and
 Suprnova storage. It feeds actions and form components without placing file
 bytes, transfer authority, or trusted file metadata inside component snapshots.
-The standalone reference provider streams through the Live host into
-quarantined files; provider-neutral direct storage preserves the same authority
-and lifecycle contract.
+The executor-neutral engine delegates raw quarantine byte I/O through a host
+capability. Its reference provider retains path policy, hashing, and state while
+the Rust test-support host supplies the Tokio filesystem adapter;
+provider-neutral direct storage preserves the same authority and lifecycle
+contract.
 
 ## Capabilities
 
@@ -38,6 +40,10 @@ Acceptance criteria:
   diagnostics, or inspection output.
 - Selecting a replacement file retires or preserves the previous temporary
   upload according to explicit form policy.
+- The optional upload artifact proposes only the opaque handle or `null` to the
+  declared upload field through a core-validated typed capability; it cannot
+  write another model field or carry the transfer grant into an action/model
+  envelope.
 - File controls remain subject to native browser security restrictions.
 
 UX flow:
@@ -67,6 +73,9 @@ Acceptance criteria:
 - Checksums or equivalent integrity checks detect corrupt/incomplete transfer
   when resume or chunking is supported.
 - Reverse-proxy/file transfer is the daemon-free reference provider.
+- The engine defines an asynchronous `QuarantineStore` capability and performs
+  no blocking filesystem calls. The Tokio-backed reference file implementation
+  and its HTTP body adaptation live in the test-support host.
 - Direct-to-storage is a provider-neutral capability with conformance for
   constrained instructions, integrity, completion, verification, cancellation,
   expiry, and cleanup; every provider preserves the same authority model.
@@ -100,6 +109,11 @@ Acceptance criteria:
 - Rejected or quarantined files cannot be finalized or served publicly.
 - Image or media metadata parsing is bounded against decompression and parser
   abuse.
+- The reference image-dimension probe uses exact `imagesize` 0.15.0 with default
+  features disabled and only PNG/JPEG/GIF/WebP enabled. It reads a capped byte
+  prefix, fails closed when the necessary header exceeds that cap, and is covered
+  by a dedicated hostile-input corpus and fuzz target. Full media decoding is an
+  application validation capability.
 
 UX flow:
 1. Transfer completes -> server verification begins and the UI distinguishes it
@@ -146,10 +160,13 @@ Acceptance criteria:
 - Background cleanup has observable age, volume, failure, and retry metrics.
 - A browser disconnect does not leave permanent unowned files.
 - Removal updates component state and validation without forging native file
-  input values.
+  input values. The runtime may assign only `input.value = ""` to clear a
+  retired native selection; assigning a non-empty value or `input.files` is
+  forbidden.
 - Cross-reload resume requires an explicit authenticated application route that
-  reauthorizes the opaque handle and issues a new transfer grant; no default
-  localStorage, sessionStorage, or IndexedDB persistence is permitted.
+  lives outside the reserved `/__live/` namespace, reauthorizes the opaque
+  handle, and issues a new transfer grant; no default localStorage,
+  sessionStorage, or IndexedDB persistence is permitted.
 
 UX flow:
 1. Application user cancels or removes a pending file -> its progress stops and
@@ -193,6 +210,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Kept the engine executor-neutral with a host-owned asynchronous
+  `QuarantineStore`; the Tokio file provider and dynamic reference HTTP host live
+  in test support. Added the core-validated upload-handle proposal capability,
+  bounded `imagesize` 0.15.0 probing with fuzz coverage, empty-string-only native
+  input clearing, and application-owned reacquisition routes outside `/__live/`.
 - 2026-08-23 -- Locked Iteration 004 upload architecture around a non-authority
   opaque handle plus a separate secret transfer grant, a revisioned temporary
   lifecycle, a daemon-free reverse-proxy/file reference provider, and one

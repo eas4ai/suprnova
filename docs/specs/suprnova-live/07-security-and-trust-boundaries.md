@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-24
 
 ## Scope
 
@@ -78,6 +78,10 @@ Acceptance criteria:
   identity-bound work.
 - Seed promotion requires the same current CSRF, origin, session, tenant, and
   middleware checks as an ordinary first action.
+- Cookie-authorized WebSocket upgrades reject missing, null, or unapproved
+  `Origin` before accepting the connection. Explicit cross-origin streaming
+  requires a configured non-wildcard allowlist and a separate transport
+  credential contract; an opaque document-transport handle is never authority.
 - Cross-origin use is denied unless an explicit supported deployment contract
   enables it.
 
@@ -238,6 +242,10 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
+  pre-upgrade `Origin` validation for cookie-authorized transports. Explicit
+  cross-origin use requires a non-wildcard allowlist plus separate credential
+  policy; multiplexing handles and subscription descriptors remain non-authority.
 - 2026-08-23 -- Separated Iteration 004 upload handles from secret transfer
   grants and signed subscription descriptions from any required transport
   credentials. Every operation reauthorizes current scope, and aggregate
