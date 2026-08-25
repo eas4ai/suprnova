@@ -2152,9 +2152,8 @@ mod tests {
         let router: Router = Router::new().get("/users/:id", h).into();
         let m = router.match_route(&Method::GET, "/users/42");
         let (pattern, _handler, params) = m.expect(
-            "fluent :id syntax must match /users/42 \ -
-             convert_route_params should run in the fluent path too",
-        );
+            "fluent :id syntax must match /users/42 \
+             - convert_route_params should run in the fluent path too",        );
         assert_eq!(pattern, "/users/{id}");
         assert_eq!(params.get("id"), Some(&"42".to_string()));
     }

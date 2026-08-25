@@ -1150,9 +1150,8 @@ fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
     assert_eq!(
         declared.len(),
         2,
-        "expected the API manifest to declare two binaries, found {declared:?} \ -
-         if that changed, the Dockerfile's stub step needs changing too"
-    );
+        "expected the API manifest to declare two binaries, found {declared:?} \
+         - if that changed, the Dockerfile's stub step needs changing too"    );
 
     for path in declared {
         assert!(

@@ -52,8 +52,8 @@ impl AnonymousNotifiable {
         let channel = channel.into();
         if channel == "database" {
             return Err(crate::FrameworkError::internal(
-                "the database channel does not support on-demand notifications \ -
-                 an anonymous notifiable has no polymorphic id to attach the \
+                "the database channel does not support on-demand notifications \
+                 - an anonymous notifiable has no polymorphic id to attach the \
                  row to",
             ));
         }

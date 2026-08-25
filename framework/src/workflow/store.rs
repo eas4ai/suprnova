@@ -262,9 +262,8 @@ pub async fn refresh_lock(
             workflow_id = id,
             worker_id,
             attempts,
-            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \ -
-             another worker has reclaimed this row; dropping this refresh"
-        );
+            "workflow lease refresh: fencing check failed (worker_id/attempts no longer match) \
+             - another worker has reclaimed this row; dropping this refresh"        );
     }
 
     Ok(())
