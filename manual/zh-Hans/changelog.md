@@ -2,8 +2,6 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
-## 未发布
-
 ## 1.3.1 - 2026-08-24
 
 > The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.

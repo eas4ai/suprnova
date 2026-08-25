@@ -5,8 +5,6 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
-## Unveröffentlicht
-
 ## 1.3.1 - 2026-08-24
 
 > The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.

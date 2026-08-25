@@ -2,8 +2,6 @@
 
 Suprnovaで何が変わったかを、バージョンごとに読みやすくまとめたログです。各バージョンのセクションは、そのバージョンのリリース記録です。バージョンは、バージョンコミットと対応する`v<version>`タグがアトミックにプッシュされたときにリリースされます。新しい順に並んでいます。
 
-## 未リリース
-
 ## 1.3.1 - 2026-08-24
 
 > The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.

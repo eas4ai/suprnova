@@ -6,8 +6,6 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
-## Sin publicar
-
 ## 1.3.1 - 2026-08-24
 
 > The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.
