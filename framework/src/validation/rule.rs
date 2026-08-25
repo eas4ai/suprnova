@@ -18,7 +18,8 @@
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
 //!   [`rules::RequiredUnless`], [`rules::Same`],
-//!   [`rules::Different`], [`rules::Confirmed`].
+//!   [`rules::Different`], [`rules::Confirmed`], [`rules::Gt`],
+//!   [`rules::Gte`], [`rules::Lt`], [`rules::Lte`].
 //! - [`AsyncRule`] - async check (DB queries - [`async_rules::Unique`]
 //!   lives here).
 //!
@@ -1133,6 +1134,162 @@ pub mod rules {
                 Err(fail())
             } else {
                 Ok(())
+            }
+        }
+    }
+
+    /// The right-hand operand of a comparison rule ([`Gt`], [`Gte`],
+    /// [`Lt`], [`Lte`]), and the measure applied to both sides.
+    ///
+    /// Laravel infers the measure from the attribute's *other* rules
+    /// (`getSize`, `ValidatesAttributes.php:2817-2835`). A Suprnova rule
+    /// has no view of the other rules on its field, and guessing from the
+    /// string's shape is the coercion habit the 13.27 strictness fixes
+    /// were closing - so the measure is part of the operand. Pairing them
+    /// in one enum also makes the meaningless combination unwritable:
+    /// there is no literal-plus-length variant, because comparing a value
+    /// against the length of the digits you typed is not a check anyone
+    /// wants (use [`Min`] or [`Max`] for that), and Laravel refuses it too.
+    pub enum CompareWith<'a> {
+        /// A literal number. Both sides must be finite: the value has to
+        /// parse as a finite `f64`, and a non-finite literal fails the
+        /// field rather than comparing against infinity.
+        Number(f64),
+        /// A sibling field compared numerically. Both the value and the
+        /// sibling must parse as finite `f64`.
+        NumericField(&'a str),
+        /// A sibling field compared by Unicode scalar count - the same
+        /// measure [`Min`] and [`Max`] use.
+        LengthField(&'a str),
+    }
+
+    /// Parse a finite `f64`, rejecting `NaN`, `inf`, and magnitudes that
+    /// overflow to infinity - the contract [`Numeric`] already enforces,
+    /// kept identical so the two rules agree on what a number is.
+    fn finite_number(raw: &str) -> Option<f64> {
+        match raw.trim().parse::<f64>() {
+            Ok(n) if n.is_finite() => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Measure both sides of a comparison and order them.
+    ///
+    /// `None` means the comparison cannot be made at all: an unparseable
+    /// or non-finite operand, or a sibling field the form never supplied.
+    /// Every caller turns `None` into its own failure message, so an
+    /// unusable operand fails the field instead of panicking or passing.
+    /// Both sides are finite by the time `partial_cmp` runs, so it never
+    /// returns `None` there.
+    fn compare_sides(
+        value: &str,
+        with: &CompareWith<'_>,
+        ctx: &FormContext,
+    ) -> Option<std::cmp::Ordering> {
+        match with {
+            CompareWith::Number(operand) if operand.is_finite() => {
+                finite_number(value)?.partial_cmp(operand)
+            }
+            CompareWith::Number(_) => None,
+            CompareWith::NumericField(other) => {
+                let lhs = finite_number(value)?;
+                let rhs = finite_number(ctx.get(*other)?)?;
+                lhs.partial_cmp(&rhs)
+            }
+            CompareWith::LengthField(other) => {
+                let rhs = ctx.get(*other)?.chars().count();
+                Some(value.chars().count().cmp(&rhs))
+            }
+        }
+    }
+
+    /// How an operand is named in a failure message: a literal renders as
+    /// its own number, a field operand as the field's **name**.
+    ///
+    /// Never the sibling's value. A validation message is rendered into a
+    /// response body, and the sibling's value is submitted data - the same
+    /// reason `validation-must-match` deliberately drops its `$other`
+    /// parameter.
+    fn operand_label(with: &CompareWith<'_>) -> String {
+        match with {
+            CompareWith::Number(n) => n.to_string(),
+            CompareWith::NumericField(other) | CompareWith::LengthField(other) => {
+                (*other).to_string()
+            }
+        }
+    }
+
+    /// Laravel `gt:field_or_value` - the value must be greater than its
+    /// operand.
+    ///
+    /// [`CompareWith`] carries both the operand and the measure. An
+    /// operand that cannot be measured - a non-numeric value under a
+    /// numeric comparison, a sibling the form never sent, a non-finite
+    /// literal - fails the field with this rule's message. Arrays and
+    /// files have no comparison here: a rule only ever sees a string, and
+    /// upload sizes are capped by the multipart parser instead.
+    pub struct Gt<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Gt<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Greater) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-gt")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be greater than {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `gte:field_or_value` - the value must be greater than or
+    /// equal to its operand. See [`Gt`] for the operand and failure rules.
+    pub struct Gte<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Gte<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-gte")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be greater than or equal to {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `lt:field_or_value` - the value must be less than its
+    /// operand. See [`Gt`] for the operand and failure rules.
+    pub struct Lt<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Lt<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Less) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-lt")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be less than {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `lte:field_or_value` - the value must be less than or equal
+    /// to its operand. See [`Gt`] for the operand and failure rules.
+    pub struct Lte<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Lte<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-lte")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be less than or equal to {other}")))
+                }
             }
         }
     }

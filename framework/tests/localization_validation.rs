@@ -311,6 +311,10 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
         "validation-in-array",
         "validation-contains",
         "validation-doesnt-contain",
+        "validation-gt",
+        "validation-gte",
+        "validation-lt",
+        "validation-lte",
     ];
 
     // The `#[derive(Validate)]` path speaks the validator crate's codes;

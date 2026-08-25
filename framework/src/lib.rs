@@ -402,10 +402,10 @@ pub use validation::message::{TranslateArgs, ValidationMessage};
 pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
-        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Contains, Different,
-        Distinct, DoesntContain, Email, HttpUrl, In, InArray, Integer, Max, Min, NotIn, Numeric,
-        Required, RequiredIf, RequiredUnless, RequiredWith, RequiredWithAll, Same, Url,
-        UrlProtocols, Uuid,
+        Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
+        Different, Distinct, DoesntContain, Email, Gt, Gte, HttpUrl, In, InArray, Integer, Lt, Lte,
+        Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith,
+        RequiredWithAll, Same, Url, UrlProtocols, Uuid,
     },
 };
 #[cfg(feature = "vector-pinecone")]

@@ -36,6 +36,10 @@ validation-distinct = The { $field } field has a duplicate value.
 validation-in-array = The selected { $field } is invalid.
 validation-contains = The { $field } field is missing a required value.
 validation-doesnt-contain = The { $field } field contains a forbidden value.
+validation-gt = The { $field } field must be greater than { $other }.
+validation-gte = The { $field } field must be greater than or equal to { $other }.
+validation-lt = The { $field } field must be less than { $other }.
+validation-lte = The { $field } field must be less than or equal to { $other }.
 
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.
