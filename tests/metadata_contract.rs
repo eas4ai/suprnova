@@ -6,7 +6,11 @@ use suprnova_live::metadata::{
     EventMetadata, EventPayloadMetadata, FieldMetadata, MetadataErrorKind,
 };
 use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
-use suprnova_live::state::{ModelCodec, ModelPath};
+use suprnova_live::state::{BindingTiming, ModelCodec, ModelPath};
+use suprnova_live::upload::{
+    UploadDimensionLimits, UploadFieldPolicy, UploadMediaType, UploadReplacementPolicy,
+    UploadScanPolicy,
+};
 use suprnova_live::validation::ValidationSelection;
 
 fn versions() -> ContractVersions {
@@ -263,6 +267,46 @@ fn refresh_on_promote_cannot_bypass_the_protocol_v2_contract() {
     .expect_err("refresh-on-promote requires protocol v2");
 
     assert_eq!(error.kind(), MetadataErrorKind::UnsupportedProtocol);
+}
+
+#[test]
+fn upload_field_policy_and_finalize_action_are_part_of_the_component_contract() {
+    let upload_policy = |maximum_width| {
+        UploadFieldPolicy::new(
+            1,
+            4 * 1024 * 1024,
+            UploadReplacementPolicy::RetirePrevious,
+            vec![UploadMediaType::Png, UploadMediaType::Jpeg],
+            Some(UploadDimensionLimits::new(maximum_width, 2_048, 4_194_304).expect("dimensions")),
+            UploadScanPolicy::Disabled,
+            ActionName::parse("save_avatar").expect("finalize action"),
+        )
+        .expect("upload policy")
+    };
+    let upload_field = |maximum_width| {
+        field("avatar", FieldCategory::Model)
+            .with_model_binding(ModelCodec::String, BindingTiming::Change)
+            .expect("model binding")
+            .with_upload_policy(upload_policy(maximum_width))
+            .expect("upload metadata")
+    };
+
+    let first = metadata(vec![upload_field(2_048)], vec![action("save_avatar", 1)]);
+    let changed = metadata(vec![upload_field(1_024)], vec![action("save_avatar", 1)]);
+    assert_ne!(first.contract_digest(), changed.contract_digest());
+
+    let missing_action = ComponentMetadata::new(
+        ComponentName::parse("account.profile").expect("component identity"),
+        ViewName::parse("components/account/profile.html").expect("view identity"),
+        versions(),
+        vec![upload_field(2_048)],
+        vec![],
+    )
+    .expect_err("finalize action must be registered");
+    assert_eq!(
+        missing_action.kind(),
+        MetadataErrorKind::InvalidUploadMetadata
+    );
 }
 use suprnova_live::action::{
     ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,

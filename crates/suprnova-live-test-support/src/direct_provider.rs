@@ -16,9 +16,9 @@ use suprnova_live::{
     upload::{
         BoundedHeaders, ChunkDisposition, ChunkReceipt, DirectPartReference,
         DirectTransferInstruction, DirectUploadProvider, IntegrityEvidence, PrepareTransfer,
-        ReportDirectPart, TransferDisposition, TransferMethod, TransferPlan, TrustedProviderOrigin,
-        TrustedProviderUrl, UploadChecksum, UploadError, UploadErrorKind, UploadFuture,
-        UploadHandle, UploadPart, UploadProvider, VerifyTransfer,
+        QuarantineBytes, ReadUpload, ReportDirectPart, TransferDisposition, TransferMethod,
+        TransferPlan, TrustedProviderOrigin, TrustedProviderUrl, UploadChecksum, UploadError,
+        UploadErrorKind, UploadFuture, UploadHandle, UploadPart, UploadProvider, VerifyTransfer,
     },
 };
 
@@ -370,6 +370,75 @@ impl DirectProviderConformanceAdapter {
         Ok(IntegrityEvidence::from_provider(cursor, actual))
     }
 
+    fn read_inner(&self, request: ReadUpload<'_>) -> Result<QuarantineBytes, UploadError> {
+        if request.maximum_bytes() == 0 || request.maximum_bytes() > self.limits.max_chunk_bytes() {
+            return Err(UploadError::new(UploadErrorKind::InputTooLarge));
+        }
+        let state = lock(&self.state);
+        let entry = state
+            .entries
+            .get(request.handle())
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        if request.offset() > entry.expected_bytes {
+            return Err(UploadError::new(UploadErrorKind::InvalidField));
+        }
+        let mut cursor = 0_u64;
+        for (expected_index, part) in entry.parts.values().enumerate() {
+            let expected_index = u32::try_from(expected_index)
+                .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+            let bytes = part
+                .bytes
+                .as_ref()
+                .filter(|_| part.reported)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::IncompleteTransfer))?;
+            if part.instruction.part().index() != expected_index
+                || part.instruction.part().offset() != cursor
+            {
+                return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
+            }
+            cursor = cursor
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::InputTooLarge))?;
+        }
+        if cursor != entry.expected_bytes {
+            return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
+        }
+
+        let target = usize::try_from(
+            (entry.expected_bytes - request.offset()).min(request.maximum_bytes() as u64),
+        )
+        .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
+        let end = request
+            .offset()
+            .checked_add(target as u64)
+            .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
+        let mut output = Vec::with_capacity(target);
+        for part in entry.parts.values() {
+            let bytes = part
+                .bytes
+                .as_ref()
+                .filter(|_| part.reported)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::IncompleteTransfer))?;
+            let part_start = part.instruction.part().offset();
+            let part_end = part_start
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::InputTooLarge))?;
+            let overlap_start = part_start.max(request.offset());
+            let overlap_end = part_end.min(end);
+            if overlap_start < overlap_end {
+                let start = usize::try_from(overlap_start - part_start)
+                    .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
+                let finish = usize::try_from(overlap_end - part_start)
+                    .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
+                output.extend_from_slice(&bytes[start..finish]);
+            }
+        }
+        if output.len() != target {
+            return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
+        }
+        Ok(QuarantineBytes::from(output))
+    }
+
     fn issue_instruction(
         &self,
         object_identity: u64,
@@ -448,6 +517,13 @@ impl UploadProvider for DirectProviderConformanceAdapter {
         request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
         Box::pin(async move { self.verify_inner(request) })
+    }
+
+    fn read<'a>(
+        &'a self,
+        request: ReadUpload<'a>,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        Box::pin(async move { self.read_inner(request) })
     }
 
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {

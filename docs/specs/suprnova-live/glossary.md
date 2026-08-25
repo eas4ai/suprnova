@@ -311,6 +311,37 @@ that binding; the browser reference itself is never completion or integrity
 evidence.
 _Avoid_: provider receipt as authority, checksum claim, upload handle, transfer grant
 
+**Accepted upload type**:
+A digest-significant field-policy contract pairing one canonical MIME type with
+its permitted filename extensions. Matching requires a built-in or trusted
+application-classified authoritative type; browser MIME and filename claims are
+never classification evidence.
+_Avoid_: browser accept value, MIME claim, filename suffix as proof
+
+**Application-classified upload type**:
+A canonical MIME type returned by a trusted application classifier after it
+inspects authoritative quarantined content the bounded built-in classifier does
+not recognize. It is explicit trusted validation output, not a browser claim.
+_Avoid_: client content type, accepted upload type, inferred filename type
+
+**Validation evidence**:
+An immutable record binding authoritative size, checksum, content
+classification, media facts, scope, policy digest, and the exact Ready revision
+that finalization must reauthorize.
+_Avoid_: browser metadata, provider receipt, scan result alone, durable file
+
+**Finalize token**:
+An opaque host-finalizer identity for one prepared durable-storage operation,
+used only for idempotent commit, compensation, and reconciliation. It is never a
+browser capability or public storage location.
+_Avoid_: transfer grant, upload handle, public URL, database transaction
+
+**Upload finalizer**:
+The host capability that prepares and commits durable upload storage and exposes
+explicit compensation and reconciliation after partial failure. It does not
+claim distributed atomicity or exactly-once external effects.
+_Avoid_: upload provider, database transaction, exactly-once file mover
+
 **Subscription descriptor**:
 A signed, expiring server-issued declaration of one permitted asynchronous
 subscription, including registered stream identity, capabilities, topics, typed
@@ -458,7 +489,8 @@ _Avoid_: raw palette value, Tailwind utility class, component-specific hard-code
   protocol; accepted responses may request only registered browser effects.
 - A selected browser file creates a temporary upload. The upload handle may
   enter typed Live state, while its transfer grant stays outside all snapshots
-  and markup until the application finalizes or abandons the upload.
+  and markup. Authoritative validation stores exact Ready-revision evidence;
+  only an authorized action may invoke the upload finalizer or abandon the upload.
 - A subscription descriptor authorizes one asynchronous subscription contract;
   compatible subscriptions share a document transport, while stream continuity
   or authoritative refresh determines whether material freshness can be called

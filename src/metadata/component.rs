@@ -116,6 +116,15 @@ impl ComponentMetadata {
         {
             return Err(MetadataError::new(MetadataErrorKind::DuplicateAction));
         }
+        if fields.iter().any(|field| {
+            field.upload_policy().is_some_and(|policy| {
+                !actions
+                    .iter()
+                    .any(|action| action.name() == policy.finalize_action())
+            })
+        }) {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidUploadMetadata));
+        }
 
         events.sort_by(|left, right| left.name().cmp(right.name()));
         if events

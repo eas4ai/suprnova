@@ -32,6 +32,7 @@ rustc-ice-*.txt
 /fuzz/corpus/*/
 !/fuzz/corpus/directive_contract/
 !/fuzz/corpus/browser_metadata/
+!/fuzz/corpus/upload_media_header/
 /fuzz/corpus/directive_contract/*
 !/fuzz/corpus/directive_contract/valid-click
 !/fuzz/corpus/directive_contract/valid-model
@@ -41,6 +42,11 @@ rustc-ice-*.txt
 !/fuzz/corpus/browser_metadata/valid-instance-shape
 !/fuzz/corpus/browser_metadata/valid-seed-shape
 !/fuzz/corpus/browser_metadata/rejected-executable
+/fuzz/corpus/upload_media_header/*
+!/fuzz/corpus/upload_media_header/truncated-png.hex
+!/fuzz/corpus/upload_media_header/truncated-gif.hex
+!/fuzz/corpus/upload_media_header/truncated-webp.hex
+!/fuzz/corpus/upload_media_header/malformed-jpeg-markers.hex
 /benchmarks/local/
 /tests/fixtures/compile/target/
 /tests/fixtures/compile/*/target/

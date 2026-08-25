@@ -55,6 +55,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | html5ever | 0.39.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | http | 1.4.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | hybrid-array | 0.4.14 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | imagesize | 0.15.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | indexmap | 2.14.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | itoa | 1.0.18 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | jobserver | 0.1.35 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

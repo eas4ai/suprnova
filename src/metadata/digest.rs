@@ -10,6 +10,9 @@ use crate::identity::{ComponentName, ContentDigest, ViewName};
 use crate::limits::InputLimits;
 use crate::snapshot::state::{FieldCategory, StateCodec};
 use crate::state::{BindingTiming, ModelCodec, UrlBindingMode};
+use crate::upload::{
+    ScanFailurePolicy, UploadFieldPolicy, UploadReplacementPolicy, UploadScanPolicy,
+};
 use crate::validation::ValidationSelection;
 
 use super::{
@@ -148,7 +151,118 @@ fn field_value(field: &FieldMetadata) -> CanonicalValue {
                 ]))
             }),
         ),
+        (
+            "upload".to_owned(),
+            field
+                .upload_policy()
+                .map_or(CanonicalValue::Null, upload_policy_value),
+        ),
     ]))
+}
+
+fn upload_policy_value(policy: &UploadFieldPolicy) -> CanonicalValue {
+    CanonicalValue::Object(BTreeMap::from([
+        (
+            "accepted_types".to_owned(),
+            CanonicalValue::Array(
+                policy
+                    .accepted_types()
+                    .iter()
+                    .map(|accepted| {
+                        CanonicalValue::Object(BTreeMap::from([
+                            (
+                                "extensions".to_owned(),
+                                CanonicalValue::Array(
+                                    accepted
+                                        .extensions()
+                                        .iter()
+                                        .cloned()
+                                        .map(CanonicalValue::String)
+                                        .collect(),
+                                ),
+                            ),
+                            (
+                                "media_type".to_owned(),
+                                CanonicalValue::String(accepted.media_type().to_owned()),
+                            ),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "dimensions".to_owned(),
+            policy.dimensions().map_or(CanonicalValue::Null, |limits| {
+                CanonicalValue::Object(BTreeMap::from([
+                    (
+                        "maximum_height".to_owned(),
+                        CanonicalValue::String(limits.maximum_height().to_string()),
+                    ),
+                    (
+                        "maximum_pixels".to_owned(),
+                        CanonicalValue::String(limits.maximum_pixels().to_string()),
+                    ),
+                    (
+                        "maximum_width".to_owned(),
+                        CanonicalValue::String(limits.maximum_width().to_string()),
+                    ),
+                ]))
+            }),
+        ),
+        (
+            "finalize_action".to_owned(),
+            CanonicalValue::String(policy.finalize_action().as_str().to_owned()),
+        ),
+        (
+            "maximum_file_bytes".to_owned(),
+            CanonicalValue::String(policy.maximum_file_bytes().to_string()),
+        ),
+        (
+            "maximum_files".to_owned(),
+            CanonicalValue::String(policy.maximum_files().to_string()),
+        ),
+        (
+            "replacement".to_owned(),
+            CanonicalValue::String(
+                match policy.replacement() {
+                    UploadReplacementPolicy::RetirePrevious => "retire_previous",
+                    UploadReplacementPolicy::PreservePrevious => "preserve_previous",
+                }
+                .to_owned(),
+            ),
+        ),
+        ("scan".to_owned(), scan_policy_value(policy.scan())),
+    ]))
+}
+
+fn scan_policy_value(policy: UploadScanPolicy) -> CanonicalValue {
+    match policy {
+        UploadScanPolicy::Disabled => CanonicalValue::String("disabled".to_owned()),
+        UploadScanPolicy::Required {
+            on_timeout,
+            on_unavailable,
+        } => CanonicalValue::Object(BTreeMap::from([
+            (
+                "on_timeout".to_owned(),
+                CanonicalValue::String(scan_failure_name(on_timeout).to_owned()),
+            ),
+            (
+                "on_unavailable".to_owned(),
+                CanonicalValue::String(scan_failure_name(on_unavailable).to_owned()),
+            ),
+            (
+                "type".to_owned(),
+                CanonicalValue::String("required".to_owned()),
+            ),
+        ])),
+    }
+}
+
+const fn scan_failure_name(policy: ScanFailurePolicy) -> &'static str {
+    match policy {
+        ScanFailurePolicy::Retry => "retry",
+        ScanFailurePolicy::Reject => "reject",
+    }
 }
 
 fn timing_value(timing: Option<BindingTiming>) -> CanonicalValue {

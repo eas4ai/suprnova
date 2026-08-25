@@ -410,6 +410,57 @@ impl UploadService {
         Ok(record)
     }
 
+    pub(crate) async fn trusted_status(
+        &self,
+        context: &TrustedLiveRequestContext,
+        field: ModelField,
+        handle: UploadHandle,
+        control: UploadControlKind,
+        now: UnixMillis,
+    ) -> Result<UploadRecord, UploadError> {
+        Self::require_current(context, now)?;
+        let authority = self.authority(context, handle, field);
+        self.authorize_current(context, authority.handle(), authority.field(), control, now)
+            .await?;
+        self.require_active()?;
+        let record = self
+            .ledger
+            .load(authority.handle())
+            .await?
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        if record.authority() != &authority {
+            return Err(UploadError::new(UploadErrorKind::ScopeMismatch));
+        }
+        if record.expires_at() <= now {
+            return Err(UploadError::new(UploadErrorKind::UploadExpired));
+        }
+        Ok(record)
+    }
+
+    pub(crate) async fn trusted_transition(
+        &self,
+        context: &TrustedLiveRequestContext,
+        field: ModelField,
+        transition: UploadTransitionRequest,
+        now: UnixMillis,
+    ) -> Result<TransitionOutcome, UploadError> {
+        Self::require_current(context, now)?;
+        let authority = self.authority(context, transition.handle().clone(), field);
+        self.authorize_current(
+            context,
+            authority.handle(),
+            authority.field(),
+            UploadControlKind::from_transition(transition.transition()),
+            now,
+        )
+        .await?;
+        self.validate_transition_limits(&transition)?;
+        self.require_active()?;
+        self.ledger
+            .transition(ConditionalTransition::new(authority, transition, now))
+            .await
+    }
+
     /// Returns a cloneable observer canceled when this service retires.
     #[must_use]
     pub fn cancellation(&self) -> CancellationFlag {

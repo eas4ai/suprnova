@@ -99,6 +99,16 @@ pub enum UploadErrorKind {
     ChecksumMismatch,
     /// The complete authoritative byte range was not present.
     IncompleteTransfer,
+    /// A recognized media header was truncated, malformed, or exceeded its parser cap.
+    MediaHeaderUnproved,
+    /// Accepted validation evidence was absent or did not match current authority.
+    ValidationEvidenceUnavailable,
+    /// A trusted durable-storage finalizer violated or could not complete its contract.
+    FinalizationFailed,
+    /// Cleanup of partially prepared durable work could not be confirmed.
+    CompensationFailed,
+    /// Durable work may exist but its lifecycle outcome still requires reconciliation.
+    ReconciliationRequired,
     /// Per-upload or provider-wide cancellation stopped the operation.
     TransferCanceled,
     /// A bounded descriptor, chunk, queue, or memory permit was unavailable.
@@ -141,6 +151,11 @@ impl UploadErrorKind {
             Self::BodyInterrupted => "upload_body_interrupted",
             Self::ChecksumMismatch => "upload_checksum_mismatch",
             Self::IncompleteTransfer => "upload_incomplete_transfer",
+            Self::MediaHeaderUnproved => "upload_media_header_unproved",
+            Self::ValidationEvidenceUnavailable => "upload_validation_evidence_unavailable",
+            Self::FinalizationFailed => "upload_finalization_failed",
+            Self::CompensationFailed => "upload_compensation_failed",
+            Self::ReconciliationRequired => "upload_reconciliation_required",
             Self::TransferCanceled => "upload_transfer_canceled",
             Self::ResourceExhausted => "upload_resource_exhausted",
         }

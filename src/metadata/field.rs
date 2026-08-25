@@ -3,6 +3,7 @@
 use crate::identity::ModelField;
 use crate::snapshot::state::{FieldCategory, StateCodec};
 use crate::state::{BindingTiming, ModelCodec, UrlBinding};
+use crate::upload::UploadFieldPolicy;
 
 use super::{MetadataError, MetadataErrorKind};
 
@@ -17,6 +18,7 @@ pub struct FieldMetadata {
     session_codec: Option<ModelCodec>,
     binding_timing: Option<BindingTiming>,
     url_binding: Option<UrlBinding>,
+    upload_policy: Option<UploadFieldPolicy>,
 }
 
 impl FieldMetadata {
@@ -37,6 +39,7 @@ impl FieldMetadata {
             session_codec: None,
             binding_timing: None,
             url_binding: None,
+            upload_policy: None,
         }
     }
 
@@ -96,6 +99,19 @@ impl FieldMetadata {
         Ok(self)
     }
 
+    /// Attaches a canonical upload contract to one browser-proposable field.
+    pub fn with_upload_policy(mut self, policy: UploadFieldPolicy) -> Result<Self, MetadataError> {
+        if !matches!(
+            self.category,
+            FieldCategory::Model | FieldCategory::Transient
+        ) || self.upload_policy.is_some()
+        {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidUploadMetadata));
+        }
+        self.upload_policy = Some(policy);
+        Ok(self)
+    }
+
     /// Returns the registered field identity.
     #[must_use]
     pub const fn name(&self) -> &ModelField {
@@ -142,5 +158,11 @@ impl FieldMetadata {
     #[must_use]
     pub const fn url_binding(&self) -> Option<&UrlBinding> {
         self.url_binding.as_ref()
+    }
+
+    /// Returns the digest-significant upload contract, when declared.
+    #[must_use]
+    pub const fn upload_policy(&self) -> Option<&UploadFieldPolicy> {
+        self.upload_policy.as_ref()
     }
 }

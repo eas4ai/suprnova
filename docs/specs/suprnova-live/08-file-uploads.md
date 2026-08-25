@@ -99,6 +99,14 @@ from public or durable storage until accepted.
 
 Acceptance criteria:
 - Server validation does not rely solely on browser MIME or extension claims.
+- Accepted upload types are digest-significant canonical MIME/extension
+  contracts. The bounded engine authoritatively classifies PNG/JPEG/GIF/WebP;
+  other formats such as PDF require an explicit trusted application classifier
+  over quarantined content before a browser claim may agree with the result.
+- Scanner and application-classifier ports receive only immutable inspection
+  facts plus a provider-neutral, read-only, chunk-bounded content view and an
+  absolute host-enforced deadline; they receive no transfer or storage-mutation
+  capability.
 - Original names are treated as display metadata, normalized, bounded, and
   prevented from controlling storage paths.
 - Malware/content scanning hooks can quarantine pending files without blocking
@@ -138,6 +146,9 @@ Acceptance criteria:
 - Provider preparation, durable commit, compensation, retry, and reconciliation
   are explicit; Live does not claim a distributed transaction across storage
   and the application database.
+- Immutable validation evidence binds authoritative inspection facts, complete
+  scope, policy digest, and exact Ready revision. A finalizer token is host-only
+  idempotency identity and never browser or public-storage authority.
 - Repeated finalization cannot duplicate a file or domain record.
 - A completed temporary upload may expire if never finalized.
 
@@ -210,6 +221,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-24 -- Made accepted-type metadata extensible beyond the four bounded
+  image probes: custom types require a trusted application classifier over
+  authoritative quarantined content, while browser MIME and filename claims
+  remain non-authoritative. Scanner/classifier ports receive a bounded read-only
+  content view and deadline rather than storage mutation authority. Bound
+  validation evidence and host-only finalize tokens to exact scope, policy, and
+  lifecycle revision.
 - 2026-08-24 -- Kept the engine executor-neutral with a host-owned asynchronous
   `QuarantineStore`; the Tokio file provider and dynamic reference HTTP host live
   in test support. Added the core-validated upload-handle proposal capability,

@@ -17,9 +17,10 @@ use suprnova_live::{
     upload::{
         BoundedHeaders, ChunkBody, ChunkDisposition, DirectPartReference,
         DirectTransferInstruction, DirectUploadProvider, PrepareTransfer, QuarantinedFileProvider,
-        ReportDirectPart, ReverseProxyUploadProvider, TransferDisposition, TransferInstruction,
-        TransferMethod, TrustedProviderOrigin, TrustedProviderUrl, UploadChecksum, UploadError,
-        UploadErrorKind, UploadHandle, UploadPart, UploadProvider, VerifyTransfer, WriteChunk,
+        ReadUpload, ReportDirectPart, ReverseProxyUploadProvider, TransferDisposition,
+        TransferInstruction, TransferMethod, TrustedProviderOrigin, TrustedProviderUrl,
+        UploadChecksum, UploadError, UploadErrorKind, UploadHandle, UploadPart, UploadProvider,
+        VerifyTransfer, WriteChunk,
     },
 };
 use suprnova_live_test_support::{DirectProviderConformanceAdapter, TokioFileQuarantineStore};
@@ -101,6 +102,13 @@ trait ProviderConformance: Send + Sync {
         expected: &UploadChecksum,
     ) -> Result<u64, UploadError>;
 
+    async fn read(
+        &self,
+        handle: &UploadHandle,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, UploadError>;
+
     async fn cancel(&self, handle: &UploadHandle) -> Result<(), UploadError>;
     async fn expire(&self, handle: &UploadHandle) -> Result<(), UploadError>;
     async fn cleanup(&self, handle: &UploadHandle) -> Result<(), UploadError>;
@@ -165,6 +173,18 @@ impl ProviderConformance for FileHarness {
             .verify(VerifyTransfer::new(handle, expected))
             .await
             .map(|evidence| evidence.bytes())
+    }
+
+    async fn read(
+        &self,
+        handle: &UploadHandle,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, UploadError> {
+        self.provider
+            .read(ReadUpload::new(handle, offset, maximum_bytes))
+            .await
+            .map(|bytes| bytes.to_vec())
     }
 
     async fn cancel(&self, handle: &UploadHandle) -> Result<(), UploadError> {
@@ -286,6 +306,18 @@ impl ProviderConformance for DirectHarness {
             .map(|evidence| evidence.bytes())
     }
 
+    async fn read(
+        &self,
+        handle: &UploadHandle,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, UploadError> {
+        self.provider
+            .read(ReadUpload::new(handle, offset, maximum_bytes))
+            .await
+            .map(|bytes| bytes.to_vec())
+    }
+
     async fn cancel(&self, handle: &UploadHandle) -> Result<(), UploadError> {
         self.provider.cancel(handle).await
     }
@@ -357,6 +389,13 @@ async fn assert_provider_conformance(provider: &dyn ProviderConformance) {
             .await
             .expect("complete integrity"),
         8
+    );
+    assert_eq!(
+        provider
+            .read(&primary, 2, 3)
+            .await
+            .expect("bounded authoritative read"),
+        b"cde"
     );
 
     provider

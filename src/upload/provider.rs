@@ -306,6 +306,50 @@ impl fmt::Debug for VerifyTransfer<'_> {
     }
 }
 
+/// Trusted bounded request to read authoritative completed upload bytes.
+#[derive(Clone, Copy)]
+pub struct ReadUpload<'a> {
+    handle: &'a UploadHandle,
+    offset: u64,
+    maximum_bytes: usize,
+}
+
+impl<'a> ReadUpload<'a> {
+    /// Groups an upload identity, byte offset, and hard response ceiling.
+    #[must_use]
+    pub const fn new(handle: &'a UploadHandle, offset: u64, maximum_bytes: usize) -> Self {
+        Self {
+            handle,
+            offset,
+            maximum_bytes,
+        }
+    }
+
+    /// Returns the upload whose authoritative bytes are requested.
+    #[must_use]
+    pub const fn handle(&self) -> &UploadHandle {
+        self.handle
+    }
+
+    /// Returns the zero-based byte offset.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the absolute response byte ceiling.
+    #[must_use]
+    pub const fn maximum_bytes(&self) -> usize {
+        self.maximum_bytes
+    }
+}
+
+impl fmt::Debug for ReadUpload<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ReadUpload:redacted>")
+    }
+}
+
 /// Authoritative whole-file integrity evidence produced after synchronization.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegrityEvidence {
@@ -346,6 +390,12 @@ pub trait UploadProvider: Send + Sync {
         &'a self,
         request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>>;
+
+    /// Reads no more than the requested authoritative completed byte range.
+    fn read<'a>(
+        &'a self,
+        request: ReadUpload<'a>,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>>;
 
     /// Cancels and removes one pending upload idempotently.
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>>;
@@ -1132,6 +1182,65 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         })
     }
 
+    fn read<'a>(
+        &'a self,
+        request: ReadUpload<'a>,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        Box::pin(async move {
+            self.require_active()?;
+            if request.maximum_bytes == 0 || request.maximum_bytes > self.limits.max_chunk_bytes() {
+                return Err(UploadError::new(UploadErrorKind::InputTooLarge));
+            }
+            let _descriptor = self
+                .descriptor_permits
+                .try_acquire()
+                .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+            let (object, expected_bytes, cancellation) = {
+                let transfers = lock(&self.transfers);
+                let entry = transfers
+                    .get(request.handle)
+                    .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+                if !entry.created || entry.pending.is_some() || entry.evidence.is_none() {
+                    return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
+                }
+                if entry.cancellation.is_canceled() {
+                    return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+                }
+                (
+                    entry.object.clone(),
+                    entry.expected_bytes,
+                    entry.cancellation.clone(),
+                )
+            };
+            if request.offset > expected_bytes {
+                return Err(UploadError::new(UploadErrorKind::InvalidField));
+            }
+            let target = usize::try_from(
+                (expected_bytes - request.offset).min(request.maximum_bytes as u64),
+            )
+            .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
+            let mut output = Vec::with_capacity(target);
+            while output.len() < target {
+                if cancellation.is_canceled() || self.resources.cancellation().is_canceled() {
+                    return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+                }
+                let offset = request
+                    .offset
+                    .checked_add(output.len() as u64)
+                    .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
+                let bytes = self
+                    .store
+                    .read_at(&object, offset, target - output.len())
+                    .await?;
+                if bytes.is_empty() || bytes.len() > target - output.len() {
+                    return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
+                }
+                output.extend_from_slice(&bytes);
+            }
+            Ok(QuarantineBytes::from(output))
+        })
+    }
+
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
         Box::pin(async move { self.remove_entry(handle).await })
     }
@@ -1157,6 +1266,13 @@ impl<S: QuarantineStore> UploadProvider for QuarantinedFileProvider<S> {
         request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
         QuarantinedFileProvider::verify(self, request)
+    }
+
+    fn read<'a>(
+        &'a self,
+        request: ReadUpload<'a>,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        QuarantinedFileProvider::read(self, request)
     }
 
     fn cancel<'a>(&'a self, handle: &'a UploadHandle) -> UploadFuture<'a, Result<(), UploadError>> {
