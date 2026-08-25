@@ -473,18 +473,20 @@ _Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push
 The per-logical-subscription state machine initialized only from the signed
 baseline retained by its sealed active async membership context. It applies only
 an exact same-epoch successor after registered dispatch succeeds, ignores
-duplicates and older epochs, degrades on gaps or new epochs, and restores
-currentness only from a completely prevalidated and dispatched replay
-transcript or an authoritative host refresh whose baseline covers observed
-high-water.
+duplicates and older epochs, degrades on gaps or new epochs, and validates every
+replay transition used to recover either its own degraded high-water or an exact
+bounded-delivery pressure high-water while the sequence lane remained current.
+No pressure tracker owns a parallel sequence counter.
 _Avoid_: last message wins, transport ordering, reconnect success, client timestamp
 
 **Replay transcript**:
 A bounded ordered set of freshly membership- and registry-admitted envelopes
-covering every same-scope, same-epoch position from the sequence authority's
-next required successor through at least its recorded gap high-water. Claimed
-`from`/`through` positions, empty evidence, duplicate positions, gaps, and
-cross-scope or cross-epoch messages are not proof.
+covering every same-scope, same-epoch position from the sequence authority's next
+required successor through at least the exact recorded gap or pressure-loss
+high-water. The existing sequence machine validates and commits the transcript
+even when pressure, rather than a sequence observation, created the obligation.
+Claimed `from`/`through` positions, empty evidence, duplicate positions, gaps,
+and cross-scope or cross-epoch messages are not proof.
 _Avoid_: boolean continuity flag, claimed range, reconnect success, transport ordering
 
 **Async backpressure buffer**:
@@ -497,6 +499,16 @@ binding, document/component scope, subscription, stream, epoch, registered
 identity, and presentation schema contract. It is neither the transport
 retirement lane nor a second sequence or lifecycle authority.
 _Avoid_: private async queue, event bus, replay authority, transport retirement lane
+
+**Pressure continuity tracker**:
+The bounded redacted set of unresolved delivery-loss causes keyed by exact
+logical subscription binding and document/component scope. It records authorized
+lost high-water facts but owns no sequence counter; complete replay clears only
+the exact causes it covers, while authenticated explicit retirement discharges
+only that retired binding's obligation. Its four finite cause classes are capped
+at four times the document membership ceiling; saturation remains degraded until
+aggregate retirement rather than forgetting an unidentified loss.
+_Avoid_: document-wide degraded boolean, global recovery flag, sequence authority, telemetry label map
 
 **Authorized async buffer entry**:
 A private non-forgeable one-use delivery value created only inside the
@@ -523,7 +535,10 @@ The cohesive server owner that composes one Task 4 round-robin physical document
 transport with one aggregate Task 5 queue and shared delivery permits. It pulls
 at most one provider item per pump, owns no hidden per-island ingress buffer, and
 owns exactly one Task 3 sequence lane per exact logical subscription binding so
-the caller cannot inject another sequence authority.
+the caller cannot inject another sequence authority. Its finite redacted pressure
+tracker retains unresolved causes by exact binding and scope; recovery clears
+only covered causes for that membership. A detached terminal predecessor retains
+its sole lane as an exact/rotated same-ID re-admission fence until delivery drains.
 _Avoid_: per-island backpressure queue, caller-supplied sequence machine, second event bus, document work arbiter
 
 **Buffer disposition**:

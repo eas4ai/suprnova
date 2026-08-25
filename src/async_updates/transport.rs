@@ -17,6 +17,7 @@ use crate::host::HostScopeFacts;
 use crate::identity::{ContentDigest, UnixMillis};
 use crate::resource::{PermitPool, ResourceBounds, ResourceOwner, Retirement};
 
+use super::backpressure::PressureMembership;
 use super::{
     AsyncBackpressure, AsyncBackpressureError, AsyncBufferEntry, AsyncEnvelope,
     AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, AsyncMembershipRegistryPort, AsyncPayload,
@@ -1805,6 +1806,18 @@ impl BoundedDocumentTransportSession {
                 return Err(error);
             }
         };
+        let pressure_membership = PressureMembership::new(
+            candidate.authorization.subscription().clone(),
+            candidate.authorization.binding().clone(),
+            candidate.authorization.document_scope().clone(),
+            candidate
+                .authorization
+                .verified
+                .claims()
+                .authorization_memo()
+                .clone(),
+        );
+        let pressure_position = candidate.envelope.position();
         let terminal = candidate.terminal;
         if terminal
             && !self.terminal_drains.iter().any(|drain| {
@@ -1824,7 +1837,13 @@ impl BoundedDocumentTransportSession {
             !terminal,
         ) {
             Ok(authorized) => authorized,
-            Err(error) => return Err(self.reject_pulled_delivery(error)),
+            Err(error) => {
+                return Err(self.reject_pulled_delivery(
+                    error,
+                    pressure_membership.clone(),
+                    pressure_position,
+                ));
+            }
         };
         let final_now = candidate.authorization.authority.now();
         if let Err(error) = self.transport.revalidate_async_delivery(
@@ -1834,7 +1853,11 @@ impl BoundedDocumentTransportSession {
             final_now,
             !terminal,
         ) {
-            return Err(self.reject_pulled_delivery(error));
+            return Err(self.reject_pulled_delivery(
+                error,
+                pressure_membership.clone(),
+                pressure_position,
+            ));
         }
         let commit_now = candidate.authorization.authority.now();
         if let Err(error) = self.transport.revalidate_async_delivery(
@@ -1844,21 +1867,37 @@ impl BoundedDocumentTransportSession {
             commit_now,
             !terminal,
         ) {
-            return Err(self.reject_pulled_delivery(error));
+            return Err(self.reject_pulled_delivery(
+                error,
+                pressure_membership.clone(),
+                pressure_position,
+            ));
         }
         if authorized.document_generation() != self.transport.control_generation {
             let error = AsyncTransportError::new(AsyncTransportErrorKind::StaleControl);
-            return Err(self.reject_pulled_delivery(error));
+            return Err(self.reject_pulled_delivery(
+                error,
+                pressure_membership.clone(),
+                pressure_position,
+            ));
         }
         if !authorized.is_current_at(commit_now) {
             let error = AsyncTransportError::new(AsyncTransportErrorKind::AuthorizationLost);
-            return Err(self.reject_pulled_delivery(error));
+            return Err(self.reject_pulled_delivery(
+                error,
+                pressure_membership.clone(),
+                pressure_position,
+            ));
         }
         let disposition = match self.pressure.offer(authorized) {
             Ok(disposition) => disposition,
             Err(_) => {
                 let error = AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope);
-                return Err(self.reject_pulled_delivery(error));
+                return Err(self.reject_pulled_delivery(
+                    error,
+                    pressure_membership.clone(),
+                    pressure_position,
+                ));
             }
         };
         self.prune_empty_terminal_drains();
@@ -2023,6 +2062,7 @@ impl BoundedDocumentTransportSession {
             return Err(AsyncDeliveryError::new(AsyncDeliveryErrorKind::Retired));
         }
 
+        let pressure_membership = delivery.pressure_membership().clone();
         let Some(sequence) = self.sequence_lanes.iter_mut().find(|lane| {
             lane.subscription == *delivery.envelope().subscription()
                 && lane.binding == *delivery.binding()
@@ -2042,15 +2082,11 @@ impl BoundedDocumentTransportSession {
                 .dispatch(&mut sequence.machine, dispatch_now, dispatcher)
                 .map(AsyncDeliveryDisposition::Sequence)
         };
-        if matches!(&outcome, Ok(AsyncDeliveryDisposition::Replay(_)))
-            && self.pressure.retained_events() == 0
-            && self
-                .sequence_lanes
-                .iter()
-                .all(|lane| lane.machine.state() == SequenceState::Current)
-        {
-            self.pressure.clear_recovered();
+        if let Ok(AsyncDeliveryDisposition::Replay(replay)) = &outcome {
+            self.pressure
+                .record_replay_recovery(&pressure_membership, replay.current());
         }
+        self.pressure.commit_recoveries_if_drained();
         self.prune_empty_terminal_drains();
         match outcome {
             Ok(disposition) => Ok(Some(disposition)),
@@ -2086,6 +2122,16 @@ impl BoundedDocumentTransportSession {
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         self.pressure.is_degraded()
+            || self
+                .sequence_lanes
+                .iter()
+                .any(|lane| lane.machine.state() == SequenceState::Degraded)
+    }
+
+    /// Returns the bounded count of redacted unresolved pressure causes.
+    #[must_use]
+    pub fn unresolved_pressure_cause_count(&self) -> usize {
+        self.pressure.unresolved_pressure_cause_count()
     }
 
     /// Returns one bounded low-cardinality pressure snapshot.
@@ -2148,6 +2194,18 @@ impl BoundedDocumentTransportSession {
 
     /// Commits one established logical membership.
     pub fn commit_add(&mut self, ready: ReadyTransportAdd) -> Result<(), AsyncTransportError> {
+        if let Some(existing) = self
+            .terminal_drains
+            .iter()
+            .find(|drain| drain.subscription() == ready.authorization.subscription())
+        {
+            let kind = if existing.binding() == ready.authorization.binding() {
+                AsyncTransportErrorKind::DuplicateMembership
+            } else {
+                AsyncTransportErrorKind::DescriptorMismatch
+            };
+            return Err(AsyncTransportError::new(kind));
+        }
         let sequence = DocumentSequenceLane::new(&ready.authorization);
         self.transport.commit_add(ready)?;
         self.sequence_lanes.push(sequence);
@@ -2209,8 +2267,13 @@ impl BoundedDocumentTransportSession {
         self.prune_sequence_lanes();
     }
 
-    fn reject_pulled_delivery(&mut self, error: AsyncTransportError) -> AsyncTransportError {
-        self.pressure.record_delivery_loss();
+    fn reject_pulled_delivery(
+        &mut self,
+        error: AsyncTransportError,
+        membership: PressureMembership,
+        high_water: StreamPosition,
+    ) -> AsyncTransportError {
+        self.pressure.record_delivery_loss(membership, high_water);
         self.prune_empty_terminal_drains();
         error
     }

@@ -413,6 +413,71 @@ impl SequenceMachine {
         })
     }
 
+    /// Recovers a bounded-delivery loss while the ordinary sequence lane stayed current.
+    ///
+    /// The pressure layer supplies only the exact authorized lost high-water fact;
+    /// this machine still validates and commits every sequence transition itself.
+    pub(crate) fn recover_from_pressure_replay(
+        &mut self,
+        transcript: Vec<ActiveAsyncMembershipGuard<'_>>,
+        required_high_water: StreamPosition,
+        now: UnixMillis,
+        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+    ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
+        if self.state != SequenceState::Current
+            || transcript.is_empty()
+            || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES
+            || required_high_water.epoch() != self.current.epoch()
+            || required_high_water.sequence() <= self.current.sequence()
+        {
+            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+        }
+
+        let mut expected = self
+            .current
+            .sequence()
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0))?;
+        let mut through = self.current;
+        for (index, guard) in transcript.iter().enumerate() {
+            if !guard.is_current_at(now) {
+                return Err(self.replay_error(SequenceErrorKind::MembershipExpired, 0));
+            }
+            if guard.context() != &self.context || !self.matches_scope(guard.envelope()) {
+                return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, 0));
+            }
+            let position = guard.envelope().position();
+            if position.epoch() != self.current.epoch() || position.sequence().get() != expected {
+                return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+            }
+            through = position;
+            if index + 1 < transcript.len() {
+                expected = expected.checked_add(1).ok_or_else(|| {
+                    self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0)
+                })?;
+            }
+        }
+        if through.sequence() < required_high_water.sequence() {
+            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+        }
+
+        let mut applied = 0;
+        for guard in transcript {
+            let (_, envelope) = guard.into_parts();
+            if let Err(error) = dispatcher.dispatch(envelope) {
+                return Err(self.replay_error(dispatch_error_kind(error), applied));
+            }
+            self.current = envelope.position();
+            applied += 1;
+        }
+        Ok(ReplayDispatchOutcome {
+            applied,
+            current: self.current,
+            state: self.state,
+        })
+    }
+
     /// Requests and installs a baseline only through trusted host continuity authority.
     pub fn recover_from_authoritative_refresh(
         &mut self,

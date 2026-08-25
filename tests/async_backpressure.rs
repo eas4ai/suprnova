@@ -25,7 +25,8 @@ use suprnova_live::resource::{PermitPool, ResourceBounds, Retirement};
 mod support;
 
 use support::{
-    DeliveryAuthorityDrift, ScriptItem, ScriptedSource, TransportFixture, position, subscription,
+    DeliveryAuthorityDrift, ScriptItem, ScriptedSource, TransportFixture, WakeGate, position,
+    subscription,
 };
 
 #[derive(Default)]
@@ -269,6 +270,16 @@ async fn add_empty_membership(
     authorization: suprnova_live::async_updates::AuthorizedTransportSubscription,
 ) {
     let source = ScriptedSource::new(vec![vec![ScriptItem::End]]);
+    try_add_membership(bounded, authorization, &source)
+        .await
+        .expect("commit empty membership");
+}
+
+async fn try_add_membership(
+    bounded: &mut BoundedDocumentTransportSession,
+    authorization: suprnova_live::async_updates::AuthorizedTransportSubscription,
+    source: &ScriptedSource,
+) -> Result<(), suprnova_live::async_updates::AsyncTransportError> {
     let pending = bounded
         .prepare_add(authorization)
         .expect("prepare empty membership");
@@ -280,10 +291,10 @@ async fn add_empty_membership(
         .prepare_establish(authorized)
         .expect("prepare empty establishment");
     let ready = establishing
-        .establish(&source)
+        .establish(source)
         .await
         .expect("establish empty membership");
-    bounded.commit_add(ready).expect("commit empty membership");
+    bounded.commit_add(ready)
 }
 
 #[tokio::test]
@@ -605,6 +616,81 @@ async fn empty_eof_prunes_terminal_drain_and_lane_before_exact_identity_reuse() 
         assert_eq!(bounded.terminal_drain_count(), 0);
         assert_eq!(bounded.sequence_position(&authorization), None);
     }
+}
+
+#[tokio::test]
+async fn queued_terminal_fences_exact_and_rotated_readmission_until_delivery() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = bounded_document(
+        &fixture,
+        0x75,
+        vec![AsyncPayload::Complete(CompletionReason::StreamCompleted)],
+    )
+    .await;
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(bounded.terminal_drain_count(), 1);
+    assert_eq!(bounded.delivery_lane_count(), 1);
+
+    let exact_source = ScriptedSource::new(vec![vec![ScriptItem::End]]);
+    let exact = try_add_membership(&mut bounded, authorization.clone(), &exact_source)
+        .await
+        .expect_err("the retained exact sequence lane fences readmission");
+    assert_eq!(
+        exact.kind(),
+        suprnova_live::async_updates::AsyncTransportErrorKind::DuplicateMembership
+    );
+    assert_eq!(exact_source.drop_count(), 1);
+    assert_eq!(bounded.terminal_drain_count(), 1);
+    assert_eq!(bounded.delivery_lane_count(), 1);
+
+    let rotated_fixture =
+        TransportFixture::new_with_signing_key(position(7, 0), "terminal-rotated", 0x76).await;
+    let rotated = rotated_fixture.request(
+        subscription(0x75),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let rotated_source = ScriptedSource::new(vec![vec![ScriptItem::End]]);
+    let mismatch = try_add_membership(&mut bounded, rotated, &rotated_source)
+        .await
+        .expect_err("a rotated binding cannot overlap a retained predecessor lane");
+    assert_eq!(
+        mismatch.kind(),
+        suprnova_live::async_updates::AsyncTransportErrorKind::DescriptorMismatch
+    );
+    assert_eq!(rotated_source.drop_count(), 1);
+    assert_eq!(bounded.terminal_drain_count(), 1);
+    assert_eq!(bounded.delivery_lane_count(), 1);
+
+    let mut dispatcher = RecordingDispatcher::default();
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    ));
+    assert_eq!(bounded.terminal_drain_count(), 0);
+    assert_eq!(bounded.delivery_lane_count(), 0);
+
+    add_empty_membership(&mut bounded, authorization.clone()).await;
+    assert_eq!(bounded.delivery_lane_count(), 1);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 0))
+    );
+    assert_eq!(bounded.pump_next(fixture.registry.as_ref()).await, Ok(None));
+    assert_eq!(bounded.delivery_lane_count(), 0);
+
+    let rotated = rotated_fixture.request(
+        subscription(0x75),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    add_empty_membership(&mut bounded, rotated.clone()).await;
+    assert_eq!(bounded.delivery_lane_count(), 1);
+    assert_eq!(bounded.sequence_position(&authorization), None);
+    assert_eq!(bounded.sequence_position(&rotated), Some(position(7, 0)));
 }
 
 #[tokio::test]
@@ -1630,6 +1716,10 @@ async fn ordinary_replaceable_tail_cannot_split_an_admitted_replay_group() {
         Some(position(7, 4))
     );
     assert_eq!(bounded.retained_events(), 0);
+    assert!(
+        !bounded.is_degraded(),
+        "a proven replay recovery clears after the unrelated queued successor drains"
+    );
 }
 
 #[tokio::test]
@@ -1844,6 +1934,285 @@ async fn one_membership_replay_cannot_clear_a_healthy_documents_other_degraded_l
         Some(SequenceState::Current)
     );
     assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn sibling_replay_cannot_clear_an_exact_ordered_overflow_cause() {
+    use std::sync::Arc;
+
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let first = fixture.request(subscription(0x99), origin.clone());
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0x9a,
+        4,
+    );
+    let first_gate = Arc::new(WakeGate::new());
+    let first_source = ScriptedSource::new(vec![vec![
+        ScriptItem::RawEnvelope(browser_event(first.context(), 1)),
+        ScriptItem::RawEnvelope(browser_event(first.context(), 2)),
+        ScriptItem::Wait(first_gate.clone()),
+        ScriptItem::RawEnvelope(browser_event(first.context(), 3)),
+    ]]);
+    let pending = document.prepare_add(first.clone()).expect("prepare first");
+    let authorized = pending.authorize().await.expect("authorize first");
+    let establishing = document
+        .prepare_establish(authorized)
+        .expect("prepare first establishment");
+    let ready = establishing
+        .establish(&first_source)
+        .await
+        .expect("establish first");
+    document.commit_add(ready).expect("commit first");
+    let mut bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(2, 256 * 1024).expect("two-item document bound"),
+        PermitPool::new(1).expect("shared delivery permit"),
+        policy(),
+    )
+    .expect("bounded document");
+
+    let mut dispatcher = RecordingDispatcher::default();
+    for _ in 0..2 {
+        assert_eq!(
+            bounded.pump_next(fixture.registry.as_ref()).await,
+            Ok(Some(BufferDisposition::Queued))
+        );
+        assert!(matches!(
+            bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+            Ok(Some(AsyncDeliveryDisposition::Sequence(
+                SequenceDisposition::Apply
+            )))
+        ));
+    }
+
+    let second = fixture.request(subscription(0x9b), origin.clone());
+    let filler = fixture.request(subscription(0x9c), origin);
+    let sibling_source = ScriptedSource::new(vec![
+        vec![ScriptItem::RawEnvelope(heartbeat_at(
+            second.context(),
+            7,
+            2,
+        ))],
+        vec![ScriptItem::RawEnvelope(heartbeat_at(
+            filler.context(),
+            7,
+            1,
+        ))],
+    ]);
+    try_add_membership(&mut bounded, second.clone(), &sibling_source)
+        .await
+        .expect("commit second membership");
+    try_add_membership(&mut bounded, filler.clone(), &sibling_source)
+        .await
+        .expect("commit filler membership");
+
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    first_gate.release();
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Degraded))
+    );
+    assert_eq!(bounded.sequence_state(&first), Some(SequenceState::Current));
+    assert!(bounded.is_degraded());
+
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Degraded(SequenceDegradation::Gap)
+        )))
+    ));
+    assert!(matches!(
+        bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+        Ok(Some(AsyncDeliveryDisposition::Sequence(
+            SequenceDisposition::Apply
+        )))
+    ));
+
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &second,
+                vec![
+                    heartbeat_at(second.context(), 7, 1),
+                    heartbeat_at(second.context(), 7, 2),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("second replay admission"),
+        BufferDisposition::Queued
+    );
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("second replay dispatch");
+    assert_eq!(
+        bounded.sequence_state(&second),
+        Some(SequenceState::Current)
+    );
+    assert_eq!(bounded.sequence_state(&first), Some(SequenceState::Current));
+    assert!(bounded.is_degraded());
+
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &first,
+                vec![browser_event(first.context(), 3)],
+                fixture.registry.as_ref(),
+            )
+            .expect("first replay admission"),
+        BufferDisposition::Queued
+    );
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("first exact replay dispatch");
+    assert_eq!(bounded.sequence_state(&first), Some(SequenceState::Current));
+    assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn authenticated_exact_retirement_discharges_only_that_memberships_pressure_obligation() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let authorization = fixture.request(subscription(0x9d), origin.clone());
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0x9d,
+        4,
+    );
+    let source = ScriptedSource::new(vec![vec![
+        ScriptItem::RawEnvelope(browser_event(authorization.context(), 1)),
+        ScriptItem::RawEnvelope(browser_event(authorization.context(), 2)),
+        ScriptItem::Pending,
+    ]]);
+    let pending = document
+        .prepare_add(authorization.clone())
+        .expect("prepare exact membership");
+    let authorized = pending
+        .authorize()
+        .await
+        .expect("authorize exact membership");
+    let establishing = document
+        .prepare_establish(authorized)
+        .expect("prepare exact establishment");
+    let ready = establishing
+        .establish(&source)
+        .await
+        .expect("establish exact membership");
+    document.commit_add(ready).expect("commit exact membership");
+    let mut bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(1, 256 * 1024).expect("one-item document bound"),
+        PermitPool::new(1).expect("shared delivery permit"),
+        policy(),
+    )
+    .expect("bounded document");
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("first admission");
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Degraded))
+    );
+    assert!(bounded.is_degraded());
+    let mut dispatcher = RecordingDispatcher::default();
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("retained exact successor dispatch");
+
+    let sibling = fixture.request(subscription(0x9e), origin);
+    let sibling_source = ScriptedSource::new(vec![vec![ScriptItem::RawEnvelope(heartbeat_at(
+        sibling.context(),
+        7,
+        2,
+    ))]]);
+    try_add_membership(&mut bounded, sibling.clone(), &sibling_source)
+        .await
+        .expect("commit sibling membership");
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("sibling gap admission");
+    bounded
+        .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
+        .expect("sibling gap classification");
+    assert_eq!(
+        bounded.sequence_state(&sibling),
+        Some(SequenceState::Degraded)
+    );
+
+    let remove = bounded
+        .prepare_remove(&authorization)
+        .expect("prepare exact removal");
+    let ready = remove.authorize().await.expect("authorize exact removal");
+    assert_eq!(bounded.commit_remove(ready), Ok(CloseDisposition::Closed));
+    assert_eq!(bounded.sequence_state(&authorization), None);
+    assert!(bounded.is_degraded());
+    assert_eq!(
+        bounded.sequence_state(&sibling),
+        Some(SequenceState::Degraded)
+    );
+
+    let remove = bounded
+        .prepare_remove(&sibling)
+        .expect("prepare sibling removal");
+    let ready = remove.authorize().await.expect("authorize sibling removal");
+    assert_eq!(bounded.commit_remove(ready), Ok(CloseDisposition::Closed));
+    assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn unresolved_pressure_cause_storage_is_hard_bounded_across_membership_churn() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0x9f,
+        suprnova_live::async_updates::MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS,
+    );
+    let mut bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(64, 256 * 1024).expect("document bounds"),
+        PermitPool::new(1).expect("shared delivery permit"),
+        policy(),
+    )
+    .expect("bounded document");
+    let cause_bound = suprnova_live::async_updates::MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS * 4;
+
+    for index in 0..=cause_bound {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+        let subscription = SubscriptionId::from_bytes(&bytes).expect("unique subscription");
+        let authorization = fixture.request(subscription, origin.clone());
+        let source = ScriptedSource::new(vec![vec![
+            ScriptItem::RawEnvelope(heartbeat_at(authorization.context(), 7, 1)),
+            ScriptItem::Error(suprnova_live::async_updates::AsyncTransportErrorKind::SourceFailed),
+        ]]);
+        try_add_membership(&mut bounded, authorization, &source)
+            .await
+            .expect("commit churn membership");
+        assert_eq!(
+            bounded.pump_next(fixture.registry.as_ref()).await,
+            Ok(Some(BufferDisposition::Queued))
+        );
+        assert!(bounded.pump_next(fixture.registry.as_ref()).await.is_err());
+    }
+
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.delivery_lane_count(), 0);
+    assert!(bounded.is_degraded());
+    assert_eq!(bounded.unresolved_pressure_cause_count(), cause_bound);
 }
 
 #[tokio::test]

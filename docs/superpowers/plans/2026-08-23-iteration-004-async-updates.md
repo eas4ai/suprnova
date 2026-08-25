@@ -433,6 +433,11 @@
   ordinary single-envelope dispatch. Hostile callback, public API, repeated
   identity reuse, zero-validation over-count, complete recovery, and truthful
   partial-failure tests failed before correction.
+- [x] Record the fourth correction REDs: one document-wide degradation flag let
+  a sibling replay erase an unrelated ordered-overflow obligation, and terminal
+  detachment let exact or rotated same-ID admission create another sequence lane
+  while the queued predecessor retained the first. Exact pressure/replay and
+  pending-terminal admission tests failed before correction.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -500,6 +505,15 @@
   queue is empty and every exact logical lane is current; one membership cannot
   clear a degraded sibling. Partial dispatch exposes its committed prefix and
   remains degraded.
+- [x] Track unresolved pressure by finite cause and exact subscription binding,
+  document scope, and component memo. Pressure high-water remains evidence for
+  the existing Task 3 machine, not a second sequence counter; exact replay clears
+  only covered causes for that membership after the queue drains, and explicit
+  authenticated removal discharges only that exact retired binding. Fence exact
+  and rotated same-ID commits while a queued terminal predecessor retains its
+  sole lane; after delivery, re-admission creates exactly one fresh lane. Four
+  finite cause classes cap retained tracker state at four times the existing
+  document membership ceiling; saturation remains conservatively degraded.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

@@ -292,13 +292,23 @@ Acceptance criteria:
   cancellation, or a concurrent cloned-handle admission changes no replay queue
   position. Private contiguous group markers preserve the admitted transcript
   through one lock-scoped dequeue and one RAII permit lease. Dispatch invokes
-  Task 3 `recover_from_replay` on the exact lane, never ordinary single-envelope
-  dispatch. A later replaceable ordinary message cannot coalesce with or replace
-  any replay group member. Complete recovery clears document pressure
-  degradation only after the aggregate queue is empty and every exact logical
-  sequence lane is current; one membership cannot clear a sibling's degraded
-  state. Authorization or dispatcher failure retains degraded sequence state
-  and exposes the truthful committed replay prefix.
+  Task 3 replay recovery on the exact lane, never ordinary single-envelope
+  dispatch. A pressure loss may leave that Task 3 lane current; in that case the
+  same machine validates and commits the exact successor transcript through the
+  pressure tracker's authorized lost high-water rather than creating a second
+  counter. A later replaceable ordinary message cannot coalesce with or replace
+  any replay group member. Unresolved pressure is retained by exact subscription
+  binding, document/component scope, and finite cause. Complete recovery clears
+  only that exact membership's covered causes, and only after the aggregate queue
+  is empty; document currentness additionally requires every exact logical
+  sequence lane and every unresolved pressure cause to be clean. One membership
+  cannot clear a sibling's pressure loss even when both Task 3 lanes otherwise
+  report current. Admission, delivery, sequence, and detachment are the four
+  finite cause classes, so retained cause storage is hard-bounded at four times
+  the document membership ceiling across lifetime churn. Saturation stays
+  conservatively degraded until aggregate retirement rather than discarding an
+  unknown obligation. Authorization or dispatcher failure retains the exact
+  unresolved cause and exposes the truthful committed replay prefix.
 - Coalescing may replace only the newest exact contiguous refresh for the same
   signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
@@ -319,11 +329,15 @@ Acceptance criteria:
 - Explicit membership removal and provider failure atomically purge only queued
   entries with that exact subscription binding, release their byte/item
   reservations under the queue lock, and drop removed values after unlocking.
-  Graceful source completion and `Complete`
-  retain already-admitted ordered predecessors through the single terminal
-  drain; an empty EOF prunes its drain and exact sequence lane before returning,
-  so repeated or signing-key-rotated identity reuse remains bounded. A healthy
-  sibling remains routable throughout cleanup.
+  Graceful source completion and `Complete` retain already-admitted ordered
+  predecessors through the single terminal drain. While that drain retains its
+  exact Task 3 lane, same-ID re-admission is fenced: the exact binding is a
+  duplicate and a rotated binding is a descriptor mismatch. Delivery of the
+  terminal predecessor (or an empty EOF) prunes the drain and lane before return,
+  after which exact or signing-key-rotated identity reuse creates one fresh lane.
+  Authenticated explicit removal discharges only that exact retired binding's
+  remaining pressure obligation; unrelated detach/cleanup does not silently
+  forgive lost continuity. A healthy sibling remains routable throughout cleanup.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
 - Persisted `pagehide` closes long-lived transports and transport timers before
@@ -371,6 +385,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Bound Task 5 pressure recovery and terminal sequencing to exact
+  logical memberships. The document retains finite redacted pressure causes by
+  binding and scope, so one sibling's replay cannot clear another sibling's
+  ordered overflow while its Task 3 lane remains current. Exact replay is still
+  validated and committed by that existing Task 3 machine through the lost
+  high-water; explicit authenticated retirement clears only its exact obligation.
+  A queued terminal predecessor also fences exact and rotated same-ID admission
+  until its retained lane drains, preventing duplicate sequence authority.
 - 2026-08-25 -- Removed the remaining Task 5 delivery bypasses and preserved
   replay as recovery authority end to end. Raw Task 4 `next` is no longer a
   public API; provider delivery, replay admission, dequeue, and registered
