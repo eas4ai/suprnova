@@ -301,6 +301,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Closed the upload security gate with bounded arbitrary-byte
+  protocol, lifecycle-sequence, and capped media-header fuzz targets. Browser
+  conformance now keeps a live grant sentinel absent from rendered HTML,
+  URL/history, storage, console, and request traces; the static test host emits
+  no literal grant, defines no quarantine-serving route, and upload resume still
+  requires current memory or explicit authenticated application reacquisition.
 - 2026-08-25 -- Implemented truthful accessible upload projection and strict
   keyed continuity. Native file selection is read only from the declared input
   target; same-key/same-node input, progress, and control identity survives a

@@ -5,6 +5,13 @@ import { expectNoSeriousA11yViolations } from "./support/a11y.js";
 test("native uploads keep accessible progress across a compatible morph and retire on rekey", async ({
   page,
 }) => {
+  const grantSentinel = "browser-fixture-grant";
+  const consoleTrace: string[] = [];
+  const requestTrace: string[] = [];
+  page.on("console", (message) => consoleTrace.push(message.text()));
+  page.on("request", (request) => {
+    requestTrace.push(`${request.url()}\n${request.postData() ?? ""}`);
+  });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/scenario/uploads");
   await expect(page.locator("html")).toHaveAttribute("data-upload-runtime", "ready");
@@ -48,6 +55,30 @@ test("native uploads keep accessible progress across a compatible morph and reti
   await expect(page.locator("#attachment-retry")).toBeDisabled();
   await expect(page.locator("#attachment-cancel")).toBeEnabled();
   await expectNoSeriousA11yViolations(page, { sourceUrl: "/test-vendor/axe.js" });
+  expect(
+    await page.evaluate(async (sentinel) => {
+      const indexedDatabases =
+        typeof indexedDB.databases === "function" ? await indexedDB.databases() : [];
+      const storageEntries = (storage: Storage) =>
+        Array.from({ length: storage.length }, (_, index) => {
+          const key = storage.key(index);
+          return key === null ? null : [key, storage.getItem(key)];
+        });
+      const observable = [
+        document.documentElement.outerHTML,
+        document.URL,
+        location.href,
+        JSON.stringify(history.state),
+        document.cookie,
+        JSON.stringify(storageEntries(localStorage)),
+        JSON.stringify(storageEntries(sessionStorage)),
+        JSON.stringify(indexedDatabases),
+      ].join("\n");
+      return observable.includes(sentinel);
+    }, grantSentinel),
+  ).toBe(false);
+  expect(consoleTrace.join("\n")).not.toContain(grantSentinel);
+  expect(requestTrace.join("\n")).not.toContain(grantSentinel);
 
   await page.evaluate(() => {
     const release: unknown = Reflect.get(window, "__releaseUploadChunk");

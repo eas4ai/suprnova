@@ -657,13 +657,13 @@ QuarantineStore>` stays in the engine. It creates
   keyboard-native.
 
 - [x] Run upload unit tests and Playwright Chromium/Firefox/WebKit with accessibility/CSP checks and deterministic lifecycle events.
-- [ ] Commit: `feat(browser): preserve accessible upload continuity`.
+- [x] Commit: `feat(browser): preserve accessible upload continuity`.
 
 ## Task 10: Fuzz, verify, and hand off uploads
 
 **Files:** upload fuzz targets and every upload file
 
-- [ ] Add fuzz targets that decode arbitrary bytes under strict limits, apply arbitrary transition sequences, and probe capped PNG/JPEG/GIF/WebP headers without panic, allocation/loop escape, dimension overflow, state regression, or cross-handle acceptance:
+- [x] Add fuzz targets that decode arbitrary bytes under strict limits, apply arbitrary transition sequences, and probe capped PNG/JPEG/GIF/WebP headers without panic, allocation/loop escape, dimension overflow, state regression, or cross-handle acceptance:
 
   ```rust
     fuzz_target!(|input: &[u8]| {
@@ -679,14 +679,16 @@ QuarantineStore>` stays in the engine. It creates
     });
   ```
 
-- [ ] Run the complete upload gate:
+- [x] Run the complete upload gate:
 
   ```bash
   rtk cargo fmt --all -- --check
   rtk env CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features
   rtk env CARGO_INCREMENTAL=0 cargo test --test upload_identity --test upload_protocol --test upload_state --test upload_file_provider --test upload_direct_provider --test upload_validation --test upload_finalization --test upload_cleanup --test upload_security
-    rtk cargo +nightly fuzz build
-    rtk cargo +nightly fuzz run upload_media_header -- -runs=1000
+  rtk cargo +nightly fuzz build
+  rtk cargo +nightly fuzz run upload_protocol -- -runs=1000
+  rtk cargo +nightly fuzz run upload_state -- -runs=1000
+  rtk cargo +nightly fuzz run upload_media_header -- -runs=1000
   rtk npm --prefix browser run format:check
   rtk npm --prefix browser run lint
   rtk npm --prefix browser run typecheck
@@ -697,8 +699,8 @@ QuarantineStore>` stays in the engine. It creates
   rtk git diff --check
   ```
 
-- [ ] Inspect logs, traces, snapshots, HTML, URLs/history, diagnostics, serialized actions/models, and test-host inspection output with the grant sentinel. Confirm quarantined/unverified content has no serving route and reload has no ambient resume state.
-- [ ] Commit verification corrections as `chore: close iteration 004 upload gate`.
+- [x] Inspect logs, traces, snapshots, HTML, URLs/history, diagnostics, serialized actions/models, and test-host inspection output with the grant sentinel. Confirm quarantined/unverified content has no serving route and reload has no ambient resume state.
+- [x] Commit verification corrections as `chore: close iteration 004 upload gate`.
 
 ## Definition-of-done coverage
 
@@ -710,9 +712,9 @@ QuarantineStore>` stays in the engine. It creates
 
 ## Plan self-review checklist
 
-- [ ] No grant type implements revealing formatting or serialization into Live state.
-- [ ] No client filename/path influences a storage path and quarantine is never served.
-- [ ] File and direct providers share state/authority semantics; no vendor capability is claimed.
-- [ ] Ready and finalized remain distinct and only an authorized deliberate action finalizes.
-- [ ] Resume is current-document-only unless explicit authenticated reacquisition succeeds.
-- [ ] Every queue, buffer, permit, file descriptor, task, timer, listener, and transfer has one bounded owner and idempotent retirement.
+- [x] No grant type implements revealing formatting or serialization into Live state.
+- [x] No client filename/path influences a storage path and quarantine is never served.
+- [x] File and direct providers share state/authority semantics; no vendor capability is claimed.
+- [x] Ready and finalized remain distinct and only an authorized deliberate action finalizes.
+- [x] Resume is current-document-only unless explicit authenticated reacquisition succeeds.
+- [x] Every queue, buffer, permit, file descriptor, task, timer, listener, and transfer has one bounded owner and idempotent retirement.

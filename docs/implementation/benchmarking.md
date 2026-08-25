@@ -91,9 +91,9 @@ cardinality, artifact SHA-256/Brotli size, and retained bytes per island through
 the browser heap instrumentation.
 
 The current exploratory evidence is bound to artifact
-`316650a9ed4ed318254d1e5b66e675dc65e81088936e5ced63388592d93fc5e3`
-at 46,133 Brotli bytes. Its p95 values are 59 ms for D100, 441.1 ms for M1K,
-and 728.8 ms for M5K, with 4,732.36 retained bytes per island. These are checked
+`7e7f790ec2e6feeaf4f6bdd15655754b21657b604b26ec6d4136d4eebb401869`
+at 46,947 Brotli bytes. Its p95 values are 30.3 ms for D100, 136.9 ms for M1K,
+and 584.4 ms for M5K, with 4,735.68 retained bytes per island. These are checked
 development measurements, not public release claims.
 
 `--release --dedicated` requires B1 evidence and the exact full methodology.

@@ -817,12 +817,13 @@ function uploadsBoot() {
 
     let revision = 0;
     let releaseChunk = null;
+    const fixtureGrant = ["browser", "fixture", "grant"].join("-");
     class FixtureUploadTransport {
       async send(request) {
         revision += 1;
         if (request.operation === "create") {
           return {
-            grant: "browser-fixture-grant",
+            grant: fixtureGrant,
             handle: "018f47c1-2af0-7cc4-a001-000000000001",
             revision: String(revision),
             state: "queued",

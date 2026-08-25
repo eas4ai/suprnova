@@ -91,3 +91,17 @@ path = "fuzz_targets/upload_media_header.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "upload_protocol"
+path = "fuzz_targets/upload_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_state"
+path = "fuzz_targets/upload_state.rs"
+test = false
+doc = false
+bench = false

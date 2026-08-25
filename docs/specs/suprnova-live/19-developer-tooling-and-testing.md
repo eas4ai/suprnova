@@ -440,6 +440,12 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added bounded upload protocol, transition-sequence, and media
+  header fuzz targets and exercised each for 1,000 runs after building the full
+  fuzz workspace. Re-recorded the exact production ESM artifact
+  `7e7f790ec2e6feeaf4f6bdd15655754b21657b604b26ec6d4136d4eebb401869`
+  at 46,947 Brotli bytes through pinned Chromium; the exploratory result passed
+  and now supplies the unattended exact-artifact baseline.
 - 2026-08-25 -- Added built-artifact upload continuity evidence across Chromium,
   Firefox, and WebKit, including strict CSP, accessibility, reduced motion,
   same-identity preservation, rekey retirement, and native clearing. The test

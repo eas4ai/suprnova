@@ -10,7 +10,14 @@ fuzz_target!(|data: &[u8]| {
         .strip_prefix(b"hex:")
         .and_then(decode_hex)
         .unwrap_or_else(|| data[..data.len().min(MAX_MEDIA_PREFIX_BYTES)].to_vec());
-    let _ = MediaHeaderProbe::probe(&decoded);
+    if let Ok(Some(dimensions)) = MediaHeaderProbe::probe(&decoded) {
+        assert_ne!(dimensions.width(), 0);
+        assert_ne!(dimensions.height(), 0);
+        assert_eq!(
+            dimensions.pixels(),
+            u64::from(dimensions.width()) * u64::from(dimensions.height())
+        );
+    }
 });
 
 fn decode_hex(value: &[u8]) -> Option<Vec<u8>> {
