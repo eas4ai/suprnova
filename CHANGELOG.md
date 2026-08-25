@@ -133,6 +133,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   QR-code rendering. The new image subsystem is built on the OxideAV crates
   behind the `media` feature instead.
 
+### Upgrading
+
+- **`Envelope` gained a public `unique_lock_owner: Option<String>` field.** The
+  wire format is unchanged - the field is `#[serde(default)]` and skipped when
+  `None`, so envelopes round-trip byte-identically in both directions and
+  `schema_version` stays at 2 - but any code that builds an `Envelope` with a
+  struct literal now has to name it. Add `unique_lock_owner: None` unless you
+  are deliberately carrying a uniqueness lock across the push. Code that only
+  reads envelopes, or builds them through `Queue::push` and its siblings, needs
+  no change.
+
 ## 1.3.2 - 2026-08-25
 
 ### Added

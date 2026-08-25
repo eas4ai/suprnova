@@ -19,7 +19,9 @@ use suprnova::idempotency::Idempotency;
 use suprnova::queue::driver::QueueDriver;
 use suprnova::queue::memory::MemoryQueueDriver;
 use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
-use suprnova::queue::{Envelope, JobMiddleware, JobMiddlewareNext, JobOutcome, Queue};
+use suprnova::queue::{
+    Envelope, JobMiddleware, JobMiddlewareNext, JobOutcome, MemoryFailedJobStore, Queue,
+};
 use suprnova::{FrameworkError, Job, async_trait};
 use tokio_util::sync::CancellationToken;
 
@@ -356,4 +358,139 @@ async fn an_envelope_without_a_recorded_owner_keeps_ttl_semantics() {
         "with no owner token there is nothing to release owner-scoped, so the \
          TTL still gates re-dispatch"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The `finally` sweep.
+//
+// A middleware that short-circuits means the pipeline core never ran, so the
+// release at processing start never happened. Every short-circuit except
+// `Released` still has to give the lock up, because the job is never going to
+// process - Laravel guards its `finally` on `! $job->isReleased()`, not on the
+// severity of the outcome.
+// ---------------------------------------------------------------------------
+
+static SHORT_CIRCUIT_HANDLED: AtomicUsize = AtomicUsize::new(0);
+
+/// How a short-circuiting middleware settles the job without ever calling the
+/// handler.
+enum ShortCircuit {
+    Deleted,
+    Failed,
+    Completed,
+}
+
+struct ShortCircuitMiddleware(ShortCircuit);
+
+#[async_trait]
+impl JobMiddleware for ShortCircuitMiddleware {
+    async fn handle(
+        &self,
+        _env: Envelope,
+        _next: JobMiddlewareNext,
+    ) -> Result<JobOutcome, FrameworkError> {
+        Ok(match self.0 {
+            ShortCircuit::Deleted => JobOutcome::Deleted,
+            ShortCircuit::Failed => JobOutcome::Failed {
+                reason: "short-circuited by middleware".into(),
+            },
+            ShortCircuit::Completed => JobOutcome::Completed,
+        })
+    }
+}
+
+/// One opted-in unique job per short-circuit outcome. Each needs its own
+/// `job_name` and its own `middleware()`, so the boilerplate is generated
+/// rather than written three times.
+macro_rules! short_circuit_job {
+    ($ty:ident, $job_name:literal, $unique_id:literal, $variant:ident) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct $ty;
+
+        #[async_trait]
+        impl Job for $ty {
+            fn job_name() -> &'static str {
+                $job_name
+            }
+            fn unique_id(&self) -> Option<String> {
+                Some($unique_id.into())
+            }
+            fn unique_until_processing() -> bool {
+                true
+            }
+            fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
+                vec![Arc::new(ShortCircuitMiddleware(ShortCircuit::$variant))]
+            }
+            async fn handle(self) -> Result<(), FrameworkError> {
+                SHORT_CIRCUIT_HANDLED.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    };
+}
+
+short_circuit_job!(DroppedJob, "wave5-sweep-deleted", "sweep-deleted", Deleted);
+short_circuit_job!(
+    DeadLetteredJob,
+    "wave5-sweep-failed",
+    "sweep-failed",
+    Failed
+);
+short_circuit_job!(
+    CompletedByMiddlewareJob,
+    "wave5-sweep-completed",
+    "sweep-completed",
+    Completed
+);
+
+/// Push the job, let the worker settle it once, and assert the sweep freed the
+/// lock so a re-push inside `unique_for` wins it again.
+async fn assert_sweep_releases_lock<J: Job>(make: impl Fn() -> J, settled_as: &str) {
+    install_cache();
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    register_job::<J>();
+    SHORT_CIRCUIT_HANDLED.store(0, Ordering::SeqCst);
+
+    assert!(
+        Queue::push_unique(make()).await.expect("push"),
+        "the first push must win the lock"
+    );
+    work_one(driver.clone()).await;
+    assert_eq!(
+        SHORT_CIRCUIT_HANDLED.load(Ordering::SeqCst),
+        0,
+        "the middleware short-circuited, so the handler never ran and the \
+         release at processing start never happened"
+    );
+
+    assert!(
+        Queue::push_unique(make()).await.expect("re-push"),
+        "a job the middleware settled as {settled_as} is never going to \
+         process, so the sweep must release its uniqueness lock"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_job_dropped_by_middleware_gives_up_its_lock() {
+    assert_sweep_releases_lock(|| DroppedJob, "deleted").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_job_dead_lettered_by_middleware_gives_up_its_lock() {
+    // A dead-letter with no store bound logs the whole envelope at ERROR;
+    // bind one so the settlement takes its normal path.
+    Queue::set_failed_store(Arc::new(MemoryFailedJobStore::new()));
+    assert_sweep_releases_lock(|| DeadLetteredJob, "failed").await;
+}
+
+#[tokio::test]
+#[serial]
+async fn a_job_completed_by_middleware_gives_up_its_lock() {
+    // The one short-circuit that is not a failure. The lock still has to go:
+    // the handler never ran, so nothing released it at processing start, and
+    // the job is settled and gone.
+    assert_sweep_releases_lock(|| CompletedByMiddlewareJob, "completed").await;
 }

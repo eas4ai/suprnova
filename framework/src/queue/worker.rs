@@ -229,6 +229,14 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
             // the uniqueness lock in exactly this position (the pipeline's
             // `->then(...)`), so a middleware that sends the job back to the
             // queue never gets its lock released out from under it.
+            //
+            // Under the sync driver this runs inline inside the very
+            // `push_unique` call that took the lock, so the job releases a lock
+            // its own caller still holds a guard for. That is the correct
+            // outcome - processing HAS begun - but the caller's lease renewer
+            // then reports a lost lease, and `push_unique` reports
+            // `FreshUnfenced`. Both warnings are expected on that path; the
+            // queues chapter says so.
             if unique_until_processing {
                 release_unique_lock_if_held(&env).await;
             }
@@ -599,18 +607,22 @@ pub async fn run_worker(
         let deps = SettlementDeps::current();
 
         // Laravel's `finally` sweep (`CallQueuedHandler::dispatchThroughMiddleware`).
-        // A middleware that short-circuited means the pipeline core never ran,
-        // so the release at processing start never happened either, and the
-        // job would sit on its uniqueness lock for the rest of the TTL despite
-        // being dropped or dead-lettered. The arms below that can only be
-        // reached with the core already run call this too; that second release
-        // finds no lock this envelope owns and reports `false`, which is why it
-        // is safe to sweep without tracking whether the core ran.
+        // A middleware that short-circuits means the pipeline core never ran,
+        // so the release at processing start never happened either, and the job
+        // would sit on its uniqueness lock for the rest of the TTL despite
+        // being dropped, dead-lettered, or reported complete by the middleware
+        // itself.
         //
-        // `Released` is deliberately not swept: a job put back on the queue has
-        // not started processing, and Laravel guards that same case with
-        // `! $job->isReleased()`. Nor is `TimedOut`, which can only be reached
-        // after the core started.
+        // The guard is Laravel's, and it is about the job's state, not the
+        // outcome's severity: sweep everything except `Released`, because a job
+        // put back on the queue has not started processing
+        // (`! $job->isReleased()`). `TimedOut` is likewise left alone - it can
+        // only be reached with the core already started, so the release already
+        // happened at dispatch time.
+        //
+        // Arms reachable with the core already run sweep too. That second
+        // release finds no lock this envelope owns and reports `false`, which
+        // is what makes it safe to sweep without tracking whether the core ran.
         //
         // The owner-token check comes first so the registry read is skipped
         // entirely for the ordinary job, which never carries one.
@@ -619,6 +631,9 @@ pub async fn run_worker(
 
         match outcome {
             DispatchOutcome::Settled(JobOutcome::Completed) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
             }
             DispatchOutcome::Settled(JobOutcome::Released { delay }) => {

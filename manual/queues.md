@@ -179,18 +179,35 @@ impl Job for RebuildSearchIndex {
 ```
 
 The worker releases the lock after the job's middleware pass and immediately
-before the handler runs. Three consequences follow:
+before the handler runs. Four consequences follow:
 
 - A job that a middleware releases back onto the queue keeps its lock. It has
   not started processing, so nothing has changed for a duplicate.
-- A job that a middleware deletes or dead-letters releases its lock, because
-  it is never going to process at all.
+- A job that a middleware short-circuits any other way gives up its lock,
+  because it is never going to process at all. That covers deleting the job,
+  dead-lettering it, and reporting it complete without ever calling the
+  handler.
+- A job that fails releases its lock and is still retried. The lock went the
+  moment processing began, so a duplicate can enqueue while the failed attempt
+  waits out its backoff, and you end up with two envelopes for the same unique
+  id. That is the trade this opt-in makes. If a retry has to keep holding the
+  slot, leave `unique_until_processing` off and let the `unique_for` TTL cover
+  the whole attempt chain.
 - The release is owner-scoped. `push_unique` records the lock's owner token on
   the envelope, and the worker releases with that token, so a redelivered
   attempt can never release a lock that a newer dispatch has since acquired.
 
 `unique_until_processing` needs the same two things `push_unique` needs: a
 `unique_id` that returns `Some(id)`, and a bootstrapped cache layer.
+
+Under the `sync` driver the handler runs inline inside the `push_unique` call
+that took the lock, so the job releases a lock its own caller is still
+nominally holding. If that handler runs for longer than a third of
+`unique_for`, the dedupe lease renewer notices the lock is gone and logs a
+lost-lease warning, and `push_unique` logs its own "exclusivity could not be
+proven" warning on top. Both are expected here rather than a fault: the job
+ran, the push returns `Ok(true)`, and the lock is gone because the job itself
+released it.
 
 ### Why Suprnova diverges
 
