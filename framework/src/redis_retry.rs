@@ -17,13 +17,17 @@ use std::time::Duration;
 
 /// How long to wait before a retry.
 ///
-/// `ConnectionManager` replaces a dead connection on a background task, so an
-/// immediate retry can observe the same dead connection and fail identically -
-/// the retry would be decorative. Laravel does not need a pause because its
-/// `command()` rebuilds the client synchronously from the connector before
-/// retrying; this is the async-manager equivalent. Fifty milliseconds sits
-/// well inside the cache driver's own 500 ms reconnect ceiling and is paid
-/// only on a failure that would otherwise have been returned to the caller.
+/// This is a courtesy delay, not a correctness requirement. `ConnectionManager`
+/// installs the replacement connection future synchronously before it returns
+/// the failing command's error (`ConnectionManager::reconnect` builds the new
+/// `SharedRedisFuture` and compare-and-swaps it in), and every
+/// `send_packed_command` reloads that slot, so the next attempt already awaits
+/// the replacement rather than the dead socket. What the pause buys is the
+/// server's side of the problem: a Redis that just dropped us is usually
+/// restarting or overloaded, and hammering it the microsecond its socket closed
+/// helps neither party. Fifty milliseconds is small next to the reconnect the
+/// next attempt is about to await anyway - see [`attempts_from_raw`] for what
+/// that reconnect actually costs.
 pub(crate) const RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Total attempts a read-shaped command gets, including the first.
@@ -40,9 +44,28 @@ pub(crate) fn read_attempts() -> u32 {
 /// Split out from [`read_attempts`] so the policy is testable without mutating
 /// process-global environment state. An unparseable value degrades to the
 /// default instead of failing boot: this knob tunes resilience, and refusing
-/// to start over a typo in it would be a worse outage than ignoring it. The
-/// clamp exists for the same reason - a stray `REDIS_COMMAND_RETRIES=9999`
-/// against a genuinely down Redis would otherwise stall a request for minutes.
+/// to start over a typo in it would be a worse outage than ignoring it.
+///
+/// # The clamp bounds attempts, not seconds
+///
+/// Budget this in seconds per attempt, not in the 50 ms of [`RETRY_BACKOFF`].
+/// When a connection has dropped, the next attempt awaits the replacement
+/// connection future, so it pays the driver's whole connect budget before it
+/// can even send the command, and then its response timeout:
+///
+/// - The cache driver configures up to 3 connect retries, at most 500 ms
+///   apart, each capped by a 2 s connect timeout, with a 5 s response timeout.
+/// - The queue and rate-limiter drivers use `ConnectionManager::new`, i.e. the
+///   redis-rs defaults: up to 6 connect retries with an *uncapped* exponential
+///   delay from 100 ms, each capped by a 1 s connect timeout, with a 500 ms
+///   response timeout.
+///
+/// So one retry against a down Redis costs seconds, and the clamp of 10 extra
+/// retries bounds a single wrapped read at 12 attempts, not at any wall-clock
+/// figure - which is tens of seconds to minutes on one call. A stall counts
+/// too: [`is_transient`] treats a timeout as retryable, so a merely slow server
+/// makes every wrapped read issue up to `attempts` commands instead of one.
+/// Raise this only when a caller can afford to wait that long.
 pub(crate) fn attempts_from_raw(raw: Option<&str>) -> u32 {
     let extra = raw
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -63,7 +86,17 @@ pub(crate) fn attempts_from_raw(raw: Option<&str>) -> u32 {
 /// A `READONLY` reply is excluded on purpose. Laravel matches that string
 /// because a phpredis client can be pointed at another node; a Suprnova driver
 /// holds one connection to one endpoint, so retrying a replica that just told
-/// us it is read-only produces the same answer, more slowly.
+/// us it is read-only produces the same answer, more slowly. redis-rs agrees:
+/// its own `retry_method` returns `NoRetry` for that kind.
+///
+/// `LOADING`, `TRYAGAIN`, and `MASTERDOWN` are excluded too, and this one is a
+/// judgement call rather than an echo of redis-rs, whose `retry_method` marks
+/// all three `WaitAndRetry`. They are server-authored replies about server
+/// state, not connection failures: the server received the command, understood
+/// it, and asked for time. Answering that on a 50 ms cadence adds load to a
+/// node that is already recovering, and the wait these need is measured in
+/// seconds to minutes - far outside a per-command budget. Surfacing them lets
+/// the caller decide.
 pub(crate) fn is_transient(e: &redis::RedisError) -> bool {
     e.is_connection_dropped() || e.is_io_error() || e.is_connection_refusal() || e.is_timeout()
 }
@@ -71,10 +104,13 @@ pub(crate) fn is_transient(e: &redis::RedisError) -> bool {
 /// Run an idempotent Redis command, retrying it after a transient failure.
 ///
 /// `make` is called once per attempt and must build a *fresh* future each
-/// time, cloning the driver's `ConnectionManager` inside itself. Cloning per
-/// attempt is the point: the clone picks up whatever connection the manager
-/// currently holds, so the retry runs against the reconnected socket rather
-/// than the dead one the first attempt found.
+/// time. Cloning the driver's `ConnectionManager` inside the closure is how the
+/// call sites do that, and the reason is ownership, not connection routing: a
+/// clone per attempt keeps the closure a plain `FnMut` with nothing borrowed
+/// across the await. A `ConnectionManager` clone shares one `Arc` of internal
+/// state and reloads the live connection slot on every command, so a clone and
+/// the original see the same replacement connection after a drop - the clone
+/// is not what makes the retry reach a healthy socket.
 ///
 /// # Only wrap commands that are safe to run twice
 ///

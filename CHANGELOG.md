@@ -13,8 +13,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   that hit the dead socket still failed your call. `GET`, `EXISTS`, the `SCAN`
   and `SSCAN` pages behind `Cache::flush` / `Cache::flush_tags`, the queue
   driver's `XLEN` / `ZCARD` / `XPENDING` reads, and the rate limiter's
-  `Retry-After` computation now retry once after a 50 ms pause - long enough for
-  the reconnect to land. `REDIS_COMMAND_RETRIES` adds further retries on top.
+  `Retry-After` computation now retry once after a short pause.
+  `REDIS_COMMAND_RETRIES` adds further retries on top, clamped at 10. Budget the
+  retry in seconds rather than milliseconds: the second attempt waits for the
+  replacement connection, so it costs the driver's whole connect and response
+  budget, and a timed-out command counts as transient as well as a dropped one.
   Writes never retry at any setting: a transient error means the connection
   failed, not that the server refused the command, so repeating a `SET`, an
   `INCR`, a lock acquisition, a rate-limit hit, or a queue pop could run it
