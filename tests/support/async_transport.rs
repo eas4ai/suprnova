@@ -5,7 +5,7 @@ use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use suprnova_live::async_updates::{
@@ -64,12 +64,43 @@ type TestFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct WakeGate {
     state: Mutex<WakeGateState>,
     observed: AtomicBool,
-    registration_hook: Mutex<Option<fn(&WakeGate)>>,
 }
 
 struct WakeGateState {
     released: bool,
     waiter: Option<Waker>,
+    interleaving: Option<Arc<RegistrationInterleaving>>,
+}
+
+/// Deterministic coordination for the exact release-versus-registration boundary.
+pub struct RegistrationInterleaving {
+    observed_unreleased: Barrier,
+    release_attempt_started: Barrier,
+}
+
+impl RegistrationInterleaving {
+    /// Creates one two-party poll/release choreography.
+    pub fn new() -> Self {
+        Self {
+            observed_unreleased: Barrier::new(2),
+            release_attempt_started: Barrier::new(2),
+        }
+    }
+
+    fn before_waiter_registration(&self) {
+        self.observed_unreleased.wait();
+        self.release_attempt_started.wait();
+    }
+
+    /// Waits until poll observes unreleased while holding the state mutex.
+    pub fn wait_until_observed_unreleased(&self) {
+        self.observed_unreleased.wait();
+    }
+
+    /// Announces that release is about to attempt the state mutex.
+    pub fn signal_release_attempt_started(&self) {
+        self.release_attempt_started.wait();
+    }
 }
 
 impl WakeGate {
@@ -79,36 +110,34 @@ impl WakeGate {
             state: Mutex::new(WakeGateState {
                 released: false,
                 waiter: None,
+                interleaving: None,
             }),
             observed: AtomicBool::new(false),
-            registration_hook: Mutex::new(None),
         }
     }
 
-    /// Installs a one-use deterministic hook around waiter registration.
-    pub fn with_registration_hook(self, hook: fn(&WakeGate)) -> Self {
-        *self
-            .registration_hook
+    /// Installs one deterministic release-versus-registration choreography.
+    pub fn with_registration_interleaving(
+        self,
+        interleaving: Arc<RegistrationInterleaving>,
+    ) -> Self {
+        self.state
             .lock()
-            .expect("wake gate registration hook lock") = Some(hook);
+            .expect("wake gate state lock")
+            .interleaving = Some(interleaving);
         self
     }
 
     /// Polls the controlled gate directly for deterministic wake tests.
     pub fn poll(&self, task: &mut Context<'_>) -> Poll<()> {
         self.observed.store(true, Ordering::Release);
-        let hook = {
-            self.registration_hook
-                .lock()
-                .expect("wake gate registration hook lock")
-                .take()
-        };
-        if let Some(hook) = hook {
-            hook(self);
-        }
         let mut state = self.state.lock().expect("wake gate state lock");
         if state.released {
             return Poll::Ready(());
+        }
+        let interleaving = state.interleaving.take();
+        if let Some(interleaving) = &interleaving {
+            interleaving.before_waiter_registration();
         }
         register_current_waker(&mut state.waiter, task.waker());
         Poll::Pending
@@ -882,7 +911,6 @@ impl AsyncEventSource for ScriptedSource {
 pub struct ControlledSubscribeSource {
     observed: AtomicBool,
     state: Mutex<ControlledSubscribeState>,
-    registration_hook: Mutex<Option<fn(&ControlledSubscribeSource)>>,
     close_count: Arc<AtomicUsize>,
     drop_count: Arc<AtomicUsize>,
 }
@@ -890,6 +918,7 @@ pub struct ControlledSubscribeSource {
 struct ControlledSubscribeState {
     released: bool,
     waiter: Option<Waker>,
+    interleaving: Option<Arc<RegistrationInterleaving>>,
 }
 
 impl ControlledSubscribeSource {
@@ -900,19 +929,22 @@ impl ControlledSubscribeSource {
             state: Mutex::new(ControlledSubscribeState {
                 released: false,
                 waiter: None,
+                interleaving: None,
             }),
-            registration_hook: Mutex::new(None),
             close_count: Arc::new(AtomicUsize::new(0)),
             drop_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// Installs a one-use deterministic hook around waiter registration.
-    pub fn with_registration_hook(self, hook: fn(&ControlledSubscribeSource)) -> Self {
-        *self
-            .registration_hook
+    /// Installs one deterministic release-versus-registration choreography.
+    pub fn with_registration_interleaving(
+        self,
+        interleaving: Arc<RegistrationInterleaving>,
+    ) -> Self {
+        self.state
             .lock()
-            .expect("subscribe registration hook lock") = Some(hook);
+            .expect("subscribe state lock")
+            .interleaving = Some(interleaving);
         self
     }
 
@@ -956,40 +988,40 @@ impl AsyncEventSource for ControlledSubscribeSource {
     {
         Box::pin(std::future::poll_fn(move |task| {
             self.observed.store(true, Ordering::Release);
-            let hook = {
-                self.registration_hook
-                    .lock()
-                    .expect("subscribe registration hook lock")
-                    .take()
-            };
-            if let Some(hook) = hook {
-                hook(self);
+            let mut state = self.state.lock().expect("subscribe state lock");
+            if state.released {
+                return ready_controlled_session(self, request);
             }
-            {
-                let mut state = self.state.lock().expect("subscribe state lock");
-                if !state.released {
-                    register_current_waker(&mut state.waiter, task.waker());
-                    return std::task::Poll::Pending;
-                }
+            let interleaving = state.interleaving.take();
+            if let Some(interleaving) = &interleaving {
+                interleaving.before_waiter_registration();
             }
-            std::task::Poll::Ready(Ok(Box::pin(ScriptedSession {
-                baseline: request.baseline(),
-                events: VecDeque::new(),
-                closed: false,
-                pending_first_close: false,
-                permanently_pending_close: false,
-                close_was_pending: false,
-                close_error_attempts: 0,
-                close_error_kind: AsyncTransportErrorKind::SourceFailed,
-                close_count: self.close_count.clone(),
-                close_poll_count: Arc::new(AtomicUsize::new(0)),
-                drop_count: self.drop_count.clone(),
-                close_gate: None,
-                pending_read_waker: None,
-                pending_close_waker: None,
-            }) as Pin<Box<dyn AsyncEventSession>>))
+            register_current_waker(&mut state.waiter, task.waker());
+            Poll::Pending
         }))
     }
+}
+
+fn ready_controlled_session(
+    source: &ControlledSubscribeSource,
+    request: &AuthorizedTransportSubscription,
+) -> Poll<Result<Pin<Box<dyn AsyncEventSession>>, AsyncTransportError>> {
+    Poll::Ready(Ok(Box::pin(ScriptedSession {
+        baseline: request.baseline(),
+        events: VecDeque::new(),
+        closed: false,
+        pending_first_close: false,
+        permanently_pending_close: false,
+        close_was_pending: false,
+        close_error_attempts: 0,
+        close_error_kind: AsyncTransportErrorKind::SourceFailed,
+        close_count: source.close_count.clone(),
+        close_poll_count: Arc::new(AtomicUsize::new(0)),
+        drop_count: source.drop_count.clone(),
+        close_gate: None,
+        pending_read_waker: None,
+        pending_close_waker: None,
+    }) as Pin<Box<dyn AsyncEventSession>>))
 }
 
 fn register_current_waker(slot: &mut Option<Waker>, candidate: &Waker) {

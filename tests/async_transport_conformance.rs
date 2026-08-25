@@ -27,8 +27,8 @@ use suprnova_live::identity::{ContentDigest, ScopeFingerprint, UnixMillis};
 mod support;
 
 use support::{
-    ControlledSubscribeSource, ScriptItem, ScriptedSource, TransportFixture, WakeGate, position,
-    subscription,
+    ControlledSubscribeSource, RegistrationInterleaving, ScriptItem, ScriptedSource,
+    TransportFixture, WakeGate, position, subscription,
 };
 
 #[test]
@@ -543,17 +543,26 @@ async fn controlled_read_and_close_pending_states_register_and_use_exact_wakers(
 
 #[test]
 fn wake_gate_release_between_state_check_and_registration_cannot_be_lost() {
-    let gate = WakeGate::new().with_registration_hook(WakeGate::release);
+    let interleaving = Arc::new(RegistrationInterleaving::new());
+    let gate = Arc::new(WakeGate::new().with_registration_interleaving(interleaving.clone()));
+    let release_gate = gate.clone();
+    let release_interleaving = interleaving.clone();
+    let release = std::thread::spawn(move || {
+        release_interleaving.wait_until_observed_unreleased();
+        release_interleaving.signal_release_attempt_started();
+        release_gate.release();
+    });
     let wakes = Arc::new(WakeCounter::default());
     let waker = Waker::from(wakes.clone());
     let mut task = Context::from_waker(&waker);
 
+    assert!(gate.poll(&mut task).is_pending());
+    release.join().expect("controlled gate release thread");
+    assert_eq!(wakes.count(), 1, "registered waiter receives release wake");
     assert!(gate.poll(&mut task).is_ready());
-    assert_eq!(wakes.count(), 0, "ready polls do not need a wake");
-    assert!(!gate.waiter_registered());
+    assert!(!gate.waiter_registered(), "release consumes the waiter");
     gate.release();
-    assert_eq!(wakes.count(), 0, "repeated release is idempotent");
-    assert!(gate.poll(&mut task).is_ready());
+    assert_eq!(wakes.count(), 1, "repeated release is idempotent");
 }
 
 #[tokio::test]
@@ -561,17 +570,32 @@ async fn controlled_subscribe_release_between_state_check_and_registration_canno
     let fixture = TransportFixture::new(position(22, 10)).await;
     let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
     let authorization = fixture.request(subscription(0xbf), origin);
-    let source =
-        ControlledSubscribeSource::new().with_registration_hook(ControlledSubscribeSource::release);
+    let interleaving = Arc::new(RegistrationInterleaving::new());
+    let source = Arc::new(
+        ControlledSubscribeSource::new().with_registration_interleaving(interleaving.clone()),
+    );
+    let release_source = source.clone();
+    let release_interleaving = interleaving.clone();
+    let release = std::thread::spawn(move || {
+        release_interleaving.wait_until_observed_unreleased();
+        release_interleaving.signal_release_attempt_started();
+        release_source.release();
+    });
     let mut subscribe = source.subscribe(&authorization);
     let wakes = Arc::new(WakeCounter::default());
     let waker = Waker::from(wakes.clone());
     let mut task = Context::from_waker(&waker);
 
+    assert!(subscribe.as_mut().poll(&mut task).is_pending());
+    release.join().expect("controlled subscribe release thread");
+    assert_eq!(
+        wakes.count(),
+        1,
+        "registered source waiter receives release wake"
+    );
     assert!(subscribe.as_mut().poll(&mut task).is_ready());
-    assert_eq!(wakes.count(), 0, "ready source polls do not need a wake");
     source.release();
-    assert_eq!(wakes.count(), 0, "repeated release is idempotent");
+    assert_eq!(wakes.count(), 1, "repeated release is idempotent");
 }
 
 #[tokio::test]
