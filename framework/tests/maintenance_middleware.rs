@@ -310,3 +310,305 @@ async fn file_driver_full_lifecycle_uses_tokio_fs() {
     driver.deactivate().await.unwrap();
     assert!(!driver.active().await.unwrap(), "up after deactivate");
 }
+
+/// Mint a bypass cookie carrying a chosen payload, the way
+/// `bypass_response` does, so a test can present one the server would
+/// never issue. The ciphertext is real - the same key, the same AAD - so
+/// what these tests exercise is the payload check, not the crypto.
+fn forged_bypass_cookie(payload: serde_json::Value) -> String {
+    let cookie = suprnova::Cookie::encrypted("suprnova_maintenance", payload.to_string())
+        .expect("encrypt bypass cookie");
+    format!("suprnova_maintenance={}", cookie.value())
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_inside_its_deadline_grants_access() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // The control for every refusal below: the same forged shape, the same
+    // secret, differing only in its deadline. Without this, a middleware
+    // that refused every payload outright would satisfy the refusal tests
+    // and never check a deadline at all.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let (status, _headers, body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 200,
+        "an unexpired cookie for the current secret must grant access"
+    );
+    assert_eq!(body, "home");
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_whose_deadline_has_passed_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // The right secret, sealed by the real key - but stamped as having
+    // expired an hour ago. What the browser did with `max-age` is not
+    // what decides this.
+    let expired = chrono::Utc::now().timestamp() - 3600;
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": expired,
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "an expired bypass cookie must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_bare_secret_bypass_cookie_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // What every cookie issued before this change looks like: the bare
+    // secret, with no deadline in it at all.
+    let legacy = suprnova::Cookie::encrypted("suprnova_maintenance", "opensesame")
+        .expect("encrypt legacy cookie");
+    let cookie = format!("suprnova_maintenance={}", legacy.value());
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a payload with no deadline is refused; visit the secret URL again to get one"
+    );
+}
+
+#[tokio::test]
+async fn rotating_the_secret_still_invalidates_an_unexpired_cookie() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("new-secret".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // Well inside its TTL, but issued for the secret that was rotated out.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "old-secret",
+        "expires_at": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "the secret comparison still runs after the deadline check"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_at_or_one_second_past_its_deadline_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // The boundary itself: a deadline of "now" is already spent, because
+    // the check is `expires_at <= now`. A request cannot arrive before the
+    // instant the payload names, so an inclusive comparison is the only one
+    // that leaves no usable sliver.
+    let at_deadline = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp(),
+    }));
+    let (status, _headers, _body) =
+        request(addr, "GET", "/", &[("Cookie", at_deadline.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a cookie exactly at its deadline must not grant access"
+    );
+
+    let one_second_past = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() - 1,
+    }));
+    let (status, _headers, _body) =
+        request(addr, "GET", "/", &[("Cookie", one_second_past.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a cookie one second past its deadline must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_whose_deadline_outlives_the_ttl_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // The server only ever stamps `now + 12h`, so a further deadline was
+    // never issued by this application. Refusing it caps what any bypass
+    // cookie can be worth at the one TTL, whatever its payload claims.
+    let far_future = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + 365 * 24 * 60 * 60,
+    }));
+    let (status, _headers, _body) =
+        request(addr, "GET", "/", &[("Cookie", far_future.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a deadline beyond the issuing TTL must not grant access"
+    );
+}
+
+/// Mirrors the framework's private `BYPASS_TTL_SECS`. The cap these tests
+/// probe is expressed in terms of it, so the value has to be restated here.
+const BYPASS_TTL_SECS: i64 = 12 * 60 * 60;
+
+#[tokio::test]
+async fn a_bypass_cookie_minted_by_a_clock_slightly_ahead_is_accepted() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // Multi-pod is the default topology and every pod mints from its own
+    // clock. A deadline a few seconds past one TTL means the issuing pod
+    // ran slightly ahead, not that the cookie was forged - refusing it
+    // would kill a working bypass mid-incident.
+    let now = chrono::Utc::now().timestamp();
+    let slightly_ahead = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": now + BYPASS_TTL_SECS + 30,
+    }));
+    let (status, _headers, body) =
+        request(addr, "GET", "/", &[("Cookie", slightly_ahead.as_str())]).await;
+    assert_eq!(
+        status, 200,
+        "a deadline inside the clock-skew allowance must still grant access"
+    );
+    assert_eq!(body, "home");
+
+    // Past the allowance, the cap applies again: no cookie is ever worth
+    // more than one TTL plus the slack real clocks need.
+    let beyond_allowance = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + BYPASS_TTL_SECS + 120,
+    }));
+    let (status, _headers, _body) =
+        request(addr, "GET", "/", &[("Cookie", beyond_allowance.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a deadline past the clock-skew allowance must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_with_an_unknown_payload_field_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // `deny_unknown_fields` is contract, not decoration: the payload shape
+    // is what rejects anything this build did not mint, so a payload that
+    // carries extra keys is not a payload this build recognises.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + 3600,
+        "admin": true,
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "an unknown field in the payload must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_with_a_non_integer_deadline_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // `expires_at` is typed `i64`, so a stringly-typed deadline never
+    // reaches the comparison at all - it fails to deserialize first.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": (chrono::Utc::now().timestamp() + 3600).to_string(),
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a deadline that is not an integer must not grant access"
+    );
+}

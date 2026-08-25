@@ -311,7 +311,7 @@ gaps as of the shipped framework.
 | `php artisan route:cache` | Routes are macro-expanded at compile time | diverged | The router is built at boot from already-typed routes |
 | Envoy (SSH deploys) | Use any orchestrator - Docker, systemd, Kubernetes, fly.io, Railway | by design no | The binary is the deploy artifact |
 | Forge / Vapor | Not ours to ship - but the recipes for Railway, DO, and Hetzner cover the same job | diverged | [Deployment](deployment.md), [Railway](deployment-railway.md), [Digital Ocean](deployment-digital-ocean.md), [Hetzner](deployment-hetzner.md) |
-| Maintenance mode (`php artisan down` / `up`) | `./app down` / `./app up` - bypass secret, custom retry/message/except paths, `file` or `cache` driver | shipped | [Deployment](deployment.md) |
+| Maintenance mode (`php artisan down` / `up`) | `./app down` / `./app up` - bypass secret with a server-checked 12-hour expiry, custom retry/message/except paths, `file` or `cache` driver | shipped | [Deployment](deployment.md) |
 | Horizon (queue dashboard) | No dashboard yet | not yet | Failed-job inspection via `cargo run --bin console queue:failed` until then |
 
 ## Packages (Laravel's official packages - ours either ship in core, ship as adapters, or are deliberate gaps)
