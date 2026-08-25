@@ -1183,11 +1183,7 @@ where
     /// same to the caller as a stale-handle pre-flight failure (HTTP
     /// 404 rather than a generic 500).
     async fn update_or_fail(self, attrs: Attrs) -> Result<Self, FrameworkError> {
-        use crate::database::transaction::CURRENT_TX;
-
-        let in_tx = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
-
-        if in_tx {
+        if crate::database::after_commit::in_transaction() {
             // Already inside `DB::transaction` — the surrounding
             // closure owns atomicity. Run the UPDATE through the
             // ambient tx and translate SeaORM's missing-row signals
@@ -1238,11 +1234,7 @@ where
     /// the caller would have seen had the pre-flight observed the
     /// missing row.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
-        use crate::database::transaction::CURRENT_TX;
-
-        let in_tx = CURRENT_TX.try_with(|t| t.is_some()).unwrap_or(false);
-
-        if in_tx {
+        if crate::database::after_commit::in_transaction() {
             return delete_one_or_fail::<Self>(self, None).await;
         }
 

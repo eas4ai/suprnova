@@ -238,6 +238,12 @@ transaction via a `tokio::task_local` - you do NOT have to thread a
 returns a database error; use `tx.savepoint(...)` for nested-rollback
 behaviour.
 
+The closure form is also the only form that can defer work to the commit. A
+job whose type declares `Job::after_commit()` (or a dispatch made with
+`Queue::push_after_commit`) waits inside this closure and only reaches the
+queue driver once the commit succeeds; a rollback discards it. See
+[After-commit dispatch](queues.md#after-commit-dispatch).
+
 For typed aggregate or custom SQL that must execute on the same pinned
 connection, use the transaction handle directly:
 
@@ -310,6 +316,12 @@ Holding a `Transaction` handle pins one pool connection for its
 lifetime; pre-load any rows you need to read BEFORE the
 `begin_transaction()` call, especially on SQLite (single shared
 connection).
+
+Because manual mode installs no task-local, it has no commit for a deferred
+dispatch to hang on either: an
+[after-commit](queues.md#after-commit-dispatch) job pushed inside a manual
+transaction is pushed immediately. Use the closure form when a dispatch has to
+wait for the commit.
 
 ### Savepoints
 

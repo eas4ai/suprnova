@@ -125,6 +125,7 @@ envelope is committed to the driver - not when the handler runs.
 | `Queue::push_later(job, at)` | available at a specific `DateTime<Utc>` |
 | `Queue::later(delay, job)` | available after `delay` from now |
 | `Queue::push_with(job, overrides)` | enqueue immediately with per-push `EnvelopeOverrides` |
+| `Queue::push_after_commit(job)` | enqueue when the surrounding `DB::transaction` commits |
 | `Queue::later_with(delay, job, overrides)` | available after `delay` from now, with per-push `EnvelopeOverrides` |
 | `Queue::push_unique(job)` | dedupe by `J::unique_id` within `J::unique_for`, returns `Ok(true)` when the envelope was pushed, `Ok(false)` when a live dedupe key suppressed it |
 | `Queue::push_unique_later(job, at)` | unique + scheduled |
@@ -259,6 +260,7 @@ and the job's own `Job::*` declaration for that field:
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
+| `after_commit` | `Job::after_commit()` |
 
 `EnvelopeOverrides` is the primitive `Mail::on_queue`/`.on_connection()` and
 `Notify::queue`'s per-notification queue tuning are both built on - see
@@ -307,6 +309,123 @@ class can carry different delays. `Job::delay()` here is a class-level
 default instead, like `Job::queue()` or `Job::max_tries()` - a dispatch
 needing a delay computed from its own data uses `Queue::later`/`push_later`,
 which already outranks the declared default.
+
+### After-commit dispatch
+
+A job pushed inside a [`DB::transaction`](database.md#transactions) is racing
+that transaction. A worker on another process can pop the envelope, look for
+the row the transaction is still holding open, and fail - or worse, the
+transaction rolls back and the job runs against data that no longer exists.
+
+Opt the job into waiting for the commit:
+
+```rust
+use suprnova::{DB, FrameworkError, Job, Queue, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    order_id: i64,
+}
+
+#[async_trait]
+impl Job for SendReceipt {
+    fn job_name() -> &'static str { "send-receipt" }
+    fn after_commit() -> bool { true }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // The order row is guaranteed to be durable by the time this runs.
+        Ok(())
+    }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Nothing reaches the driver here.
+        Queue::push(SendReceipt { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// The envelope is on the queue now, and only now.
+```
+
+Three rules cover every case:
+
+- **Inside a transaction, the whole push waits for the commit.** Not just the
+  driver write: the envelope build, the `JobQueueing` event and the
+  `JobQueued` event all happen at commit time too, so a listener is never told
+  about a job that a rollback then discards.
+- **A rollback discards it.** The push simply never happens. If it took a
+  uniqueness lock, the rollback gives that lock back.
+- **Outside a transaction the push happens immediately.** That is what makes
+  the opt-in safe to declare on the job type: a dispatch site does not have to
+  know whether the code path it sits on is transactional.
+
+Per dispatch rather than per job type, use `EnvelopeOverrides::after_commit`.
+`Some(true)` is Laravel's `afterCommit()` and has the shorthand
+`Queue::push_after_commit(job)`; `Some(false)` is Laravel's `beforeCommit()`,
+for the one dispatch that has to be visible to a worker before the commit
+lands:
+
+```rust
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+// Defer a job whose type does not opt in.
+Queue::push_after_commit(SendWelcomeEmail { user_id: 42 }).await?;
+
+// Push immediately even though the job type opts in.
+Queue::push_with(
+    SendReceipt { order_id: 7 },
+    EnvelopeOverrides { after_commit: Some(false), ..Default::default() },
+)
+.await?;
+```
+
+A deferred `Queue::push` re-resolves [`Job::delay()`](#job-declared-delay)
+against the commit, not against the push, because the delay means "wait this
+long after dispatch" and for a deferred job dispatch *is* the commit. An
+explicit timestamp is the caller's intent about a moment in time, so
+`Queue::push_later`, `Queue::later` and `Queue::later_with` carry theirs
+through the deferral unchanged.
+
+`Queue::push_unique` defers with one deliberate asymmetry: the dedupe lock is
+taken immediately, so a second `push_unique` for the same unique id inside the
+same transaction is still suppressed and still reports `Ok(false)`. Only the
+envelope waits. The winner reports `Ok(true)` even though its push is pending,
+because the push is going to happen. A rollback releases the lock it took,
+owner-scoped, so the `unique_for` window is never blocked by a dispatch that
+never happened.
+
+Batches and chains do not defer, the same way they do not consult
+`Job::delay()`: `Queue::batch()` and `Queue::chain()` build and push their
+envelopes directly. Wrap the `.dispatch()` call so it runs after the
+transaction returns if a batch has to wait for a commit.
+
+Under `Queue::fake()` a push is recorded immediately, deferral and all, so a
+test can assert on it without committing anything. This matches Laravel's
+`Bus::fake`, and it is what lets a test drive one transactional handler and
+assert its dispatches in the same breath.
+
+### Why Suprnova diverges
+
+`Queue::bulk` is monomorphic - every element shares one concrete `J` - so its
+after-commit partition is all or nothing for the call. Laravel partitions a
+heterogeneous array into deferred and immediate halves; there is nothing here
+to partition.
+
+Deferral is tied to the closure form. A push inside a manual
+[`DB::begin_transaction`](database.md#manual-form) happens **immediately**,
+because manual mode installs no ambient transaction and therefore has no
+commit to hang a callback on. Deferring there would queue a callback that
+nothing ever runs, and a dispatch that silently disappears is worse than one
+that happens too early. Reach for `DB::transaction` when a dispatch has to
+wait for the commit.
+
+Laravel also reads a connection-level `after_commit` config key as the last
+fallback in its precedence chain. Suprnova stops at the per-push override and
+then the job's own `Job::after_commit()`: queue connections here do not carry
+their own dispatch policy.
 
 ## Job configuration
 

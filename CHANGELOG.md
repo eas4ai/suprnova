@@ -4,10 +4,31 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## Unreleased
+## 1.3.3 - 2026-08-25
 
 ### Added
 
+- **After-commit dispatch.** `Job::after_commit()` holds a push until the
+  surrounding `DB::transaction` commits, so a worker on another process can
+  never pop an envelope that describes rows the transaction has not made
+  durable yet. The whole push waits, not just the driver write: the envelope
+  build, `JobQueueing` and `JobQueued` all happen at commit time, so no
+  listener is ever told about a job a rollback then discards. A rollback
+  discards the push entirely; outside a transaction the push happens
+  immediately, which is what lets a job type declare the opt-in without every
+  dispatch site knowing whether its code path is transactional. Per dispatch,
+  `EnvelopeOverrides::after_commit` outranks the job: `Some(true)` (with the
+  shorthand `Queue::push_after_commit(job)`) defers a job that did not opt in,
+  and `Some(false)` is Laravel's `beforeCommit()`. A deferred `Queue::push`
+  re-resolves `Job::delay()` against the commit rather than the push, while
+  `Queue::push_later` / `later` / `later_with` carry the caller's absolute
+  timestamp through unchanged. `Queue::push_unique` takes its dedupe lock
+  immediately even when the envelope is deferred, so a duplicate inside the
+  same transaction is still suppressed, and a rollback releases that lock
+  owner-scoped. `Queue::bulk` defers as a unit. `Queue::fake()` records a push
+  immediately, deferral and all, matching Laravel's `Bus::fake`. Manual
+  `DB::begin_transaction` never defers - it installs no ambient transaction, so
+  there is no commit to hang a callback on.
 - **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
   uniqueness lock when processing begins - after the job's middleware pass,
   immediately before the handler runs - instead of holding it for the full
@@ -135,6 +156,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Upgrading
 
+- **`EnvelopeOverrides` gained a public `after_commit: Option<bool>` field.**
+  Every construction in this repo and in the scaffolded templates uses
+  `..Default::default()`, which needs no change. Code that builds an
+  `EnvelopeOverrides` with an exhaustive struct literal has to name the new
+  field; `after_commit: None` keeps today's behaviour, which is to defer to
+  `Job::after_commit()`. Nothing else changes: `after_commit()` defaults to
+  `false`, so no existing job starts waiting for a commit it did not before.
 - **`Envelope` gained a public `unique_lock_owner: Option<String>` field.** The
   wire format is unchanged - the field is `#[serde(default)]` and skipped when
   `None`, so envelopes round-trip byte-identically in both directions and

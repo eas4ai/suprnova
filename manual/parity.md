@@ -111,7 +111,7 @@ gaps as of the shipped framework.
 | Job-declared delay | `fn delay() -> Option<Duration>` on `Job`, honored by `Queue::push` and `Queue::bulk` | shipped | An explicit `Queue::push_later` / `Queue::later(delay, job)` call always wins over the job's own default. [Queues](queues.md) |
 | Unique-job skipped event | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | shipped | Fired on the push side when `push_unique` dedupes; the call still returns `Ok(false)` |
 | Queue pausing (`queue:pause` / `queue:resume`) | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`, cache-backed, with `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` events | shipped | A per-queue pause only takes effect on a worker started with an explicit `--queue=...` list; `resume_all` doesn't clear a per-queue pause. [Queues](queues.md) |
-| After-commit dispatch (`afterCommit()`) | Jobs pushed inside a transaction are visible to the driver immediately | not yet | A rollback today leaves the job queued. Wrap the push outside the transaction until transaction-scoped dispatch ships |
+| After-commit dispatch (`afterCommit()`) | `fn after_commit() -> bool` on `Job`, `EnvelopeOverrides::after_commit` per push, `Queue::push_after_commit` | shipped | The whole push waits for the commit, events included, and a rollback discards it; a deferred `push_unique` still takes its lock immediately so dedupe works inside the transaction. Manual `DB::begin_transaction` never defers. [Queues](queues.md) |
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
 | `ShouldBeUniqueUntilProcessing` | `fn unique_until_processing() -> bool` on `Job`, released after the middleware pass and before the handler | shipped | Owner-scoped release, so a redelivered attempt never releases a newer dispatch's lock. A job a middleware releases back onto the queue keeps its lock. [Queues](queues.md) |
 | Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
@@ -408,7 +408,6 @@ shape of the gap in one place:
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: OTel surface today, dashboard later |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `cargo run --bin console queue:failed` and OTel metrics |
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
-| After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
 | Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
 

@@ -33,6 +33,20 @@
 //! only if everything succeeded; otherwise restore the snapshot") is
 //! the same across all three backends.
 //!
+//! ## After-commit callbacks
+//!
+//! [`DB::transaction`](crate::DB::transaction) drains two callback registries
+//! when it finishes: the after-commit list runs once the physical commit
+//! succeeds, and the rollback list runs instead when the closure returns `Err`.
+//! Both run *outside* the `CURRENT_TX` scope, so a callback that dispatches
+//! its own work sees no ambient transaction and acts immediately.
+//!
+//! The queue is the caller that matters: `Job::after_commit()` routes a push
+//! through this registry so the envelope only reaches the driver once the rows
+//! it describes are durable. See `database::after_commit`. Manual transactions
+//! do not participate - they install no `CURRENT_TX`, so there is no drain
+//! point.
+//!
 //! ## Nested `DB::transaction` is rejected at runtime
 //!
 //! SeaORM's `DatabaseConnection::begin()` doesn't compose — calling
@@ -63,6 +77,19 @@ use std::time::Duration;
 pub(crate) struct TxState {
     pub(crate) tx: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
+    /// Callbacks queued by
+    /// [`after_commit::register_callback`](super::after_commit::register_callback),
+    /// run in registration order once the physical commit succeeds.
+    ///
+    /// `std::sync::Mutex`, not `tokio::sync::Mutex`: registration is a
+    /// synchronous `Vec::push` and the drain is a single `mem::take`, so the
+    /// lock is never held across an `.await`.
+    pub(crate) after_commit: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
+    /// Compensating callbacks queued by
+    /// [`after_commit::register_rollback_callback`](super::after_commit::register_rollback_callback),
+    /// run when the transaction rolls back. The after-commit list is discarded
+    /// in that case.
+    pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
 }
 
 tokio::task_local! {
@@ -944,9 +971,22 @@ impl DB {
         let tx_state = Arc::new(TxState {
             tx: tx_arc.clone(),
             connection_name: conn_name.clone(),
+            after_commit: std::sync::Mutex::new(Vec::new()),
+            on_rollback: std::sync::Mutex::new(Vec::new()),
         });
+        let registry = tx_state.clone();
 
         let result = CURRENT_TX.scope(Some(tx_state), f(&transaction)).await;
+
+        // Take the deferred callbacks off the shared state and release our
+        // `TxState` clone right away: `TxState` holds an
+        // `Arc<DatabaseTransaction>`, so `Arc::try_unwrap` below cannot reach
+        // the transaction to commit it while this clone is alive. The
+        // callbacks themselves run further down, after the physical commit or
+        // rollback and outside `CURRENT_TX::scope`, so a callback that
+        // dispatches its own work sees no ambient transaction.
+        let (after_commit_callbacks, rollback_callbacks) = super::after_commit::drain(&registry);
+        drop(registry);
 
         // Drop the wrapper BEFORE calling `Arc::try_unwrap`. The
         // `transaction` binding holds the second `Arc` clone (the
@@ -971,6 +1011,10 @@ impl DB {
                     connection_name: conn_name.to_string(),
                 })
                 .await;
+                // The rollback list is dropped here: Laravel discards the
+                // branch that did not happen.
+                drop(rollback_callbacks);
+                super::after_commit::run_after_commit(after_commit_callbacks).await?;
                 Ok(value)
             }
             Err(e) => {
@@ -1021,6 +1065,15 @@ impl DB {
                         );
                     }
                 }
+                // Compensate for whatever the closure deferred, then discard
+                // the after-commit list - the commit it was waiting for is
+                // never going to happen. Both leaked-handle branches land here:
+                // a zombie transaction is still one that did not commit, so a
+                // deferred push did not happen and its unique lock has to go
+                // back. Callback errors are logged, never returned: the caller
+                // needs the original error, not the compensation's.
+                drop(after_commit_callbacks);
+                super::after_commit::run_rollback(rollback_callbacks).await;
                 Err(e)
             }
         }
@@ -1043,6 +1096,14 @@ impl DB {
     /// Manual mode does NOT install `CURRENT_TX`. Scope individual
     /// operations through the transaction with `Builder::with_tx(&tx)`
     /// or the `Model::*_with_tx(&tx, ...)` shims.
+    ///
+    /// One consequence worth knowing before you reach for this form: because
+    /// there is no `CURRENT_TX`, there is no after-commit registry and no drain
+    /// point either, so a [`Job::after_commit`](crate::queue::Job::after_commit)
+    /// push inside a manual transaction happens **immediately** rather than
+    /// waiting for [`Transaction::commit`]. Deferring it would mean queuing a
+    /// callback nothing will ever run. Use [`DB::transaction`] when a dispatch
+    /// has to wait for the commit.
     ///
     /// Holding a `Transaction` pins one pool connection for its
     /// entire lifetime. Pre-load any rows you need to read BEFORE
