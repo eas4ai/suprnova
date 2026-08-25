@@ -268,6 +268,7 @@ async fn morph_to_unknown_when_morph_type_string_unknown() {
         }
         other => panic!(
             "expected Unknown for parent_type=\"legacy_article\" (no target registers that string \
-             - LegacyArticle's registered morph_type is \"blog_post\"), got {other:?}"        ),
+             - LegacyArticle's registered morph_type is \"blog_post\"), got {other:?}"
+        ),
     }
 }
