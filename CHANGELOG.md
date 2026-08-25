@@ -30,6 +30,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Bypass cookies issued before this release stop working.** The cookie's payload changed from the bare secret to a sealed `{ secret, expires_at }` object, and a payload with no deadline is refused. Visit the secret URL once after upgrading to get a new cookie. Nothing else changes: `down`, `up`, `--secret`, and `--with-secret` all behave as before.
 - **An include path longer than five segments now returns its first five relationships instead of all of them.** Nothing outside a resource's allowlist was ever reachable, so no response gains data; a deep path loses its tail. One status code changes with it: a path whose over-deep tail names a relationship the resource does not allow is truncated before anything validates it, so it now returns `200` with the segments that survived where the full path used to return `400` - adjust any client or test asserting on that rejection. Raise the ceiling with `suprnova::max_relationship_depth(n)` if your API documents paths longer than that.
 - **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behaviour.
+
 ## 1.3.3 - 2026-08-25
 
 ### Added
