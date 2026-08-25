@@ -394,8 +394,9 @@ _Avoid_: transport credential, channel authority, document transport handle, ses
 The sealed framework value produced only when a Task 2 connect-authorized
 subscription and one host-owned atomic membership/current-registry snapshot
 agree on exact logical subscription ID, registered stream, full event
-contracts, and declared presentation signals. It authorizes bounded decode and
-scope selection, not transport membership implementation or application work.
+contracts, declared presentation signals, and the verified signed descriptor
+baseline. It authorizes bounded decode and sequence-scope selection, not
+transport membership implementation or application work.
 _Avoid_: caller-supplied allowlist, transport handle, subscription descriptor alone, dispatch token
 
 **Asynchronous event envelope**:
@@ -407,11 +408,12 @@ effects.
 _Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push payload
 
 **Sequence authority**:
-The per-logical-subscription state machine that applies only an exact
-same-epoch successor, ignores duplicates and older epochs, degrades on gaps or
-new epochs, and restores currentness only from a complete validated replay
-transcript or an authoritative host refresh whose baseline covers observed
-high-water.
+The per-logical-subscription state machine initialized only from the signed
+baseline retained by its sealed active async membership context. It applies only
+an exact same-epoch successor, ignores duplicates and older epochs, degrades on
+gaps or new epochs, and restores currentness only from a complete validated
+replay transcript or an authoritative host refresh whose baseline covers
+observed high-water.
 _Avoid_: last message wins, transport ordering, reconnect success, client timestamp
 
 **Replay transcript**:

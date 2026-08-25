@@ -391,6 +391,7 @@ impl fmt::Debug for AsyncMembershipValidation<'_> {
 pub struct AsyncEnvelopeContext {
     subscription: SubscriptionId,
     stream: StreamName,
+    authoritative_baseline: StreamPosition,
     events: BoundedEventContracts,
     presentation_signals: BoundedPresentationSignalContracts,
 }
@@ -416,6 +417,7 @@ impl AsyncEnvelopeContext {
         Ok(Self {
             subscription,
             stream,
+            authoritative_baseline: authorized.verified().baseline(),
             events,
             presentation_signals,
         })
@@ -431,6 +433,12 @@ impl AsyncEnvelopeContext {
     #[must_use]
     pub const fn stream(&self) -> &StreamName {
         &self.stream
+    }
+
+    /// Returns the signed Task 2 descriptor baseline for this exact scope.
+    #[must_use]
+    pub const fn authoritative_baseline(&self) -> StreamPosition {
+        self.authoritative_baseline
     }
 }
 

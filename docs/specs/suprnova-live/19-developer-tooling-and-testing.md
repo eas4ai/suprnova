@@ -454,7 +454,8 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   nonmutation under incomplete or forged replay evidence. Async fuzz setup now
   obtains its sealed decode context through the real Task 2 issue/connect path
   and the host membership validation port rather than a privileged test
-  constructor.
+  constructor; sequence fuzz baselines enter through the trusted continuity
+  fixture before signed descriptor issuance rather than through the machine.
 - 2026-08-25 -- Added executable v4 async-envelope and continuity golden
   conformance, adversarial/property coverage for membership, registration,
   canonical bounds, gaps, epoch change, recovery, regression, and overflow,

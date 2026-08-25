@@ -255,8 +255,10 @@ blob store merely to replay bytes.
 - 2026-08-25 -- Sealed async decoding behind a Task 2 connect-authorized
   subscription plus one atomic host validation of active logical membership,
   exact stream, current full event contracts, and declared presentation-signal
-  contracts. Subscription IDs now reject impossible encoded lengths and
-  non-base64url shapes before decoding; every nested object participates in
+  contracts. The sealed context retains the verified signed descriptor baseline
+  as part of that coherent scope; sequence construction accepts no independent
+  position. Subscription IDs reject impossible encoded lengths and
+  non-base64url shapes before decoding, and every nested object participates in
   duplicate-key and canonical semantic-order rejection.
 - 2026-08-25 -- Implemented asynchronous event-envelope protocol v1 as a
   canonical exact-key JSON contract independent from the unchanged Live

@@ -83,6 +83,7 @@ type TestFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 struct SubscriptionFixturePorts {
     component: ComponentMetadata,
     parameters: TrustedMountParameters,
+    baseline: StreamPosition,
 }
 
 impl SubscriptionRegistryPort for SubscriptionFixturePorts {
@@ -105,9 +106,9 @@ impl SubscriptionContinuityPort for SubscriptionFixturePorts {
         &'a self,
         _request: SubscriptionBaselineRequest<'a>,
     ) -> TestFuture<'a, Result<AuthoritativeStreamPosition, SubscriptionError>> {
-        Box::pin(async {
+        Box::pin(async move {
             Ok(AuthoritativeStreamPosition::from_host_continuity(
-                StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(0)),
+                self.baseline,
             ))
         })
     }
@@ -274,47 +275,50 @@ fn subscription_trusted_context(ports: Arc<SubscriptionFixturePorts>) -> Trusted
 
 fn authorized_subscription() -> &'static AuthorizedSubscription {
     static AUTHORIZED: OnceLock<AuthorizedSubscription> = OnceLock::new();
-    AUTHORIZED.get_or_init(|| {
-        let ports = Arc::new(SubscriptionFixturePorts {
-            component: subscription_component_metadata(),
-            parameters: TrustedMountParameters::new(Vec::new()).expect("mount parameters"),
-        });
-        let context = subscription_trusted_context(ports);
-        let service = SubscriptionService::new(subscription_key_ring());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
-            let issued = service
-                .issue(
-                    &context,
-                    SubscriptionIssueRequest::new(
-                        stream(),
-                        CapabilityVersion::new(1).expect("capability"),
-                        UnixMillis::new(5_000),
-                        PollFallbackPolicy::new(
-                            10_000,
-                            0,
-                            PollInitialBehavior::AfterInterval,
-                            PollVisibilityPolicy::PauseWhenHidden,
-                        )
-                        .expect("poll fallback"),
-                    ),
-                    UnixMillis::new(1_000),
-                )
-                .await
-                .expect("issued subscription");
-            service
-                .connect(
-                    &context,
-                    issued.descriptor(),
-                    issued.transport_credential(),
-                    UnixMillis::new(1_100),
-                )
-                .await
-                .expect("authorized subscription")
-        })
+    AUTHORIZED.get_or_init(|| build_authorized_subscription(position(4, 40)))
+}
+
+fn build_authorized_subscription(baseline: StreamPosition) -> AuthorizedSubscription {
+    let ports = Arc::new(SubscriptionFixturePorts {
+        component: subscription_component_metadata(),
+        parameters: TrustedMountParameters::new(Vec::new()).expect("mount parameters"),
+        baseline,
+    });
+    let context = subscription_trusted_context(ports);
+    let service = SubscriptionService::new(subscription_key_ring());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let issued = service
+            .issue(
+                &context,
+                SubscriptionIssueRequest::new(
+                    stream(),
+                    CapabilityVersion::new(1).expect("capability"),
+                    UnixMillis::new(5_000),
+                    PollFallbackPolicy::new(
+                        10_000,
+                        0,
+                        PollInitialBehavior::AfterInterval,
+                        PollVisibilityPolicy::PauseWhenHidden,
+                    )
+                    .expect("poll fallback"),
+                ),
+                UnixMillis::new(1_000),
+            )
+            .await
+            .expect("issued subscription");
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_100),
+            )
+            .await
+            .expect("authorized subscription")
     })
 }
 
@@ -346,16 +350,12 @@ impl AsyncMembershipRegistryPort for TestMembershipRegistry {
     }
 }
 
-fn membership_registry() -> TestMembershipRegistry {
+fn membership_registry_for(authorized: &AuthorizedSubscription) -> TestMembershipRegistry {
     TestMembershipRegistry {
         active: true,
         subscription: subscription_id(),
         stream: stream(),
-        events: authorized_subscription()
-            .verified()
-            .claims()
-            .events()
-            .clone(),
+        events: authorized.verified().claims().events().clone(),
         presentation_signals: BoundedPresentationSignalContracts::new(vec![
             PresentationSignalContract::new(
                 BrowserOperationName::parse("completion_percent").expect("signal name"),
@@ -364,6 +364,10 @@ fn membership_registry() -> TestMembershipRegistry {
         ])
         .expect("signals"),
     }
+}
+
+fn membership_registry() -> TestMembershipRegistry {
+    membership_registry_for(authorized_subscription())
 }
 
 fn context() -> AsyncEnvelopeContext {
@@ -375,8 +379,22 @@ fn context() -> AsyncEnvelopeContext {
     .expect("active current membership")
 }
 
+fn context_at(baseline: StreamPosition) -> AsyncEnvelopeContext {
+    let authorized = build_authorized_subscription(baseline);
+    AsyncEnvelopeContext::from_authorized(
+        &authorized,
+        subscription_id(),
+        &membership_registry_for(&authorized),
+    )
+    .expect("active current membership at baseline")
+}
+
 fn limits() -> AsyncCodecLimits {
     AsyncCodecLimits::v1()
+}
+
+fn position(epoch: u64, sequence: u64) -> StreamPosition {
+    StreamPosition::new(StreamEpoch::new(epoch), StreamSequence::new(sequence))
 }
 
 fn fixture_position(value: &Value) -> StreamPosition {
@@ -426,6 +444,15 @@ fn decode(payload: &str, epoch: u64, sequence: u64) -> suprnova_live::async_upda
 fn async_protocol_is_independent_from_live_action_and_morph_versions() {
     assert_eq!(SUPPORTED_ASYNC_PROTOCOL_VERSIONS, &[1]);
     assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, &[1, 2]);
+}
+
+#[test]
+fn sequence_machine_starts_only_from_the_signed_authorized_baseline() {
+    let context = context();
+    let signed_baseline = position(4, 40);
+
+    assert_eq!(context.authoritative_baseline(), signed_baseline);
+    assert_eq!(SequenceMachine::new(&context).current(), signed_baseline);
 }
 
 #[test]
@@ -789,10 +816,7 @@ fn byte_depth_entry_string_and_payload_limits_are_enforced() {
 #[test]
 fn membership_and_stream_binding_are_validated_before_sequence_observation() {
     let context = context();
-    let mut machine = SequenceMachine::new(
-        &context,
-        StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40)),
-    );
+    let mut machine = SequenceMachine::new(&context);
     let current = machine.current();
     let other_id = SubscriptionId::from_bytes(b"subscription-002").expect("other id");
     let registry = membership_registry();
@@ -867,8 +891,7 @@ fn membership_and_stream_binding_are_validated_before_sequence_observation() {
 #[test]
 fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
     let context = context();
-    let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40));
-    let mut machine = SequenceMachine::new(&context, baseline);
+    let mut machine = SequenceMachine::new(&context);
 
     assert_eq!(
         machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 40)),
@@ -930,9 +953,9 @@ fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
 
 #[test]
 fn replay_recovery_requires_a_complete_contiguous_same_scope_transcript() {
-    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
-    let mut machine = SequenceMachine::new(&context, baseline);
+    let context = context_at(baseline);
+    let mut machine = SequenceMachine::new(&context);
     let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43));
     assert_eq!(
         machine.high_water(),
@@ -1013,7 +1036,7 @@ fn cross_scope_envelopes_and_replay_cannot_change_sequence_authority() {
     )
     .expect("valid B envelope");
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40));
-    let mut machine = SequenceMachine::new(&context_a, baseline);
+    let mut machine = SequenceMachine::new(&context_a);
     let state = machine.state();
 
     assert_eq!(
@@ -1040,9 +1063,9 @@ fn cross_scope_envelopes_and_replay_cannot_change_sequence_authority() {
 
 #[test]
 fn only_host_continuity_authority_can_establish_a_covering_new_baseline() {
-    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
-    let mut machine = SequenceMachine::new(&context, baseline);
+    let context = context_at(baseline);
+    let mut machine = SequenceMachine::new(&context);
     let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 5, 3));
     let high_water = machine.high_water();
 
@@ -1088,9 +1111,9 @@ fn only_host_continuity_authority_can_establish_a_covering_new_baseline() {
 
 #[test]
 fn sequence_overflow_never_wraps_or_applies() {
-    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(9), StreamSequence::new(u64::MAX));
-    let mut machine = SequenceMachine::new(&context, baseline);
+    let context = context_at(baseline);
+    let mut machine = SequenceMachine::new(&context);
     assert_eq!(
         machine.observe(&decode("{\"kind\":\"heartbeat\"}", 9, u64::MAX)),
         SequenceDisposition::IgnoreDuplicate
@@ -1105,9 +1128,9 @@ fn sequence_overflow_never_wraps_or_applies() {
 proptest! {
     #[test]
     fn sequence_machine_never_applies_a_gap(observed in prop::collection::vec((0_u64..4, any::<u64>()), 0..128)) {
-        let context = context();
         let baseline = StreamPosition::new(StreamEpoch::new(2), StreamSequence::new(10));
-        let mut machine = SequenceMachine::new(&context, baseline);
+        let context = context_at(baseline);
+        let mut machine = SequenceMachine::new(&context);
         for (epoch, sequence) in observed {
             let before = machine.current();
             let envelope = decode("{\"kind\":\"heartbeat\"}", epoch, sequence);
@@ -1124,10 +1147,10 @@ proptest! {
         gap in 2_u64..64,
         omitted_offset in 1_u64..64,
     ) {
-        let context = context();
         let baseline = StreamPosition::new(StreamEpoch::new(7), StreamSequence::new(10));
+        let context = context_at(baseline);
         let high_sequence = 10 + gap;
-        let mut machine = SequenceMachine::new(&context, baseline);
+        let mut machine = SequenceMachine::new(&context);
         let _ = machine.observe(&decode(
             "{\"kind\":\"heartbeat\"}",
             7,
@@ -1207,8 +1230,8 @@ fn version_four_async_fixture_is_executable_not_documentary() {
         .expect("continuity cases")
     {
         let baseline = fixture_position(&case["baseline"]);
-        let context = context();
-        let mut machine = SequenceMachine::new(&context, baseline);
+        let context = context_at(baseline);
+        let mut machine = SequenceMachine::new(&context);
         let disposition = if let Some(observed) = case.get("observed") {
             let observed = fixture_position(observed);
             let envelope = decode(

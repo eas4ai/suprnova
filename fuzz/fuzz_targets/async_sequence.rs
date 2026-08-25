@@ -3,8 +3,8 @@
 use libfuzzer_sys::fuzz_target;
 use suprnova_live::async_updates::{
     AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncEnvelope,
-    BaselineDisposition, SequenceDisposition, SequenceMachine, StreamEpoch, StreamPosition,
-    StreamSequence, decode_async_envelope,
+    AsyncEnvelopeContext, BaselineDisposition, SequenceDisposition, SequenceMachine, StreamEpoch,
+    StreamPosition, StreamSequence, decode_async_envelope,
 };
 
 const MAX_TRANSITIONS: usize = 256;
@@ -33,14 +33,18 @@ fn u64_at(bytes: &[u8], start: usize) -> u64 {
     u64::from_le_bytes(value)
 }
 
-fn heartbeat(position: StreamPosition, limits: &AsyncCodecLimits) -> AsyncEnvelope {
+fn heartbeat(
+    position: StreamPosition,
+    limits: &AsyncCodecLimits,
+    context: &AsyncEnvelopeContext,
+) -> AsyncEnvelope {
     let subscription = support::async_subscription_id().to_base64url();
     let encoded = format!(
         "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"epoch\":\"{}\",\"sequence\":\"{}\"}},\"protocol_version\":1,\"stream\":\"fuzz\",\"subscription\":\"{subscription}\"}}",
         position.epoch().get(),
         position.sequence().get(),
     );
-    decode_async_envelope(encoded.as_bytes(), limits, support::async_context())
+    decode_async_envelope(encoded.as_bytes(), limits, context)
         .expect("generated bounded heartbeat")
 }
 
@@ -48,12 +52,8 @@ fuzz_target!(|bytes: &[u8]| {
     if bytes.len() < 16 {
         return;
     }
-    let baseline = StreamPosition::new(
-        StreamEpoch::new(u64_at(bytes, 0)),
-        StreamSequence::new(u64_at(bytes, 8)),
-    );
-    let context = support::async_context();
-    let mut machine = SequenceMachine::new(context, baseline);
+    let context = support::async_sequence_context(bytes[0]);
+    let mut machine = SequenceMachine::new(context);
     let subscription = support::async_subscription_id().to_base64url();
     let limits = AsyncCodecLimits::v1();
 
@@ -107,6 +107,7 @@ fuzz_target!(|bytes: &[u8]| {
                                         StreamSequence::new(value),
                                     ),
                                     &limits,
+                                    context,
                                 )
                             })
                             .collect::<Vec<_>>(),

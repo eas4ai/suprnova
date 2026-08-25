@@ -251,9 +251,10 @@ production feature or public convenience constructor.
   snapshot from the host membership/current-registry port and independently
   matches its stream and full event contracts to the Task 2 authorized
   descriptor. A sequence machine is permanently bound to that exact
-  subscription and stream; cross-scope envelopes and recovery transcripts are
-  rejected before position observation and cannot mutate current position,
-  degradation state, or observed high-water.
+  subscription, stream, and signed authoritative baseline, with no public raw
+  baseline input; cross-scope envelopes and recovery transcripts are rejected
+  before position observation and cannot mutate current position, degradation
+  state, or observed high-water.
 - 2026-08-25 -- Made active subscription membership and registered stream
   identity prerequisites for constructing an asynchronous envelope, so an
   invalid or cross-subscription message cannot reach sequence observation or

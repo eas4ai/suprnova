@@ -228,7 +228,9 @@ UX flow:
   at least the recorded high-water with no empty proof, duplicate, regression,
   or omission. A new epoch or otherwise unavailable replay can be adopted only
   through the injected host continuity authority, and its baseline must not
-  regress and must cover all observed high-water.
+  regress and must cover all observed high-water. Initial sequence authority is
+  the baseline retained from the same verified Task 2 descriptor as the sealed
+  membership context, never a caller-supplied machine argument.
 - 2026-08-25 -- Implemented the independent canonical async-envelope protocol
   v1 with required bounded logical-subscription identity, registered stream,
   monotonic epoch/sequence position, and the closed refresh, typed browser

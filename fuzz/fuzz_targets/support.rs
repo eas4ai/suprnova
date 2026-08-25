@@ -76,6 +76,7 @@ impl EventPayloadMetadata for FuzzEvent {
 struct FuzzSubscriptionPorts {
     component: ComponentMetadata,
     parameters: TrustedMountParameters,
+    baseline: StreamPosition,
 }
 
 impl SubscriptionRegistryPort for FuzzSubscriptionPorts {
@@ -98,9 +99,9 @@ impl SubscriptionContinuityPort for FuzzSubscriptionPorts {
         &'a self,
         _request: SubscriptionBaselineRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<AuthoritativeStreamPosition, SubscriptionError>> {
-        Box::pin(async {
+        Box::pin(async move {
             Ok(AuthoritativeStreamPosition::from_host_continuity(
-                StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(0)),
+                self.baseline,
             ))
         })
     }
@@ -181,48 +182,89 @@ pub(crate) fn async_subscription_id() -> SubscriptionId {
 pub(crate) fn async_context() -> &'static AsyncEnvelopeContext {
     static CONTEXT: OnceLock<AsyncEnvelopeContext> = OnceLock::new();
     CONTEXT.get_or_init(|| {
-        let ports = Arc::new(FuzzSubscriptionPorts {
-            component: async_component_metadata(),
-            parameters: TrustedMountParameters::new(Vec::new()).expect("empty mount parameters"),
-        });
-        let trusted = async_trusted_context(ports.clone());
-        let service = SubscriptionService::new(async_subscription_key_ring());
-        let issued = block_on_ready(service.issue(
-            &trusted,
-            SubscriptionIssueRequest::new(
-                async_stream(),
-                CapabilityVersion::new(1).expect("static capability"),
-                UnixMillis::new(5_000),
-                PollFallbackPolicy::new(
-                    10_000,
-                    0,
-                    PollInitialBehavior::AfterInterval,
-                    PollVisibilityPolicy::PauseWhenHidden,
-                )
-                .expect("static fallback"),
-            ),
-            UnixMillis::new(1_000),
+        build_async_context(StreamPosition::new(
+            StreamEpoch::new(1),
+            StreamSequence::new(0),
         ))
-        .expect("fuzz subscription issuance");
-        let authorized = block_on_ready(service.connect(
-            &trusted,
-            issued.descriptor(),
-            issued.transport_credential(),
-            UnixMillis::new(1_100),
-        ))
-        .expect("fuzz subscription authorization");
-        let membership = FuzzMembershipRegistry {
-            subscription: async_subscription_id(),
-            stream: async_stream(),
-            events: authorized.verified().claims().events().clone(),
-        };
-        AsyncEnvelopeContext::from_authorized(
-            &authorized,
-            async_subscription_id(),
-            &membership,
-        )
-        .expect("active fuzz membership")
     })
+}
+
+pub(crate) fn async_sequence_context(selector: u8) -> &'static AsyncEnvelopeContext {
+    static ZERO: OnceLock<AsyncEnvelopeContext> = OnceLock::new();
+    static ORDINARY: OnceLock<AsyncEnvelopeContext> = OnceLock::new();
+    static BEFORE_OVERFLOW: OnceLock<AsyncEnvelopeContext> = OnceLock::new();
+    static OVERFLOW: OnceLock<AsyncEnvelopeContext> = OnceLock::new();
+    match selector % 4 {
+        0 => ZERO.get_or_init(|| {
+            build_async_context(StreamPosition::new(
+                StreamEpoch::new(0),
+                StreamSequence::new(0),
+            ))
+        }),
+        1 => ORDINARY.get_or_init(|| {
+            build_async_context(StreamPosition::new(
+                StreamEpoch::new(1),
+                StreamSequence::new(10),
+            ))
+        }),
+        2 => BEFORE_OVERFLOW.get_or_init(|| {
+            build_async_context(StreamPosition::new(
+                StreamEpoch::new(9),
+                StreamSequence::new(u64::MAX - 1),
+            ))
+        }),
+        _ => OVERFLOW.get_or_init(|| {
+            build_async_context(StreamPosition::new(
+                StreamEpoch::new(9),
+                StreamSequence::new(u64::MAX),
+            ))
+        }),
+    }
+}
+
+fn build_async_context(baseline: StreamPosition) -> AsyncEnvelopeContext {
+    let ports = Arc::new(FuzzSubscriptionPorts {
+        component: async_component_metadata(),
+        parameters: TrustedMountParameters::new(Vec::new()).expect("empty mount parameters"),
+        baseline,
+    });
+    let trusted = async_trusted_context(ports.clone());
+    let service = SubscriptionService::new(async_subscription_key_ring());
+    let issued = block_on_ready(service.issue(
+        &trusted,
+        SubscriptionIssueRequest::new(
+            async_stream(),
+            CapabilityVersion::new(1).expect("static capability"),
+            UnixMillis::new(5_000),
+            PollFallbackPolicy::new(
+                10_000,
+                0,
+                PollInitialBehavior::AfterInterval,
+                PollVisibilityPolicy::PauseWhenHidden,
+            )
+            .expect("static fallback"),
+        ),
+        UnixMillis::new(1_000),
+    ))
+    .expect("fuzz subscription issuance");
+    let authorized = block_on_ready(service.connect(
+        &trusted,
+        issued.descriptor(),
+        issued.transport_credential(),
+        UnixMillis::new(1_100),
+    ))
+    .expect("fuzz subscription authorization");
+    let membership = FuzzMembershipRegistry {
+        subscription: async_subscription_id(),
+        stream: async_stream(),
+        events: authorized.verified().claims().events().clone(),
+    };
+    AsyncEnvelopeContext::from_authorized(
+        &authorized,
+        async_subscription_id(),
+        &membership,
+    )
+    .expect("active fuzz membership")
 }
 
 fn async_event_metadata() -> EventMetadata {

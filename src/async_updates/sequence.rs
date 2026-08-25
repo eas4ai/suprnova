@@ -185,11 +185,11 @@ pub struct SequenceMachine {
 impl SequenceMachine {
     /// Starts from one sealed membership context and authoritative descriptor baseline.
     #[must_use]
-    pub fn new(context: &AsyncEnvelopeContext, authoritative_baseline: StreamPosition) -> Self {
+    pub fn new(context: &AsyncEnvelopeContext) -> Self {
         Self {
             subscription: context.subscription().clone(),
             stream: context.stream().clone(),
-            current: authoritative_baseline,
+            current: context.authoritative_baseline(),
             state: SequenceState::Current,
             degradation: None,
             high_water: None,
