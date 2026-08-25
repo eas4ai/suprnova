@@ -21,7 +21,7 @@
     {"id":"duplicate-sequence","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"4","sequence":"41"},"expected":"ignore_duplicate","state":"current"},
     {"id":"sequence-gap","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"4","sequence":"43"},"expected":"degrade","state":"degraded"},
     {"id":"epoch-change-without-proof","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"5","sequence":"1"},"expected":"degrade","state":"degraded"},
-    {"id":"trusted-replay-proof","baseline":{"epoch":"4","sequence":"41"},"proof":{"kind":"replay","through":{"epoch":"4","sequence":"43"}},"expected":"adopt_baseline","state":"current"},
-    {"id":"authoritative-refresh-baseline","baseline":{"epoch":"4","sequence":"41"},"proof":{"kind":"authoritative_refresh","through":{"epoch":"5","sequence":"7"}},"expected":"adopt_baseline","state":"current"}
+    {"id":"trusted-replay-transcript","baseline":{"epoch":"4","sequence":"41"},"observed_gap":{"epoch":"4","sequence":"43"},"recovery":{"kind":"replay","transcript":[{"epoch":"4","sequence":"42"},{"epoch":"4","sequence":"43"}]},"expected":"adopt_baseline","state":"current"},
+    {"id":"authoritative-refresh-baseline","baseline":{"epoch":"4","sequence":"41"},"observed_gap":{"epoch":"5","sequence":"1"},"recovery":{"baseline":{"epoch":"5","sequence":"7"},"kind":"authoritative_refresh"},"expected":"adopt_baseline","state":"current"}
   ]
 }

@@ -448,6 +448,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Extended Task 3 adversarial coverage to prove nested duplicate
+  and semantic key-order rejection, encoded subscription-ID preflight bounds,
+  stale and cross-scope membership rejection, immutable sequence scope, and
+  nonmutation under incomplete or forged replay evidence. Async fuzz setup now
+  obtains its sealed decode context through the real Task 2 issue/connect path
+  and the host membership validation port rather than a privileged test
+  constructor.
 - 2026-08-25 -- Added executable v4 async-envelope and continuity golden
   conformance, adversarial/property coverage for membership, registration,
   canonical bounds, gaps, epoch change, recovery, regression, and overflow,

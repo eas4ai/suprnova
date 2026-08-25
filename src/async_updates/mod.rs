@@ -18,7 +18,8 @@ pub use authorization::{
 };
 pub use envelope::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeError,
-    AsyncEnvelopeErrorKind, AsyncPayload, BoundedPresentationSignalContracts, CompletionReason,
+    AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort, AsyncMembershipRequest,
+    AsyncMembershipValidation, AsyncPayload, BoundedPresentationSignalContracts, CompletionReason,
     Heartbeat, PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
     RegisteredRefresh, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId,
     decode_async_envelope, encode_async_envelope,
@@ -32,7 +33,8 @@ pub use metadata::{
     TopicName,
 };
 pub use sequence::{
-    BaselineDisposition, ContinuityProof, SequenceDegradation, SequenceDisposition, SequenceError,
+    AsyncContinuityAuthorityPort, AsyncContinuityRequest, BaselineDisposition,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, SequenceDegradation, SequenceDisposition, SequenceError,
     SequenceErrorKind, SequenceMachine, SequenceState,
 };
 pub use subscription::{

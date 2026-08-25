@@ -390,6 +390,14 @@ active membership before sequence observation or dispatch and grants no
 authorization by itself.
 _Avoid_: transport credential, channel authority, document transport handle, session ID
 
+**Active async membership context**:
+The sealed framework value produced only when a Task 2 connect-authorized
+subscription and one host-owned atomic membership/current-registry snapshot
+agree on exact logical subscription ID, registered stream, full event
+contracts, and declared presentation signals. It authorizes bounded decode and
+scope selection, not transport membership implementation or application work.
+_Avoid_: caller-supplied allowlist, transport handle, subscription descriptor alone, dispatch token
+
 **Asynchronous event envelope**:
 The independently versioned canonical bounded message that binds an active
 subscription ID, registered stream, monotonic position, and one closed
@@ -401,9 +409,18 @@ _Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push
 **Sequence authority**:
 The per-logical-subscription state machine that applies only an exact
 same-epoch successor, ignores duplicates and older epochs, degrades on gaps or
-new epochs, and adopts a new non-regressing baseline only from trusted replay
-proof or authoritative refresh.
+new epochs, and restores currentness only from a complete validated replay
+transcript or an authoritative host refresh whose baseline covers observed
+high-water.
 _Avoid_: last message wins, transport ordering, reconnect success, client timestamp
+
+**Replay transcript**:
+A bounded ordered set of already membership- and registry-validated envelopes
+covering every same-scope, same-epoch position from the sequence authority's
+next required successor through at least its recorded gap high-water. Claimed
+`from`/`through` positions, empty evidence, duplicate positions, gaps, and
+cross-scope or cross-epoch messages are not proof.
+_Avoid_: boolean continuity flag, claimed range, reconnect success, transport ordering
 
 **Credential rotation uncertainty**:
 A subscription credential rotation that committed predecessor consumption and
@@ -421,9 +438,9 @@ _Avoid_: island socket, global shared socket, subscription authority, event bus
 
 **Stream continuity**:
 Proof that every required typed event after an authoritative baseline has been
-accounted for through an unbroken sequence or trusted replay. A reconnect without
-that proof remains degraded until authoritative refresh establishes a new
-baseline.
+accounted for through an unbroken sequence or complete validated replay
+transcript. A reconnect without that proof remains degraded until authoritative
+host refresh establishes a new baseline that covers observed high-water.
 _Avoid_: socket connected, eventual freshness, best-effort ordering, last message wins
 
 **Presentation-only stream update**:

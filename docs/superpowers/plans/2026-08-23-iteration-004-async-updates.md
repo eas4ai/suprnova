@@ -265,8 +265,10 @@
   membership before sequence observation or dispatch. Decode with
   exact-key/size/depth/entry/string limits before payload allocation.
   `SequenceMachine` ignores duplicates, applies only the next sequence in the
-  current epoch, degrades on gaps, and requires replay proof or authoritative
-  refresh before adopting a new baseline.
+  current epoch, degrades on gaps, and requires a bounded contiguous transcript
+  of already validated same-scope envelopes through recorded high-water or an
+  authoritative host refresh before adopting a new baseline. Epoch adoption is
+  available only through the injected host continuity authority.
 
 - [x] Add both fuzz targets, run fixtures/properties/security, and prove Live action/morph versions remain `[1, 2]`.
 - [x] Commit: `feat(async): add bounded event envelope and sequence model`.
@@ -388,7 +390,7 @@
 
 **Files:** `browser/src/async-updates/{types,envelope,subscription,connections,continuity}.ts`, async entry points, browser tests
 
-- [ ] Add failing fake-transport tests for authoritative initial baseline, replay proof, subscription routing, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, 100 logical subscriptions sharing one document transport, and at most eight concurrent handshakes per origin across multiple documents:
+- [ ] Add failing fake-transport tests for authoritative initial baseline, complete validated replay transcripts, subscription routing, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, 100 logical subscriptions sharing one document transport, and at most eight concurrent handshakes per origin across multiple documents:
 
   ```ts
   it("cannot claim current on initial connect without proof", () => {
@@ -636,7 +638,7 @@
 
 ## Plan self-review checklist
 
-- [ ] Initial connect and reconnect cannot claim current without descriptor baseline plus replay proof or authoritative refresh.
+- [ ] Initial connect and reconnect cannot claim current without descriptor baseline plus a complete validated replay transcript or authoritative host refresh.
 - [ ] Stream credentials are secret and separate from signed descriptors.
 - [ ] Poll-only is complete; push-only reports degradation; hybrid fallback is continuity-aware and jittered.
 - [ ] `live:poll` carries no action value; the signed descriptor supplies hybrid fallback and a legal poll directive only overrides its interval policy.

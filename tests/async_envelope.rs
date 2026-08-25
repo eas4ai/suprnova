@@ -1,31 +1,66 @@
 //! Independently versioned asynchronous envelope and sequence-authority tests.
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU16};
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 
 use proptest::prelude::*;
 use serde_json::Value;
 use suprnova_live::SUPPORTED_PROTOCOL_VERSIONS;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeErrorKind, AsyncPayload,
-    BaselineDisposition, BoundedEventContracts, BoundedPresentationSignalContracts, BoundedTargets,
-    BrowserPayloadSchema, CompletionReason, ContinuityProof, EventCyclePolicy, EventOrder,
-    EventSource, EventTarget, PresentationSignalContract, RegisteredBrowserEvent,
+    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncEnvelope,
+    AsyncEnvelopeContext, AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort,
+    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AuthoritativeStreamPosition,
+    AuthorizedSubscription, BaselineDisposition, BoundedEventContracts, BoundedEventNames,
+    BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics, BrowserPayloadSchema,
+    CapabilityVersion, CompletionReason, CurrentSubscriptionRegistration, EventCyclePolicy,
+    EventOrder, EventSource, EventTarget, PollFallbackPolicy, PollInitialBehavior,
+    PollVisibilityPolicy, PresentationSignalContract, ReconnectPolicy, RegisteredBrowserEvent,
     RegisteredPresentationSignal, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, SequenceDisposition,
     SequenceErrorKind, SequenceMachine, SequenceState, StreamEpoch, StreamErrorCode, StreamName,
-    StreamPosition, StreamSequence, SubscriptionEventContract, SubscriptionId,
-    decode_async_envelope, encode_async_envelope,
+    StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
+    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
+    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
+    SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
+    SubscriptionError, SubscriptionEventContract, SubscriptionId, SubscriptionIssueRequest,
+    SubscriptionMetadata, SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort,
+    SubscriptionRegistryRequest, SubscriptionService, TopicName, TransportCredential,
+    TrustedMountParameters, decode_async_envelope, encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
 use suprnova_live::conformance::{FixtureVersion, fixture_directory};
-use suprnova_live::identity::BrowserOperationName;
-use suprnova_live::metadata::{EventMetadata, EventPayloadMetadata};
+use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+use suprnova_live::host::{
+    CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts,
+    LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalogBuilder,
+    MountCatalogEntry, MountScopeRequirements, MountSelection, ScopeRequirement,
+    TrustedLiveRequestContext,
+};
+use suprnova_live::identity::{BrowserOperationName, BuildId, IslandSlot, KeyId, UnixMillis};
+use suprnova_live::metadata::{ComponentMetadata, EventMetadata, EventPayloadMetadata};
+use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1};
+
+#[path = "component_support.rs"]
+mod component_support;
 
 struct OrdersUpdated;
 
 impl EventPayloadMetadata for OrdersUpdated {
     const NAME: &'static str = "orders.updated";
     const VERSION: u16 = 1;
+    const PAYLOAD_CONTRACT: &'static str = "orders.updated.payload";
+    const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+}
+
+struct OrdersUpdatedV2;
+
+impl EventPayloadMetadata for OrdersUpdatedV2 {
+    const NAME: &'static str = "orders.updated";
+    const VERSION: u16 = 2;
     const PAYLOAD_CONTRACT: &'static str = "orders.updated.payload";
     const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
 }
@@ -43,6 +78,246 @@ fn event_contract() -> SubscriptionEventContract {
     SubscriptionEventContract::from_registered(&metadata).expect("event contract")
 }
 
+type TestFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+struct SubscriptionFixturePorts {
+    component: ComponentMetadata,
+    parameters: TrustedMountParameters,
+}
+
+impl SubscriptionRegistryPort for SubscriptionFixturePorts {
+    fn resolve<'a>(
+        &'a self,
+        request: SubscriptionRegistryRequest<'a>,
+    ) -> TestFuture<'a, Result<CurrentSubscriptionRegistration, SubscriptionError>> {
+        Box::pin(async move {
+            CurrentSubscriptionRegistration::from_registered(
+                &self.component,
+                request.stream(),
+                &self.parameters,
+            )
+        })
+    }
+}
+
+impl SubscriptionContinuityPort for SubscriptionFixturePorts {
+    fn authoritative_baseline<'a>(
+        &'a self,
+        _request: SubscriptionBaselineRequest<'a>,
+    ) -> TestFuture<'a, Result<AuthoritativeStreamPosition, SubscriptionError>> {
+        Box::pin(async {
+            Ok(AuthoritativeStreamPosition::from_host_continuity(
+                StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(0)),
+            ))
+        })
+    }
+}
+
+impl SubscriptionAuthorizationPort for SubscriptionFixturePorts {
+    fn authorize<'a>(
+        &'a self,
+        _request: SubscriptionAuthorizationRequest<'a>,
+    ) -> TestFuture<'a, Result<SubscriptionAuthorizationDecision, SubscriptionError>> {
+        Box::pin(async { Ok(SubscriptionAuthorizationDecision::Allow) })
+    }
+}
+
+impl SubscriptionCredentialPort for SubscriptionFixturePorts {
+    fn issue<'a>(
+        &'a self,
+        _request: SubscriptionCredentialRequest<'a>,
+    ) -> TestFuture<'a, Result<TransportCredential, SubscriptionError>> {
+        Box::pin(async { TransportCredential::from_host_authority_bearer(vec![0x51; 32]) })
+    }
+
+    fn consume_and_rotate<'a>(
+        &'a self,
+        _request: SubscriptionCredentialRotationRequest<'a>,
+    ) -> TestFuture<'a, SubscriptionCredentialRotationOutcome> {
+        Box::pin(async {
+            match TransportCredential::from_host_authority_bearer(vec![0x52; 32]) {
+                Ok(credential) => SubscriptionCredentialRotationOutcome::Rotated(credential),
+                Err(_) => SubscriptionCredentialRotationOutcome::Failed,
+            }
+        })
+    }
+}
+
+fn subscription_component_metadata() -> ComponentMetadata {
+    let base = component_support::metadata();
+    let event = EventMetadata::from_payload_with_contract::<OrdersUpdated>(
+        EventSource::Stream,
+        BoundedTargets::new(vec![EventTarget::SelfIsland, EventTarget::Document])
+            .expect("bounded targets"),
+        EventOrder::PerSourceSequence,
+        EventCyclePolicy::MaximumHops(NonZeroU8::new(4).expect("nonzero hops")),
+        4,
+    )
+    .expect("registered event metadata");
+    let subscription = SubscriptionMetadata::new(
+        stream(),
+        BoundedTopics::new(vec![TopicName::parse("orders").expect("topic")]).expect("topics"),
+        BoundedEventNames::new(vec![
+            BrowserOperationName::parse(OrdersUpdated::NAME).expect("event name"),
+        ])
+        .expect("event names"),
+        SubscriptionModes::new(vec![SubscriptionMode::ServerSentEvents]).expect("mode"),
+        ReconnectPolicy::RefreshOnReconnect,
+    );
+    ComponentMetadata::new_with_async_contracts(
+        base.identity().clone(),
+        base.view().clone(),
+        base.versions(),
+        base.fields().to_vec(),
+        base.actions().to_vec(),
+        vec![event],
+        base.effects().to_vec(),
+        vec![subscription],
+        base.refresh_on_promote(),
+    )
+    .expect("subscription component metadata")
+}
+
+fn subscription_key_ring() -> SnapshotKeyRing {
+    let key = KeyRecord::new(
+        KeyId::parse("async-envelope-key").expect("key ID"),
+        RootKey::new(vec![0x39; 32]).expect("root key"),
+        UnixMillis::new(0),
+        UnixMillis::new(20_000),
+        UnixMillis::new(40_000),
+    )
+    .expect("key record");
+    SnapshotKeyRing::new(key, Vec::new()).expect("key ring")
+}
+
+fn subscription_trusted_context(ports: Arc<SubscriptionFixturePorts>) -> TrustedLiveRequestContext {
+    let component = &ports.component;
+    let descriptor = ComponentDescriptor::new(component.clone());
+    let contract = ComponentContract::new(
+        component.identity().clone(),
+        descriptor.contract_digest().clone(),
+        1,
+        1,
+        1,
+    )
+    .expect("component contract");
+    let registry = ComponentRegistryBuilder::new()
+        .register(descriptor)
+        .expect("component registration")
+        .build();
+    let route = component_support::snapshot_support::route(0x64);
+    let slot = IslandSlot::parse("async-envelope").expect("slot");
+    let catalog = MountCatalogBuilder::new()
+        .register(
+            &registry,
+            MountCatalogEntry::new(
+                ExpectedSeedV1::new(
+                    contract,
+                    BuildId::parse("build-async-envelope").expect("build"),
+                    route.clone(),
+                    slot.clone(),
+                    component_support::schema_set(),
+                ),
+                MountScopeRequirements::new(
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                    ScopeRequirement::Required,
+                ),
+            ),
+        )
+        .expect("mount registration")
+        .build();
+    let scope = component_support::fixture_host_scope();
+    let capabilities = HostCapabilities::bound_to(scope.clone())
+        .with_subscription_registry(ports.clone())
+        .with_subscription_continuity(ports.clone())
+        .with_subscription_authorization(ports.clone())
+        .with_subscription_credentials(ports.clone());
+    let expires_at = UnixMillis::new(10_000);
+    let mut checks = HostCheckFacts::new();
+    let overrides = BTreeMap::<CheckKind, CheckFact>::new();
+    for kind in CheckKind::ALL {
+        checks
+            .record(
+                kind,
+                overrides
+                    .get(&kind)
+                    .copied()
+                    .unwrap_or_else(|| CheckFact::new(CheckDisposition::Passed, expires_at)),
+            )
+            .expect("host check");
+    }
+    let selection = MountSelection::new(
+        route.clone(),
+        slot.clone(),
+        component.identity().clone(),
+        component.contract_digest().clone(),
+        1,
+    );
+    LiveRequestContextValidator::new(300_000)
+        .expect("validator")
+        .validate(
+            &catalog,
+            LiveRequestContextCandidate::new(
+                route,
+                slot,
+                selection,
+                scope,
+                checks,
+                capabilities,
+                expires_at,
+            ),
+            UnixMillis::new(1_000),
+        )
+        .expect("trusted context")
+}
+
+fn authorized_subscription() -> &'static AuthorizedSubscription {
+    static AUTHORIZED: OnceLock<AuthorizedSubscription> = OnceLock::new();
+    AUTHORIZED.get_or_init(|| {
+        let ports = Arc::new(SubscriptionFixturePorts {
+            component: subscription_component_metadata(),
+            parameters: TrustedMountParameters::new(Vec::new()).expect("mount parameters"),
+        });
+        let context = subscription_trusted_context(ports);
+        let service = SubscriptionService::new(subscription_key_ring());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let issued = service
+                .issue(
+                    &context,
+                    SubscriptionIssueRequest::new(
+                        stream(),
+                        CapabilityVersion::new(1).expect("capability"),
+                        UnixMillis::new(5_000),
+                        PollFallbackPolicy::new(
+                            10_000,
+                            0,
+                            PollInitialBehavior::AfterInterval,
+                            PollVisibilityPolicy::PauseWhenHidden,
+                        )
+                        .expect("poll fallback"),
+                    ),
+                    UnixMillis::new(1_000),
+                )
+                .await
+                .expect("issued subscription");
+            service
+                .connect(
+                    &context,
+                    issued.descriptor(),
+                    issued.transport_credential(),
+                    UnixMillis::new(1_100),
+                )
+                .await
+                .expect("authorized subscription")
+        })
+    })
+}
+
 fn subscription_id() -> SubscriptionId {
     SubscriptionId::from_bytes(b"subscription-001").expect("subscription id")
 }
@@ -51,17 +326,53 @@ fn stream() -> StreamName {
     StreamName::parse("orders").expect("stream")
 }
 
-fn context() -> AsyncEnvelopeContext {
-    AsyncEnvelopeContext::new(
-        subscription_id(),
-        stream(),
-        BoundedEventContracts::new(vec![event_contract()]).expect("events"),
-        BoundedPresentationSignalContracts::new(vec![PresentationSignalContract::new(
-            BrowserOperationName::parse("completion_percent").expect("signal name"),
-            BrowserPayloadSchema::U64,
-        )])
+struct TestMembershipRegistry {
+    active: bool,
+    subscription: SubscriptionId,
+    stream: StreamName,
+    events: BoundedEventContracts,
+    presentation_signals: BoundedPresentationSignalContracts,
+}
+
+impl AsyncMembershipRegistryPort for TestMembershipRegistry {
+    fn validate_current(
+        &self,
+        request: AsyncMembershipRequest<'_>,
+        validation: &mut AsyncMembershipValidation<'_>,
+    ) {
+        if self.active && request.subscription() == &self.subscription {
+            validation.accept_current(&self.stream, &self.events, &self.presentation_signals);
+        }
+    }
+}
+
+fn membership_registry() -> TestMembershipRegistry {
+    TestMembershipRegistry {
+        active: true,
+        subscription: subscription_id(),
+        stream: stream(),
+        events: authorized_subscription()
+            .verified()
+            .claims()
+            .events()
+            .clone(),
+        presentation_signals: BoundedPresentationSignalContracts::new(vec![
+            PresentationSignalContract::new(
+                BrowserOperationName::parse("completion_percent").expect("signal name"),
+                BrowserPayloadSchema::U64,
+            ),
+        ])
         .expect("signals"),
+    }
+}
+
+fn context() -> AsyncEnvelopeContext {
+    AsyncEnvelopeContext::from_authorized(
+        authorized_subscription(),
+        subscription_id(),
+        &membership_registry(),
     )
+    .expect("active current membership")
 }
 
 fn limits() -> AsyncCodecLimits {
@@ -88,9 +399,20 @@ fn fixture_position(value: &Value) -> StreamPosition {
 }
 
 fn wire(payload: &str, epoch: u64, sequence: u64) -> Vec<u8> {
+    wire_for(&subscription_id(), &stream(), payload, epoch, sequence)
+}
+
+fn wire_for(
+    subscription: &SubscriptionId,
+    stream: &StreamName,
+    payload: &str,
+    epoch: u64,
+    sequence: u64,
+) -> Vec<u8> {
     format!(
-        "{{\"payload\":{payload},\"position\":{{\"epoch\":\"{epoch}\",\"sequence\":\"{sequence}\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{}\"}}",
-        subscription_id().to_base64url(),
+        "{{\"payload\":{payload},\"position\":{{\"epoch\":\"{epoch}\",\"sequence\":\"{sequence}\"}},\"protocol_version\":1,\"stream\":\"{}\",\"subscription\":\"{}\"}}",
+        stream.as_str(),
+        subscription.to_base64url(),
     )
     .into_bytes()
 }
@@ -275,6 +597,82 @@ fn unknown_major_duplicate_unknown_and_noncanonical_fields_fail_closed() {
 }
 
 #[test]
+fn nested_duplicate_fields_and_semantic_key_misordering_fail_closed() {
+    let duplicate_cases = [
+        "{\"kind\":\"heartbeat\",\"kind\":\"heartbeat\"}",
+        "{\"kind\":\"refresh\",\"name\":\"refresh\",\"name\":\"refresh\"}",
+        "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":null,\"schema_version\":1,\"schema_version\":1,\"target\":\"self\"}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"name\":\"completion_percent\",\"value\":1}",
+        "{\"kind\":\"complete\",\"reason\":\"server_shutdown\",\"reason\":\"server_shutdown\"}",
+        "{\"code\":\"authorization_lost\",\"code\":\"authorization_lost\",\"kind\":\"error\"}",
+        "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1,\"count\":2},\"schema_version\":1,\"target\":\"self\"}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":{\"count\":1,\"count\":2}}",
+    ];
+    for payload in duplicate_cases {
+        assert_eq!(
+            decode_async_envelope(&wire(payload, 1, 1), &limits(), &context())
+                .expect_err("nested duplicate key")
+                .kind(),
+            AsyncEnvelopeErrorKind::DuplicateField
+        );
+    }
+
+    let id = subscription_id().to_base64url();
+    let duplicate_position = format!(
+        "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"epoch\":\"1\",\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
+    );
+    assert_eq!(
+        decode_async_envelope(duplicate_position.as_bytes(), &limits(), &context())
+            .expect_err("duplicate position key")
+            .kind(),
+        AsyncEnvelopeErrorKind::DuplicateField
+    );
+
+    let noncanonical = [
+        format!(
+            "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"sequence\":\"1\",\"epoch\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
+        ),
+        format!(
+            "{{\"payload\":{{\"kind\":\"browser_event\",\"event\":\"orders.updated\",\"payload\":{{\"z\":1,\"a\":2}},\"schema_version\":1,\"target\":\"self\"}},\"position\":{{\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
+        ),
+        format!(
+            "{{\"payload\":{{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":{{\"z\":1,\"a\":2}}}},\"position\":{{\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
+        ),
+    ];
+    for encoded in noncanonical {
+        assert_eq!(
+            decode_async_envelope(encoded.as_bytes(), &limits(), &context())
+                .expect_err("nested semantic key order must be canonical")
+                .kind(),
+            AsyncEnvelopeErrorKind::NonCanonical
+        );
+    }
+}
+
+#[test]
+fn subscription_id_rejects_encoded_length_and_shape_before_decode() {
+    assert_eq!(SubscriptionId::MIN_ENCODED_LEN, 22);
+    assert_eq!(SubscriptionId::MAX_ENCODED_LEN, 43);
+    assert!(SubscriptionId::parse(&"A".repeat(SubscriptionId::MIN_ENCODED_LEN)).is_ok());
+    assert!(SubscriptionId::parse(&"A".repeat(SubscriptionId::MAX_ENCODED_LEN)).is_ok());
+    assert!(SubscriptionId::from_bytes(&[0x5a; 32]).is_ok());
+    for invalid in [
+        "A".repeat(SubscriptionId::MIN_ENCODED_LEN - 1),
+        "A".repeat(SubscriptionId::MAX_ENCODED_LEN + 1),
+        format!("{}=", "A".repeat(SubscriptionId::MIN_ENCODED_LEN - 1)),
+        format!("{}+", "A".repeat(SubscriptionId::MIN_ENCODED_LEN - 1)),
+        format!("{}/", "A".repeat(SubscriptionId::MIN_ENCODED_LEN - 1)),
+    ] {
+        assert_eq!(
+            SubscriptionId::parse(&invalid)
+                .expect_err("invalid encoded subscription ID")
+                .kind(),
+            AsyncEnvelopeErrorKind::InvalidEnvelope
+        );
+    }
+}
+
+#[test]
 fn unsupported_or_malformed_operations_cannot_become_dispatch_authority() {
     let payloads = [
         "{\"html\":\"<p>unsafe</p>\",\"kind\":\"html\"}",
@@ -390,40 +788,76 @@ fn byte_depth_entry_string_and_payload_limits_are_enforced() {
 
 #[test]
 fn membership_and_stream_binding_are_validated_before_sequence_observation() {
-    let mut machine = SequenceMachine::new(StreamPosition::new(
-        StreamEpoch::new(4),
-        StreamSequence::new(40),
-    ));
+    let context = context();
+    let mut machine = SequenceMachine::new(
+        &context,
+        StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40)),
+    );
     let current = machine.current();
     let other_id = SubscriptionId::from_bytes(b"subscription-002").expect("other id");
-    let wrong_subscription = wire("{\"kind\":\"heartbeat\"}", 4, 41);
-    let wrong_context = AsyncEnvelopeContext::new(
-        other_id,
-        stream(),
-        BoundedEventContracts::new(vec![event_contract()]).expect("events"),
-        BoundedPresentationSignalContracts::new(vec![]).expect("signals"),
-    );
+    let registry = membership_registry();
     assert_eq!(
-        decode_async_envelope(&wrong_subscription, &limits(), &wrong_context)
-            .expect_err("inactive subscription")
+        AsyncEnvelopeContext::from_authorized(authorized_subscription(), other_id, &registry,)
+            .expect_err("inactive membership cannot create decode authority")
             .kind(),
         AsyncEnvelopeErrorKind::SubscriptionMismatch,
     );
     assert_eq!(machine.current(), current);
 
-    let wrong_stream = AsyncEnvelopeContext::new(
-        subscription_id(),
-        StreamName::parse("other").expect("other stream"),
-        BoundedEventContracts::new(vec![event_contract()]).expect("events"),
-        BoundedPresentationSignalContracts::new(vec![]).expect("signals"),
-    );
+    let mut wrong_stream = membership_registry();
+    wrong_stream.stream = StreamName::parse("other").expect("other stream");
     assert_eq!(
-        decode_async_envelope(&wrong_subscription, &limits(), &wrong_stream)
-            .expect_err("wrong stream")
-            .kind(),
+        AsyncEnvelopeContext::from_authorized(
+            authorized_subscription(),
+            subscription_id(),
+            &wrong_stream,
+        )
+        .expect_err("cross-stream registry cannot create decode authority")
+        .kind(),
         AsyncEnvelopeErrorKind::StreamMismatch,
     );
     assert_eq!(machine.current(), current);
+
+    let mut stale_registry = membership_registry();
+    stale_registry.events = BoundedEventContracts::new(vec![
+        SubscriptionEventContract::from_registered(
+            &EventMetadata::from_payload_with_contract::<OrdersUpdatedV2>(
+                EventSource::Stream,
+                BoundedTargets::new(vec![EventTarget::SelfIsland]).expect("target"),
+                EventOrder::PerSourceSequence,
+                EventCyclePolicy::MaximumHops(NonZeroU8::new(4).expect("hops")),
+                4,
+            )
+            .expect("stale event metadata"),
+        )
+        .expect("stale event contract"),
+    ])
+    .expect("stale registry events");
+    assert_eq!(
+        AsyncEnvelopeContext::from_authorized(
+            authorized_subscription(),
+            subscription_id(),
+            &stale_registry,
+        )
+        .expect_err("stale registry cannot create decode authority")
+        .kind(),
+        AsyncEnvelopeErrorKind::UnregisteredPayload,
+    );
+
+    assert_eq!(
+        decode_async_envelope(
+            &wire(
+                "{\"kind\":\"presentation_signal\",\"name\":\"caller_invented\",\"value\":1}",
+                4,
+                41,
+            ),
+            &limits(),
+            &context,
+        )
+        .expect_err("caller cannot add presentation authority")
+        .kind(),
+        AsyncEnvelopeErrorKind::UnregisteredPayload,
+    );
 
     let valid = decode("{\"kind\":\"heartbeat\"}", 4, 41);
     assert_eq!(machine.observe(&valid), SequenceDisposition::Apply);
@@ -432,8 +866,9 @@ fn membership_and_stream_binding_are_validated_before_sequence_observation() {
 
 #[test]
 fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
+    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40));
-    let mut machine = SequenceMachine::new(baseline);
+    let mut machine = SequenceMachine::new(&context, baseline);
 
     assert_eq!(
         machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 40)),
@@ -464,11 +899,12 @@ fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
     );
     assert_eq!(machine.current().sequence(), StreamSequence::new(41));
 
+    let replay = [
+        decode("{\"kind\":\"heartbeat\"}", 4, 42),
+        decode("{\"kind\":\"heartbeat\"}", 4, 43),
+    ];
     assert_eq!(
-        machine.adopt(ContinuityProof::Replay {
-            from: StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41)),
-            through: StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(43)),
-        }),
+        machine.recover_from_replay(&replay),
         Ok(BaselineDisposition::Adopted)
     );
     assert_eq!(machine.state(), SequenceState::Current);
@@ -481,58 +917,180 @@ fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
         machine.observe(&decode("{\"kind\":\"heartbeat\"}", 5, 1)),
         SequenceDisposition::Degraded(_)
     ));
+    let authority = StaticContinuityAuthority(StreamPosition::new(
+        StreamEpoch::new(5),
+        StreamSequence::new(7),
+    ));
     assert_eq!(
-        machine.adopt(ContinuityProof::AuthoritativeRefresh {
-            baseline: StreamPosition::new(StreamEpoch::new(5), StreamSequence::new(7)),
-        }),
+        machine.recover_from_authoritative_refresh(&authority),
         Ok(BaselineDisposition::Adopted)
     );
     assert_eq!(machine.state(), SequenceState::Current);
 }
 
 #[test]
-fn invalid_replay_and_regressing_refresh_proofs_cannot_rewrite_authority() {
+fn replay_recovery_requires_a_complete_contiguous_same_scope_transcript() {
+    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
-    let mut machine = SequenceMachine::new(baseline);
+    let mut machine = SequenceMachine::new(&context, baseline);
     let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43));
+    assert_eq!(
+        machine.high_water(),
+        Some(StreamPosition::new(
+            StreamEpoch::new(4),
+            StreamSequence::new(43)
+        ))
+    );
 
-    for proof in [
-        ContinuityProof::Replay {
-            from: StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40)),
-            through: StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(43)),
-        },
-        ContinuityProof::Replay {
-            from: baseline,
-            through: StreamPosition::new(StreamEpoch::new(5), StreamSequence::new(1)),
-        },
-    ] {
+    let invalid = [
+        Vec::new(),
+        vec![decode("{\"kind\":\"heartbeat\"}", 4, 41)],
+        vec![decode("{\"kind\":\"heartbeat\"}", 4, 42)],
+        vec![
+            decode("{\"kind\":\"heartbeat\"}", 4, 42),
+            decode("{\"kind\":\"heartbeat\"}", 4, 42),
+            decode("{\"kind\":\"heartbeat\"}", 4, 43),
+        ],
+        vec![
+            decode("{\"kind\":\"heartbeat\"}", 4, 42),
+            decode("{\"kind\":\"heartbeat\"}", 4, 44),
+        ],
+        vec![
+            decode("{\"kind\":\"heartbeat\"}", 5, 1),
+            decode("{\"kind\":\"heartbeat\"}", 5, 2),
+        ],
+    ];
+    for transcript in invalid {
         assert_eq!(
             machine
-                .adopt(proof)
-                .expect_err("invalid replay proof")
+                .recover_from_replay(&transcript)
+                .expect_err("invalid replay transcript")
                 .kind(),
-            SequenceErrorKind::InvalidReplayProof
+            SequenceErrorKind::InvalidReplayTranscript
         );
         assert_eq!(machine.current(), baseline);
         assert_eq!(machine.state(), SequenceState::Degraded);
     }
 
+    let valid = [
+        decode("{\"kind\":\"heartbeat\"}", 4, 42),
+        decode("{\"kind\":\"heartbeat\"}", 4, 43),
+    ];
     assert_eq!(
-        machine
-            .adopt(ContinuityProof::AuthoritativeRefresh {
-                baseline: StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40)),
-            })
-            .expect_err("same-epoch baseline regression")
-            .kind(),
-        SequenceErrorKind::BaselineRegression
+        machine.recover_from_replay(&valid),
+        Ok(BaselineDisposition::Adopted)
+    );
+    assert_eq!(machine.current(), valid[1].position());
+}
+
+struct StaticContinuityAuthority(StreamPosition);
+
+impl AsyncContinuityAuthorityPort for StaticContinuityAuthority {
+    fn authoritative_refresh(
+        &self,
+        _request: AsyncContinuityRequest<'_>,
+    ) -> Option<StreamPosition> {
+        Some(self.0)
+    }
+}
+
+#[test]
+fn cross_scope_envelopes_and_replay_cannot_change_sequence_authority() {
+    let context_a = context();
+    let other_id = SubscriptionId::from_bytes(b"subscription-002").expect("other id");
+    let mut registry_b = membership_registry();
+    registry_b.subscription = other_id.clone();
+    let context_b = AsyncEnvelopeContext::from_authorized(
+        authorized_subscription(),
+        other_id.clone(),
+        &registry_b,
+    )
+    .expect("active B membership");
+    let envelope_b = decode_async_envelope(
+        &wire_for(&other_id, &stream(), "{\"kind\":\"heartbeat\"}", 4, 43),
+        &limits(),
+        &context_b,
+    )
+    .expect("valid B envelope");
+    let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(40));
+    let mut machine = SequenceMachine::new(&context_a, baseline);
+    let state = machine.state();
+
+    assert_eq!(
+        machine.observe(&envelope_b),
+        SequenceDisposition::ScopeMismatch
     );
     assert_eq!(machine.current(), baseline);
+    assert_eq!(machine.high_water(), None);
+    assert_eq!(machine.state(), state);
+
+    let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43));
+    let high_water = machine.high_water();
+    assert_eq!(
+        machine
+            .recover_from_replay(&[envelope_b])
+            .expect_err("cross-scope replay")
+            .kind(),
+        SequenceErrorKind::ScopeMismatch
+    );
+    assert_eq!(machine.current(), baseline);
+    assert_eq!(machine.high_water(), high_water);
+    assert_eq!(machine.state(), SequenceState::Degraded);
+}
+
+#[test]
+fn only_host_continuity_authority_can_establish_a_covering_new_baseline() {
+    let context = context();
+    let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
+    let mut machine = SequenceMachine::new(&context, baseline);
+    let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 5, 3));
+    let high_water = machine.high_water();
+
+    assert_eq!(
+        machine
+            .recover_from_replay(&[
+                decode("{\"kind\":\"heartbeat\"}", 4, 42),
+                decode("{\"kind\":\"heartbeat\"}", 4, 43),
+            ])
+            .expect_err("same-epoch replay cannot prove a new epoch")
+            .kind(),
+        SequenceErrorKind::InvalidReplayTranscript
+    );
+    assert_eq!(machine.current(), baseline);
+    assert_eq!(machine.high_water(), high_water);
+
+    assert_eq!(
+        machine
+            .recover_from_authoritative_refresh(&StaticContinuityAuthority(StreamPosition::new(
+                StreamEpoch::new(5),
+                StreamSequence::new(2)
+            ),))
+            .expect_err("host baseline must cover observed high-water")
+            .kind(),
+        SequenceErrorKind::AuthoritativeBaselineInsufficient
+    );
+    assert_eq!(machine.current(), baseline);
+    assert_eq!(machine.high_water(), high_water);
+
+    assert_eq!(
+        machine.recover_from_authoritative_refresh(&StaticContinuityAuthority(
+            StreamPosition::new(StreamEpoch::new(5), StreamSequence::new(3)),
+        )),
+        Ok(BaselineDisposition::Adopted)
+    );
+    assert_eq!(
+        machine.current(),
+        StreamPosition::new(StreamEpoch::new(5), StreamSequence::new(3))
+    );
+    assert_eq!(machine.high_water(), None);
+    assert_eq!(machine.state(), SequenceState::Current);
 }
 
 #[test]
 fn sequence_overflow_never_wraps_or_applies() {
+    let context = context();
     let baseline = StreamPosition::new(StreamEpoch::new(9), StreamSequence::new(u64::MAX));
-    let mut machine = SequenceMachine::new(baseline);
+    let mut machine = SequenceMachine::new(&context, baseline);
     assert_eq!(
         machine.observe(&decode("{\"kind\":\"heartbeat\"}", 9, u64::MAX)),
         SequenceDisposition::IgnoreDuplicate
@@ -547,8 +1105,9 @@ fn sequence_overflow_never_wraps_or_applies() {
 proptest! {
     #[test]
     fn sequence_machine_never_applies_a_gap(observed in prop::collection::vec((0_u64..4, any::<u64>()), 0..128)) {
+        let context = context();
         let baseline = StreamPosition::new(StreamEpoch::new(2), StreamSequence::new(10));
-        let mut machine = SequenceMachine::new(baseline);
+        let mut machine = SequenceMachine::new(&context, baseline);
         for (epoch, sequence) in observed {
             let before = machine.current();
             let envelope = decode("{\"kind\":\"heartbeat\"}", epoch, sequence);
@@ -558,6 +1117,44 @@ proptest! {
                 prop_assert_eq!(machine.current(), envelope.position());
             }
         }
+    }
+
+    #[test]
+    fn incomplete_replay_transcripts_never_adopt_or_clear_a_gap(
+        gap in 2_u64..64,
+        omitted_offset in 1_u64..64,
+    ) {
+        let context = context();
+        let baseline = StreamPosition::new(StreamEpoch::new(7), StreamSequence::new(10));
+        let high_sequence = 10 + gap;
+        let mut machine = SequenceMachine::new(&context, baseline);
+        let _ = machine.observe(&decode(
+            "{\"kind\":\"heartbeat\"}",
+            7,
+            high_sequence,
+        ));
+        let omitted = 11 + (omitted_offset % gap);
+        let transcript = (11..=high_sequence)
+            .filter(|sequence| *sequence != omitted)
+            .map(|sequence| decode("{\"kind\":\"heartbeat\"}", 7, sequence))
+            .collect::<Vec<_>>();
+
+        prop_assert_eq!(
+            machine
+                .recover_from_replay(&transcript)
+                .expect_err("incomplete transcript")
+                .kind(),
+            SequenceErrorKind::InvalidReplayTranscript
+        );
+        prop_assert_eq!(machine.current(), baseline);
+        prop_assert_eq!(machine.state(), SequenceState::Degraded);
+        prop_assert_eq!(
+            machine.high_water(),
+            Some(StreamPosition::new(
+                StreamEpoch::new(7),
+                StreamSequence::new(high_sequence),
+            ))
+        );
     }
 
     #[test]
@@ -610,7 +1207,8 @@ fn version_four_async_fixture_is_executable_not_documentary() {
         .expect("continuity cases")
     {
         let baseline = fixture_position(&case["baseline"]);
-        let mut machine = SequenceMachine::new(baseline);
+        let context = context();
+        let mut machine = SequenceMachine::new(&context, baseline);
         let disposition = if let Some(observed) = case.get("observed") {
             let observed = fixture_position(observed);
             let envelope = decode(
@@ -624,21 +1222,50 @@ fn version_four_async_fixture_is_executable_not_documentary() {
                 SequenceDisposition::Degraded(_) => "degrade",
                 SequenceDisposition::IgnoreStaleEpoch => "ignore_stale_epoch",
                 SequenceDisposition::AwaitingRecovery => "awaiting_recovery",
+                SequenceDisposition::ScopeMismatch => "scope_mismatch",
             }
         } else {
-            let proof = &case["proof"];
-            let through = fixture_position(&proof["through"]);
-            let authority = match proof["kind"].as_str().expect("proof kind") {
-                "replay" => ContinuityProof::Replay {
-                    from: baseline,
-                    through,
-                },
-                "authoritative_refresh" => {
-                    ContinuityProof::AuthoritativeRefresh { baseline: through }
+            let observed_gap = fixture_position(&case["observed_gap"]);
+            assert!(matches!(
+                machine.observe(&decode(
+                    "{\"kind\":\"heartbeat\"}",
+                    observed_gap.epoch().get(),
+                    observed_gap.sequence().get(),
+                )),
+                SequenceDisposition::Degraded(_)
+            ));
+            let recovery = &case["recovery"];
+            match recovery["kind"].as_str().expect("recovery kind") {
+                "replay" => {
+                    let transcript = recovery["transcript"]
+                        .as_array()
+                        .expect("replay transcript")
+                        .iter()
+                        .map(|position| {
+                            let position = fixture_position(position);
+                            decode(
+                                "{\"kind\":\"heartbeat\"}",
+                                position.epoch().get(),
+                                position.sequence().get(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        machine.recover_from_replay(&transcript),
+                        Ok(BaselineDisposition::Adopted)
+                    );
                 }
-                other => panic!("unknown proof kind: {other}"),
-            };
-            assert_eq!(machine.adopt(authority), Ok(BaselineDisposition::Adopted));
+                "authoritative_refresh" => {
+                    let authority = fixture_position(&recovery["baseline"]);
+                    assert_eq!(
+                        machine.recover_from_authoritative_refresh(&StaticContinuityAuthority(
+                            authority
+                        )),
+                        Ok(BaselineDisposition::Adopted)
+                    );
+                }
+                other => panic!("unknown recovery kind: {other}"),
+            }
             "adopt_baseline"
         };
         assert_eq!(

@@ -1,26 +1,26 @@
 #![no_main]
 
-use std::num::NonZeroU8;
-
 use libfuzzer_sys::fuzz_target;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncEnvelopeContext, BaselineDisposition, BoundedEventContracts,
-    BoundedPresentationSignalContracts, BoundedTargets, BrowserPayloadSchema, ContinuityProof,
-    EventCyclePolicy, EventOrder, EventSource, EventTarget, SequenceDisposition, SequenceMachine,
-    StreamEpoch, StreamName, StreamPosition, StreamSequence, SubscriptionEventContract,
-    SubscriptionId, decode_async_envelope,
+    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncEnvelope,
+    BaselineDisposition, SequenceDisposition, SequenceMachine, StreamEpoch, StreamPosition,
+    StreamSequence, decode_async_envelope,
 };
-use suprnova_live::metadata::{EventMetadata, EventPayloadMetadata};
 
 const MAX_TRANSITIONS: usize = 256;
+const MAX_FUZZ_REPLAY: u64 = 32;
 
-struct FuzzEvent;
+mod support;
 
-impl EventPayloadMetadata for FuzzEvent {
-    const NAME: &'static str = "fuzz.event";
-    const VERSION: u16 = 1;
-    const PAYLOAD_CONTRACT: &'static str = "fuzz.event.payload";
-    const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+struct FuzzContinuityAuthority(StreamPosition);
+
+impl AsyncContinuityAuthorityPort for FuzzContinuityAuthority {
+    fn authoritative_refresh(
+        &self,
+        _request: AsyncContinuityRequest<'_>,
+    ) -> Option<StreamPosition> {
+        Some(self.0)
+    }
 }
 
 fn u64_at(bytes: &[u8], start: usize) -> u64 {
@@ -33,24 +33,15 @@ fn u64_at(bytes: &[u8], start: usize) -> u64 {
     u64::from_le_bytes(value)
 }
 
-fn context() -> AsyncEnvelopeContext {
-    let metadata = EventMetadata::from_payload_with_contract::<FuzzEvent>(
-        EventSource::Stream,
-        BoundedTargets::new(vec![EventTarget::SelfIsland]).expect("static target"),
-        EventOrder::PerSourceSequence,
-        EventCyclePolicy::MaximumHops(NonZeroU8::new(1).expect("static hop")),
-        1,
-    )
-    .expect("static event metadata");
-    AsyncEnvelopeContext::new(
-        SubscriptionId::from_bytes(b"fuzz-subscription").expect("static subscription"),
-        StreamName::parse("fuzz").expect("static stream"),
-        BoundedEventContracts::new(vec![
-            SubscriptionEventContract::from_registered(&metadata).expect("static event contract"),
-        ])
-        .expect("static event set"),
-        BoundedPresentationSignalContracts::new(Vec::new()).expect("empty signal set"),
-    )
+fn heartbeat(position: StreamPosition, limits: &AsyncCodecLimits) -> AsyncEnvelope {
+    let subscription = support::async_subscription_id().to_base64url();
+    let encoded = format!(
+        "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"epoch\":\"{}\",\"sequence\":\"{}\"}},\"protocol_version\":1,\"stream\":\"fuzz\",\"subscription\":\"{subscription}\"}}",
+        position.epoch().get(),
+        position.sequence().get(),
+    );
+    decode_async_envelope(encoded.as_bytes(), limits, support::async_context())
+        .expect("generated bounded heartbeat")
 }
 
 fuzz_target!(|bytes: &[u8]| {
@@ -61,11 +52,9 @@ fuzz_target!(|bytes: &[u8]| {
         StreamEpoch::new(u64_at(bytes, 0)),
         StreamSequence::new(u64_at(bytes, 8)),
     );
-    let mut machine = SequenceMachine::new(baseline);
-    let subscription = SubscriptionId::from_bytes(b"fuzz-subscription")
-        .expect("static subscription")
-        .to_base64url();
-    let context = context();
+    let context = support::async_context();
+    let mut machine = SequenceMachine::new(context, baseline);
+    let subscription = support::async_subscription_id().to_base64url();
     let limits = AsyncCodecLimits::v1();
 
     for chunk in bytes[16..].chunks(17).take(MAX_TRANSITIONS) {
@@ -79,7 +68,7 @@ fuzz_target!(|bytes: &[u8]| {
                 let encoded = format!(
                     "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"epoch\":\"{epoch}\",\"sequence\":\"{sequence}\"}},\"protocol_version\":1,\"stream\":\"fuzz\",\"subscription\":\"{subscription}\"}}"
                 );
-                let envelope = decode_async_envelope(encoded.as_bytes(), &limits, &context)
+                let envelope = decode_async_envelope(encoded.as_bytes(), &limits, context)
                     .expect("generated bounded heartbeat");
                 match machine.observe(&envelope) {
                     SequenceDisposition::Apply => {
@@ -93,25 +82,45 @@ fuzz_target!(|bytes: &[u8]| {
                     SequenceDisposition::Degraded(_)
                     | SequenceDisposition::AwaitingRecovery
                     | SequenceDisposition::IgnoreDuplicate
-                    | SequenceDisposition::IgnoreStaleEpoch => {
+                    | SequenceDisposition::IgnoreStaleEpoch
+                    | SequenceDisposition::ScopeMismatch => {
                         assert_eq!(machine.current(), before);
                     }
                 }
             }
             1 => {
-                let result = machine.adopt(ContinuityProof::Replay {
-                    from: before,
-                    through: position,
+                let transcript = machine.high_water().and_then(|high_water| {
+                    if high_water.epoch() != before.epoch() {
+                        return None;
+                    }
+                    let first = before.sequence().get().checked_add(1)?;
+                    let distance = high_water.sequence().get().checked_sub(first)?;
+                    if distance >= MAX_FUZZ_REPLAY {
+                        return None;
+                    }
+                    Some(
+                        (first..=high_water.sequence().get())
+                            .map(|value| {
+                                heartbeat(
+                                    StreamPosition::new(
+                                        before.epoch(),
+                                        StreamSequence::new(value),
+                                    ),
+                                    &limits,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
                 });
+                let result = machine.recover_from_replay(transcript.as_deref().unwrap_or(&[]));
                 if result.is_ok() {
-                    assert_eq!(position.epoch(), before.epoch());
-                    assert!(position.sequence() >= before.sequence());
+                    assert_eq!(machine.current().epoch(), before.epoch());
+                    assert!(machine.current().sequence() > before.sequence());
                 }
             }
             _ => {
-                let result = machine.adopt(ContinuityProof::AuthoritativeRefresh {
-                    baseline: position,
-                });
+                let result = machine
+                    .recover_from_authoritative_refresh(&FuzzContinuityAuthority(position));
                 if matches!(
                     result,
                     Ok(BaselineDisposition::Adopted | BaselineDisposition::AlreadyCurrent)

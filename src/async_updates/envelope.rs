@@ -14,8 +14,8 @@ use crate::identity::{BrowserOperationName, IslandSlot};
 use crate::limits::{InputLimits, LimitConfigurationError};
 
 use super::{
-    BoundedEventContracts, BrowserPayloadSchema, EventTarget, StreamEpoch, StreamName,
-    StreamPosition, StreamSequence, SubscriptionEventContract,
+    AuthorizedSubscription, BoundedEventContracts, BrowserPayloadSchema, EventTarget, StreamEpoch,
+    StreamName, StreamPosition, StreamSequence, SubscriptionEventContract,
 };
 
 /// Independently versioned asynchronous event-envelope majors supported here.
@@ -170,6 +170,12 @@ impl AsyncCodecLimits {
 pub struct SubscriptionId(Vec<u8>);
 
 impl SubscriptionId {
+    /// Minimum canonical unpadded base64url length for a 128-bit identity.
+    pub const MIN_ENCODED_LEN: usize = 22;
+
+    /// Maximum canonical unpadded base64url length for a 256-bit identity.
+    pub const MAX_ENCODED_LEN: usize = 43;
+
     /// Constructs an identity from trusted server bytes.
     pub fn from_bytes(value: &[u8]) -> Result<Self, AsyncEnvelopeError> {
         if !(MIN_SUBSCRIPTION_ID_BYTES..=MAX_SUBSCRIPTION_ID_BYTES).contains(&value.len()) {
@@ -182,7 +188,11 @@ impl SubscriptionId {
 
     /// Parses canonical unpadded base64url subscription identity.
     pub fn parse(value: &str) -> Result<Self, AsyncEnvelopeError> {
-        if value.contains('=') {
+        if !(Self::MIN_ENCODED_LEN..=Self::MAX_ENCODED_LEN).contains(&value.len())
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
             return Err(AsyncEnvelopeError::new(
                 AsyncEnvelopeErrorKind::InvalidEnvelope,
             ));
@@ -271,7 +281,112 @@ impl BoundedPresentationSignalContracts {
     }
 }
 
-/// Current active-membership and registered-payload context required for decode.
+/// Exact authorized subscription and proposed membership supplied to the host registry.
+#[derive(Clone, Copy)]
+pub struct AsyncMembershipRequest<'a> {
+    authorized: &'a AuthorizedSubscription,
+    subscription: &'a SubscriptionId,
+}
+
+impl<'a> AsyncMembershipRequest<'a> {
+    /// Returns the Task 2 connect-authorized subscription capability.
+    #[must_use]
+    pub const fn authorized(self) -> &'a AuthorizedSubscription {
+        self.authorized
+    }
+
+    /// Returns the logical membership identity requiring active validation.
+    #[must_use]
+    pub const fn subscription(self) -> &'a SubscriptionId {
+        self.subscription
+    }
+}
+
+impl fmt::Debug for AsyncMembershipRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AsyncMembershipRequest:redacted>")
+    }
+}
+
+/// Host-owned active-membership and current-registry authority.
+///
+/// Task 3 defines only this validation hook. Physical transport membership and
+/// multiplexing remain owned by Task 4.
+pub trait AsyncMembershipRegistryPort: Send + Sync {
+    /// Atomically validates active membership and supplies one current registry snapshot.
+    fn validate_current(
+        &self,
+        request: AsyncMembershipRequest<'_>,
+        validation: &mut AsyncMembershipValidation<'_>,
+    );
+}
+
+/// Framework-owned sink that seals exactly one host-validated registry snapshot.
+pub struct AsyncMembershipValidation<'a> {
+    authorized: &'a AuthorizedSubscription,
+    candidate: Option<(
+        StreamName,
+        BoundedEventContracts,
+        BoundedPresentationSignalContracts,
+    )>,
+    rejected: Option<AsyncEnvelopeErrorKind>,
+}
+
+impl AsyncMembershipValidation<'_> {
+    /// Accepts one atomic current snapshot from the host-owned membership port.
+    ///
+    /// The framework independently compares stream and full event contracts to
+    /// the Task 2 connect-authorized claims. A second acceptance fails closed.
+    pub fn accept_current(
+        &mut self,
+        stream: &StreamName,
+        events: &BoundedEventContracts,
+        presentation_signals: &BoundedPresentationSignalContracts,
+    ) -> bool {
+        if self.candidate.is_some() || self.rejected.is_some() {
+            self.candidate = None;
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        let claims = self.authorized.verified().claims();
+        if stream != claims.stream() {
+            self.rejected = Some(AsyncEnvelopeErrorKind::StreamMismatch);
+            return false;
+        }
+        if events != claims.events() {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        self.candidate = Some((stream.clone(), events.clone(), presentation_signals.clone()));
+        true
+    }
+
+    fn finish(
+        self,
+    ) -> Result<
+        (
+            StreamName,
+            BoundedEventContracts,
+            BoundedPresentationSignalContracts,
+        ),
+        AsyncEnvelopeError,
+    > {
+        self.candidate.ok_or_else(|| {
+            AsyncEnvelopeError::new(
+                self.rejected
+                    .unwrap_or(AsyncEnvelopeErrorKind::SubscriptionMismatch),
+            )
+        })
+    }
+}
+
+impl fmt::Debug for AsyncMembershipValidation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AsyncMembershipValidation:redacted>")
+    }
+}
+
+/// Sealed active-membership and registered-payload context required for decode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AsyncEnvelopeContext {
     subscription: SubscriptionId,
@@ -281,20 +396,41 @@ pub struct AsyncEnvelopeContext {
 }
 
 impl AsyncEnvelopeContext {
-    /// Binds decode to one selected active logical subscription and current registry.
-    #[must_use]
-    pub const fn new(
+    /// Validates Task 2 authorization against active membership and current registry.
+    pub fn from_authorized(
+        authorized: &AuthorizedSubscription,
         subscription: SubscriptionId,
-        stream: StreamName,
-        events: BoundedEventContracts,
-        presentation_signals: BoundedPresentationSignalContracts,
-    ) -> Self {
-        Self {
+        registry: &dyn AsyncMembershipRegistryPort,
+    ) -> Result<Self, AsyncEnvelopeError> {
+        let request = AsyncMembershipRequest {
+            authorized,
+            subscription: &subscription,
+        };
+        let mut validation = AsyncMembershipValidation {
+            authorized,
+            candidate: None,
+            rejected: None,
+        };
+        registry.validate_current(request, &mut validation);
+        let (stream, events, presentation_signals) = validation.finish()?;
+        Ok(Self {
             subscription,
             stream,
             events,
             presentation_signals,
-        }
+        })
+    }
+
+    /// Returns the active logical subscription scope.
+    #[must_use]
+    pub const fn subscription(&self) -> &SubscriptionId {
+        &self.subscription
+    }
+
+    /// Returns the active registered stream scope.
+    #[must_use]
+    pub const fn stream(&self) -> &StreamName {
+        &self.stream
     }
 }
 

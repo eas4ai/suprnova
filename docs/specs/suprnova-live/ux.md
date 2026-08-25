@@ -174,7 +174,8 @@ competing for ownership of the same DOM.
    never automatically invokes a mutating Live action.
 3. The push connection drops or a sequence gap appears -> HTTP actions and
    document navigation continue; hybrid policy activates jittered polling while
-   the runtime seeks replay proof or an authoritative refresh.
+   the runtime seeks a complete validated replay transcript or an authoritative
+   host refresh.
 4. The transport reconnects -> the region returns to current only after stream
    continuity is proved or refresh establishes a new baseline.
 

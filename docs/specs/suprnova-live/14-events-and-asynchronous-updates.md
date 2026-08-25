@@ -222,6 +222,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Replaced claimed replay ranges with a bounded transcript of
+  already membership- and registry-validated envelopes. Gap recovery requires
+  every same-scope, same-epoch position from the last applied successor through
+  at least the recorded high-water with no empty proof, duplicate, regression,
+  or omission. A new epoch or otherwise unavailable replay can be adopted only
+  through the injected host continuity authority, and its baseline must not
+  regress and must cover all observed high-water.
 - 2026-08-25 -- Implemented the independent canonical async-envelope protocol
   v1 with required bounded logical-subscription identity, registered stream,
   monotonic epoch/sequence position, and the closed refresh, typed browser
@@ -229,8 +236,8 @@ UX flow:
   union. The sequence machine applies only the exact same-epoch successor,
   ignores duplicates and older epochs, preserves its last authoritative
   position across gaps and newer epochs, and cannot restore currentness or
-  adopt a non-regressing baseline without explicit trusted replay proof or an
-  authoritative refresh.
+  adopt a non-regressing baseline without a complete validated replay
+  transcript or an authoritative host refresh.
 - 2026-08-25 -- Implemented the canonical subscription-v1 descriptor with the
   exact `suprnova-live/async-subscription/v1` HKDF purpose, bounded exact-key
   claims, overlapping key-ID verification, exclusive expiry, and a
@@ -259,7 +266,8 @@ UX flow:
   polling-only, push-only, or continuity-aware hybrid freshness. Push may queue
   only registered refresh, typed browser event, or presentation-only signal
   work; it never automatically invokes a mutating Live action. Gaps require
-  trusted replay proof or authoritative refresh before currentness is claimed;
+  complete validated replay transcript or authoritative host refresh before
+  currentness is claimed;
   the signed descriptor's baseline epoch/sequence closes the initial SSR-to-
   stream gap.
 - 2026-08-21 -- WebSockets and SSE augment Live; rejected persistent sockets as
