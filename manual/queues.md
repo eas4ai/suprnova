@@ -148,6 +148,64 @@ handler already has to tolerate redelivery, so this needs no extra handling -
 but the log is there because a burst of them means the cache backing your
 dedupe lock is struggling.
 
+### Unique until processing
+
+A uniqueness lock normally lasts the whole `unique_for` window, even after the
+job has run. When the lock exists to coalesce *queued* duplicates rather than
+to serialize execution, opt in to releasing it the moment processing begins:
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebuildSearchIndex {
+    index: String,
+}
+
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "rebuild-search-index" }
+    fn unique_id(&self) -> Option<String> { Some(self.index.clone()) }
+    fn unique_until_processing() -> bool { true }
+    fn unique_for() -> Duration { Duration::from_secs(3600) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // A rebuild that runs for 20 minutes no longer swallows the
+        // re-dispatch that arrives at minute 2.
+        Ok(())
+    }
+}
+```
+
+The worker releases the lock after the job's middleware pass and immediately
+before the handler runs. Three consequences follow:
+
+- A job that a middleware releases back onto the queue keeps its lock. It has
+  not started processing, so nothing has changed for a duplicate.
+- A job that a middleware deletes or dead-letters releases its lock, because
+  it is never going to process at all.
+- The release is owner-scoped. `push_unique` records the lock's owner token on
+  the envelope, and the worker releases with that token, so a redelivered
+  attempt can never release a lock that a newer dispatch has since acquired.
+
+`unique_until_processing` needs the same two things `push_unique` needs: a
+`unique_id` that returns `Some(id)`, and a bootstrapped cache layer.
+
+### Why Suprnova diverges
+
+Laravel releases an *ordinary* unique job's lock once the handler returns.
+Suprnova lets that lock expire with the `unique_for` TTL instead, which keeps
+the dedupe window honest when a worker dies mid-job: the window you configured
+is the window you get, whether or not the handler ever returned.
+`unique_until_processing` behaves the same in both frameworks.
+
+Suprnova also never force-releases a uniqueness lock. Laravel falls back to a
+forced release for a first attempt that carries no owner token. The only
+envelopes that reach a Suprnova worker without one are envelopes queued before
+the token existed, and those keep TTL expiry rather than risking a release that
+deletes a newer dispatch's lock.
+
 ### Per-push overrides with `EnvelopeOverrides`
 
 `Queue::push_with` and `Queue::later_with` take an `EnvelopeOverrides`
@@ -258,6 +316,7 @@ impl Job for SendWelcomeEmail {
         Some(format!("welcome:{}", self.user_id))
     }
     fn unique_for() -> Duration { Duration::from_secs(600) }  // default: 5 minutes
+    fn unique_until_processing() -> bool { true }          // default: false (TTL is the window)
     fn middleware() -> Vec<std::sync::Arc<dyn JobMiddleware>> {
         vec![/* see "Job middleware" below */]
     }

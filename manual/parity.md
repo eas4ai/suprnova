@@ -113,7 +113,7 @@ gaps as of the shipped framework.
 | Queue pausing (`queue:pause` / `queue:resume`) | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`, cache-backed, with `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` events | shipped | A per-queue pause only takes effect on a worker started with an explicit `--queue=...` list; `resume_all` doesn't clear a per-queue pause. [Queues](queues.md) |
 | After-commit dispatch (`afterCommit()`) | Jobs pushed inside a transaction are visible to the driver immediately | not yet | A rollback today leaves the job queued. Wrap the push outside the transaction until transaction-scoped dispatch ships |
 | Failover queue connection | No `failover` driver | not yet | Pick the connection explicitly per push, or bind your own `QueueDriver` that wraps two, until a `FailoverQueueDriver` ships |
-| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` holds the lock for the whole job | not yet | Releasing the uniqueness lock at claim time (rather than completion) is a separate semantic that isn't wired yet |
+| `ShouldBeUniqueUntilProcessing` | `fn unique_until_processing() -> bool` on `Job`, released after the middleware pass and before the handler | shipped | Owner-scoped release, so a redelivered attempt never releases a newer dispatch's lock. A job a middleware releases back onto the queue keeps its lock. [Queues](queues.md) |
 | Queue inspection (`pendingJobs` / `delayedJobs` / `reservedJobs`) | No driver-level inspection API | not yet | Query the driver's backing store directly (`jobs` table, Redis keys) until the inspection surface ships |
 | Schedule per-task timezone | `.timezone(chrono_tz::Tz)` / `.try_timezone("name")` per task, `Schedule::timezone` default, `schedule:list --timezone` | shipped | Typed `chrono_tz::Tz` instead of Laravel's string; the schedule-wide default is `Schedule::timezone` in `schedule::register` rather than an `app.schedule_timezone` config key, and an unpinned task keeps the process-local zone. [Scheduling](scheduling.md) |
 | Rate Limiting | `RateLimiter::for_signature(...)`, `ThrottleRequestsMiddleware`, `RateLimitMiddleware` | shipped | Sliding window via `SlidingWindowConfig`. [Rate Limiting](rate-limiting.md) |
@@ -410,7 +410,6 @@ shape of the gap in one place:
 | Image manipulation | `Illuminate\Image` equivalent (resize / crop / convert) | Use the `image` crate directly behind your own `App::bind` |
 | After-commit dispatch | Transaction-scoped job dispatch | Push after the transaction returns |
 | Failover queue connection | `failover` driver over an ordered driver list | Choose the connection per push |
-| `ShouldBeUniqueUntilProcessing` | Lock released at claim time | `push_unique` holds the lock for the whole job |
 | Queue inspection | `pendingJobs` / `delayedJobs` / `reservedJobs` | Query the driver's backing store |
 
 ## What we won't ship (and why)

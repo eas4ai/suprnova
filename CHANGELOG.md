@@ -8,6 +8,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
+  uniqueness lock when processing begins - after the job's middleware pass,
+  immediately before the handler runs - instead of holding it for the full
+  `unique_for` window, which is what you want when the lock exists to coalesce
+  queued duplicates rather than to serialize execution. A job that a middleware
+  releases back onto the queue keeps its lock, because it has not started
+  processing; a job a middleware deletes or dead-letters gives its lock up.
+  Release is owner-scoped: `Queue::push_unique` records the cache lock's owner
+  token on the envelope (`Envelope::unique_lock_owner`, an additive field that
+  leaves the frozen wire format byte-identical for every non-unique push), and
+  the worker releases with that token, so a redelivered attempt can never
+  force-release a lock a newer dispatch now holds. The supporting idempotency
+  surface is public too: `Idempotency::commit_on_success_owned` hands the body
+  the lock owner and returns it, and `Idempotency::release_owned(key, owner)`
+  releases owner-scoped, reporting `Ok(false)` rather than an error when the
+  lock is absent or held by somebody else. Plain `unique_id` jobs are unchanged
+  and still let the `unique_for` TTL be the dedupe window.
 - **`Gate::default_denial_response` customizes the default shape of a bare denial.** Mirrors
   Laravel's `Gate::defaultDenialResponse($response)`. Set once - typically in
   `bootstrap::register()` - it reshapes exactly two outcomes: a bare `false` (a bool gate -

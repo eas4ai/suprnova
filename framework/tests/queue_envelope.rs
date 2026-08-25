@@ -26,6 +26,7 @@ fn envelope_round_trips_through_json() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };
@@ -54,6 +55,11 @@ fn envelope_accepts_legacy_v1_payloads() {
     assert_eq!(env.schema_version, 1);
     assert!(env.batch_id.is_none());
     assert!(env.chain_remaining.is_empty());
+    assert!(
+        env.unique_lock_owner.is_none(),
+        "an envelope written before the unique-lock owner token existed must \
+         decode with no owner, not fail"
+    );
 }
 
 #[test]
@@ -94,6 +100,7 @@ fn envelope_wire_format_is_frozen() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };

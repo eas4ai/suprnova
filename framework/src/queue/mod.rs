@@ -428,17 +428,29 @@ impl Queue {
             )
         })?;
         let ttl = J::unique_for();
-        let key = format!("queue-unique:{}:{}", J::job_name(), id);
+        let key = unique_key(J::job_name(), &id);
         // The closure below takes `id` by value to stamp the envelope's
         // idempotency key, so keep a copy for the event payload.
         let unique_id = id.clone();
 
-        let outcome =
-            crate::idempotency::Idempotency::commit_on_success(&key, ttl, move || async move {
-                let mut env = envelope_for::<J>(&job, available_at)?;
-                env.idempotency_key = Some(id);
-                let drv = current_driver()?;
-                drv.push(env).await
+        // `commit_on_success_owned` rather than `commit_on_success`: the owner
+        // token of the lock we are holding right now has to reach the envelope,
+        // because for a `unique_until_processing` job the worker - a different
+        // task, possibly a different process - is what releases it.
+        let (outcome, _owner) =
+            crate::idempotency::Idempotency::commit_on_success_owned(&key, ttl, move |owner| {
+                // Built outside the async block so the future borrows nothing
+                // from `owner`, which the higher-ranked closure bound forbids.
+                let built = envelope_for::<J>(&job, available_at).map(|mut env| {
+                    env.idempotency_key = Some(id);
+                    env.unique_lock_owner = owner.map(str::to_owned);
+                    env
+                });
+                async move {
+                    let env = built?;
+                    let drv = current_driver()?;
+                    drv.push(env).await
+                }
             })
             .await?;
 
@@ -677,9 +689,9 @@ impl Queue {
 
     /// Re-enqueue a previously dead-lettered job by id. Loads the
     /// envelope from the configured [`FailedJobStore`], resets its
-    /// `attempts`, `available_at`, and `idempotency_key`, pushes it
-    /// through the configured driver, then deletes the failed-job
-    /// record. Mirrors `php artisan queue:retry <id>`.
+    /// `attempts`, `available_at`, `idempotency_key`, and
+    /// `unique_lock_owner`, pushes it through the configured driver, then
+    /// deletes the failed-job record. Mirrors `php artisan queue:retry <id>`.
     ///
     /// Returns `Ok(true)` when the record was retried, `Ok(false)` when
     /// the id had no record in the store.
@@ -698,6 +710,7 @@ impl Queue {
         env.attempts = 0;
         env.available_at = Utc::now();
         env.idempotency_key = None;
+        env.unique_lock_owner = None;
         let drv = current_driver()?;
         drv.push(env).await?;
         store.forget(id).await?;
@@ -732,6 +745,7 @@ impl Queue {
             env.attempts = 0;
             env.available_at = Utc::now();
             env.idempotency_key = None;
+            env.unique_lock_owner = None;
             drv.push(env).await?;
             store.forget(record.id).await?;
             count += 1;
@@ -958,6 +972,17 @@ fn resolve_job_delay<J: Job>(
     }
 }
 
+/// The idempotency key a `push_unique` dispatch takes its dedupe lock under.
+///
+/// Shared by the push side ([`Queue::push_unique`]) and the worker side (the
+/// `unique_until_processing` release), because those two are the only places
+/// that address this key and a drift between them is invisible: the release
+/// would report "nothing to release" and the lock would linger for its full
+/// TTL.
+pub(crate) fn unique_key(job_name: &str, id: &str) -> String {
+    format!("queue-unique:{job_name}:{id}")
+}
+
 fn envelope_for<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,
@@ -1010,6 +1035,7 @@ pub(crate) fn build_envelope<J: Job>(
         timeout_secs,
         fail_on_timeout: J::fail_on_timeout(),
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     })

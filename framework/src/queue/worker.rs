@@ -72,6 +72,13 @@ type MiddlewareFactory = Arc<dyn Fn() -> Vec<Arc<dyn JobMiddleware>> + Send + Sy
 struct Registration {
     dispatcher: Dispatcher,
     middleware: MiddlewareFactory,
+    /// Snapshot of [`Job::unique_until_processing`] taken at registration.
+    ///
+    /// Registry metadata rather than payload sniffing: the worker has to know
+    /// this before it decides to release the lock, and deserializing the job
+    /// just to ask would put a decode on the path of every popped envelope -
+    /// including the ones whose decode is the thing that fails.
+    unique_until_processing: bool,
 }
 
 static REGISTRY: RwLock<Option<HashMap<String, Registration>>> = RwLock::new(None);
@@ -88,6 +95,7 @@ pub fn register_job<J: Job>() {
         })
     });
     let middleware: MiddlewareFactory = Arc::new(|| J::middleware());
+    let unique_until_processing = J::unique_until_processing();
     // Hot-path registry: recover in place on poison so a panic in any
     // other job's registration doesn't kill the inventory-drain at
     // process boot. The critical section is a single HashMap insert.
@@ -100,6 +108,7 @@ pub fn register_job<J: Job>() {
             Registration {
                 dispatcher,
                 middleware,
+                unique_until_processing,
             },
         )
         .is_some()
@@ -147,6 +156,59 @@ fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
         .unwrap_or_default()
 }
 
+/// Whether the job registered under `name` opted into
+/// [`Job::unique_until_processing`].
+///
+/// `false` for an unregistered name: the dispatcher is about to fail that
+/// envelope anyway, and releasing a uniqueness lock for a job nobody can run
+/// would let duplicates pile in behind a job that never executes.
+pub(crate) fn job_is_unique_until_processing(name: &str) -> bool {
+    let Ok(g) = lock::read(&REGISTRY, "queue job registry") else {
+        return false;
+    };
+    g.as_ref()
+        .and_then(|m| m.get(name).map(|r| r.unique_until_processing))
+        .unwrap_or(false)
+}
+
+/// Release a unique-until-processing lock, owner-scoped, best-effort.
+///
+/// `Ok(false)` - owner mismatch, or the lock already expired - is not an
+/// error: either a newer dispatch holds the lock and must keep it, or the TTL
+/// beat us. A store failure is logged and swallowed, because a lock that
+/// outlives its job by at most `unique_for` is the documented degradation,
+/// while failing the job over it would turn a cache hiccup into a retry storm.
+///
+/// ### Why there is no ownerless fallback
+///
+/// Laravel releases an ownerless unique lock with `forceRelease()` when the
+/// job is on its first attempt (`UniqueLock::release`). Suprnova does not: a
+/// forced release deletes whichever lock is there, including one a newer
+/// dispatch acquired seconds ago, and the only envelopes that reach here
+/// without an owner token are ones serialized before the token existed. Those
+/// keep exactly the TTL-expiry behaviour they shipped with.
+async fn release_unique_lock_if_held(env: &Envelope) {
+    let Some(id) = env.idempotency_key.as_deref() else {
+        return;
+    };
+    let Some(owner) = env
+        .unique_lock_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+    else {
+        return;
+    };
+    let key = crate::queue::unique_key(&env.job_name, id);
+    if let Err(e) = crate::idempotency::Idempotency::release_owned(&key, owner).await {
+        tracing::warn!(
+            job = %env.job_name,
+            id = %env.id,
+            error = %e,
+            "unique-until-processing lock release failed; the lock now expires by TTL"
+        );
+    }
+}
+
 /// Run the middleware pipeline ending in the raw dispatcher. Returns the
 /// terminal [`JobOutcome`] OR a handler error (which the worker translates
 /// into retry / dead-letter).
@@ -157,10 +219,19 @@ fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
 pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, FrameworkError> {
     let job_name = env.job_name.clone();
     let mw_stack = middleware_for(&job_name);
+    let unique_until_processing = job_is_unique_until_processing(&job_name);
     // Build the innermost layer: actually dispatch the job, lift result
     // into JobOutcome::Completed.
     let innermost: Next = Box::new(move |env: Envelope| {
         Box::pin(async move {
+            // Processing begins here, and this is the last point at which
+            // every middleware has passed the job through - Laravel releases
+            // the uniqueness lock in exactly this position (the pipeline's
+            // `->then(...)`), so a middleware that sends the job back to the
+            // queue never gets its lock released out from under it.
+            if unique_until_processing {
+                release_unique_lock_if_held(&env).await;
+            }
             let payload = env.payload.clone();
             dispatch_by_name(&env.job_name, payload).await?;
             Ok(JobOutcome::Completed)
@@ -527,6 +598,25 @@ pub async fn run_worker(
         // settlement helpers with explicit fakes instead of mutating globals.
         let deps = SettlementDeps::current();
 
+        // Laravel's `finally` sweep (`CallQueuedHandler::dispatchThroughMiddleware`).
+        // A middleware that short-circuited means the pipeline core never ran,
+        // so the release at processing start never happened either, and the
+        // job would sit on its uniqueness lock for the rest of the TTL despite
+        // being dropped or dead-lettered. The arms below that can only be
+        // reached with the core already run call this too; that second release
+        // finds no lock this envelope owns and reports `false`, which is why it
+        // is safe to sweep without tracking whether the core ran.
+        //
+        // `Released` is deliberately not swept: a job put back on the queue has
+        // not started processing, and Laravel guards that same case with
+        // `! $job->isReleased()`. Nor is `TimedOut`, which can only be reached
+        // after the core started.
+        //
+        // The owner-token check comes first so the registry read is skipped
+        // entirely for the ordinary job, which never carries one.
+        let sweep_unique_lock =
+            env.unique_lock_owner.is_some() && job_is_unique_until_processing(&env.job_name);
+
         match outcome {
             DispatchOutcome::Settled(JobOutcome::Completed) => {
                 handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
@@ -535,6 +625,9 @@ pub async fn run_worker(
                 handle_released(&*driver, &res.token, &env, delay, &connection, "middleware").await;
             }
             DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 handle_dead_letter(
                     &*driver,
                     &res.token,
@@ -547,6 +640,9 @@ pub async fn run_worker(
                 .await;
             }
             DispatchOutcome::Settled(JobOutcome::Deleted) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 // Middleware decided to drop the job without dead-letter.
                 //
                 // If this envelope belonged to a batch, the batch's
@@ -582,6 +678,9 @@ pub async fn run_worker(
                 tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
             }
             DispatchOutcome::Failed(e) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 if env.attempts >= env.max_tries {
                     handle_dead_letter(
                         &*driver,
@@ -1556,6 +1655,7 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            unique_lock_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }

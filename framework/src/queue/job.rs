@@ -183,6 +183,27 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         Duration::from_secs(300)
     }
 
+    /// Whether this job's uniqueness lock is released when processing begins
+    /// rather than expiring with [`Self::unique_for`]'s TTL.
+    ///
+    /// Laravel's `ShouldBeUniqueUntilProcessing`: the lock stops blocking
+    /// re-dispatch the moment the worker starts executing the handler, which is
+    /// what you want when the lock exists to coalesce *queued* duplicates
+    /// rather than to serialize execution. A long-running rebuild can then be
+    /// re-queued while the previous run is still finishing, instead of the
+    /// re-dispatch being silently swallowed for the rest of the TTL.
+    ///
+    /// Requires [`Self::unique_id`] to return `Some` and dispatch through the
+    /// [`Queue::push_unique`](crate::queue::Queue::push_unique) family: the
+    /// owner token the worker releases with is recorded at push time.
+    /// Default: `false` (the TTL is the dedupe window).
+    fn unique_until_processing() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     /// Middleware pipeline wrapping the handler. Returned in order, outermost
     /// first — i.e. `vec![Throttle, RateLimit]` runs `Throttle` first, then
     /// `RateLimit`, then the handler. Mirrors Laravel's `$job->middleware()`.
