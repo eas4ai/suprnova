@@ -91,7 +91,7 @@
 
 **Files:** metadata modules, `src/async_updates/{mod,metadata}.rs`, metadata tests
 
-- [ ] Add failing tests for event name/schema/source/target/scope/order/fanout and subscription stream/topic/event/reconnect declarations, including duplicate and unbounded contracts:
+- [x] Add failing tests for event name/schema/source/target/scope/order/fanout and subscription stream/topic/event/reconnect declarations, including duplicate and unbounded contracts:
 
   ```rust
   #[test]
@@ -103,20 +103,35 @@
   }
   ```
 
-- [ ] Run `rtk cargo test --test async_metadata --test metadata_contract`; record failure because existing `EventMetadata` only stores name/version/payload type.
-- [ ] Expand event metadata and add subscription metadata using closed enums:
+- [x] Run `rtk cargo test --test async_metadata --test metadata_contract`; record failure because existing `EventMetadata` only stores name/version/payload type.
+- [x] Expand event metadata and add subscription metadata using closed enums:
 
   ```rust
   pub enum EventSource { Component, Stream }
-  pub enum EventTarget { SelfIsland, Parent, Child, NamedIsland, Document, Browser }
-  pub enum EventOrder { PerSourceSequence }
-  pub enum EventCyclePolicy { ForbidRepeatedIsland, MaximumHops(NonZeroU8) }
+  pub enum EventTarget {
+      SelfIsland,
+      Parent,
+      Child,
+      NamedIsland(IslandSlot),
+      Document,
+      Browser(BrowserOperationName),
+  }
+    pub enum EventOrder { PerSourceSequence }
+    pub enum EventCyclePolicy { ForbidRepeatedIsland, MaximumHops(NonZeroU8) }
 
-  pub struct EventMetadata {
-      name: BrowserOperationName,
-      version: u16,
-      payload_type: TypeId,
-      schema: BrowserPayloadSchema,
+    pub trait EventPayloadMetadata {
+        const NAME: &'static str;
+        const VERSION: u16;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+        const PAYLOAD_CONTRACT: &'static str = Self::NAME;
+    }
+
+    pub struct EventMetadata {
+        name: BrowserOperationName,
+        version: u16,
+        payload_type: TypeId,
+        payload_contract: PayloadContractIdentity,
+        schema: BrowserPayloadSchema,
       source: EventSource,
       targets: BoundedTargets,
       order: EventOrder,
@@ -133,10 +148,14 @@
   }
   ```
 
-  Sort and reject duplicates, require stream events to be registered, include all fields in the canonical component digest, and preserve existing component-authored event behavior through constructors with explicit defaults.
+  Sort and reject duplicates, require stream events to be registered, include all fields in the canonical component digest, and preserve existing component-authored event behavior through constructors with explicit defaults. `TypeId` remains an in-process matching guard only; the digest uses the explicit validated `PAYLOAD_CONTRACT`, whose compatibility default is the registered event identity and whose override lets payload contracts evolve independently.
 
-- [ ] Run metadata, action-outcome, component-harness, and digest stability tests; format and Clippy.
-- [ ] Commit: `feat(async): declare typed event subscriptions`.
+  `EventTarget` is also the closed propagation-scope contract. The named-island
+  and approved-browser-listener variants carry the exact registered identity,
+  so metadata cannot authorize an arbitrary named target or global listener.
+
+- [x] Run metadata, action-outcome, component-harness, and digest stability tests; format and Clippy.
+- [x] Commit: `feat(async): declare typed event subscriptions`.
 
 ## Task 2: Sign descriptors and separate transport credentials
 

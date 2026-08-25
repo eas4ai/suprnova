@@ -5,6 +5,8 @@
 
 /// Registered typed actions, current authorization, and semantic outcomes.
 pub mod action;
+/// Typed, bounded declarations for authorized asynchronous updates.
+pub mod async_updates;
 /// Bounded RFC 8785-compatible values and codecs.
 pub mod canonical;
 pub mod checker;

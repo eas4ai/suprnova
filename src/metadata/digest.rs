@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 use sha2::{Digest as _, Sha256};
 
 use crate::action::{AuthorizationRequirement, TransactionPolicy};
+use crate::async_updates::{
+    BrowserPayloadSchema, EventCyclePolicy, EventOrder, EventSource, EventTarget, ReconnectPolicy,
+    SubscriptionMetadata, SubscriptionMode,
+};
 use crate::canonical::{CanonicalValue, to_canonical_bytes};
 use crate::identity::{ComponentName, ContentDigest, ViewName};
 use crate::limits::InputLimits;
@@ -34,6 +38,7 @@ pub(super) fn contract_digest(
     actions: &[ActionMetadata],
     events: &[EventMetadata],
     effects: &[EffectMetadata],
+    subscriptions: &[SubscriptionMetadata],
     refresh_on_promote: bool,
 ) -> Result<ContentDigest, MetadataError> {
     let value = CanonicalValue::Object(BTreeMap::from([
@@ -60,6 +65,10 @@ pub(super) fn contract_digest(
         (
             "refresh_on_promote".to_owned(),
             CanonicalValue::Bool(refresh_on_promote),
+        ),
+        (
+            "subscriptions".to_owned(),
+            CanonicalValue::Array(subscriptions.iter().map(subscription_value).collect()),
         ),
         (
             "versions".to_owned(),
@@ -408,11 +417,197 @@ fn validation_selection_value(selection: &ValidationSelection) -> CanonicalValue
 }
 
 fn event_value(event: &EventMetadata) -> CanonicalValue {
-    browser_operation_value(event.name().as_str(), event.version())
+    CanonicalValue::Object(BTreeMap::from([
+        ("cycle".to_owned(), event_cycle_value(event.cycle())),
+        (
+            "maximum_fanout".to_owned(),
+            CanonicalValue::String(event.maximum_fanout().to_string()),
+        ),
+        (
+            "name".to_owned(),
+            CanonicalValue::String(event.name().as_str().to_owned()),
+        ),
+        (
+            "order".to_owned(),
+            CanonicalValue::String(event_order_name(event.order()).to_owned()),
+        ),
+        (
+            "payload_contract".to_owned(),
+            CanonicalValue::String(event.payload_contract().as_str().to_owned()),
+        ),
+        (
+            "schema".to_owned(),
+            CanonicalValue::String(payload_schema_name(event.schema()).to_owned()),
+        ),
+        (
+            "source".to_owned(),
+            CanonicalValue::String(event_source_name(event.source()).to_owned()),
+        ),
+        (
+            "targets".to_owned(),
+            CanonicalValue::Array(
+                event
+                    .targets()
+                    .as_slice()
+                    .iter()
+                    .map(event_target_value)
+                    .collect(),
+            ),
+        ),
+        (
+            "version".to_owned(),
+            CanonicalValue::String(event.version().to_string()),
+        ),
+    ]))
 }
 
 fn effect_value(effect: &EffectMetadata) -> CanonicalValue {
     browser_operation_value(effect.name().as_str(), effect.version())
+}
+
+fn subscription_value(subscription: &SubscriptionMetadata) -> CanonicalValue {
+    CanonicalValue::Object(BTreeMap::from([
+        (
+            "events".to_owned(),
+            CanonicalValue::Array(
+                subscription
+                    .events()
+                    .as_slice()
+                    .iter()
+                    .map(|event| CanonicalValue::String(event.as_str().to_owned()))
+                    .collect(),
+            ),
+        ),
+        (
+            "modes".to_owned(),
+            CanonicalValue::Array(
+                subscription
+                    .modes()
+                    .as_slice()
+                    .iter()
+                    .map(|mode| CanonicalValue::String(subscription_mode_name(*mode).to_owned()))
+                    .collect(),
+            ),
+        ),
+        (
+            "reconnect".to_owned(),
+            reconnect_value(subscription.reconnect()),
+        ),
+        (
+            "stream".to_owned(),
+            CanonicalValue::String(subscription.stream().as_str().to_owned()),
+        ),
+        (
+            "topics".to_owned(),
+            CanonicalValue::Array(
+                subscription
+                    .topics()
+                    .as_slice()
+                    .iter()
+                    .map(|topic| CanonicalValue::String(topic.as_str().to_owned()))
+                    .collect(),
+            ),
+        ),
+    ]))
+}
+
+fn event_target_value(target: &EventTarget) -> CanonicalValue {
+    match target {
+        EventTarget::SelfIsland => CanonicalValue::String("self_island".to_owned()),
+        EventTarget::Parent => CanonicalValue::String("parent".to_owned()),
+        EventTarget::Child => CanonicalValue::String("child".to_owned()),
+        EventTarget::NamedIsland(slot) => CanonicalValue::Object(BTreeMap::from([
+            (
+                "slot".to_owned(),
+                CanonicalValue::String(slot.as_str().to_owned()),
+            ),
+            (
+                "type".to_owned(),
+                CanonicalValue::String("named_island".to_owned()),
+            ),
+        ])),
+        EventTarget::Document => CanonicalValue::String("document".to_owned()),
+        EventTarget::Browser(listener) => CanonicalValue::Object(BTreeMap::from([
+            (
+                "listener".to_owned(),
+                CanonicalValue::String(listener.as_str().to_owned()),
+            ),
+            (
+                "type".to_owned(),
+                CanonicalValue::String("browser".to_owned()),
+            ),
+        ])),
+    }
+}
+
+fn event_cycle_value(policy: EventCyclePolicy) -> CanonicalValue {
+    match policy {
+        EventCyclePolicy::ForbidRepeatedIsland => {
+            CanonicalValue::String("forbid_repeated_island".to_owned())
+        }
+        EventCyclePolicy::MaximumHops(maximum_hops) => CanonicalValue::Object(BTreeMap::from([
+            (
+                "maximum_hops".to_owned(),
+                CanonicalValue::String(maximum_hops.to_string()),
+            ),
+            (
+                "type".to_owned(),
+                CanonicalValue::String("maximum_hops".to_owned()),
+            ),
+        ])),
+    }
+}
+
+fn reconnect_value(policy: ReconnectPolicy) -> CanonicalValue {
+    match policy {
+        ReconnectPolicy::RefreshOnReconnect => {
+            CanonicalValue::String("refresh_on_reconnect".to_owned())
+        }
+        ReconnectPolicy::ResumeOrRefresh { maximum_attempts } => {
+            CanonicalValue::Object(BTreeMap::from([
+                (
+                    "maximum_attempts".to_owned(),
+                    CanonicalValue::String(maximum_attempts.to_string()),
+                ),
+                (
+                    "type".to_owned(),
+                    CanonicalValue::String("resume_or_refresh".to_owned()),
+                ),
+            ]))
+        }
+    }
+}
+
+const fn payload_schema_name(schema: BrowserPayloadSchema) -> &'static str {
+    match schema {
+        BrowserPayloadSchema::Json => "json",
+        BrowserPayloadSchema::Null => "null",
+        BrowserPayloadSchema::Boolean => "boolean",
+        BrowserPayloadSchema::I64 => "i64",
+        BrowserPayloadSchema::U64 => "u64",
+        BrowserPayloadSchema::F64 => "f64",
+        BrowserPayloadSchema::String => "string",
+    }
+}
+
+const fn event_source_name(source: EventSource) -> &'static str {
+    match source {
+        EventSource::Component => "component",
+        EventSource::Stream => "stream",
+    }
+}
+
+const fn event_order_name(order: EventOrder) -> &'static str {
+    match order {
+        EventOrder::PerSourceSequence => "per_source_sequence",
+    }
+}
+
+const fn subscription_mode_name(mode: SubscriptionMode) -> &'static str {
+    match mode {
+        SubscriptionMode::ServerSentEvents => "server_sent_events",
+        SubscriptionMode::WebSocket => "web_socket",
+    }
 }
 
 fn browser_operation_value(name: &str, version: u16) -> CanonicalValue {
@@ -445,5 +640,212 @@ const fn codec_name(codec: StateCodec) -> &'static str {
         StateCodec::I64Decimal => "i64_decimal",
         StateCodec::U64Decimal => "u64_decimal",
         StateCodec::BytesBase64Url => "bytes_base64url",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU8;
+
+    use crate::async_updates::{
+        BoundedTargets, BrowserPayloadSchema, EventCyclePolicy, EventOrder, EventSource,
+        EventTarget,
+    };
+
+    use super::*;
+    use crate::metadata::EventPayloadMetadata;
+
+    struct DigestPayloadAlpha;
+
+    impl EventPayloadMetadata for DigestPayloadAlpha {
+        const NAME: &'static str = "digest_payload";
+        const VERSION: u16 = 1;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+        const PAYLOAD_CONTRACT: &'static str = "digest_payload_alpha";
+    }
+
+    struct DigestPayloadBeta;
+
+    impl EventPayloadMetadata for DigestPayloadBeta {
+        const NAME: &'static str = "digest_payload";
+        const VERSION: u16 = 1;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+        const PAYLOAD_CONTRACT: &'static str = "digest_payload_beta";
+    }
+
+    struct DigestNameChanged;
+
+    impl EventPayloadMetadata for DigestNameChanged {
+        const NAME: &'static str = "digest_payload_other";
+        const VERSION: u16 = 1;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+        const PAYLOAD_CONTRACT: &'static str = "digest_payload_alpha";
+    }
+
+    struct DigestVersionChanged;
+
+    impl EventPayloadMetadata for DigestVersionChanged {
+        const NAME: &'static str = "digest_payload";
+        const VERSION: u16 = 2;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
+        const PAYLOAD_CONTRACT: &'static str = "digest_payload_alpha";
+    }
+
+    struct DigestSchemaChanged;
+
+    impl EventPayloadMetadata for DigestSchemaChanged {
+        const NAME: &'static str = "digest_payload";
+        const VERSION: u16 = 1;
+        const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::String;
+        const PAYLOAD_CONTRACT: &'static str = "digest_payload_alpha";
+    }
+
+    fn metadata<T: EventPayloadMetadata + 'static>() -> EventMetadata {
+        metadata_with::<T>(
+            EventSource::Component,
+            EventTarget::SelfIsland,
+            EventCyclePolicy::ForbidRepeatedIsland,
+            8,
+        )
+    }
+
+    fn metadata_with<T: EventPayloadMetadata + 'static>(
+        source: EventSource,
+        target: EventTarget,
+        cycle: EventCyclePolicy,
+        maximum_fanout: u16,
+    ) -> EventMetadata {
+        EventMetadata::from_payload_with_contract::<T>(
+            source,
+            BoundedTargets::new(vec![target]).expect("event target"),
+            EventOrder::PerSourceSequence,
+            cycle,
+            maximum_fanout,
+        )
+        .expect("event metadata")
+    }
+
+    fn canonical_event_digest(value: &CanonicalValue) -> Vec<u8> {
+        let limits = InputLimits::new(32 * 1_024, 8, 256, 256).expect("test limits");
+        Sha256::digest(to_canonical_bytes(value, &limits).expect("canonical event value")).to_vec()
+    }
+
+    fn assert_only_event_field_changed(
+        baseline: &CanonicalValue,
+        variant: &CanonicalValue,
+        expected_field: &str,
+    ) {
+        let CanonicalValue::Object(baseline_fields) = baseline else {
+            panic!("baseline event contract must be a canonical object");
+        };
+        let CanonicalValue::Object(variant_fields) = variant else {
+            panic!("variant event contract must be a canonical object");
+        };
+        assert_eq!(
+            baseline_fields.keys().collect::<Vec<_>>(),
+            variant_fields.keys().collect::<Vec<_>>()
+        );
+        let changed = baseline_fields
+            .iter()
+            .filter_map(|(name, value)| (variant_fields.get(name) != Some(value)).then_some(name))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(changed, vec![expected_field]);
+        assert_ne!(
+            canonical_event_digest(baseline),
+            canonical_event_digest(variant),
+            "{expected_field} must be digest-significant"
+        );
+    }
+
+    #[test]
+    fn payload_contract_identity_is_independently_digest_significant() {
+        let alpha = event_value(&metadata::<DigestPayloadAlpha>());
+        let beta = event_value(&metadata::<DigestPayloadBeta>());
+
+        assert_ne!(
+            DigestPayloadAlpha::PAYLOAD_CONTRACT,
+            DigestPayloadBeta::PAYLOAD_CONTRACT
+        );
+        assert_ne!(
+            canonical_event_digest(&alpha),
+            canonical_event_digest(&beta)
+        );
+    }
+
+    #[test]
+    fn every_event_field_is_independently_digest_significant() {
+        let baseline = event_value(&metadata::<DigestPayloadAlpha>());
+        let CanonicalValue::Object(fields) = &baseline else {
+            panic!("event contract must be a canonical object");
+        };
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "cycle",
+                "maximum_fanout",
+                "name",
+                "order",
+                "payload_contract",
+                "schema",
+                "source",
+                "targets",
+                "version",
+            ]
+        );
+        assert_eq!(
+            fields.get("order"),
+            Some(&CanonicalValue::String("per_source_sequence".to_owned()))
+        );
+
+        let variants = [
+            ("name", event_value(&metadata::<DigestNameChanged>())),
+            ("version", event_value(&metadata::<DigestVersionChanged>())),
+            (
+                "payload_contract",
+                event_value(&metadata::<DigestPayloadBeta>()),
+            ),
+            ("schema", event_value(&metadata::<DigestSchemaChanged>())),
+            (
+                "source",
+                event_value(&metadata_with::<DigestPayloadAlpha>(
+                    EventSource::Stream,
+                    EventTarget::SelfIsland,
+                    EventCyclePolicy::ForbidRepeatedIsland,
+                    8,
+                )),
+            ),
+            (
+                "targets",
+                event_value(&metadata_with::<DigestPayloadAlpha>(
+                    EventSource::Component,
+                    EventTarget::Document,
+                    EventCyclePolicy::ForbidRepeatedIsland,
+                    8,
+                )),
+            ),
+            (
+                "cycle",
+                event_value(&metadata_with::<DigestPayloadAlpha>(
+                    EventSource::Component,
+                    EventTarget::SelfIsland,
+                    EventCyclePolicy::MaximumHops(NonZeroU8::new(3).expect("nonzero hops")),
+                    8,
+                )),
+            ),
+            (
+                "maximum_fanout",
+                event_value(&metadata_with::<DigestPayloadAlpha>(
+                    EventSource::Component,
+                    EventTarget::SelfIsland,
+                    EventCyclePolicy::ForbidRepeatedIsland,
+                    9,
+                )),
+            ),
+        ];
+        for (field, variant) in variants {
+            assert_only_event_field_changed(&baseline, &variant, field);
+        }
     }
 }

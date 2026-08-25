@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::async_updates::{EventSource, MAX_SUBSCRIPTIONS, SubscriptionMetadata};
 use crate::identity::{ComponentName, ContentDigest, ViewName};
 use crate::snapshot::state::FieldCategory;
 
@@ -26,6 +27,7 @@ pub struct ComponentMetadata {
     actions: Vec<ActionMetadata>,
     events: Vec<EventMetadata>,
     effects: Vec<EffectMetadata>,
+    subscriptions: Vec<SubscriptionMetadata>,
     refresh_on_promote: bool,
     contract_digest: ContentDigest,
 }
@@ -60,10 +62,39 @@ impl ComponentMetadata {
         identity: ComponentName,
         view: ViewName,
         versions: ContractVersions,
+        fields: Vec<FieldMetadata>,
+        actions: Vec<ActionMetadata>,
+        events: Vec<EventMetadata>,
+        effects: Vec<EffectMetadata>,
+        refresh_on_promote: bool,
+    ) -> Result<Self, MetadataError> {
+        Self::new_with_async_contracts(
+            identity,
+            view,
+            versions,
+            fields,
+            actions,
+            events,
+            effects,
+            Vec::new(),
+            refresh_on_promote,
+        )
+    }
+
+    /// Creates complete metadata including event and stream-subscription contracts.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the macro supplies one closed contract tuple"
+    )]
+    pub fn new_with_async_contracts(
+        identity: ComponentName,
+        view: ViewName,
+        versions: ContractVersions,
         mut fields: Vec<FieldMetadata>,
         mut actions: Vec<ActionMetadata>,
         mut events: Vec<EventMetadata>,
         mut effects: Vec<EffectMetadata>,
+        mut subscriptions: Vec<SubscriptionMetadata>,
         refresh_on_promote: bool,
     ) -> Result<Self, MetadataError> {
         if refresh_on_promote && versions.minimum_protocol() < 2 {
@@ -80,6 +111,9 @@ impl ComponentMetadata {
         }
         if effects.len() > MAX_EFFECTS {
             return Err(MetadataError::new(MetadataErrorKind::TooManyEffects));
+        }
+        if subscriptions.len() > MAX_SUBSCRIPTIONS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManySubscriptions));
         }
 
         fields.sort_by(|left, right| left.name().cmp(right.name()));
@@ -142,6 +176,39 @@ impl ComponentMetadata {
             return Err(MetadataError::new(MetadataErrorKind::DuplicateEffect));
         }
 
+        subscriptions.sort_by(|left, right| left.stream().cmp(right.stream()));
+        if subscriptions
+            .windows(2)
+            .any(|pair| pair[0].stream() == pair[1].stream())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateSubscription));
+        }
+        if subscriptions.iter().any(|subscription| {
+            subscription.events().as_slice().iter().any(|event_name| {
+                !events.iter().any(|event| {
+                    event.name() == event_name && event.source() == EventSource::Stream
+                })
+            })
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::UnknownSubscriptionEvent,
+            ));
+        }
+        if events.iter().any(|event| {
+            event.source() == EventSource::Stream
+                && !subscriptions.iter().any(|subscription| {
+                    subscription
+                        .events()
+                        .as_slice()
+                        .iter()
+                        .any(|name| name == event.name())
+                })
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::UnregisteredStreamEvent,
+            ));
+        }
+
         let contract_digest = contract_digest(
             &identity,
             &view,
@@ -150,6 +217,7 @@ impl ComponentMetadata {
             &actions,
             &events,
             &effects,
+            &subscriptions,
             refresh_on_promote,
         )?;
         Ok(Self {
@@ -160,6 +228,7 @@ impl ComponentMetadata {
             actions,
             events,
             effects,
+            subscriptions,
             refresh_on_promote,
             contract_digest,
         })
@@ -205,6 +274,12 @@ impl ComponentMetadata {
     #[must_use]
     pub fn effects(&self) -> &[EffectMetadata] {
         &self.effects
+    }
+
+    /// Returns declared asynchronous subscriptions in canonical stream order.
+    #[must_use]
+    pub fn subscriptions(&self) -> &[SubscriptionMetadata] {
+        &self.subscriptions
     }
 
     /// Returns whether seed promotion must resolve as a protocol-v2 fresh render.

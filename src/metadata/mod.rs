@@ -11,7 +11,10 @@ mod version;
 use std::error::Error;
 use std::fmt;
 
-pub use browser::{EffectMetadata, EffectPayloadMetadata, EventMetadata, EventPayloadMetadata};
+pub use browser::{
+    EffectMetadata, EffectPayloadMetadata, EventMetadata, EventPayloadMetadata,
+    PayloadContractIdentity,
+};
 pub use component::ComponentMetadata;
 pub use field::FieldMetadata;
 pub use generated::{LiveComponentContract, LiveComponentDefinitionMetadata};
@@ -35,6 +38,22 @@ pub enum MetadataErrorKind {
     TooManyEvents,
     /// More browser effects were declared than the bounded profile permits.
     TooManyEffects,
+    /// More event target scopes were declared than the bounded profile permits.
+    TooManyEventTargets,
+    /// An event target declaration was empty or otherwise inconsistent.
+    InvalidEventTarget,
+    /// The same exact event target scope was declared more than once.
+    DuplicateEventTarget,
+    /// An event fanout was zero, below its explicit targets, or above the fixed ceiling.
+    InvalidEventFanout,
+    /// More asynchronous subscriptions were declared than the component permits.
+    TooManySubscriptions,
+    /// More topic scopes were declared than one subscription permits.
+    TooManySubscriptionTopics,
+    /// More typed event names were declared than one subscription permits.
+    TooManySubscriptionEvents,
+    /// More physical transport modes were declared than the closed transport set permits.
+    TooManySubscriptionModes,
     /// The component declared the same field identity more than once.
     DuplicateField,
     /// The component declared the same action identity more than once.
@@ -43,6 +62,20 @@ pub enum MetadataErrorKind {
     DuplicateEvent,
     /// Two declared effect payload types registered the same browser identity.
     DuplicateEffect,
+    /// The same stream identity was declared more than once.
+    DuplicateSubscription,
+    /// The same trusted topic scope was declared more than once.
+    DuplicateSubscriptionTopic,
+    /// The same typed stream event was declared more than once.
+    DuplicateSubscriptionEvent,
+    /// The same approved stream transport was declared more than once.
+    DuplicateSubscriptionMode,
+    /// A subscription omitted a required bounded declaration.
+    InvalidSubscriptionMetadata,
+    /// A subscription named an absent or component-authored event.
+    UnknownSubscriptionEvent,
+    /// A stream-authored event was not registered by any subscription.
+    UnregisteredStreamEvent,
     /// Field model, timing, category, or URL metadata was internally inconsistent.
     InvalidBindingMetadata,
     /// Action argument, authorization, validation, or transaction metadata was inconsistent.
@@ -67,10 +100,25 @@ impl MetadataErrorKind {
             Self::TooManyActions => "too_many_component_actions",
             Self::TooManyEvents => "too_many_component_events",
             Self::TooManyEffects => "too_many_component_effects",
+            Self::TooManyEventTargets => "too_many_event_targets",
+            Self::InvalidEventTarget => "invalid_event_target",
+            Self::DuplicateEventTarget => "duplicate_event_target",
+            Self::InvalidEventFanout => "invalid_event_fanout",
+            Self::TooManySubscriptions => "too_many_component_subscriptions",
+            Self::TooManySubscriptionTopics => "too_many_subscription_topics",
+            Self::TooManySubscriptionEvents => "too_many_subscription_events",
+            Self::TooManySubscriptionModes => "too_many_subscription_modes",
             Self::DuplicateField => "duplicate_component_field",
             Self::DuplicateAction => "duplicate_component_action",
             Self::DuplicateEvent => "duplicate_component_event",
             Self::DuplicateEffect => "duplicate_component_effect",
+            Self::DuplicateSubscription => "duplicate_component_subscription",
+            Self::DuplicateSubscriptionTopic => "duplicate_subscription_topic",
+            Self::DuplicateSubscriptionEvent => "duplicate_subscription_event",
+            Self::DuplicateSubscriptionMode => "duplicate_subscription_mode",
+            Self::InvalidSubscriptionMetadata => "invalid_subscription_metadata",
+            Self::UnknownSubscriptionEvent => "unknown_subscription_event",
+            Self::UnregisteredStreamEvent => "unregistered_stream_event",
             Self::InvalidBindingMetadata => "invalid_component_binding_metadata",
             Self::InvalidActionMetadata => "invalid_component_action_metadata",
             Self::InvalidUploadMetadata => "invalid_component_upload_metadata",
