@@ -32,7 +32,8 @@ Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`. Built-in
 `ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`.
 Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`:
+`RequiredUnless`, `Same`, `Different`, `Confirmed`, `Gt`, `Gte`, `Lt`,
+`Lte`. Built-in `AsyncRule`:
 [`Unique`](#the-unique-rule).
 
 ```rust
@@ -192,6 +193,37 @@ field can legitimately be empty at run time, so the value simply fails.
 `InArray`'s failure message names no values, because its list comes out of
 the request and a validation message is rendered into a response body.
 
+### Comparison rules
+
+`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against
+another field. `CompareWith` names the operand and the measure together:
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// Laravel's gt:0 - a literal operand, compared numerically.
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// Laravel's lte:max_price - a sibling field, compared numerically.
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// Laravel's gt:summary on two string fields - compared by character count.
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+All four read sibling fields, so they are `ContextualRule`s and every
+`validate!` row carries `=> with ctx` - including a row whose only operand
+is a literal, where the context goes unread. Pass an empty `FormContext`
+there.
+
+Anything the rule cannot measure fails the field: a value that is not a
+finite number under a numeric comparison, a sibling the form never sent, a
+sibling that is not a number, or a non-finite literal such as `f64::NAN`.
+None of those panics, and none of them passes.
+
 ### Why Suprnova diverges
 
 Laravel's `distinct:strict` leans on PHP's coercing `==`. JSON values are
@@ -210,6 +242,17 @@ matches. Suprnova never had that hole - `In` and `NotIn` compare `&str`
 with `==` - and the new rules match JSON values variant by variant. Laravel's
 `contains` stayed loose; Suprnova's does not. The cost is that these rules
 cannot check a numeric array: `Contains(&["1"])` does not match `[1]`.
+
+Laravel's `gt` family picks its measure at run time: the number itself for
+numerics, `count()` for arrays, kilobytes for files, and character length
+for everything else, with the numeric branch gated on whether the field
+also carries `numeric` or `integer`. Suprnova writes the measure into the
+rule instead, because a rule here cannot see the other rules on its field
+and sniffing the value's shape is the coercion habit these rules exist to
+avoid. Two of Laravel's four measures have no counterpart at all: a rule
+only ever receives a string, so an array-valued sibling cannot be read,
+and uploads never reach the rule surface - the multipart parser caps their
+size before a handler sees them.
 
 ## The `validate!` macro
 
