@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::action::ActionAuthorizationPort;
 use crate::identity::{ContentDigest, IdentityError, ScopeFingerprint};
+use crate::upload::UploadAuthorizationPort;
 
 macro_rules! host_fingerprint {
     ($(#[$attribute:meta])* $name:ident) => {
@@ -110,6 +111,7 @@ impl fmt::Debug for HostScopeFacts {
 pub struct HostCapabilities {
     scope: HostScopeFacts,
     action_authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+    upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
 }
 
 impl HostCapabilities {
@@ -119,6 +121,7 @@ impl HostCapabilities {
         Self {
             scope,
             action_authorization: None,
+            upload_authorization: None,
         }
     }
 
@@ -132,12 +135,26 @@ impl HostCapabilities {
         self
     }
 
+    /// Installs the host-owned current authorization provider for upload controls.
+    #[must_use]
+    pub fn with_upload_authorization(
+        mut self,
+        authorization: Arc<dyn UploadAuthorizationPort>,
+    ) -> Self {
+        self.upload_authorization = Some(authorization);
+        self
+    }
+
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
         &self.scope
     }
 
     pub(crate) fn action_authorization(&self) -> Option<&dyn ActionAuthorizationPort> {
         self.action_authorization.as_deref()
+    }
+
+    pub(crate) fn upload_authorization(&self) -> Option<&dyn UploadAuthorizationPort> {
+        self.upload_authorization.as_deref()
     }
 }
 

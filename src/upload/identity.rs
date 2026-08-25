@@ -69,6 +69,24 @@ pub enum UploadErrorKind {
     RevisionExhausted,
     /// The bounded retained idempotency outcome history is full.
     IdempotencyHistoryFull,
+    /// The trusted request authority expired before upload admission.
+    RequestAuthorityExpired,
+    /// No current upload-authorization provider was available.
+    AuthorizationUnavailable,
+    /// Current principal or resource policy denied the upload operation.
+    AuthorizationDenied,
+    /// The upload authority ledger could not complete the requested operation.
+    LedgerUnavailable,
+    /// The bounded creation-rate window has no remaining capacity.
+    CreationRateExceeded,
+    /// The bounded pending-upload scope has no remaining capacity.
+    PendingLimitExceeded,
+    /// The bounded per-field upload count has no remaining capacity.
+    FileCountExceeded,
+    /// Temporary upload authority expired independently of its transfer grant.
+    UploadExpired,
+    /// The owning upload service lifecycle has retired.
+    ServiceRetired,
 }
 
 impl UploadErrorKind {
@@ -92,6 +110,15 @@ impl UploadErrorKind {
             Self::InvalidTransition => "invalid_upload_transition",
             Self::RevisionExhausted => "upload_revision_exhausted",
             Self::IdempotencyHistoryFull => "upload_idempotency_history_full",
+            Self::RequestAuthorityExpired => "upload_request_authority_expired",
+            Self::AuthorizationUnavailable => "upload_authorization_unavailable",
+            Self::AuthorizationDenied => "upload_authorization_denied",
+            Self::LedgerUnavailable => "upload_ledger_unavailable",
+            Self::CreationRateExceeded => "upload_creation_rate_exceeded",
+            Self::PendingLimitExceeded => "upload_pending_limit_exceeded",
+            Self::FileCountExceeded => "upload_file_count_exceeded",
+            Self::UploadExpired => "upload_expired",
+            Self::ServiceRetired => "upload_service_retired",
         }
     }
 }
@@ -103,7 +130,9 @@ pub struct UploadError {
 }
 
 impl UploadError {
-    pub(crate) const fn new(kind: UploadErrorKind) -> Self {
+    /// Constructs one closed redacted failure for a host implementation.
+    #[must_use]
+    pub const fn new(kind: UploadErrorKind) -> Self {
         Self { kind }
     }
 

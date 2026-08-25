@@ -205,6 +205,30 @@ impl UploadTransitionRequest {
             transition,
         }
     }
+
+    /// Returns the target temporary upload.
+    #[must_use]
+    pub const fn handle(&self) -> &UploadHandle {
+        &self.handle
+    }
+
+    /// Returns the required current revision.
+    #[must_use]
+    pub const fn expected_revision(&self) -> UploadRevision {
+        self.expected_revision
+    }
+
+    /// Returns the bounded retry identity.
+    #[must_use]
+    pub const fn idempotency_key(&self) -> &UploadIdempotencyKey {
+        &self.idempotency_key
+    }
+
+    /// Returns the requested closed lifecycle transition.
+    #[must_use]
+    pub const fn transition(&self) -> &UploadTransition {
+        &self.transition
+    }
 }
 
 /// Whether a transition newly committed or replayed its exact stored outcome.

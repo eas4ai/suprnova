@@ -117,6 +117,10 @@ pub struct TrustedLiveRequestContext {
 }
 
 impl TrustedLiveRequestContext {
+    pub(crate) const fn host_scope_facts(&self) -> &HostScopeFacts {
+        &self.scope
+    }
+
     /// Returns the current aggregate principal/session/tenant scope.
     #[must_use]
     pub const fn scope(&self) -> &ScopeFingerprint {

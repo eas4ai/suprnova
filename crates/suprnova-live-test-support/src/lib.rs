@@ -8,6 +8,7 @@ mod context;
 mod harness;
 mod host;
 mod trace;
+mod upload;
 
 pub use assertions::HarnessAssertions;
 pub use context::SyntheticLiveRequestContextBuilder;
@@ -20,3 +21,4 @@ pub use host::{
     ControlledTransactions, ControlledValidation, HarnessServices, TransactionFault,
 };
 pub use trace::{HarnessTrace, HarnessTraceEvent};
+pub use upload::{ControlledUploadAuthorization, MemoryUploadLedger};

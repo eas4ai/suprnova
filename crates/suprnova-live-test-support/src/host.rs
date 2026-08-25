@@ -21,6 +21,7 @@ use suprnova_live::validation::{
     ValidationFuture, ValidationIssue, ValidationPort, ValidationPortError, ValidationRequest,
 };
 
+use crate::upload::ControlledUploadAuthorization;
 use crate::{HarnessTrace, HarnessTraceEvent};
 
 /// Deterministic wall clock whose value and failure state are test-controlled.
@@ -398,6 +399,7 @@ pub struct HarnessServices {
     clock: Arc<ControlledClock>,
     instance_ids: Arc<ControlledInstanceIds>,
     authorization: Arc<ControlledAuthorization>,
+    upload_authorization: Arc<ControlledUploadAuthorization>,
     validation: Arc<ControlledValidation>,
     transactions: Arc<ControlledTransactions>,
     session: Arc<ControlledSession>,
@@ -412,6 +414,7 @@ impl HarnessServices {
             clock: Arc::new(ControlledClock::new(now)),
             instance_ids: Arc::new(ControlledInstanceIds::new(trace.clone())),
             authorization: Arc::new(ControlledAuthorization::new(trace.clone())),
+            upload_authorization: Arc::new(ControlledUploadAuthorization::new()),
             validation: Arc::new(ControlledValidation::new(trace.clone())),
             transactions: Arc::new(ControlledTransactions::new(trace.clone())),
             session: Arc::new(ControlledSession::new(trace.clone())),
@@ -441,6 +444,12 @@ impl HarnessServices {
     #[must_use]
     pub const fn authorization(&self) -> &Arc<ControlledAuthorization> {
         &self.authorization
+    }
+
+    /// Returns the mutable current upload-authorization control.
+    #[must_use]
+    pub const fn upload_authorization(&self) -> &Arc<ControlledUploadAuthorization> {
+        &self.upload_authorization
     }
 
     /// Returns the mutable validation control.

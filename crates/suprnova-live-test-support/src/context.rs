@@ -10,6 +10,7 @@ use suprnova_live::host::{
     MountSelection, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::UnixMillis;
+use suprnova_live::upload::UploadAuthorizationPort;
 
 /// Dev-only ergonomic builder that never bypasses production host validation.
 pub struct SyntheticLiveRequestContextBuilder {
@@ -20,6 +21,7 @@ pub struct SyntheticLiveRequestContextBuilder {
     expires_at: UnixMillis,
     overrides: BTreeMap<CheckKind, CheckFact>,
     action_authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+    upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
 }
 
 impl SyntheticLiveRequestContextBuilder {
@@ -40,6 +42,7 @@ impl SyntheticLiveRequestContextBuilder {
             expires_at,
             overrides: BTreeMap::new(),
             action_authorization: None,
+            upload_authorization: None,
         }
     }
 
@@ -60,11 +63,24 @@ impl SyntheticLiveRequestContextBuilder {
         self
     }
 
+    /// Installs a conformance upload-authorization provider without bypassing validation.
+    #[must_use]
+    pub fn with_upload_authorization(
+        mut self,
+        authorization: Arc<dyn UploadAuthorizationPort>,
+    ) -> Self {
+        self.upload_authorization = Some(authorization);
+        self
+    }
+
     /// Runs the complete production catalog, check, expiry, and capability validator.
     pub fn build(self) -> Result<TrustedLiveRequestContext, HostContextError> {
         let mut capabilities = HostCapabilities::bound_to(self.scope.clone());
         if let Some(authorization) = self.action_authorization {
             capabilities = capabilities.with_action_authorization(authorization);
+        }
+        if let Some(authorization) = self.upload_authorization {
+            capabilities = capabilities.with_upload_authorization(authorization);
         }
         let current_route = self.selection.route().clone();
         let current_slot = self.selection.slot().clone();

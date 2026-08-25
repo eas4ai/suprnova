@@ -43,6 +43,7 @@ use suprnova_live::snapshot::state::{
     FieldCategory, FieldSpec, StateCodec, StateExposure, StateSchema,
 };
 use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1, SnapshotSchemaSet};
+use suprnova_live::upload::UploadAuthorizationPort;
 use suprnova_live::validation::ValidationSelection;
 use suprnova_live::view::{AssetSet, IslandRender};
 use suprnova_live_test_support::SyntheticLiveRequestContextBuilder;
@@ -425,6 +426,12 @@ pub(crate) fn trusted_context_with_authorization(
     trusted_context_with_port(Some(authorization))
 }
 
+pub(crate) fn trusted_context_with_upload_authorization(
+    authorization: Arc<dyn UploadAuthorizationPort>,
+) -> TrustedLiveRequestContext {
+    trusted_context_for_with_ports(metadata(), None, Some(authorization), schema_set())
+}
+
 fn trusted_context_with_port(
     authorization: Option<Arc<dyn ActionAuthorizationPort>>,
 ) -> TrustedLiveRequestContext {
@@ -441,6 +448,15 @@ pub(crate) fn trusted_context_for(
 pub(crate) fn trusted_context_for_with_schemas(
     component_metadata: &'static ComponentMetadata,
     authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+    schemas: SnapshotSchemaSet,
+) -> TrustedLiveRequestContext {
+    trusted_context_for_with_ports(component_metadata, authorization, None, schemas)
+}
+
+fn trusted_context_for_with_ports(
+    component_metadata: &'static ComponentMetadata,
+    authorization: Option<Arc<dyn ActionAuthorizationPort>>,
+    upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
     schemas: SnapshotSchemaSet,
 ) -> TrustedLiveRequestContext {
     let descriptor = ComponentDescriptor::new(component_metadata.clone());
@@ -478,23 +494,7 @@ pub(crate) fn trusted_context_for_with_schemas(
         )
         .expect("mount catalog entry")
         .build();
-    let scope =
-        ScopeFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x40)).expect("scope identity");
-    let facts = HostScopeFacts::new(
-        scope,
-        Some(
-            SessionFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x41))
-                .expect("session identity"),
-        ),
-        Some(
-            PrincipalFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x42))
-                .expect("principal identity"),
-        ),
-        Some(
-            TenantFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x43))
-                .expect("tenant identity"),
-        ),
-    );
+    let facts = fixture_host_scope();
     let mut builder = SyntheticLiveRequestContextBuilder::new(
         catalog,
         MountSelection::new(
@@ -511,7 +511,30 @@ pub(crate) fn trusted_context_for_with_schemas(
     if let Some(authorization) = authorization {
         builder = builder.with_action_authorization(authorization);
     }
+    if let Some(authorization) = upload_authorization {
+        builder = builder.with_upload_authorization(authorization);
+    }
     builder.build().expect("trusted context")
+}
+
+pub(crate) fn fixture_host_scope() -> HostScopeFacts {
+    let scope =
+        ScopeFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x40)).expect("scope identity");
+    HostScopeFacts::new(
+        scope,
+        Some(
+            SessionFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x41))
+                .expect("session identity"),
+        ),
+        Some(
+            PrincipalFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x42))
+                .expect("principal identity"),
+        ),
+        Some(
+            TenantFingerprint::from_bytes(&snapshot_support::bytes::<32>(0x43))
+                .expect("tenant identity"),
+        ),
+    )
 }
 
 pub(crate) fn schema_set() -> SnapshotSchemaSet {
