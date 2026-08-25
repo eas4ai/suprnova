@@ -156,6 +156,25 @@ pub(crate) async fn run_after_commit(
     }
 }
 
+/// Compensate for a transaction that did not commit: discard the after-commit
+/// list, then run the rollback list.
+///
+/// Every path that reaches a transaction's end without a durable commit funnels
+/// through here - the closure returning `Err`, a leaked `TxHandle` that blocks
+/// the commit, and a COMMIT the database refuses alike. They are the same event
+/// as far as a deferred dispatch is concerned: it did not happen, so a
+/// uniqueness lock taken on its behalf has to go back rather than block
+/// re-dispatch for the rest of its TTL.
+pub(crate) async fn compensate(
+    after_commit: Vec<AfterCommitCallback>,
+    on_rollback: Vec<AfterCommitCallback>,
+) {
+    // Explicit rather than letting the binding fall out of scope: dropping the
+    // after-commit list is the decision, not a side effect of the borrow ending.
+    drop(after_commit);
+    run_rollback(on_rollback).await;
+}
+
 /// Run every rollback callback in registration order, log-and-continue.
 ///
 /// Errors are never returned: the caller is on its way to surfacing the

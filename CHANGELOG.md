@@ -28,7 +28,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   owner-scoped. `Queue::bulk` defers as a unit. `Queue::fake()` records a push
   immediately, deferral and all, matching Laravel's `Bus::fake`. Manual
   `DB::begin_transaction` never defers - it installs no ambient transaction, so
-  there is no commit to hang a callback on.
+  there is no commit to hang a callback on. Every ending that leaves the commit
+  unlanded compensates identically, including a `COMMIT` the database refuses
+  and a leaked `TxHandle` that blocks one. Queued mail, notifications, batches
+  and chains do not defer yet.
+- **`DB::transaction` can now return `Err` after a successful commit**, when an
+  after-commit callback fails: the message reads `after-commit callback failed
+  (the transaction itself committed): …`, the closure's return value is lost and
+  its writes are not. `DB::transaction_with_attempts` never retries that error,
+  however deadlock-shaped the callback's own message reads - re-running a closure
+  whose writes are already durable would apply them twice.
 - **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
   uniqueness lock when processing begins - after the job's middleware pass,
   immediately before the handler runs - instead of holding it for the full

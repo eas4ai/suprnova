@@ -19,8 +19,11 @@ use suprnova::queue::driver::{QueueDriver, Reservation, ReservationToken};
 use suprnova::queue::testing::{install_fake, pushed};
 use suprnova::queue::worker::register_job;
 use suprnova::queue::{Envelope, SyncQueueDriver};
-use suprnova::testing::TestDatabase;
-use suprnova::{DB, EnvelopeOverrides, FrameworkError, Job, Queue, async_trait};
+use suprnova::testing::{TestContainer, TestDatabase};
+use suprnova::{
+    DB, DatabaseConfig, DbConnection, EnvelopeOverrides, FrameworkError, Job, Queue, TxHandle,
+    async_trait,
+};
 
 // --- Driver -----------------------------------------------------------------
 
@@ -42,6 +45,10 @@ impl RecordingDriver {
         let g = self.pushed.lock().unwrap();
         assert_eq!(g.len(), 1, "expected exactly one pushed envelope");
         g[0].clone()
+    }
+
+    fn envelopes(&self) -> Vec<Envelope> {
+        self.pushed.lock().unwrap().clone()
     }
 }
 
@@ -156,6 +163,48 @@ impl Job for UniqueAfterCommitJob {
     }
     fn unique_for() -> Duration {
         Duration::from_secs(300)
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DelayedUniqueAfterCommitJob {
+    key: String,
+}
+
+#[async_trait]
+impl Job for DelayedUniqueAfterCommitJob {
+    fn job_name() -> &'static str {
+        "wave5-after-commit-unique-delayed"
+    }
+    fn after_commit() -> bool {
+        true
+    }
+    fn delay() -> Option<Duration> {
+        Some(Duration::from_secs(LONG_DELAY_SECS as u64))
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some(self.key.clone())
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// A second opted-in job type, so a test can tell two concurrent transactions'
+/// deferred pushes apart by `job_name` alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OtherAfterCommitJob;
+
+#[async_trait]
+impl Job for OtherAfterCommitJob {
+    fn job_name() -> &'static str {
+        "wave5-after-commit-other"
+    }
+    fn after_commit() -> bool {
+        true
     }
     async fn handle(self) -> Result<(), FrameworkError> {
         Ok(())
@@ -565,5 +614,289 @@ async fn a_failing_deferred_push_surfaces_from_the_transaction() {
     assert!(
         err.to_string().contains("after-commit callback failed"),
         "the error must say the transaction itself committed: {err}"
+    );
+}
+
+// --- Paths where the closure said Ok but the commit never landed ------------
+
+#[tokio::test]
+#[serial]
+async fn a_leaked_tx_handle_still_releases_a_deferred_unique_lock() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    // Leaking a TxHandle past an `Ok` return blocks the commit: `Arc::try_unwrap`
+    // cannot reach the transaction, so nothing is ever made durable. The
+    // deferred push must be compensated exactly as a rollback would be.
+    let leaked: Arc<Mutex<Option<TxHandle>>> = Arc::new(Mutex::new(None));
+    let leaked_for_closure = leaked.clone();
+
+    let result: Result<(), FrameworkError> = DB::transaction(move |tx| {
+        let slot = leaked_for_closure.clone();
+        let handle = tx.handle();
+        Box::pin(async move {
+            *slot.lock().unwrap() = Some(handle);
+            let taken = Queue::push_unique(UniqueAfterCommitJob {
+                key: "leaked-handle".into(),
+            })
+            .await?;
+            assert!(taken, "the lock is taken at push time");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a leaked TxHandle blocks the commit, so the call must fail"
+    );
+    assert_eq!(
+        driver.count(),
+        0,
+        "the commit never landed, so nothing queued"
+    );
+
+    let retried = Queue::push_unique(UniqueAfterCommitJob {
+        key: "leaked-handle".into(),
+    })
+    .await
+    .expect("re-push");
+    assert!(
+        retried,
+        "a transaction that never committed must release the lock its deferred \
+         push took, exactly as a rollback does"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_refused_commit_still_releases_a_deferred_unique_lock() {
+    let driver = install_driver();
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    // A deferred foreign key is checked at COMMIT, not at INSERT, so this is a
+    // transaction whose closure succeeds and whose COMMIT the database refuses.
+    db.execute_unprepared("PRAGMA foreign_keys = ON")
+        .await
+        .expect("pragma");
+    db.execute_unprepared("CREATE TABLE t17_parent (id INTEGER PRIMARY KEY)")
+        .await
+        .expect("parent table");
+    db.execute_unprepared(
+        "CREATE TABLE t17_child (\
+            id INTEGER PRIMARY KEY, \
+            parent_id INTEGER NOT NULL REFERENCES t17_parent(id) DEFERRABLE INITIALLY DEFERRED\
+         )",
+    )
+    .await
+    .expect("child table");
+
+    let result: Result<(), FrameworkError> = DB::transaction(|tx| {
+        Box::pin(async move {
+            let backend = tx.backend();
+            tx.query_all(sea_orm::Statement::from_string(
+                backend,
+                "INSERT INTO t17_child (id, parent_id) VALUES (1, 999)".to_owned(),
+            ))
+            .await?;
+            let taken = Queue::push_unique(UniqueAfterCommitJob {
+                key: "refused-commit".into(),
+            })
+            .await?;
+            assert!(taken, "the lock is taken at push time");
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await;
+
+    let err = result.expect_err("the deferred foreign key must fail the COMMIT");
+    assert!(
+        err.to_string().to_lowercase().contains("foreign key"),
+        "expected the COMMIT-time constraint failure, got: {err}"
+    );
+    assert_eq!(
+        driver.count(),
+        0,
+        "the commit was refused, so nothing queued"
+    );
+
+    let retried = Queue::push_unique(UniqueAfterCommitJob {
+        key: "refused-commit".into(),
+    })
+    .await
+    .expect("re-push");
+    assert!(
+        retried,
+        "a refused COMMIT must release the lock the deferred push took"
+    );
+}
+
+// --- The two deliberate deviations -----------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn a_failing_deferred_unique_push_releases_its_own_lock() {
+    let driver = install_driver();
+    driver.fail.store(true, Ordering::SeqCst);
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    let result = DB::transaction(|_tx| {
+        Box::pin(async {
+            let taken = Queue::push_unique(UniqueAfterCommitJob {
+                key: "push-fails".into(),
+            })
+            .await?;
+            assert!(taken);
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await;
+
+    let err = result.expect_err("the driver refused the deferred push");
+    assert!(
+        err.to_string().contains("after-commit callback failed"),
+        "the transaction committed; only the deferred push failed: {err}"
+    );
+
+    // The commit DID land, so the rollback callback never ran. The dedupe key
+    // gates re-submission of a dispatch that happened, and this one did not.
+    driver.fail.store(false, Ordering::SeqCst);
+    let retried = Queue::push_unique(UniqueAfterCommitJob {
+        key: "push-fails".into(),
+    })
+    .await
+    .expect("re-push");
+    assert!(
+        retried,
+        "a deferred push that failed must release its own dedupe lock, the same \
+         way commit_on_success releases when its body fails"
+    );
+    assert_eq!(driver.count(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_deferred_unique_push_recomputes_the_delay_at_commit_time() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+
+    let before = Utc::now();
+    DB::transaction(|_tx| {
+        Box::pin(async {
+            Queue::push_unique(DelayedUniqueAfterCommitJob {
+                key: "delayed-unique".into(),
+            })
+            .await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let env = driver.only();
+    let floor =
+        before + chrono::Duration::seconds(LONG_DELAY_SECS) + chrono::Duration::milliseconds(400);
+    assert!(
+        env.available_at >= floor,
+        "push_unique must resolve Job::delay() the same way push does - against \
+         the commit, not the push: available_at {} is earlier than {floor}",
+        env.available_at
+    );
+}
+
+// --- Registry isolation -----------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn two_concurrent_transactions_keep_separate_registries() {
+    let driver = install_driver();
+
+    // A pool of its own, so two transactions can be open at once. `sqlite::memory:`
+    // gives each pooled connection an independent database, which is exactly
+    // right here: the test asserts on registry isolation and issues no SQL.
+    let config = DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .max_connections(4)
+        .min_connections(2)
+        .logging(false)
+        .build();
+    let conn = DbConnection::connect(&config).await.expect("pool");
+
+    let (a_registered_tx, a_registered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (b_registered_tx, b_registered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (a_committed_tx, a_committed_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let observed_after_a = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_for_b = observed_after_a.clone();
+    let driver_for_b = driver.clone();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        TestContainer::scope(async move {
+            TestContainer::singleton(conn);
+
+            let a = TestContainer::spawn(async move {
+                DB::transaction(move |_tx| {
+                    Box::pin(async move {
+                        Queue::push(AfterCommitJob).await?;
+                        a_registered_tx.send(()).expect("signal A");
+                        // Hold the transaction open until B has registered too,
+                        // so both scopes are live at the same instant.
+                        b_registered_rx.await.expect("await B");
+                        Ok::<(), FrameworkError>(())
+                    })
+                })
+                .await
+                .expect("A commits");
+                a_committed_tx.send(()).expect("signal A committed");
+            });
+
+            let b = TestContainer::spawn(async move {
+                DB::transaction(move |_tx| {
+                    Box::pin(async move {
+                        a_registered_rx.await.expect("await A");
+                        Queue::push(OtherAfterCommitJob).await?;
+                        b_registered_tx.send(()).expect("signal B");
+                        a_committed_rx.await.expect("await A's commit");
+                        // A's drain has finished. If the registry were shared,
+                        // B's still-pending job would already be on the driver.
+                        *observed_for_b.lock().unwrap() = driver_for_b
+                            .envelopes()
+                            .into_iter()
+                            .map(|e| e.job_name)
+                            .collect();
+                        Ok::<(), FrameworkError>(())
+                    })
+                })
+                .await
+                .expect("B commits");
+            });
+
+            a.await.expect("A joins");
+            b.await.expect("B joins");
+        }),
+    )
+    .await;
+    outcome.expect("neither transaction may hang");
+
+    assert_eq!(
+        *observed_after_a.lock().unwrap(),
+        vec!["wave5-after-commit".to_string()],
+        "A's commit must publish A's job and only A's - a shared registry would \
+         have drained B's pending push too"
+    );
+    let names: Vec<String> = driver.envelopes().into_iter().map(|e| e.job_name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "wave5-after-commit".to_string(),
+            "wave5-after-commit-other".to_string()
+        ],
+        "each transaction publishes its own job at its own commit"
     );
 }

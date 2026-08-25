@@ -395,12 +395,22 @@ same transaction is still suppressed and still reports `Ok(false)`. Only the
 envelope waits. The winner reports `Ok(true)` even though its push is pending,
 because the push is going to happen. A rollback releases the lock it took,
 owner-scoped, so the `unique_for` window is never blocked by a dispatch that
-never happened.
+never happened - and so does any other ending where the commit does not land,
+including a refused `COMMIT`. The one bound on that guarantee is the TTL
+itself: a transaction that stays open longer than `unique_for` can have its
+lock expire and be re-taken by another dispatch mid-flight, so give
+`unique_for` room above your longest transaction if the dedupe matters.
 
 Batches and chains do not defer, the same way they do not consult
 `Job::delay()`: `Queue::batch()` and `Queue::chain()` build and push their
 envelopes directly. Wrap the `.dispatch()` call so it runs after the
 transaction returns if a batch has to wait for a commit.
+
+Queued [mail](mail.md#queueing) and [notifications](notifications.md) do not
+defer either. Both ride one shared job type, and there is no
+`ShouldQueueAfterCommit` equivalent on `Mailable` or `Notification` yet, so a
+`Mail::queue` or `Notify::queue` call inside a transaction reaches the driver
+immediately. Send those after the transaction returns.
 
 Under `Queue::fake()` a push is recorded immediately, deferral and all, so a
 test can assert on it without committing anything. This matches Laravel's

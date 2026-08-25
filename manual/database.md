@@ -232,6 +232,17 @@ DB::transaction(|_tx| {
 
 Commit on `Ok(_)`. Rollback + propagate the error on `Err(_)`.
 
+An `Err` is not always a rollback. If an
+[after-commit](queues.md#after-commit-dispatch) callback fails, the commit has
+already landed and is durable; `DB::transaction` still returns `Err`, and the
+message reads `after-commit callback failed (the transaction itself
+committed): <the callback's error>`. The closure's return value is lost, its
+writes are not, and only a deferred dispatch failed. Every registered callback
+still runs and the first error is the one you get.
+`DB::transaction_with_attempts` never retries that error, however
+deadlock-shaped it reads: re-running a closure whose writes are already durable
+would apply them twice.
+
 Operations inside the closure automatically pick up the active
 transaction via a `tokio::task_local` - you do NOT have to thread a
 `&tx` handle through every model call. Nested `DB::transaction`

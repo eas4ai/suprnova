@@ -92,6 +92,44 @@ pub(crate) struct TxState {
     pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
 }
 
+/// Why a `DB::transaction` call failed, kept out of the flat `FrameworkError`
+/// so [`DB::transaction_with_attempts`] can tell the two apart.
+///
+/// A retry is only ever safe when nothing was written. Once the COMMIT lands,
+/// the closure's writes are durable and re-running it would apply them twice -
+/// so an after-commit callback failing has to be a distinct outcome, not an
+/// error the retry loop pattern-matches on a message. `is_deadlock` matches the
+/// substring `"deadlock"`, and a deferred queue push failing against a
+/// contended table produces exactly that string, after the commit.
+enum TransactionFailure {
+    /// The transaction did not commit: the closure returned `Err`, a leaked
+    /// `TxHandle` blocked the commit, or the database refused it. Nothing is
+    /// durable, so a retry is safe.
+    NotCommitted(FrameworkError),
+    /// The transaction committed and an after-commit callback then failed.
+    /// Never retryable.
+    AfterCommitCallback(FrameworkError),
+}
+
+impl TransactionFailure {
+    /// Flatten to the error the public surface returns. Both variants carry a
+    /// user-facing error already; the variant only ever mattered internally.
+    fn into_error(self) -> FrameworkError {
+        match self {
+            Self::NotCommitted(e) | Self::AfterCommitCallback(e) => e,
+        }
+    }
+}
+
+impl From<FrameworkError> for TransactionFailure {
+    /// Every `?` inside `transaction_inner` fires before the COMMIT, so the
+    /// blanket conversion is the pre-commit case. The post-commit case is
+    /// constructed explicitly at its one call site.
+    fn from(e: FrameworkError) -> Self {
+        Self::NotCommitted(e)
+    }
+}
+
 tokio::task_local! {
     /// Active transaction installed by [`DB::transaction`] /
     /// [`DB::transaction_with_attempts`] for the duration of their
@@ -892,6 +930,14 @@ impl DB {
     /// - Closure returns `Ok` → commit. Result propagated.
     /// - Closure returns `Err` → rollback. Original error returned.
     ///
+    /// One `Err` does **not** mean the transaction rolled back: when an
+    /// after-commit callback fails, the commit already succeeded and is
+    /// durable, and the error reads `after-commit callback failed (the
+    /// transaction itself committed): …`. The closure's return value is lost
+    /// in that case, but its writes are not. Only a deferred dispatch failed -
+    /// see [`Job::after_commit`](crate::queue::Job::after_commit). Every
+    /// registered callback still runs; the first error is the one you get.
+    ///
     /// Nested `DB::transaction` calls are rejected with a database
     /// error — SeaORM's `begin()` doesn't compose. Use
     /// [`Transaction::savepoint`] for nested-rollback behaviour.
@@ -933,6 +979,30 @@ impl DB {
         >,
         T: Send,
     {
+        Self::transaction_inner(f)
+            .await
+            .map_err(TransactionFailure::into_error)
+    }
+
+    /// [`DB::transaction`] with the failure cause still intact.
+    ///
+    /// The public entry point flattens everything to a `FrameworkError`, which
+    /// is the right surface for a caller that just wants to know it failed.
+    /// [`DB::transaction_with_attempts`] needs more than that: re-running a
+    /// closure whose writes are already durable would double them, so it has to
+    /// tell "nothing was written" from "the commit landed and an after-commit
+    /// callback failed afterwards". Encoding that in the return type rather
+    /// than in the error's message means no user-supplied error text can ever
+    /// be mistaken for either.
+    async fn transaction_inner<F, T>(f: F) -> Result<T, TransactionFailure>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
         // Reject nested calls before doing any work. Without this
         // guard, `conn.inner().begin()` below would start a brand-new
         // top-level transaction on a pooled connection that's
@@ -942,7 +1012,8 @@ impl DB {
         if nested {
             return Err(FrameworkError::database(
                 "nested DB::transaction is not supported; use tx.savepoint(name) for nested rollback",
-            ));
+            )
+            .into());
         }
 
         let conn = DB::connection()?;
@@ -998,15 +1069,31 @@ impl DB {
 
         match result {
             Ok(value) => {
-                let tx = Arc::try_unwrap(tx_arc).map_err(|_| {
-                    FrameworkError::internal(
-                        "DB::transaction: TxHandle clones outlived the closure; \
-                         drop them before the closure returns Ok so commit can proceed",
-                    )
-                })?;
-                tx.commit()
-                    .await
-                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                // Two ways an `Ok` closure still fails to commit, and both have
+                // to compensate before surfacing. A leaked `TxHandle` leaves the
+                // transaction pending rollback; a refused COMMIT rolls it back
+                // outright. Returning early from either without running the
+                // rollback callbacks would strand a deferred `push_unique`'s
+                // dedupe lock for the whole `unique_for` window, on a dispatch
+                // that never happened.
+                let tx = match Arc::try_unwrap(tx_arc) {
+                    Ok(tx) => tx,
+                    Err(arc) => {
+                        drop(arc); // release OUR ref; leaked refs still keep the tx alive
+                        super::after_commit::compensate(after_commit_callbacks, rollback_callbacks)
+                            .await;
+                        return Err(FrameworkError::internal(
+                            "DB::transaction: TxHandle clones outlived the closure; \
+                             drop them before the closure returns Ok so commit can proceed",
+                        )
+                        .into());
+                    }
+                };
+                if let Err(commit_err) = tx.commit().await {
+                    super::after_commit::compensate(after_commit_callbacks, rollback_callbacks)
+                        .await;
+                    return Err(FrameworkError::database(commit_err.to_string()).into());
+                }
                 emit_tx_event(super::events::TransactionCommitted {
                     connection_name: conn_name.to_string(),
                 })
@@ -1014,7 +1101,14 @@ impl DB {
                 // The rollback list is dropped here: Laravel discards the
                 // branch that did not happen.
                 drop(rollback_callbacks);
-                super::after_commit::run_after_commit(after_commit_callbacks).await?;
+                // Deliberately NOT `?`: this failure happened *after* a durable
+                // commit, and `transaction_with_attempts` must never re-run the
+                // closure for it, however deadlock-shaped the callback's error
+                // reads.
+                if let Err(e) = super::after_commit::run_after_commit(after_commit_callbacks).await
+                {
+                    return Err(TransactionFailure::AfterCommitCallback(e));
+                }
                 Ok(value)
             }
             Err(e) => {
@@ -1065,16 +1159,13 @@ impl DB {
                         );
                     }
                 }
-                // Compensate for whatever the closure deferred, then discard
-                // the after-commit list - the commit it was waiting for is
-                // never going to happen. Both leaked-handle branches land here:
-                // a zombie transaction is still one that did not commit, so a
-                // deferred push did not happen and its unique lock has to go
-                // back. Callback errors are logged, never returned: the caller
-                // needs the original error, not the compensation's.
-                drop(after_commit_callbacks);
-                super::after_commit::run_rollback(rollback_callbacks).await;
-                Err(e)
+                // Compensate for whatever the closure deferred: the commit it
+                // was waiting for is never going to happen, and a zombie
+                // transaction is still one that did not commit. Callback errors
+                // are logged, never returned - the caller needs the original
+                // error, not the compensation's.
+                super::after_commit::compensate(after_commit_callbacks, rollback_callbacks).await;
+                Err(e.into())
             }
         }
     }
@@ -1149,6 +1240,12 @@ impl DB {
     /// with full jitter, capped at 500ms — so contending writers don't
     /// thrash the database after a deadlock victim is chosen. On the
     /// final attempt the error propagates unchanged with no sleep.
+    ///
+    /// A failure that happens *after* the COMMIT is never retried, whatever it
+    /// says. Once the commit lands the closure's writes are durable, so
+    /// re-running it would apply them twice; an after-commit callback failing
+    /// with a deadlock-shaped message is a deferred dispatch's problem, not the
+    /// transaction's. See [`Job::after_commit`](crate::queue::Job::after_commit).
     pub async fn transaction_with_attempts<F, T>(
         attempts: u32,
         mut f: F,
@@ -1172,9 +1269,15 @@ impl DB {
             ));
         }
         for attempt in 1..=attempts {
-            match DB::transaction(|tx| f(tx)).await {
+            // `transaction_inner`, not `transaction`: the retry decision needs
+            // to know whether the COMMIT landed. An after-commit callback that
+            // fails with a deadlock-shaped error must not re-run a closure whose
+            // writes are already durable.
+            match DB::transaction_inner(|tx| f(tx)).await {
                 Ok(v) => return Ok(v),
-                Err(e) if is_deadlock(&e) && attempt < attempts => {
+                Err(TransactionFailure::NotCommitted(e))
+                    if is_deadlock(&e) && attempt < attempts =>
+                {
                     let backoff = deadlock_retry_backoff(attempt);
                     tracing::warn!(
                         target: "suprnova::eloquent::tx",
@@ -1187,7 +1290,7 @@ impl DB {
                     tokio::time::sleep(backoff).await;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(failure) => return Err(failure.into_error()),
             }
         }
         // unreachable — the loop either returns `Ok(_)` or the final
@@ -1344,6 +1447,77 @@ fn is_deadlock(e: &FrameworkError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A closure that fails with a deadlock-shaped error is the case
+    /// `transaction_with_attempts` exists for: nothing committed, so re-running
+    /// is safe. This is the control for the test below it.
+    #[tokio::test]
+    async fn a_deadlocked_closure_is_retried() {
+        let _db = crate::testing::TestDatabase::sqlite_memory()
+            .await
+            .expect("sqlite");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = runs.clone();
+
+        let err = DB::transaction_with_attempts(3, move |_tx| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(FrameworkError::database(
+                    "ERROR: deadlock detected (SQLSTATE 40P01)",
+                ))
+            })
+        })
+        .await
+        .expect_err("every attempt deadlocked");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "all three attempts run");
+        assert!(err.to_string().contains("deadlock"));
+    }
+
+    /// The same error text, raised from an after-commit callback instead, must
+    /// NOT be retried: the closure's writes are already durable, so re-running
+    /// it would apply them twice. Before `TransactionFailure` existed, the
+    /// retry loop's `is_deadlock` substring match could not tell these apart.
+    #[tokio::test]
+    async fn an_after_commit_failure_is_never_retried_however_deadlocked_it_reads() {
+        let _db = crate::testing::TestDatabase::sqlite_memory()
+            .await
+            .expect("sqlite");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = runs.clone();
+
+        let err = DB::transaction_with_attempts(3, move |_tx| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                crate::database::after_commit::register_callback(Box::new(|| {
+                    Box::pin(async {
+                        Err(FrameworkError::database(
+                            "ERROR: deadlock detected (SQLSTATE 40P01)",
+                        ))
+                    })
+                }))
+                .await?;
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect_err("the after-commit callback failed");
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the commit landed on the first attempt; re-running the closure would \
+             double its writes"
+        );
+        assert!(
+            err.to_string()
+                .contains("after-commit callback failed (the transaction itself committed)"),
+            "the caller must be told the commit happened: {err}"
+        );
+    }
 
     #[test]
     fn is_deadlock_matches_postgres_sqlstates() {

@@ -1081,20 +1081,6 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
     Ok(())
 }
 
-/// Resolve `available_at` for the entry points that consult
-/// [`Job::delay`]: [`Queue::push`], [`Queue::push_with`], [`Queue::bulk`],
-/// and [`Queue::push_unique`]. Returns `base` unchanged when the job
-/// declares no delay.
-///
-/// `push_later` / `later` / `later_with` / [`Queue::push_unique_later`] /
-/// [`Queue::later_unique`] never reach it - they take an explicit
-/// `available_at` (or delay) from the caller, and that always wins over the
-/// job's own declared default.
-///
-/// Which of the two applies is carried as an [`AvailableAt`] rather than a
-/// resolved timestamp, so a push deferred to a transaction commit can resolve
-/// the delay against the commit while an explicit timestamp survives the
-/// deferral unchanged.
 /// How a push decides its `available_at`, carried far enough down the call
 /// chain that a deferred push can decide it again at commit time.
 ///
@@ -1126,6 +1112,20 @@ impl AvailableAt {
     }
 }
 
+/// Resolve `available_at` for the entry points that consult
+/// [`Job::delay`]: [`Queue::push`], [`Queue::push_with`], [`Queue::bulk`],
+/// and [`Queue::push_unique`]. Returns `base` unchanged when the job
+/// declares no delay.
+///
+/// `push_later` / `later` / `later_with` / [`Queue::push_unique_later`] /
+/// [`Queue::later_unique`] never reach it - they take an explicit
+/// `available_at` (or delay) from the caller, and that always wins over the
+/// job's own declared default.
+///
+/// Which of the two applies is carried as an [`AvailableAt`] rather than a
+/// resolved timestamp, so a push deferred to a transaction commit can resolve
+/// the delay against the commit while an explicit timestamp survives the
+/// deferral unchanged.
 fn resolve_job_delay<J: Job>(
     base: chrono::DateTime<chrono::Utc>,
 ) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
