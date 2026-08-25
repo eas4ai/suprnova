@@ -1,6 +1,7 @@
 import type { JsonValue } from "../canonical.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
+import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
 
 export type RuntimeFeatureRegistrationOutcome =
   "registered" | "already_registered" | "incompatible" | "conflict" | "registry_full";
@@ -18,6 +19,10 @@ export interface RuntimeFeatureDriverIslandPort {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
+  proposeUploadHandle(
+    field: string,
+    proposal: UploadHandleProposal,
+  ): UploadHandleProposalDisposition;
   writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
 }
 

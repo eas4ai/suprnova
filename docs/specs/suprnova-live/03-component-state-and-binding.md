@@ -1,7 +1,7 @@
 # Suprnova Live -- 03 Component State and Binding
 
 Status: Normative design specification
-Last revised: 2026-08-21
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -216,6 +216,19 @@ Initial typed query input and the server-side reflected/navigated URL decision
 are testable through the host-neutral harness; browser events, debounce queues,
 `history.replaceState`, and document navigation execution remain iteration 003.
 
+## Iteration 004 typed upload proposal profile
+
+The optional upload artifact cannot write general component authority. The core
+accepts only `null`, one canonical opaque upload handle, or a bounded ordered
+handle list for the exact field declared by `live:upload` on the owning active
+island. A field cannot simultaneously have an ordinary `live:model` binding
+anywhere in that island's owned DOM; the declaration scan is bounded and skips
+nested islands. Core validates handle grammar, prevents a handle claim from crossing an
+island or field, and places the accepted value in the ordinary model proposal
+batch. The proposal does not schedule a request by itself; the next deliberate
+action carries it through the existing typed model path. Transfer grants, file
+bytes, browser paths, and trusted metadata never enter that batch.
+
 ## Acceptance criteria
 
 - Browser mutation is deny-by-default and restricted to explicit model fields.
@@ -227,6 +240,13 @@ are testable through the host-neutral harness; browser events, debounce queues,
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made upload/model-field exclusivity island-wide rather than
+  element-local, preventing a separately placed ordinary model control from
+  colliding with the typed upload proposal during the deliberate action batch.
+- 2026-08-25 -- Added a core-owned typed upload proposal path. It admits only a
+  declared upload field and `null`, one canonical handle, or a bounded handle
+  list; claims cannot cross island or field scope, and accepted values join the
+  ordinary model batch without triggering an eager Live request.
 - 2026-08-21 -- Made ordinary component fields instance-only `State`, added a
   distinct nondehydrated `Session` category, and required explicit `Public`
   declaration for reusable seed state. Public-seed promotion freshly mounts the

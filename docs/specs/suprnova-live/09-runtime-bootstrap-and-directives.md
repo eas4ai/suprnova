@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -77,6 +77,15 @@ Acceptance criteria:
   document. A later island fails only optional-capability admission with one
   bounded `resource_exhausted` diagnostic; ordinary Live and already admitted
   optional owners continue, and retiring an admitted island releases capacity.
+- The upload slot receives one typed `proposeUploadHandle` capability. Core
+  validates current island ownership, the declared upload field, canonical
+  handle grammar, cross-field/cross-island claims, and retirement; no generic
+  model write or authority mutation port is exposed.
+- The ESM upload artifact registers one default feature immediately. Applications
+  configure that same singleton before document connection with bounded typed
+  ports; they do not register a competing feature. Explicit post-reload
+  reacquisition resolves the already-connected island element through the
+  artifact's scoped owner and fails closed for an absent or retired owner.
 - Dynamically inserted islands connect through the same validated path.
 - Removing an island cancels or retires its pending browser resources according
   to scheduling and upload policy.
@@ -200,6 +209,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made optional upload configuration operate on the one
+  automatically registered feature before boot and exposed a scoped resume
+  entry for explicit application-owned reacquisition; the public artifact no
+  longer advertises a factory whose result cannot replace its default slot.
+- 2026-08-25 -- Added the sealed upload-handle proposal capability to the
+  optional island port. It is a core-validated narrow write into the existing
+  typed model batch, not a generic action, snapshot, or model mutation API.
 - 2026-08-24 -- Corrected optional Stimulus delivery to a manifest-typed
   ESM/classic adapter pair, with an equivalent package export for bundler users.
   The adapter must register before unchanged `boot({ stimulus })` startup;

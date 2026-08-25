@@ -589,7 +589,13 @@ provider tests and test-support fixtures
 
     Reload has no resume state. `reacquire(handle)` exists only through the
     optional `UploadApplicationPort` supplied by application bootstrap and still
-    requires the user-held `File` to match authoritative identity. The feature
+    requires the user-held `File` to match authoritative identity.
+    `ReacquiredUpload` carries both the authoritative uploaded-byte offset and
+    next chunk index; status reconciliation returns the same cursor, and the
+    browser never derives the index from its current chunk-size configuration.
+    Fence every pending reacquisition with a bounded island/field generation so
+    newer selection/removal, island retirement, or document disposal discards a
+    late grant without installing it. The feature
     contains no fixed reacquisition URL and registers no `/__live/` reacquire
     route; the reference application demonstrates an authenticated route outside
     that namespace.

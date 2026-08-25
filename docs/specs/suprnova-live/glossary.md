@@ -278,6 +278,20 @@ runtime memory and never enters snapshots, HTML, URLs, history, action/model
 envelopes, logs, traces, or diagnostics.
 _Avoid_: upload handle, signed snapshot, session token, resumable public URL
 
+**Upload proposal authority**:
+The core-owned narrow capability that admits only `null`, one canonical upload
+handle, or a bounded ordered handle list for the exact declared upload field of
+the current island, then writes it through the ordinary typed model batch. It is
+not a generic model, snapshot, action, or feature-authority mutation port.
+_Avoid_: generic feature write, transfer grant proposal, automatic upload action
+
+**Upload file identity**:
+A bounded current-document comparison tuple of sanitized display name, byte
+size, browser MIME claim, and last-modified value used to match a user-held
+`File` during explicit reacquisition. It is never trusted storage identity,
+content validation, path authority, or proof of ownership.
+_Avoid_: quarantine object, authoritative MIME, browser path, upload authority
+
 **Quarantine store**:
 A host-supplied asynchronous byte-I/O capability for exclusively creating,
 writing, syncing, reading, and removing non-public temporary upload objects. It

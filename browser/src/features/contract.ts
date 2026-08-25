@@ -3,6 +3,7 @@ import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
+import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
 import type {
   StimulusBootstrapOptions,
   StimulusContinuity,
@@ -53,6 +54,10 @@ export interface RuntimeFeatureIslandPort {
   readonly identity: IslandExtensionIdentity;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
+  proposeUploadHandle(
+    field: string,
+    proposal: UploadHandleProposal,
+  ): UploadHandleProposalDisposition;
   queryDirectiveOwnership(
     parser: RuntimeFeatureDirectiveParser,
   ): readonly RuntimeFeatureDirectiveOwnership[];
@@ -281,7 +286,7 @@ function* featureElements(root: Element, node: Element = root): Generator<Elemen
   if (shadow !== null) for (const child of shadow.children) yield* featureElements(root, child);
 }
 
-function featureDirectives(
+export function queryFeatureDirectiveOwnership(
   root: Element,
   parser: RuntimeFeatureDirectiveParser,
   capability: string,
@@ -399,8 +404,10 @@ function defineFeature(
         onDispose: (dispose: VoidFunction) => {
           own(disposers, dispose);
         },
+        proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
+          port.proposeUploadHandle(field, proposal),
         queryDirectiveOwnership: (parser: RuntimeFeatureDirectiveParser) =>
-          featureDirectives(
+          queryFeatureDirectiveOwnership(
             port.element,
             parser,
             slot === 0 ? "uploads@1" : "async@1",

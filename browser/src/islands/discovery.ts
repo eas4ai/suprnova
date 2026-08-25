@@ -37,6 +37,11 @@ import { TransitionRunner } from "../transitions/runner.js";
 import { NativeDocumentNavigation } from "../navigation/native.js";
 import { DIRTY_WORK_ATTRIBUTE, NAVIGATION_GUARD_ATTRIBUTE } from "../navigation/guards.js";
 import {
+  type UploadHandleProposal,
+  type UploadHandleProposalDisposition,
+} from "../uploads/types.js";
+import { declaresUploadField, UploadProposalAuthority } from "../uploads/proposal.js";
+import {
   ISLAND_ROOT_SELECTOR,
   ISLAND_STATUS_ATTRIBUTE,
   IslandMetadataError,
@@ -102,6 +107,7 @@ export class DocumentRuntime {
   readonly #identities = new Map<string, IslandRecord>();
   readonly #childParameterHashes = new WeakMap<IslandRecord, string[]>();
   readonly #recoveries = new WeakMap<IslandRecord, ApplicationRecovery>();
+  readonly #uploadProposals = new UploadProposalAuthority<IslandRecord>();
   readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
@@ -275,6 +281,7 @@ export class DocumentRuntime {
     this.#lazy.dispose();
     this.#signals.dispose();
     this.#composition.dispose();
+    this.#uploadProposals.dispose();
     this.#records.clear();
     this.#identities.clear();
   }
@@ -881,6 +888,8 @@ export class DocumentRuntime {
         documentKey: record.metadata.documentKey,
         slot: record.metadata.slot,
       }),
+      proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
+        this.#proposeUploadHandle(record, field, proposal, current),
       writePresentationSignal: (target: Element, name: string, value: JsonValue) => {
         if (!current() || this.#ownership.ownerForNode(target) !== record) {
           throw new Error("feature_signal_context_invalid");
@@ -889,6 +898,19 @@ export class DocumentRuntime {
       },
     });
     this.#invokeFeatureDriver(driver, 1, port);
+  }
+
+  #proposeUploadHandle(
+    record: IslandRecord,
+    field: string,
+    proposal: UploadHandleProposal,
+    current: () => boolean,
+  ): UploadHandleProposalDisposition {
+    return this.#uploadProposals.propose(record, field, proposal, {
+      active: current,
+      declared: (candidate) => declaresUploadField(record.element, candidate),
+      write: (value) => this.#events.proposeTypedModel(record, field, value),
+    });
   }
 
   #retireFeatureDriver(record: IslandRecord): void {

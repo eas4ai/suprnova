@@ -40,10 +40,10 @@ Acceptance criteria:
   diagnostics, or inspection output.
 - Selecting a replacement file retires or preserves the previous temporary
   upload according to explicit form policy.
-- The optional upload artifact proposes only the opaque handle or `null` to the
-  declared upload field through a core-validated typed capability; it cannot
-  write another model field or carry the transfer grant into an action/model
-  envelope.
+- The optional upload artifact proposes only `null`, one opaque handle, or a
+  bounded ordered handle list for a multiple-file control to the declared
+  upload field through a core-validated typed capability; it cannot write
+  another model field or carry the transfer grant into an action/model envelope.
 - File controls remain subject to native browser security restrictions.
 
 UX flow:
@@ -82,6 +82,29 @@ Acceptance criteria:
 - Count, aggregate bytes, creation rate, temporary storage, verification time,
   in-flight work, retry, and retention are bounded in addition to per-file and
   per-chunk limits.
+
+The production optional artifact owns one upload manager per document and one
+current-document transfer owner per selected file. It uses the shared bounded
+owner for queueing, permits, lifecycle, and disposal; defaults to four active
+files and 256 KiB chunks; retains at most one uncertain chunk in JavaScript and
+never more than two chunk buffers per active transfer; and computes chunk plus
+whole-file SHA-256 incrementally without reading the whole file into framework
+memory. Public configuration cannot exceed 16 active transfers, 64 files, 4 MiB
+chunks, or 4 MiB of manager queue accounting. Transport, connectivity, retry
+randomness, and the optional application reacquisition port are injected before
+runtime boot through `configureUploads`; `resumeUpload` is the supported
+document/island-scoped explicit reacquisition entry rather than a second feature
+registration. The
+reference fetch adapter uses the fixed reserved `/__live/upload` endpoint and
+places a transfer grant only in the `Authorization` header, never in the URL,
+history, diagnostics, or model proposal. It reads upload control responses
+through a 16 KiB bounded stream rather than an unbounded `response.json()`.
+Every typed response is checked against its operation and cannot regress the
+expected revision. Server-terminal failure, cancellation, expiry, or
+finalization clears the proposal, file, grant, handle, and uncertain bytes.
+Completion retains one idempotency key until acknowledgment; a lost completion
+response first reconciles through read-only status and resends only when the
+authoritative state remains transferable.
 
 UX flow:
 1. Accepted file enters the upload queue -> progress advances without blocking
@@ -203,6 +226,12 @@ Acceptance criteria:
   lives outside the reserved `/__live/` namespace, reauthorizes the opaque
   handle, and issues a new transfer grant; no default localStorage,
   sessionStorage, or IndexedDB persistence is permitted.
+- Reacquisition returns the exact authoritative uploaded-byte offset and next
+  chunk index; neither is reconstructed from the current deployment's chunk
+  size. The
+  browser verifies the user-held file identity, incrementally rehashes the
+  already accepted prefix under the same chunk bound, reads authoritative
+  status, and only then resumes without issuing a second create request.
 
 UX flow:
 1. Application user cancels or removes a pending file -> its progress stops and
@@ -246,6 +275,24 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Bound resumed transfer to both the authoritative byte offset and
+  next chunk index, including status reconciliation, so deployment-time chunk
+  configuration changes cannot corrupt provider sequencing. Per-island/field
+  generations discard late grants after newer selection, removal, retirement,
+  or document disposal.
+- 2026-08-25 -- Hardened the production browser artifact with operation-specific
+  response states, non-regressing revisions, terminal authority disposal,
+  stable completion idempotency plus status reconciliation, upload-specific
+  hard ceilings, and real offset-bearing reacquisition. The automatically
+  registered singleton now exposes pre-boot `configureUploads` and scoped
+  `resumeUpload` instead of advertising an unusable replacement factory.
+- 2026-08-25 -- Implemented the current-document browser owner on the shared
+  bounded-resource foundation with injected transport/connectivity/randomness,
+  256 KiB default chunks, incremental SHA-256, uncertain-chunk idempotent retry,
+  strict native-input clearing, and immediate secret disposal. Multiple-file
+  fields use a bounded ordered handle list. Core proposal authority validates
+  declaration, UUID grammar, island/field scope, and retirement before the
+  existing model batch may observe the value.
 - 2026-08-25 -- Defined cleanup as a bounded ledger-owned claim protocol. Active
   expiry is atomic with the claim, `Finalizing`/`Finalized` are ineligible,
   physical deletion is idempotent and outside the ledger lock, and completion is

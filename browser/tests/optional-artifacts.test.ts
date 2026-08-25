@@ -148,6 +148,9 @@ describe("role-typed optional production artifacts", () => {
     expect(declarations).not.toContain("export type RuntimeFeatureName");
     expect(declarations).toContain("export const stimulusRegistration");
     expect(declarations).toContain("export const uploadsFeature: RuntimeFeature");
+    expect(declarations).toContain("export function configureUploads");
+    expect(declarations).toContain("export function resumeUpload");
+    expect(declarations).not.toContain("export function createUploadsFeature");
     expect(declarations).toContain("export const asyncFeature: RuntimeFeature");
   });
 
@@ -226,8 +229,19 @@ describe("role-typed optional production artifacts", () => {
         stimulusRegistration,
       } from "@suprnova/live/stimulus";
       import uploads, {
+        configureUploads,
+        FetchUploadTransport,
+        reacquireUpload,
+        resumeUpload,
         uploadsFeature,
         uploadsRegistration,
+        type ReacquiredTransfer,
+        type UploadApplicationPort,
+        type UploadFeatureOptions,
+        type UploadResumeRequest,
+        type UploadTransport,
+        type UploadTransportRequest,
+        type UploadTransportResponse,
       } from "@suprnova/live/uploads";
       import asynchronous, {
         asyncFeature,
@@ -238,6 +252,13 @@ describe("role-typed optional production artifacts", () => {
       const upload: RuntimeFeature = uploads;
       const asynchronousFeature: RuntimeFeature = asynchronous;
       const stimulusOutcome: RuntimeFeatureRegistrationOutcome = stimulus;
+      const uploadApplication = null as UploadApplicationPort | null;
+      const uploadOptions = null as UploadFeatureOptions | null;
+      const uploadRequest = null as UploadResumeRequest | null;
+      const uploadTransport = null as UploadTransport | null;
+      const uploadTransportRequest = null as UploadTransportRequest | null;
+      const uploadTransportResponse = null as UploadTransportResponse | null;
+      const reacquiredTransfer = null as ReacquiredTransfer | null;
       const portOverrides: RuntimePortOverrides = {
         connectivity: { isOnline: () => true },
       };
@@ -291,6 +312,10 @@ describe("role-typed optional production artifacts", () => {
         stimulusRegistration,
         uploadsFeature,
         uploadsRegistration,
+        configureUploads,
+        FetchUploadTransport,
+        reacquireUpload,
+        resumeUpload,
         asyncFeature,
         asyncRegistration,
         liveApi,
@@ -298,6 +323,13 @@ describe("role-typed optional production artifacts", () => {
         upload,
         asynchronousFeature,
         stimulusOutcome,
+        uploadApplication,
+        uploadOptions,
+        uploadRequest,
+        uploadTransport,
+        uploadTransportRequest,
+        uploadTransportResponse,
+        reacquiredTransfer,
         portOverrides,
         rootTypeExports,
       ];
@@ -420,6 +452,9 @@ describe("role-typed optional production artifacts", () => {
       if (surface?.version !== 1 || typeof Reflect.get(surface, adopt) !== "function") process.exit(2);
       if (stimulus.stimulusRegistration !== "registered") process.exit(3);
       if (uploads.uploadsRegistration !== "registered" || uploads.default !== uploads.uploadsFeature) process.exit(4);
+      if (typeof uploads.configureUploads !== "function" || typeof uploads.resumeUpload !== "function") process.exit(7);
+      if (typeof uploads.FetchUploadTransport !== "function" || typeof uploads.reacquireUpload !== "function") process.exit(8);
+      if ("createUploadsFeature" in uploads) process.exit(9);
       if (asynchronous.asyncRegistration !== "registered" || asynchronous.default !== asynchronous.asyncFeature) process.exit(5);
       const core = await import(new URL("suprnova-live.esm.js", "file://" + root + "/"));
       if (typeof core.boot !== "function" || Reflect.get(globalThis, symbol) !== surface) process.exit(6);

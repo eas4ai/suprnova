@@ -91,6 +91,10 @@ export class EventRouter {
     return this.#models.state(record);
   }
 
+  proposeTypedModel(record: IslandRecord, field: string, value: JsonValue): boolean {
+    return this.#models.proposeTyped(record, field, value).changed;
+  }
+
   suspend(): void {
     this.#models.suspend();
   }

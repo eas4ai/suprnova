@@ -7,7 +7,7 @@ import type { ServerIntent, ServerOperation } from "../scheduler/intent.js";
 import { FIFO_POLICY } from "../scheduler/policy.js";
 import type { SchedulerPolicy } from "../scheduler/types.js";
 import { controlEligibleForModel, readModelControl, type ModelControlRead } from "./control.js";
-import { ModelState } from "./state.js";
+import { ModelState, type ModelEditResult } from "./state.js";
 import {
   ModelTimingCoordinator,
   parseModelTiming,
@@ -100,6 +100,7 @@ export class ModelFormRuntime {
   readonly #bindings = new WeakMap<object, ModelBinding>();
   readonly #byIsland = new Map<IslandRecord, Set<ModelBinding>>();
   readonly #states = new WeakMap<IslandRecord, ModelState>();
+  readonly #typedFields = new Map<IslandRecord, Set<string>>();
   readonly #timings = new WeakMap<IslandRecord, ModelTimingCoordinator>();
   readonly #registeredRecords = new WeakSet<IslandRecord>();
   #bindingSequence = 0;
@@ -173,9 +174,10 @@ export class ModelFormRuntime {
   prepareAction(owned: OwnedDirective, eventType: string): ModelBatch {
     if (eventType === "init") return emptyBatch();
     const bindings = this.#byIsland.get(owned.island);
-    if (bindings === undefined) return emptyBatch();
     let selected: ModelBinding[];
-    if (eventType === "submit") {
+    if (bindings === undefined) {
+      selected = [];
+    } else if (eventType === "submit") {
       const form = asForm(owned.element);
       if (form === null) return emptyBatch();
       selected = [...bindings].filter((binding) => associatedWithForm(binding.owned.element, form));
@@ -184,7 +186,24 @@ export class ModelFormRuntime {
         (binding) => binding.timing.kind === "action" || binding.owned.element === owned.element,
       );
     }
-    return this.#sampleBatch(owned.island, selected, true);
+    return mergeModelBatches(
+      this.#sampleBatch(owned.island, selected, true),
+      this.#typedBatch(owned.island),
+    );
+  }
+
+  proposeTyped(record: IslandRecord, field: string, value: JsonValue): ModelEditResult {
+    let fields = this.#typedFields.get(record);
+    if (fields === undefined) {
+      fields = new Set();
+      this.#typedFields.set(record, fields);
+    }
+    if (!fields.has(field)) {
+      if (fields.size >= MAX_BINDINGS_PER_ISLAND) throw new Error("model_binding_limit");
+      fields.add(field);
+      this.#state(record).register(field);
+    }
+    return this.#state(record).propose(field, value);
   }
 
   trackIntent(record: IslandRecord, batch: ModelBatch, intent: ServerIntent): void {
@@ -281,6 +300,22 @@ export class ModelFormRuntime {
     return buildModelBatch(samples);
   }
 
+  #typedBatch(record: IslandRecord): ModelBatch {
+    const state = this.#state(record);
+    const samples: ModelBatchSample[] = [];
+    for (const field of this.#typedFields.get(record) ?? []) {
+      const proposal = state.proposal(field);
+      if (isMissing(proposal)) continue;
+      samples.push({
+        editSequence: state.editSequence(field),
+        eligible: true,
+        field,
+        read: { kind: "value", value: proposal },
+      });
+    }
+    return buildModelBatch(samples);
+  }
+
   #readField(record: IslandRecord, field: string): ModelControlRead {
     const bindings = [...(this.#byIsland.get(record) ?? [])].filter(
       (binding) => binding.owned.directive.value === field,
@@ -335,6 +370,7 @@ export class ModelFormRuntime {
     if (bindings === undefined) return;
     for (const binding of [...bindings]) this.#retireBinding(bindings, binding);
     this.#timings.get(record)?.dispose();
+    this.#typedFields.delete(record);
     this.#byIsland.delete(record);
   }
 }
@@ -421,6 +457,18 @@ function asForm(target: EventTarget | null): HTMLFormElement | null {
 function associatedWithForm(element: Element, form: HTMLFormElement): boolean {
   if ("form" in element && element.form !== undefined) return element.form === form;
   return form.contains(element);
+}
+
+function mergeModelBatches(left: ModelBatch, right: ModelBatch): ModelBatch {
+  if (right.operations.length === 0) return left;
+  if (left.operations.length === 0) return right;
+  const duplicate = Object.keys(right.proposals).find((field) => field in left.proposals);
+  if (duplicate !== undefined) throw new Error("model_control_ambiguous");
+  return Object.freeze({
+    editSequences: Object.freeze({ ...left.editSequences, ...right.editSequences }),
+    operations: Object.freeze([...left.operations, ...right.operations]),
+    proposals: Object.freeze({ ...left.proposals, ...right.proposals }),
+  });
 }
 
 function emptyBatch(): ModelBatch {

@@ -189,6 +189,9 @@ type RuntimeFeatureDiagnosticDetail =
   | "resource_exhausted";
 type FreshRenderReason = "poll" | "stream";
 type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type UploadHandle = string;
+export type UploadHandleProposal = UploadHandle | readonly UploadHandle[] | null;
+export type UploadHandleProposalDisposition = "accepted" | "unchanged" | "retired";
 type FeatureDirectiveDiagnosticCode =
   | "not_live_directive"
   | "attribute_limit"
@@ -235,6 +238,10 @@ export interface RuntimeFeatureIslandPort {
   readonly identity: IslandExtensionIdentity;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
+  proposeUploadHandle(
+    field: string,
+    proposal: UploadHandleProposal,
+  ): UploadHandleProposalDisposition;
   queryDirectiveOwnership(
     parser: RuntimeFeatureDirectiveParser,
   ): readonly RuntimeFeatureDirectiveOwnership[];
@@ -395,7 +402,131 @@ export default stimulusRegistration;
 }
 
 declare module "@suprnova/live/uploads" {
-import type { RuntimeFeature, RuntimeFeatureRegistrationOutcome } from "@suprnova/live";
+import type {
+  RuntimeFeature,
+  RuntimeFeatureRegistrationOutcome,
+  UploadHandle,
+} from "@suprnova/live";
+export type { UploadHandle } from "@suprnova/live";
+export type UploadPresentationState =
+  | "queued"
+  | "transferring"
+  | "verifying"
+  | "ready"
+  | "finalizing"
+  | "finalized"
+  | "interrupted"
+  | "failed"
+  | "canceled"
+  | "expired";
+export interface UploadFileIdentity {
+  readonly lastModified: number;
+  readonly name: string;
+  readonly size: number;
+  readonly type: string;
+}
+interface UploadRequestBase { readonly signal: AbortSignal; }
+export interface CreateUploadRequest extends UploadRequestBase {
+  readonly operation: "create";
+  readonly field: string;
+  readonly file: UploadFileIdentity;
+  readonly idempotencyKey: string;
+  readonly island: Readonly<{ component: string; documentKey: string; slot: string }>;
+}
+export interface PutUploadChunkRequest extends UploadRequestBase {
+  readonly operation: "put_chunk";
+  readonly bytes: ArrayBuffer;
+  readonly checksum: string;
+  readonly chunkIndex: number;
+  readonly expectedRevision: string;
+  readonly grant: string;
+  readonly handle: UploadHandle;
+  readonly idempotencyKey: string;
+}
+export interface CompleteUploadRequest extends UploadRequestBase {
+  readonly operation: "complete";
+  readonly expectedRevision: string;
+  readonly grant: string;
+  readonly handle: UploadHandle;
+  readonly idempotencyKey: string;
+  readonly wholeChecksum: string;
+}
+export interface CancelUploadRequest extends UploadRequestBase {
+  readonly operation: "cancel";
+  readonly expectedRevision: string;
+  readonly grant: string;
+  readonly handle: UploadHandle;
+  readonly idempotencyKey: string;
+}
+export interface StatusUploadRequest extends UploadRequestBase {
+  readonly operation: "status";
+  readonly grant: string;
+  readonly handle: UploadHandle;
+}
+export type UploadTransportRequest =
+  | CreateUploadRequest
+  | PutUploadChunkRequest
+  | CompleteUploadRequest
+  | CancelUploadRequest
+  | StatusUploadRequest;
+export interface UploadTransportResponse {
+  readonly grant?: string;
+  readonly handle?: UploadHandle;
+  readonly nextChunkIndex?: number;
+  readonly revision: string;
+  readonly state: UploadPresentationState;
+}
+export interface UploadTransport {
+  send(request: UploadTransportRequest): Promise<UploadTransportResponse>;
+}
+export interface UploadConnectivity { online(): boolean; }
+export interface UploadRandomness { idempotencyKey(): string; }
+export interface UploadFeatureOptions {
+  readonly application?: UploadApplicationPort;
+  readonly chunkBytes?: number;
+  readonly connectivity?: UploadConnectivity;
+  readonly maxActive?: number;
+  readonly maxItems?: number;
+  readonly maxQueueBytes?: number;
+  readonly randomness?: UploadRandomness;
+  readonly transport?: UploadTransport;
+}
+export interface ReacquiredUpload {
+  readonly fileIdentity: UploadFileIdentity;
+  readonly grant: string;
+  readonly nextChunkIndex: number;
+  readonly revision: string;
+  readonly state: "queued" | "transferring" | "verifying";
+  readonly uploadedBytes: number;
+}
+export interface ReacquiredTransfer extends ReacquiredUpload {
+  readonly file: File;
+  readonly handle: UploadHandle;
+}
+export interface UploadApplicationPort {
+  reacquire(request: Readonly<{
+    field: string;
+    fileIdentity: UploadFileIdentity;
+    handle: UploadHandle;
+  }>): Promise<ReacquiredUpload>;
+}
+export class FetchUploadTransport implements UploadTransport {
+  constructor(fetchPort: typeof globalThis.fetch);
+  send(request: UploadTransportRequest): Promise<UploadTransportResponse>;
+}
+export interface UploadResumeRequest {
+  readonly field: string;
+  readonly file: File;
+  readonly handle: UploadHandle;
+  readonly input: HTMLInputElement;
+  readonly island: Element;
+}
+export function configureUploads(options: UploadFeatureOptions): void;
+export function reacquireUpload(
+  application: UploadApplicationPort | undefined,
+  request: Readonly<{ field: string; file: File; handle: UploadHandle }>,
+): Promise<ReacquiredTransfer>;
+export function resumeUpload(request: UploadResumeRequest): Promise<void>;
 export const uploadsFeature: RuntimeFeature;
 export const uploadsRegistration: RuntimeFeatureRegistrationOutcome;
 export default uploadsFeature;

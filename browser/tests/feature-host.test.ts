@@ -44,6 +44,10 @@ import { parseFeatureDirective } from "../src/features/directive-parser.js";
 import { IslandRecord } from "../src/islands/record.js";
 import type { IslandMetadata } from "../src/islands/metadata.js";
 import type { StimulusBootstrapOptions } from "../src/stimulus/port.js";
+import type {
+  UploadHandleProposal,
+  UploadHandleProposalDisposition,
+} from "../src/uploads/types.js";
 
 interface Counters {
   readonly connectDocument: Mock<(context: RuntimeFeatureDocumentContext) => void>;
@@ -114,6 +118,9 @@ interface DriverIslandSource {
   readonly element: Element;
   readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
   readonly enqueueFreshRender: Mock<(reason: FreshRenderReason) => FreshRenderDisposition>;
+  readonly proposeUploadHandle: Mock<
+    (field: string, proposal: UploadHandleProposal) => UploadHandleProposalDisposition
+  >;
   readonly writePresentationSignal: Mock<
     (element: Element, name: string, value: JsonValue) => JsonValue
   >;
@@ -132,6 +139,7 @@ function islandSource(name: string, element?: Element): DriverIslandSource {
       documentKey: `document-${name}`,
       slot: `slot-${name}`,
     }),
+    proposeUploadHandle: vi.fn(() => "accepted"),
     retire() {
       active = false;
     },
@@ -258,6 +266,10 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
           : "retired";
       },
       identity: Object.freeze({ ...island.source.identity }),
+      proposeUploadHandle: (field: string, proposal: UploadHandleProposal) => {
+        if (!current()) return "retired";
+        return island.source.proposeUploadHandle(field, proposal);
+      },
       writePresentationSignal: (element: Element, name: string, value: JsonValue) => {
         if (!current() || element !== island.source.element) throw new Error("stale_driver_port");
         return island.source.writePresentationSignal(element, name, value);
@@ -654,7 +666,7 @@ describe("one driver claim and optional owner per island", () => {
     expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
   });
 
-  it("exposes only diagnostic, lifecycle, directive, presentation, and fresh-render ports", () => {
+  it("exposes only typed upload, diagnostic, lifecycle, directive, presentation, and fresh-render ports", () => {
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
     const source = islandSource("surface");
@@ -670,6 +682,7 @@ describe("one driver claim and optional owner per island", () => {
       "enqueueFreshRender",
       "identity",
       "onDispose",
+      "proposeUploadHandle",
       "queryDirectiveOwnership",
       "writePresentationSignal",
     ]);
@@ -689,6 +702,13 @@ describe("one driver claim and optional owner per island", () => {
     }
     expect(Object.isFrozen(islandPort?.identity)).toBe(true);
     expect(islandPort?.enqueueFreshRender("poll")).toBe("queued");
+    expect(islandPort?.proposeUploadHandle("avatar", "018f47c1-2af0-7cc4-a001-000000000001")).toBe(
+      "accepted",
+    );
+    expect(source.proposeUploadHandle).toHaveBeenCalledWith(
+      "avatar",
+      "018f47c1-2af0-7cc4-a001-000000000001",
+    );
     expect(islandPort?.writePresentationSignal(source.element, "progress", 42)).toBe(42);
   });
 
@@ -704,6 +724,7 @@ describe("one driver claim and optional owner per island", () => {
     expect(port?.enqueueFreshRender("invalid" as FreshRenderReason)).toBe("retired");
     runtime.retireIsland(source.element);
     expect(port?.enqueueFreshRender("poll")).toBe("retired");
+    expect(port?.proposeUploadHandle("avatar", null)).toBe("retired");
     expect(() => port?.writePresentationSignal(source.element, "progress", 1)).toThrow(
       "stale_driver_port",
     );

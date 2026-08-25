@@ -379,6 +379,19 @@ that successful reclamation does not retain permanent tombstones. Tests also
 assert that cleanup never claims `Finalizing` or `Finalized` authority and never
 holds a ledger lock across host I/O.
 
+The optional upload browser unit suite covers native single/multiple selection,
+multiple fields, replacement and repeated selection, zero-byte and hostile path
+claims, bounded active work/chunks, uncertain-response idempotent retry,
+completion-status reconciliation, terminal-response cleanup, revision/state
+validation, offline interruption, cancel/remove/clear, core proposal authority,
+typed model batching, offset-bearing application-owned reacquisition with real
+network resume and an authoritative next-chunk cursor, late-grant races against
+newer selection and island retirement, public upload-specific ceilings, grant placement, production
+configuration/resume exports, and absence of ambient browser persistence across
+selection and lifecycle. The exact changed core artifact is remeasured in
+Chromium before its baseline hash is updated; a source edit or hand-written hash
+alone is not qualification evidence.
+
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
 queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
@@ -406,6 +419,19 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added changed-chunk-size resume coverage for the authoritative
+  next chunk index and deterministic races proving late reacquisition cannot
+  replace newer selection or revive a retired island.
+- 2026-08-25 -- Extended browser conformance to cover typed terminal responses,
+  revision/state mismatch, uncertain completion status reconciliation with a
+  stable idempotency key, resumed transfer after application reacquisition,
+  upload-specific ceilings, island-wide model collision, real lifecycle
+  persistence absence, and the callable production configuration/resume API.
+- 2026-08-25 -- Added direct browser conformance for bounded current-document
+  upload transfer and the core proposal authority, including standard
+  incremental SHA-256 vectors, uncertain-chunk replay, secret placement, typed
+  batching, and no ambient persistence. Re-recorded the exact changed core
+  artifact through the Chromium budget harness before accepting its baseline.
 - 2026-08-25 -- Made the daemon-free Tier 0 upload ledger the cleanup
   conformance reference. Controlled-clock and deterministic-concurrency tests
   cover state races, lease loss, idempotent retry, orphan recovery, bounded
