@@ -100,6 +100,25 @@ fn spawn_daemon(subcommand: &str, db_path: &Path) -> Child {
         .unwrap_or_else(|e| panic!("spawn `{APP_BIN} {subcommand}`: {e}"))
 }
 
+/// Read whatever the daemon wrote to stderr.
+///
+/// Every failure path here reports it. An unexpected exit code is a panic
+/// inside the daemon and the panic message is the only thing that says
+/// which one; without it a red run says "exited 101" and nothing more,
+/// which is not enough to fix anything.
+fn drain_stderr(child: &mut Child) -> String {
+    use std::io::Read;
+    child
+        .stderr
+        .take()
+        .map(|mut err| {
+            let mut buf = String::new();
+            let _ = err.read_to_string(&mut buf);
+            buf
+        })
+        .unwrap_or_default()
+}
+
 /// Block until the daemon prints a line containing `needle`.
 ///
 /// Reading the banner rather than sleeping a fixed interval: signalling a
@@ -110,9 +129,21 @@ fn wait_for_line(child: &mut Child, needle: &str) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                return;
-            }
+            // Send failures are ignored on purpose, and the loop runs to
+            // EOF rather than stopping at the first one.
+            //
+            // `rx` is a local of `wait_for_line`, so it is dropped the
+            // moment the caller has seen the line it was waiting for.
+            // Returning here on the next send would drop `stdout` with it
+            // and close the read end of the pipe while the daemon is still
+            // alive. The daemon prints "shutting down" from inside the
+            // signal arm, so it would then die of EPIPE: `println!` panics
+            // on a broken pipe, the daemon exits 101, and the assertion
+            // below reads that as "the drain never ran" - the exact
+            // signal-handling failure this file exists to catch, faked by
+            // the harness. Holding the pipe open until the child closes it
+            // also keeps a chatty daemon from blocking on a full pipe.
+            let _ = tx.send(line);
         }
     });
 
@@ -183,37 +214,30 @@ fn assert_daemon_drains(subcommand: &str, banner: &str, sig: &str) {
 
     let mut child = spawn_daemon(subcommand, &db);
     if let Err(why) = wait_for_line(&mut child, banner) {
-        let stderr = child
-            .stderr
-            .take()
-            .map(|mut e| {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = e.read_to_string(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
         let _ = child.kill();
         let _ = child.wait();
+        let stderr = drain_stderr(&mut child);
         panic!("`{subcommand}` did not reach its banner: {why}\nstderr:\n{stderr}");
     }
 
     signal(&child, sig);
 
     let Some((status, took)) = wait_for_exit(&mut child) else {
+        let stderr = drain_stderr(&mut child);
         panic!(
             "`{subcommand}` was still running {}s after {sig} and had to be killed. \
-             Nothing is listening for the signal.",
+             Nothing is listening for the signal.\nstderr:\n{stderr}",
             EXIT_TIMEOUT.as_secs()
         );
     };
 
+    let stderr = drain_stderr(&mut child);
     assert_eq!(
         status.code(),
         Some(0),
         "`{subcommand}` exited {:?} after {sig} in {took:?}; a clean drain exits 0. \
          143 means the default disposition killed it, so no handler ran and the \
-         drain behind the select! never executed.",
+         drain behind the select! never executed.\nstderr:\n{stderr}",
         status.code()
     );
 }
@@ -251,24 +275,27 @@ fn workflow_worker_handles_sigterm_rather_than_dying_from_it() {
     if let Err(why) = wait_for_line(&mut child, "Stop with Ctrl+C or SIGTERM") {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("`workflow:work` did not reach its banner: {why}");
+        let stderr = drain_stderr(&mut child);
+        panic!("`workflow:work` did not reach its banner: {why}\nstderr:\n{stderr}");
     }
 
     signal(&child, "TERM");
 
     let Some((status, took)) = wait_for_exit(&mut child) else {
+        let stderr = drain_stderr(&mut child);
         panic!(
             "`workflow:work` was still running {}s after SIGTERM and had to be killed. \
-             Nothing is listening for the signal.",
+             Nothing is listening for the signal.\nstderr:\n{stderr}",
             EXIT_TIMEOUT.as_secs()
         );
     };
 
+    let stderr = drain_stderr(&mut child);
     assert!(
         status.code().is_some(),
         "`workflow:work` was terminated by a signal after {took:?} instead of exiting \
          on its own. A `None` exit code means the default disposition killed it, so no \
-         handler was installed and the drain never ran."
+         handler was installed and the drain never ran.\nstderr:\n{stderr}"
     );
 }
 
