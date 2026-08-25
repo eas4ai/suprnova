@@ -193,7 +193,14 @@ default = [
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.
 testing = []
-magnetar-oauth = ["suprnova-magnetar/oauth"]
+magnetar-oauth = [
+    "suprnova-magnetar/oauth",
+    "suprnova-magnetar/oauth-apple",
+    "suprnova-magnetar/oauth-facebook",
+    "suprnova-magnetar/oauth-google",
+    "suprnova-magnetar/oauth-tiktok",
+    "suprnova-magnetar/oauth-x",
+]
 # Enables the OpenDAL-backed filesystem facade with the local, in-memory,
 # and S3 backends. Kept in the default set for backward compatibility.
 filesystem = ["dep:opendal"]

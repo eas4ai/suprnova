@@ -9,44 +9,76 @@ Suprnovaは、フレームワーク所有の `Auth` ファサードを通じて�
 
 Suprnovaはこれらのフローのルートをインストールしません。アプリケーションが開始ハンドラとコールバックハンドラを小さく用意し、マジックリンクのメールをどのように配信するかを決めます。
 
-## Magnetarの初期化
+## OAuth で Magnetar を初期化する
 
-`DB::init` の後、かつ `APP_KEY` によって `Crypt` が初期化された後に、デフォルトのパスワード、パスキー、セッション、ロックアウト、二要素の各エンジンを初期化します:
+パスワード、パスキー、セッション、ロックアウト、二要素認証サービスを初期化する同じ `MagnetarConfig` で OAuth を設定します。プロバイダーレジストリはこれらのサービスと原子的に公開されます。いずれかのサービスを構築できない場合、どれも可視になりません。
 
-```rust
-use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+```rust,no_run
+use std::sync::Arc;
+use suprnova::{
+    AbuseLimiter, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig,
+    OAuthAuthorizationConfig, OAuthHttpTransport, PasskeyConfig,
+    RevocationTransport, SecretString, init_magnetar,
+};
 
-pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
-    let database = DB::connection()?;
-    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+fn auth_config(
+    database: DatabaseConnection,
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> MagnetarConfig {
+    let provider = Arc::new(GoogleOAuthProvider::new(
+        GoogleProviderConfig {
+            client_id: "google-client".to_owned(),
+            client_secret: SecretString::from("google-secret".to_owned()),
+            redirect_uri: Some("https://app.example.com/auth/google/callback".to_owned()),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+            endpoints: EndpointOverrides::default(),
+        },
+        revocation,
+    ));
+    let oauth = MagnetarOAuthHostConfig::new(
+        vec![MagnetarOAuthProviderConfig {
+            provider,
+            redirect_uri: "https://app.example.com/auth/google/callback".to_owned(),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+        }],
+        transport,
+        limiter,
+        OAuthAuthorizationConfig::default(),
+        AutoLinkPolicy::default(),
+    )
+    .expect("valid OAuth host configuration");
+
+    MagnetarConfig::from_sea_orm(database)
         .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
+            rp_id: "app.example.com".to_owned(),
+            rp_origin: "https://app.example.com".to_owned(),
+        })
+        .oauth(oauth)
+}
 
-    init_magnetar(config).await
+pub async fn register_auth(
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    init_magnetar(auth_config(
+        database.inner().clone(),
+        transport,
+        revocation,
+        limiter,
+    ))
+    .await
 }
 ```
 
-`MagnetarConfig` はアプリケーションのSeaORM接続を使用します。デフォルトエンジンは `apply_migrations` が有効（デフォルト）ならスキーマを作成します。デプロイ時に同じスキーマ設定を別途実行する場合にだけ `.apply_migrations(false)` を設定してください。
+フレームワークは、`OAuthProvider` コントラクト、5 つのファーストパーティプロバイダー実装と設定型、およびカスタムプロバイダーに必要な HTTP、失効、悪用リミッターの境界を再エクスポートします。アプリケーションに `suprnova-magnetar` への直接依存は不要です。
 
-`init_magnetar` はパスワード/セッションアダプターとパスキーアダプターをアトミックにインストールします。2回目のインストールはエンジンを置き換えて認証状態を分割する代わりに、エラーを返します。
-
-## OAuthエンジンのインストール
-
-OAuthサポートは、フレームワークのデフォルトの `magnetar-oauth` 機能によってコンパイルされますが、プロバイダーの登録は常に明示的な実行時ステップです。`--no-default-features` ビルドでは、`magnetar-oauth` を明示的に有効にしてください。`init_magnetar` は内部の具体的なホストエンジンを返すことも公開することもないため、以下の例は自身で `MagnetarHostEngine` を構築して保持するアプリケーションにのみ当てはまり、前述のデフォルト初期化例に追加することはできません。現在の公開APIには、`MagnetarConfig` を通じてすでにインストールしたエンジンへOAuthレジストリを追加するためのコンビニエンスメソッドはありません。
-
-```rust,ignore
-use std::sync::Arc;
-use suprnova::magnetar_integration::install_magnetar_oauth_engine;
-
-let oauth = host_engine.oauth_service(oauth_host_config)?;
-install_magnetar_oauth_engine(Arc::new(oauth))?;
-```
-
-`MagnetarOAuthHostConfig` は、`MagnetarOAuthProviderConfig` の明示的なリスト、HTTPトランスポート、濫用リミッター、認可ポリシー、自動リンクポリシーを受け取ります。インストールされるとプロバイダーレジストリが権威あるものになります。不明なプロバイダーは別の認証実装へフォールスルーせず、フェイルクローズします。
-
-プロバイダー実装とクライアント認証の設定一式は `suprnova-magnetar` クレートから提供されます。OAuthエンジンを構築するアプリケーションは、利用するプロバイダー機能を有効にしたうえで、このクレートを直接の依存関係として追加する必要があります。フレームワークはOAuthクライアントIDやシークレットを環境変数から推測しません。アプリケーション設定またはシークレットマネージャーを通じて読み取り、ブートストラップ中にプロバイダーレジストリを構築してください。
+`MagnetarConfig` は `apply_migrations` が有効な場合にスキーマを作成します。これはデフォルトです。デプロイが同じスキーマを別途準備する場合にのみ `.apply_migrations(false)` を使用してください。2 回目の初期化は、インストール済みエンジンを置き換えるのではなくエラーを返します。
 
 ## セッションのバインディング
 

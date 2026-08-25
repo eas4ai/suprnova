@@ -241,6 +241,12 @@ impl OAuthAuth {
 fn oauth_engine(
     provider: &str,
 ) -> Result<&'static std::sync::Arc<dyn super::engine::MagnetarOAuthAuthEngine>, FrameworkError> {
+    let guard = super::engine_install_guard()?;
+    if guard.reserved {
+        return Err(FrameworkError::internal(
+            "Magnetar engine installation is still in progress",
+        ));
+    }
     let engine = super::MAGNETAR_OAUTH_ENGINE
         .get()
         .ok_or_else(|| FrameworkError::internal("Magnetar OAuth engine is not installed"))?;

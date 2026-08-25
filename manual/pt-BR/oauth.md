@@ -14,66 +14,76 @@ O Suprnova não instala rotas para esses fluxos. As aplicações fornecem pequen
 handlers de início e retorno de chamada e decidem como entregar o e-mail do
 link mágico.
 
-## Inicialize o Magnetar
+## Inicializar o Magnetar com OAuth
 
-Inicialize os mecanismos padrão de senha, passkey, sessão, bloqueio e dois fatores
-depois de `DB::init` e depois que `APP_KEY` inicializar `Crypt`:
+Configure OAuth na mesma `MagnetarConfig` que inicializa serviços de senha, chave de acesso, sessão, bloqueio e autenticação de dois fatores. O registro de provedores é publicado atomicamente com esses serviços: se qualquer serviço não puder ser criado, nenhum deles ficará visível.
 
-```rust
-use suprnova::{DB, MagnetarConfig, PasskeyConfig, init_magnetar};
+```rust,no_run
+use std::sync::Arc;
+use suprnova::{
+    AbuseLimiter, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig,
+    OAuthAuthorizationConfig, OAuthHttpTransport, PasskeyConfig,
+    RevocationTransport, SecretString, init_magnetar,
+};
 
-pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
-    let database = DB::connection()?;
-    let config = MagnetarConfig::from_sea_orm(database.inner().clone())
+fn auth_config(
+    database: DatabaseConnection,
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> MagnetarConfig {
+    let provider = Arc::new(GoogleOAuthProvider::new(
+        GoogleProviderConfig {
+            client_id: "google-client".to_owned(),
+            client_secret: SecretString::from("google-secret".to_owned()),
+            redirect_uri: Some("https://app.example.com/auth/google/callback".to_owned()),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+            endpoints: EndpointOverrides::default(),
+        },
+        revocation,
+    ));
+    let oauth = MagnetarOAuthHostConfig::new(
+        vec![MagnetarOAuthProviderConfig {
+            provider,
+            redirect_uri: "https://app.example.com/auth/google/callback".to_owned(),
+            scopes: vec!["openid".to_owned(), "email".to_owned()],
+        }],
+        transport,
+        limiter,
+        OAuthAuthorizationConfig::default(),
+        AutoLinkPolicy::default(),
+    )
+    .expect("valid OAuth host configuration");
+
+    MagnetarConfig::from_sea_orm(database)
         .passkey_config(PasskeyConfig {
-            rp_id: "app.example.com".to_string(),
-            rp_origin: "https://app.example.com".to_string(),
-        });
+            rp_id: "app.example.com".to_owned(),
+            rp_origin: "https://app.example.com".to_owned(),
+        })
+        .oauth(oauth)
+}
 
-    init_magnetar(config).await
+pub async fn register_auth(
+    transport: Arc<dyn OAuthHttpTransport>,
+    revocation: Arc<dyn RevocationTransport>,
+    limiter: Arc<dyn AbuseLimiter>,
+) -> Result<(), suprnova::FrameworkError> {
+    let database = DB::connection()?;
+    init_magnetar(auth_config(
+        database.inner().clone(),
+        transport,
+        revocation,
+        limiter,
+    ))
+    .await
 }
 ```
 
-`MagnetarConfig` usa a conexão SeaORM da aplicação. O mecanismo padrão cria seu
-esquema quando `apply_migrations` está habilitado, que é o padrão. Defina
-`.apply_migrations(false)` somente quando a implantação executar a mesma
-configuração de esquema separadamente.
+O framework reexporta o contrato `OAuthProvider`, as cinco implementações de provedores próprios e seus tipos de configuração, além dos limites de HTTP, revogação e limitador de abuso necessários para um provedor personalizado. As aplicações não precisam de uma dependência direta de `suprnova-magnetar`.
 
-`init_magnetar` instala adaptadores de senha/sessão e passkey atomicamente. Uma
-segunda instalação retorna um erro em vez de substituir o mecanismo e dividir o
-estado de autenticação.
-
-## Instalação do mecanismo OAuth
-
-O suporte a OAuth é compilado pelo recurso padrão `magnetar-oauth` do framework,
-mas o registro de provedores é sempre uma etapa explícita em runtime. Em um build
-com `--no-default-features`, habilite `magnetar-oauth` explicitamente.
-`init_magnetar` não retorna nem expõe seu engine de host concreto interno, então
-o exemplo abaixo aplica-se somente a uma aplicação que constrói e mantém seu
-próprio `MagnetarHostEngine`; ele não pode ser anexado ao exemplo de inicialização
-padrão anterior. A API pública atual não tem um método de conveniência para
-adicionar um registro OAuth a um engine já instalado por `MagnetarConfig`.
-
-```rust,ignore
-use std::sync::Arc;
-use suprnova::magnetar_integration::install_magnetar_oauth_engine;
-
-let oauth = host_engine.oauth_service(oauth_host_config)?;
-install_magnetar_oauth_engine(Arc::new(oauth))?;
-```
-
-`MagnetarOAuthHostConfig` recebe uma lista explícita de valores
-`MagnetarOAuthProviderConfig`, um transporte HTTP, um limitador de abuso, uma
-política de autorização e uma política de vinculação automática. O registro de
-provedores se torna autoritativo quando instalado. Um provedor desconhecido falha
-de forma fechada em vez de recorrer a outra implementação de autenticação.
-
-As implementações de provedores e seus dossiês de autenticação de cliente vêm do
-crate `suprnova-magnetar`. As aplicações que constroem o mecanismo OAuth devem
-adicionar esse crate como dependência direta com os recursos dos provedores que
-usam. O framework não infere IDs ou segredos de cliente OAuth de variáveis de
-ambiente. Leia-os pela configuração da aplicação ou por um gerenciador de
-segredos e construa o registro de provedores durante o bootstrap.
+`MagnetarConfig` cria seu esquema quando `apply_migrations` está habilitado, que é o padrão. Use `.apply_migrations(false)` somente quando a implantação preparar o mesmo esquema separadamente. Uma segunda inicialização retorna um erro em vez de substituir qualquer mecanismo instalado.
 
 ## Associação à sessão
 

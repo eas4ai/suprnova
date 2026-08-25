@@ -26,6 +26,8 @@ use super::engine::{
     HostLifecycleDeduplication, HostPasswordLockout, HostUserAdapter, LifecycleDeliveryClaim,
     MagnetarBinding, MagnetarHostEngine, MagnetarHostEngineParts,
 };
+#[cfg(feature = "magnetar-oauth")]
+use super::engine::{HostOAuthError, MagnetarOAuthAuthEngine, MagnetarOAuthHostConfig};
 use super::{LockoutStatus, User, UserId};
 use crate::crypto::{Crypt, CryptPurpose as FrameworkCryptPurpose};
 use crate::error::FrameworkError;
@@ -38,6 +40,8 @@ pub struct MagnetarConfig {
     sessions: OpaqueConfig,
     lockout: LockoutConfig,
     two_factor: TwoFactorConfig,
+    #[cfg(feature = "magnetar-oauth")]
+    oauth: Option<MagnetarOAuthHostConfig>,
 }
 
 impl MagnetarConfig {
@@ -51,6 +55,8 @@ impl MagnetarConfig {
             sessions: OpaqueConfig::default(),
             lockout: LockoutConfig::default(),
             two_factor: TwoFactorConfig::default(),
+            #[cfg(feature = "magnetar-oauth")]
+            oauth: None,
         }
     }
 
@@ -65,6 +71,14 @@ impl MagnetarConfig {
     #[must_use]
     pub fn passkey_config(mut self, passkey: PasskeyConfig) -> Self {
         self.passkey = passkey;
+        self
+    }
+
+    /// Configure the OAuth providers published with the default engine.
+    #[cfg(feature = "magnetar-oauth")]
+    #[must_use]
+    pub fn oauth(mut self, oauth: MagnetarOAuthHostConfig) -> Self {
+        self.oauth = Some(oauth);
         self
     }
 
@@ -331,13 +345,17 @@ impl HostLifecycleDeduplication for SqlLifecycleDedup {
     }
 }
 
-/// Initialize the default Magnetar password, passkey, session, lockout, and
-/// two-factor engines.
+/// Initialize the default Magnetar password, passkey, session, lockout,
+/// two-factor, and configured OAuth engines.
+///
+/// Every configured adapter is built before the reservation publishes any
+/// engine slot.
 ///
 /// # Errors
 ///
 /// Returns an error when the application key is unavailable, schema setup
-/// fails, engine construction fails, or an engine was already installed.
+/// fails, any configured engine cannot be built, or an engine was already
+/// installed.
 pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError> {
     let reservation = super::reserve_magnetar_engines()?;
     if !Crypt::is_initialized() {
@@ -400,13 +418,30 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
         .map_err(map_error)?,
     );
     let passkey = Arc::new(engine.passkey_service(&config.passkey).map_err(map_error)?);
+    #[cfg(feature = "magnetar-oauth")]
+    let oauth: Option<Arc<dyn MagnetarOAuthAuthEngine>> = config
+        .oauth
+        .map(|oauth| {
+            engine
+                .oauth_service(oauth)
+                .map(|service| Arc::new(service) as Arc<dyn MagnetarOAuthAuthEngine>)
+                .map_err(|error| match error {
+                    HostOAuthError::Protocol(error) => {
+                        FrameworkError::internal(format!("Magnetar OAuth initialization: {error}"))
+                    }
+                    HostOAuthError::Auth(error) => map_error(error),
+                })
+        })
+        .transpose()?;
+    #[cfg(not(feature = "magnetar-oauth"))]
+    let oauth = ();
 
     if config.apply_migrations {
         magnetar::default_schema::migrate(&config.connection)
             .await
             .map_err(map_error)?;
     }
-    reservation.install(engine, passkey)?;
+    reservation.install(engine, passkey, oauth)?;
     Ok(())
 }
 

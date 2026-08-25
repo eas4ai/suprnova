@@ -68,13 +68,34 @@ static MAGNETAR_PASSKEY_ENGINE: OnceLock<Arc<dyn engine::MagnetarPasskeyAuthEngi
 #[cfg(feature = "magnetar-oauth")]
 static MAGNETAR_OAUTH_ENGINE: OnceLock<Arc<dyn engine::MagnetarOAuthAuthEngine>> = OnceLock::new();
 
+#[cfg(feature = "magnetar-oauth")]
+type OptionalMagnetarOAuthEngine = Option<Arc<dyn engine::MagnetarOAuthAuthEngine>>;
+#[cfg(not(feature = "magnetar-oauth"))]
+type OptionalMagnetarOAuthEngine = ();
+
+#[cfg(feature = "magnetar-oauth")]
+fn no_oauth_engine() -> OptionalMagnetarOAuthEngine {
+    None
+}
+#[cfg(not(feature = "magnetar-oauth"))]
+fn no_oauth_engine() {}
+
+#[cfg(feature = "magnetar-oauth")]
+fn oauth_engine_is_installed() -> bool {
+    MAGNETAR_OAUTH_ENGINE.get().is_some()
+}
+#[cfg(not(feature = "magnetar-oauth"))]
+fn oauth_engine_is_installed() -> bool {
+    false
+}
+
 /// Atomically install password/session and passkey adapters from one host
 /// engine bundle. Neither adapter is visible until both are ready.
 pub fn install_magnetar_engines(
     password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
     passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
 ) -> Result<(), FrameworkError> {
-    reserve_magnetar_engines()?.install(password, passkey)
+    reserve_magnetar_engines()?.install(password, passkey, no_oauth_engine())
 }
 
 /// Test-only password adapter installation for isolated facade harnesses.
@@ -120,6 +141,7 @@ impl EngineInstallReservation {
         mut self,
         password: Arc<dyn engine::MagnetarPasswordAuthEngine>,
         passkey: Arc<dyn engine::MagnetarPasskeyAuthEngine>,
+        oauth: OptionalMagnetarOAuthEngine,
     ) -> Result<(), FrameworkError> {
         let mut guard = engine_install_guard()?;
         if !self.active || !guard.reserved {
@@ -127,7 +149,10 @@ impl EngineInstallReservation {
                 "Magnetar engine installation reservation is not active",
             ));
         }
-        if MAGNETAR_PASSWORD_ENGINE.get().is_some() || MAGNETAR_PASSKEY_ENGINE.get().is_some() {
+        if MAGNETAR_PASSWORD_ENGINE.get().is_some()
+            || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+            || oauth_engine_is_installed()
+        {
             return Err(FrameworkError::internal(
                 "Magnetar authentication engines are already installed",
             ));
@@ -138,6 +163,14 @@ impl EngineInstallReservation {
         MAGNETAR_PASSKEY_ENGINE
             .set(passkey)
             .map_err(|_| FrameworkError::internal("Magnetar passkey engine installation raced"))?;
+        #[cfg(feature = "magnetar-oauth")]
+        if let Some(oauth) = oauth {
+            MAGNETAR_OAUTH_ENGINE.set(oauth).map_err(|_| {
+                FrameworkError::internal("Magnetar OAuth engine installation raced")
+            })?;
+        }
+        #[cfg(not(feature = "magnetar-oauth"))]
+        let _ = oauth;
         guard.reserved = false;
         self.active = false;
         Ok(())
@@ -160,6 +193,7 @@ pub(crate) fn reserve_magnetar_engines() -> Result<EngineInstallReservation, Fra
     if guard.reserved
         || MAGNETAR_PASSWORD_ENGINE.get().is_some()
         || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+        || oauth_engine_is_installed()
     {
         return Err(FrameworkError::internal(
             "Magnetar authentication engines are already installed or reserved",
@@ -222,15 +256,24 @@ fn engine_install_guard()
         .lock()
         .map_err(|_| FrameworkError::internal("Magnetar engine install lock poisoned"))
 }
-/// Install the real Magnetar OAuth adapter used only for its configured
-/// provider registry. Replacing an adapter is rejected.
+/// Install an OAuth adapter assembled by a custom retained host engine.
+///
+/// Default-engine applications configure OAuth through
+/// [`MagnetarConfig::oauth`] so password, passkey, and OAuth adapters publish
+/// under one reservation. Replacing an adapter is rejected.
 #[cfg(feature = "magnetar-oauth")]
 pub fn install_magnetar_oauth_engine(
     engine: Arc<dyn engine::MagnetarOAuthAuthEngine>,
 ) -> Result<(), FrameworkError> {
+    let guard = engine_install_guard()?;
+    if guard.reserved || MAGNETAR_OAUTH_ENGINE.get().is_some() {
+        return Err(FrameworkError::internal(
+            "Magnetar OAuth engine is already installed or reserved",
+        ));
+    }
     MAGNETAR_OAUTH_ENGINE
         .set(engine)
-        .map_err(|_| FrameworkError::internal("Magnetar OAuth engine is already installed"))
+        .map_err(|_| FrameworkError::internal("Magnetar OAuth engine installation raced"))
 }
 
 /// Revoke one active Magnetar session by its stable row identifier.

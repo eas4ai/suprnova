@@ -154,6 +154,31 @@ pub use database::{
     READ_REPLICA_CONNECTION_NAME, ReadWriteType, RouteBinding, RouteParam, Transaction,
     TransactionBeginning, TransactionCommitted, TransactionRolledBack, TxHandle, UrlSource,
 };
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar::{
+    Error as MagnetarError, Result as MagnetarResult,
+    abuse::{AbuseLimiter, AbusePolicy, Permit},
+    oauth::{
+        AuthorizationRequestShape, AutoLinkPolicy, ClientAuthentication,
+        ClientAuthenticationMaterial, EndpointOverrides, InvalidGrantMeaning,
+        OAuthAuthorizationConfig, OAuthProtocolError, OAuthProvider, OAuthResult, ParamPlacement,
+        PkcePosture, ProviderIdentity, ProviderResponse, RefreshPolicy, RevocationRequest,
+        RevocationTransport, TokenHint, TokenRequestShape,
+    },
+    plugin::{
+        HttpRequest as OAuthHttpRequest, HttpResponse as OAuthHttpResponse,
+        HttpTransport as OAuthHttpTransport,
+    },
+    plugins::{
+        oauth_apple::{AppleOAuthProvider, AppleProviderConfig, ApplePublicKeySource},
+        oauth_facebook::{FacebookOAuthProvider, FacebookProviderConfig},
+        oauth_google::{GoogleOAuthProvider, GoogleProviderConfig},
+        oauth_tiktok::{TikTokOAuthProvider, TikTokProviderConfig},
+        oauth_x::{XOAuthProvider, XProviderConfig},
+    },
+};
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar_integration::engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig};
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
@@ -162,6 +187,8 @@ pub use database::{
 pub use magnetar_integration::{
     MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
 };
+#[cfg(feature = "magnetar-oauth")]
+pub use secrecy::SecretString;
 
 // SeaORM type aliasing — Suprnova design principle #4: SeaORM is an
 // implementation detail; consumers reach for `suprnova::*` and never
