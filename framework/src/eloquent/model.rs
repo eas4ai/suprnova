@@ -884,12 +884,18 @@ where
     /// statement, so there is no window between "I have the current
     /// values" and "I hold the lock".
     ///
-    /// Mirrors Laravel's `refreshForUpdate`. Like
-    /// [`Self::refresh`], this reads through the row the model's own
-    /// default query can see: registered global scopes are dropped,
-    /// but a `#[model(soft_deletes)]` model still refuses to reload a
-    /// trashed row. A row that no longer exists returns
-    /// [`FrameworkError::not_found`] rather than leaving `self` stale.
+    /// Mirrors Laravel's `refreshForUpdate()` -> `newQueryWithoutScopes()`.
+    /// The reload runs on a fresh, unscoped [`Builder`], never through
+    /// [`Self::query`]: every registered global scope AND the
+    /// `#[model(soft_deletes)]` filter are bypassed, the same way the
+    /// macro-emitted `with_trashed()` / `only_trashed()` build their
+    /// own unscoped builder rather than undoing `query()`'s scope. A
+    /// trashed row reloads too, with `deleted_at` coming back set -
+    /// this is a lookup by primary key under a lock, and scoping a
+    /// by-key reload is exactly what would hand admin tooling and
+    /// cross-tenant callers a false not-found. A row that no longer
+    /// exists returns [`FrameworkError::not_found`] rather than
+    /// leaving `self` stale.
     ///
     /// The lock only holds for the length of a transaction - call this
     /// inside `DB::transaction(...)`, otherwise the lock releases the
@@ -911,8 +917,7 @@ where
         Self: crate::eloquent::EagerLoadDispatch,
         <Self::Entity as EntityTrait>::Model: sea_orm::FromQueryResult,
     {
-        let fresh = Self::query()
-            .without_global_scopes()
+        let fresh = Builder::<Self>::new()
             .where_key(self.primary_key_value_json())
             .lock_for_update()
             .first()

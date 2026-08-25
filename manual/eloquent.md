@@ -425,7 +425,13 @@ let replica: User = user.replicate_except(["email"]).await?;
 `refresh` mutates in place; `fresh` returns a separately-fetched
 copy. `refresh_for_update` is `refresh` under a `SELECT ... FOR UPDATE`
 row lock - use it inside a transaction when you need the row's current
-values and the exclusive lock in one statement. `replicate` builds an
+values and the exclusive lock in one statement. Unlike `refresh`,
+`refresh_for_update` bypasses every registered global scope AND the
+`#[model(soft_deletes)]` filter: it reloads a trashed row too, with
+`deleted_at` coming back set. The reload is a lookup by primary key
+under a lock - scoping it the way an ordinary read is scoped would
+hand admin tooling and cross-tenant callers a false not-found for a
+row they already hold a reference to. `replicate` builds an
 in-memory clone with the PK reset (`Default::default()` for the key
 type). Caller saves explicitly.
 
