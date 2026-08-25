@@ -8,7 +8,8 @@ use suprnova_live::async_updates::{
 mod support;
 
 fuzz_target!(|bytes: &[u8]| {
-    let limits = AsyncCodecLimits::v1();
+    let limits = AsyncCodecLimits::new(512, 4, 16, 128, 256)
+        .expect("reachable bounded fuzz codec profile");
     if let Ok(envelope) = decode_async_envelope(bytes, &limits, support::async_context()) {
         assert_eq!(
             encode_async_envelope(&envelope, &limits).expect("validated envelope re-encodes"),

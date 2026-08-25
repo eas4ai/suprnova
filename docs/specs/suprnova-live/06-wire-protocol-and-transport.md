@@ -252,6 +252,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Unified server-authored asynchronous payload construction with
+  wire decode's canonical serialize, bounded parse, canonical re-encode, and
+  registered-payload validation profile. Integer schemas admit only lossless
+  browser-safe integers through magnitude `2^53 - 1`; finite `F64` remains
+  distinct. Async protocol v1 now names a 1,024-entry production ceiling and
+  rejects the first object or array member beyond it.
 - 2026-08-25 -- Sealed async decoding behind a Task 2 connect-authorized
   subscription plus one atomic host validation of active logical membership,
   exact stream, current full event contracts, and declared presentation-signal

@@ -163,6 +163,18 @@ Acceptance criteria:
   wildcard origin acceptance is forbidden.
 - SSE and WebSocket share one independently versioned event-envelope schema;
   transport choice cannot change message authority or continuity semantics.
+- Queue admission rechecks current descriptor expiry, logical membership,
+  subscription/stream scope, full event contracts, and declared presentation
+  signals for every envelope. A cloneable decode context is not fresh
+  membership authority. Guard consumption rechecks exclusive descriptor expiry
+  so a retained once-current guard cannot dispatch after expiry.
+- Sequence classification precedes registered dispatch. Exact-next delivery
+  advances only after dispatch succeeds; dispatch rejection or failure retains
+  the prior position so a fresh retry is not misclassified as a duplicate.
+- Replay validates the entire bounded same-scope transcript before any dispatch
+  or mutation, then dispatches in order and commits after each success. Partial
+  failure reports its applied prefix, retains degraded state and observed
+  high-water, and resumes only from freshly admitted remaining suffix evidence.
 - An invalidation or authoritative change enters the normal island scheduler and
   obtains HTML and snapshot state through an ordinary verified refresh/action
   response.
@@ -222,8 +234,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Required a fresh non-cloneable active-membership guard for every
+  sequence observation and made sequence application dispatch-aware. Exact-next
+  position commits only after the closed registered dispatcher succeeds. Replay
+  prevalidates its entire at-most-1,024-envelope transcript before work, commits
+  each successful dispatch in order, and reports a truthful applied prefix,
+  current position, degraded state, and retained high-water on first, middle,
+  or final dispatch failure.
 - 2026-08-25 -- Replaced claimed replay ranges with a bounded transcript of
-  already membership- and registry-validated envelopes. Gap recovery requires
+  freshly membership- and registry-admitted envelopes. Gap recovery requires
   every same-scope, same-epoch position from the last applied successor through
   at least the recorded high-water with no empty proof, duplicate, regression,
   or omission. A new epoch or otherwise unavailable replay can be adopted only

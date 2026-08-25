@@ -448,6 +448,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added constructor/decode agreement vectors at browser-safe
+  integer boundaries, large finite doubles, canonical zero, and non-finite
+  exclusion; fresh-membership and dispatch-failure tests; first/middle/final
+  replay-failure recovery; and exact 1,024/1,025 entry and replay boundaries.
+  Envelope fuzzing uses a reachable tiny codec profile, while sequence fuzzing
+  can construct the full production replay window through freshly admitted
+  guards rather than a 32-message test-only cap.
 - 2026-08-25 -- Extended Task 3 adversarial coverage to prove nested duplicate
   and semantic key-order rejection, encoded subscription-ID preflight bounds,
   stale and cross-scope membership rejection, immutable sequence scope, and

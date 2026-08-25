@@ -20,9 +20,9 @@ use suprnova_live::async_updates::{
     SubscriptionCredentialPort, SubscriptionCredentialRequest,
     SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
     SubscriptionError, SubscriptionFuture, SubscriptionId,
-    SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode, SubscriptionModes,
-    SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService, TopicName,
-    TransportCredential, TrustedMountParameters,
+    SubscriptionEventContract, SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode,
+    SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
+    SubscriptionService, TopicName, TransportCredential, TrustedMountParameters,
 };
 use suprnova_live::checker::{CheckReport, CheckerLimits, TemplateCatalog, TemplateChecker};
 use suprnova_live::child::{ChildParameterLimits, ExpectedChildParametersV1};
@@ -137,7 +137,7 @@ impl SubscriptionCredentialPort for FuzzSubscriptionPorts {
     }
 }
 
-struct FuzzMembershipRegistry {
+pub(crate) struct FuzzMembershipRegistry {
     subscription: SubscriptionId,
     stream: StreamName,
     events: BoundedEventContracts,
@@ -177,6 +177,18 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 
 pub(crate) fn async_subscription_id() -> SubscriptionId {
     SubscriptionId::from_bytes(b"fuzz-subscription").expect("static subscription identity")
+}
+
+pub(crate) fn async_membership_registry() -> FuzzMembershipRegistry {
+    FuzzMembershipRegistry {
+        subscription: async_subscription_id(),
+        stream: async_stream(),
+        events: BoundedEventContracts::new(vec![
+            SubscriptionEventContract::from_registered(&async_event_metadata())
+                .expect("static event contract"),
+        ])
+        .expect("static event contracts"),
+    }
 }
 
 pub(crate) fn async_context() -> &'static AsyncEnvelopeContext {
@@ -254,11 +266,7 @@ fn build_async_context(baseline: StreamPosition) -> AsyncEnvelopeContext {
         UnixMillis::new(1_100),
     ))
     .expect("fuzz subscription authorization");
-    let membership = FuzzMembershipRegistry {
-        subscription: async_subscription_id(),
-        stream: async_stream(),
-        events: authorized.verified().claims().events().clone(),
-    };
+    let membership = async_membership_registry();
     AsyncEnvelopeContext::from_authorized(
         &authorized,
         async_subscription_id(),

@@ -5,7 +5,7 @@
 
 /// Reviewed v4 fixture-manifest identity used to generate this contract.
 pub const DIRECTIVE_FIXTURE_MANIFEST_SHA256: &str =
-    "189077e3d61f569864666d818a6fa4f22e58d87818a86dc02f4e661692597cd8";
+    "cf320d954da3d788e4c2bf6ff6ebc176f06eafc8623a102962cc8f81f40fc54c";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectiveOwner {

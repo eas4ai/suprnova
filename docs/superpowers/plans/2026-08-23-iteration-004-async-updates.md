@@ -228,7 +228,8 @@
       fn sequence_machine_never_applies_a_gap(positions in stream_positions()) {
           let mut machine = SequenceMachine::new(&sealed_authorized_context());
           for position in positions {
-              if let SequenceDisposition::Apply = machine.observe(position) {
+              let guard = freshly_admit(position);
+              if let Ok(SequenceDisposition::Apply) = machine.dispatch(guard, now, &mut dispatcher()) {
                   prop_assert_eq!(position, machine.current());
               }
           }
@@ -271,6 +272,10 @@
   available only through the injected host continuity authority. Its initial
   position comes only from the verified signed baseline retained by the sealed
   Task 2 authorization context; construction has no raw position argument.
+  That cloneable context is static codec authority. Each sequence observation
+  consumes a fresh one-use host membership guard, and exact-next position commits
+  only after closed registered dispatch succeeds. Replay prevalidates the whole
+  bounded transcript and reports/retains a truthful committed prefix on failure.
 
 - [x] Add both fuzz targets, run fixtures/properties/security, and prove Live action/morph versions remain `[1, 2]`.
 - [x] Commit: `feat(async): add bounded event envelope and sequence model`.
@@ -604,8 +609,10 @@
   ```rust
   fuzz_target!(|bytes: &[u8]| {
       if let Ok(envelope) = decode_async_envelope(bytes, AsyncCodecLimits::hostile_test()) {
-          let mut sequence = SequenceMachine::new(&sealed_authorized_context());
-          if matches!(sequence.observe(envelope.position()), SequenceDisposition::Apply) {
+          let context = sealed_authorized_context();
+          let mut sequence = SequenceMachine::new(&context);
+          let guard = context.freshly_admit(&envelope);
+          if matches!(sequence.dispatch(guard, now, &mut dispatcher()), Ok(SequenceDisposition::Apply)) {
               assert_eq!(envelope.position(), sequence.current());
           }
       }

@@ -17,10 +17,11 @@ pub use authorization::{
     SubscriptionService, TrustedMountParameters,
 };
 pub use envelope::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeError,
-    AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort, AsyncMembershipRequest,
-    AsyncMembershipValidation, AsyncPayload, BoundedPresentationSignalContracts, CompletionReason,
-    Heartbeat, PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
+    ActiveAsyncMembershipGuard, AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext,
+    AsyncEnvelopeError, AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort,
+    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload,
+    BoundedPresentationSignalContracts, CompletionReason, Heartbeat, MAX_ASYNC_ENVELOPE_ENTRIES,
+    PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
     RegisteredRefresh, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId,
     decode_async_envelope, encode_async_envelope,
 };
@@ -33,9 +34,11 @@ pub use metadata::{
     TopicName,
 };
 pub use sequence::{
-    AsyncContinuityAuthorityPort, AsyncContinuityRequest, BaselineDisposition,
-    MAX_REPLAY_TRANSCRIPT_ENVELOPES, SequenceDegradation, SequenceDisposition, SequenceError,
-    SequenceErrorKind, SequenceMachine, SequenceState,
+    AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
+    AsyncDispatchErrorKind, AsyncEnvelopeDispatchPort, BaselineDisposition,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, ReplayDispatchError, ReplayDispatchOutcome,
+    SequenceDegradation, SequenceDisposition, SequenceError, SequenceErrorKind, SequenceMachine,
+    SequenceState,
 };
 pub use subscription::{
     ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, CapabilityVersion,

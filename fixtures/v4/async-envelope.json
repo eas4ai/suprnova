@@ -4,7 +4,7 @@
   "live_protocol_versions": [1, 2],
   "payload_kinds": ["refresh", "browser_event", "presentation_signal", "heartbeat", "complete", "error"],
   "subscription_states": ["disconnected", "connecting", "current", "degraded", "reconnecting", "closed"],
-  "codec_limits": {"max_bytes": 65536, "max_depth": 8, "max_entries": 64, "max_string_bytes": 4096, "max_payload_bytes": 32768},
+  "codec_limits": {"max_bytes": 65536, "max_depth": 8, "max_entries": 1024, "max_string_bytes": 4096, "max_payload_bytes": 32768},
   "envelope_cases": [
     {"id":"refresh","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"refresh\",\"name\":\"refresh\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"41\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
     {"id":"browser-event","expected":"accepted","encoded":"{\"payload\":{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1},\"schema_version\":1,\"target\":\"self\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"42\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},

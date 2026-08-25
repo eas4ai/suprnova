@@ -300,7 +300,7 @@ fn version_four_encoded_cases_are_canonical_and_within_exact_limits() {
     assert_codec_semantics(
         &asynchronous,
         "envelope_cases",
-        [65_536, 8, 64, 4_096],
+        [65_536, 8, 1_024, 4_096],
         Some(32_768),
     );
 }

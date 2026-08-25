@@ -2,17 +2,26 @@
 
 use libfuzzer_sys::fuzz_target;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncEnvelope,
-    AsyncEnvelopeContext, BaselineDisposition, SequenceDisposition, SequenceMachine, StreamEpoch,
+    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
+    AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, BaselineDisposition,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, SequenceDisposition, SequenceMachine, StreamEpoch,
     StreamPosition, StreamSequence, decode_async_envelope,
 };
+use suprnova_live::identity::UnixMillis;
 
 const MAX_TRANSITIONS: usize = 256;
-const MAX_FUZZ_REPLAY: u64 = 32;
 
 mod support;
 
 struct FuzzContinuityAuthority(StreamPosition);
+
+struct AcceptingDispatcher;
+
+impl AsyncEnvelopeDispatchPort for AcceptingDispatcher {
+    fn dispatch(&mut self, _envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
+        Ok(())
+    }
+}
 
 impl AsyncContinuityAuthorityPort for FuzzContinuityAuthority {
     fn authoritative_refresh(
@@ -56,6 +65,8 @@ fuzz_target!(|bytes: &[u8]| {
     let mut machine = SequenceMachine::new(context);
     let subscription = support::async_subscription_id().to_base64url();
     let limits = AsyncCodecLimits::v1();
+    let registry = support::async_membership_registry();
+    let mut dispatcher = AcceptingDispatcher;
 
     for chunk in bytes[16..].chunks(17).take(MAX_TRANSITIONS) {
         let operation = chunk[0] % 3;
@@ -70,8 +81,11 @@ fuzz_target!(|bytes: &[u8]| {
                 );
                 let envelope = decode_async_envelope(encoded.as_bytes(), &limits, context)
                     .expect("generated bounded heartbeat");
-                match machine.observe(&envelope) {
-                    SequenceDisposition::Apply => {
+                let guard = context
+                    .admit(&envelope, &registry, UnixMillis::new(1_200))
+                    .expect("current fuzz membership");
+                match machine.dispatch(guard, UnixMillis::new(1_200), &mut dispatcher) {
+                    Ok(SequenceDisposition::Apply) => {
                         assert_eq!(machine.current(), position);
                         assert_eq!(position.epoch(), before.epoch());
                         assert_eq!(
@@ -79,11 +93,14 @@ fuzz_target!(|bytes: &[u8]| {
                             before.sequence().get().checked_add(1).expect("applied successor"),
                         );
                     }
-                    SequenceDisposition::Degraded(_)
-                    | SequenceDisposition::AwaitingRecovery
-                    | SequenceDisposition::IgnoreDuplicate
-                    | SequenceDisposition::IgnoreStaleEpoch
-                    | SequenceDisposition::ScopeMismatch => {
+                    Ok(
+                        SequenceDisposition::Degraded(_)
+                        | SequenceDisposition::AwaitingRecovery
+                        | SequenceDisposition::IgnoreDuplicate
+                        | SequenceDisposition::IgnoreStaleEpoch
+                        | SequenceDisposition::ScopeMismatch,
+                    )
+                    | Err(_) => {
                         assert_eq!(machine.current(), before);
                     }
                 }
@@ -95,7 +112,7 @@ fuzz_target!(|bytes: &[u8]| {
                     }
                     let first = before.sequence().get().checked_add(1)?;
                     let distance = high_water.sequence().get().checked_sub(first)?;
-                    if distance >= MAX_FUZZ_REPLAY {
+                    if distance >= MAX_REPLAY_TRANSCRIPT_ENVELOPES as u64 {
                         return None;
                     }
                     Some(
@@ -113,7 +130,20 @@ fuzz_target!(|bytes: &[u8]| {
                             .collect::<Vec<_>>(),
                     )
                 });
-                let result = machine.recover_from_replay(transcript.as_deref().unwrap_or(&[]));
+                let transcript = transcript.unwrap_or_default();
+                let guards = transcript
+                    .iter()
+                    .map(|envelope| {
+                        context
+                            .admit(envelope, &registry, UnixMillis::new(1_200))
+                            .expect("current fuzz replay membership")
+                    })
+                    .collect::<Vec<_>>();
+                let result = machine.recover_from_replay(
+                    guards,
+                    UnixMillis::new(1_200),
+                    &mut dispatcher,
+                );
                 if result.is_ok() {
                     assert_eq!(machine.current().epoch(), before.epoch());
                     assert!(machine.current().sequence() > before.sequence());

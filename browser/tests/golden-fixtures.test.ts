@@ -358,7 +358,7 @@ describe("shared versioned Live fixtures", () => {
     assertCodecSemantics(asRecord(required(fixtures, "async-envelope.json")), "envelope_cases", {
       maxBytes: 65_536,
       maxDepth: 8,
-      maxEntries: 64,
+      maxEntries: 1_024,
       maxStringBytes: 4_096,
       maxPayloadBytes: 32_768,
     });

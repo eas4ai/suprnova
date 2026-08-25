@@ -246,6 +246,14 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Demoted the cloneable async envelope context to a static
+  authorization/codec contract. Every queue admission now rechecks exclusive
+  descriptor expiry, active host membership, exact subscription and stream,
+  current full event contracts, declared presentation signals, and the closed
+  payload before issuing a non-cloneable one-use guard. Only the sequence
+  machine consumes that guard and rechecks descriptor expiry at consumption;
+  no raw public observation or commit token can bypass fresh authority or
+  successful registered dispatch.
 - 2026-08-25 -- Removed caller-constructible async membership and continuity
   authority. A framework-owned validation sink accepts at most one atomic
   snapshot from the host membership/current-registry port and independently

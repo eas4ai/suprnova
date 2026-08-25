@@ -11,19 +11,21 @@ use proptest::prelude::*;
 use serde_json::Value;
 use suprnova_live::SUPPORTED_PROTOCOL_VERSIONS;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncEnvelope,
-    AsyncEnvelopeContext, AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort,
-    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AuthoritativeStreamPosition,
-    AuthorizedSubscription, BaselineDisposition, BoundedEventContracts, BoundedEventNames,
-    BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics, BrowserPayloadSchema,
-    CapabilityVersion, CompletionReason, CurrentSubscriptionRegistration, EventCyclePolicy,
-    EventOrder, EventSource, EventTarget, PollFallbackPolicy, PollInitialBehavior,
-    PollVisibilityPolicy, PresentationSignalContract, ReconnectPolicy, RegisteredBrowserEvent,
-    RegisteredPresentationSignal, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, SequenceDisposition,
-    SequenceErrorKind, SequenceMachine, SequenceState, StreamEpoch, StreamErrorCode, StreamName,
-    StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
-    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
+    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
+    AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, AsyncEnvelopeErrorKind,
+    AsyncMembershipRegistryPort, AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload,
+    AuthoritativeStreamPosition, AuthorizedSubscription, BaselineDisposition,
+    BoundedEventContracts, BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets,
+    BoundedTopics, BrowserPayloadSchema, CapabilityVersion, CompletionReason,
+    CurrentSubscriptionRegistration, EventCyclePolicy, EventOrder, EventSource, EventTarget,
+    MAX_ASYNC_ENVELOPE_ENTRIES, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
+    PresentationSignalContract, ReconnectPolicy, RegisteredBrowserEvent,
+    RegisteredPresentationSignal, ReplayDispatchError, ReplayDispatchOutcome,
+    SUPPORTED_ASYNC_PROTOCOL_VERSIONS, SequenceDisposition, SequenceErrorKind, SequenceMachine,
+    SequenceState, StreamEpoch, StreamErrorCode, StreamName, StreamPosition, StreamSequence,
+    SubscriptionAuthorizationDecision, SubscriptionAuthorizationPort,
+    SubscriptionAuthorizationRequest, SubscriptionBaselineRequest, SubscriptionContinuityPort,
+    SubscriptionCredentialPort, SubscriptionCredentialRequest,
     SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
     SubscriptionError, SubscriptionEventContract, SubscriptionId, SubscriptionIssueRequest,
     SubscriptionMetadata, SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort,
@@ -361,6 +363,14 @@ fn membership_registry_for(authorized: &AuthorizedSubscription) -> TestMembershi
                 BrowserOperationName::parse("completion_percent").expect("signal name"),
                 BrowserPayloadSchema::U64,
             ),
+            PresentationSignalContract::new(
+                BrowserOperationName::parse("signed_count").expect("signal name"),
+                BrowserPayloadSchema::I64,
+            ),
+            PresentationSignalContract::new(
+                BrowserOperationName::parse("measurement").expect("signal name"),
+                BrowserPayloadSchema::F64,
+            ),
         ])
         .expect("signals"),
     }
@@ -523,6 +533,91 @@ fn server_authored_envelopes_require_the_current_registered_context() {
     )
     .expect_err("server-authored payloads must be bounded before envelope construction");
     assert_eq!(oversized.kind(), AsyncEnvelopeErrorKind::StringTooLong);
+}
+
+#[test]
+fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
+    const MAX_BROWSER_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    let context = context();
+    let safe = MAX_BROWSER_SAFE_INTEGER as f64;
+
+    for (name, value) in [
+        ("signed_count", -safe),
+        ("signed_count", safe),
+        ("completion_percent", 0.0),
+        ("completion_percent", safe),
+        ("measurement", f64::MAX),
+    ] {
+        let signal = RegisteredPresentationSignal::new(
+            &context,
+            BrowserOperationName::parse(name).expect("registered signal"),
+            CanonicalValue::number(value).expect("finite canonical number"),
+        )
+        .expect("lossless server-authored value");
+        let envelope = AsyncEnvelope::new(
+            &context,
+            position(4, 41),
+            AsyncPayload::PresentationSignal(signal),
+        )
+        .expect("server envelope");
+        let encoded = encode_async_envelope(&envelope, &limits()).expect("canonical encode");
+        assert_eq!(
+            decode_async_envelope(&encoded, &limits(), &context).expect("canonical decode"),
+            envelope,
+        );
+    }
+
+    for (name, value) in [
+        ("signed_count", -(safe + 1.0)),
+        ("signed_count", safe + 1.0),
+        ("signed_count", i64::MIN as f64),
+        ("signed_count", i64::MAX as f64),
+        ("completion_percent", -1.0),
+        ("completion_percent", safe + 1.0),
+        ("completion_percent", u64::MAX as f64),
+    ] {
+        assert_eq!(
+            RegisteredPresentationSignal::new(
+                &context,
+                BrowserOperationName::parse(name).expect("registered signal"),
+                CanonicalValue::number(value).expect("finite canonical number"),
+            )
+            .expect_err("integer schemas reject values outside browser-safe exact integers")
+            .kind(),
+            AsyncEnvelopeErrorKind::UnregisteredPayload,
+        );
+    }
+
+    let normalized = RegisteredPresentationSignal::new(
+        &context,
+        BrowserOperationName::parse("completion_percent").expect("registered signal"),
+        CanonicalValue::number(-0.0).expect("negative zero is finite"),
+    )
+    .expect("canonical negative zero represents unsigned zero");
+    let CanonicalValue::Number(normalized) = normalized.value() else {
+        panic!("normalized numeric signal")
+    };
+    assert!(!normalized.get().is_sign_negative());
+
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            CanonicalValue::number(value).is_err(),
+            "non-finite values cannot reach a server-authored payload constructor",
+        );
+    }
+
+    let huge_integral_event = RegisteredBrowserEvent::new(
+        &context,
+        BrowserOperationName::parse("orders.updated").expect("event name"),
+        1,
+        EventTarget::SelfIsland,
+        CanonicalValue::number(safe + 1.0).expect("finite canonical number"),
+    )
+    .expect_err("constructor must apply the same canonical parser as decode");
+    assert_eq!(
+        huge_integral_event.kind(),
+        AsyncEnvelopeErrorKind::InvalidEnvelope,
+    );
 }
 
 #[test]
@@ -814,6 +909,89 @@ fn byte_depth_entry_string_and_payload_limits_are_enforced() {
 }
 
 #[test]
+fn production_entry_and_replay_limits_accept_exactly_1024_and_reject_1025() {
+    const ENVELOPE_ENTRY_OVERHEAD: usize = 12;
+    assert_eq!(MAX_ASYNC_ENVELOPE_ENTRIES, 1_024);
+    let exact_nested_entries = MAX_ASYNC_ENVELOPE_ENTRIES - ENVELOPE_ENTRY_OVERHEAD;
+
+    let exact_array = (0..exact_nested_entries)
+        .map(|_| "0")
+        .collect::<Vec<_>>()
+        .join(",");
+    let over_array = format!("{exact_array},0");
+    for (nested, expected) in [
+        (format!("[{exact_array}]"), Ok(())),
+        (
+            format!("[{over_array}]"),
+            Err(AsyncEnvelopeErrorKind::TooManyEntries),
+        ),
+    ] {
+        let payload = format!(
+            "{{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{nested},\"schema_version\":1,\"target\":\"self\"}}"
+        );
+        let result = decode_async_envelope(&wire(&payload, 4, 41), &limits(), &context());
+        assert_eq!(result.map(|_| ()).map_err(|error| error.kind()), expected);
+    }
+
+    let exact_object = (0..exact_nested_entries)
+        .map(|index| format!("\"k{index:04}\":0"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let over_object = format!("{exact_object},\"z\":0");
+    for (nested, expected) in [
+        (format!("{{{exact_object}}}"), Ok(())),
+        (
+            format!("{{{over_object}}}"),
+            Err(AsyncEnvelopeErrorKind::TooManyEntries),
+        ),
+    ] {
+        let payload = format!(
+            "{{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{nested},\"schema_version\":1,\"target\":\"self\"}}"
+        );
+        let result = decode_async_envelope(&wire(&payload, 4, 41), &limits(), &context());
+        assert_eq!(result.map(|_| ()).map_err(|error| error.kind()), expected);
+    }
+
+    for replay_len in [1_024_usize, 1_025] {
+        let context = context();
+        let registry = membership_registry();
+        let mut machine = SequenceMachine::new(&context);
+        let high_water = 40 + replay_len as u64;
+        let gap = decode("{\"kind\":\"heartbeat\"}", 4, high_water);
+        let mut dispatcher = RecordingDispatcher::default();
+        assert!(matches!(
+            machine
+                .dispatch(
+                    admit(&context, &gap, &registry),
+                    UnixMillis::new(1_200),
+                    &mut dispatcher,
+                )
+                .expect("fresh gap classification"),
+            SequenceDisposition::Degraded(_),
+        ));
+        let transcript = (41..=high_water)
+            .map(|sequence| decode("{\"kind\":\"heartbeat\"}", 4, sequence))
+            .collect::<Vec<_>>();
+        let guards = transcript
+            .iter()
+            .map(|envelope| admit(&context, envelope, &registry))
+            .collect::<Vec<_>>();
+        let result = machine.recover_from_replay(guards, UnixMillis::new(1_200), &mut dispatcher);
+        if replay_len == 1_024 {
+            let outcome = result.expect("exact replay limit");
+            assert_eq!(outcome.applied(), 1_024);
+            assert_eq!(outcome.current(), position(4, high_water));
+        } else {
+            let error = result.expect_err("first replay beyond production limit");
+            assert_eq!(error.kind(), SequenceErrorKind::InvalidReplayTranscript);
+            assert_eq!(error.applied(), 0);
+            assert_eq!(dispatcher.attempts.len(), 0);
+            assert_eq!(machine.current(), position(4, 40));
+        }
+    }
+}
+
+#[test]
 fn membership_and_stream_binding_are_validated_before_sequence_observation() {
     let context = context();
     let mut machine = SequenceMachine::new(&context);
@@ -884,7 +1062,10 @@ fn membership_and_stream_binding_are_validated_before_sequence_observation() {
     );
 
     let valid = decode("{\"kind\":\"heartbeat\"}", 4, 41);
-    assert_eq!(machine.observe(&valid), SequenceDisposition::Apply);
+    assert_eq!(
+        dispatch_without_failure(&context, &mut machine, &valid),
+        SequenceDisposition::Apply,
+    );
     assert_eq!(machine.current(), valid.position());
 }
 
@@ -892,32 +1073,38 @@ fn membership_and_stream_binding_are_validated_before_sequence_observation() {
 fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
     let context = context();
     let mut machine = SequenceMachine::new(&context);
+    let duplicate = decode("{\"kind\":\"heartbeat\"}", 4, 40);
 
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 40)),
+        dispatch_without_failure(&context, &mut machine, &duplicate),
         SequenceDisposition::IgnoreDuplicate
     );
+    let stale = decode("{\"kind\":\"heartbeat\"}", 3, 99);
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 3, 99)),
+        dispatch_without_failure(&context, &mut machine, &stale),
         SequenceDisposition::IgnoreStaleEpoch
     );
+    let next = decode("{\"kind\":\"heartbeat\"}", 4, 41);
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 41)),
+        dispatch_without_failure(&context, &mut machine, &next),
         SequenceDisposition::Apply
     );
     assert_eq!(machine.state(), SequenceState::Current);
 
+    let gap = decode("{\"kind\":\"heartbeat\"}", 4, 43);
     assert!(matches!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43)),
+        dispatch_without_failure(&context, &mut machine, &gap),
         SequenceDisposition::Degraded(_)
     ));
     assert_eq!(machine.state(), SequenceState::Degraded);
+    let duplicate = decode("{\"kind\":\"heartbeat\"}", 4, 41);
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 41)),
+        dispatch_without_failure(&context, &mut machine, &duplicate),
         SequenceDisposition::IgnoreDuplicate
     );
+    let waiting = decode("{\"kind\":\"heartbeat\"}", 4, 42);
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 42)),
+        dispatch_without_failure(&context, &mut machine, &waiting),
         SequenceDisposition::AwaitingRecovery
     );
     assert_eq!(machine.current().sequence(), StreamSequence::new(41));
@@ -926,18 +1113,18 @@ fn sequence_machine_applies_only_next_and_degrades_on_gaps_or_new_epochs() {
         decode("{\"kind\":\"heartbeat\"}", 4, 42),
         decode("{\"kind\":\"heartbeat\"}", 4, 43),
     ];
-    assert_eq!(
-        machine.recover_from_replay(&replay),
-        Ok(BaselineDisposition::Adopted)
-    );
+    let outcome = recover_without_failure(&context, &mut machine, &replay)
+        .expect("complete contiguous replay");
+    assert_eq!(outcome.applied(), 2);
     assert_eq!(machine.state(), SequenceState::Current);
     assert_eq!(
         machine.current(),
         StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(43))
     );
 
+    let next_epoch = decode("{\"kind\":\"heartbeat\"}", 5, 1);
     assert!(matches!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 5, 1)),
+        dispatch_without_failure(&context, &mut machine, &next_epoch),
         SequenceDisposition::Degraded(_)
     ));
     let authority = StaticContinuityAuthority(StreamPosition::new(
@@ -956,7 +1143,8 @@ fn replay_recovery_requires_a_complete_contiguous_same_scope_transcript() {
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
     let context = context_at(baseline);
     let mut machine = SequenceMachine::new(&context);
-    let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43));
+    let gap = decode("{\"kind\":\"heartbeat\"}", 4, 43);
+    let _ = dispatch_without_failure(&context, &mut machine, &gap);
     assert_eq!(
         machine.high_water(),
         Some(StreamPosition::new(
@@ -985,8 +1173,7 @@ fn replay_recovery_requires_a_complete_contiguous_same_scope_transcript() {
     ];
     for transcript in invalid {
         assert_eq!(
-            machine
-                .recover_from_replay(&transcript)
+            recover_without_failure(&context, &mut machine, &transcript)
                 .expect_err("invalid replay transcript")
                 .kind(),
             SequenceErrorKind::InvalidReplayTranscript
@@ -999,10 +1186,9 @@ fn replay_recovery_requires_a_complete_contiguous_same_scope_transcript() {
         decode("{\"kind\":\"heartbeat\"}", 4, 42),
         decode("{\"kind\":\"heartbeat\"}", 4, 43),
     ];
-    assert_eq!(
-        machine.recover_from_replay(&valid),
-        Ok(BaselineDisposition::Adopted)
-    );
+    let outcome =
+        recover_without_failure(&context, &mut machine, &valid).expect("valid replay transcript");
+    assert_eq!(outcome.applied(), valid.len());
     assert_eq!(machine.current(), valid[1].position());
 }
 
@@ -1014,6 +1200,258 @@ impl AsyncContinuityAuthorityPort for StaticContinuityAuthority {
         _request: AsyncContinuityRequest<'_>,
     ) -> Option<StreamPosition> {
         Some(self.0)
+    }
+}
+
+#[derive(Default)]
+struct RecordingDispatcher {
+    attempts: Vec<StreamPosition>,
+    applied: Vec<StreamPosition>,
+    fail_once_at: Option<StreamPosition>,
+}
+
+impl RecordingDispatcher {
+    fn failing_once_at(position: StreamPosition) -> Self {
+        Self {
+            fail_once_at: Some(position),
+            ..Self::default()
+        }
+    }
+}
+
+impl AsyncEnvelopeDispatchPort for RecordingDispatcher {
+    fn dispatch(&mut self, envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
+        self.attempts.push(envelope.position());
+        if self.fail_once_at == Some(envelope.position()) {
+            self.fail_once_at = None;
+            return Err(AsyncDispatchError::failed());
+        }
+        self.applied.push(envelope.position());
+        Ok(())
+    }
+}
+
+fn admit<'a>(
+    context: &'a AsyncEnvelopeContext,
+    envelope: &'a AsyncEnvelope,
+    registry: &TestMembershipRegistry,
+) -> suprnova_live::async_updates::ActiveAsyncMembershipGuard<'a> {
+    context
+        .admit(envelope, registry, UnixMillis::new(1_200))
+        .expect("fresh active membership")
+}
+
+fn dispatch_without_failure(
+    context: &AsyncEnvelopeContext,
+    machine: &mut SequenceMachine,
+    envelope: &AsyncEnvelope,
+) -> SequenceDisposition {
+    let registry = membership_registry();
+    let mut dispatcher = RecordingDispatcher::default();
+    machine
+        .dispatch(
+            admit(context, envelope, &registry),
+            UnixMillis::new(1_200),
+            &mut dispatcher,
+        )
+        .expect("closed test dispatch")
+}
+
+fn recover_without_failure<'a>(
+    context: &'a AsyncEnvelopeContext,
+    machine: &mut SequenceMachine,
+    transcript: &'a [AsyncEnvelope],
+) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
+    let registry = membership_registry();
+    let guards = transcript
+        .iter()
+        .map(|envelope| admit(context, envelope, &registry))
+        .collect::<Vec<_>>();
+    let mut dispatcher = RecordingDispatcher::default();
+    machine.recover_from_replay(guards, UnixMillis::new(1_200), &mut dispatcher)
+}
+
+#[test]
+fn fresh_membership_and_successful_dispatch_are_required_before_sequence_commit() {
+    let context = context();
+    let envelope = decode("{\"kind\":\"heartbeat\"}", 4, 41);
+    let mut machine = SequenceMachine::new(&context);
+    let mut dispatcher = RecordingDispatcher::failing_once_at(envelope.position());
+
+    let mut revoked = membership_registry();
+    revoked.active = false;
+    assert!(
+        context
+            .admit(&envelope, &revoked, UnixMillis::new(1_200))
+            .is_err()
+    );
+    assert_eq!(machine.current(), position(4, 40));
+    assert!(dispatcher.attempts.is_empty());
+
+    assert_eq!(
+        context
+            .admit(&envelope, &membership_registry(), UnixMillis::new(5_000))
+            .expect_err("exclusive descriptor expiry rejects admission")
+            .kind(),
+        AsyncEnvelopeErrorKind::MembershipExpired,
+    );
+
+    let admitted_before_expiry = context
+        .admit(&envelope, &membership_registry(), UnixMillis::new(4_999))
+        .expect("membership is active immediately before expiry");
+    assert_eq!(
+        machine
+            .dispatch(
+                admitted_before_expiry,
+                UnixMillis::new(5_000),
+                &mut dispatcher,
+            )
+            .expect_err("a retained guard expires before dispatch")
+            .kind(),
+        SequenceErrorKind::MembershipExpired,
+    );
+    assert_eq!(machine.current(), position(4, 40));
+    assert!(dispatcher.attempts.is_empty());
+
+    let mut stale_signals = membership_registry();
+    stale_signals.presentation_signals =
+        BoundedPresentationSignalContracts::new(Vec::new()).expect("empty current signals");
+    assert!(
+        context
+            .admit(&envelope, &stale_signals, UnixMillis::new(1_200))
+            .is_err()
+    );
+
+    let mut stale_events = membership_registry();
+    stale_events.events = BoundedEventContracts::new(vec![
+        SubscriptionEventContract::from_registered(
+            &EventMetadata::from_payload_with_contract::<OrdersUpdatedV2>(
+                EventSource::Stream,
+                BoundedTargets::new(vec![EventTarget::SelfIsland]).expect("target"),
+                EventOrder::PerSourceSequence,
+                EventCyclePolicy::MaximumHops(NonZeroU8::new(4).expect("hops")),
+                4,
+            )
+            .expect("changed event metadata"),
+        )
+        .expect("changed event contract"),
+    ])
+    .expect("changed current events");
+    assert!(
+        context
+            .admit(&envelope, &stale_events, UnixMillis::new(1_200))
+            .is_err()
+    );
+
+    let dispatch_error = machine
+        .dispatch(
+            admit(&context, &envelope, &membership_registry()),
+            UnixMillis::new(1_200),
+            &mut dispatcher,
+        )
+        .expect_err("failed dispatch cannot commit sequence");
+    assert_eq!(dispatch_error.kind(), SequenceErrorKind::DispatchFailed);
+    assert_eq!(machine.current(), position(4, 40));
+    assert_eq!(machine.state(), SequenceState::Current);
+    assert_eq!(machine.high_water(), None);
+
+    assert_eq!(
+        machine
+            .dispatch(
+                admit(&context, &envelope, &membership_registry()),
+                UnixMillis::new(1_200),
+                &mut dispatcher,
+            )
+            .expect("fresh retry dispatch"),
+        SequenceDisposition::Apply,
+    );
+    assert_eq!(machine.current(), position(4, 41));
+
+    assert_eq!(
+        machine
+            .dispatch(
+                admit(&context, &envelope, &membership_registry()),
+                UnixMillis::new(1_200),
+                &mut dispatcher,
+            )
+            .expect("stale admitted duplicate is classified without dispatch"),
+        SequenceDisposition::IgnoreDuplicate,
+    );
+    assert_eq!(dispatcher.applied, vec![position(4, 41)]);
+}
+
+#[test]
+fn replay_dispatch_failure_reports_truth_and_resumes_only_the_remaining_suffix() {
+    for failed_at in [41, 42, 44] {
+        let context = context();
+        let registry = membership_registry();
+        let mut machine = SequenceMachine::new(&context);
+        let gap = decode("{\"kind\":\"heartbeat\"}", 4, 44);
+        let mut dispatcher = RecordingDispatcher::failing_once_at(position(4, failed_at));
+
+        assert!(matches!(
+            machine
+                .dispatch(
+                    admit(&context, &gap, &registry),
+                    UnixMillis::new(1_200),
+                    &mut dispatcher,
+                )
+                .expect("gap classification does not dispatch"),
+            SequenceDisposition::Degraded(_),
+        ));
+        assert!(dispatcher.attempts.is_empty());
+
+        let replay = (41..=44)
+            .map(|sequence| decode("{\"kind\":\"heartbeat\"}", 4, sequence))
+            .collect::<Vec<_>>();
+        let guards = replay
+            .iter()
+            .map(|envelope| admit(&context, envelope, &registry))
+            .collect::<Vec<_>>();
+        let error = machine
+            .recover_from_replay(guards, UnixMillis::new(1_200), &mut dispatcher)
+            .expect_err("selected replay dispatch fails once");
+        assert_eq!(error.kind(), SequenceErrorKind::DispatchFailed);
+        assert_eq!(error.applied(), (failed_at - 41) as usize);
+        assert_eq!(error.current(), position(4, failed_at - 1));
+        assert_eq!(error.state(), SequenceState::Degraded);
+        assert_eq!(error.high_water(), Some(position(4, 44)));
+
+        if failed_at > 41 {
+            let attempts_before_invalid_prefix = dispatcher.attempts.len();
+            let full_retry = replay
+                .iter()
+                .map(|envelope| admit(&context, envelope, &registry))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                machine
+                    .recover_from_replay(full_retry, UnixMillis::new(1_200), &mut dispatcher,)
+                    .expect_err("committed prefix cannot be redispatched")
+                    .kind(),
+                SequenceErrorKind::InvalidReplayTranscript,
+            );
+            assert_eq!(dispatcher.attempts.len(), attempts_before_invalid_prefix);
+        }
+
+        let remaining = replay
+            .iter()
+            .filter(|envelope| envelope.position().sequence().get() >= failed_at)
+            .map(|envelope| admit(&context, envelope, &registry))
+            .collect::<Vec<_>>();
+        let outcome = machine
+            .recover_from_replay(remaining, UnixMillis::new(1_200), &mut dispatcher)
+            .expect("fresh remaining replay suffix");
+        assert_eq!(outcome.applied(), (45 - failed_at) as usize);
+        assert_eq!(outcome.current(), position(4, 44));
+        assert_eq!(outcome.state(), SequenceState::Current);
+        assert_eq!(machine.high_water(), None);
+
+        assert_eq!(
+            dispatcher.applied,
+            (41..=44)
+                .map(|sequence| position(4, sequence))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -1039,19 +1477,35 @@ fn cross_scope_envelopes_and_replay_cannot_change_sequence_authority() {
     let mut machine = SequenceMachine::new(&context_a);
     let state = machine.state();
 
+    let mut dispatcher = RecordingDispatcher::default();
     assert_eq!(
-        machine.observe(&envelope_b),
-        SequenceDisposition::ScopeMismatch
+        machine
+            .dispatch(
+                context_b
+                    .admit(&envelope_b, &registry_b, UnixMillis::new(1_200))
+                    .expect("fresh B guard"),
+                UnixMillis::new(1_200),
+                &mut dispatcher,
+            )
+            .expect_err("B guard cannot enter A machine")
+            .kind(),
+        SequenceErrorKind::ScopeMismatch,
     );
     assert_eq!(machine.current(), baseline);
     assert_eq!(machine.high_water(), None);
     assert_eq!(machine.state(), state);
 
-    let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 4, 43));
+    let gap = decode("{\"kind\":\"heartbeat\"}", 4, 43);
+    let _ = dispatch_without_failure(&context_a, &mut machine, &gap);
     let high_water = machine.high_water();
+    let cross_scope_guards = vec![
+        context_b
+            .admit(&envelope_b, &registry_b, UnixMillis::new(1_200))
+            .expect("fresh B replay guard"),
+    ];
     assert_eq!(
         machine
-            .recover_from_replay(&[envelope_b])
+            .recover_from_replay(cross_scope_guards, UnixMillis::new(1_200), &mut dispatcher,)
             .expect_err("cross-scope replay")
             .kind(),
         SequenceErrorKind::ScopeMismatch
@@ -1066,15 +1520,16 @@ fn only_host_continuity_authority_can_establish_a_covering_new_baseline() {
     let baseline = StreamPosition::new(StreamEpoch::new(4), StreamSequence::new(41));
     let context = context_at(baseline);
     let mut machine = SequenceMachine::new(&context);
-    let _ = machine.observe(&decode("{\"kind\":\"heartbeat\"}", 5, 3));
+    let next_epoch = decode("{\"kind\":\"heartbeat\"}", 5, 3);
+    let _ = dispatch_without_failure(&context, &mut machine, &next_epoch);
     let high_water = machine.high_water();
 
+    let invalid_replay = [
+        decode("{\"kind\":\"heartbeat\"}", 4, 42),
+        decode("{\"kind\":\"heartbeat\"}", 4, 43),
+    ];
     assert_eq!(
-        machine
-            .recover_from_replay(&[
-                decode("{\"kind\":\"heartbeat\"}", 4, 42),
-                decode("{\"kind\":\"heartbeat\"}", 4, 43),
-            ])
+        recover_without_failure(&context, &mut machine, &invalid_replay)
             .expect_err("same-epoch replay cannot prove a new epoch")
             .kind(),
         SequenceErrorKind::InvalidReplayTranscript
@@ -1114,12 +1569,14 @@ fn sequence_overflow_never_wraps_or_applies() {
     let baseline = StreamPosition::new(StreamEpoch::new(9), StreamSequence::new(u64::MAX));
     let context = context_at(baseline);
     let mut machine = SequenceMachine::new(&context);
+    let duplicate = decode("{\"kind\":\"heartbeat\"}", 9, u64::MAX);
     assert_eq!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 9, u64::MAX)),
+        dispatch_without_failure(&context, &mut machine, &duplicate),
         SequenceDisposition::IgnoreDuplicate
     );
+    let next_epoch = decode("{\"kind\":\"heartbeat\"}", 10, 0);
     assert!(matches!(
-        machine.observe(&decode("{\"kind\":\"heartbeat\"}", 10, 0)),
+        dispatch_without_failure(&context, &mut machine, &next_epoch),
         SequenceDisposition::Degraded(_)
     ));
     assert_eq!(machine.current(), baseline);
@@ -1134,7 +1591,7 @@ proptest! {
         for (epoch, sequence) in observed {
             let before = machine.current();
             let envelope = decode("{\"kind\":\"heartbeat\"}", epoch, sequence);
-            if machine.observe(&envelope) == SequenceDisposition::Apply {
+            if dispatch_without_failure(&context, &mut machine, &envelope) == SequenceDisposition::Apply {
                 prop_assert_eq!(epoch, before.epoch().get());
                 prop_assert_eq!(sequence, before.sequence().get() + 1);
                 prop_assert_eq!(machine.current(), envelope.position());
@@ -1151,11 +1608,12 @@ proptest! {
         let context = context_at(baseline);
         let high_sequence = 10 + gap;
         let mut machine = SequenceMachine::new(&context);
-        let _ = machine.observe(&decode(
+        let observed_gap = decode(
             "{\"kind\":\"heartbeat\"}",
             7,
             high_sequence,
-        ));
+        );
+        let _ = dispatch_without_failure(&context, &mut machine, &observed_gap);
         let omitted = 11 + (omitted_offset % gap);
         let transcript = (11..=high_sequence)
             .filter(|sequence| *sequence != omitted)
@@ -1163,8 +1621,7 @@ proptest! {
             .collect::<Vec<_>>();
 
         prop_assert_eq!(
-            machine
-                .recover_from_replay(&transcript)
+            recover_without_failure(&context, &mut machine, &transcript)
                 .expect_err("incomplete transcript")
                 .kind(),
             SequenceErrorKind::InvalidReplayTranscript
@@ -1239,7 +1696,7 @@ fn version_four_async_fixture_is_executable_not_documentary() {
                 observed.epoch().get(),
                 observed.sequence().get(),
             );
-            match machine.observe(&envelope) {
+            match dispatch_without_failure(&context, &mut machine, &envelope) {
                 SequenceDisposition::Apply => "apply",
                 SequenceDisposition::IgnoreDuplicate => "ignore_duplicate",
                 SequenceDisposition::Degraded(_) => "degrade",
@@ -1249,12 +1706,13 @@ fn version_four_async_fixture_is_executable_not_documentary() {
             }
         } else {
             let observed_gap = fixture_position(&case["observed_gap"]);
+            let gap = decode(
+                "{\"kind\":\"heartbeat\"}",
+                observed_gap.epoch().get(),
+                observed_gap.sequence().get(),
+            );
             assert!(matches!(
-                machine.observe(&decode(
-                    "{\"kind\":\"heartbeat\"}",
-                    observed_gap.epoch().get(),
-                    observed_gap.sequence().get(),
-                )),
+                dispatch_without_failure(&context, &mut machine, &gap),
                 SequenceDisposition::Degraded(_)
             ));
             let recovery = &case["recovery"];
@@ -1273,10 +1731,8 @@ fn version_four_async_fixture_is_executable_not_documentary() {
                             )
                         })
                         .collect::<Vec<_>>();
-                    assert_eq!(
-                        machine.recover_from_replay(&transcript),
-                        Ok(BaselineDisposition::Adopted)
-                    );
+                    recover_without_failure(&context, &mut machine, &transcript)
+                        .expect("fixture replay recovery");
                 }
                 "authoritative_refresh" => {
                     let authority = fixture_position(&recovery["baseline"]);

@@ -8,14 +8,15 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::canonical::{
-    CanonicalErrorKind, CanonicalValue, parse_canonical_value, to_canonical_bytes,
+    CanonicalErrorKind, CanonicalValue, MAX_SAFE_INTEGER, parse_canonical_value, to_canonical_bytes,
 };
-use crate::identity::{BrowserOperationName, IslandSlot};
+use crate::identity::{BrowserOperationName, IslandSlot, UnixMillis};
 use crate::limits::{InputLimits, LimitConfigurationError};
 
 use super::{
     AuthorizedSubscription, BoundedEventContracts, BrowserPayloadSchema, EventTarget, StreamEpoch,
     StreamName, StreamPosition, StreamSequence, SubscriptionEventContract,
+    VerifiedSubscriptionDescriptor,
 };
 
 /// Independently versioned asynchronous event-envelope majors supported here.
@@ -24,6 +25,8 @@ pub const SUPPORTED_ASYNC_PROTOCOL_VERSIONS: &[u16] = &[1];
 const MAX_SUBSCRIPTION_ID_BYTES: usize = 32;
 const MIN_SUBSCRIPTION_ID_BYTES: usize = 16;
 const MAX_PRESENTATION_SIGNALS: usize = 64;
+/// Maximum total array elements plus object members in async protocol v1.
+pub const MAX_ASYNC_ENVELOPE_ENTRIES: usize = 1_024;
 const ENVELOPE_KEYS: [&str; 5] = [
     "payload",
     "position",
@@ -64,6 +67,8 @@ pub enum AsyncEnvelopeErrorKind {
     InvalidPayload,
     /// A typed event or presentation signal did not match current registration.
     UnregisteredPayload,
+    /// The signed subscription descriptor reached its exclusive expiry.
+    MembershipExpired,
 }
 
 impl AsyncEnvelopeErrorKind {
@@ -85,6 +90,7 @@ impl AsyncEnvelopeErrorKind {
             Self::UnsupportedPayload => "unsupported_async_payload",
             Self::InvalidPayload => "invalid_async_payload",
             Self::UnregisteredPayload => "unregistered_async_payload",
+            Self::MembershipExpired => "async_membership_expired",
         }
     }
 }
@@ -150,7 +156,7 @@ impl AsyncCodecLimits {
     /// Returns the locked protocol-v1 envelope profile shared by the v4 corpus.
     #[must_use]
     pub fn v1() -> Self {
-        match Self::new(65_536, 8, 64, 4_096, 32_768) {
+        match Self::new(65_536, 8, MAX_ASYNC_ENVELOPE_ENTRIES, 4_096, 32_768) {
             Ok(limits) => limits,
             Err(_) => unreachable!("locked async limits are below engine ceilings"),
         }
@@ -284,15 +290,15 @@ impl BoundedPresentationSignalContracts {
 /// Exact authorized subscription and proposed membership supplied to the host registry.
 #[derive(Clone, Copy)]
 pub struct AsyncMembershipRequest<'a> {
-    authorized: &'a AuthorizedSubscription,
+    verified: &'a VerifiedSubscriptionDescriptor,
     subscription: &'a SubscriptionId,
 }
 
 impl<'a> AsyncMembershipRequest<'a> {
-    /// Returns the Task 2 connect-authorized subscription capability.
+    /// Returns the Task 2 integrity-verified subscription descriptor.
     #[must_use]
-    pub const fn authorized(self) -> &'a AuthorizedSubscription {
-        self.authorized
+    pub const fn verified(self) -> &'a VerifiedSubscriptionDescriptor {
+        self.verified
     }
 
     /// Returns the logical membership identity requiring active validation.
@@ -323,7 +329,7 @@ pub trait AsyncMembershipRegistryPort: Send + Sync {
 
 /// Framework-owned sink that seals exactly one host-validated registry snapshot.
 pub struct AsyncMembershipValidation<'a> {
-    authorized: &'a AuthorizedSubscription,
+    verified: &'a VerifiedSubscriptionDescriptor,
     candidate: Option<(
         StreamName,
         BoundedEventContracts,
@@ -348,7 +354,7 @@ impl AsyncMembershipValidation<'_> {
             self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
             return false;
         }
-        let claims = self.authorized.verified().claims();
+        let claims = self.verified.claims();
         if stream != claims.stream() {
             self.rejected = Some(AsyncEnvelopeErrorKind::StreamMismatch);
             return false;
@@ -389,6 +395,7 @@ impl fmt::Debug for AsyncMembershipValidation<'_> {
 /// Sealed active-membership and registered-payload context required for decode.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AsyncEnvelopeContext {
+    verified: VerifiedSubscriptionDescriptor,
     subscription: SubscriptionId,
     stream: StreamName,
     authoritative_baseline: StreamPosition,
@@ -403,18 +410,11 @@ impl AsyncEnvelopeContext {
         subscription: SubscriptionId,
         registry: &dyn AsyncMembershipRegistryPort,
     ) -> Result<Self, AsyncEnvelopeError> {
-        let request = AsyncMembershipRequest {
-            authorized,
-            subscription: &subscription,
-        };
-        let mut validation = AsyncMembershipValidation {
-            authorized,
-            candidate: None,
-            rejected: None,
-        };
-        registry.validate_current(request, &mut validation);
-        let (stream, events, presentation_signals) = validation.finish()?;
+        let verified = authorized.verified().clone();
+        let (stream, events, presentation_signals) =
+            validate_membership(&verified, &subscription, registry)?;
         Ok(Self {
+            verified,
             subscription,
             stream,
             authoritative_baseline: authorized.verified().baseline(),
@@ -439,6 +439,119 @@ impl AsyncEnvelopeContext {
     #[must_use]
     pub const fn authoritative_baseline(&self) -> StreamPosition {
         self.authoritative_baseline
+    }
+
+    /// Freshly admits one envelope against current host membership and registry authority.
+    ///
+    /// The returned guard is non-cloneable and consumed by the sequence machine.
+    /// Physical transport membership remains outside this operation.
+    pub fn admit<'a>(
+        &'a self,
+        envelope: &'a AsyncEnvelope,
+        registry: &dyn AsyncMembershipRegistryPort,
+        now: UnixMillis,
+    ) -> Result<ActiveAsyncMembershipGuard<'a>, AsyncEnvelopeError> {
+        if now >= self.verified.expires_at() {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::MembershipExpired,
+            ));
+        }
+        if envelope.subscription != self.subscription {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::SubscriptionMismatch,
+            ));
+        }
+        if envelope.stream != self.stream {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::StreamMismatch,
+            ));
+        }
+        let (stream, events, presentation_signals) =
+            validate_membership(&self.verified, &self.subscription, registry)?;
+        if stream != self.stream
+            || events != self.events
+            || presentation_signals != self.presentation_signals
+        {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::UnregisteredPayload,
+            ));
+        }
+        validate_registered_payload(self, &envelope.payload)?;
+        Ok(ActiveAsyncMembershipGuard {
+            context: self,
+            envelope,
+        })
+    }
+}
+
+fn validate_membership(
+    verified: &VerifiedSubscriptionDescriptor,
+    subscription: &SubscriptionId,
+    registry: &dyn AsyncMembershipRegistryPort,
+) -> Result<
+    (
+        StreamName,
+        BoundedEventContracts,
+        BoundedPresentationSignalContracts,
+    ),
+    AsyncEnvelopeError,
+> {
+    let request = AsyncMembershipRequest {
+        verified,
+        subscription,
+    };
+    let mut validation = AsyncMembershipValidation {
+        verified,
+        candidate: None,
+        rejected: None,
+    };
+    registry.validate_current(request, &mut validation);
+    validation.finish()
+}
+
+/// One-use proof that an envelope passed current host membership admission.
+///
+/// ```compile_fail
+/// use suprnova_live::async_updates::{
+///     ActiveAsyncMembershipGuard, AsyncEnvelopeDispatchPort, SequenceMachine,
+/// };
+/// use suprnova_live::identity::UnixMillis;
+///
+/// fn cannot_reuse(
+///     guard: ActiveAsyncMembershipGuard<'_>,
+///     machine: &mut SequenceMachine,
+///     dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+/// ) {
+///     let _ = machine.dispatch(guard, UnixMillis::new(0), dispatcher);
+///     let _ = machine.dispatch(guard, UnixMillis::new(0), dispatcher);
+/// }
+/// ```
+pub struct ActiveAsyncMembershipGuard<'a> {
+    context: &'a AsyncEnvelopeContext,
+    envelope: &'a AsyncEnvelope,
+}
+
+impl<'a> ActiveAsyncMembershipGuard<'a> {
+    pub(crate) fn is_current_at(&self, now: UnixMillis) -> bool {
+        now < self.context.verified.expires_at()
+    }
+
+    pub(crate) const fn context(&self) -> &'a AsyncEnvelopeContext {
+        self.context
+    }
+
+    pub(crate) const fn envelope(&self) -> &'a AsyncEnvelope {
+        self.envelope
+    }
+
+    pub(crate) const fn into_parts(self) -> (&'a AsyncEnvelopeContext, &'a AsyncEnvelope) {
+        (self.context, self.envelope)
+    }
+}
+
+impl fmt::Debug for ActiveAsyncMembershipGuard<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ActiveAsyncMembershipGuard:redacted>")
     }
 }
 
@@ -482,9 +595,10 @@ impl RegisteredBrowserEvent {
             target,
             payload,
         };
-        validate_registered_event(context, &event)?;
-        validate_programmatic_value(event.payload())?;
-        Ok(event)
+        match validate_programmatic_payload(context, &AsyncPayload::BrowserEvent(event))? {
+            AsyncPayload::BrowserEvent(event) => Ok(event),
+            _ => unreachable!("validated browser-event payload preserves its closed variant"),
+        }
     }
 
     /// Returns the registered event identity.
@@ -537,9 +651,10 @@ impl RegisteredPresentationSignal {
         value: CanonicalValue,
     ) -> Result<Self, AsyncEnvelopeError> {
         let signal = Self { name, value };
-        validate_registered_signal(context, &signal)?;
-        validate_programmatic_value(signal.value())?;
-        Ok(signal)
+        match validate_programmatic_payload(context, &AsyncPayload::PresentationSignal(signal))? {
+            AsyncPayload::PresentationSignal(signal) => Ok(signal),
+            _ => unreachable!("validated presentation-signal payload preserves its closed variant"),
+        }
     }
 
     /// Returns the declared local signal identity.
@@ -617,7 +732,7 @@ impl AsyncEnvelope {
         position: StreamPosition,
         payload: AsyncPayload,
     ) -> Result<Self, AsyncEnvelopeError> {
-        validate_registered_payload(context, &payload)?;
+        let payload = validate_programmatic_payload(context, &payload)?;
         let envelope = Self {
             protocol_version: 1,
             subscription: context.subscription.clone(),
@@ -625,8 +740,9 @@ impl AsyncEnvelope {
             position,
             payload,
         };
-        encode_async_envelope(&envelope, &AsyncCodecLimits::v1())?;
-        Ok(envelope)
+        let limits = AsyncCodecLimits::v1();
+        let encoded = encode_async_envelope(&envelope, &limits)?;
+        decode_async_envelope(&encoded, &limits, context)
     }
 
     /// Returns the independently versioned async protocol major.
@@ -1152,15 +1268,27 @@ fn validate_registered_payload(
     }
 }
 
-fn validate_programmatic_value(value: &CanonicalValue) -> Result<(), AsyncEnvelopeError> {
+fn validate_programmatic_payload(
+    context: &AsyncEnvelopeContext,
+    payload: &AsyncPayload,
+) -> Result<AsyncPayload, AsyncEnvelopeError> {
+    validate_registered_payload(context, payload)?;
     let limits = AsyncCodecLimits::v1();
-    let encoded = to_canonical_bytes(value, &limits.input()).map_err(map_canonical)?;
+    let value = payload_value(payload)?;
+    let encoded = to_canonical_bytes(&value, &limits.input()).map_err(map_canonical)?;
     if encoded.len() > limits.max_payload_bytes() {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::PayloadTooLarge,
         ));
     }
-    Ok(())
+    let reparsed = parse_canonical_value(&encoded, &limits.input()).map_err(map_canonical)?;
+    let recoded = to_canonical_bytes(&reparsed, &limits.input()).map_err(map_canonical)?;
+    if recoded != encoded {
+        return Err(AsyncEnvelopeError::new(
+            AsyncEnvelopeErrorKind::NonCanonical,
+        ));
+    }
+    parse_payload(reparsed, context)
 }
 
 fn parse_presentation_signal(
@@ -1224,11 +1352,11 @@ fn schema_matches(schema: BrowserPayloadSchema, value: &CanonicalValue) -> bool 
         | (BrowserPayloadSchema::String, CanonicalValue::String(_)) => true,
         (BrowserPayloadSchema::I64, CanonicalValue::Number(number)) => {
             let value = number.get();
-            value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64
+            value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER as f64
         }
         (BrowserPayloadSchema::U64, CanonicalValue::Number(number)) => {
             let value = number.get();
-            value.fract() == 0.0 && value >= 0.0 && value <= u64::MAX as f64
+            value.fract() == 0.0 && value >= 0.0 && value <= MAX_SAFE_INTEGER as f64
         }
         (BrowserPayloadSchema::F64, CanonicalValue::Number(_)) => true,
         _ => false,
