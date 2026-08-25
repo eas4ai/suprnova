@@ -355,7 +355,11 @@ apparatus and do not claim active Suprnova storage or broadcasting registration.
 Subscription conformance rejects caller-proposed baselines, oversized current
 registry contracts, hostile topic segments, cross-descriptor and
 cross-operation credentials, exclusive expiry, and second use of both Connect
-and Renew credentials; provider fixtures mint distinct MAC-derived bearers.
+and Renew credentials. Provider fixtures mint distinct MAC-derived bearers and
+prove all-or-nothing consume-plus-successor persistence, rollback on failure,
+policy/signing checks before mutation, operation rotation, committed-response
+loss recovery through fresh issuance, and shared authority across independent
+service facades.
 
 The shared manifest-driven corpus advances to `fixtures/v4/` for promoted
 `live:upload`, `live:progress`, `live:poll`, and `live:stream` grammar,

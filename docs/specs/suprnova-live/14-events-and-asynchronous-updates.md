@@ -66,10 +66,15 @@ Acceptance criteria:
   canonical claims exceed the descriptor budget.
 - Private and presence subscriptions reauthorize the current principal.
 - Subscription tokens are unique, cryptographically unpredictable, scoped,
-  expiring, non-loggable, and atomically single-use when required. Connect
-  consumes a Connect credential and mints Renew; renewal consumes Renew and
-  mints Connect. Replay authority belongs to the host credential provider across
-  processes and restarts.
+  expiring, non-loggable, and atomically single-use when required. After every
+  registry, scope, expiry, signing, and current-policy check passes, one
+  host-owned operation consumes Connect while persisting its Renew successor, or
+  consumes Renew while persisting its Connect successor. Replay and uniqueness
+  authority belongs to that provider across processes and restarts. Provider
+  failure is all-or-nothing and leaves the predecessor valid. A committed
+  rotation whose response is lost leaves the predecessor consumed; the client
+  must obtain a freshly issued subscription rather than replay or recover an
+  idempotent rotation result.
 - Cross-process fanout preserves tenant and channel isolation.
 - Removing or navigating away from an island unsubscribes it.
 - A push message cannot supply trusted snapshot or replacement HTML directly.
@@ -229,8 +234,11 @@ UX flow:
   authority, and trusted registration proves the worst-case full claims fit the
   canonical descriptor budget. A separate zeroizing, unique credential binds
   the exact descriptor, current subscription scope, expiry, and Connect or Renew
-  operation; the host provider atomically consumes it and rotates operations at
-  each successful boundary.
+  operation. Only after all non-mutating checks succeed, one host-provider
+  transaction consumes the predecessor and persists a unique successor across
+  processes and restarts. Atomic provider failure retains the predecessor;
+  committed-but-lost responses require fresh issuance rather than a Task 3
+  idempotent rotation machine.
 - 2026-08-24 -- Multiplexed compatible subscriptions over one document transport,
   made subscription identity explicit in every envelope, and required strict
   WebSocket `Origin` validation. Polling is fresh-render-only; signed descriptors

@@ -206,9 +206,12 @@
   The public issue request cannot propose a baseline: current resolved scope is
   sent to a trusted continuity port. Trusted registration calculates the
   worst-case full canonical claims and rejects metadata that cannot fit the
-  descriptor budget. Credential providers mint unique unpredictable bearers and
-  atomically consume each operation-scoped credential across processes and
-  restarts; Connect rotates to Renew and Renew rotates to Connect.
+  descriptor budget. After every non-mutating check, one distributed/restart-safe
+  credential-provider operation consumes the predecessor and persists a unique
+  unpredictable successor: Connect becomes Renew and Renew becomes Connect.
+  Provider failure retains the predecessor; a committed-but-lost response
+  requires a freshly issued subscription and does not introduce Task 3
+  idempotent outcome machinery.
 
 - [x] Run authorization-loss, expiry/renewal, redaction, snapshot/HTML/URL/history sentinel, and hostile-context tests.
 - [x] Commit: `feat(async): sign authorized subscription descriptors`.

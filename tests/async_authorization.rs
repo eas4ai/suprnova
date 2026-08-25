@@ -17,8 +17,9 @@ use suprnova_live::async_updates::{
     PollVisibilityPolicy, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition, StreamSequence,
     SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
     SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionClaims, SubscriptionContinuityPort, SubscriptionCredentialDecision,
-    SubscriptionCredentialPort, SubscriptionCredentialRequest, SubscriptionCredentialScope,
+    SubscriptionClaims, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionCredentialRequest, SubscriptionCredentialRotationOutcome,
+    SubscriptionCredentialRotationRequest, SubscriptionCredentialScope,
     SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
     SubscriptionEventContract, SubscriptionIssueRequest, SubscriptionMetadata,
     SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService, TopicName,
@@ -54,6 +55,8 @@ struct ControlledSubscriptionPorts {
     next_credential: AtomicU64,
     baseline: Mutex<StreamPosition>,
     fixed_credentials: AtomicBool,
+    fail_next_rotation: AtomicBool,
+    lose_next_rotation_response: AtomicBool,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -81,11 +84,17 @@ impl ControlledSubscriptionPorts {
                 StreamSequence::new(19),
             )),
             fixed_credentials: AtomicBool::new(false),
+            fail_next_rotation: AtomicBool::new(false),
+            lose_next_rotation_response: AtomicBool::new(false),
         })
     }
 
     fn revoke(&self) {
         self.allowed.store(false, Ordering::SeqCst);
+    }
+
+    fn allow(&self) {
+        self.allowed.store(true, Ordering::SeqCst);
     }
 
     fn revise_component(&self, component: ComponentMetadata) {
@@ -113,6 +122,48 @@ impl ControlledSubscriptionPorts {
 
     fn use_fixed_credentials(&self) {
         self.fixed_credentials.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_next_rotation(&self) {
+        self.fail_next_rotation.store(true, Ordering::SeqCst);
+    }
+
+    fn lose_next_rotation_response(&self) {
+        self.lose_next_rotation_response
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn minted_credential(
+        &self,
+        request: SubscriptionCredentialRequest<'_>,
+    ) -> Result<(Vec<u8>, CredentialRecord, TransportCredential), SubscriptionError> {
+        let mut token = CREDENTIAL_SENTINEL.to_vec();
+        if !self.fixed_credentials.load(Ordering::SeqCst) {
+            let counter = self.next_credential.fetch_add(1, Ordering::SeqCst);
+            let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0x7c; 32])
+                .expect("fixed-length HMAC test key");
+            mac.update(b"suprnova-live/test-subscription-credential/v1\0");
+            mac.update(&counter.to_be_bytes());
+            mac.update(request.binding().to_base64url().as_bytes());
+            mac.update(&[match request.operation() {
+                SubscriptionAuthorizationOperation::Issue => 0,
+                SubscriptionAuthorizationOperation::Connect => 1,
+                SubscriptionAuthorizationOperation::Renew => 2,
+            }]);
+            mac.update(&request.expires_at().get().to_be_bytes());
+            mac.update(request.scope().component().as_str().as_bytes());
+            mac.update(request.scope().component_contract().as_bytes());
+            mac.update(request.scope().stream().as_str().as_bytes());
+            token.extend_from_slice(&mac.finalize().into_bytes());
+        }
+        let record = CredentialRecord {
+            binding: request.binding().to_base64url(),
+            operation: request.operation(),
+            scope: request.scope().clone(),
+            expires_at: request.expires_at(),
+        };
+        let credential = TransportCredential::from_host_authority_bearer(token.clone())?;
+        Ok((token, record, credential))
     }
 }
 
@@ -175,64 +226,78 @@ impl SubscriptionCredentialPort for ControlledSubscriptionPorts {
     ) -> TestFuture<'a, Result<TransportCredential, SubscriptionError>> {
         Box::pin(async move {
             assert!(request.presented().is_none());
-            let mut token = CREDENTIAL_SENTINEL.to_vec();
-            if !self.fixed_credentials.load(Ordering::SeqCst) {
-                let counter = self.next_credential.fetch_add(1, Ordering::SeqCst);
-                let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0x7c; 32])
-                    .expect("fixed-length HMAC test key");
-                mac.update(b"suprnova-live/test-subscription-credential/v1\0");
-                mac.update(&counter.to_be_bytes());
-                mac.update(request.binding().to_base64url().as_bytes());
-                mac.update(&[match request.operation() {
-                    SubscriptionAuthorizationOperation::Issue => 0,
-                    SubscriptionAuthorizationOperation::Connect => 1,
-                    SubscriptionAuthorizationOperation::Renew => 2,
-                }]);
-                mac.update(&request.expires_at().get().to_be_bytes());
-                mac.update(request.scope().component().as_str().as_bytes());
-                mac.update(request.scope().component_contract().as_bytes());
-                mac.update(request.scope().stream().as_str().as_bytes());
-                token.extend_from_slice(&mac.finalize().into_bytes());
+            let (token, record, credential) = self.minted_credential(request)?;
+            let mut records = self.credentials.lock().expect("credentials");
+            if records.contains_key(&token) {
+                return TransportCredential::from_host_authority_bearer(Vec::new());
             }
-            self.credentials.lock().expect("credentials").insert(
-                token.clone(),
-                CredentialRecord {
-                    binding: request.binding().to_base64url(),
-                    operation: request.operation(),
-                    scope: request.scope().clone(),
-                    expires_at: request.expires_at(),
-                },
-            );
-            TransportCredential::from_host_authority_bearer(token)
+            records.insert(token, record);
+            Ok(credential)
         })
     }
 
-    fn verify_and_consume<'a>(
+    fn consume_and_rotate<'a>(
         &'a self,
-        request: SubscriptionCredentialRequest<'a>,
-    ) -> TestFuture<'a, Result<SubscriptionCredentialDecision, SubscriptionError>> {
+        request: SubscriptionCredentialRotationRequest<'a>,
+    ) -> TestFuture<'a, SubscriptionCredentialRotationOutcome> {
         Box::pin(async move {
             assert!(!format!("{request:?}").contains("scoped-async-credential-sentinel"));
+            let predecessor = request.predecessor();
+            let successor = request.successor();
             let mut records = self.credentials.lock().expect("credentials");
-            let accepted = request.presented().is_some_and(|credential| {
+            let accepted = predecessor.presented().is_some_and(|credential| {
                 let bearer = credential.expose_authorization_bearer();
-                let accepted = records.get(bearer).is_some_and(|record| {
-                    record.binding == request.binding().to_base64url()
-                        && record.operation == request.operation()
-                        && record.scope == *request.scope()
-                        && record.expires_at == request.expires_at()
-                        && request.now() < record.expires_at
-                });
-                if accepted {
-                    records.remove(bearer);
-                }
-                accepted
+                records.get(bearer).is_some_and(|record| {
+                    record.binding == predecessor.binding().to_base64url()
+                        && record.operation == predecessor.operation()
+                        && record.scope == *predecessor.scope()
+                        && record.expires_at == predecessor.expires_at()
+                        && predecessor.now() < record.expires_at
+                })
             });
-            Ok(if accepted {
-                SubscriptionCredentialDecision::Accept
-            } else {
-                SubscriptionCredentialDecision::Reject
-            })
+            let valid_transition = matches!(
+                (predecessor.operation(), successor.operation()),
+                (
+                    SubscriptionAuthorizationOperation::Connect,
+                    SubscriptionAuthorizationOperation::Renew
+                ) | (
+                    SubscriptionAuthorizationOperation::Renew,
+                    SubscriptionAuthorizationOperation::Connect
+                )
+            ) && successor.presented().is_none()
+                && predecessor.scope() == successor.scope()
+                && successor.now() < successor.expires_at()
+                && (predecessor.operation() != SubscriptionAuthorizationOperation::Connect
+                    || (predecessor.binding().to_base64url()
+                        == successor.binding().to_base64url()
+                        && predecessor.expires_at() == successor.expires_at()));
+            if !accepted || !valid_transition {
+                return SubscriptionCredentialRotationOutcome::Reject;
+            }
+            if self.fail_next_rotation.swap(false, Ordering::SeqCst) {
+                return SubscriptionCredentialRotationOutcome::Failed;
+            }
+
+            let (token, record, credential) = match self.minted_credential(successor) {
+                Ok(minted) => minted,
+                Err(_) => return SubscriptionCredentialRotationOutcome::Failed,
+            };
+            let predecessor_bearer = predecessor
+                .presented()
+                .expect("validated predecessor")
+                .expose_authorization_bearer();
+            if records.contains_key(&token) || token.as_slice() == predecessor_bearer {
+                return SubscriptionCredentialRotationOutcome::Failed;
+            }
+            records.remove(predecessor_bearer);
+            records.insert(token, record);
+            if self
+                .lose_next_rotation_response
+                .swap(false, Ordering::SeqCst)
+            {
+                return SubscriptionCredentialRotationOutcome::Uncertain;
+            }
+            SubscriptionCredentialRotationOutcome::Rotated(credential)
         })
     }
 }
@@ -966,12 +1031,322 @@ async fn renewal_credential_is_consumed_atomically_after_one_use() {
 }
 
 #[tokio::test]
+async fn authorization_denial_precedes_rotation_and_leaves_the_predecessor_valid() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports.clone());
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    ports.revoke();
+
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_050),
+            )
+            .await
+            .expect_err("current denial must happen before credential mutation")
+            .kind(),
+        SubscriptionErrorKind::AuthorizationDenied
+    );
+
+    ports.allow();
+    service
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_060),
+        )
+        .await
+        .expect("the predecessor remained valid after denied policy");
+}
+
+#[tokio::test]
+async fn renewal_descriptor_failure_precedes_rotation_and_leaves_the_predecessor_valid() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    let connected = service
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_050),
+        )
+        .await
+        .expect("connect and rotate to renew");
+
+    assert_eq!(
+        service
+            .renew(
+                &context,
+                issued.descriptor(),
+                connected.renewal_credential(),
+                UnixMillis::new(1_060),
+                UnixMillis::new(1_060),
+            )
+            .await
+            .expect_err("exclusive successor expiry must fail before rotation")
+            .kind(),
+        SubscriptionErrorKind::DescriptorExpired
+    );
+
+    service
+        .renew(
+            &context,
+            issued.descriptor(),
+            connected.renewal_credential(),
+            UnixMillis::new(6_000),
+            UnixMillis::new(1_070),
+        )
+        .await
+        .expect("the renewal predecessor remained valid after signing failure");
+}
+
+#[tokio::test]
+async fn atomic_provider_failure_rolls_back_and_allows_one_later_rotation() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports.clone());
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    ports.fail_next_rotation();
+
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_050),
+            )
+            .await
+            .expect_err("atomic provider failure is all-or-nothing")
+            .kind(),
+        SubscriptionErrorKind::CredentialUnavailable
+    );
+
+    service
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_060),
+        )
+        .await
+        .expect("failed atomic rotation retained the predecessor");
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_070),
+            )
+            .await
+            .expect_err("successful retry consumed the predecessor exactly once")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn lost_rotation_response_requires_fresh_issuance_and_replay_fails_closed() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports.clone());
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue connect credential");
+    ports.lose_next_rotation_response();
+
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_050),
+            )
+            .await
+            .expect_err("committed rotation with lost response is explicitly uncertain")
+            .kind(),
+        SubscriptionErrorKind::CredentialRotationUncertain
+    );
+    assert_eq!(
+        service
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_060),
+            )
+            .await
+            .expect_err("uncertain predecessor cannot be replayed")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+
+    let fresh = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(6_000)),
+            UnixMillis::new(1_070),
+        )
+        .await
+        .expect("recovery obtains a freshly issued descriptor and credential");
+    service
+        .connect(
+            &context,
+            fresh.descriptor(),
+            fresh.transport_credential(),
+            UnixMillis::new(1_080),
+        )
+        .await
+        .expect("fresh issuance recovers without replaying uncertain authority");
+}
+
+#[tokio::test]
+async fn independent_service_facades_share_atomic_rotation_authority() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let first_facade = SubscriptionService::new(key_ring());
+    let second_facade = SubscriptionService::new(key_ring());
+    let issued = first_facade
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue through first facade");
+    let connected = second_facade
+        .connect(
+            &context,
+            issued.descriptor(),
+            issued.transport_credential(),
+            UnixMillis::new(1_050),
+        )
+        .await
+        .expect("second facade atomically consumes and rotates shared authority");
+
+    assert_eq!(
+        first_facade
+            .connect(
+                &context,
+                issued.descriptor(),
+                issued.transport_credential(),
+                UnixMillis::new(1_060),
+            )
+            .await
+            .expect_err("first facade sees the shared predecessor consumption")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+    first_facade
+        .renew(
+            &context,
+            issued.descriptor(),
+            connected.renewal_credential(),
+            UnixMillis::new(6_000),
+            UnixMillis::new(1_070),
+        )
+        .await
+        .expect("rotated Renew successor succeeds once through either facade");
+    assert_eq!(
+        second_facade
+            .renew(
+                &context,
+                issued.descriptor(),
+                connected.renewal_credential(),
+                UnixMillis::new(6_000),
+                UnixMillis::new(1_080),
+            )
+            .await
+            .expect_err("shared Renew successor replay fails")
+            .kind(),
+        SubscriptionErrorKind::InvalidCredential
+    );
+}
+
+#[tokio::test]
+async fn concurrent_service_facades_commit_exactly_one_rotation() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let first_facade = SubscriptionService::new(key_ring());
+    let second_facade = SubscriptionService::new(key_ring());
+    let issued = first_facade
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("issue shared predecessor");
+
+    let first = first_facade.connect(
+        &context,
+        issued.descriptor(),
+        issued.transport_credential(),
+        UnixMillis::new(1_050),
+    );
+    let second = second_facade.connect(
+        &context,
+        issued.descriptor(),
+        issued.transport_credential(),
+        UnixMillis::new(1_050),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let outcomes = [first, second];
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().err())
+            .map(|error| error.kind())
+            .collect::<Vec<_>>(),
+        vec![SubscriptionErrorKind::InvalidCredential]
+    );
+}
+
+#[tokio::test]
 async fn fixed_global_or_repeated_credential_fails_issuance_conformance() {
     let ports = ControlledSubscriptionPorts::allowing();
     ports.use_fixed_credentials();
     let context = trusted_context(ports);
-    let service = SubscriptionService::new(key_ring());
-    service
+    let first_facade = SubscriptionService::new(key_ring());
+    let second_facade = SubscriptionService::new(key_ring());
+    first_facade
         .issue(
             &context,
             issue_request(UnixMillis::new(5_000)),
@@ -981,17 +1356,49 @@ async fn fixed_global_or_repeated_credential_fails_issuance_conformance() {
         .expect("first unique registration of provider token");
 
     assert_eq!(
-        service
+        second_facade
             .issue(
                 &context,
                 issue_request(UnixMillis::new(5_000)),
                 UnixMillis::new(1_001),
             )
             .await
-            .expect_err("fixed global credential must fail provider conformance")
+            .expect_err("shared provider must reject a fixed global credential")
             .kind(),
         SubscriptionErrorKind::InvalidCredential
     );
+}
+
+#[tokio::test]
+async fn fixed_global_provider_cannot_commit_an_atomic_successor_collision() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    ports.use_fixed_credentials();
+    let context = trusted_context(ports);
+    let service = SubscriptionService::new(key_ring());
+    let issued = service
+        .issue(
+            &context,
+            issue_request(UnixMillis::new(5_000)),
+            UnixMillis::new(1_000),
+        )
+        .await
+        .expect("first fixed credential is registered once");
+
+    for now in [UnixMillis::new(1_050), UnixMillis::new(1_060)] {
+        assert_eq!(
+            service
+                .connect(
+                    &context,
+                    issued.descriptor(),
+                    issued.transport_credential(),
+                    now,
+                )
+                .await
+                .expect_err("fixed successor collision must fail without consuming predecessor")
+                .kind(),
+            SubscriptionErrorKind::CredentialUnavailable
+        );
+    }
 }
 
 #[tokio::test]

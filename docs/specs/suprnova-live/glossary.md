@@ -379,9 +379,17 @@ the current component contract and stream registration are re-resolved at each
 boundary, and only the host continuity authority supplies the issuance
 baseline. Transport credentials remain separately secret, descriptor-scoped,
 operation-scoped, expiring, uniquely minted, and atomically single-use when
-required; Connect consumption rotates to Renew and Renew consumption rotates to
-Connect.
+required. One host-owned transaction consumes Connect and persists Renew, or
+consumes Renew and persists Connect, after all non-mutating checks succeed.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
+
+**Credential rotation uncertainty**:
+A subscription credential rotation that committed predecessor consumption and
+successor persistence but lost the successor response. The predecessor cannot
+replay and the undisclosed successor cannot be recovered; the client obtains a
+freshly issued subscription and credential. This is not an idempotent outcome
+record or permission to retry the predecessor.
+_Avoid_: retryable provider failure, reusable credential, Task 3 sequence result
 
 **Document transport**:
 One physical SSE or WebSocket connection owned by a browser document for a

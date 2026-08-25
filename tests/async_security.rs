@@ -4,8 +4,8 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use suprnova_live::async_updates::{
-    AuthorizationMemo, SubscriptionErrorKind, TopicName, TransportCredential,
-    TrustedMountParameters,
+    AuthorizationMemo, SubscriptionCredentialRotationOutcome, SubscriptionErrorKind, TopicName,
+    TransportCredential, TrustedMountParameters,
 };
 use suprnova_live::crypto::{KeyErrorKind, KeyRecord, RootKey, SnapshotKeyRing, SnapshotPurpose};
 use suprnova_live::identity::{KeyId, UnixMillis};
@@ -163,6 +163,16 @@ fn transport_credential_has_only_an_authority_bearing_accessor_and_redacted_debu
         CREDENTIAL_SENTINEL.as_bytes()
     );
     assert!(!format!("{credential:?}").contains(CREDENTIAL_SENTINEL));
+}
+
+#[test]
+fn atomic_rotation_outcome_never_formats_the_successor_credential() {
+    let outcome = SubscriptionCredentialRotationOutcome::Rotated(
+        TransportCredential::from_host_authority_bearer(CREDENTIAL_SENTINEL.as_bytes().to_vec())
+            .expect("credential"),
+    );
+
+    assert!(!format!("{outcome:?}").contains(CREDENTIAL_SENTINEL));
 }
 
 #[test]

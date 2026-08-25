@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -49,15 +48,6 @@ pub enum SubscriptionAuthorizationDecision {
     Allow,
     /// Current principal or resource policy denies this boundary.
     Deny,
-}
-
-/// Closed host result for a descriptor-scoped transport credential.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubscriptionCredentialDecision {
-    /// The separate secret is valid for exactly this signed descriptor binding.
-    Accept,
-    /// The secret is missing, revoked, expired, or bound elsewhere.
-    Reject,
 }
 
 /// Opaque stable digest of one exact signed descriptor.
@@ -630,6 +620,66 @@ impl fmt::Debug for SubscriptionCredentialRequest<'_> {
     }
 }
 
+/// Exact predecessor and successor bindings for one atomic credential rotation.
+#[derive(Clone, Copy)]
+pub struct SubscriptionCredentialRotationRequest<'a> {
+    predecessor: SubscriptionCredentialRequest<'a>,
+    successor: SubscriptionCredentialRequest<'a>,
+}
+
+impl<'a> SubscriptionCredentialRotationRequest<'a> {
+    fn new(
+        predecessor: SubscriptionCredentialRequest<'a>,
+        successor: SubscriptionCredentialRequest<'a>,
+    ) -> Self {
+        Self {
+            predecessor,
+            successor,
+        }
+    }
+
+    /// Returns the exact presented operation, binding, scope, expiry, and time.
+    #[must_use]
+    pub const fn predecessor(self) -> SubscriptionCredentialRequest<'a> {
+        self.predecessor
+    }
+
+    /// Returns the exact successor operation, binding, scope, expiry, and time.
+    #[must_use]
+    pub const fn successor(self) -> SubscriptionCredentialRequest<'a> {
+        self.successor
+    }
+}
+
+impl fmt::Debug for SubscriptionCredentialRotationRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<SubscriptionCredentialRotationRequest:redacted>")
+    }
+}
+
+/// Closed host result for one atomic credential consume-and-rotate boundary.
+pub enum SubscriptionCredentialRotationOutcome {
+    /// The predecessor was consumed and this unique successor was persisted atomically.
+    Rotated(TransportCredential),
+    /// The predecessor or requested successor binding was invalid; nothing changed.
+    Reject,
+    /// The provider failed and guarantees the predecessor remains valid.
+    Failed,
+    /// Rotation committed but the successor response was lost and cannot be recovered.
+    Uncertain,
+}
+
+impl fmt::Debug for SubscriptionCredentialRotationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rotated(_) => formatter.write_str("<CredentialRotation:rotated:redacted>"),
+            Self::Reject => formatter.write_str("<CredentialRotation:reject>"),
+            Self::Failed => formatter.write_str("<CredentialRotation:failed>"),
+            Self::Uncertain => formatter.write_str("<CredentialRotation:uncertain>"),
+        }
+    }
+}
+
 /// Host-owned store or issuer for descriptor-scoped non-loggable credentials.
 pub trait SubscriptionCredentialPort: Send + Sync {
     /// Mints a unique, cryptographically unpredictable secret bound to the exact descriptor.
@@ -641,15 +691,19 @@ pub trait SubscriptionCredentialPort: Send + Sync {
         request: SubscriptionCredentialRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<TransportCredential, SubscriptionError>>;
 
-    /// Atomically verifies and consumes a presented operation-scoped secret.
+    /// Atomically consumes the predecessor and persists one unique successor.
     ///
-    /// The host credential authority owns replay prevention. A successful
-    /// consume must make every later consume of the same bearer fail across
-    /// all processes and restarts sharing that authority.
-    fn verify_and_consume<'a>(
+    /// The host credential authority owns uniqueness and replay prevention for
+    /// its deployment profile across processes and restarts. `Rotated` means
+    /// predecessor consumption and unpredictable successor persistence committed
+    /// together. `Reject` makes no mutation because a binding was invalid;
+    /// `Failed` leaves a previously valid predecessor valid. `Uncertain` means
+    /// rotation committed but the successor response was lost; predecessor replay
+    /// must fail and the client must obtain a freshly issued subscription.
+    fn consume_and_rotate<'a>(
         &'a self,
-        request: SubscriptionCredentialRequest<'a>,
-    ) -> SubscriptionFuture<'a, Result<SubscriptionCredentialDecision, SubscriptionError>>;
+        request: SubscriptionCredentialRotationRequest<'a>,
+    ) -> SubscriptionFuture<'a, SubscriptionCredentialRotationOutcome>;
 }
 
 /// Non-authoritative bounded inputs selecting one current registered stream.
@@ -741,7 +795,6 @@ impl fmt::Debug for AuthorizedSubscription {
 /// Trusted issue/connect/renew coordinator over host-owned current policy.
 pub struct SubscriptionService {
     codec: SubscriptionDescriptorCodec,
-    last_issued_credential: Mutex<Option<[u8; 32]>>,
 }
 
 impl SubscriptionService {
@@ -750,7 +803,6 @@ impl SubscriptionService {
     pub const fn new(keys: SnapshotKeyRing) -> Self {
         Self {
             codec: SubscriptionDescriptorCodec::new(keys),
-            last_issued_credential: Mutex::new(None),
         }
     }
 
@@ -808,7 +860,6 @@ impl SubscriptionService {
                 now,
             ))
             .await?;
-        self.reject_immediately_repeated_credential(&credential)?;
         Ok(IssuedSubscription {
             descriptor,
             transport_credential: credential,
@@ -834,16 +885,6 @@ impl SubscriptionService {
             .await?;
         let credential_scope =
             SubscriptionCredentialScope::from_current(context, verified.claims());
-        verify_credential(
-            context,
-            SubscriptionAuthorizationOperation::Connect,
-            &binding,
-            &credential_scope,
-            verified.expires_at(),
-            now,
-            credential,
-        )
-        .await?;
         authorize(
             context,
             SubscriptionAuthorizationRequest::new(
@@ -854,20 +895,27 @@ impl SubscriptionService {
             ),
         )
         .await?;
-        let credentials = context
-            .capabilities()
-            .subscription_credentials()
-            .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
-        let renewal_credential = credentials
-            .issue(SubscriptionCredentialRequest::issue(
-                SubscriptionAuthorizationOperation::Renew,
-                &binding,
-                &credential_scope,
-                verified.expires_at(),
-                now,
-            ))
-            .await?;
-        self.reject_immediately_repeated_credential(&renewal_credential)?;
+        let renewal_credential = consume_and_rotate_credential(
+            context,
+            SubscriptionCredentialRotationRequest::new(
+                SubscriptionCredentialRequest::verify(
+                    SubscriptionAuthorizationOperation::Connect,
+                    &binding,
+                    &credential_scope,
+                    verified.expires_at(),
+                    now,
+                    credential,
+                ),
+                SubscriptionCredentialRequest::issue(
+                    SubscriptionAuthorizationOperation::Renew,
+                    &binding,
+                    &credential_scope,
+                    verified.expires_at(),
+                    now,
+                ),
+            ),
+        )
+        .await?;
         Ok(AuthorizedSubscription {
             verified,
             renewal_credential,
@@ -896,16 +944,6 @@ impl SubscriptionService {
             )
             .await?;
         let old_scope = SubscriptionCredentialScope::from_current(context, verified.claims());
-        verify_credential(
-            context,
-            SubscriptionAuthorizationOperation::Renew,
-            &old_binding,
-            &old_scope,
-            verified.expires_at(),
-            now,
-            credential,
-        )
-        .await?;
         authorize(
             context,
             SubscriptionAuthorizationRequest::new(
@@ -932,20 +970,27 @@ impl SubscriptionService {
         let descriptor = self.codec.sign(&claims, now)?;
         let binding = SubscriptionBinding::from_descriptor(&descriptor)?;
         let credential_scope = SubscriptionCredentialScope::from_current(context, &claims);
-        let credentials = context
-            .capabilities()
-            .subscription_credentials()
-            .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
-        let credential = credentials
-            .issue(SubscriptionCredentialRequest::issue(
-                SubscriptionAuthorizationOperation::Connect,
-                &binding,
-                &credential_scope,
-                expires_at,
-                now,
-            ))
-            .await?;
-        self.reject_immediately_repeated_credential(&credential)?;
+        let credential = consume_and_rotate_credential(
+            context,
+            SubscriptionCredentialRotationRequest::new(
+                SubscriptionCredentialRequest::verify(
+                    SubscriptionAuthorizationOperation::Renew,
+                    &old_binding,
+                    &old_scope,
+                    verified.expires_at(),
+                    now,
+                    credential,
+                ),
+                SubscriptionCredentialRequest::issue(
+                    SubscriptionAuthorizationOperation::Connect,
+                    &binding,
+                    &credential_scope,
+                    expires_at,
+                    now,
+                ),
+            ),
+        )
+        .await?;
         Ok(IssuedSubscription {
             descriptor,
             transport_credential: credential,
@@ -972,24 +1017,6 @@ impl SubscriptionService {
             return Err(SubscriptionError::new(SubscriptionErrorKind::ScopeMismatch));
         }
         Ok((verified, SubscriptionBinding::from_descriptor(descriptor)?))
-    }
-
-    fn reject_immediately_repeated_credential(
-        &self,
-        credential: &TransportCredential,
-    ) -> Result<(), SubscriptionError> {
-        let digest: [u8; 32] = Sha256::digest(credential.expose_authorization_bearer()).into();
-        let mut previous = self
-            .last_issued_credential
-            .lock()
-            .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
-        if previous.as_ref() == Some(&digest) {
-            return Err(SubscriptionError::new(
-                SubscriptionErrorKind::InvalidCredential,
-            ));
-        }
-        *previous = Some(digest);
-        Ok(())
     }
 }
 
@@ -1123,28 +1150,24 @@ async fn authorize(
     }
 }
 
-async fn verify_credential(
+async fn consume_and_rotate_credential(
     context: &TrustedLiveRequestContext,
-    operation: SubscriptionAuthorizationOperation,
-    binding: &SubscriptionBinding,
-    scope: &SubscriptionCredentialScope,
-    expires_at: UnixMillis,
-    now: UnixMillis,
-    credential: &TransportCredential,
-) -> Result<(), SubscriptionError> {
+    request: SubscriptionCredentialRotationRequest<'_>,
+) -> Result<TransportCredential, SubscriptionError> {
     let credentials = context
         .capabilities()
         .subscription_credentials()
         .ok_or_else(|| SubscriptionError::new(SubscriptionErrorKind::CredentialUnavailable))?;
-    match credentials
-        .verify_and_consume(SubscriptionCredentialRequest::verify(
-            operation, binding, scope, expires_at, now, credential,
-        ))
-        .await?
-    {
-        SubscriptionCredentialDecision::Accept => Ok(()),
-        SubscriptionCredentialDecision::Reject => Err(SubscriptionError::new(
+    match credentials.consume_and_rotate(request).await {
+        SubscriptionCredentialRotationOutcome::Rotated(successor) => Ok(successor),
+        SubscriptionCredentialRotationOutcome::Reject => Err(SubscriptionError::new(
             SubscriptionErrorKind::InvalidCredential,
+        )),
+        SubscriptionCredentialRotationOutcome::Failed => Err(SubscriptionError::new(
+            SubscriptionErrorKind::CredentialUnavailable,
+        )),
+        SubscriptionCredentialRotationOutcome::Uncertain => Err(SubscriptionError::new(
+            SubscriptionErrorKind::CredentialRotationUncertain,
         )),
     }
 }

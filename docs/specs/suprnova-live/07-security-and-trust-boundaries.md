@@ -256,11 +256,15 @@ production feature or public convenience constructor.
   credentials bind the exact descriptor, subscription scope, exclusive expiry,
   and Connect or Renew operation. The host continuity authority, never a public
   issue request, supplies the signed baseline. Host credential providers mint
-  unique unpredictable bearers and atomically consume them across processes and
-  restarts before rotating Connect to Renew or Renew to Connect. Trusted
-  registration enforces the full canonical claims budget; mount-topic segments
-  reject empty, traversal, encoded, and multi-segment forms; all
-  credential-bearing debug surfaces are bounded and redacted.
+  unique unpredictable bearers. After descriptor, registry, scope, expiry,
+  signing, and current-policy checks, one distributed/restart-safe provider
+  transaction consumes Connect and persists Renew or consumes Renew and persists
+  Connect. Provider failure leaves the predecessor valid. If rotation commits
+  but the response is lost, predecessor replay fails closed and recovery requires
+  a freshly issued subscription. Trusted registration enforces the full
+  canonical claims budget; mount-topic segments reject empty, traversal,
+  encoded, and multi-segment forms; all credential-bearing debug surfaces are
+  bounded and redacted.
 - 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
   pre-upgrade `Origin` validation for cookie-authorized transports. Explicit
   cross-origin use requires a non-wildcard allowlist plus separate credential

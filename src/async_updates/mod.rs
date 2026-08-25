@@ -8,10 +8,11 @@ pub use authorization::{
     AuthoritativeStreamPosition, AuthorizedSubscription, CurrentSubscriptionRegistration,
     IssuedSubscription, SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
     SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialDecision,
-    SubscriptionCredentialPort, SubscriptionCredentialRequest, SubscriptionCredentialScope,
-    SubscriptionFuture, SubscriptionIssueRequest, SubscriptionRegistryPort,
-    SubscriptionRegistryRequest, SubscriptionService, TrustedMountParameters,
+    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionCredentialRequest, SubscriptionCredentialRotationOutcome,
+    SubscriptionCredentialRotationRequest, SubscriptionCredentialScope, SubscriptionFuture,
+    SubscriptionIssueRequest, SubscriptionRegistryPort, SubscriptionRegistryRequest,
+    SubscriptionService, TrustedMountParameters,
 };
 
 pub use metadata::{

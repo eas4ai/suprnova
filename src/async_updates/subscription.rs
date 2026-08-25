@@ -92,6 +92,8 @@ pub enum SubscriptionErrorKind {
     AuthorizationDenied,
     /// The separate transport credential service was unavailable.
     CredentialUnavailable,
+    /// Credential rotation committed but the successor response was lost.
+    CredentialRotationUncertain,
     /// The separate transport credential was invalid for this descriptor binding.
     InvalidCredential,
     /// A trusted request context was expired before subscription work.
@@ -117,6 +119,7 @@ impl SubscriptionErrorKind {
             Self::AuthorizationUnavailable => "subscription_authorization_unavailable",
             Self::AuthorizationDenied => "subscription_authorization_denied",
             Self::CredentialUnavailable => "transport_credential_unavailable",
+            Self::CredentialRotationUncertain => "transport_credential_rotation_uncertain",
             Self::InvalidCredential => "invalid_transport_credential",
             Self::ContextExpired => "subscription_context_expired",
             Self::UnregisteredSubscription => "unregistered_subscription",
