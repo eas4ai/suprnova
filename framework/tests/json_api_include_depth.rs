@@ -255,3 +255,32 @@ async fn the_most_recent_setter_call_wins() {
 
     max_relationship_depth(DEFAULT_MAX_RELATIONSHIP_DEPTH);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_collection_truncates_the_same_way_a_single_resource_does() {
+    max_relationship_depth(2);
+    assert_eq!(current_max_relationship_depth(), 2);
+
+    // Two chains of different lengths, both over the cap. Without
+    // truncation the deeper one alone contributes six included resources.
+    let posts = vec![nested_post(3), nested_post(2)];
+    let set = RequestIncludeSet::from_query("include=author.posts.author.posts.author.posts");
+    let body = scope_include_set(set, async move {
+        let resp = Resource::collection(posts).render().await.expect("render");
+        assert_eq!(resp.status_code(), 200);
+        serde_json::from_slice::<Value>(resp.body()).expect("json body")
+    })
+    .await;
+
+    assert_eq!(
+        included_pairs(&body),
+        vec![
+            ("authors".to_string(), "1".to_string()),
+            ("posts".to_string(), "1".to_string()),
+        ],
+        "Resource::collection walks the same capped tree as Resource::single"
+    );
+
+    max_relationship_depth(DEFAULT_MAX_RELATIONSHIP_DEPTH);
+}

@@ -270,7 +270,7 @@ relationships at all.
 
 ### Why Suprnova diverges
 
-Two visible divergences from Laravel's `JsonApiResource`:
+Three visible divergences from Laravel's `JsonApiResource`:
 
 1. **Strict default-deny for `?include=`.** Laravel's resource layer silently
    ignores include paths that don't resolve. Suprnova rejects them with a
@@ -284,6 +284,12 @@ Two visible divergences from Laravel's `JsonApiResource`:
    lifecycle, so the status is set on the response object itself -
    `.created()` when you mean it, `.status(204)` when the response is empty,
    and so on. A single mutator stays honest under any flow.
+
+3. **A depth cap of `0` turns includes off entirely.** Laravel clamps only
+   the tail of a path, after the leading segment has already been split
+   off, so its `0` still emits the first hop. Suprnova truncates the whole
+   path, so `max_relationship_depth(0)` means no relationships at all - see
+   Depth cap above.
 
 ## Pagination
 

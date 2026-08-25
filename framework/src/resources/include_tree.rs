@@ -153,6 +153,19 @@ mod tests {
     }
 
     #[test]
+    fn a_path_exactly_as_long_as_the_cap_keeps_every_segment() {
+        let tree = IncludeTree::from_include_set_with_depth(
+            &set(&["author.posts.author.posts.author"]),
+            5,
+        );
+        assert_eq!(
+            depth_of(&tree, &["author", "posts", "author", "posts", "author"]),
+            5,
+            "a path exactly at the cap is not truncated"
+        );
+    }
+
+    #[test]
     fn a_path_longer_than_the_cap_is_truncated() {
         let tree = IncludeTree::from_include_set_with_depth(
             &set(&["author.posts.author.posts.author.posts"]),
