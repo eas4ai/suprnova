@@ -409,6 +409,18 @@ position commit; it is not physical transport membership or a caller-markable
 commit token.
 _Avoid_: async envelope context, reusable membership token, transport handle, success flag
 
+**Transport membership authority**:
+The fresh host-owned decision consumed at every external SSE/WebSocket logical
+membership add or remove. The host re-resolves the current component/identity
+authorization memo, active subscription, stream, resolved topics, full event
+contracts, canonical registered modes, and exact document/control policy; the
+framework independently compares those facts to the descriptor-bound request
+and rechecks exclusive expiry. Add performs the check before source work and
+again after asynchronous source establishment immediately before commit. It is
+not the subscription descriptor, browser control record, document transport
+handle, physical adapter kind, or a reusable caller-constructible token.
+_Avoid_: authorized transport token, document-handle authority, cached membership check, mode hint
+
 **Asynchronous event envelope**:
 The independently versioned canonical bounded message that binds an active
 subscription ID, registered stream, monotonic position, and one closed

@@ -361,6 +361,20 @@ policy/signing checks before mutation, operation rotation, committed-response
 loss recovery through fresh issuance, and shared authority across independent
 service facades.
 
+Transport conformance is one shared semantic assertion suite invoked through
+two adapter factories, not a common document-session test followed by codec
+smoke tests. The SSE factory establishes the production response contract,
+performs authenticated same-origin ordinary HTTP membership control, and emits
+one-way canonical SSE records. The WebSocket factory performs strict
+pre-authentication origin upgrade, round-trips exact-key subscribe/unsubscribe
+controls, and emits/decodes canonical text-envelope frames. Adapter-tagged
+counters prove both factories ran baseline/replay/order/routing,
+duplicate/gap/no-apply, heartbeat/completion/errors, cancellation, authority
+loss, membership/limits, slow-client bounds, removal, idempotent close, and
+controlled shutdown cases. Injected clocks and subscription barriers cover
+expiry/revocation/mode drift before and during source establishment without
+sleeps, including exact once-only disposal after a failed post-await check.
+
 The shared manifest-driven corpus advances to `fixtures/v4/` for promoted
 `live:upload`, `live:progress`, `live:poll`, and `live:stream` grammar,
 capability negotiation, independently versioned upload/event envelopes,
@@ -448,6 +462,15 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Refactored Task 4 transport conformance so the complete shared
+  semantic suite executes through both genuine adapter factories. SSE exercises
+  its same-origin HTTP control and one-way record path; WebSocket exercises
+  strict origin upgrade plus control/envelope encode/decode. Adapter-tagged case,
+  control, connection, and wire counters prevent one implementation from being a
+  codec-only passenger. Controlled barriers cover preflight and post-subscribe
+  expiry, revocation, authorization-scope and same-name mode drift, once-only
+  cleanup, duplicate host-snapshot acceptance, and unauthorized external removal
+  without sleeps.
 - 2026-08-25 -- Added deterministic shared transport conformance for signed
   baselines, contiguous replay, ordered multiplexed routing, Task 3
   duplicate/gap behavior, heartbeat/completion/error envelopes, cancellation,

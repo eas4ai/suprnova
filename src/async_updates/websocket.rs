@@ -273,12 +273,7 @@ impl WebSocketCodec {
         frame: WebSocketFrame<'_>,
         context: &AsyncEnvelopeContext,
     ) -> Result<AsyncEnvelope, AsyncTransportError> {
-        let payload = text_payload(frame)?;
-        if payload.len() > MAX_WEBSOCKET_ENVELOPE_BYTES {
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::FrameTooLarge,
-            ));
-        }
+        let payload = text_payload(frame, MAX_WEBSOCKET_ENVELOPE_BYTES)?;
         decode_async_envelope(payload, &self.envelope_limits, context)
             .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))
     }
@@ -300,12 +295,7 @@ impl WebSocketCodec {
         frame: WebSocketFrame<'_>,
         document: &DocumentTransportSession,
     ) -> Result<WebSocketControlRecord, AsyncTransportError> {
-        let payload = text_payload(frame)?;
-        if payload.len() > MAX_WEBSOCKET_CONTROL_BYTES {
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::FrameTooLarge,
-            ));
-        }
+        let payload = text_payload(frame, MAX_WEBSOCKET_CONTROL_BYTES)?;
         let limits = control_limits()?;
         let canonical = parse_canonical_value(payload, &limits).map_err(|_| invalid_envelope())?;
         let recoded = to_canonical_bytes(&canonical, &limits).map_err(|_| invalid_envelope())?;
@@ -365,12 +355,24 @@ impl ControlWire {
     }
 }
 
-fn text_payload(frame: WebSocketFrame<'_>) -> Result<&[u8], AsyncTransportError> {
+fn text_payload(
+    frame: WebSocketFrame<'_>,
+    maximum_bytes: usize,
+) -> Result<&[u8], AsyncTransportError> {
     match frame {
         WebSocketFrame::Text {
             payload,
             final_fragment: true,
-        } if std::str::from_utf8(payload).is_ok() => Ok(payload),
+        } => {
+            if payload.len() > maximum_bytes {
+                return Err(AsyncTransportError::new(
+                    AsyncTransportErrorKind::FrameTooLarge,
+                ));
+            }
+            std::str::from_utf8(payload)
+                .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::UnsupportedFrame))?;
+            Ok(payload)
+        }
         WebSocketFrame::Text { .. }
         | WebSocketFrame::Binary(_)
         | WebSocketFrame::Continuation(_) => Err(AsyncTransportError::new(

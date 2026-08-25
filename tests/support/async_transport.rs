@@ -4,12 +4,14 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Waker;
 
 use suprnova_live::async_updates::{
     AsyncEnvelope, AsyncEventSession, AsyncEventSource, AsyncMembershipRegistryPort,
-    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AsyncTransportError,
+    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AsyncTransportAuthorityPort,
+    AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
     AsyncTransportErrorKind, AsyncTransportFuture, AuthoritativeStreamPosition,
     AuthorizedSubscription, AuthorizedTransportSubscription, BoundedEventContracts,
     BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics,
@@ -22,7 +24,8 @@ use suprnova_live::async_updates::{
     SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
     SubscriptionError, SubscriptionId, SubscriptionIssueRequest, SubscriptionMetadata,
     SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
-    SubscriptionService, TopicName, TransportCredential, TrustedMountParameters, VerifiedOrigin,
+    SubscriptionService, TopicName, TransportCredential, TransportMembershipOperation,
+    TrustedMountParameters, VerifiedOrigin,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
@@ -122,10 +125,17 @@ impl SubscriptionCredentialPort for SubscriptionFixturePorts {
 /// Current host membership registry used by transport admission and sequence tests.
 pub struct MembershipRegistry {
     active: AtomicBool,
+    now: AtomicU64,
+    allow_subscribe: AtomicBool,
+    allow_unsubscribe: AtomicBool,
+    accept_twice: AtomicBool,
     subscriptions: Mutex<Vec<SubscriptionId>>,
     stream: StreamName,
+    topics: BoundedTopics,
     events: BoundedEventContracts,
     signals: BoundedPresentationSignalContracts,
+    modes: Mutex<SubscriptionModes>,
+    authorization_memo: Mutex<suprnova_live::async_updates::AuthorizationMemo>,
 }
 
 impl MembershipRegistry {
@@ -140,6 +150,41 @@ impl MembershipRegistry {
     /// Revokes every logical membership without changing descriptor bytes.
     pub fn revoke(&self) {
         self.active.store(false, Ordering::Release);
+    }
+
+    /// Advances deterministic transport time without sleeping.
+    pub fn set_now(&self, now: UnixMillis) {
+        self.now.store(now.get(), Ordering::Release);
+    }
+
+    /// Replaces the same-name current registration's canonical transport modes.
+    pub fn set_modes(&self, modes: Vec<SubscriptionMode>) {
+        *self.modes.lock().expect("membership mode lock") =
+            SubscriptionModes::new(modes).expect("current modes");
+    }
+
+    /// Revokes browser-initiated removal while preserving internal retirement.
+    pub fn deny_unsubscribe(&self) {
+        self.allow_unsubscribe.store(false, Ordering::Release);
+    }
+
+    /// Makes the trusted-port fixture attempt two current-snapshot acceptances.
+    pub fn accept_twice(&self) {
+        self.accept_twice.store(true, Ordering::Release);
+    }
+
+    /// Simulates a principal, session, tenant, or component-contract scope change.
+    pub fn change_authorization_scope(&self) {
+        *self
+            .authorization_memo
+            .lock()
+            .expect("authorization memo lock") =
+            suprnova_live::async_updates::AuthorizationMemo::parse("current-scope-revision")
+                .expect("authorization memo");
+    }
+
+    fn modes(&self) -> SubscriptionModes {
+        self.modes.lock().expect("membership mode lock").clone()
     }
 }
 
@@ -162,6 +207,61 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
     }
 }
 
+impl AsyncTransportAuthorityPort for MembershipRegistry {
+    fn now(&self) -> UnixMillis {
+        UnixMillis::new(self.now.load(Ordering::Acquire))
+    }
+
+    fn validate_current<'a>(
+        &'a self,
+        request: AsyncTransportAuthorityRequest<'a>,
+        validation: &'a mut AsyncTransportAuthorityValidation,
+    ) -> AsyncTransportFuture<'a, ()> {
+        Box::pin(async move {
+            let operation_allowed = match request.operation() {
+                TransportMembershipOperation::Subscribe => {
+                    self.allow_subscribe.load(Ordering::Acquire)
+                }
+                TransportMembershipOperation::Unsubscribe => {
+                    self.allow_unsubscribe.load(Ordering::Acquire)
+                }
+            };
+            let active = operation_allowed
+                && self.active.load(Ordering::Acquire)
+                && self
+                    .subscriptions
+                    .lock()
+                    .expect("membership registry lock")
+                    .iter()
+                    .any(|subscription| subscription == request.subscription());
+            if active {
+                validation.accept_current(
+                    &self
+                        .authorization_memo
+                        .lock()
+                        .expect("authorization memo lock"),
+                    &self.stream,
+                    &self.topics,
+                    &self.events,
+                    &self.modes(),
+                );
+                if self.accept_twice.load(Ordering::Acquire) {
+                    validation.accept_current(
+                        &self
+                            .authorization_memo
+                            .lock()
+                            .expect("authorization memo lock"),
+                        &self.stream,
+                        &self.topics,
+                        &self.events,
+                        &self.modes(),
+                    );
+                }
+            }
+        })
+    }
+}
+
 /// Complete Task 2 authorization fixture used by transport conformance.
 pub struct TransportFixture {
     /// Connect-authorized descriptor and renewal credential.
@@ -173,7 +273,26 @@ pub struct TransportFixture {
 impl TransportFixture {
     /// Builds a descriptor whose signed authoritative baseline is controlled.
     pub async fn new(baseline: StreamPosition) -> Self {
-        Self::new_with_scope(baseline, component_support::fixture_host_scope()).await
+        Self::new_with_scope(
+            baseline,
+            component_support::fixture_host_scope(),
+            SubscriptionModes::new(vec![
+                SubscriptionMode::ServerSentEvents,
+                SubscriptionMode::WebSocket,
+            ])
+            .expect("modes"),
+        )
+        .await
+    }
+
+    /// Builds a descriptor from a registration with exact current transport modes.
+    pub async fn new_with_modes(baseline: StreamPosition, modes: Vec<SubscriptionMode>) -> Self {
+        Self::new_with_scope(
+            baseline,
+            component_support::fixture_host_scope(),
+            SubscriptionModes::new(modes).expect("modes"),
+        )
+        .await
     }
 
     /// Builds a descriptor under a distinct deterministic authorization scope.
@@ -185,12 +304,25 @@ impl TransportFixture {
             Some(PrincipalFingerprint::from_bytes(&fingerprint).expect("principal")),
             Some(TenantFingerprint::from_bytes(&fingerprint).expect("tenant")),
         );
-        Self::new_with_scope(baseline, scope).await
+        Self::new_with_scope(
+            baseline,
+            scope,
+            SubscriptionModes::new(vec![
+                SubscriptionMode::ServerSentEvents,
+                SubscriptionMode::WebSocket,
+            ])
+            .expect("modes"),
+        )
+        .await
     }
 
-    async fn new_with_scope(baseline: StreamPosition, scope: HostScopeFacts) -> Self {
+    async fn new_with_scope(
+        baseline: StreamPosition,
+        scope: HostScopeFacts,
+        modes: SubscriptionModes,
+    ) -> Self {
         let ports = Arc::new(SubscriptionFixturePorts {
-            component: subscription_component_metadata(),
+            component: subscription_component_metadata(modes.clone()),
             parameters: TrustedMountParameters::new(Vec::new()).expect("mount parameters"),
             baseline,
         });
@@ -226,10 +358,19 @@ impl TransportFixture {
             .expect("authorized subscription");
         let registry = Arc::new(MembershipRegistry {
             active: AtomicBool::new(true),
+            now: AtomicU64::new(NOW.get()),
+            allow_subscribe: AtomicBool::new(true),
+            allow_unsubscribe: AtomicBool::new(true),
+            accept_twice: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
             stream: stream(),
+            topics: authorized.verified().claims().topics().clone(),
             events: authorized.verified().claims().events().clone(),
             signals: BoundedPresentationSignalContracts::new(Vec::new()).expect("empty signals"),
+            modes: Mutex::new(modes),
+            authorization_memo: Mutex::new(
+                authorized.verified().claims().authorization_memo().clone(),
+            ),
         });
         Self {
             authorized,
@@ -260,6 +401,8 @@ impl TransportFixture {
             subscription,
             self.registry.as_ref(),
             origin,
+            self.registry.modes(),
+            self.registry.clone(),
             now,
         )
     }
@@ -365,6 +508,67 @@ impl AsyncEventSource for ScriptedSource {
     }
 }
 
+/// Deterministic source that pauses subscription establishment at an await boundary.
+pub struct ControlledSubscribeSource {
+    observed: AtomicBool,
+    released: AtomicBool,
+    waiter: Mutex<Option<Waker>>,
+    close_count: Arc<AtomicUsize>,
+}
+
+impl ControlledSubscribeSource {
+    /// Creates one unreleased subscription barrier.
+    pub fn new() -> Self {
+        Self {
+            observed: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            waiter: Mutex::new(None),
+            close_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Returns whether source establishment reached the controlled await.
+    pub fn observed(&self) -> bool {
+        self.observed.load(Ordering::Acquire)
+    }
+
+    /// Releases the source establishment future and wakes its exact waiter.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        if let Some(waiter) = self.waiter.lock().expect("subscribe waiter lock").take() {
+            waiter.wake();
+        }
+    }
+
+    /// Returns how many opened sessions completed their close transition.
+    pub fn close_count(&self) -> usize {
+        self.close_count.load(Ordering::Acquire)
+    }
+}
+
+impl AsyncEventSource for ControlledSubscribeSource {
+    fn subscribe<'a>(
+        &'a self,
+        request: &'a AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<Box<dyn AsyncEventSession>, AsyncTransportError>> {
+        Box::pin(std::future::poll_fn(move |task| {
+            self.observed.store(true, Ordering::Release);
+            if !self.released.load(Ordering::Acquire) {
+                *self.waiter.lock().expect("subscribe waiter lock") = Some(task.waker().clone());
+                return std::task::Poll::Pending;
+            }
+            std::task::Poll::Ready(Ok(Box::new(ScriptedSession {
+                baseline: request.baseline(),
+                events: VecDeque::new(),
+                closed: false,
+                pending_first_close: false,
+                close_was_pending: false,
+                close_count: self.close_count.clone(),
+            }) as Box<dyn AsyncEventSession>))
+        }))
+    }
+}
+
 struct ScriptedSession {
     baseline: StreamPosition,
     events: VecDeque<SessionStep>,
@@ -439,7 +643,7 @@ pub fn stream() -> StreamName {
     StreamName::parse("orders").expect("stream")
 }
 
-fn subscription_component_metadata() -> ComponentMetadata {
+fn subscription_component_metadata(modes: SubscriptionModes) -> ComponentMetadata {
     let base = component_support::metadata();
     let event = EventMetadata::from_payload_with_contract::<OrdersUpdated>(
         EventSource::Stream,
@@ -457,11 +661,7 @@ fn subscription_component_metadata() -> ComponentMetadata {
             BrowserOperationName::parse(OrdersUpdated::NAME).expect("event name"),
         ])
         .expect("event names"),
-        SubscriptionModes::new(vec![
-            SubscriptionMode::ServerSentEvents,
-            SubscriptionMode::WebSocket,
-        ])
-        .expect("modes"),
+        modes,
         ReconnectPolicy::RefreshOnReconnect,
     );
     ComponentMetadata::new_with_async_contracts(

@@ -54,10 +54,12 @@ pub use subscription::{
     SubscriptionEventContract, TransportCredential, VerifiedSubscriptionDescriptor,
 };
 pub use transport::{
-    AsyncEventSession, AsyncEventSource, AsyncTransportError, AsyncTransportErrorKind,
-    AsyncTransportFuture, AuthorizedTransportSubscription, CloseDisposition,
-    DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
-    DocumentTransportSession, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, VerifiedOrigin,
+    AsyncEventSession, AsyncEventSource, AsyncTransportAuthorityPort,
+    AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
+    AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportSubscription,
+    CloseDisposition, DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
+    DocumentTransportSession, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, TransportMembershipOperation,
+    VerifiedOrigin,
 };
 pub use websocket::{
     AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,

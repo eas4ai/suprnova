@@ -5,6 +5,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::task::Poll;
 
 use base64::Engine as _;
@@ -14,7 +15,8 @@ use crate::identity::UnixMillis;
 
 use super::{
     AsyncEnvelope, AsyncEnvelopeContext, AsyncMembershipRegistryPort, AuthorizationMemo,
-    AuthorizedSubscription, StreamPosition, SubscriptionId, VerifiedSubscriptionDescriptor,
+    AuthorizedSubscription, BoundedEventContracts, BoundedTopics, StreamName, StreamPosition,
+    SubscriptionId, SubscriptionMode, SubscriptionModes, VerifiedSubscriptionDescriptor,
 };
 
 const MIN_DOCUMENT_HANDLE_BYTES: usize = 16;
@@ -284,6 +286,168 @@ pub enum DocumentTransportKind {
     WebSocket,
 }
 
+impl DocumentTransportKind {
+    const fn registration_mode(self) -> SubscriptionMode {
+        match self {
+            Self::ServerSentEvents => SubscriptionMode::ServerSentEvents,
+            Self::WebSocket => SubscriptionMode::WebSocket,
+        }
+    }
+}
+
+/// External browser-control operation whose authority must be current at consumption.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportMembershipOperation {
+    /// Add one logical subscription to the exact document transport.
+    Subscribe,
+    /// Remove one logical subscription from the exact document transport.
+    Unsubscribe,
+}
+
+/// Closed current facts a trusted host must re-evaluate for one control boundary.
+#[derive(Clone, Copy)]
+pub struct AsyncTransportAuthorityRequest<'a> {
+    operation: TransportMembershipOperation,
+    descriptor: &'a VerifiedSubscriptionDescriptor,
+    subscription: &'a SubscriptionId,
+    document_origin: &'a VerifiedOrigin,
+    document_kind: DocumentTransportKind,
+    document_handle: &'a DocumentTransportHandle,
+}
+
+impl<'a> AsyncTransportAuthorityRequest<'a> {
+    /// Returns the exact external membership operation being consumed.
+    #[must_use]
+    pub const fn operation(self) -> TransportMembershipOperation {
+        self.operation
+    }
+
+    /// Returns the previously verified signed descriptor for current comparison.
+    #[must_use]
+    pub const fn descriptor(self) -> &'a VerifiedSubscriptionDescriptor {
+        self.descriptor
+    }
+
+    /// Returns the exact signed logical routing identity.
+    #[must_use]
+    pub const fn subscription(self) -> &'a SubscriptionId {
+        self.subscription
+    }
+
+    /// Returns the exact normalized origin owning the physical document transport.
+    #[must_use]
+    pub const fn document_origin(self) -> &'a VerifiedOrigin {
+        self.document_origin
+    }
+
+    /// Returns the invoked adapter kind, which is compatibility rather than authority.
+    #[must_use]
+    pub const fn document_kind(self) -> DocumentTransportKind {
+        self.document_kind
+    }
+
+    /// Returns the correlation-only document handle for exact host control lookup.
+    #[must_use]
+    pub const fn document_handle(self) -> &'a DocumentTransportHandle {
+        self.document_handle
+    }
+}
+
+impl fmt::Debug for AsyncTransportAuthorityRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AsyncTransportAuthorityRequest")
+            .field("operation", &self.operation)
+            .field("subscription", &self.subscription)
+            .field("document_origin", &self.document_origin)
+            .field("document_kind", &self.document_kind)
+            .field("document_handle", &self.document_handle)
+            .field("descriptor", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Framework-owned comparison sink for a trusted current-authority lookup.
+///
+/// Hosts may call `accept_current` only after re-resolving the current component
+/// contract, registered stream/topics/events/modes, principal, session, tenant,
+/// aggregate authorization scope, and exact document membership/control policy.
+/// The authorization memo is Task 2's binding of component contract and host
+/// scope; the remaining values are compared independently here.
+pub struct AsyncTransportAuthorityValidation {
+    expected_memo: AuthorizationMemo,
+    expected_stream: StreamName,
+    expected_topics: BoundedTopics,
+    expected_events: BoundedEventContracts,
+    expected_modes: SubscriptionModes,
+    required_mode: SubscriptionMode,
+    outcome: Option<Result<(), AsyncTransportError>>,
+}
+
+impl AsyncTransportAuthorityValidation {
+    /// Accepts a coherent fresh host snapshot; stale or drifted facts stay closed.
+    pub fn accept_current(
+        &mut self,
+        authorization_memo: &AuthorizationMemo,
+        stream: &StreamName,
+        topics: &BoundedTopics,
+        events: &BoundedEventContracts,
+        modes: &SubscriptionModes,
+    ) -> bool {
+        if self.outcome.is_some() {
+            self.outcome = Some(Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            )));
+            return false;
+        }
+        let exact_current = authorization_memo == &self.expected_memo
+            && stream == &self.expected_stream
+            && topics == &self.expected_topics
+            && events == &self.expected_events
+            && modes == &self.expected_modes;
+        let outcome = if !exact_current {
+            Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ))
+        } else if !modes.as_slice().contains(&self.required_mode) {
+            Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::TransportMismatch,
+            ))
+        } else {
+            Ok(())
+        };
+        let accepted = outcome.is_ok();
+        self.outcome = Some(outcome);
+        accepted
+    }
+
+    fn finish(self) -> Result<(), AsyncTransportError> {
+        self.outcome.unwrap_or_else(|| {
+            Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ))
+        })
+    }
+}
+
+/// Trusted host port for fresh external membership authority and controlled time.
+///
+/// The port is called at every add/remove consumption boundary. A browser value,
+/// document handle, or retained request can never construct a reusable accepted
+/// guard. Internal completion, revocation cleanup, and shutdown do not use this
+/// external-control port and retain cleanup authority after credentials expire.
+pub trait AsyncTransportAuthorityPort: Send + Sync {
+    /// Returns current host time for exclusive descriptor-expiry enforcement.
+    fn now(&self) -> UnixMillis;
+
+    /// Re-evaluates all current registry, identity, and exact document-control facts.
+    fn validate_current<'a>(
+        &'a self,
+        request: AsyncTransportAuthorityRequest<'a>,
+        validation: &'a mut AsyncTransportAuthorityValidation,
+    ) -> AsyncTransportFuture<'a, ()>;
+}
+
 impl DocumentTransportLimits {
     /// Creates a non-zero limit no greater than the architecture ceiling.
     pub fn new(max_memberships: usize) -> Result<Self, AsyncTransportError> {
@@ -302,20 +466,29 @@ impl DocumentTransportLimits {
     }
 }
 
-/// Descriptor-bound authorization required to add or remove one logical membership.
+/// Descriptor-bound membership request that grants no reusable current authority.
 pub struct AuthorizedTransportSubscription {
     context: AsyncEnvelopeContext,
     verified: VerifiedSubscriptionDescriptor,
     origin: VerifiedOrigin,
+    authorized_modes: SubscriptionModes,
+    authority: Arc<dyn AsyncTransportAuthorityPort>,
 }
 
 impl AuthorizedTransportSubscription {
-    /// Binds Task 2 authorization to one active logical membership and exact origin.
+    /// Binds Task 2 authorization to one logical membership and exact origin.
+    ///
+    /// `authorized_modes` must come from the same trusted registered metadata
+    /// resolved for Task 2 authorization. Construction captures descriptor-bound
+    /// facts only; it does not replace the fresh authority-port checks performed
+    /// whenever an external add or remove consumes this request.
     pub fn new(
         authorized: &AuthorizedSubscription,
         subscription: SubscriptionId,
         registry: &dyn AsyncMembershipRegistryPort,
         origin: VerifiedOrigin,
+        authorized_modes: SubscriptionModes,
+        authority: Arc<dyn AsyncTransportAuthorityPort>,
         now: UnixMillis,
     ) -> Result<Self, AsyncTransportError> {
         if now >= authorized.verified().expires_at() {
@@ -329,6 +502,8 @@ impl AuthorizedTransportSubscription {
             context,
             verified: authorized.verified().clone(),
             origin,
+            authorized_modes,
+            authority,
         })
     }
 
@@ -358,6 +533,47 @@ impl AuthorizedTransportSubscription {
 
     fn authorization_memo(&self) -> &AuthorizationMemo {
         self.verified.claims().authorization_memo()
+    }
+
+    async fn validate_current(
+        &self,
+        document: &DocumentTransportSession,
+        operation: TransportMembershipOperation,
+    ) -> Result<(), AsyncTransportError> {
+        if self.authority.now() >= self.verified.expires_at() {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ));
+        }
+        let claims = self.verified.claims();
+        let mut validation = AsyncTransportAuthorityValidation {
+            expected_memo: claims.authorization_memo().clone(),
+            expected_stream: claims.stream().clone(),
+            expected_topics: claims.topics().clone(),
+            expected_events: claims.events().clone(),
+            expected_modes: self.authorized_modes.clone(),
+            required_mode: document.kind.registration_mode(),
+            outcome: None,
+        };
+        self.authority
+            .validate_current(
+                AsyncTransportAuthorityRequest {
+                    operation,
+                    descriptor: &self.verified,
+                    subscription: self.subscription(),
+                    document_origin: &document.origin,
+                    document_kind: document.kind,
+                    document_handle: &document.handle,
+                },
+                &mut validation,
+            )
+            .await;
+        if self.authority.now() >= self.verified.expires_at() {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ));
+        }
+        validation.finish()
     }
 }
 
@@ -486,12 +702,22 @@ impl DocumentTransportSession {
         authorization: AuthorizedTransportSubscription,
     ) -> Result<(), AsyncTransportError> {
         self.validate_add(&authorization)?;
+        authorization
+            .validate_current(self, TransportMembershipOperation::Subscribe)
+            .await?;
         let mut session = source.subscribe(&authorization).await?;
         if session.baseline() != authorization.baseline() {
             let _ = session.close().await;
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::BaselineMismatch,
             ));
+        }
+        if let Err(error) = authorization
+            .validate_current(self, TransportMembershipOperation::Subscribe)
+            .await
+        {
+            let _ = session.close().await;
+            return Err(error);
         }
         if self.authorization_scope.is_none() {
             self.authorization_scope = Some(authorization.authorization_memo().clone());
@@ -511,6 +737,9 @@ impl DocumentTransportSession {
         authorization: &AuthorizedTransportSubscription,
     ) -> Result<CloseDisposition, AsyncTransportError> {
         self.validate_common(authorization)?;
+        authorization
+            .validate_current(self, TransportMembershipOperation::Unsubscribe)
+            .await?;
         let Some(index) = self
             .memberships
             .iter()

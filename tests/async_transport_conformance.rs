@@ -8,20 +8,22 @@ use proptest::prelude::*;
 use suprnova_live::async_updates::{
     AsyncCodecLimits, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
     AsyncEventSession, AsyncEventSource, AsyncPayload, AsyncTransportErrorKind,
-    AsyncTransportFuture, CloseDisposition, CompletionReason, DocumentTransportHandle,
-    DocumentTransportKind, DocumentTransportLimits, DocumentTransportSession, Heartbeat,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, SequenceDegradation,
-    SequenceDisposition, SequenceMachine, SseEncoder, SseMembershipControl, SseResponseContract,
-    StreamErrorCode, VerifiedOrigin, WebSocketAuthentication, WebSocketCodec,
-    WebSocketControlRecord, WebSocketFrame, WebSocketMembershipControl, WebSocketOriginPolicy,
-    decode_async_envelope,
+    AsyncTransportFuture, AuthorizedTransportSubscription, CloseDisposition, CompletionReason,
+    DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
+    DocumentTransportSession, Heartbeat, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh,
+    SequenceDegradation, SequenceDisposition, SequenceMachine, SseEncoder, SseMembershipControl,
+    SseResponseContract, StreamErrorCode, SubscriptionMode, VerifiedOrigin,
+    WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
+    WebSocketMembershipControl, WebSocketOriginPolicy, decode_async_envelope,
 };
 use suprnova_live::identity::UnixMillis;
 
 #[path = "support/async_transport.rs"]
 mod support;
 
-use support::{ScriptItem, ScriptedSource, TransportFixture, position, subscription};
+use support::{
+    ControlledSubscribeSource, ScriptItem, ScriptedSource, TransportFixture, position, subscription,
+};
 
 #[test]
 fn task_four_transport_surface_is_present() {
@@ -360,6 +362,583 @@ impl AsyncEnvelopeDispatchPort for RecordingDispatcher {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdapterKind {
+    Sse,
+    WebSocket,
+}
+
+#[derive(Debug)]
+struct AdapterCoverage {
+    adapter: AdapterKind,
+    semantic_cases: usize,
+    connects: usize,
+    subscribe_controls: usize,
+    unsubscribe_controls: usize,
+    wire_records: usize,
+}
+
+impl AdapterCoverage {
+    fn new(adapter: AdapterKind) -> Self {
+        Self {
+            adapter,
+            semantic_cases: 0,
+            connects: 0,
+            subscribe_controls: 0,
+            unsubscribe_controls: 0,
+            wire_records: 0,
+        }
+    }
+
+    fn case(&mut self) {
+        self.semantic_cases += 1;
+    }
+}
+
+struct AdapterHarness {
+    adapter: AdapterKind,
+    origin: VerifiedOrigin,
+    handle: DocumentTransportHandle,
+    document: DocumentTransportSession,
+    websocket: WebSocketCodec,
+}
+
+impl AdapterHarness {
+    fn connect(
+        adapter: AdapterKind,
+        maximum_memberships: usize,
+        handle_byte: u8,
+        coverage: &mut AdapterCoverage,
+    ) -> Self {
+        let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+        let kind = match adapter {
+            AdapterKind::Sse => {
+                let headers = SseResponseContract::headers();
+                assert_eq!(
+                    headers[http::header::CACHE_CONTROL],
+                    "no-store, no-transform"
+                );
+                assert_eq!(
+                    headers[http::header::CONTENT_TYPE],
+                    "text/event-stream; charset=utf-8"
+                );
+                DocumentTransportKind::ServerSentEvents
+            }
+            AdapterKind::WebSocket => {
+                let policy = WebSocketOriginPolicy::new(origin.clone(), Vec::new())
+                    .expect("strict origin policy");
+                let origin_text = origin.to_string();
+                let upgrade = policy
+                    .authorize_upgrade(&[origin_text.as_str()], || {
+                        Ok(WebSocketAuthentication::Cookie(()))
+                    })
+                    .expect("origin validated before same-origin cookie authentication");
+                assert_eq!(upgrade.origin(), &origin);
+                assert!(!upgrade.is_cross_origin());
+                DocumentTransportKind::WebSocket
+            }
+        };
+        coverage.connects += 1;
+        let handle = DocumentTransportHandle::from_bytes(&[handle_byte; 16]).expect("handle");
+        let document = DocumentTransportSession::new(
+            origin.clone(),
+            kind,
+            handle.clone(),
+            DocumentTransportLimits::new(maximum_memberships).expect("limits"),
+        );
+        Self {
+            adapter,
+            origin,
+            handle,
+            document,
+            websocket: WebSocketCodec::v1(),
+        }
+    }
+
+    async fn subscribe(
+        &mut self,
+        source: &dyn AsyncEventSource,
+        authorization: AuthorizedTransportSubscription,
+        coverage: &mut AdapterCoverage,
+    ) -> Result<(), suprnova_live::async_updates::AsyncTransportError> {
+        coverage.subscribe_controls += 1;
+        match self.adapter {
+            AdapterKind::Sse => {
+                SseMembershipControl::subscribe(
+                    &mut self.document,
+                    &self.handle,
+                    &self.origin,
+                    source,
+                    authorization,
+                )
+                .await
+            }
+            AdapterKind::WebSocket => {
+                let control =
+                    WebSocketControlRecord::Subscribe(authorization.subscription().clone());
+                let encoded = self.websocket.encode_control(&control)?;
+                let decoded = self.websocket.decode_control(
+                    WebSocketFrame::Text {
+                        payload: &encoded,
+                        final_fragment: true,
+                    },
+                    &self.document,
+                )?;
+                WebSocketMembershipControl::subscribe(
+                    &mut self.document,
+                    &decoded,
+                    source,
+                    authorization,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn unsubscribe(
+        &mut self,
+        authorization: &AuthorizedTransportSubscription,
+        coverage: &mut AdapterCoverage,
+    ) -> Result<CloseDisposition, suprnova_live::async_updates::AsyncTransportError> {
+        coverage.unsubscribe_controls += 1;
+        match self.adapter {
+            AdapterKind::Sse => {
+                SseMembershipControl::unsubscribe(
+                    &mut self.document,
+                    &self.handle,
+                    &self.origin,
+                    authorization,
+                )
+                .await
+            }
+            AdapterKind::WebSocket => {
+                let control =
+                    WebSocketControlRecord::Unsubscribe(authorization.subscription().clone());
+                let encoded = self.websocket.encode_control(&control)?;
+                let decoded = self.websocket.decode_control(
+                    WebSocketFrame::Text {
+                        payload: &encoded,
+                        final_fragment: true,
+                    },
+                    &self.document,
+                )?;
+                WebSocketMembershipControl::unsubscribe(&mut self.document, &decoded, authorization)
+                    .await
+            }
+        }
+    }
+
+    async fn next_wire(
+        &mut self,
+        context: &suprnova_live::async_updates::AsyncEnvelopeContext,
+        coverage: &mut AdapterCoverage,
+    ) -> Result<Option<AsyncEnvelope>, suprnova_live::async_updates::AsyncTransportError> {
+        let Some(envelope) = self.document.next().await? else {
+            return Ok(None);
+        };
+        coverage.wire_records += 1;
+        let decoded = match self.adapter {
+            AdapterKind::Sse => {
+                let event = SseEncoder::encode_envelope(&envelope)?;
+                assert_eq!(event.event(), "suprnova-live-async");
+                decode_async_envelope(event.data(), &AsyncCodecLimits::v1(), context).map_err(
+                    |_| {
+                        suprnova_live::async_updates::AsyncTransportError::new(
+                            AsyncTransportErrorKind::InvalidEnvelope,
+                        )
+                    },
+                )?
+            }
+            AdapterKind::WebSocket => {
+                let encoded = self.websocket.encode_envelope(&envelope)?;
+                self.websocket.decode_envelope(
+                    WebSocketFrame::Text {
+                        payload: &encoded,
+                        final_fragment: true,
+                    },
+                    context,
+                )?
+            }
+        };
+        Ok(Some(decoded))
+    }
+}
+
+async fn assert_full_adapter_conformance(adapter: AdapterKind) -> AdapterCoverage {
+    let mut coverage = AdapterCoverage::new(adapter);
+
+    // Signed baseline, ordered replay, heartbeat, completion, and typed wire error.
+    coverage.case();
+    let fixture = TransportFixture::new(position(30, 40)).await;
+    let authorization = fixture.request(
+        subscription(70),
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+    );
+    let context = authorization.context().clone();
+    let source = ScriptedSource::new(vec![vec![
+        ScriptItem::Envelope(position(30, 41), AsyncPayload::Heartbeat(Heartbeat)),
+        ScriptItem::Envelope(
+            position(30, 42),
+            AsyncPayload::Complete(CompletionReason::StreamCompleted),
+        ),
+        ScriptItem::Envelope(
+            position(30, 43),
+            AsyncPayload::Error(StreamErrorCode::ReplayUnavailable),
+        ),
+        ScriptItem::End,
+    ]]);
+    let mut harness = AdapterHarness::connect(adapter, 2, 0x70, &mut coverage);
+    harness
+        .subscribe(&source, authorization, &mut coverage)
+        .await
+        .expect("adapter baseline connect");
+    let first = harness
+        .next_wire(&context, &mut coverage)
+        .await
+        .expect("heartbeat")
+        .expect("heartbeat envelope");
+    let second = harness
+        .next_wire(&context, &mut coverage)
+        .await
+        .expect("completion")
+        .expect("completion envelope");
+    let third = harness
+        .next_wire(&context, &mut coverage)
+        .await
+        .expect("typed error")
+        .expect("typed error envelope");
+    assert_eq!(first.position(), position(30, 41));
+    assert!(matches!(first.payload(), AsyncPayload::Heartbeat(_)));
+    assert!(matches!(second.payload(), AsyncPayload::Complete(_)));
+    assert!(matches!(third.payload(), AsyncPayload::Error(_)));
+    assert!(
+        harness
+            .next_wire(&context, &mut coverage)
+            .await
+            .expect("logical completion")
+            .is_none()
+    );
+    if adapter == AdapterKind::Sse {
+        assert_eq!(
+            SseEncoder::heartbeat_comment(),
+            b": suprnova-live heartbeat\n\n"
+        );
+    }
+
+    // Task 3 duplicate/gap authority remains independent after adapter decode.
+    coverage.case();
+    let fixture = TransportFixture::new(position(31, 10)).await;
+    let authorization = fixture.request(
+        subscription(71),
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+    );
+    let context = authorization.context().clone();
+    let source = ScriptedSource::new(vec![vec![
+        ScriptItem::Envelope(position(31, 11), AsyncPayload::Refresh(RegisteredRefresh)),
+        ScriptItem::Envelope(position(31, 11), AsyncPayload::Heartbeat(Heartbeat)),
+        ScriptItem::Envelope(position(31, 13), AsyncPayload::Refresh(RegisteredRefresh)),
+        ScriptItem::Envelope(position(31, 12), AsyncPayload::Refresh(RegisteredRefresh)),
+        ScriptItem::Envelope(position(31, 13), AsyncPayload::Heartbeat(Heartbeat)),
+    ]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x71, &mut coverage);
+    harness
+        .subscribe(&source, authorization, &mut coverage)
+        .await
+        .expect("adapter sequence membership");
+    let mut machine = SequenceMachine::new(&context);
+    let mut dispatcher = RecordingDispatcher::default();
+    let mut dispositions = Vec::new();
+    for _ in 0..3 {
+        let envelope = harness
+            .next_wire(&context, &mut coverage)
+            .await
+            .expect("adapter delivery")
+            .expect("envelope");
+        let guard = context
+            .admit(&envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
+            .expect("fresh admission");
+        dispositions.push(
+            machine
+                .dispatch(guard, UnixMillis::new(1_200), &mut dispatcher)
+                .expect("sequence classification"),
+        );
+    }
+    assert_eq!(
+        dispositions,
+        vec![
+            SequenceDisposition::Apply,
+            SequenceDisposition::IgnoreDuplicate,
+            SequenceDisposition::Degraded(SequenceDegradation::Gap),
+        ]
+    );
+    assert_eq!(dispatcher.applied, vec![position(31, 11)]);
+    let mut replay = Vec::new();
+    for _ in 0..2 {
+        replay.push(
+            harness
+                .next_wire(&context, &mut coverage)
+                .await
+                .expect("adapter replay delivery")
+                .expect("replay envelope"),
+        );
+    }
+    let replay_guards = replay
+        .iter()
+        .map(|envelope| {
+            context
+                .admit(envelope, fixture.registry.as_ref(), UnixMillis::new(1_200))
+                .expect("fresh replay admission")
+        })
+        .collect::<Vec<_>>();
+    let replay_outcome = machine
+        .recover_from_replay(replay_guards, UnixMillis::new(1_200), &mut dispatcher)
+        .expect("complete adapter replay");
+    assert_eq!(replay_outcome.applied(), 2);
+    assert_eq!(machine.current(), position(31, 13));
+    assert_eq!(
+        dispatcher.applied,
+        vec![position(31, 11), position(31, 12), position(31, 13)]
+    );
+
+    // Exact subscription routing is enforced before either adapter emits bytes.
+    coverage.case();
+    let fixture = TransportFixture::new(position(32, 0)).await;
+    let first = fixture.request(
+        subscription(72),
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+    );
+    let second = fixture.request(
+        subscription(73),
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+    );
+    let foreign = AsyncEnvelope::new(
+        second.context(),
+        position(32, 1),
+        AsyncPayload::Heartbeat(Heartbeat),
+    )
+    .expect("foreign envelope");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::RawEnvelope(foreign)]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x72, &mut coverage);
+    harness
+        .subscribe(&source, first, &mut coverage)
+        .await
+        .expect("routing membership");
+    assert_eq!(
+        harness
+            .document
+            .next()
+            .await
+            .expect_err("cross-subscription route")
+            .kind(),
+        AsyncTransportErrorKind::RoutingMismatch
+    );
+
+    // Cancelling adapter-specific establishment commits no logical membership.
+    coverage.case();
+    let fixture = TransportFixture::new(position(33, 0)).await;
+    let source = ControlledSubscribeSource::new();
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x73, &mut coverage);
+    let mut pending = Box::pin(harness.subscribe(
+        &source,
+        fixture.request(subscription(74), harness.origin.clone()),
+        &mut coverage,
+    ));
+    let waker = Waker::noop();
+    let mut task = Context::from_waker(waker);
+    assert!(matches!(pending.as_mut().poll(&mut task), Poll::Pending));
+    drop(pending);
+    assert_eq!(harness.document.membership_count(), 0);
+    assert_eq!(source.close_count(), 0);
+
+    // Current auth loss is observed through each real control path.
+    coverage.case();
+    let fixture = TransportFixture::new(position(34, 0)).await;
+    let request = fixture.request(
+        subscription(75),
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+    );
+    fixture.registry.revoke();
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x74, &mut coverage);
+    assert_eq!(
+        harness
+            .subscribe(&source, request, &mut coverage)
+            .await
+            .expect_err("adapter current authorization loss")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+
+    // Duplicate and hard membership limits are enforced before source work.
+    coverage.case();
+    let fixture = TransportFixture::new(position(35, 0)).await;
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x75, &mut coverage);
+    harness
+        .subscribe(
+            &source,
+            fixture.request(subscription(76), harness.origin.clone()),
+            &mut coverage,
+        )
+        .await
+        .expect("first membership");
+    assert_eq!(
+        harness
+            .subscribe(
+                &source,
+                fixture.request(subscription(76), harness.origin.clone()),
+                &mut coverage,
+            )
+            .await
+            .expect_err("duplicate membership")
+            .kind(),
+        AsyncTransportErrorKind::DuplicateMembership
+    );
+    assert_eq!(
+        harness
+            .subscribe(
+                &source,
+                fixture.request(subscription(77), harness.origin.clone()),
+                &mut coverage,
+            )
+            .await
+            .expect_err("membership hard limit")
+            .kind(),
+        AsyncTransportErrorKind::MembershipLimit
+    );
+    harness.document.close().await.expect("limit cleanup");
+
+    // One pending logical client cannot stall a ready sibling on the same transport.
+    coverage.case();
+    let fixture = TransportFixture::new(position(36, 0)).await;
+    let source = ScriptedSource::new(vec![
+        vec![ScriptItem::Pending],
+        vec![ScriptItem::Envelope(
+            position(36, 1),
+            AsyncPayload::Heartbeat(Heartbeat),
+        )],
+    ]);
+    let mut harness = AdapterHarness::connect(adapter, 2, 0x76, &mut coverage);
+    let first = fixture.request(subscription(78), harness.origin.clone());
+    let second = fixture.request(subscription(79), harness.origin.clone());
+    let second_context = second.context().clone();
+    harness
+        .subscribe(&source, first, &mut coverage)
+        .await
+        .expect("slow membership");
+    harness
+        .subscribe(&source, second, &mut coverage)
+        .await
+        .expect("ready membership");
+    let ready = harness
+        .next_wire(&second_context, &mut coverage)
+        .await
+        .expect("bounded fan-in")
+        .expect("ready sibling");
+    assert_eq!(ready.subscription(), &subscription(79));
+    harness.document.close().await.expect("slow cleanup");
+
+    // Typed provider errors retire only their logical session.
+    coverage.case();
+    let fixture = TransportFixture::new(position(37, 0)).await;
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Error(
+        AsyncTransportErrorKind::SourceFailed,
+    )]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x77, &mut coverage);
+    harness
+        .subscribe(
+            &source,
+            fixture.request(subscription(80), harness.origin.clone()),
+            &mut coverage,
+        )
+        .await
+        .expect("error membership");
+    assert_eq!(
+        harness
+            .document
+            .next()
+            .await
+            .expect_err("typed provider error")
+            .kind(),
+        AsyncTransportErrorKind::SourceFailed
+    );
+    assert_eq!(harness.document.membership_count(), 0);
+
+    // Authenticated adapter-specific unsubscribe removes exactly one membership.
+    coverage.case();
+    let fixture = TransportFixture::new(position(38, 0)).await;
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x78, &mut coverage);
+    harness
+        .subscribe(
+            &source,
+            fixture.request(subscription(81), harness.origin.clone()),
+            &mut coverage,
+        )
+        .await
+        .expect("unsubscribe membership");
+    assert_eq!(
+        harness
+            .unsubscribe(
+                &fixture.request(subscription(81), harness.origin.clone()),
+                &mut coverage,
+            )
+            .await
+            .expect("adapter unsubscribe"),
+        CloseDisposition::Closed
+    );
+    assert_eq!(harness.document.membership_count(), 0);
+
+    // Cancelled shutdown retains authority; resumed close is idempotent.
+    coverage.case();
+    let fixture = TransportFixture::new(position(39, 0)).await;
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]).with_pending_first_close();
+    let mut harness = AdapterHarness::connect(adapter, 1, 0x79, &mut coverage);
+    harness
+        .subscribe(
+            &source,
+            fixture.request(subscription(82), harness.origin.clone()),
+            &mut coverage,
+        )
+        .await
+        .expect("shutdown membership");
+    let mut close = Box::pin(harness.document.close());
+    let mut task = Context::from_waker(waker);
+    assert!(matches!(close.as_mut().poll(&mut task), Poll::Pending));
+    drop(close);
+    assert_eq!(source.close_count(), 0);
+    assert_eq!(
+        harness.document.close().await.expect("resumed close"),
+        CloseDisposition::Closed
+    );
+    assert_eq!(
+        harness.document.close().await.expect("idempotent close"),
+        CloseDisposition::AlreadyClosed
+    );
+    assert_eq!(source.close_count(), 1);
+
+    coverage
+}
+
+#[tokio::test]
+async fn full_shared_conformance_runs_through_both_real_adapter_paths() {
+    let sse = assert_full_adapter_conformance(AdapterKind::Sse).await;
+    let websocket = assert_full_adapter_conformance(AdapterKind::WebSocket).await;
+
+    for coverage in [&sse, &websocket] {
+        assert_eq!(coverage.semantic_cases, 10, "{coverage:?}");
+        assert!(coverage.connects >= coverage.semantic_cases, "{coverage:?}");
+        assert!(
+            coverage.subscribe_controls >= coverage.semantic_cases,
+            "{coverage:?}"
+        );
+        assert!(coverage.unsubscribe_controls >= 1, "{coverage:?}");
+        assert!(coverage.wire_records >= 9, "{coverage:?}");
+    }
+    assert_eq!(sse.adapter, AdapterKind::Sse);
+    assert_eq!(websocket.adapter, AdapterKind::WebSocket);
+}
+
 #[tokio::test]
 async fn multiplexing_preserves_independent_task_three_duplicate_and_gap_authority() {
     let baseline = position(13, 40);
@@ -510,6 +1089,283 @@ async fn membership_requires_unexpired_descriptor_and_exact_descriptor_on_remove
         .expect_err("descriptor mismatch");
     assert_eq!(mismatch.kind(), AsyncTransportErrorKind::DescriptorMismatch);
     document.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn membership_rechecks_expiry_revocation_and_scope_before_source_work() {
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+
+    let expired_fixture = TransportFixture::new(position(16, 0)).await;
+    let expired_request = expired_fixture.request(subscription(31), origin.clone());
+    expired_fixture.registry.set_now(UnixMillis::new(5_000));
+    let expired_source = ControlledSubscribeSource::new();
+    let mut expired_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x61; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    assert_eq!(
+        expired_document
+            .add(&expired_source, expired_request)
+            .await
+            .expect_err("held authorization expires before consumption")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(expired_document.membership_count(), 0);
+    assert!(!expired_source.observed());
+
+    let revoked_fixture = TransportFixture::new(position(16, 10)).await;
+    let revoked_request = revoked_fixture.request(subscription(32), origin.clone());
+    revoked_fixture.registry.revoke();
+    let revoked_source = ControlledSubscribeSource::new();
+    let mut revoked_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x62; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    assert_eq!(
+        revoked_document
+            .add(&revoked_source, revoked_request)
+            .await
+            .expect_err("membership revoked before consumption")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert!(!revoked_source.observed());
+
+    let scope_fixture = TransportFixture::new(position(16, 20)).await;
+    let scope_request = scope_fixture.request(subscription(33), origin.clone());
+    scope_fixture.registry.change_authorization_scope();
+    let scope_source = ControlledSubscribeSource::new();
+    let mut scope_document = DocumentTransportSession::new(
+        origin,
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x63; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    assert_eq!(
+        scope_document
+            .add(&scope_source, scope_request)
+            .await
+            .expect_err("principal/session/tenant/component scope changed")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert!(!scope_source.observed());
+
+    let duplicate_snapshot_fixture = TransportFixture::new(position(16, 30)).await;
+    duplicate_snapshot_fixture.registry.accept_twice();
+    let duplicate_snapshot_source = ScriptedSource::new(vec![vec![ScriptItem::End]]);
+    let mut duplicate_snapshot_document = DocumentTransportSession::new(
+        VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x6a; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    assert_eq!(
+        duplicate_snapshot_document
+            .add(
+                &duplicate_snapshot_source,
+                duplicate_snapshot_fixture.request(
+                    subscription(40),
+                    VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+                ),
+            )
+            .await
+            .expect_err("authority port may accept only one coherent snapshot")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+}
+
+#[tokio::test]
+async fn membership_revalidates_after_subscribe_and_disposes_revoked_session_once() {
+    let fixture = TransportFixture::new(position(17, 0)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ControlledSubscribeSource::new();
+    let mut document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x64; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+
+    let mut add = Box::pin(document.add(&source, fixture.request(subscription(34), origin)));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(add.as_mut().poll(&mut context), Poll::Pending));
+    assert!(source.observed());
+    fixture.registry.revoke();
+    source.release();
+    assert_eq!(
+        add.await
+            .expect_err("revocation during source subscribe")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(source.close_count(), 1);
+    assert_eq!(document.membership_count(), 0);
+}
+
+#[tokio::test]
+async fn membership_revalidates_expiry_and_registration_mode_after_subscribe_wait() {
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+
+    let expired_fixture = TransportFixture::new(position(17, 10)).await;
+    let expired_source = ControlledSubscribeSource::new();
+    let mut expired_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x65; 16]).expect("handle"),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    let mut expired_add = Box::pin(expired_document.add(
+        &expired_source,
+        expired_fixture.request(subscription(35), origin.clone()),
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        expired_add.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    expired_fixture.registry.set_now(UnixMillis::new(5_000));
+    expired_source.release();
+    assert_eq!(
+        expired_add
+            .await
+            .expect_err("expiry during source subscribe")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(expired_source.close_count(), 1);
+    assert_eq!(expired_document.membership_count(), 0);
+
+    let mode_fixture = TransportFixture::new(position(17, 20)).await;
+    let mode_source = ControlledSubscribeSource::new();
+    let mode_handle = DocumentTransportHandle::from_bytes(&[0x66; 16]).expect("handle");
+    let mut mode_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        mode_handle.clone(),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    let mut mode_add = Box::pin(SseMembershipControl::subscribe(
+        &mut mode_document,
+        &mode_handle,
+        &origin,
+        &mode_source,
+        mode_fixture.request(subscription(36), origin.clone()),
+    ));
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        mode_add.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    mode_fixture
+        .registry
+        .set_modes(vec![SubscriptionMode::ServerSentEvents]);
+    mode_source.release();
+    assert_eq!(
+        mode_add
+            .await
+            .expect_err("same-name mode revision during source subscribe")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(mode_source.close_count(), 1);
+    assert_eq!(mode_document.membership_count(), 0);
+}
+
+#[tokio::test]
+async fn registered_modes_are_authority_and_external_remove_rechecks_policy() {
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+
+    let sse_only =
+        TransportFixture::new_with_modes(position(18, 0), vec![SubscriptionMode::ServerSentEvents])
+            .await;
+    let websocket_handle = DocumentTransportHandle::from_bytes(&[0x67; 16]).expect("handle");
+    let mut websocket_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::WebSocket,
+        websocket_handle,
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    let websocket_subscribe = WebSocketControlRecord::Subscribe(subscription(37));
+    assert_eq!(
+        WebSocketMembershipControl::subscribe(
+            &mut websocket_document,
+            &websocket_subscribe,
+            &source,
+            sse_only.request(subscription(37), origin.clone()),
+        )
+        .await
+        .expect_err("SSE-only registration cannot use WebSocket")
+        .kind(),
+        AsyncTransportErrorKind::TransportMismatch
+    );
+
+    let ws_only =
+        TransportFixture::new_with_modes(position(18, 10), vec![SubscriptionMode::WebSocket]).await;
+    let sse_handle = DocumentTransportHandle::from_bytes(&[0x68; 16]).expect("handle");
+    let mut sse_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        sse_handle.clone(),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    assert_eq!(
+        SseMembershipControl::subscribe(
+            &mut sse_document,
+            &sse_handle,
+            &origin,
+            &source,
+            ws_only.request(subscription(38), origin.clone()),
+        )
+        .await
+        .expect_err("WebSocket-only registration cannot use SSE")
+        .kind(),
+        AsyncTransportErrorKind::TransportMismatch
+    );
+
+    let both = TransportFixture::new(position(18, 20)).await;
+    let both_source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let both_handle = DocumentTransportHandle::from_bytes(&[0x69; 16]).expect("handle");
+    let mut both_document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        both_handle.clone(),
+        DocumentTransportLimits::new(1).expect("limits"),
+    );
+    SseMembershipControl::subscribe(
+        &mut both_document,
+        &both_handle,
+        &origin,
+        &both_source,
+        both.request(subscription(39), origin.clone()),
+    )
+    .await
+    .expect("both-mode registration accepts SSE");
+    both.registry.deny_unsubscribe();
+    assert_eq!(
+        both_document
+            .remove(&both.request(subscription(39), origin))
+            .await
+            .expect_err("external remove must reauthorize")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationLost
+    );
+    assert_eq!(both_document.membership_count(), 1);
+    assert_eq!(both_source.close_count(), 0);
+    assert_eq!(
+        both_document.close().await.expect("internal retirement"),
+        CloseDisposition::Closed
+    );
+    assert_eq!(both_source.close_count(), 1);
 }
 
 #[tokio::test]
@@ -838,6 +1694,62 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
     );
+    let invalid_utf8_at_envelope_limit = vec![0xff; 65_536];
+    assert_eq!(
+        codec
+            .decode_envelope(
+                WebSocketFrame::Text {
+                    payload: &invalid_utf8_at_envelope_limit,
+                    final_fragment: true,
+                },
+                authorization.context(),
+            )
+            .expect_err("invalid UTF-8 at the exact envelope limit")
+            .kind(),
+        AsyncTransportErrorKind::UnsupportedFrame
+    );
+    let oversized_invalid_utf8_envelope = vec![0xff; 65_537];
+    assert_eq!(
+        codec
+            .decode_envelope(
+                WebSocketFrame::Text {
+                    payload: &oversized_invalid_utf8_envelope,
+                    final_fragment: true,
+                },
+                authorization.context(),
+            )
+            .expect_err("size preflight precedes envelope UTF-8 validation")
+            .kind(),
+        AsyncTransportErrorKind::FrameTooLarge
+    );
+    for payload in [vec![b'a'; 1_048_576], vec![0xff; 1_048_576]] {
+        assert_eq!(
+            codec
+                .decode_envelope(
+                    WebSocketFrame::Text {
+                        payload: &payload,
+                        final_fragment: true,
+                    },
+                    authorization.context(),
+                )
+                .expect_err("very large envelope preflight")
+                .kind(),
+            AsyncTransportErrorKind::FrameTooLarge
+        );
+    }
+    assert_eq!(
+        codec
+            .decode_envelope(
+                WebSocketFrame::Text {
+                    payload: &[0xff],
+                    final_fragment: false,
+                },
+                authorization.context(),
+            )
+            .expect_err("fragment shape precedes UTF-8 validation")
+            .kind(),
+        AsyncTransportErrorKind::UnsupportedFrame
+    );
 
     let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
     let initial_subscribe = WebSocketControlRecord::Subscribe(subscription(14));
@@ -931,6 +1843,49 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
     );
+    let invalid_utf8_at_control_limit = vec![0xff; 512];
+    assert_eq!(
+        codec
+            .decode_control(
+                WebSocketFrame::Text {
+                    payload: &invalid_utf8_at_control_limit,
+                    final_fragment: true,
+                },
+                &document,
+            )
+            .expect_err("invalid UTF-8 at the exact control limit")
+            .kind(),
+        AsyncTransportErrorKind::UnsupportedFrame
+    );
+    let oversized_invalid_utf8_control = vec![0xff; 513];
+    assert_eq!(
+        codec
+            .decode_control(
+                WebSocketFrame::Text {
+                    payload: &oversized_invalid_utf8_control,
+                    final_fragment: true,
+                },
+                &document,
+            )
+            .expect_err("size preflight precedes control UTF-8 validation")
+            .kind(),
+        AsyncTransportErrorKind::FrameTooLarge
+    );
+    for payload in [vec![b'a'; 1_048_576], vec![0xff; 1_048_576]] {
+        assert_eq!(
+            codec
+                .decode_control(
+                    WebSocketFrame::Text {
+                        payload: &payload,
+                        final_fragment: true,
+                    },
+                    &document,
+                )
+                .expect_err("very large control preflight")
+                .kind(),
+            AsyncTransportErrorKind::FrameTooLarge
+        );
+    }
     let forged_control = WebSocketControlRecord::Unsubscribe(subscription(16));
     let forged = WebSocketMembershipControl::unsubscribe(
         &mut document,

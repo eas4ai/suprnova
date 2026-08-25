@@ -327,6 +327,17 @@
   `SubscriptionId` and never merges logical sequence authority. The ID itself
   remains non-secret routing identity and grants no authority.
 
+  `AuthorizedTransportSubscription` is a descriptor-bound request, not a
+  reusable admission result. Every external add/remove calls the trusted
+  `AsyncTransportAuthorityPort` with the exact subscription, operation, origin,
+  document kind, and correlation-only handle. The framework compares one fresh
+  current host snapshot for component/identity authorization memo, stream,
+  topics, full event contracts, and canonical registered modes and independently
+  checks exclusive descriptor expiry. Add validates before source work and again
+  after `subscribe().await` immediately before commit; failed post-validation
+  closes/disposes the opened session once and installs nothing. Internal
+  retirement and shutdown remain independent from expired browser authority.
+
   `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus
   heartbeat comments. SSE membership changes use authenticated same-origin
   control requests and a non-authoritative document transport handle.
@@ -339,9 +350,19 @@
   subscription credential is accepted. Both adapters consume the same verified
   descriptor and sequence semantics.
 
+  WebSocket raw frame shape and byte ceilings are checked before UTF-8 and JSON
+  work (65,536 envelope bytes; 512 control bytes). Registered
+  `SubscriptionModes` are authority rather than a document-kind hint, so exact
+  mode-set drift revokes a retained request.
+
 - [x] Run shared conformance against both transports, cross-site WebSocket
   hijacking cases, membership add/remove/replay cases, ordinary HTTP endpoint
-  regression tests, and controlled shutdown.
+  regression tests, and controlled shutdown. The complete common semantic suite
+  runs through genuine SSE response/HTTP-control/record paths and genuine
+  WebSocket origin/control/envelope paths; adapter-tagged counters prove both
+  executed every case. Controlled clocks and barriers cover preflight and
+  post-subscribe expiry, revocation, scope/mode drift, once-only disposal, and
+  unauthorized external removal without sleeps.
 - [x] Commit: `feat(async): add SSE and WebSocket transport sessions`.
 
 ## Task 5: Enforce server-side fanout and backpressure bounds

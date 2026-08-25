@@ -84,6 +84,14 @@ Acceptance criteria:
   credential contract; an opaque document-transport handle is never authority.
 - Cross-origin use is denied unless an explicit supported deployment contract
   enables it.
+- Browser transport controls and a non-authoritative document handle never
+  grant membership authority. External SSE/WebSocket add and remove re-evaluate
+  exclusive descriptor expiry plus current component contract, principal,
+  session, tenant, aggregate scope, active membership, stream, resolved topics,
+  event contracts, registered modes, origin, document, and operation through a
+  trusted host port. Source subscription is bracketed by preflight and
+  post-await validation; failure after opening closes/disposes the new logical
+  session once and commits nothing.
 
 UX flow:
 1. Authenticated application user invokes an action -> current middleware
@@ -246,6 +254,16 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made physical transport membership a fresh host-authority
+  boundary rather than a retained descriptor check. The framework owns the
+  comparison sink, independently checks exclusive expiry before and after each
+  asynchronous authority lookup, requires exact current authorization memo,
+  stream, topics, full event contracts, and canonical mode-set agreement, and
+  supplies the exact operation/origin/document/subscription facts to the host. A
+  second attempted current-snapshot acceptance fails closed rather than
+  replacing the first decision.
+  Add revalidates after source subscription and disposes an opened session on
+  drift; external remove reauthorizes while internal retirement remains safe.
 - 2026-08-25 -- Implemented exact normalized HTTP(S) WebSocket origin policy
   before descriptor or credential processing. Missing, duplicate, opaque,
   wildcard, malformed, userinfo-bearing, path/query-bearing, and unapproved

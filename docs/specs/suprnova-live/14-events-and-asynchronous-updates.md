@@ -163,6 +163,27 @@ Acceptance criteria:
   wildcard origin acceptance is forbidden.
 - SSE and WebSocket share one independently versioned event-envelope schema;
   transport choice cannot change message authority or continuity semantics.
+- Every external SSE or WebSocket membership add/remove enters a trusted host
+  transport-authority port. At that exact consumption boundary the host
+  re-resolves the current component contract and authorization memo (principal,
+  session, tenant, and aggregate scope), active logical membership, registered
+  stream, resolved topics, full event contracts, canonical subscription modes,
+  and exact document/control authority; the framework independently rechecks
+  exclusive descriptor expiry and exact agreement with the Task 2 descriptor.
+  A retained descriptor-bound request, document handle, or browser control is
+  never reusable current authority.
+- Subscription establishment validates before source work and again after the
+  asynchronous source subscribe completes, immediately before membership
+  commit. Failed post-subscribe validation closes/disposes the newly opened
+  logical session exactly once and installs nothing. External removal similarly
+  reauthorizes, while completion, revocation retirement, cancellation recovery,
+  and controlled shutdown retain internal cleanup authority after browser
+  credentials expire.
+- Current registered `SubscriptionModes` are authority. The physical document
+  kind is compatibility only: SSE-only cannot use WebSocket, WebSocket-only
+  cannot use SSE, and any same-name mode-set revision invalidates a retained
+  membership request even when the newly registered set still contains the
+  invoked adapter.
 - Queue admission rechecks current descriptor expiry, logical membership,
   subscription/stream scope, full event contracts, and declared presentation
   signals for every envelope. A cloneable decode context is not fresh
@@ -234,6 +255,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Replaced retained transport admission with a fresh host
+  authority port at every external add/remove boundary. Add validates both
+  before and after asynchronous source subscription; authority loss, exclusive
+  expiry, or registry/mode drift after the await closes the opened logical
+  session once and commits no membership. Canonical registered modes now bind
+  authority independently from the document compatibility kind, while internal
+  retirement and shutdown remain able to clean up expired/revoked memberships.
 - 2026-08-25 -- Implemented host-neutral cancellation-safe logical event
   sessions and one bounded document fan-in per compatible origin, transport,
   and authorization scope. The document layer routes only exact active

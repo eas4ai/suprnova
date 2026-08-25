@@ -252,6 +252,15 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made WebSocket frame shape and raw byte ceilings a pre-decode
+  boundary: complete text-envelope frames allow at most 65,536 bytes and control
+  frames at most 512 bytes, with first-over and very-large valid/invalid UTF-8
+  inputs rejected as `frame_too_large` before UTF-8 or canonical JSON work.
+  Binary, continuation, and fragmented shapes remain unsupported. The full
+  transport-neutral semantic suite now runs through both real adapters: SSE uses
+  its one-way record encoder plus authenticated same-origin HTTP control, while
+  WebSocket uses strict origin upgrade, exact-key control encode/decode, and
+  canonical envelope text frames.
 - 2026-08-25 -- Adapted the same canonical async-envelope v1 bytes to bounded
   SSE `id`/`event`/`data` records and complete WebSocket text messages. SSE IDs
   are non-authoritative correlation only. WebSocket membership controls use an
