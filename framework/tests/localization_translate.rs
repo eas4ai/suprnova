@@ -176,7 +176,7 @@ fn reload_if_stale_detects_a_new_file() {
     // Nothing on disk changed yet: no reload should fire.
     assert!(!t.reload_if_stale().unwrap());
 
-    // A brand new file changes the file set, not any existing mtime —
+    // A brand new file changes the file set, not any existing mtime -
     // an mtime high-water mark alone wouldn't necessarily catch this on
     // a filesystem with coarse mtime resolution, but a file-set
     // comparison always does.
@@ -195,7 +195,7 @@ fn reload_if_stale_detects_a_deleted_file() {
     assert_eq!(t.translate(&en, "w", &TranslateArgs::new()).unwrap(), "two");
 
     // Deleting a file can only hold or lower a max-mtime watermark, never
-    // raise it — that's the bug this test guards against. A file-set
+    // raise it - that's the bug this test guards against. A file-set
     // comparison catches it regardless.
     fs::remove_file(tmp.path().join("en").join("extra.ftl")).unwrap();
     assert!(t.reload_if_stale().unwrap());
@@ -204,7 +204,7 @@ fn reload_if_stale_detects_a_deleted_file() {
 
 /// `Lang` facade + `__!` macro tests. These bind a process-global
 /// container binding (`App::bind::<dyn Translator>`), and tests within
-/// one integration-test binary run concurrently by default — a later
+/// one integration-test binary run concurrently by default - a later
 /// bind would race/overwrite an earlier one. `#[serial_test::serial]`
 /// forces the three tests in this module to run one at a time relative
 /// to each other (the other tests in this file never touch the

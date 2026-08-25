@@ -1,4 +1,4 @@
-//! `suprnova key:generate` — print a fresh 32-byte AES-256 key,
+//! `suprnova key:generate` - print a fresh 32-byte AES-256 key,
 //! base64-URL-safe-no-pad encoded. Identical wire format to
 //! `suprnova::EncryptionKey::to_base64()` so the framework's loader
 //! accepts it directly via the `APP_KEY` env var.
@@ -18,12 +18,12 @@ pub fn generate_app_key() -> String {
 }
 
 /// Generate a random 24-byte service password, encoded URL-safe base64
-/// (no padding) — 32 characters, no `@`, `:`, `/`, or `#`, so it can be
+/// (no padding) - 32 characters, no `@`, `:`, `/`, or `#`, so it can be
 /// dropped into a `postgres://user:pass@host/db` URL without escaping.
 ///
 /// Used for the credentials in a generated `docker-compose.yml`. Those
 /// used to be the literal strings `suprnova_secret` and `minioadmin`,
-/// published on `0.0.0.0` — a known password on an open port is not a
+/// published on `0.0.0.0` - a known password on an open port is not a
 /// development convenience, it is a public database.
 pub fn generate_service_password() -> String {
     let mut bytes = [0u8; 24];
@@ -81,12 +81,12 @@ mod tests {
         let k = generate_app_key();
         let parsed =
             suprnova::EncryptionKey::from_base64(&k).expect("framework should accept our key");
-        // Encode the parsed key back and compare — must round-trip.
+        // Encode the parsed key back and compare - must round-trip.
         assert_eq!(parsed.to_base64(), k);
     }
 
     /// Two consecutive calls must produce different keys (32 bytes
-    /// from /dev/urandom — collision probability is astronomical).
+    /// from /dev/urandom - collision probability is astronomical).
     #[test]
     fn two_calls_return_different_keys() {
         let a = generate_app_key();

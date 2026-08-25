@@ -1,4 +1,4 @@
-//! Phase 10C T1 — Model lifecycle events.
+//! Phase 10C T1 - Model lifecycle events.
 //!
 //! Covers the cross-model shared types (`EventResult`,
 //! `CancellableListener`) plus the macro-emitted per-model
@@ -9,7 +9,7 @@
 //! The dispatcher is process-global (`EventFacade` + the
 //! `CANCELLABLE_REGISTRY` static). Listeners registered in one test
 //! survive into the next, so we shard each scenario across a
-//! distinct model type (`T1CreatedUser`, `T1CancelUser`, ...) — same
+//! distinct model type (`T1CreatedUser`, `T1CancelUser`, ...) - same
 //! convention every other 10A/10B test follows for inventory
 //! collisions. The `Created` listener for `T1CreatedUser` only sees
 //! `T1CreatedUser` events; `T1CancelUser::create` is unaffected.
@@ -37,7 +37,7 @@ fn event_result_cancel_carries_reason() {
 //
 // We declare a thin model whose only job is to provide
 // `t1_user::events::*` for the event-name assertions below. No
-// migrations / runtime persistence needed for this test — the macro's
+// migrations / runtime persistence needed for this test - the macro's
 // emission is what we're verifying.
 
 #[suprnova::model(table = "t1_users")]
@@ -393,7 +393,7 @@ async fn deleting_cancel_aborts_delete_and_row_stays() {
     let err = u.delete().await.unwrap_err();
     assert!(format!("{err}").contains("veto"));
 
-    // Row stays — cancelled delete must not have run.
+    // Row stays - cancelled delete must not have run.
     let still = T1DeleteVetoUser::find(id).await.unwrap();
     assert!(still.is_some(), "cancelled delete must leave the row");
 }
@@ -846,7 +846,7 @@ impl CancellableListener<t1_update_user::events::Updating> for CountUpdatingT1 {
 #[async_trait]
 impl Listener<t1_update_user::events::Updated> for RecordUpdatedT1 {
     async fn handle(&self, event: &t1_update_user::events::Updated) -> Result<(), FrameworkError> {
-        // OnceCell stores the FIRST update only — the static is reset
+        // OnceCell stores the FIRST update only - the static is reset
         // implicitly via the test ordering (one update per test).
         let _ = UPDATED_PREV_EMAIL.set(event.previous.email.clone());
         let _ = UPDATED_CUR_EMAIL.set(event.current.email.clone());
@@ -900,7 +900,7 @@ pub struct MutateOnCreateT1;
 impl CancellableListener<t1_mutate_user::events::Creating> for MutateOnCreateT1 {
     async fn handle(&self, event: &t1_mutate_user::events::Creating) -> EventResult {
         let mut attrs = event.attrs.lock().await;
-        // Mutate the in-flight attrs — the resulting INSERT should
+        // Mutate the in-flight attrs - the resulting INSERT should
         // pick up the new value.
         attrs.insert("email", "mutated@x.com");
         EventResult::Ok
@@ -1100,7 +1100,7 @@ async fn saving_cancel_aborts_both_create_and_update() {
     let rows = T1SavingCancelUser::all().await.unwrap();
     assert!(
         rows.is_empty(),
-        "Saving cancel must abort the INSERT — no row persisted"
+        "Saving cancel must abort the INSERT - no row persisted"
     );
 }
 
@@ -1151,7 +1151,7 @@ async fn updating_cancel_aborts_update_row_unchanged() {
 #[tokio::test]
 async fn no_listener_fast_path_succeeds_silently() {
     // Models without any registered listeners must complete their
-    // CRUD operations cleanly — dispatch_cancellable's empty-list
+    // CRUD operations cleanly - dispatch_cancellable's empty-list
     // fast path returns Ok immediately.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     db.execute_unprepared(

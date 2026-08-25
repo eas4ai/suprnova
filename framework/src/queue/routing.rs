@@ -1,8 +1,8 @@
 //! Central queue routing rules.
 //!
 //! Laravel 13 added `Queue::route(ProcessPodcast::class, connection: 'redis',
-//! queue: 'podcasts')` so deployment-shaped decisions — which worker pool
-//! drains which job — live in one place instead of being scattered across job
+//! queue: 'podcasts')` so deployment-shaped decisions - which worker pool
+//! drains which job - live in one place instead of being scattered across job
 //! definitions. This is the Suprnova equivalent.
 //!
 //! # Why a runtime registry rather than an attribute
@@ -35,11 +35,11 @@
 //! 2. the job's own [`Job::queue`] / [`Job::connection`]
 //! 3. the driver / global default
 //!
-//! A registered route with a `None` field does not mask the job's own value —
+//! A registered route with a `None` field does not mask the job's own value -
 //! only the fields you actually set take effect, so routing the connection
 //! without disturbing the queue is expressible.
 //!
-//! The queue dimension is honored end to end — envelope, driver storage,
+//! The queue dimension is honored end to end - envelope, driver storage,
 //! `queue:work --queue=...` filtering. The connection dimension currently
 //! resolves the connection *name* reported on queue lifecycle events; driver
 //! selection by connection is not implemented, and one process-global driver
@@ -53,7 +53,7 @@ use crate::queue::Job;
 
 /// A routing rule: where a job's envelopes should be pushed.
 ///
-/// Both fields are independent — `None` means "defer to the next source in
+/// Both fields are independent - `None` means "defer to the next source in
 /// the resolution order" rather than "use the default".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueRoute {
@@ -90,7 +90,7 @@ pub(crate) fn try_set_route<J: Job>(
 ///
 /// Reads degrade to "no route" on a poisoned registry rather than failing.
 /// This runs on the push path, and a poisoned routing table must not take
-/// job dispatch down with it — falling back to the default queue keeps work
+/// job dispatch down with it - falling back to the default queue keeps work
 /// flowing while the poison is diagnosed.
 pub(crate) fn route_for(job_name: &str) -> Option<QueueRoute> {
     let guard = crate::lock::read(registry(), LOCK_CONTEXT).ok()?;
@@ -99,7 +99,7 @@ pub(crate) fn route_for(job_name: &str) -> Option<QueueRoute> {
 
 /// Remove every registered route. Test-support only: routes are global
 /// process state, so a test that registers one must clear it to stay
-/// hermetic. Compiled out of normal builds — routes are registered once at
+/// hermetic. Compiled out of normal builds - routes are registered once at
 /// boot and never torn down in a running process.
 #[cfg(test)]
 pub(crate) fn clear_routes() -> Result<(), FrameworkError> {

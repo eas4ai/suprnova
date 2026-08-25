@@ -10,7 +10,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Payment: Send + Sync {
     /// Charge a stored payment method. May complete server-side, redirect
-    /// for SCA, or hand off to a client-side action — distinguished by
+    /// for SCA, or hand off to a client-side action - distinguished by
     /// the [`ChargeResult`] variant.
     async fn charge(&self, req: ChargeRequest) -> PaymentResult<ChargeResult>;
     /// Capture funds previously authorized via a separate-capture flow.

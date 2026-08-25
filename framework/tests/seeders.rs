@@ -7,7 +7,7 @@
 //! fires per seeder so observability tools can see which seeder is
 //! mid-run.
 //!
-//! All tests are `#[serial]` — the seeder registry is a process-
+//! All tests are `#[serial]` - the seeder registry is a process-
 //! global `RwLock<Option<IndexMap>>`. Each test calls
 //! `suprnova::seed::clear()` first to drop any leakage from prior
 //! tests in the binary.
@@ -83,7 +83,7 @@ impl Seeder for FailingSeeder {
     }
 }
 
-/// Replacement for `SeederB` — registers under the same name to
+/// Replacement for `SeederB` - registers under the same name to
 /// exercise the last-write-wins contract.
 struct SeederBStub;
 #[async_trait]
@@ -158,7 +158,7 @@ async fn run_all_runs_seeders_in_registration_order() {
     }
 
     // Register in declared order: C first, then A, then B. The
-    // run_all visit order must match — NOT alphabetical, NOT random.
+    // run_all visit order must match - NOT alphabetical, NOT random.
     seed::register::<OrderedC>();
     seed::register::<OrderedA>();
     seed::register::<OrderedB>();
@@ -179,8 +179,8 @@ async fn re_registering_same_name_replaces_in_place_last_write_wins() {
     reset_all();
 
     seed::register::<SeederA>();
-    seed::register::<SeederB>(); // Original — increments B_RAN.
-    seed::register::<SeederBStub>(); // Replacement — decrements B_RAN.
+    seed::register::<SeederB>(); // Original - increments B_RAN.
+    seed::register::<SeederBStub>(); // Replacement - decrements B_RAN.
     seed::register::<SeederC>();
 
     assert_eq!(seed::count(), 3, "B's slot was overwritten, not duplicated");
@@ -220,7 +220,7 @@ async fn run_all_aborts_on_first_error_without_rolling_back() {
     assert_eq!(
         C_RAN.load(Ordering::SeqCst),
         0,
-        "SeederC did NOT run — the loop aborts on the first error"
+        "SeederC did NOT run - the loop aborts on the first error"
     );
 }
 
@@ -448,7 +448,7 @@ mod without_events {
                 dispatch_after(CreatedFake).await.unwrap();
             })
             .await;
-            // Back in the outer scope — still muted.
+            // Back in the outer scope - still muted.
             dispatch_after(CreatedFake).await.unwrap();
         })
         .await;

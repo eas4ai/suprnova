@@ -12,10 +12,10 @@
 //! the AAD on either side fails the tag check.
 //!
 //! Suprnova uses the AAD to bind ciphertext to a *purpose* (cookie,
-//! cursor, 2FA secret, etc.) — see [`super::CryptPurpose`]. Reusing the
+//! cursor, 2FA secret, etc.) - see [`super::CryptPurpose`]. Reusing the
 //! same key under different AADs gives cryptographic domain separation:
 //! ciphertext produced for one surface fails to decrypt on another. The
-//! AAD itself does NOT travel on the wire — both encrypt and decrypt
+//! AAD itself does NOT travel on the wire - both encrypt and decrypt
 //! supply the same bytes by independent agreement.
 
 use aes_gcm::{
@@ -32,7 +32,7 @@ const NONCE_LEN: usize = 12;
 /// authentication tag. Returns the on-wire bytes:
 /// `nonce || ciphertext_with_tag`.
 ///
-/// `aad` is NOT serialised into the output — only its contribution to
+/// `aad` is NOT serialised into the output - only its contribution to
 /// the authentication tag survives. Decrypt callers must supply the
 /// byte-identical `aad` to verify.
 pub(crate) fn encrypt(
@@ -58,8 +58,8 @@ pub(crate) fn encrypt(
 }
 
 /// Decrypt on-wire bytes (`nonce || ciphertext_with_tag`) under `key`
-/// with `aad` bound into the GCM authentication tag. Any tampering —
-/// flipped bit, wrong key, truncated nonce, *mismatched AAD* — yields
+/// with `aad` bound into the GCM authentication tag. Any tampering -
+/// flipped bit, wrong key, truncated nonce, *mismatched AAD* - yields
 /// an error.
 ///
 /// A wire produced by `encrypt(key, aad_a, ...)` will fail `decrypt`
@@ -153,7 +153,7 @@ mod tests {
     fn empty_aad_is_distinct_purpose() {
         // Empty AAD is a valid (degenerate) purpose. A wire produced
         // with empty AAD must NOT decrypt under a non-empty AAD and
-        // vice versa — there's no implicit "any AAD" mode.
+        // vice versa - there's no implicit "any AAD" mode.
         let key = EncryptionKey::generate();
         let with_aad = encrypt(&key, AAD, b"payload").unwrap();
         assert!(decrypt(&key, b"", &with_aad).is_err());

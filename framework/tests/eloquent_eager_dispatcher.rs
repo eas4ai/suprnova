@@ -1,4 +1,4 @@
-//! Phase 10B T1 — verifies the macro-emitted dispatcher skeletons
+//! Phase 10B T1 - verifies the macro-emitted dispatcher skeletons
 //! (`__eager_load`, `__recurse_eager_load`, `__count_relation`,
 //! `__aggregate_relation`) return clear "no relation" errors for
 //! unknown names. T2-T7 add per-relation match arms.
@@ -123,7 +123,7 @@ async fn pivot_accessor_panics_without_context() {
     //
     // `DispatcherUser` carries an `Arc<dyn Any + Send + Sync>` slot
     // for the pivot, which isn't `UnwindSafe` by default; wrap in
-    // `AssertUnwindSafe` to bypass that — the panic is the test
+    // `AssertUnwindSafe` to bypass that - the panic is the test
     // surface, and we're not threading data across it.
     let u = DispatcherUser {
         id: 1,

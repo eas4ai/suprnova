@@ -1,4 +1,4 @@
-//! Production gate #375 — session persistence failures fail closed.
+//! Production gate #375 - session persistence failures fail closed.
 //!
 //! When the session store's `write` fails AND the session was mutated
 //! this request (dirty bit set by a login, logout, CSRF rotation, flash,
@@ -6,7 +6,7 @@
 //! rather than returning the handler's success response with a session
 //! cookie for state the store never recorded. Otherwise a "successful"
 //! login that never persisted would hand the client a cookie whose id has
-//! no backing row — the next request loads an empty session and the
+//! no backing row - the next request loads an empty session and the
 //! mutation silently vanishes.
 //!
 //! Conversely, a NON-dirty session (the write was only a `last_activity`
@@ -26,7 +26,7 @@ use suprnova::{Crypt, EncryptionKey, FrameworkError};
 
 /// `Crypt` is a process-global; install a key exactly once so
 /// `SessionMiddleware::handle` doesn't bail at its top-of-fn guard
-/// (which also returns 500 — see the body assertion in the dirty test
+/// (which also returns 500 - see the body assertion in the dirty test
 /// for why that distinction matters).
 fn ensure_crypt() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -35,7 +35,7 @@ fn ensure_crypt() {
     });
 }
 
-/// Session store whose `write` always fails — simulates a backing-store
+/// Session store whose `write` always fails - simulates a backing-store
 /// outage. `read` returns a clean existing session so the clean test can
 /// exercise a due sliding-expiry touch; the dirty test is cookieless and
 /// therefore never calls `read`.
@@ -116,7 +116,7 @@ fn test_config() -> SessionConfig {
     config
 }
 
-/// A mutated session whose write fails must surface as 500 — and the body
+/// A mutated session whose write fails must surface as 500 - and the body
 /// must come from the fail-closed write path, not the top-of-handle Crypt
 /// guard (which is also a 500).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -169,7 +169,7 @@ async fn dirty_session_write_failure_fails_closed_500() {
 /// through: the user-visible state is intact, and 500-ing every read-only
 /// request during a transient store outage would be worse than the lost
 /// activity-timestamp bump. (This passing also proves `Crypt` is
-/// installed — otherwise the top-of-handle guard would 500 here too,
+/// installed - otherwise the top-of-handle guard would 500 here too,
 /// which confirms the sibling test's 500 is genuinely our branch.)
 ///
 /// Note on POST: this test originally drove a GET request, but the
@@ -178,7 +178,7 @@ async fn dirty_session_write_failure_fails_closed_500() {
 /// powers `Redirect::back`). That makes every GET a "dirty" mutation
 /// even when the handler doesn't touch the session. POST keeps the
 /// original semantics: no `_previous.url` write, so an untouched session
-/// stays clean — letting the read-only-store-outage assertion below
+/// stays clean - letting the read-only-store-outage assertion below
 /// still pin the clean-write branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_session_write_failure_passes_through() {
@@ -188,7 +188,7 @@ async fn clean_session_write_failure_passes_through() {
 
     // Handler does NOT touch the session. A legacy cookie has no bounded
     // touch timestamp, so the middleware attempts a last_activity write,
-    // which fails — but nothing was mutated.
+    // which fails - but nothing was mutated.
     let next: Next =
         Arc::new(move |_req| Box::pin(async move { Ok(suprnova::HttpResponse::text("ok")) }));
 

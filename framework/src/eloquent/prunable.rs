@@ -1,12 +1,12 @@
-//! Prunable / MassPrunable — scheduled cleanup of stale rows.
+//! Prunable / MassPrunable - scheduled cleanup of stale rows.
 //!
 //! Two flavours of pruning:
 //!
-//! - [`Prunable`] — per-row prune. Iterates the scope, calls the
+//! - [`Prunable`] - per-row prune. Iterates the scope, calls the
 //!   optional [`Prunable::pruning`] hook for each row (audit / cleanup
 //!   side effects), and force-deletes one row at a time. Use when
 //!   per-row work is required.
-//! - [`MassPrunable`] — set-based prune. Renders the scope's WHERE
+//! - [`MassPrunable`] - set-based prune. Renders the scope's WHERE
 //!   clause into a single `DELETE FROM ... WHERE ...` and lets the
 //!   database drop every matching row in one statement. Use when no
 //!   per-row hook is needed and rowcount could be large.
@@ -79,7 +79,7 @@ where
         Send + Into<sea_orm::Value>,
 {
     /// Builder describing the rows that should be pruned. Each call
-    /// constructs a fresh builder — implementors don't share state.
+    /// constructs a fresh builder - implementors don't share state.
     fn prunable() -> Builder<Self>;
 
     /// Optional per-row hook fired right before the row is
@@ -93,7 +93,7 @@ where
 
 /// Set-based prune. Implementors define the `prunable()` scope; the
 /// runner renders its WHERE clause into a single `DELETE` and executes
-/// it. No per-row hook — pair with [`Prunable`] (and pay the
+/// it. No per-row hook - pair with [`Prunable`] (and pay the
 /// row-by-row cost) when audit / notification work matters.
 ///
 /// Pair with `#[suprnova::prunable]` on the impl block to register the
@@ -130,7 +130,7 @@ pub type PrunerFn =
 /// `inventory::submit!`.
 #[derive(Debug, Clone, Copy)]
 pub struct PrunerEntry {
-    /// Last-segment type name (`"User"`, `"Session"`) — the same
+    /// Last-segment type name (`"User"`, `"Session"`) - the same
     /// string the user passes to [`prune_one`] / `--model=...`.
     pub type_name: &'static str,
     /// Runtime entry point. `dry_run = true` returns the rowcount that
@@ -149,7 +149,7 @@ pub fn pruners() -> impl Iterator<Item = &'static PrunerEntry> {
 }
 
 /// Run every registered pruner. Returns the total rowcount deleted
-/// across all types. Errors propagate from the first failing pruner —
+/// across all types. Errors propagate from the first failing pruner -
 /// later pruners do not run.
 pub async fn prune_all() -> Result<u64, FrameworkError> {
     let mut total = 0u64;
@@ -174,7 +174,7 @@ pub async fn prune_all_dry() -> Result<u64, FrameworkError> {
 /// registered for the name, `Err(...)` when the pruner itself fails.
 ///
 /// Errors when two or more distinct prunable impls share the same
-/// last-segment `type_name` — the `--model=Session` flag is keyed by
+/// last-segment `type_name` - the `--model=Session` flag is keyed by
 /// that string and inventory iteration order is link-time, so silently
 /// running whichever entry the iterator yields first would route
 /// `model:prune --model=Session` to a nondeterministic pruner. The
@@ -216,7 +216,7 @@ where
                 if (prev.run as usize) != (entry.run as usize) {
                     return Err(FrameworkError::internal(format!(
                         "pruner registry: type `{type_name}` is registered \
-                         by two distinct `#[suprnova::prunable]` impls — \
+                         by two distinct `#[suprnova::prunable]` impls - \
                          rename one of the colliding models so \
                          `model:prune --model={type_name}` stays \
                          deterministic"

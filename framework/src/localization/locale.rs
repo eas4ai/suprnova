@@ -37,7 +37,7 @@ impl Locale {
         &self.0
     }
 
-    /// The hard-coded `en` locale — the last-resort default `Lang` falls
+    /// The hard-coded `en` locale - the last-resort default `Lang` falls
     /// back to when no bootstrap config, task-local, or global override
     /// applies (or when a malformed env value would otherwise make
     /// `LocalizationConfig::from_env` fail). Built via the `langid!`

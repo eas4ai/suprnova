@@ -1,14 +1,14 @@
-//! Phase 10C T2c — parse `observers = [...]` attribute on `#[model]`
+//! Phase 10C T2c - parse `observers = [...]` attribute on `#[model]`
 //! and emit the per-model `Self::observe()` runtime registration shim.
 //!
 //! Two emissions:
 //!
-//! - [`emit_observers_attestation`] — compile-time validation that each
+//! - [`emit_observers_attestation`] - compile-time validation that each
 //!   listed observer type resolves. Actual listener registration happens
 //!   via the `#[observer(M)]` inventory pathway (T2b); this attribute is
 //!   compile-check + documentation only.
 //!
-//! - [`emit_per_model_observe_shim`] — runtime registration path that
+//! - [`emit_per_model_observe_shim`] - runtime registration path that
 //!   complements the inventory pathway. Each call to
 //!   `User::observe(MyObserver)` registers all 16 listener adapters at
 //!   call time. Mirrors Laravel's `User::observe(MyObserver::class)`
@@ -78,12 +78,12 @@ const CANCELLABLE_METHODS: &[(&str, &str)] = &[
 /// Registers all 16 listener adapters at call time. Each adapter is a
 /// generic struct that stores a clone of the observer and delegates
 /// into the trait method. Unlike T2b's inventory pathway, the shim
-/// emits the full set of 16 listeners — the trait defaults make
+/// emits the full set of 16 listeners - the trait defaults make
 /// non-overridden methods cheap no-ops, and there's no parse-time impl
 /// block to walk for "which methods did the user override?".
 ///
 /// Idempotency is the caller's concern. Calling `User::observe(MyObs)`
-/// twice registers twice — matches Laravel's manual semantics. Tests
+/// twice registers twice - matches Laravel's manual semantics. Tests
 /// that exercise this shim with the inventory pathway also active
 /// should be aware that the inventory observer fires in addition to
 /// the manually-installed one.
@@ -110,7 +110,7 @@ pub fn emit_per_model_observe_shim(struct_ident: &Ident) -> TokenStream {
 
     quote! {
         impl #struct_ident {
-            /// Phase 10C T2c — manual observer registration (per-model
+            /// Phase 10C T2c - manual observer registration (per-model
             /// shim, complements the `#[suprnova::observer(M)]` inventory
             /// pathway).
             ///
@@ -122,7 +122,7 @@ pub fn emit_per_model_observe_shim(struct_ident: &Ident) -> TokenStream {
             /// # Idempotency
             ///
             /// Each call registers a fresh set of adapters. Two calls
-            /// to `Self::observe(MyObs)` register two sets — matches
+            /// to `Self::observe(MyObs)` register two sets - matches
             /// Laravel's `Model::observe(MyObs::class)` semantics. If
             /// the observer is also registered via
             /// `#[suprnova::observer]`, the inventory adapter fires in
@@ -251,7 +251,7 @@ fn emit_observe_arm_cancellable(
 }
 
 /// Emit the call expression for a non-cancellable adapter's `handle`
-/// body. Matches T2b's per-method shape — same event field layout
+/// body. Matches T2b's per-method shape - same event field layout
 /// emitted by `model/events.rs`.
 fn emit_observe_call_non_cancellable(method: &str) -> TokenStream {
     match method {
@@ -270,7 +270,7 @@ fn emit_observe_call_non_cancellable(method: &str) -> TokenStream {
             obs.replicating(&event.source, &mut *replica).await
         },
         other => {
-            // Unreachable on the closed 11-method set — `NON_CANCELLABLE_METHODS`
+            // Unreachable on the closed 11-method set - `NON_CANCELLABLE_METHODS`
             // is the lone source. A compile_error! here means the
             // method table grew without an arm update.
             let msg =

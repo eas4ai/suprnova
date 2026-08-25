@@ -1,7 +1,7 @@
 //! Re-export of the vendored `suprnova-web-push` crate.
 //!
 //! Provides Web Push Protocol support (RFC 8030) for sending push notifications
-//! to subscribed clients. The items here are the low-level protocol surface —
+//! to subscribed clients. The items here are the low-level protocol surface -
 //! VAPID signing, AES128GCM payload encryption, and a transport client.
 //!
 //! Most applications use web push through the notifications subsystem instead

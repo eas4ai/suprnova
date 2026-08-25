@@ -7,7 +7,7 @@
 //!
 //! ## SeaORM note
 //!
-//! SeaORM `ModelTrait` carries no per-instance relation-loaded state — loaded
+//! SeaORM `ModelTrait` carries no per-instance relation-loaded state - loaded
 //! relations live on query results, not on the model itself. A generic blanket
 //! `impl<M: ModelTrait> IsRelationLoaded for &M` has nothing to consult, so we
 //! do **not** provide one. Users implement `IsRelationLoaded` on their own
@@ -40,7 +40,7 @@
 /// ```
 pub trait IsRelationLoaded {
     /// Returns `true` when the named relation has been loaded onto
-    /// `self` — used by the [`when_loaded!`](crate::when_loaded) macro
+    /// `self` - used by the [`when_loaded!`](crate::when_loaded) macro
     /// to decide whether a `Prop` resolves lazily or is absent.
     fn is_relation_loaded(&self, relation_name: &str) -> bool;
 }
@@ -85,4 +85,4 @@ macro_rules! when_loaded {
 
 // Note: `when_loaded!` is available at the crate root as `suprnova::when_loaded!`
 // via the `#[macro_export]` annotation above. There is no separate
-// `suprnova::data::when_loaded!` path — use the crate-root path.
+// `suprnova::data::when_loaded!` path - use the crate-root path.

@@ -1,11 +1,11 @@
-//! [`FeatureMiddleware`] — opens a per-request feature-flag
+//! [`FeatureMiddleware`] - opens a per-request feature-flag
 //! [`featureflag::context::Context`] populated by user-
 //! defined extractors, then runs the downstream handler inside that
 //! context.
 //!
 //! Without this middleware in the chain, `is_enabled!` calls fall
 //! back to the [`Context::root`](featureflag::context::Context::root)
-//! context with no user / team scope — only global flags resolve.
+//! context with no user / team scope - only global flags resolve.
 //! With it installed, user- and team-scoped flags light up
 //! automatically.
 //!
@@ -14,11 +14,11 @@
 //! [`FeatureMiddleware::new`] ships with a sensible default for the
 //! one identifier every Suprnova app has: the authenticated user id
 //! ([`Auth::id`]). Team extraction is application-specific (header,
-//! subdomain, JWT claim, route segment) so it is **opt-in** —
+//! subdomain, JWT claim, route segment) so it is **opt-in** -
 //! call [`FeatureMiddleware::with_team_extractor`] or the convenience
 //! [`FeatureMiddleware::with_team_from_header`] to wire it.
 //!
-//! Both extractors can be overridden — pass a custom user-id closure
+//! Both extractors can be overridden - pass a custom user-id closure
 //! to [`FeatureMiddleware::with_user_id_extractor`] when the standard
 //! `Auth::id()` doesn't match your identity model.
 //!
@@ -41,7 +41,7 @@
 //! to call [`features::bootstrap_database_cached`](crate::features::bootstrap_database_cached)
 //! (or otherwise install an evaluator via
 //! [`features::install_evaluator`](crate::features::install_evaluator)),
-//! every flag silently returns its compile-time default — a hard
+//! every flag silently returns its compile-time default - a hard
 //! misconfiguration to catch in QA. This middleware logs one
 //! `tracing::warn!` on the first request when no evaluator is
 //! installed, so the missing wiring is loud in the operator's logs.
@@ -69,7 +69,7 @@ type TeamExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static;
 /// Composes after `SessionMiddleware` and `AuthMiddleware`/equivalent,
 /// since the default user-id extractor reads the session-bound user
 /// identity via [`Auth::id`]. Place this in your global middleware
-/// stack — `is_enabled!` calls in any downstream handler then see the
+/// stack - `is_enabled!` calls in any downstream handler then see the
 /// right scope automatically.
 ///
 /// # Extractors
@@ -79,9 +79,9 @@ type TeamExtractor = dyn Fn(&Request) -> Option<String> + Send + Sync + 'static;
 /// scope key (`user:{id}` / `team:{name}`) is omitted from the
 /// resolution walk, so global flags still resolve.
 ///
-/// * **`user_id`** — defaults to [`Auth::id`]; replace with
+/// * **`user_id`** - defaults to [`Auth::id`]; replace with
 ///   [`Self::with_user_id_extractor`] for custom identity models.
-/// * **`team`** — no default; opt in with
+/// * **`team`** - no default; opt in with
 ///   [`Self::with_team_extractor`] or
 ///   [`Self::with_team_from_header`].
 pub struct FeatureMiddleware {
@@ -180,7 +180,7 @@ fn build_context_from_fields(user_id: Option<String>, team: Option<String>) -> C
 }
 
 /// Flag flipped after the first request observes a missing global
-/// evaluator. We log one warning per process — silent failure is worse
+/// evaluator. We log one warning per process - silent failure is worse
 /// than noisy logs, but a per-request flood would be worse still.
 static MISSING_EVALUATOR_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -389,18 +389,18 @@ mod tests {
         let prior_warned = MISSING_EVALUATOR_WARNED.swap(false, Ordering::SeqCst);
         let prior_installed = crate::features::bootstrap::is_installed();
 
-        // is_installed() reads bootstrap::INSTALLED — force false so
+        // is_installed() reads bootstrap::INSTALLED - force false so
         // the warn_once_if_no_evaluator branch fires. We restore the
         // prior value at the end.
         // Direct access via re-export: we can't write INSTALLED directly
         // (it's pub(super) to the bootstrap module's tests), but the
         // public install_evaluator / mark_installed only flip false→true,
         // never true→false. To force false we read+observe rather than
-        // write — which is fine because the only thing that flipped it
+        // write - which is fine because the only thing that flipped it
         // is mark_installed, and a fresh process starts false. Tests in
         // the same binary that called mark_installed (e.g. bootstrap
         // tests) restore the prior bit themselves. If is_installed is
-        // true here, the warn branch is genuinely dead-by-design — the
+        // true here, the warn branch is genuinely dead-by-design - the
         // contract is "warn only when no evaluator installed", so the
         // test asserts the contract by exercising both branches: if
         // installed, no warn fires; if not installed, exactly one warn.
@@ -417,7 +417,7 @@ mod tests {
             );
         } else {
             // The warn branch fired. The bit is now true. Subsequent
-            // calls must NOT re-fire — the AtomicBool swap is the
+            // calls must NOT re-fire - the AtomicBool swap is the
             // observable signal that the emission short-circuited.
             assert!(
                 after_first,

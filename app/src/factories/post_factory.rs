@@ -1,4 +1,4 @@
-//! `PostFactory` — dogfood for the `Faker.fake::<T>() + Dummy<Faker>`
+//! `PostFactory` - dogfood for the `Faker.fake::<T>() + Dummy<Faker>`
 //! path on a richer model.
 //!
 //! Phase 10A T11 polish broadened `Persistable` to cover Eloquent
@@ -19,24 +19,24 @@ impl Dummy<Faker> for Post {
         // Lorem-style fake content.
         let title: String = suprnova::__fake::faker::lorem::en::Sentence(3..7).fake_with_rng(rng);
         let body: String = suprnova::__fake::faker::lorem::en::Paragraph(3..6).fake_with_rng(rng);
-        // Reference a "user" id in 1..=50 — matches the typical
+        // Reference a "user" id in 1..=50 - matches the typical
         // UsersSeeder count.
         let author_id: i64 = (1..=50i64).fake_with_rng(rng);
         let now = chrono::Utc::now();
 
         Post {
-            // PK placeholder — `persist_via_seaorm` flips to `NotSet`.
+            // PK placeholder - `persist_via_seaorm` flips to `NotSet`.
             id: 0,
             author_id,
             title,
             body,
             is_public: Faker.fake_with_rng::<bool, _>(rng),
-            // Runtime shape — the auto-injected `AsDateTime` cast on
+            // Runtime shape - the auto-injected `AsDateTime` cast on
             // the macro converts to TEXT (RFC-3339) at the storage
             // boundary.
             created_at: now,
             updated_at: now,
-            // Phase 10B T1 — relations scratch state. Empty by
+            // Phase 10B T1 - relations scratch state. Empty by
             // default; populated by `Builder::with([...])` (eager
             // loader) and `BelongsToMany::get()` (m2m pivot).
             __eager: Default::default(),

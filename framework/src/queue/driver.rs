@@ -1,4 +1,4 @@
-//! Queue driver trait — the contract every backend implements.
+//! Queue driver trait - the contract every backend implements.
 
 use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
@@ -22,7 +22,7 @@ pub enum Settled {
     /// as one atomic step. There is no window in which one happened without
     /// the other.
     Atomically,
-    /// The reservation was no longer this worker's — visibility expired and
+    /// The reservation was no longer this worker's - visibility expired and
     /// another consumer reclaimed the message, or a previous settlement
     /// already committed. **Nothing was enqueued and nothing was dropped.**
     ///
@@ -73,7 +73,7 @@ pub trait QueueDriver: Send + Sync {
     /// The default implementation rejects a non-empty filter rather than
     /// quietly draining every queue. A worker asked to drain only `billing`
     /// that silently drains everything is indistinguishable from a working
-    /// setup until the wrong pool consumes the wrong jobs — a failure that
+    /// setup until the wrong pool consumes the wrong jobs - a failure that
     /// surfaces in production, not in a smoke test. Drivers that cannot
     /// filter should keep this default so the misconfiguration is loud at
     /// startup.
@@ -115,12 +115,12 @@ pub trait QueueDriver: Send + Sync {
     ) -> Result<(), FrameworkError>;
 
     /// Return a reserved message to the queue after `delay` **without**
-    /// consuming an attempt — the retry a job asked for itself via
+    /// consuming an attempt - the retry a job asked for itself via
     /// `Queue::release`, a busy `WithoutOverlapping` lock, or a rate limiter
     /// that wants the work later rather than fewer times.
     ///
     /// The next delivery MUST carry the same `attempts` value this delivery
-    /// carried. Drivers that requeue their own stored copy get this for free —
+    /// carried. Drivers that requeue their own stored copy get this for free -
     /// the worker bumps `attempts` on its local envelope only, so the stored
     /// copy still holds the pre-run count. Drivers that re-publish the caller's
     /// `env` must decrement it, which is what the default below does.
@@ -135,7 +135,7 @@ pub trait QueueDriver: Send + Sync {
     /// still-reserved original, and
     /// [`DatabaseQueueDriver`](crate::queue::database::DatabaseQueueDriver)
     /// returned `UNIQUE constraint failed: jobs.id`. The worker then declined
-    /// to ack — correctly, on the evidence it had — so the requested delay was
+    /// to ack - correctly, on the evidence it had - so the requested delay was
     /// silently dropped, no `JobReleased` event fired, and the job simply sat
     /// reserved until visibility expiry redelivered it. Every release on a
     /// database-backed queue behaved that way.
@@ -158,7 +158,7 @@ pub trait QueueDriver: Send + Sync {
     }
 
     /// Enqueue `follow_ups` and drop the reservation held by `token` as a
-    /// single atomic step — the outbox half of terminal settlement (DATA-02).
+    /// single atomic step - the outbox half of terminal settlement (DATA-02).
     ///
     /// Returns [`Settled::Unsupported`] by default, which tells the worker to
     /// fall back to push-then-ack. Implement it on any backend where the
@@ -171,7 +171,7 @@ pub trait QueueDriver: Send + Sync {
     /// there is no safe order:
     ///
     /// - Ack first, and a crash before the push loses the rest of the chain
-    ///   permanently — nothing is left in the queue to retry from.
+    ///   permanently - nothing is left in the queue to retry from.
     /// - Push first (what the worker does when this returns `Unsupported`),
     ///   and a crash before the ack redelivers the finished job, which runs
     ///   its handler a second time and pushes the successor again.
@@ -211,7 +211,7 @@ pub trait QueueDriver: Send + Sync {
     /// `Queue::size($queue)`.
     ///
     /// Default implementation returns `Err` describing the unsupported
-    /// operation — drivers that can answer the count cheaply override.
+    /// operation - drivers that can answer the count cheaply override.
     async fn size(&self) -> Result<u64, FrameworkError> {
         Err(FrameworkError::internal(format!(
             "queue driver '{}' does not implement size()",

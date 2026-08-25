@@ -27,7 +27,7 @@ pub fn run() {
 
     // Emit the Dockerfile that matches the scaffold this project came
     // from. Through v0.7.2 there was only one, and it was the full-stack
-    // one — so on an API project the very first instruction,
+    // one - so on an API project the very first instruction,
     // `COPY frontend/package.json`, failed outright and `suprnova new
     // --api` + `docker:init` + `docker build` could not succeed.
     let manifest = fs::read_to_string("Cargo.toml").unwrap_or_default();
@@ -43,7 +43,7 @@ pub fn run() {
     }
     match kind {
         cargo_meta::ProjectKind::Api => {
-            ui::success("Created Dockerfile (API project — no frontend stage)")
+            ui::success("Created Dockerfile (API project - no frontend stage)")
         }
         cargo_meta::ProjectKind::FullStack => ui::success("Created Dockerfile"),
     }

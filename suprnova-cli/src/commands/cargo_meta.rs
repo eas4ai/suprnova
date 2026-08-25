@@ -32,8 +32,8 @@ pub fn package_name_from_path(path: &Path) -> Option<String> {
 
 /// The `path` of the `[[bin]]` target whose name matches the package.
 ///
-/// Both scaffolds declare two binaries — the server (named for the
-/// package) and `console` — so "the first bin" is not good enough.
+/// Both scaffolds declare two binaries - the server (named for the
+/// package) and `console` - so "the first bin" is not good enough.
 pub fn server_bin_path(content: &str) -> Option<String> {
     let table = parse_cargo_toml(content).ok()?;
     let package_name = table.get("package")?.get("name")?.as_str()?;
@@ -48,10 +48,10 @@ pub fn server_bin_path(content: &str) -> Option<String> {
 /// Which scaffold shape a project was generated from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectKind {
-    /// `suprnova new` — server at `cmd/main.rs`, with a `frontend/` that
+    /// `suprnova new` - server at `cmd/main.rs`, with a `frontend/` that
     /// Vite builds into `public/assets`.
     FullStack,
-    /// `suprnova new --api` — server at `src/main.rs`, no `frontend/`
+    /// `suprnova new --api` - server at `src/main.rs`, no `frontend/`
     /// and no `cmd/` at all.
     Api,
 }
@@ -64,7 +64,7 @@ pub enum ProjectKind {
 ///
 /// Defaults to [`ProjectKind::FullStack`] when the manifest cannot be
 /// read or declares no matching bin, because that is what every previous
-/// version emitted unconditionally — an unparseable manifest should not
+/// version emitted unconditionally - an unparseable manifest should not
 /// silently switch an existing project to a different Dockerfile.
 pub fn detect_project_kind(content: &str) -> ProjectKind {
     match server_bin_path(content).as_deref() {
@@ -174,7 +174,7 @@ path = "src/bin/console.rs"
     #[test]
     fn the_server_bin_is_found_by_name_not_by_position() {
         // Both scaffolds declare two bins, and `console` sorts first in
-        // neither — but relying on order would be luck rather than logic.
+        // neither - but relying on order would be luck rather than logic.
         assert_eq!(
             server_bin_path(API_MANIFEST).as_deref(),
             Some("src/main.rs")

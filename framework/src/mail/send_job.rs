@@ -1,4 +1,4 @@
-//! `SendMailJob` — the framework-shipped Job that processes `Mail::queue`
+//! `SendMailJob` - the framework-shipped Job that processes `Mail::queue`
 //! and `Mail::later` dispatches via the Phase 5A FROZEN envelope.
 //!
 //! The job carries the routed recipients + the mailable's `(name, payload)`
@@ -56,12 +56,12 @@ pub struct SendMailJob {
     #[serde(default)]
     pub return_path: Option<Address>,
     /// Builder-side subject override. When `Some`, replaces the mailable's
-    /// `render_subject()` output on the queue path — matches the send
+    /// `render_subject()` output on the queue path - matches the send
     /// path's precedence (see `MailBuilder::send`).
     #[serde(default)]
     pub subject_override: Option<String>,
     /// Builder-side extra attachments. Appended after the mailable's own
-    /// `attachments()` — matches the send path's order.
+    /// `attachments()` - matches the send path's order.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
 }

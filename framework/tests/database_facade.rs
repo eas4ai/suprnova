@@ -1,4 +1,4 @@
-//! Phase 10C T10 — DB facade + DynamicRow integration tests.
+//! Phase 10C T10 - DB facade + DynamicRow integration tests.
 //!
 //! Covers the runtime-shape escape hatch: `DynamicRow` (typed accessors
 //! over `serde_json::Map`), `DB::table(name)` (model-less query
@@ -265,7 +265,7 @@ async fn db_select_projects_named_columns() {
         .await
         .unwrap();
 
-    // Named columns (no aggregates) — sqlx has type info, so
+    // Named columns (no aggregates) - sqlx has type info, so
     // JsonValue::find_by_statement keeps them.
     let rows = DB::select(
         "SELECT event, actor_id FROM audit_log WHERE actor_id = ? ORDER BY id",

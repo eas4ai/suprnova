@@ -1,4 +1,4 @@
-//! Model-backed user provider — Laravel's `EloquentUserProvider`.
+//! Model-backed user provider - Laravel's `EloquentUserProvider`.
 //!
 //! Resolves users through a typed [`Model`] that
 //! also implements [`Authenticatable`]. The typed half of the
@@ -214,7 +214,7 @@ where
                 self.dummy_verify().await?;
                 Ok(false)
             }
-            // No password supplied at all — nothing to equalise against a
+            // No password supplied at all - nothing to equalise against a
             // real verify, so no dummy work is warranted.
             (None, _) => Ok(false),
         }
@@ -223,7 +223,7 @@ where
     async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {
         let user = M::query().filter("email", email).first().await?;
         // This is the lookup BY email: the caller already supplied the target
-        // address, so echo the queried `email` back into the carrier — it IS
+        // address, so echo the queried `email` back into the carrier - it IS
         // the verify/reset target the user typed.
         Ok(user.map(|u| AuthFlowUser {
             id: u.get_auth_identifier(),
@@ -266,7 +266,7 @@ where
         // load → mutate → `Model::save`: this (a) fires the full model
         // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
         // the change, and (b) is a read-modify-write of the whole row, so a
-        // concurrent flow on the same user could clobber a field — acceptable
+        // concurrent flow on the same user could clobber a field - acceptable
         // here as both verify/reset paths are token-gated. Absent id → no-op.
         if let Some(mut user) = self.find_by_identifier(id).await? {
             user.set_email_verified_at(Some(Utc::now()));
@@ -279,10 +279,10 @@ where
         // load → mutate → `Model::save`: this (a) fires the full model
         // lifecycle (Saving/Updating/Updated/Saved) so observers and audit see
         // the change, and (b) is a read-modify-write of the whole row, so a
-        // concurrent flow on the same user could clobber a field — acceptable
+        // concurrent flow on the same user could clobber a field - acceptable
         // here as both verify/reset paths are token-gated. Absent id → no-op.
         if let Some(mut user) = self.find_by_identifier(id).await? {
-            // `hashed` arrives ALREADY HASHED — store it verbatim. `save()`
+            // `hashed` arrives ALREADY HASHED - store it verbatim. `save()`
             // overlays the full serialized model onto the ActiveModel, so the
             // password column persists regardless of fillable/guarded.
             user.set_password_hash(hashed);

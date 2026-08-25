@@ -1,4 +1,4 @@
-//! {project_name} — JSON:API Server Entry Point
+//! {project_name} - JSON:API Server Entry Point
 
 use suprnova::Application;
 

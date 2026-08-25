@@ -1,10 +1,10 @@
-//! `EncryptHistory` middleware — opts a route or group of routes into
+//! `EncryptHistory` middleware - opts a route or group of routes into
 //! Inertia history-state encryption.
 //!
 //! Per the v3 protocol, when the page object carries `encryptHistory:
 //! true`, the client AES-encrypts its history-state entry before
 //! pushing. After logout/cleared-history, the key is rotated so the
-//! prior entries can't be decrypted — protecting privileged data the
+//! prior entries can't be decrypted - protecting privileged data the
 //! user navigated through while authenticated.
 //!
 //! ## Precedence
@@ -15,7 +15,7 @@
 //! 1. [`InertiaConfig::encrypt_history_default`](crate::InertiaConfig::encrypt_history_default)
 //! 2. This middleware (`tokio::task_local` per request)
 //! 3. Per-response `InertiaResponse::encrypt_history(bool)` (handler
-//!    override — usually wins, including to opt OUT of group-level
+//!    override - usually wins, including to opt OUT of group-level
 //!    encryption)
 
 use crate::http::{Request, Response};
@@ -28,7 +28,7 @@ use async_trait::async_trait;
 pub struct EncryptHistoryMiddleware;
 
 impl EncryptHistoryMiddleware {
-    /// Build a new `EncryptHistoryMiddleware`. Stateless — no arguments needed.
+    /// Build a new `EncryptHistoryMiddleware`. Stateless - no arguments needed.
     pub fn new() -> Self {
         Self
     }

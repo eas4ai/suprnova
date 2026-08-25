@@ -19,7 +19,7 @@ use suprnova::{Event, EventFacade, text};
 
 /// `tokio-tungstenite::connect_async` doesn't send `Origin`, so the
 /// production-default `OriginPolicy::SameOrigin` would 403 every test.
-/// Opt into `AllowAny` for these tests — they exercise broadcasting
+/// Opt into `AllowAny` for these tests - they exercise broadcasting
 /// semantics, not browser CSRF defense.
 fn open_ws_config() -> WsConfig {
     WsConfig {
@@ -78,7 +78,7 @@ impl Channel for NoPublishChat {
 }
 
 /// A parameterized channel `room.{id}` whose `authorize` reads the captured
-/// `{id}` and admits only room 42 — proving the handler resolves the pattern
+/// `{id}` and admits only room 42 - proving the handler resolves the pattern
 /// and threads the params to the hook over the live WS path.
 struct RoomChannel;
 
@@ -300,7 +300,7 @@ async fn unsubscribe_stops_event_delivery() {
     // Give abort a moment to propagate before publishing
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // Publish after unsubscribe — should NOT be delivered
+    // Publish after unsubscribe - should NOT be delivered
     hub.publish(BroadcastEnvelope::new(
         "chat.public",
         "MessagePosted",
@@ -310,7 +310,7 @@ async fn unsubscribe_stops_event_delivery() {
     .unwrap();
 
     // Wait a beat then confirm no event arrives.
-    // 150ms is conservative — abort is near-instant.
+    // 150ms is conservative - abort is near-instant.
     let result = tokio::time::timeout(Duration::from_millis(150), ws.next()).await;
     assert!(
         result.is_err(),
@@ -367,7 +367,7 @@ async fn client_publish_rejected_when_channel_denies() {
     .unwrap();
     let _ = read_server_frame(&mut ws).await; // subscribed
 
-    // Attempt to publish — should be rejected.
+    // Attempt to publish - should be rejected.
     ws.send(Message::text(
         serde_json::to_string(&json!({
             "action": "publish",
@@ -503,7 +503,7 @@ async fn client_publish_rejected_when_subscribed_to_different_channel() {
     expect_connected(&mut ws).await;
 
     // Subscribe to chat.no_publish (authorize_publish defaults to false anyway,
-    // but that's fine — what we're testing is publish-to-different-channel).
+    // but that's fine - what we're testing is publish-to-different-channel).
     ws.send(Message::text(
         serde_json::to_string(&json!({
             "action": "subscribe",
@@ -516,7 +516,7 @@ async fn client_publish_rejected_when_subscribed_to_different_channel() {
     let _ = read_server_frame(&mut ws).await; // subscribed
 
     // Try to publish to chat.public (which DOES authorize MessagePosted)
-    // from a connection that subscribed to chat.no_publish — must fail.
+    // from a connection that subscribed to chat.no_publish - must fail.
     ws.send(Message::text(
         serde_json::to_string(&json!({
             "action": "publish",
@@ -564,7 +564,7 @@ async fn client_publish_rejected_when_event_name_disallowed() {
     .unwrap();
     let _ = read_server_frame(&mut ws).await; // subscribed
 
-    // chat.public only authorizes "MessagePosted" — "Spam" should be rejected.
+    // chat.public only authorizes "MessagePosted" - "Spam" should be rejected.
     ws.send(Message::text(
         serde_json::to_string(&json!({
             "action": "publish",
@@ -693,13 +693,13 @@ async fn broadcast_to_others_excludes_the_originating_socket() {
     let (port, _hub) = spawn_toothers_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
 
-    // Connection A — capture its socket id from the `connected` frame.
+    // Connection A - capture its socket id from the `connected` frame.
     let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("A connects");
     let socket_a = expect_connected(&mut ws_a).await;
 
-    // Connection B — a second subscriber that should still receive the event.
+    // Connection B - a second subscriber that should still receive the event.
     let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("B connects");
@@ -716,7 +716,7 @@ async fn broadcast_to_others_excludes_the_originating_socket() {
     }
 
     // An HTTP request carrying A's socket id dispatches a `broadcast_to_others`
-    // RoomPing — A must NOT receive it, B must.
+    // RoomPing - A must NOT receive it, B must.
     http_get_ping_as(port, &socket_a).await;
 
     // B receives the event.
@@ -726,7 +726,7 @@ async fn broadcast_to_others_excludes_the_originating_socket() {
     assert_eq!(frame["action"], "event");
     assert_eq!(frame["event"], "RoomPing");
 
-    // A is silent — it triggered the broadcast and asked to exclude itself.
+    // A is silent - it triggered the broadcast and asked to exclude itself.
     let a_silent =
         tokio::time::timeout(Duration::from_millis(200), read_server_frame(&mut ws_a)).await;
     assert!(
@@ -738,7 +738,7 @@ async fn broadcast_to_others_excludes_the_originating_socket() {
 #[tokio::test]
 async fn lagged_subscriber_receives_explicit_lagged_frame() {
     // Subscribers that fall behind the per-channel ring buffer would
-    // previously have those frames silently dropped — clients couldn't
+    // previously have those frames silently dropped - clients couldn't
     // tell their local state had diverged. The protocol now surfaces a
     // `lagged` frame with the count so clients know to refetch.
     let (port, hub) = spawn_broadcasting_server().await;
@@ -784,7 +784,7 @@ async fn lagged_subscriber_receives_explicit_lagged_frame() {
     assert!(skipped > 0, "lagged.skipped must be > 0 (got {skipped})");
 }
 
-/// A parameterized channel that admits any room id — used by the
+/// A parameterized channel that admits any room id - used by the
 /// subscription-cap test to mint distinct channel keys cheaply
 /// (room.0, room.1, …) without registering N concrete channels.
 struct OpenRoomChannel;
@@ -851,8 +851,8 @@ async fn subscribe_beyond_per_connection_cap_returns_error_frame() {
     // Per-connection subscription cap. Without this gate a malicious
     // client could subscribe to `open.{id}` with thousands of distinct
     // ids on one connection, inflating the forwarder map and tying up
-    // tokio task slots. Use a low cap (2) so the test runs cheaply
-    // — the default of 100 has the same shape but would be slower.
+    // tokio task slots. Use a low cap (2) so the test runs cheaply -
+    // the default of 100 has the same shape but would be slower.
     let port = spawn_capped_broadcasting_server(2).await;
     let url = format!("ws://127.0.0.1:{port}/ws/broadcast");
     let (mut ws, _) = tokio_tungstenite::connect_async(&url)
@@ -860,7 +860,7 @@ async fn subscribe_beyond_per_connection_cap_returns_error_frame() {
         .expect("connect");
     expect_connected(&mut ws).await;
 
-    // Sub 1 and 2 succeed — distinct channel keys, under the cap.
+    // Sub 1 and 2 succeed - distinct channel keys, under the cap.
     for id in 1..=2u32 {
         let sub = serde_json::to_string(
             &json!({ "action": "subscribe", "channel": format!("open.{id}") }),
@@ -874,7 +874,7 @@ async fn subscribe_beyond_per_connection_cap_returns_error_frame() {
         );
     }
 
-    // Sub 3 is a fresh channel key — cap reached, expect an Error
+    // Sub 3 is a fresh channel key - cap reached, expect an Error
     // frame, NOT a Subscribed ack.
     let sub =
         serde_json::to_string(&json!({ "action": "subscribe", "channel": "open.3" })).unwrap();
@@ -890,7 +890,7 @@ async fn subscribe_beyond_per_connection_cap_returns_error_frame() {
         "error reason should name the cap explicitly"
     );
 
-    // Re-subscribe to an EXISTING channel is exempt — it replaces the
+    // Re-subscribe to an EXISTING channel is exempt - it replaces the
     // forwarder in place and doesn't grow the map. Re-subscribing to
     // open.1 must therefore succeed even though we're at the cap.
     let sub =

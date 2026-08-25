@@ -1,7 +1,7 @@
 //! Implementation of the `Promotions` trait for `StripeProvider`.
 //!
 //! Maps Suprnova's provider-neutral promotion-code minting onto Stripe's
-//! `/v1/promotion_codes` — each call mints a code off an existing coupon,
+//! `/v1/promotion_codes` - each call mints a code off an existing coupon,
 //! restricted to one customer and one redemption window. The coupon itself
 //! (the percent/amount-off object) is created ahead of time in the Stripe
 //! dashboard or API; this surface only mints codes.

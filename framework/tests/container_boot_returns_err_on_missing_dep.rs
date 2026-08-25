@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `container` #290 — boot must return
+//! Regression: HIGH audit finding `container` #290 - boot must return
 //! `Err(FrameworkError)` when a singleton's dependency is genuinely
 //! missing (or its dependency graph is cyclic), instead of panicking
 //! inside the registration closure.
@@ -19,7 +19,7 @@ use suprnova::container::provider::SingletonEntry;
 #[derive(Clone)]
 struct NeverRegistered;
 
-/// Broken `SingletonEntry` — its registration closure resolves a type
+/// Broken `SingletonEntry` - its registration closure resolves a type
 /// that we never install. With the fix in place, the fixed-point loop
 /// makes one no-progress pass and returns `Err(FrameworkError::internal)`
 /// naming this entry.
@@ -51,7 +51,7 @@ fn boot_returns_err_with_descriptive_message_when_dep_unresolvable() {
     // Error should mention the missing dep so the operator can diagnose.
     // The macro-generated message embeds the type name; here we don't go
     // through the macro (we use a hand-written closure), but the chained
-    // FrameworkError display includes the inner reason — which mentions
+    // FrameworkError display includes the inner reason - which mentions
     // "could not be booted" and the underlying "no such service"
     // message from `App::resolve`.
     assert!(

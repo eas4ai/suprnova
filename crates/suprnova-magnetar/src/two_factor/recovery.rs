@@ -28,7 +28,7 @@ pub fn generate(count: usize) -> Vec<String> {
 /// Locate `code` inside `codes` without short-circuiting.
 ///
 /// Every entry is visited and compared with [`ConstantTimeEq`], folding the
-/// result, so run time depends only on `codes.len()` — never on whether or
+/// result, so run time depends only on `codes.len()` - never on whether or
 /// where a match exists. Entries of a different length are a structural
 /// reject (codes are a fixed 13-byte shape), not a timing oracle for a
 /// same-length attacker.

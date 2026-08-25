@@ -1,23 +1,23 @@
-//! Phase 10B P11 — Soft deletes + relations interaction.
+//! Phase 10B P11 - Soft deletes + relations interaction.
 //!
 //! Pins how `#[model(soft_deletes)]` composes with the relation
 //! surface from Phase 10B. The question Laravel-coming users ask first:
 //!
-//! - Does `User::all()` hide trashed users? — yes, T10 already pinned.
-//! - Does `user.posts().get()` work on a *trashed* user? — yes,
+//! - Does `User::all()` hide trashed users? - yes, T10 already pinned.
+//! - Does `user.posts().get()` work on a *trashed* user? - yes,
 //!   because the trashed user is still a fully-materialised Rust
 //!   value; the scope only filters reads.
-//! - Does eager-loading children skip trashed children? — yes,
+//! - Does eager-loading children skip trashed children? - yes,
 //!   because the per-relation arm builds `R::query()` which routes
 //!   through the soft-delete scope.
-//! - Does `with_trashed()` propagate into relation builders? — yes,
+//! - Does `with_trashed()` propagate into relation builders? - yes,
 //!   P11 ships [`Builder<M>::with_trashed`] / [`only_trashed`] plus
 //!   forwarding methods on every relation wrapper, so
 //!   `user.posts().with_trashed().get()` and the closure form
 //!   `User::query().with_where(("posts", |q| q.with_trashed()))`
 //!   both work.
-//! - Does `force_delete` / `restore` / `delete` cascade to children?
-//!   — NO. Pinned here. Laravel doesn't cascade either; cascade is a
+//! - Does `force_delete` / `restore` / `delete` cascade to children? -
+//!   NO. Pinned here. Laravel doesn't cascade either; cascade is a
 //!   per-app concern users can handle via the event surface (10C).
 //!
 //! The tests below use throwaway tables (`sdrel_*` prefix) to avoid
@@ -99,7 +99,7 @@ async fn seed(_db: &TestDatabase) -> (SdRelUser, SdRelPost, SdRelPost) {
 async fn relation_call_on_trashed_parent_returns_alive_children() {
     // Holding a soft-deleted parent value, calling `.posts().get()` on
     // it still reads from the child table. The scope only hides the
-    // parent from collection reads — it doesn't prevent navigation
+    // parent from collection reads - it doesn't prevent navigation
     // from a Rust value you already have. Trashed children are still
     // filtered by THEIR own scope (so we only see the alive one).
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -206,7 +206,7 @@ async fn with_trashed_collection_eager_loads_for_trashed_parents() {
 async fn relation_builder_with_trashed_includes_trashed_children() {
     // P11 surface: `user.posts().with_trashed().get()` widens the
     // child scope to include trashed posts. This is the forwarding
-    // path we ship — relation wrappers expose the same modifier as
+    // path we ship - relation wrappers expose the same modifier as
     // the underlying Builder<R>.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
@@ -240,7 +240,7 @@ async fn relation_builder_only_trashed_filters_to_dead_children() {
 async fn with_where_closure_can_widen_to_trashed_children() {
     // Laravel: `User::with(['posts' => fn($q) => $q->withTrashed()])`.
     // Suprnova: `with_where(("posts", |q| q.with_trashed()))`.
-    // The closure receives a `Builder<R>` — to support this, the
+    // The closure receives a `Builder<R>` - to support this, the
     // Builder itself has to expose `with_trashed()` on soft-delete
     // models. P11 adds the method.
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -270,7 +270,7 @@ async fn parent_soft_delete_does_not_cascade_to_children() {
     let (u, _p1, _p2) = seed(&db).await;
     u.delete().await.unwrap();
 
-    // Children remain alive — they have their own scope and were
+    // Children remain alive - they have their own scope and were
     // never touched by the parent's `delete()`.
     let kids = SdRelPost::all().await.unwrap();
     assert_eq!(kids.len(), 2);
@@ -337,7 +337,7 @@ async fn parent_restore_does_not_cascade_to_children() {
 #[tokio::test]
 async fn builder_with_trashed_preserves_other_filters() {
     // Sanity: with_trashed() removes ONLY the auto-applied deleted_at
-    // null filter — not unrelated WHERE terms the user has chained.
+    // null filter - not unrelated WHERE terms the user has chained.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
     let alice = SdRelUser::create(attrs! { name: "Alice", email: "a@x.com" })
@@ -426,7 +426,7 @@ async fn migrate_through(db: &TestDatabase) {
 
 #[tokio::test]
 async fn has_many_through_filters_out_trashed_intermediate_and_target() {
-    // Mirrors Laravel's `hasManyThrough` — the JOIN renderer auto-
+    // Mirrors Laravel's `hasManyThrough` - the JOIN renderer auto-
     // appends `AND <table>.<col> IS NULL` for every model on the
     // chain that opts into soft deletes. Pre-A2-M-004 the relation
     // returned trashed B and C rows alongside alive ones.

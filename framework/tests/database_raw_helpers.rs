@@ -1,4 +1,4 @@
-//! Laravel-13 parity — raw helper completeness.
+//! Laravel-13 parity - raw helper completeness.
 //!
 //! Covers `DB::select_one`, `DB::scalar`, `DB::insert` (raw),
 //! `DB::statement` (with bindings), `DB::unprepared`, plus the

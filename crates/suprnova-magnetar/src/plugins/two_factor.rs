@@ -1,7 +1,7 @@
 //! The two-factor route plugin: enrollment lifecycle and the challenge.
 //!
 //! Enrollment routes require the authenticated owner; the challenge route
-//! is deliberately unauthenticated — it completes the gate ceremony a
+//! is deliberately unauthenticated - it completes the gate ceremony a
 //! primary sign-in created, and only the gate can turn that proof into a
 //! session. The remember-me preference stated at login rides the challenge
 //! request (the host adapter injects the stashed value on the web lane),

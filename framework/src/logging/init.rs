@@ -29,7 +29,7 @@ pub(crate) fn parse_env_filter(level: &str) -> Result<EnvFilter, String> {
 /// A malformed directive is a real misconfiguration, so it is reported on
 /// stderr: this runs while installing the subscriber, before any global
 /// `tracing` subscriber is guaranteed to exist, so a `tracing::warn!`
-/// could be silently dropped — stderr is always visible to the operator.
+/// could be silently dropped - stderr is always visible to the operator.
 pub(crate) fn build_env_filter(level: &str) -> EnvFilter {
     match parse_env_filter(level) {
         Ok(filter) => filter,
@@ -64,7 +64,7 @@ pub fn init_subscriber(config: LogConfig) {
 }
 
 /// Internal helper used by `init_telemetry` to install the (non-OTel) part
-/// of the subscriber. Returns whether install actually succeeded — a
+/// of the subscriber. Returns whether install actually succeeded - a
 /// duplicate install (e.g. inside tests) leaves the existing subscriber
 /// in place and emits a `tracing::warn!` through it so the operator can
 /// see that this `LogConfig` was not applied.
@@ -96,7 +96,7 @@ pub(crate) fn install_base_subscriber(config: &LogConfig) -> bool {
         // embedder that initialises logging more than once). The existing
         // one wins and this `LogConfig` was NOT applied. `try_init` only
         // fails when a subscriber is already in place, so that subscriber
-        // is guaranteed to receive this `warn!` — `warn!` rather than
+        // is guaranteed to receive this `warn!` - `warn!` rather than
         // `debug!` so an info-level production filter still surfaces it,
         // since the bool return value tends to be ignored by callers.
         tracing::warn!(
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn parse_env_filter_rejects_invalid_directive() {
-        // An invalid level name after `=` is a parse error — `build_env_filter`
+        // An invalid level name after `=` is a parse error - `build_env_filter`
         // surfaces it on stderr instead of silently falling back unannounced.
         assert!(parse_env_filter("app=notalevel").is_err());
     }
@@ -137,7 +137,7 @@ mod tests {
         // After at least one install in the process, a subsequent attempt
         // must report `false`: the existing global subscriber wins and the
         // new `LogConfig` is not applied. The first call may itself be a
-        // duplicate if another test already installed the default — either
+        // duplicate if another test already installed the default - either
         // way the second call is deterministically not-applied.
         let _first = install_base_subscriber(&LogConfig::default());
         let second = install_base_subscriber(&LogConfig::default());

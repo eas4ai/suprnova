@@ -1,6 +1,6 @@
 //! On-demand / anonymous notifications.
 //!
-//! `AnonymousNotifiable` is a "user without a row" — it carries a per-channel
+//! `AnonymousNotifiable` is a "user without a row" - it carries a per-channel
 //! route map directly, so callers can fire a notification at an arbitrary
 //! email/endpoint/channel without needing a database-backed recipient.
 //!
@@ -11,7 +11,7 @@
 use crate::notifications::Notifiable;
 use std::collections::HashMap;
 
-/// A notifiable target without a backing model — built from per-channel
+/// A notifiable target without a backing model - built from per-channel
 /// `(channel, route)` pairs.
 ///
 /// Mirrors Laravel's `Illuminate\Notifications\AnonymousNotifiable`. Use it
@@ -42,7 +42,7 @@ impl AnonymousNotifiable {
 
     /// Add a per-channel route. Returns `self` for chaining.
     ///
-    /// Returns an error when the channel name is `"database"` — see the
+    /// Returns an error when the channel name is `"database"` - see the
     /// type-level docs for why.
     pub fn route(
         mut self,
@@ -53,7 +53,7 @@ impl AnonymousNotifiable {
         if channel == "database" {
             return Err(crate::FrameworkError::internal(
                 "the database channel does not support on-demand notifications \
-                 — an anonymous notifiable has no polymorphic id to attach the \
+                 - an anonymous notifiable has no polymorphic id to attach the \
                  row to",
             ));
         }
@@ -62,7 +62,7 @@ impl AnonymousNotifiable {
     }
 
     /// Add multiple `(channel, route)` pairs at once. Equivalent to a fold
-    /// over [`Self::route`] — same database-channel rejection applies.
+    /// over [`Self::route`] - same database-channel rejection applies.
     pub fn routes<I, C, R>(mut self, pairs: I) -> Result<Self, crate::FrameworkError>
     where
         I: IntoIterator<Item = (C, R)>,

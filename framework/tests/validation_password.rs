@@ -9,7 +9,7 @@
 //! `Rule::passes(&rule, ...)` / `AsyncRule::passes(&rule, ...).await`.
 //!
 //! `Http::assert_sent`/`fake_response` are also free functions
-//! (`suprnova::assert_sent`), not `Http::` associated items — only
+//! (`suprnova::assert_sent`), not `Http::` associated items - only
 //! `Http::fake`, `Http::fake_response_text`, and the request builders
 //! (`Http::get`/`post`/...) are associated with `Http` itself.
 

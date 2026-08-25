@@ -2,7 +2,7 @@
 //!
 //! `hyper::body::Incoming` cannot be constructed outside hyper's
 //! connection machinery, so these drive `handle_request` over a loopback
-//! socket — the same harness `framework/tests/cors_middleware.rs` uses.
+//! socket - the same harness `framework/tests/cors_middleware.rs` uses.
 //! `framework/tests/inertia.rs` covers the response builder through an
 //! `InertiaRequestExt` mock; this file covers everything that only exists
 //! once a real middleware chain is in play.
@@ -41,7 +41,7 @@ impl Middleware for SeededSessionScope {
 fn router() -> Router {
     Router::new()
         .get("/home", |_req| async { text("home") })
-        // Body-less 200 — the shape Laravel's `onEmptyResponse` catches.
+        // Body-less 200 - the shape Laravel's `onEmptyResponse` catches.
         // The local binding pins the error half of `Response`, which a
         // bare `Ok(...)` leaves for inference to guess.
         .get("/empty", |_req| async {
@@ -197,7 +197,7 @@ async fn an_empty_200_on_an_inertia_visit_becomes_a_303_back() {
     // `onEmptyResponse` redirects back instead.
     //
     // No session middleware in this registry, so `Redirect::back("/")`
-    // finds no `_previous.url` and takes the "/" fallback — this is the
+    // finds no `_previous.url` and takes the "/" fallback - this is the
     // fallback case. `an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url`
     // below covers the actual "back" behavior with a session in scope.
     let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
@@ -219,7 +219,7 @@ async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
     // (the key `SessionMiddleware` writes on every successful GET, see
     // `SessionData::set_previous_url`) rather than falling back to the
     // default. This is the behavior the fallback test above cannot
-    // exercise — an empty-response substitution that actually goes "back"
+    // exercise - an empty-response substitution that actually goes "back"
     // instead of always landing on "/".
     let slot = suprnova::session::new_session_slot_for_test();
     {
@@ -244,7 +244,7 @@ async fn an_empty_200_on_an_inertia_visit_redirects_to_the_previous_url() {
 
 #[tokio::test]
 async fn an_empty_200_on_a_plain_browser_visit_is_left_alone() {
-    // Only Inertia visits get the substitution — a REST endpoint that
+    // Only Inertia visits get the substitution - a REST endpoint that
     // legitimately returns a body-less 200 must keep doing so.
     let registry = MiddlewareRegistry::new().append(InertiaHeadersMiddleware::new());
     let addr = spawn_server(router(), registry, 2).await;
@@ -260,7 +260,7 @@ async fn an_empty_200_on_a_plain_browser_visit_is_left_alone() {
 async fn a_version_mismatch_reflashes_the_session_before_the_409() {
     // The client answers a 409 with a full-page GET. That GET is a NEW
     // request, so the session middleware ages `_flash.old.*` away before
-    // the destination page can read it — a validation error flashed by
+    // the destination page can read it - a validation error flashed by
     // the previous request vanishes purely because the asset version
     // moved. Laravel reflashes first (Middleware.php:171-175).
     let slot = suprnova::session::new_session_slot_for_test();
@@ -328,7 +328,7 @@ async fn a_matching_version_does_not_reflash() {
     let session = guard.as_ref().unwrap();
     assert!(
         session.has("_flash.old.status"),
-        "no bounce, no reflash — the entry stays where it was"
+        "no bounce, no reflash - the entry stays where it was"
     );
     assert!(!session.has("_flash.new.status"));
 }
@@ -339,7 +339,7 @@ async fn a_matching_version_does_not_reflash() {
 async fn a_version_mismatch_409_still_carries_vary_x_inertia_when_headers_middleware_wraps_it() {
     // `Inertia::install` registers `InertiaHeadersMiddleware` first
     // specifically so it is outermost and sees the `409` the version
-    // middleware returns without ever calling the handler — that
+    // middleware returns without ever calling the handler - that
     // composition is the whole point of the registration order, and is
     // exercised nowhere else in this file: the `Vary` tests above never
     // register a version middleware, and the version-mismatch tests above

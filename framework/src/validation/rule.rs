@@ -1,27 +1,27 @@
-//! Rule objects — composable validators that work alongside (and
+//! Rule objects - composable validators that work alongside (and
 //! independently of) `#[derive(Validate)]`.
 //!
 //! Four traits cover the design space:
 //!
-//! - [`Rule`] — pure sync check on a single value. Built-ins:
+//! - [`Rule`] - pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
 //!   [`rules::Max`], [`rules::Between`], [`rules::In`],
 //!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
 //!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
 //!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
 //!   [`rules::HttpUrl`], [`rules::Uuid`], [`rules::Password`]
-//!   (strength checks only — see [`AsyncRule`] below for its
+//!   (strength checks only - see [`AsyncRule`] below for its
 //!   `uncompromised()` half).
-//! - [`ValueRule`] — pure sync check on a JSON-shaped value (array or
+//! - [`ValueRule`] - pure sync check on a JSON-shaped value (array or
 //!   object), for rules a bare string can't carry enough structure for.
 //!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
-//! - [`ContextualRule`] — sync check that can read sibling fields
+//! - [`ContextualRule`] - sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
 //!   [`rules::RequiredUnless`], [`rules::Same`],
 //!   [`rules::Different`], [`rules::Confirmed`].
-//! - [`AsyncRule`] — async check (DB queries — [`async_rules::Unique`]
-//!   lives here; HTTP — [`rules::Password`]'s `uncompromised()` speaks
+//! - [`AsyncRule`] - async check (DB queries - [`async_rules::Unique`]
+//!   lives here; HTTP - [`rules::Password`]'s `uncompromised()` speaks
 //!   the Have I Been Pwned k-anonymity API here).
 //!
 //! # Coherence
@@ -63,7 +63,7 @@ use std::collections::HashMap;
 /// without touching a single rule.
 ///
 /// Every built-in rule returns a keyed message whose id is
-/// `validation-<rule name in kebab-case>` — [`rules::RequiredWithAll`]
+/// `validation-<rule name in kebab-case>` - [`rules::RequiredWithAll`]
 /// emits `validation-required-with-all`. Those ids ship in the
 /// framework's embedded English catalog and an app overrides any of
 /// them by defining the same id in its own `lang/<locale>/*.ftl`.
@@ -88,15 +88,15 @@ use std::collections::HashMap;
 /// ```
 ///
 /// A keyless message (`"...".into()`) renders its text as-is in every
-/// locale — the right choice for one-off, app-specific checks. A keyed
+/// locale - the right choice for one-off, app-specific checks. A keyed
 /// message needs its id defined in a catalog; when it isn't, rendering
 /// falls back to the message's own English text, so a missing
 /// translation degrades instead of breaking.
 pub trait Rule {
     /// Check `value`. Return `Ok(())` if it passes, `Err(message)` if
     /// it fails.
-    // `ValidationMessage` is 144 bytes — key, args map, fallback text,
-    // and context prefix — which trips clippy's 128-byte heuristic for
+    // `ValidationMessage` is 144 bytes - key, args map, fallback text,
+    // and context prefix - which trips clippy's 128-byte heuristic for
     // returned errors. Boxing it would buy a heap allocation on every
     // failed check and an unwrap at every call site, to save stack bytes
     // on a path that runs once per invalid field. The struct stays
@@ -118,14 +118,14 @@ pub trait Rule {
     }
 }
 
-/// A synchronous validator over a JSON-shaped value — [`Rule`]'s sibling
+/// A synchronous validator over a JSON-shaped value - [`Rule`]'s sibling
 /// for checks that need more structure than a string carries (allowed
 /// keys on an object, duplicates in an array). Same keyed-message
 /// contract as [`Rule`]; translation happens once, at
 /// [`ValidationErrors::to_json`](crate::ValidationErrors::to_json).
 ///
 /// The field a `ValueRule` runs against must hold `serde_json::Value`
-/// (or `Option<serde_json::Value>` on a `?:`/`?=>` row) — [`Rule`] and
+/// (or `Option<serde_json::Value>` on a `?:`/`?=>` row) - [`Rule`] and
 /// [`ContextualRule`] only ever see `&str`. A [`validate!`] row
 /// dispatches to `Rule` or `ValueRule` automatically, by whichever
 /// trait the rule's type implements.
@@ -170,7 +170,7 @@ pub trait ContextualRule {
     ///
     /// The returned [`ValidationMessage`] follows the same keyed
     /// contract as [`Rule::passes`].
-    // By value for the same reason as `Rule::passes` — see the note there.
+    // By value for the same reason as `Rule::passes` - see the note there.
     #[allow(clippy::result_large_err)]
     fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage>;
 
@@ -178,7 +178,7 @@ pub trait ContextualRule {
     /// the given field key. The error-accumulating analogue of
     /// [`Self::passes`].
     ///
-    /// Most rules don't need the field name — [`Self::check_named`]'s
+    /// Most rules don't need the field name - [`Self::check_named`]'s
     /// default impl calls into this method, ignoring `field`. Override
     /// `check_named` directly when the rule needs the name (see
     /// [`rules::Confirmed`]).
@@ -210,7 +210,7 @@ pub trait ContextualRule {
     }
 }
 
-/// Built-in synchronous rules — both pure ([`Rule`]) and contextual
+/// Built-in synchronous rules - both pure ([`Rule`]) and contextual
 /// ([`ContextualRule`]).
 pub mod rules {
     use super::{AsyncRule, ContextualRule, FormContext, Rule, ValueRule};
@@ -231,7 +231,7 @@ pub mod rules {
         value.trim().is_empty()
     }
 
-    /// Laravel `required` — value must be present and non-whitespace.
+    /// Laravel `required` - value must be present and non-whitespace.
     pub struct Required;
     impl Rule for Required {
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
@@ -243,7 +243,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `email` — defers to [`validator::ValidateEmail`] so
+    /// Laravel `email` - defers to [`validator::ValidateEmail`] so
     /// semantics match `#[validate(email)]` on derived types.
     pub struct Email;
     impl Rule for Email {
@@ -256,7 +256,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `min:N` — value must be at least `N` characters long.
+    /// Laravel `min:N` - value must be at least `N` characters long.
     ///
     /// Counts Unicode scalar values (`char`s), not bytes, so multi-byte
     /// characters count as a single character.
@@ -273,7 +273,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `max:N` — value must be at most `N` characters long.
+    /// Laravel `max:N` - value must be at most `N` characters long.
     ///
     /// Counts Unicode scalar values (`char`s), not bytes.
     pub struct Max(pub usize);
@@ -289,7 +289,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `between:min,max` — value length is `min..=max` inclusive
+    /// Laravel `between:min,max` - value length is `min..=max` inclusive
     /// (counted in Unicode scalar values, not bytes).
     pub struct Between(pub usize, pub usize);
     impl Rule for Between {
@@ -309,7 +309,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `in:foo,bar,baz` — value must be one of the allowed
+    /// Laravel `in:foo,bar,baz` - value must be one of the allowed
     /// strings (exact match, case-sensitive).
     pub struct In(pub &'static [&'static str]);
     impl Rule for In {
@@ -324,7 +324,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `not_in:foo,bar,baz` — value must NOT be in the
+    /// Laravel `not_in:foo,bar,baz` - value must NOT be in the
     /// forbidden list (exact match, case-sensitive).
     pub struct NotIn(pub &'static [&'static str]);
     impl Rule for NotIn {
@@ -339,7 +339,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `integer` — value parses cleanly as an `i64`.
+    /// Laravel `integer` - value parses cleanly as an `i64`.
     pub struct Integer;
     impl Rule for Integer {
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
@@ -349,7 +349,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `numeric` — value parses as a **finite** `f64` (covers
+    /// Laravel `numeric` - value parses as a **finite** `f64` (covers
     /// integers, floats, and scientific notation).
     ///
     /// Rust's `f64::from_str` accepts `"NaN"`, `"inf"`, `"-inf"`, and
@@ -367,7 +367,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `boolean` — accepts `"true"`, `"false"`, `"0"`, `"1"`,
+    /// Laravel `boolean` - accepts `"true"`, `"false"`, `"0"`, `"1"`,
     /// `"yes"`, `"no"`, `"on"`, `"off"` (case-insensitive).
     pub struct Boolean;
     impl Rule for Boolean {
@@ -382,12 +382,12 @@ pub mod rules {
         }
     }
 
-    /// Laravel `alpha` — value must contain only alphabetic
+    /// Laravel `alpha` - value must contain only alphabetic
     /// characters and be non-empty.
     ///
     /// **Unicode semantics:** uses [`char::is_alphabetic`] which
     /// accepts non-ASCII letters (`é`, `ñ`, `中`, etc.). This differs
-    /// from Laravel 13's default `alpha`, which is ASCII-only — Laravel
+    /// from Laravel 13's default `alpha`, which is ASCII-only - Laravel
     /// only matches Unicode if the `:ascii` suffix is omitted in newer
     /// versions. Suprnova picks the international default; if you need
     /// ASCII-only behaviour, gate with a custom rule.
@@ -403,7 +403,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `alpha_num` — value is letters or digits only; must be
+    /// Laravel `alpha_num` - value is letters or digits only; must be
     /// non-empty. Uses Unicode-aware [`char::is_alphanumeric`]. For a
     /// rule that also permits `_` and `-`, use [`AlphaDash`].
     pub struct AlphaNum;
@@ -418,7 +418,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `alpha_dash` — value is letters, digits, underscores,
+    /// Laravel `alpha_dash` - value is letters, digits, underscores,
     /// or hyphens; must be non-empty. Uses Unicode-aware
     /// [`char::is_alphanumeric`]. For letters and digits only, use
     /// [`AlphaNum`].
@@ -509,7 +509,7 @@ pub mod rules {
     /// followed by a non-empty host token that doesn't itself start with
     /// `/`. This is Laravel's `Str::isUrl` host requirement
     /// (`reference/framework-13.25.0/src/Illuminate/Support/Str.php:633`):
-    /// the pattern's host group, opened at `Str.php:636`, has no `?` — an
+    /// the pattern's host group, opened at `Str.php:636`, has no `?` - an
     /// absent or empty host never matches, no matter how valid the
     /// scheme.
     ///
@@ -517,9 +517,9 @@ pub mod rules {
     /// authority, because the WHATWG URL parser `url::Url::parse` uses is
     /// forgiving of extra slashes for "special" schemes (`http`, `https`,
     /// `ftp`, `file`, `ws`, `wss`) in a way Laravel's PCRE match is not.
-    /// `http:///foo` folds its third `/` straight into the host —
+    /// `http:///foo` folds its third `/` straight into the host -
     /// `Url::parse("http:///foo").host_str()` comes back `Some("foo")`, a
-    /// non-empty host — even though Laravel's regex fails to match at
+    /// non-empty host - even though Laravel's regex fails to match at
     /// that position (the character right after `://` has to be a host
     /// character, and `/` isn't one). A non-empty `host_str()` alone is
     /// not the load-bearing check for that reason; the raw bytes are.
@@ -543,12 +543,12 @@ pub mod rules {
             && !rest.starts_with('/')
     }
 
-    /// Laravel `url` — the value matches Laravel's `^(PROTOCOLS)://HOST`
+    /// Laravel `url` - the value matches Laravel's `^(PROTOCOLS)://HOST`
     /// pattern (`Illuminate\Support\Str::isUrl`,
     /// `reference/framework-13.25.0/src/Illuminate/Support/Str.php:633`):
     /// its scheme must be on Laravel's allowlist (`ALLOWED_SCHEMES`), be
     /// followed by `://`, and that in turn must be followed by a
-    /// non-empty host token — Laravel's host group (`Str.php:636`,
+    /// non-empty host token - Laravel's host group (`Str.php:636`,
     /// `localhost | hostname | IPv4 | IPv6`) has no `?`, so an absent or
     /// empty host never matches even with a listed scheme.
     ///
@@ -562,7 +562,7 @@ pub mod rules {
     /// restriction added here: it's why `mailto:`, `data:`, and `tel:`
     /// are rejected even though those schemes are on the allowlist (no
     /// authority component at all), and why `file:///etc/passwd` is
-    /// rejected too (an authority, but an empty host — nothing sits
+    /// rejected too (an authority, but an empty host - nothing sits
     /// between the third and fourth `/`, and nothing isn't a host
     /// token). `file://` needs an actual hostname to pass, which the
     /// everyday `file:///path` form never has.
@@ -579,8 +579,8 @@ pub mod rules {
         ///
         /// The list **replaces** `ALLOWED_SCHEMES` rather than
         /// intersecting with it (Laravel's `$protocols` argument does the
-        /// same), so an app can accept its own custom scheme — a mobile
-        /// deep link, say — without the framework holding an opinion
+        /// same), so an app can accept its own custom scheme - a mobile
+        /// deep link, say - without the framework holding an opinion
         /// about it.
         ///
         /// An empty list is not "reject everything": it falls back to
@@ -635,13 +635,13 @@ pub mod rules {
     /// Like [`Url`], a value must be one of the listed schemes, followed
     /// by `://`, followed by a non-empty host. An empty list falls back
     /// to Laravel's full default allowlist (same `://`-plus-host
-    /// requirement) rather than rejecting every value — see
+    /// requirement) rather than rejecting every value - see
     /// [`Url::protocols`].
     pub struct UrlProtocols(pub &'static [&'static str]);
 
     impl Rule for UrlProtocols {
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
-            // An empty list means "no override" in Laravel — fall back to
+            // An empty list means "no override" in Laravel - fall back to
             // the same default allowlist `Url` uses.
             let protocols: &[&str] = if self.0.is_empty() {
                 ALLOWED_SCHEMES
@@ -663,11 +663,11 @@ pub mod rules {
         }
     }
 
-    /// Laravel `url:http,https` under a name — the value parses as a URL
+    /// Laravel `url:http,https` under a name - the value parses as a URL
     /// **and** its scheme is `http` or `https`.
     ///
     /// Reach for this on callback, webhook, and avatar URLs. It's
-    /// [`Url`] with the scheme list narrowed to two entries — nothing
+    /// [`Url`] with the scheme list narrowed to two entries - nothing
     /// else changes, so `ftp://host/x` and `ssh://host` (real hosts,
     /// wrong scheme) are rejected the same way `http:///x` (right
     /// scheme, no host) is.
@@ -685,7 +685,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `uuid` — value parses as a UUID in any of the formats
+    /// Laravel `uuid` - value parses as a UUID in any of the formats
     /// the [`uuid`] crate's `parse_str` accepts (hyphenated, simple,
     /// braced, urn).
     pub struct Uuid;
@@ -703,16 +703,16 @@ pub mod rules {
     /// (`reference/framework-13.25.0/src/Illuminate/Validation/Rules/Password.php:336-389`),
     /// kept literal so a re-port against a future Laravel is a plain
     /// diff rather than a re-derivation. Each pattern is compiled once
-    /// and cached — `Regex::new` is too costly to redo on every
+    /// and cached - `Regex::new` is too costly to redo on every
     /// `passes` call.
     fn password_mixed_case_pattern() -> &'static regex::Regex {
         static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
         PATTERN.get_or_init(|| {
-            // Laravel: `/(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})/u` — a run of
+            // Laravel: `/(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})/u` - a run of
             // lowercase letters followed eventually by an uppercase one,
             // or the reverse. Whichever letter class occurs first in the
             // string, one of the two alternatives matches as soon as both
-            // classes are present at all — so in effect: "contains at
+            // classes are present at all - so in effect: "contains at
             // least one lowercase AND at least one uppercase letter."
             regex::Regex::new(r"(\p{Ll}+.*\p{Lu})|(\p{Lu}+.*\p{Ll})")
                 .expect("password mixed-case pattern is a fixed, valid regex")
@@ -721,7 +721,7 @@ pub mod rules {
 
     fn password_letters_pattern() -> &'static regex::Regex {
         static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
-        // Laravel: `/\pL/u` — any Unicode letter.
+        // Laravel: `/\pL/u` - any Unicode letter.
         PATTERN.get_or_init(|| {
             regex::Regex::new(r"\pL").expect("password letters pattern is a fixed, valid regex")
         })
@@ -729,7 +729,7 @@ pub mod rules {
 
     fn password_numbers_pattern() -> &'static regex::Regex {
         static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
-        // Laravel: `/\pN/u` — any Unicode number.
+        // Laravel: `/\pN/u` - any Unicode number.
         PATTERN.get_or_init(|| {
             regex::Regex::new(r"\pN").expect("password numbers pattern is a fixed, valid regex")
         })
@@ -737,9 +737,9 @@ pub mod rules {
 
     fn password_symbols_pattern() -> &'static regex::Regex {
         static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
-        // Laravel: `/\p{Z}|\p{S}|\p{P}/u` — separator, symbol, or
+        // Laravel: `/\p{Z}|\p{S}|\p{P}/u` - separator, symbol, or
         // punctuation. `\p{Z}` (separator) is what makes a plain space
-        // count as a symbol — matching Laravel exactly.
+        // count as a symbol - matching Laravel exactly.
         PATTERN.get_or_init(|| {
             regex::Regex::new(r"\p{Z}|\p{S}|\p{P}")
                 .expect("password symbols pattern is a fixed, valid regex")
@@ -749,7 +749,7 @@ pub mod rules {
     /// Process-wide default configured by [`Password::defaults_with`].
     static DEFAULT_PASSWORD_RULE: OnceLock<fn() -> Password> = OnceLock::new();
 
-    /// Laravel `Password::min(N)` rule object — password strength
+    /// Laravel `Password::min(N)` rule object - password strength
     /// checks (length, letter mix, digits, symbols), plus an optional
     /// Have I Been Pwned [`uncompromised`](Self::uncompromised) check.
     ///
@@ -765,13 +765,13 @@ pub mod rules {
     /// assert!(Rule::passes(&rule, "weak").is_err());
     /// ```
     ///
-    /// # Two trait impls, one struct — the deliberate exception
+    /// # Two trait impls, one struct - the deliberate exception
     ///
     /// Every other built-in rule implements exactly one of `Rule` /
     /// `ContextualRule` / `AsyncRule` (see the module-level "Coherence"
     /// note). `Password` needs both: the strength checks are pure and
     /// synchronous, but [`Self::uncompromised`] needs an HTTP round trip,
-    /// which [`crate::validate!`] — sync-only by design — cannot run. So
+    /// which [`crate::validate!`] - sync-only by design - cannot run. So
     /// `Password` implements [`Rule`] for the strength-only sync path
     /// (usable in `validate!` rows) and [`AsyncRule`] for the full check
     /// (strength, then HIBP), wired through `after_validation_async`
@@ -780,7 +780,7 @@ pub mod rules {
     /// disagree about what "strength" means.
     ///
     /// Calling [`Rule::passes`] on a `Password` with `uncompromised` set
-    /// is a **loud error**, not a silent skip — see
+    /// is a **loud error**, not a silent skip - see
     /// [`Self::uncompromised`] for why that matters.
     pub struct Password {
         min: usize,
@@ -840,7 +840,7 @@ pub mod rules {
 
         /// Require at least one separator, symbol, or punctuation
         /// character (Laravel: `/\p{Z}|\p{S}|\p{P}/u`). `\p{Z}` is why a
-        /// plain space satisfies this rule — Laravel treats whitespace
+        /// plain space satisfies this rule - Laravel treats whitespace
         /// as a symbol, and so does this port.
         pub fn symbols(mut self) -> Self {
             self.symbols = true;
@@ -849,7 +849,7 @@ pub mod rules {
 
         /// Require the password to not appear in the Have I Been Pwned
         /// breach corpus, checked via [`HibpVerifier`] (or a
-        /// [`Self::verifier`] override) with threshold `0` — any
+        /// [`Self::verifier`] override) with threshold `0` - any
         /// appearance at all fails. Use
         /// [`Self::uncompromised_with_threshold`] to tolerate a small
         /// number of low-signal appearances instead.
@@ -859,7 +859,7 @@ pub mod rules {
         /// Setting this flag means the rule needs [`AsyncRule`], not
         /// [`Rule`]. If this `Password` only ever runs through
         /// [`Rule::passes`] (a `validate!` row, or a hand-written sync
-        /// call), the check is **not silently skipped** — silently
+        /// call), the check is **not silently skipped** - silently
         /// skipping a compromised-password check is the one unacceptable
         /// outcome here. `Rule::passes` instead returns a keyless,
         /// developer-facing error explaining that the rule must run via
@@ -873,7 +873,7 @@ pub mod rules {
         /// Like [`Self::uncompromised`], but the password is only
         /// flagged once it has been seen more than `threshold` times in
         /// the breach corpus (Laravel: `uncompromised($threshold = 0)`).
-        /// The comparison is strict — `count > threshold` — so
+        /// The comparison is strict - `count > threshold` - so
         /// `uncompromised_with_threshold(0)` behaves exactly like
         /// [`Self::uncompromised`]: any appearance at all fails.
         pub fn uncompromised_with_threshold(mut self, threshold: u32) -> Self {
@@ -883,7 +883,7 @@ pub mod rules {
         }
 
         /// Override the verifier [`Self::uncompromised`] uses instead of
-        /// the default [`HibpVerifier`] — for tests (a verifier that
+        /// the default [`HibpVerifier`] - for tests (a verifier that
         /// never touches the network) or to swap in a self-hosted breach
         /// corpus.
         pub fn verifier(mut self, verifier: Arc<dyn UncompromisedVerifier>) -> Self {
@@ -892,7 +892,7 @@ pub mod rules {
         }
 
         /// Configure the process-wide default returned by
-        /// [`Self::defaults`] — Laravel's `Password::defaults(fn () =>
+        /// [`Self::defaults`] - Laravel's `Password::defaults(fn () =>
         /// ...)` (`Password.php:308-317`). Takes a plain `fn` pointer
         /// rather than a closure, so the stored default stays `Copy` and
         /// `Send + Sync` without boxing. Call it once from
@@ -930,7 +930,7 @@ pub mod rules {
         /// returns the FIRST failing check (see "Why Suprnova diverges"
         /// in `manual/validation.md`).
         // Same 128-byte clippy heuristic noted on `Rule::passes`'s doc
-        // comment — `ValidationMessage` stays by-value; see that comment.
+        // comment - `ValidationMessage` stays by-value; see that comment.
         #[allow(clippy::result_large_err)]
         fn strength_check(&self, value: &str) -> Result<(), ValidationMessage> {
             let len = value.chars().count();
@@ -970,7 +970,7 @@ pub mod rules {
         /// Strength checks only. If [`Password::uncompromised`] was
         /// called and every strength check passes, returns a keyless
         /// error explaining that the HIBP check needs [`AsyncRule`]
-        /// instead — see the struct docs.
+        /// instead - see the struct docs.
         #[allow(clippy::result_large_err)]
         fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
             self.strength_check(value)?;
@@ -989,8 +989,8 @@ pub mod rules {
     #[async_trait::async_trait]
     impl AsyncRule for Password {
         /// Strength checks (delegating to the same `strength_check` that
-        /// [`Rule::passes`] uses), then — only once every strength check
-        /// passes and [`Password::uncompromised`] was called — the HIBP
+        /// [`Rule::passes`] uses), then - only once every strength check
+        /// passes and [`Password::uncompromised`] was called - the HIBP
         /// range check via [`Password::verifier`] or the default
         /// [`HibpVerifier`].
         async fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
@@ -1041,7 +1041,7 @@ pub mod rules {
 
     /// Pluggable check behind [`Password::uncompromised`]. `Ok(true)`
     /// means the password is clean; `Ok(false)` means it was found
-    /// compromised. [`HibpVerifier`] is the default — swap in your own
+    /// compromised. [`HibpVerifier`] is the default - swap in your own
     /// via [`Password::verifier`] for tests or a self-hosted breach
     /// corpus.
     ///
@@ -1050,7 +1050,7 @@ pub mod rules {
     #[async_trait::async_trait]
     pub trait UncompromisedVerifier: Send + Sync {
         /// Check `value` against the breach corpus. `threshold` is the
-        /// maximum tolerated appearance count — see
+        /// maximum tolerated appearance count - see
         /// [`Password::uncompromised_with_threshold`].
         ///
         /// # The `Err` contract
@@ -1062,7 +1062,7 @@ pub mod rules {
         /// the error regardless - logs are persisted and searchable, the
         /// same discipline [`HibpVerifier`] applies to its own logging.
         ///
-        /// `Err` is not a third way to "fail open" — it is treated as a
+        /// `Err` is not a third way to "fail open" - it is treated as a
         /// genuine implementation bug and surfaces to the caller as a
         /// failure. [`HibpVerifier`]'s fail-open behavior (a network
         /// problem reports the password clean) lives entirely inside
@@ -1070,12 +1070,12 @@ pub mod rules {
         /// never `Err`. An implementation that instead returns `Err` on
         /// its own network failure **inverts that policy to fail
         /// closed** for every app that installs it via
-        /// [`Password::verifier`] — return `Ok(true)` internally for
+        /// [`Password::verifier`] - return `Ok(true)` internally for
         /// anything you want Laravel's `NotPwnedVerifier` semantics for.
         async fn verify(&self, value: &str, threshold: u32) -> Result<bool, FrameworkError>;
     }
 
-    /// Default [`UncompromisedVerifier`] — Have I Been Pwned's
+    /// Default [`UncompromisedVerifier`] - Have I Been Pwned's
     /// k-anonymity range API, ported from Laravel's
     /// `Illuminate\Validation\NotPwnedVerifier`.
     ///
@@ -1090,17 +1090,17 @@ pub mod rules {
     /// `SUFFIX:COUNT` lines), and the match against the full hash
     /// happens locally, in this function. That is the whole point of
     /// k-anonymity: the service learns a 5-hex-character bucket shared
-    /// by (on average) hundreds of distinct passwords — never the
+    /// by (on average) hundreds of distinct passwords - never the
     /// password, and never even its full hash.
     ///
     /// # Fails open
     ///
     /// A transport error, a request timeout, a non-2xx response, or an
     /// unreadable body all report the password **clean** (`Ok(true)`)
-    /// rather than failing the check — matching Laravel's
+    /// rather than failing the check - matching Laravel's
     /// `NotPwnedVerifier` exactly, and required so a third-party outage
     /// can never block every login or signup in the app. Each of these
-    /// cases logs a `tracing::warn!` — never the password, and never the
+    /// cases logs a `tracing::warn!` - never the password, and never the
     /// prefix. That second guarantee needs its own care: `reqwest`'s
     /// transport-error `Display` (and this crate's own fail-on-real-calls
     /// message) both embed the full request URL, which *contains* the
@@ -1129,10 +1129,10 @@ pub mod rules {
     ///
     /// Needed because the two errors [`HibpVerifier`]'s
     /// [`UncompromisedVerifier::verify`] impl logs on its fail-open paths
-    /// both embed the *full request URL* in their own `Display` output —
+    /// both embed the *full request URL* in their own `Display` output -
     /// `reqwest::Error` always does, and so does this crate's own
     /// `Http::fail_on_real_calls` message (`http_client/mod.rs`'s "no
-    /// fake matched outbound request to {url}") — and that URL contains
+    /// fake matched outbound request to {url}") - and that URL contains
     /// `prefix`. Logging `%e` verbatim would leak it despite
     /// [`HibpVerifier`]'s own documented guarantee that the prefix never
     /// appears in a log line. Matches both the
@@ -1207,7 +1207,7 @@ pub mod rules {
                 }
                 return match count.trim().parse::<u64>() {
                     // `Ok(bool)` here is "is this password clean?", the
-                    // inverse of "count exceeds the threshold" — matched
+                    // inverse of "count exceeds the threshold" - matched
                     // and over threshold means compromised, so `Ok(false)`.
                     Ok(count) => Ok(count <= u64::from(threshold)),
                     Err(_) => {
@@ -1223,7 +1223,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `required_if:other,value` — the field is required only
+    /// Laravel `required_if:other,value` - the field is required only
     /// when sibling field `other` is exactly equal to `value`.
     ///
     /// When `other` matches: empty/whitespace value fails.
@@ -1251,7 +1251,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `required_with:foo,bar,baz` — the field is required
+    /// Laravel `required_with:foo,bar,baz` - the field is required
     /// when **any** of the listed sibling fields is present and
     /// non-blank.
     ///
@@ -1282,7 +1282,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `required_with_all:foo,bar,baz` — the field is required
+    /// Laravel `required_with_all:foo,bar,baz` - the field is required
     /// only when **every** listed sibling is present and non-blank.
     /// The complement of [`RequiredWith`].
     pub struct RequiredWithAll {
@@ -1310,7 +1310,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `required_unless:other,value` — the field is required
+    /// Laravel `required_unless:other,value` - the field is required
     /// unless sibling field `other` is exactly equal to `value`.
     ///
     /// When `other` matches `value`: always passes.
@@ -1338,7 +1338,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `same:other_field` — value must equal `ctx[other]`. Used
+    /// Laravel `same:other_field` - value must equal `ctx[other]`. Used
     /// for password-confirmation style flows where the two fields don't
     /// share the `<field>_confirmation` suffix convention.
     ///
@@ -1358,7 +1358,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `different:other_field` — value must differ from
+    /// Laravel `different:other_field` - value must differ from
     /// `ctx[other]`. If `other` is missing, the rule passes (there is
     /// nothing to be the same as).
     pub struct Different {
@@ -1376,7 +1376,7 @@ pub mod rules {
         }
     }
 
-    /// Laravel `confirmed` — value must equal `ctx["<field>_confirmation"]`.
+    /// Laravel `confirmed` - value must equal `ctx["<field>_confirmation"]`.
     ///
     /// Usage is through the [`crate::validate!`] macro, which threads
     /// the field ident into the rule via `stringify!($field)`:
@@ -1450,14 +1450,14 @@ pub mod rules {
         }
     }
 
-    /// Laravel `array:keys` (#60918) — the value must be a JSON object
+    /// Laravel `array:keys` (#60918) - the value must be a JSON object
     /// whose keys are all drawn from the allowed list; none of them are
     /// required to be present, this only rejects keys *outside* it.
     ///
     /// A tuple struct like [`In`]/[`NotIn`]: `ArrayKeys(&["name", "email"])`.
     /// An empty allowed list can never usefully constrain an object, so
-    /// `passes` reports it as a **keyless** message — a construction
-    /// error to fix, not a translatable failure — the pattern
+    /// `passes` reports it as a **keyless** message - a construction
+    /// error to fix, not a translatable failure - the pattern
     /// [`Confirmed`] uses for "you called this wrong."
     pub struct ArrayKeys(pub &'static [&'static str]);
     impl ValueRule for ArrayKeys {
@@ -1497,15 +1497,15 @@ pub mod rules {
         }
     }
 
-    /// Laravel `distinct` / `distinct:ignore_case` / `distinct:strict` —
+    /// Laravel `distinct` / `distinct:ignore_case` / `distinct:strict` -
     /// the value must be a JSON array with no two elements equal.
     ///
     /// `ignore_case` lowercases `String`-vs-`String` pairs before
     /// comparing. `strict` governs numbers only: `true` requires the
     /// same internal representation (`1` ≠ `1.0`); `false` (the default
-    /// meaning — no `Default` impl, name both fields) compares by
+    /// meaning - no `Default` impl, name both fields) compares by
     /// numeric value. No flag ever equates two *different-typed*
-    /// elements — JSON is already typed, unlike PHP's coercing `==`.
+    /// elements - JSON is already typed, unlike PHP's coercing `==`.
     /// Every comparison matches concrete variants or falls through to
     /// `Value`'s own total `PartialEq`, so it never panics.
     pub struct Distinct {
@@ -1559,12 +1559,12 @@ pub mod rules {
 
 /// Bridges [`Rule`] and [`ValueRule`] for [`validate!`]'s required- and
 /// optional-shape rows: which trait's `check` runs is decided by which
-/// trait `$rule`'s type implements — never by macro syntax — so one
+/// trait `$rule`'s type implements - never by macro syntax - so one
 /// field list mixes `Min(8)` and `ArrayKeys(&[...])` with no new syntax.
 /// `Field` is `str` for [`Rule`], `serde_json::Value` for [`ValueRule`];
 /// the two blanket impls target different `Field`s, so they can't
 /// conflict even for a hypothetical rule implementing both (none does).
-/// Not meant to be called directly — [`validate!`] reaches it through
+/// Not meant to be called directly - [`validate!`] reaches it through
 /// `$crate`-qualified paths that need no trait imports at the call site.
 ///
 /// [`validate!`]: crate::validate
@@ -1642,7 +1642,7 @@ pub mod async_rules {
     use crate::{DB, FrameworkError};
     use sea_orm::{ConnectionTrait, Statement, Value};
 
-    /// Laravel `unique:table,column` — issues a single parameterized
+    /// Laravel `unique:table,column` - issues a single parameterized
     /// `COUNT(*)` against the configured DB connection and fails when a
     /// matching row exists.
     ///
@@ -1684,7 +1684,7 @@ pub mod async_rules {
     /// `table`, `column`, the exclusion key column, and any
     /// [`where_eq`](Self::where_eq) scope column are `&'static str`
     /// slices from source. SQL has no placeholder for identifiers, so
-    /// they are interpolated into the query — but every one is first run
+    /// they are interpolated into the query - but every one is first run
     /// through [`crate::database::validate_identifier`],
     /// the same allowlist the model-less query builder uses, so a typo or
     /// hostile literal errors instead of shaping an injection. The value
@@ -1710,7 +1710,7 @@ pub mod async_rules {
             }
         }
 
-        /// Ignore the row whose `id` equals `id` — the "editing my own
+        /// Ignore the row whose `id` equals `id` - the "editing my own
         /// record" case, where a user's own email must not trip the rule
         /// on update. Uses the `id` primary-key column. Accepts anything
         /// that converts into a bound parameter, so integer, UUID, and
@@ -1731,7 +1731,7 @@ pub mod async_rules {
 
         /// Scope the uniqueness check to rows where `column = value`.
         /// Multiple calls AND together. This is Laravel's
-        /// `Rule::unique(...)->where(col, val)` — e.g. an email that must
+        /// `Rule::unique(...)->where(col, val)` - e.g. an email that must
         /// be unique only *within a tenant*:
         /// `Unique::new("users", "email").where_eq("tenant_id", tenant_id)`.
         pub fn where_eq(mut self, column: &'static str, value: impl Into<Value>) -> Self {
@@ -1763,9 +1763,9 @@ pub mod async_rules {
             let mut values: Vec<Value> = Vec::new();
 
             // Placeholders are rendered per backend: Postgres rejects `?`
-            // outright, so a hard-coded one made this rule — and therefore
+            // outright, so a hard-coded one made this rule - and therefore
             // every `unique` validation, including the one on a sign-up
-            // form's email — fail on Postgres. `next` stays in step with
+            // form's email - fail on Postgres. `next` stays in step with
             // `values`, which is what keeps `$1`/`$2`/… aligned with the
             // binds across all three clause groups below.
             let mut next = 1usize;
@@ -1849,7 +1849,7 @@ pub use async_rules::Unique;
 /// # impl Form {
 /// fn after_validation(&self) -> Result<(), ValidationErrors> {
 ///     // Contextual rules read sibling values from a `FormContext` you
-///     // build — a map of field name to its string value.
+///     // build - a map of field name to its string value.
 ///     let mut ctx = std::collections::HashMap::new();
 ///     ctx.insert("billing_type".to_string(), self.billing_type.clone());
 ///     validate! { self =>
@@ -1867,27 +1867,27 @@ pub use async_rules::Unique;
 ///
 /// Each row is one of three shapes:
 ///
-/// - `field_ident => Rule1, Rule2, ... ;` — the field is treated as
+/// - `field_ident => Rule1, Rule2, ... ;` - the field is treated as
 ///   required-shaped: the rule is invoked on `&self.field` directly.
 ///   This is the shape for `String`, `i64`, or any other concrete
 ///   type that derefs to `&str` (or implements [`Rule`] / [`ContextualRule`]
 ///   over the contained scalar).
-/// - `field_ident ?: Rule1, Rule2, ... ;` — the field is `Option<T>`.
+/// - `field_ident ?: Rule1, Rule2, ... ;` - the field is `Option<T>`.
 ///   When `Some`, the rules run on the unwrapped inner value; when
 ///   `None`, every rule on the row is **skipped**. This matches Laravel's
 ///   "if present, validate" semantics for optional form fields and is
 ///   the right choice for every `Option<String>` (or `Option<i64>`, …)
 ///   field on a form. **Note:** because `None` skips, a
 ///   presence-conditional rule like `RequiredIf` on a `?:` row can never
-///   fail an *absent* field — use `?=>` for that.
-/// - `field_ident ?=> Rule1, Rule2, ... ;` — also for an `Option<String>`
+///   fail an *absent* field - use `?=>` for that.
+/// - `field_ident ?=> Rule1, Rule2, ... ;` - also for an `Option<String>`
 ///   field, but the rules run **even when `None`** (absence is treated as
 ///   the empty string). This is the row for presence-conditional rules
 ///   (`RequiredIf` / `RequiredWith` / `RequiredUnless`) that must be able
 ///   to fail an absent optional field. A present `Some` is evaluated too.
 ///
 /// A rule in any row may be a [`Rule`] (over `&str`) or a [`ValueRule`]
-/// (over `&serde_json::Value`) — which one runs is resolved by which
+/// (over `&serde_json::Value`) - which one runs is resolved by which
 /// trait the rule's type implements, not by anything written in the
 /// row, so the two kinds mix freely in one field list. A `ValueRule`
 /// row needs the field's Rust type to actually be `serde_json::Value`
@@ -1896,7 +1896,7 @@ pub use async_rules::Unique;
 /// Each rule is either a plain [`Rule`] (no suffix) or a
 /// [`ContextualRule`] followed by `=> with $ctx_ident`. The contextual
 /// separator is `=> with` (not parenthesised) because `macro_rules!`
-/// matches `$rule:expr` greedily — placing the suffix in parentheses
+/// matches `$rule:expr` greedily - placing the suffix in parentheses
 /// runs into Rust's `FOLLOW` set rules for `expr` fragments.
 ///
 /// The macro expands to a fresh [`ValidationErrors`](crate::ValidationErrors),
@@ -1916,7 +1916,7 @@ pub use async_rules::Unique;
 ///
 /// # Conditionally-required optional fields
 ///
-/// `?:` is "if present, validate" — it can't *require* an absent field.
+/// `?:` is "if present, validate" - it can't *require* an absent field.
 /// When an `Option<String>` field must be present under a condition on a
 /// sibling field, use the `?=>` row instead:
 ///
@@ -1956,12 +1956,12 @@ macro_rules! validate {
 
 /// Internal row walker used by [`validate!`]. Not part of the public
 /// API even though `#[macro_export]` makes it reachable at the crate
-/// root — `#[doc(hidden)]` keeps it out of rustdoc.
+/// root - `#[doc(hidden)]` keeps it out of rustdoc.
 ///
 /// The walker consumes one row per recursive invocation. A row is one of
 /// `field => rule1, rule2;` (required-shape), `field?: rule1, rule2;`
-/// (optional-shape — runs rules only when the field is `Some`), or
-/// `field ?=> rule1, rule2;` (conditional-presence — runs rules even when
+/// (optional-shape - runs rules only when the field is `Some`), or
+/// `field ?=> rule1, rule2;` (conditional-presence - runs rules even when
 /// the field is `None`, treating absence as `""`). Recursion terminates
 /// when the input is empty (or only a stray `;` remains, supporting the
 /// optional trailing semicolon style).
@@ -1983,7 +1983,7 @@ macro_rules! __validate_rows {
     // (`field => Rule => with ctx`): the rules run *even when the field is
     // `None`*, treating absence as the empty string. This is what lets a
     // presence-conditional rule (`RequiredIf` and friends) fail an absent
-    // `Option<String>` field — the case `?:` cannot express because it
+    // `Option<String>` field - the case `?:` cannot express because it
     // skips entirely on `None`. Uses `as_deref`, so the field must be
     // `Option<String>`-shaped (an `Option<i64>` is a loud compile error).
     ($errs:ident, $self:ident, $field:ident ?=> $($rule:expr $(=> with $ctx:ident)?),+ ; $($rest:tt)*) => {

@@ -1,4 +1,4 @@
-//! The auth manager — Laravel's `AuthManager`.
+//! The auth manager - Laravel's `AuthManager`.
 //!
 //! Holds the [`AuthConfig`] wiring plus the registered
 //! [`UserProvider`]s, and resolves named guards on demand. Lives in the
@@ -116,7 +116,7 @@ impl AuthManager {
     /// Resolve the [`UserProvider`] backing the default guard.
     ///
     /// Selects the provider the same way [`default_guard`](Self::default_guard)
-    /// does — by the default guard's configured provider name — but hands back
+    /// does - by the default guard's configured provider name - but hands back
     /// the bare provider rather than a guard wrapper. The auth-flow facades
     /// ([`crate::auth_flows::EmailVerification`],
     /// [`crate::auth_flows::PasswordReset`]) use this to reach the
@@ -230,7 +230,7 @@ mod tests {
         let m = manager_with_users();
         let g = m.guard("web").unwrap();
         // FakeProvider returns None for retrieve_by_credentials (trait
-        // default), so validate is false — proves the wiring resolves.
+        // default), so validate is false - proves the wiring resolves.
         assert!(
             !g.validate(&Credentials::password("a@b.com", "x"))
                 .await

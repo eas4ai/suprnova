@@ -11,7 +11,7 @@
 //!
 //! Note: `tokio::task_local!` is task-scoped. Work spawned via
 //! `tokio::spawn` inside the scope runs on a fresh task and does NOT
-//! inherit the fake by default — those requests escape to the real
+//! inherit the fake by default - those requests escape to the real
 //! network (or fail-closed when `Http::fail_on_real_calls()` is on).
 //!
 //! For the cases that actually want spawned tasks to share the parent's
@@ -19,7 +19,7 @@
 //! spawned future), [`Http::spawn_with_fake_inheritance`] captures the
 //! current fake state via the shared `Arc` and re-installs it in the
 //! child's `tokio::task_local!` scope. Recorded requests and consumed
-//! canned responses are shared with the parent through the same Arc —
+//! canned responses are shared with the parent through the same Arc -
 //! `assert_sent` on the parent sees what the child sent.
 
 use crate::lock;
@@ -50,7 +50,7 @@ pub(crate) struct FakeState {
     canned: Vec<CannedResponse>,
 }
 
-/// A recorded outbound request — used by [`assert_sent`] /
+/// A recorded outbound request - used by [`assert_sent`] /
 /// [`assert_not_sent`].
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
@@ -72,7 +72,7 @@ struct CannedResponse {
     body: Bytes,
     /// `content-type` header value the intercepted response answers with.
     /// `"application/json"` for [`fake_response`], `"text/plain; charset=utf-8"`
-    /// for [`fake_response_text`] — the two entry points differ only in how
+    /// for [`fake_response_text`] - the two entry points differ only in how
     /// the body is *produced* (JSON-encoded vs. verbatim bytes); this field
     /// keeps the header truthful either way.
     content_type: String,
@@ -80,12 +80,12 @@ struct CannedResponse {
 
 /// Queue a canned response. The first request whose method matches
 /// (case-insensitive) and whose URL contains `url_substring` returns
-/// this response — and the canned entry is consumed.
+/// this response - and the canned entry is consumed.
 ///
 /// Method `"*"` matches any method.
 ///
 /// Subsequent matching requests fall through to the next canned entry,
-/// or — if none match — return an empty `200 {}`.
+/// or - if none match - return an empty `200 {}`.
 ///
 /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
 /// Panics if no fake scope is active on the current task.
@@ -104,7 +104,7 @@ pub fn fake_response(method: &str, url_substring: &str, status: u16, body: serde
 }
 
 /// Queue a canned response whose body is sent back to the caller verbatim
-/// as text, without JSON-encoding — the raw-body sibling of
+/// as text, without JSON-encoding - the raw-body sibling of
 /// [`fake_response`] for upstream APIs that speak `text/plain` rather than
 /// JSON (the HIBP k-anonymity range endpoint [`crate::HibpVerifier`] calls
 /// is the motivating case). Same method/URL-substring matching and
@@ -113,7 +113,7 @@ pub fn fake_response(method: &str, url_substring: &str, status: u16, body: serde
 /// `application/json`.
 ///
 /// Reached through [`crate::http_client::Http::fake_response_text`], the
-/// public entry point — kept `pub(crate)` here because there is no reason
+/// public entry point - kept `pub(crate)` here because there is no reason
 /// for a caller to reach the `fake` module directly.
 ///
 /// **Must be called inside a `Http::fake(|| async { ... })` scope.**
@@ -210,7 +210,7 @@ where
 
 /// Capture the current task's fake state for re-installation in a
 /// spawned task. Returns `None` when no fake scope is active on the
-/// current task — in which case the caller should fall through to a
+/// current task - in which case the caller should fall through to a
 /// regular `tokio::spawn` rather than asserting inheritance.
 pub(crate) fn snapshot_current_fake_state() -> Option<Arc<Mutex<FakeState>>> {
     FAKE_STATE.try_with(|state| state.clone()).ok()

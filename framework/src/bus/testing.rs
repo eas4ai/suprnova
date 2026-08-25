@@ -1,4 +1,4 @@
-//! `Bus::fake()` — installs a capture-only recorder.
+//! `Bus::fake()` - installs a capture-only recorder.
 //!
 //! `install_fake()` acquires a process-wide serialization mutex for the
 //! lifetime of the returned `BusFakeGuard` so parallel tests calling

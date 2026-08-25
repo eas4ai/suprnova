@@ -1,12 +1,12 @@
-//! Phase 10B T1 — smoke test for the macro's relation infrastructure
+//! Phase 10B T1 - smoke test for the macro's relation infrastructure
 //! auto-injection.
 //!
 //! Verifies that every `#[suprnova::model]` struct gains the two
 //! private fields the eager loader (T9) and BelongsToMany loader (T4)
 //! depend on:
 //!
-//! - `__eager: EagerLoadCache` — relation-row storage.
-//! - `__pivot: Option<Arc<dyn Any + Send + Sync>>` — m2m pivot slot.
+//! - `__eager: EagerLoadCache` - relation-row storage.
+//! - `__pivot: Option<Arc<dyn Any + Send + Sync>>` - m2m pivot slot.
 //!
 //! Both are `#[serde(skip)]` (not surfaced in JSON) and have a
 //! `Default` impl (so `From<inner::Model>` / `replicate_with` work
@@ -36,7 +36,7 @@ fn macro_injects_eager_field() {
 
 #[test]
 fn macro_injects_pivot_field() {
-    // The user can read __pivot directly — it's the storage that
+    // The user can read __pivot directly - it's the storage that
     // `pivot::<P>()` reads from. The accessor lives in T4
     // (BelongsToMany); T1 only guarantees the field exists.
     let u = SmokeUser {
@@ -66,7 +66,7 @@ fn default_initialises_eager_and_pivot() {
 fn serde_skip_on_eager_and_pivot() {
     // `to_json()` walks the struct's Serialize impl which honours
     // `#[serde(skip)]`. The auto-injected fields must NOT surface in
-    // JSON — they're framework runtime state, not part of the user-
+    // JSON - they're framework runtime state, not part of the user-
     // facing API.
     let u = SmokeUser {
         id: 9,
@@ -77,11 +77,11 @@ fn serde_skip_on_eager_and_pivot() {
     let json = u.to_array();
     assert!(
         json.get("__eager").is_none(),
-        "__eager must be #[serde(skip)] — got JSON: {json}",
+        "__eager must be #[serde(skip)] - got JSON: {json}",
     );
     assert!(
         json.get("__pivot").is_none(),
-        "__pivot must be #[serde(skip)] — got JSON: {json}",
+        "__pivot must be #[serde(skip)] - got JSON: {json}",
     );
     // Sanity: the real fields ARE present.
     assert_eq!(json["id"], 9);
@@ -92,7 +92,7 @@ fn serde_skip_on_eager_and_pivot() {
 fn pivot_is_arc_any_send_sync() {
     // Sanity: the pivot slot's type must be Arc<dyn Any + Send +
     // Sync> so T4's BelongsToMany loader can stash any pivot model
-    // type. We don't have a concrete pivot in T1 — verify the slot
+    // type. We don't have a concrete pivot in T1 - verify the slot
     // accepts an arbitrary Arc<dyn Any>.
     let pivot: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42i32);
     let u = SmokeUser {
@@ -108,7 +108,7 @@ fn pivot_is_arc_any_send_sync() {
 //
 // The macro-emitted `pivot::<P>()` accessor must distinguish the two
 // failure modes loudly. A single "load via BelongsToMany::get()"
-// message conflated both into one bucket — these tests pin the
+// message conflated both into one bucket - these tests pin the
 // distinct messages so a future regression flips the assertion, not
 // the user's debugging experience.
 
@@ -122,7 +122,7 @@ struct BtmRoleUserPivot {
     assigned_at: i64,
 }
 
-/// A different `'static` type — the wrong-type panic uses this to
+/// A different `'static` type - the wrong-type panic uses this to
 /// assert the downcast fails when the caller passes the wrong pivot
 /// type into `pivot::<P>()`.
 #[derive(Debug)]
@@ -148,7 +148,7 @@ fn pivot_panics_when_no_pivot_context() {
 #[test]
 #[should_panic(expected = "pivot is not of type")]
 fn pivot_panics_with_distinct_message_on_wrong_type() {
-    // Row HAS a pivot context — but it's a `BtmRoleUserPivot`. The
+    // Row HAS a pivot context - but it's a `BtmRoleUserPivot`. The
     // caller asks for `MmTaggable`. The accessor must NOT direct them
     // to "load via BelongsToMany::get()" (the data is there); it must
     // tell them the requested type is wrong.

@@ -1,13 +1,13 @@
-//! Phase 10C T3 — `#[suprnova::scopes(Model)]` impl-block attribute.
+//! Phase 10C T3 - `#[suprnova::scopes(Model)]` impl-block attribute.
 //!
 //! Wraps an `impl Model { ... }` block and, for every method whose
 //! signature matches the scope shape
 //! `fn name(query: Builder<Self>[, args...]) -> Builder<Self>`,
 //! emits two additional callable forms from one declaration:
 //!
-//! 1. **Static helper** on the model: `Model::active(args...)` —
+//! 1. **Static helper** on the model: `Model::active(args...)` -
 //!    starts from `Self::query()` and applies the scope.
-//! 2. **Builder extension**: `Builder<Model>::active(args...)` —
+//! 2. **Builder extension**: `Builder<Model>::active(args...)` -
 //!    chainable extension method.
 //!
 //! Methods that don't match the scope signature pass through unchanged
@@ -17,7 +17,7 @@
 //! # Why impl-block-level, not per-method
 //!
 //! Proc-macro attribute macros on `ImplItemFn` may only emit
-//! `ImplItem`s back into the impl block — they cannot emit
+//! `ImplItem`s back into the impl block - they cannot emit
 //! module-scope items (trait declarations, blanket impls). The scope
 //! pattern needs both (an extension trait that surfaces `<name>` on
 //! `Builder<M>` plus the trait impl that wires the method body), so
@@ -61,7 +61,7 @@
 //! with `pub` visibility. Inside the same module, `.<scope>()` on a
 //! `Builder<Model>` resolves automatically (the trait is a sibling
 //! item, in scope). To use the chainable form from a different
-//! module, the consumer must `use` the trait — same as any extension
+//! module, the consumer must `use` the trait - same as any extension
 //! trait in Rust. The static helper `Model::<scope>(args)` is an
 //! inherent method and works without an extra `use`.
 
@@ -121,7 +121,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         match item {
             ImplItem::Fn(mut f) => match try_expand_scope_fn(&mut f, &model_ty, &model_ident) {
                 ScopeExpand::Skip => {
-                    // Not a scope — pass through unchanged.
+                    // Not a scope - pass through unchanged.
                     new_impl_items.push(ImplItem::Fn(f));
                 }
                 ScopeExpand::Rewrite(rewrite) => {
@@ -163,7 +163,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 enum ScopeExpand {
     /// Not a scope; preserve the fn as-is.
     Skip,
-    /// Scope detected — replace with the renamed inner + static helper,
+    /// Scope detected - replace with the renamed inner + static helper,
     /// and emit module-scope items.
     Rewrite(Box<ScopeRewrite>),
     /// Scope detected but invalid (e.g. pattern arg names).
@@ -190,7 +190,7 @@ fn try_expand_scope_fn(
     let inputs = &f.sig.inputs;
     let first = match inputs.first() {
         Some(FnArg::Typed(t)) => t,
-        // No params at all, or first param is `self` — not a scope.
+        // No params at all, or first param is `self` - not a scope.
         _ => return ScopeExpand::Skip,
     };
     if !is_builder_self_type(&first.ty) {
@@ -227,7 +227,7 @@ fn try_expand_scope_fn(
                     return ScopeExpand::Error(syn::Error::new_spanned(
                         &t.pat,
                         "#[suprnova::scopes] extra parameters must be plain \
-                         `name: Type` bindings — pattern args (tuples, structs) \
+                         `name: Type` bindings - pattern args (tuples, structs) \
                          are not supported because the emitted forwarding call \
                          site needs to reference each by name",
                     ));
@@ -251,7 +251,7 @@ fn try_expand_scope_fn(
 
     // ---- Rename the original to __scope_<name> in place ----------------
     f.sig.ident = inner_name.clone();
-    // Ensure the inner is `pub` — the static helper and the trait impl
+    // Ensure the inner is `pub` - the static helper and the trait impl
     // (which may live in a separate module if the user writes
     // `crate::models::User`) both need to reach it.
     f.vis = Visibility::Public(parse_quote!(pub));

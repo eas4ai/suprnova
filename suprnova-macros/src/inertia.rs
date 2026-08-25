@@ -29,7 +29,7 @@ pub enum PropsKind {
 /// ```
 ///
 /// The leading request argument was introduced when we removed the
-/// `thread_local!` `InertiaContext` — see `docs/parity/inertia.md` Tier 0.
+/// `thread_local!` `InertiaContext` - see `docs/parity/inertia.md` Tier 0.
 pub struct InertiaResponseInput {
     pub request: Expr,
     pub component: LitStr,
@@ -131,7 +131,7 @@ pub fn inertia_response_impl(input: TokenStream) -> TokenStream {
 
 /// Pure-`proc_macro2` helper so unit tests can exercise the
 /// expansion shape without leaving the proc-macro crate.
-/// The validation against the frontend filesystem happens here too —
+/// The validation against the frontend filesystem happens here too -
 /// it's a no-op when `CARGO_MANIFEST_DIR` is unset (e.g. some IDE
 /// states), exactly as before.
 fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStream {
@@ -145,7 +145,7 @@ fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStre
     render_inertia_response_expansion(&input)
 }
 
-/// Render the macro expansion proper — the value-expr, the match
+/// Render the macro expansion proper - the value-expr, the match
 /// over the Object branch, and the trailing `resolve(...).await`.
 /// Split out of `inertia_response_inner` so unit tests can target
 /// the expansion shape without tripping the frontend-filesystem
@@ -157,7 +157,7 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
 
     // Materialize props as a `serde_json::Value`, then unfold into individual
     // eager props on the `InertiaResponse` builder. Unfolding (one prop per
-    // top-level key) is what makes partial-reload filtering work — the
+    // top-level key) is what makes partial-reload filtering work - the
     // framework needs to know each prop's name to honor X-Inertia-Partial-Data.
     //
     // Domain 5 audit M-D5-2: previously the typed-props branch panicked via
@@ -196,7 +196,7 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
         // resolve() is async (Lazy/Optional props may await). Errors flow
         // through the framework's Response type via the existing
         // From<FrameworkError> for HttpResponse conversion. The non-object
-        // branch returns Err directly — Inertia v3's protocol requires
+        // branch returns Err directly - Inertia v3's protocol requires
         // `props` to be an object, so a non-Object payload would render an
         // invalid response.
         match __value {
@@ -353,7 +353,7 @@ mod tests {
     //! expansion must propagate Serialize failures and non-Object
     //! props via `FrameworkError::internal` rather than panicking.
     //! Without these checks, a deploy that exposed a buggy `Serialize`
-    //! impl would panic per-request — Domain 2's middleware safety
+    //! impl would panic per-request - Domain 2's middleware safety
     //! net catches the panic but the operator loses the structured
     //! error path.
 
@@ -416,7 +416,7 @@ mod tests {
     }
 
     /// JSON-syntax props go through `serde_json::json!` which is
-    /// infallible — the typed-only error wrapper must NOT appear in
+    /// infallible - the typed-only error wrapper must NOT appear in
     /// the JSON branch's `value_expr`. (Both branches share the
     /// non-Object Err arm; this assertion targets just the value
     /// production phase.)

@@ -3,7 +3,7 @@
 //! Provides async body collection and parsing for JSON and form-urlencoded data.
 //!
 //! Body collection is capped to bound process memory under load. The cap
-//! is layered in three places — see [`DEFAULT_MAX_REQUEST_BODY_BYTES`],
+//! is layered in three places - see [`DEFAULT_MAX_REQUEST_BODY_BYTES`],
 //! [`set_global_max_request_body_bytes`], and
 //! [`crate::http::FormRequest::max_body_bytes`].
 
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Default cap on generic (JSON / form-urlencoded / raw) request body size,
 /// in bytes.
 ///
-/// 8 MiB — large enough for typical JSON payloads (including base64-encoded
+/// 8 MiB - large enough for typical JSON payloads (including base64-encoded
 /// images embedded in JSON), small enough that an unauthenticated client
 /// can't trivially exhaust process memory with a single request. Set at
 /// compile time; can be overridden at boot via
@@ -33,7 +33,7 @@ static GLOBAL_MAX_REQUEST_BODY: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the process-global cap on generic request body size, in bytes.
 ///
-/// Called at boot — typically from `bootstrap.rs` — to override the
+/// Called at boot - typically from `bootstrap.rs` - to override the
 /// compile-time [`DEFAULT_MAX_REQUEST_BODY_BYTES`]. Setting `0` is special:
 /// it means "use the default". Setting `usize::MAX` disables the cap
 /// entirely (not recommended for public-facing endpoints).
@@ -150,7 +150,7 @@ pub async fn collect_body(body: Incoming) -> Result<Bytes, FrameworkError> {
 
 /// Parse bytes as JSON into the target type
 ///
-/// Deserialization errors map to 422 Unprocessable Entity — the client
+/// Deserialization errors map to 422 Unprocessable Entity - the client
 /// supplied invalid input (wrong shape, rejected fields, bad types).
 pub fn parse_json<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
     serde_json::from_slice(bytes)
@@ -159,7 +159,7 @@ pub fn parse_json<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkErro
 
 /// Parse bytes as form-urlencoded into the target type
 ///
-/// Deserialization errors map to 422 Unprocessable Entity — the client
+/// Deserialization errors map to 422 Unprocessable Entity - the client
 /// supplied invalid input.
 pub fn parse_form<T: DeserializeOwned>(bytes: &Bytes) -> Result<T, FrameworkError> {
     serde_urlencoded::from_bytes(bytes)

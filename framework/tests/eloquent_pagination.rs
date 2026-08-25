@@ -1,11 +1,11 @@
-//! Phase 10C T7 — Pagination on `Builder<M>`.
+//! Phase 10C T7 - Pagination on `Builder<M>`.
 //!
 //! Three paginator types:
-//! - `LengthAwarePaginator<M>` — offset + COUNT(*); knows `total` and
+//! - `LengthAwarePaginator<M>` - offset + COUNT(*); knows `total` and
 //!   `last_page`.
-//! - `Paginator<M>` — simple, no COUNT; checks an extra row for
+//! - `Paginator<M>` - simple, no COUNT; checks an extra row for
 //!   `has_more`.
-//! - `CursorPaginator<M>` — opaque keyset over the PK; bidirectional
+//! - `CursorPaginator<M>` - opaque keyset over the PK; bidirectional
 //!   (next/prev), matching Laravel's `cursorPaginate()`.
 //!
 //! Page parameter defaults to `"page"`; override via
@@ -14,7 +14,7 @@
 //! Inertia / API shipping.
 //!
 //! Tests install per-thread query-param overrides via
-//! `Context::test_set_query` / `test_clear_query` — every test calls
+//! `Context::test_set_query` / `test_clear_query` - every test calls
 //! `test_clear_query()` up front so the previous test's state (if any
 //! leaked through Cargo's thread-pool reuse) is wiped.
 
@@ -63,7 +63,7 @@ async fn fixture(n: usize) -> TestDatabase {
     // Cursor paginate emits encrypted cursors via `CursorPaginator::encode_value`,
     // which requires Crypt to be initialised. Test binaries don't run
     // `Server::from_config`, so we install a deterministic test key
-    // ourselves. Idempotent — the first installer in the binary wins;
+    // ourselves. Idempotent - the first installer in the binary wins;
     // subsequent calls are no-ops.
     #[cfg(feature = "testing")]
     suprnova::testing::install_test_encryption_key();
@@ -173,7 +173,7 @@ async fn paginate_using_custom_param_reads_request_query() {
 async fn paginate_using_wires_page_name_into_url_for_page() {
     // url_for_page must reflect the custom page param. Without
     // `with_page_name`, calling `.url_for_page(2)` after
-    // `paginate_using("posts_page", ...)` would emit `?page=2` — a
+    // `paginate_using("posts_page", ...)` would emit `?page=2` - a
     // silent footgun.
     let _db = fixture(25).await;
     Context::test_set_query("posts_page", "1");
@@ -194,7 +194,7 @@ async fn paginate_using_wires_page_name_into_url_for_page() {
 #[cfg(feature = "testing")]
 #[tokio::test]
 async fn paginate_using_does_not_react_to_default_page_param() {
-    // The default `paginate` reads `?page` — `paginate_using("p", N)`
+    // The default `paginate` reads `?page` - `paginate_using("p", N)`
     // must NOT pick up `?page=2`, otherwise the override would be a
     // no-op in disguise.
     let _db = fixture(25).await;
@@ -202,7 +202,7 @@ async fn paginate_using_does_not_react_to_default_page_param() {
 
     let page = T7Article::query().paginate_using("p", 10).await.unwrap();
 
-    // `?p` is missing, so current_page falls back to 1 — proving the
+    // `?p` is missing, so current_page falls back to 1 - proving the
     // custom param plumbing is wired correctly.
     assert_eq!(page.current_page, 1);
 
@@ -280,7 +280,7 @@ async fn cursor_paginate_last_page_has_no_next_cursor() {
     let _db = fixture(15).await;
     Context::test_clear_query();
 
-    // First page of 10 — 5 left.
+    // First page of 10 - 5 left.
     let page1 = T7Article::query().cursor_paginate(10).await.unwrap();
     assert!(page1.next_cursor.is_some());
     Context::test_set_query("cursor", page1.next_cursor.as_ref().unwrap());
@@ -376,7 +376,7 @@ async fn cursor_paginate_is_bidirectional_and_matches_the_facade() {
     );
     assert!(
         b2.prev_cursor.is_some(),
-        "builder must emit a prev cursor on page 2 — the bidirectional level-up"
+        "builder must emit a prev cursor on page 2 - the bidirectional level-up"
     );
     assert_eq!(f2.prev_cursor.is_some(), b2.prev_cursor.is_some());
     assert_eq!(f2.next_cursor.is_some(), b2.next_cursor.is_some());
@@ -428,7 +428,7 @@ async fn cursor_paginate_invalid_cursor_errors() {
         .cursor_paginate(10)
         .await
         .expect_err("err");
-    // ParamParse / Internal — either way, not 200.
+    // ParamParse / Internal - either way, not 200.
     assert!(err.status_code() >= 400);
     Context::test_clear_query();
 }
@@ -450,7 +450,7 @@ async fn length_aware_serializes_to_laravel_shape() {
     assert!(m.contains_key("total"));
     assert!(m.contains_key("from"));
     assert!(m.contains_key("to"));
-    // path is unset — skipped from the JSON.
+    // path is unset - skipped from the JSON.
     assert!(m.get("path").is_none());
 }
 
@@ -483,7 +483,7 @@ async fn cursor_serializes_with_only_active_cursor_fields() {
     assert!(m.contains_key("per_page"));
     assert!(m.contains_key("next_cursor"));
     assert!(m.contains_key("prev_cursor"));
-    // prev_cursor is None — but still present as JSON null so client
+    // prev_cursor is None - but still present as JSON null so client
     // schemas can rely on the field.
     assert!(m.get("prev_cursor").unwrap().is_null());
 }

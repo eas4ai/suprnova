@@ -15,7 +15,7 @@ use suprnova::Request;
 use suprnova::http::TrustedProxiesConfig;
 use suprnova::routing::register_route_name;
 
-/// Trusted-proxy config that lists `127.0.0.1` — paired with a
+/// Trusted-proxy config that lists `127.0.0.1` - paired with a
 /// `with_peer_addr(127.0.0.1)` it makes the proxy-aware accessors
 /// honour the configured `X-Forwarded-*` / `X-Real-IP` headers, which
 /// is the deployment shape these legacy tests exercise.
@@ -220,7 +220,7 @@ async fn secure_returns_false_without_proxy_headers() {
 
 #[tokio::test]
 async fn secure_ignores_x_forwarded_proto_from_untrusted_peer() {
-    // Peer is NOT in the (empty) allowlist — header must be ignored,
+    // Peer is NOT in the (empty) allowlist - header must be ignored,
     // matching the fail-safe default that protects deployments behind
     // an untrusted edge.
     let req = build_request(
@@ -277,7 +277,7 @@ async fn ip_falls_back_to_peer_addr() {
 #[tokio::test]
 async fn ip_ignores_x_forwarded_for_from_untrusted_peer() {
     // Same shape as the trusted-XFF test but without a configured
-    // allowlist — the framework MUST return the TCP peer, not the
+    // allowlist - the framework MUST return the TCP peer, not the
     // attacker-controlled XFF.
     let req = build_request(
         hyper::Request::builder()
@@ -616,7 +616,7 @@ async fn user_agent_returns_header_value() {
 /// Compile-only test pinning the hyper aliasing surface at the crate
 /// root. `Request::method()` returns `&Method`, `uri()` returns `&Uri`,
 /// `headers()` returns `&HeaderMap`, and the streaming body type is
-/// `Incoming` — all hyper-owned. Re-exporting them under `suprnova::*`
+/// `Incoming` - all hyper-owned. Re-exporting them under `suprnova::*`
 /// means consumers never need to add `hyper` to their Cargo.toml just
 /// to name those types in a handler signature.
 #[test]

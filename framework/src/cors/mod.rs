@@ -6,7 +6,7 @@
 //! [`CorsMiddleware`] adds those headers and answers the preflight `OPTIONS`
 //! request the browser sends before a non-simple cross-origin call.
 //!
-//! Same-origin apps (the default Inertia setup) don't need CORS at all — it
+//! Same-origin apps (the default Inertia setup) don't need CORS at all - it
 //! only matters once a browser on a *different* origin calls your API
 //! (public API, separate SPA host, mobile webview, etc.).
 //!
@@ -27,7 +27,7 @@
 //! # Preflight reaches the middleware even on unrouted paths
 //!
 //! A preflight is `OPTIONS` + an `Access-Control-Request-Method` header, and
-//! the router has no `OPTIONS` routes — so a preflight never *matches* a
+//! the router has no `OPTIONS` routes - so a preflight never *matches* a
 //! route. The server still runs the global middleware chain for unmatched
 //! requests (terminating in a 404), so a globally-installed `CorsMiddleware`
 //! sees the preflight and short-circuits it with `204` before the 404 is
@@ -48,7 +48,7 @@
 //!     .paths(["api/*", "sanctum/csrf-cookie"]);
 //! ```
 //!
-//! With no `paths`, CORS runs on every request (the Suprnova default — the
+//! With no `paths`, CORS runs on every request (the Suprnova default - the
 //! cleaner choice when CORS is the only thing this middleware does).
 //!
 //! # Skip via predicate
@@ -80,7 +80,7 @@
 //!     .allow_origin_patterns([r"^https://[a-z0-9-]+\.staging\.example$"]);
 //! ```
 //!
-//! # No permissive default — pick an origin policy explicitly
+//! # No permissive default - pick an origin policy explicitly
 //!
 //! There is intentionally no `Default` for [`CorsConfig`]. A reflexively
 //! permissive CORS policy is a security footgun, so you must choose either a
@@ -90,7 +90,7 @@
 //! # Credentials and `*`
 //!
 //! Per the Fetch spec, `Access-Control-Allow-Origin: *` is invalid together
-//! with credentials — the browser rejects it. When
+//! with credentials - the browser rejects it. When
 //! [`allow_credentials(true)`](CorsConfig::allow_credentials) is set, the
 //! middleware always echoes the specific request `Origin` instead of `*`
 //! (and likewise reflects requested headers instead of `*`), so the
@@ -261,7 +261,7 @@ impl CorsConfig {
 
     /// Allow ANY origin (`Access-Control-Allow-Origin: *`). Explicit opt-in;
     /// there is no permissive `Default`. Incompatible with credentials per
-    /// the Fetch spec — when credentials are enabled the middleware echoes
+    /// the Fetch spec - when credentials are enabled the middleware echoes
     /// the specific request origin rather than `*`.
     pub fn any_origin() -> Self {
         Self {
@@ -280,7 +280,7 @@ impl CorsConfig {
     /// Restrict CORS to a fixed list of URL path patterns. The Laravel
     /// `cors.php` `paths` config maps directly to this builder. Patterns
     /// support `*` as a multi-segment wildcard ([Laravel's `Str::is`]
-    /// semantics — `*` is greedy across `/`).
+    /// semantics - `*` is greedy across `/`).
     ///
     /// With no `paths` set (the default), CORS runs on every request. With
     /// at least one pattern set, only matching requests get CORS treatment
@@ -288,7 +288,7 @@ impl CorsConfig {
     /// through untouched.
     ///
     /// A leading `/` is normalized away so `"api/*"` and `"/api/*"` are
-    /// equivalent — matches Laravel's behavior, where path patterns are
+    /// equivalent - matches Laravel's behavior, where path patterns are
     /// host-relative.
     ///
     /// [Laravel's `Str::is`]: https://laravel.com/docs/13.x/strings#method-str-is
@@ -311,7 +311,7 @@ impl CorsConfig {
 
     /// Allow origins matching any of the given regex patterns, in addition
     /// to the literal entries in [`CorsConfig::allow_origins`]. Mirrors
-    /// Laravel's `allowed_origins_patterns` config knob — useful for
+    /// Laravel's `allowed_origins_patterns` config knob - useful for
     /// dynamic subdomains (`https://*.example.com`), preview environments,
     /// or per-tenant origins.
     ///
@@ -418,8 +418,8 @@ impl CorsConfig {
     ///
     /// Panics at build time when the policy combines `any_origin()`
     /// with `allow_credentials(true)`. The combination is a complete
-    /// bypass of origin allowlisting — any attacker page can make
-    /// credentialed cross-origin requests and read responses — and
+    /// bypass of origin allowlisting - any attacker page can make
+    /// credentialed cross-origin requests and read responses - and
     /// rejecting it loudly at policy construction prevents the
     /// misconfiguration from reaching production. Use an explicit
     /// origin list (`from_origins(["https://app.example"])`) when
@@ -518,7 +518,7 @@ impl CorsConfig {
     }
 
     /// Whether `path` matches any of the configured `paths` patterns. With
-    /// no patterns configured, every path matches — Suprnova's default,
+    /// no patterns configured, every path matches - Suprnova's default,
     /// since the middleware is opt-in by registration.
     fn path_matches(&self, path: &str) -> bool {
         if self.paths.is_empty() {
@@ -573,7 +573,7 @@ impl CorsConfig {
 /// decorates ordinary cross-origin responses with `Access-Control-Allow-
 /// Origin` (plus credentials / exposed-headers / `Vary`).
 ///
-/// Install it **globally** so preflights reach it — see the [module
+/// Install it **globally** so preflights reach it - see the [module
 /// docs](self).
 pub struct CorsMiddleware {
     config: CorsConfig,
@@ -647,7 +647,7 @@ impl CorsMiddleware {
 impl Middleware for CorsMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         // Skip-when predicates and `paths` scoping short-circuit the
-        // middleware entirely — the request just flows through to the
+        // middleware entirely - the request just flows through to the
         // next layer with no CORS treatment. Matches Laravel's
         // `HandleCors`, which returns `$next($request)` early when
         // `hasMatchingPath` is false or a `skipWhen` callback fires.
@@ -712,7 +712,7 @@ mod tests {
         // With an explicit origin list + credentials, the policy echoes
         // the specific origin (the `*` + credentials combination is
         // invalid per the Fetch spec). The `any_origin() + credentials`
-        // combination is now rejected at build time — see
+        // combination is now rejected at build time - see
         // `any_origin_with_credentials_panics_on_build`.
         let cfg = CorsConfig::allow_origins(["https://app.example"]).allow_credentials(true);
         assert_eq!(

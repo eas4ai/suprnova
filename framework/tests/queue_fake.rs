@@ -265,8 +265,8 @@ async fn queue_fake_push_with_default_overrides_honors_job_declared_delay() {
 //
 // `push_with_at`'s fake branch used to call `testing::record`, which drops
 // everything but the payload and `available_at`. A `push_with` caller's
-// queue/connection/etc overrides were silently discarded, so — the exact
-// shape of the bug this reproduces — a notification declaring
+// queue/connection/etc overrides were silently discarded, so - the exact
+// shape of the bug this reproduces - a notification declaring
 // `fn queue() -> Some("notifications")` was indistinguishable under
 // `Queue::fake()` from one declaring nothing at all.
 

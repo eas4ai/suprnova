@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: ${DB_NAME:-suprnova_db}
     # Published on the loopback interface only. A bare "5432:5432" binds
     # 0.0.0.0 on the Docker host, which puts a development database on
-    # every interface the machine has — including the public one, on a
+    # every interface the machine has - including the public one, on a
     # laptop on a café network or any cloud VM without a firewall.
     # Override DB_HOST_BIND if you genuinely need to reach it from
     # another host.
@@ -29,7 +29,7 @@ services:
     image: redis:7-alpine
     container_name: {project_name}_redis
     restart: unless-stopped
-    # Loopback only — see the note on the postgres service. Redis ships
+    # Loopback only - see the note on the postgres service. Redis ships
     # with no authentication at all, so an exposed port is an open shell
     # onto the cache (and, via CONFIG SET, onto the filesystem).
     ports:

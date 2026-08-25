@@ -37,7 +37,7 @@ pub struct EenPost {
 }
 
 async fn fresh_named_connection_without_default_pool() -> DbConnection {
-    // Empty container — NO default pool registered. `DB::connection()`
+    // Empty container - NO default pool registered. `DB::connection()`
     // will error if anything reaches it. This mirrors the production
     // configuration that surfaced the bug: only named pools, no
     // primary.
@@ -99,7 +99,7 @@ async fn eager_load_works_when_only_named_connection_registered() {
     })
     .await;
 
-    // Builder::get + with([...]) — the orchestrator's pool resolve was
+    // Builder::get + with([...]) - the orchestrator's pool resolve was
     // what crashed before the fix.
     let users = EenUser::with(["posts"]).get().await.unwrap();
     assert_eq!(users.len(), 1);

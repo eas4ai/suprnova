@@ -185,8 +185,8 @@ async fn without_overlapping_releases_without_burning_attempt() {
     run_worker(driver.clone(), cfg, cancel.clone()).await;
 
     // After the worker exits via max_jobs, the released job should be back
-    // on the driver (delayed by release_after), and its attempts must be 0
-    // — never bumped, because release isn't a failure.
+    // on the driver (delayed by release_after), and its attempts must be 0 -
+    // never bumped, because release isn't a failure.
     let delayed = driver.delayed_size().await.unwrap();
     let pending = driver.pending_size().await.unwrap();
     assert!(
@@ -197,7 +197,7 @@ async fn without_overlapping_releases_without_burning_attempt() {
     // Discriminating check (the contract): pop the released envelope and
     // assert its attempts counter is still at 0. A bug here would surface
     // as attempts = 1, meaning every contention burn one of the job's
-    // retry budgets — `WithoutOverlapping` would silently break.
+    // retry budgets - `WithoutOverlapping` would silently break.
     held.release().await.unwrap();
     // Wait until the released-with-delay envelope becomes visible. The
     // memory driver's drain runs on virtual+real clocks; in real time

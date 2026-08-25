@@ -1,5 +1,5 @@
 //! `suprnova generate-types` writes a **checked-in** file, so its output
-//! has to be a pure function of the source — same input, same bytes.
+//! has to be a pure function of the source - same input, same bytes.
 //!
 //! It was not. The topological sort seeded its work queue by iterating a
 //! `HashMap`, and Rust randomises hash iteration order per process, so
@@ -9,7 +9,7 @@
 //! matching the Rust it claims to describe.
 //!
 //! Testing this in a single process cannot work by re-running the same
-//! input — within one process the hash seed is fixed, so the order is
+//! input - within one process the hash seed is fixed, so the order is
 //! stable however wrong the algorithm is. What distinguishes a
 //! deterministic sort from an accidental one is *order independence*:
 //! permuting the declarations must not permute the output.
@@ -75,7 +75,7 @@ fn independent_structs_emit_in_a_stable_order_regardless_of_declaration_order() 
 /// relative order however they were declared.
 ///
 /// Note which order that is: the generator emits the *referrer* first.
-/// That is not a bug to fix — a TypeScript interface may name another
+/// That is not a bug to fix - a TypeScript interface may name another
 /// declared later in the same file, so declaration order means nothing to
 /// the consumer. It is asserted here only so the choice stays a choice
 /// rather than drifting silently.

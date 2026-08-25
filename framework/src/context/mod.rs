@@ -6,7 +6,7 @@
 //! but not serialized into logs). `Context::push(key, val)` appends to
 //! a stack at that key. `Context::forget(key)` removes.
 //!
-//! Operations outside an active scope are silent no-ops — early-boot
+//! Operations outside an active scope are silent no-ops - early-boot
 //! code, tests without middleware setup, and background tasks that
 //! choose not to install a scope all keep working without panics.
 //! When a mutation falls on no scope it emits a `tracing::trace!`
@@ -32,7 +32,7 @@
 //! ```
 //!
 //! [`ContextStore`] holds `Arc<DashMap>` handles, so the propagated
-//! store is *live-shared* with the parent — writes from either side
+//! store is *live-shared* with the parent - writes from either side
 //! are visible to the other for as long as the child holds the clone.
 //! This is what audit/logging spawns want; if you need an isolated
 //! snapshot, clone the maps explicitly.
@@ -44,8 +44,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The backing store inside a request's context scope. Two maps —
-/// visible (`data`) and hidden (`hidden`) — so logging serializers
+/// The backing store inside a request's context scope. Two maps -
+/// visible (`data`) and hidden (`hidden`) - so logging serializers
 /// can dump `all()` without leaking secrets.
 ///
 /// `query` is the request's query-parameter snapshot. Populated by the
@@ -85,7 +85,7 @@ tokio::task_local! {
 
 // Testing override for `Context::query_param`.
 //
-// Per-thread so parallel tests don't collide — `#[tokio::test]` uses a
+// Per-thread so parallel tests don't collide - `#[tokio::test]` uses a
 // current-thread runtime by default, so the future is driven on the
 // calling OS thread and `thread_local!` isolates each test.
 //
@@ -359,8 +359,8 @@ impl Context {
     ///
     /// Resolution order:
     /// 1. The thread-local testing override (set via
-    ///    `Self::test_set_query`) — non-empty only after a hook installs it.
-    /// 2. The active [`CONTEXT`] scope's `query` bag — populated by
+    ///    `Self::test_set_query`) - non-empty only after a hook installs it.
+    /// 2. The active [`CONTEXT`] scope's `query` bag - populated by
     ///    the request middleware from the URL's `?key=value` pairs.
     ///
     /// Returns `None` when the key is absent in both, including when
@@ -433,7 +433,7 @@ impl Context {
     /// Repeated calls overlay onto the same map; the most recently
     /// returned guard wipes the override entirely when dropped (it does
     /// not restore the previous map). For most tests that's the right
-    /// behavior — each `#[tokio::test]` sets up its own overrides from
+    /// behavior - each `#[tokio::test]` sets up its own overrides from
     /// scratch.
     ///
     /// ```ignore
@@ -555,7 +555,7 @@ mod tests {
     #[tokio::test]
     async fn query_param_reads_scoped_store() {
         // Wipe any override leaked from a sibling test on the same OS
-        // thread — the per-thread override otherwise wins over the
+        // thread - the per-thread override otherwise wins over the
         // scoped store and would mask a real read-from-scope bug.
         Context::test_clear_query();
         let mut q = HashMap::new();
@@ -633,7 +633,7 @@ mod tests {
                 Context::add("request_id", "abc-123");
 
                 let child = tokio::spawn(async {
-                    // No scope inherited — reads see nothing.
+                    // No scope inherited - reads see nothing.
                     Context::get::<String>("request_id")
                 });
 
@@ -780,7 +780,7 @@ mod tests {
         assert!(!logs_contain("Context read returned None"));
     }
 
-    /// A type whose `Serialize` impl deterministically fails — used to
+    /// A type whose `Serialize` impl deterministically fails - used to
     /// exercise the otherwise-hard-to-trigger `to_value` error path on
     /// `add` / `push` / `hidden_add`. Ordinary types almost never fail
     /// `serde_json::to_value`, but the observability contract holds for
@@ -841,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_guard_clears_on_drop() {
         // The RAII guard wipes the override even if the test body
-        // doesn't call test_clear_query — the failure mode the LOW
+        // doesn't call test_clear_query - the failure mode the LOW
         // finding flagged.
         Context::test_clear_query();
         {
@@ -863,8 +863,8 @@ mod tests {
         let handle = tokio::task::spawn_blocking(|| {
             let _g = Context::test_query_guard("page", "13");
             // The guard runs Drop on unwind; we don't actually panic to
-            // keep the test deterministic, but the contract is the same
-            // — Drop is unconditional.
+            // keep the test deterministic, but the contract is the same -
+            // Drop is unconditional.
             assert_eq!(Context::query_param("page"), Some("13".to_string()));
         });
         handle.await.expect("spawned blocking task completes");

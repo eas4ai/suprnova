@@ -38,7 +38,7 @@ impl Model {
     /// Look up a single user by primary key.
     ///
     /// Returns `Ok(None)` when the row is not present rather than treating
-    /// that as an error — the caller decides whether to surface a 404.
+    /// that as an error - the caller decides whether to surface a 404.
     pub async fn find_by_id(id: i64) -> Result<Option<Self>, FrameworkError> {
         let conn = DB::connection()?;
         Entity::find_by_id(id)

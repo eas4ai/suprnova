@@ -48,7 +48,7 @@ async fn dispatching_broadcastable_event_publishes_to_hub_channels() {
     .unwrap();
 
     // The dispatcher runs sync listeners inline; the broadcast listener
-    // calls hub.publish which is async — wait briefly for delivery.
+    // calls hub.publish which is async - wait briefly for delivery.
     let envelope = tokio::time::timeout(Duration::from_millis(500), rx.recv())
         .await
         .expect("envelope delivered within 500ms")
@@ -102,7 +102,7 @@ impl Broadcastable for AccountFunded {
     fn broadcast_on(&self) -> Vec<String> {
         vec![format!("account.{}", self.account_id)]
     }
-    // Broadcast only the public id — never the balance.
+    // Broadcast only the public id - never the balance.
     fn broadcast_with(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({ "account_id": self.account_id }))
     }
@@ -127,7 +127,7 @@ async fn broadcast_with_replaces_the_serialized_payload() {
         .expect("recv ok");
 
     assert_eq!(envelope.data["account_id"], 7);
-    // The curated payload REPLACES the full serialization — the secret field
+    // The curated payload REPLACES the full serialization - the secret field
     // the event carries must not reach the wire.
     assert!(
         envelope.data.get("secret_balance").is_none(),
@@ -168,7 +168,7 @@ async fn broadcast_when_gates_the_push() {
     // Dispatch the suppressed instance (publish=false) first, then the
     // broadcastable one (publish=true). Sync listeners run inline within
     // `dispatch().await`, so both publish attempts finish in order before we
-    // receive — the suppressed one must simply be absent from the channel.
+    // receive - the suppressed one must simply be absent from the channel.
     EventFacade::dispatch(DraftSaved {
         doc_id: 3,
         publish: false,
@@ -191,7 +191,7 @@ async fn broadcast_when_gates_the_push() {
         "broadcast_when()==false must suppress the push: the first envelope on \
          the channel must be the publish=true event, not the suppressed one"
     );
-    // Exactly one envelope was broadcast — the suppressed instance left nothing.
+    // Exactly one envelope was broadcast - the suppressed instance left nothing.
     assert!(
         rx.try_recv().is_err(),
         "only the publish=true event should have been broadcast"
@@ -200,7 +200,7 @@ async fn broadcast_when_gates_the_push() {
 
 // ── publish failures propagate to the dispatcher caller ──────────────────────
 
-/// A hub that fails every `publish` — used to verify that fanout errors
+/// A hub that fails every `publish` - used to verify that fanout errors
 /// reach `EventFacade::dispatch` through `BroadcastListener`.
 struct FailingHub;
 

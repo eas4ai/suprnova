@@ -1,4 +1,4 @@
-//! Todo model — migrated to `#[suprnova::model]` in Phase 10A T11.
+//! Todo model - migrated to `#[suprnova::model]` in Phase 10A T11.
 //!
 //! Dogfoods the `AsBool` cast (on `done`) and the auto-managed
 //! timestamps on a real DB-backed entity.
@@ -24,5 +24,5 @@ pub struct Todo {
 }
 
 // Re-export the SeaORM types the macro emits inside the per-model
-// inner module — see `users.rs` for rationale.
+// inner module - see `users.rs` for rationale.
 pub use todo::{ActiveModel, Column, Entity};

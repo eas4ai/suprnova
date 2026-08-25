@@ -21,7 +21,7 @@ use sea_orm_migration::MigrationTrait;
 /// Public alias so consumers can write `CreatePaymentsTables` instead of
 /// the date-prefixed module name. The actual migration name recorded in
 /// the `seaql_migrations` table comes from `DeriveMigrationName`, which
-/// derives from the module path — unique and stable.
+/// derives from the module path - unique and stable.
 pub use m_2026_05_22_000001_create_payments_tables::Migration as CreatePaymentsTables;
 
 /// Returns all payments migrations in order. Wire into your app's

@@ -14,11 +14,11 @@ use serde_json::{Map, Value};
 /// envelope against the current request's include-set + fieldset.
 ///
 /// Chainable mutators mirror Laravel's `JsonResource`:
-/// - `.additional(map)` — adds top-level keys alongside `data`
-/// - `.with_meta(key, value)` — adds to top-level `meta`
-/// - `.with_link(rel, href)` — adds to top-level `links`
-/// - `.with_jsonapi(info)` — sets the top-level `jsonapi` member
-/// - `.status(code)` — overrides the response HTTP status
+/// - `.additional(map)` - adds top-level keys alongside `data`
+/// - `.with_meta(key, value)` - adds to top-level `meta`
+/// - `.with_link(rel, href)` - adds to top-level `links`
+/// - `.with_jsonapi(info)` - sets the top-level `jsonapi` member
+/// - `.status(code)` - overrides the response HTTP status
 pub struct JsonApiResponse {
     result: Result<JsonApiBuilder, IncludeResolutionError>,
     status: u16,
@@ -59,7 +59,7 @@ impl JsonApiResponse {
         self
     }
 
-    /// Alias for [`Self::with_meta`] — Laravel often uses bare `meta()`.
+    /// Alias for [`Self::with_meta`] - Laravel often uses bare `meta()`.
     pub fn meta(self, key: impl Into<String>, value: Value) -> Self {
         self.with_meta(key, value)
     }
@@ -87,7 +87,7 @@ impl JsonApiResponse {
         self.with_link(rel, href)
     }
 
-    /// Add a top-level `links` rel as an arbitrary `Value` — useful
+    /// Add a top-level `links` rel as an arbitrary `Value` - useful
     /// when the link is the JSON:API link-object form `{href, meta}`
     /// rather than a bare URL string.
     pub fn with_link_value(mut self, rel: impl Into<String>, value: Value) -> Self {
@@ -151,9 +151,9 @@ impl JsonApiResponse {
 }
 
 /// Public facade. Construction:
-/// - `Resource::single(dto)` — one resource
-/// - `Resource::collection(dtos)` — array of resources
-/// - `Resource::paginated(paginator)` — paginated collection with auto links/meta
+/// - `Resource::single(dto)` - one resource
+/// - `Resource::collection(dtos)` - array of resources
+/// - `Resource::paginated(paginator)` - paginated collection with auto links/meta
 pub struct Resource;
 
 impl Resource {
@@ -201,8 +201,8 @@ impl Resource {
                 let mut builder = JsonApiBuilder::collection(data);
                 builder.absorb_included_sink(sink);
                 // Collections take their top-level meta from the first
-                // item, mirroring Laravel's `with($request)` semantics
-                // — every item in an `AnonymousResourceCollection` is
+                // item, mirroring Laravel's `with($request)` semantics -
+                // every item in an `AnonymousResourceCollection` is
                 // the same class, so calling `resource_top_level_meta`
                 // on item 0 is a faithful single-source representative.
                 if let Some(first) = dtos.first() {
@@ -217,7 +217,7 @@ impl Resource {
         JsonApiResponse::from_result(result)
     }
 
-    /// Paginated collection — pulls items off the paginator, builds
+    /// Paginated collection - pulls items off the paginator, builds
     /// `data`, attaches `links.{self,first,prev,next,last}` and
     /// `meta.pagination` per JSON:API recommendation.
     pub fn paginated<T: IntoJsonResource, P: crate::pagination::Paginated<T>>(

@@ -1,4 +1,4 @@
-//! Auth-flows dogfood — add `email_verified_at` to `users`.
+//! Auth-flows dogfood - add `email_verified_at` to `users`.
 //!
 //! Tasks 5–8 of the provider-agnostic auth-flows change made the
 //! `EmailVerification` / `PasswordReset` facades resolve through the

@@ -1,6 +1,6 @@
-//! RoleUser — pivot model for the `users <-> roles` many-to-many.
+//! RoleUser - pivot model for the `users <-> roles` many-to-many.
 //!
-//! Pivot models are first-class `#[suprnova::model]` types — same
+//! Pivot models are first-class `#[suprnova::model]` types - same
 //! macro, same Eloquent surface. The only thing that makes this one a
 //! "pivot" is that `User::roles` and `Role::users` reference it in
 //! their `BelongsToMany<Other, RoleUser> { ... }` declaration.

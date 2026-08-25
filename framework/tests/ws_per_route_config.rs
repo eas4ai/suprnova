@@ -1,4 +1,4 @@
-//! Per-route WsConfig override tests — assert WsRouteDef.config()
+//! Per-route WsConfig override tests - assert WsRouteDef.config()
 //! threads through the registry into WsMatch.
 
 use async_trait::async_trait;

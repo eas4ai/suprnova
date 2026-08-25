@@ -5,7 +5,7 @@
 //! A local `Storage` disk is rooted at a directory. Without a guard, opendal's
 //! FS backend joins the caller-supplied path onto that root WITHOUT resolving
 //! `..`, so `disk.write("../escaped.txt", ..)` escapes the root and writes
-//! anywhere the process can reach — arbitrary read/write outside the disk.
+//! anywhere the process can reach - arbitrary read/write outside the disk.
 //!
 //! Every test plants a real `secret.txt` OUTSIDE the disk root (one level up)
 //! and proves that traversal attempts are rejected AND that the out-of-root
@@ -216,7 +216,7 @@ async fn filename_containing_dotdot_substring_is_allowed() {
     let (_tmp, _secret) = rooted_disk_with_outside_secret("ok_dotdot");
     let disk = Storage::disk("ok_dotdot").unwrap();
 
-    // `..` as a SUBSTRING of a filename is not a traversal — the guard checks
+    // `..` as a SUBSTRING of a filename is not a traversal - the guard checks
     // whole path components, so this legitimate name must be allowed.
     disk.write("my..file.txt", "fine".as_bytes().to_vec())
         .await
@@ -236,7 +236,7 @@ async fn disk_root_listing_and_stat_are_allowed() {
 
     // opendal normalizes both "" and "/" to the root indicator "/", which
     // reaches the guard as "/". That is the disk root itself, not a traversal,
-    // so listing and stat-ing it must succeed — the guard must not treat the
+    // so listing and stat-ing it must succeed - the guard must not treat the
     // single root component as an absolute-path escape.
     let entries = disk
         .list("")
@@ -263,7 +263,7 @@ async fn copy_between_disks_helper_rejects_traversal_destination() {
         .await
         .unwrap();
 
-    // `copy_between_disks` opens a writer on the destination path — the guard
+    // `copy_between_disks` opens a writer on the destination path - the guard
     // on the FS disk must reject the traversal without any explicit check in
     // the helper itself.
     let result =

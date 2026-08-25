@@ -1,7 +1,7 @@
 //! Asserts that every SeaORM type a consumer would touch is re-exported
 //! under `suprnova::*` so app code never needs `use sea_orm::*`.
 
-// `DeriveActiveEnum` is a derive macro (not a type) — verify it via
+// `DeriveActiveEnum` is a derive macro (not a type) - verify it via
 // an actual derive use on a probe enum below.
 use suprnova::DeriveActiveEnum;
 #[derive(
@@ -25,7 +25,7 @@ enum _DeriveActiveEnumProbe {
 fn sea_orm_types_are_aliased_under_suprnova() {
     // Structs / values. `Set` and `NotSet` are variants of `ActiveValue`
     // (re-exported as bare names by SeaORM), so they're verified by
-    // constructing values — not by type position.
+    // constructing values - not by type position.
     use suprnova::{
         ActiveValue, DatabaseConnection, DatabaseTransaction, NotSet, RelationDef, Schema, Select,
         Set,
@@ -45,7 +45,7 @@ fn sea_orm_types_are_aliased_under_suprnova() {
         None
     }
 
-    // Traits — verified via trait-bound check fns. Bare trait names
+    // Traits - verified via trait-bound check fns. Bare trait names
     // can't appear as types; `<T: Trait>()` checks the trait resolves
     // at compile time which is what we want here.
     fn _t_column<T: suprnova::ColumnTrait>() {}
@@ -61,7 +61,7 @@ fn sea_orm_types_are_aliased_under_suprnova() {
     fn _t_entity_name<T: suprnova::EntityName>() {}
     fn _t_entity_trait<T: suprnova::EntityTrait>() {}
     fn _t_primary_key<T: suprnova::PrimaryKeyTrait>() {}
-    // `PrimaryKeyToColumn::Column: ColumnTrait` — `()` doesn't satisfy
+    // `PrimaryKeyToColumn::Column: ColumnTrait` - `()` doesn't satisfy
     // that. Without the associated-type binding the trait re-export
     // still resolves which is what this test exercises.
     fn _t_pk_to_column<T: suprnova::PrimaryKeyToColumn>() {}

@@ -33,12 +33,12 @@ fn trims_whitespace_and_drops_empty() {
 
 #[test]
 fn array_form_include_brackets() {
-    // include[]=foo&include[]=bar — Laravel-style array form.
+    // include[]=foo&include[]=bar - Laravel-style array form.
     let s = RequestIncludeSet::from_query("include[]=foo&include[]=bar");
     assert_eq!(s.include, vec!["foo", "bar"]);
 }
 
-// HIGH 1 — includes() API
+// HIGH 1 - includes() API
 #[test]
 fn includes_finds_field() {
     let s = RequestIncludeSet::from_query("include=foo,bar");
@@ -54,7 +54,7 @@ fn includes_returns_false_on_empty_set() {
     assert!(!s.includes("anything"));
 }
 
-// HIGH 2 — IncludeError::into_framework_error()
+// HIGH 2 - IncludeError::into_framework_error()
 #[test]
 fn include_error_into_framework_error_produces_400() {
     let err = IncludeError::UnknownInclude {
@@ -75,7 +75,7 @@ fn include_error_into_framework_error_produces_400() {
     assert!(msg.contains("tags"));
 }
 
-// HIGH 3 — current_include_set() both paths
+// HIGH 3 - current_include_set() both paths
 #[tokio::test]
 async fn current_include_set_unbound_returns_empty() {
     let set = current_include_set();
@@ -98,18 +98,18 @@ async fn current_include_set_bound_returns_scoped_value() {
     );
 }
 
-// Codex review finding 9 — URL decoding ------------------------------
+// Codex review finding 9 - URL decoding ------------------------------
 
 #[test]
 fn url_decoded_comma_splits_into_separate_values() {
-    // `%2C` is `,` — must be decoded before the `,` split.
+    // `%2C` is `,` - must be decoded before the `,` split.
     let s = RequestIncludeSet::from_query("include=author%2Ccomments");
     assert_eq!(s.include, vec!["author", "comments"]);
 }
 
 #[test]
 fn url_decoded_brackets_recognized_as_array_form() {
-    // `%5B%5D` is `[]` — array form must work after decoding.
+    // `%5B%5D` is `[]` - array form must work after decoding.
     let s = RequestIncludeSet::from_query("include%5B%5D=foo&include%5B%5D=bar");
     assert_eq!(s.include, vec!["foo", "bar"]);
 }
@@ -125,7 +125,7 @@ fn url_decoded_plus_becomes_space_then_trimmed() {
 
 #[test]
 fn url_decoded_repeated_keys_merge_across_encoding() {
-    // Mix encoded and plain — both forms must merge into one list.
+    // Mix encoded and plain - both forms must merge into one list.
     let s = RequestIncludeSet::from_query("include=a%2Cb&include=c");
     assert_eq!(s.include, vec!["a", "b", "c"]);
 }

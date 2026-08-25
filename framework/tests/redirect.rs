@@ -3,7 +3,7 @@
 //!
 //! Verifies that special characters in redirect query keys and values
 //! are properly percent-encoded via `url::form_urlencoded` rather than
-//! concatenated raw — which previously produced malformed redirects and
+//! concatenated raw - which previously produced malformed redirects and
 //! parameter injection.
 
 use suprnova::Cookie;
@@ -57,7 +57,7 @@ async fn redirect_encodes_unicode_value() {
     let resp: suprnova::Response = Redirect::to("/u").query("name", "héllo").into();
     let loc = location_of(resp);
 
-    // Multi-byte UTF-8 encodes per RFC 3986 — the character itself
+    // Multi-byte UTF-8 encodes per RFC 3986 - the character itself
     // must not appear raw in the Location header.
     assert!(
         !loc.contains('é'),
@@ -93,7 +93,7 @@ async fn redirect_preserves_fragment_outside_query() {
     let resp: suprnova::Response = Redirect::to("/page#section").query("p", "1").into();
     let loc = location_of(resp);
 
-    // The fragment must land at the end, outside the query string —
+    // The fragment must land at the end, outside the query string -
     // otherwise the encoder would percent-encode the `#`.
     assert_eq!(loc, "/page?p=1#section", "got {loc}");
 }
@@ -169,7 +169,7 @@ async fn redirect_route_unknown_name_returns_sanitised_500() {
     let resp: suprnova::Response =
         Redirect::route("_definitely_not_a_registered_route_name").into();
 
-    // Short-circuit path returns Err for a 5xx — both arms carry an
+    // Short-circuit path returns Err for a 5xx - both arms carry an
     // HttpResponse; unwrap_or_else collapses them in the runtime.
     let http = match resp {
         Ok(r) => r,
@@ -198,7 +198,7 @@ async fn redirect_route_unknown_name_returns_sanitised_500() {
         "5xx body's `message` field must be the sanitised Laravel-shaped string, got {body}"
     );
     // The body must also carry the canonical `request_id` field that
-    // the FrameworkError converter injects — its presence (even when
+    // the FrameworkError converter injects - its presence (even when
     // null outside a request scope) is what distinguishes the
     // converter path from the old raw `HttpResponse::text` path.
     assert!(

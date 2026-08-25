@@ -1,7 +1,7 @@
 //! Jobs that exist to be measured, not to do work.
 //!
-//! Each one is the instrument for one question about the queue under it
-//! — signal handling, worker loss, claim exclusivity. They live in the
+//! Each one is the instrument for one question about the queue under it -
+//! signal handling, worker loss, claim exclusivity. They live in the
 //! dogfood app because those questions have to drive the real queue
 //! across real processes: a job that runs under a test harness proves
 //! things about the harness.
@@ -42,7 +42,7 @@ impl Job for BenchSleep {
     async fn handle(self) -> Result<(), FrameworkError> {
         // `warn` rather than `info`, and not by accident. These two lines
         // are the experiment's only direct evidence that the in-flight job
-        // ran to completion rather than being cut short by the drain — and
+        // ran to completion rather than being cut short by the drain - and
         // the stack runs at `LOG_LEVEL=warn`, which silently filtered them
         // out. The first run after the SIGTERM fix reported "job_finished:
         // no" for that reason alone, which reads as a framework failure and
@@ -63,8 +63,8 @@ impl Job for BenchSleep {
 ///
 /// `abort()` rather than `panic!` deliberately: a panic is caught by the
 /// framework's panic boundary and settled as a normal failure, which is
-/// the path that already works. Only an abrupt death — the process
-/// vanishing without settling anything — exercises reclaim, and that is
+/// the path that already works. Only an abrupt death - the process
+/// vanishing without settling anything - exercises reclaim, and that is
 /// what a real crash, OOM kill, or `docker kill` looks like.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BenchAbort {

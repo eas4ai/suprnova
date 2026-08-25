@@ -5,17 +5,17 @@
 //! `NEW_CHECKOUT_FLOW.is_enabled()` and writes `ON` or `OFF` into the
 //! response body. Drives three round-trips:
 //!
-//! 1. Baseline — no row in `features`, `is_enabled` returns the
+//! 1. Baseline - no row in `features`, `is_enabled` returns the
 //!    compile-time default (`false`), handler writes `OFF`.
 //! 2. After `admin::upsert("new-checkout-flow", "", true, ...)`, the
-//!    next request observes the new value — `ON`.
-//! 3. After `admin::delete`, falls back to default — `OFF`.
+//!    next request observes the new value - `ON`.
+//! 3. After `admin::delete`, falls back to default - `OFF`.
 //!
 //! This is the Phase 13 audit-fix #1 test: the framework's composition
 //! tests (`framework/tests/features.rs`) prove the FeatureSync chain
 //! propagates correctly in isolation. This test proves the chain is
 //! still doing its job when wrapped inside an actual `Server` /
-//! `Router` / `MiddlewareRegistry` / `Request<Incoming>` plumbing — the
+//! `Router` / `MiddlewareRegistry` / `Request<Incoming>` plumbing - the
 //! gap the advisor flagged at the close of Phase 13.
 //!
 //! Why a process-wide mutex: featureflag's global default evaluator is
@@ -48,14 +48,14 @@ use tokio::sync::Mutex;
 use app::features::NEW_CHECKOUT_FLOW;
 use app::migrations::Migrator;
 
-/// Same serialisation guard pattern the avatar test uses — without it,
+/// Same serialisation guard pattern the avatar test uses - without it,
 /// parallel tests in this binary trample each other's process-global
 /// state (App container, featureflag default, INSTALLED tracker).
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// Tiny handler the test drives — calls `NEW_CHECKOUT_FLOW.is_enabled()`
+/// Tiny handler the test drives - calls `NEW_CHECKOUT_FLOW.is_enabled()`
 /// and reports the answer in plain text. Bypasses the home controller's
-/// Inertia / ExampleAction dependencies on purpose — what we want to
+/// Inertia / ExampleAction dependencies on purpose - what we want to
 /// test is the middleware → handler → `is_enabled` path, not the
 /// surrounding plumbing.
 async fn flag_probe(_req: Request) -> Response {
@@ -81,7 +81,7 @@ struct TestApp {
 
 /// Build the per-test world. Uses sqlite::memory for hermeticity and
 /// binds everything through the App / TestContainer plumbing exactly
-/// the way `bootstrap_database_cached` would do it in production — but
+/// the way `bootstrap_database_cached` would do it in production - but
 /// without using the helper itself, because the helper sets the
 /// featureflag global default which is process-wide and we'd then
 /// fight other tests in this binary. install_evaluator handles the
@@ -92,7 +92,7 @@ struct TestApp {
 async fn setup_app() -> TestApp {
     let lock = TEST_LOCK.lock().await;
 
-    // Database — sqlite::memory + app migrations (which include
+    // Database - sqlite::memory + app migrations (which include
     // CreateFeaturesTable from Phase 13 T7's migration registration).
     let conn = sea_orm::Database::connect("sqlite::memory:")
         .await
@@ -120,12 +120,12 @@ async fn setup_app() -> TestApp {
     // Install the cached evaluator as featureflag's global default so
     // `context!` macro's `on_new_context` hook fires. After the first
     // test in this binary, subsequent calls warn-and-no-op (advisor
-    // flag from the install_evaluator fix); that's fine — the same
+    // flag from the install_evaluator fix); that's fine - the same
     // evaluator already routes through the snapshot we just rebuilt.
     install_evaluator(cached.clone());
 
     // Router + middleware stack. FeatureMiddleware sits in the global
-    // chain so every request opens a context — same shape as the
+    // chain so every request opens a context - same shape as the
     // production bootstrap.rs registers it.
     let router = Arc::new(register());
     // `SessionMiddleware` fails closed without `Crypt`: every request
@@ -203,7 +203,7 @@ async fn flag_propagates_through_request_path_on_upsert_and_delete() {
     // writes "OFF". If FeatureMiddleware were broken (didn't open a
     // context, or InContext's poll-reentry lost the scope across
     // handler awaits), `is_enabled()` would either panic on an
-    // uninitialised context lookup or return some stale state — either
+    // uninitialised context lookup or return some stale state - either
     // way, "OFF" wouldn't be the cleanest answer to assert against.
     assert_eq!(
         get_flag_body(app.addr).await,
@@ -221,7 +221,7 @@ async fn flag_propagates_through_request_path_on_upsert_and_delete() {
         get_flag_body(app.addr).await,
         "ON",
         "after admin::upsert: middleware + handler must observe the new value without manual reload \
-         and without waiting for the TTL — this is the kill-switch contract Phase 13 R1 ships",
+         and without waiting for the TTL - this is the kill-switch contract Phase 13 R1 ships",
     );
 
     // Delete: row gone → compile-time default takes over again.

@@ -4,7 +4,7 @@
 //! directly (the same pattern `framework/tests/data_middleware.rs`
 //! uses for `IncludeMiddleware`), sends a real HTTP request through a
 //! hyper client with the headers/cookies under test, and reads back a
-//! response body produced by `Lang::get("greet")` running downstream —
+//! response body produced by `Lang::get("greet")` running downstream -
 //! proving `scope_locale` actually bound the detected locale for the
 //! rest of the request, not just that `detect()` returned the right
 //! value in isolation.
@@ -50,7 +50,7 @@ fn write_lang(dir: &std::path::Path, locale: &str, file: &str, ftl: &str) {
 /// container's `dyn Translator`. Global container state, so every
 /// caller runs under `#[serial_test::serial]`.
 ///
-/// Returns the backing `TempDir` — the caller must keep it alive for
+/// Returns the backing `TempDir` - the caller must keep it alive for
 /// as long as the binding is in use. `LocaleMiddleware` calls
 /// `reload_if_stale()` on every request in the (default, unset
 /// `APP_ENV`) `Local` environment; if the directory were dropped
@@ -67,7 +67,7 @@ fn bind_translator() -> tempfile::TempDir {
 
 /// Boot a one-shot server wrapping `LocaleMiddleware`, send one GET
 /// with `headers` attached, and return `(status, body)`. The
-/// downstream "handler" is `Lang::get("greet")` — its output reflects
+/// downstream "handler" is `Lang::get("greet")` - its output reflects
 /// whichever locale `LocaleMiddleware` scoped around it.
 async fn drive(headers: &[(&str, &str)]) -> (u16, String) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -122,7 +122,7 @@ async fn drive(headers: &[(&str, &str)]) -> (u16, String) {
 }
 
 /// Like [`drive`], but seeds a task-local session (`session_key` =
-/// `session_locale`) around the `LocaleMiddleware::handle` call — the
+/// `session_locale`) around the `LocaleMiddleware::handle` call - the
 /// same idiom `FakeSessionScope` in `framework/tests/auth_http_middleware.rs`
 /// uses to fake `SessionMiddleware` for a downstream reader.
 ///
@@ -217,7 +217,7 @@ async fn cookie_beats_header() {
 #[serial_test::serial]
 async fn unavailable_cookie_locale_is_skipped() {
     let _tmp = bind_translator();
-    // `zz` parses as a locale but has no loaded catalog — must be
+    // `zz` parses as a locale but has no loaded catalog - must be
     // skipped silently (not a 500), falling through to the header.
     let (status, body) = drive(&[("Cookie", "locale=zz"), ("Accept-Language", "es")]).await;
     assert_eq!(status, 200);
@@ -247,7 +247,7 @@ async fn garbage_header_does_not_500() {
 async fn session_beats_cookie_and_header() {
     let _tmp = bind_translator();
     // `Session` precedes `Cookie` and `Header` in the default detection
-    // order — a session-stored locale must win over both, even when a
+    // order - a session-stored locale must win over both, even when a
     // cookie and the Accept-Language header both point elsewhere.
     let (status, body) =
         drive_with_session("es", &[("Cookie", "locale=en"), ("Accept-Language", "en")]).await;
@@ -255,7 +255,7 @@ async fn session_beats_cookie_and_header() {
     assert_eq!(body, "Hola");
 }
 
-/// `LocaleShare` — the Inertia `lang` shared prop. Reuses this file's
+/// `LocaleShare` - the Inertia `lang` shared prop. Reuses this file's
 /// `config`/`write_lang`/`bind_translator` helpers rather than
 /// duplicating catalog setup.
 mod locale_share {
@@ -290,7 +290,7 @@ mod locale_share {
     }
 
     /// Registers a `LocalizationConfig` whose `fallback_locale` is
-    /// `fallback` — a value distinct from both `en` (the env-default
+    /// `fallback` - a value distinct from both `en` (the env-default
     /// every `resolved_config()` call in this binary would otherwise
     /// silently fall back to, since nothing here ever calls
     /// `Localization::bootstrap()` to seed the `LOCALIZATION_CONFIG`
@@ -303,7 +303,7 @@ mod locale_share {
     /// `en` via the same env fallback).
     ///
     /// `Config::register` writes to a process-global repository with no
-    /// unregister — same constraint `config_debug_gating.rs`'s
+    /// unregister - same constraint `config_debug_gating.rs`'s
     /// `install_app_config` documents for `AppConfig`. Each test below
     /// calls this itself, immediately before its own `share()` call, so
     /// last-write-wins makes every test self-contained regardless of
@@ -354,14 +354,14 @@ mod locale_share {
         assert_eq!(value["catalog"]["hash"], Value::String(hash));
     }
 
-    /// `catalog` must be JSON `null` — never an error — for every reason
+    /// `catalog` must be JSON `null` - never an error - for every reason
     /// the adjudicated shape names: no `Translator` bound at all, or a
     /// bound `Translator` with nothing loaded for the current locale.
     ///
     /// This deliberately does not bind a `Translator` in this test.
     /// `App::bind` (used by `bind_translator` above, and by every
     /// `LocaleMiddleware` test in this file) writes to the
-    /// process-global container with no unbind — `TestContainer`
+    /// process-global container with no unbind - `TestContainer`
     /// overrides what it explicitly binds but does not block fallthrough
     /// to that global container for a type it leaves unbound (see
     /// `App::make`'s doc comment), so nothing in this binary can prove
@@ -369,7 +369,7 @@ mod locale_share {
     /// locale `zz` sidesteps that: it's the same "parses but never has a
     /// loaded catalog" sentinel `unavailable_cookie_locale_is_skipped`
     /// uses above, and no fixture in this file ever writes a `zz`
-    /// catalog — so `catalog` resolves to `null` deterministically
+    /// catalog - so `catalog` resolves to `null` deterministically
     /// whether this run sees no bound `Translator` at all (the
     /// `resolve_make` error path) or a sibling's leftover `en`/`es`
     /// translator (the "no catalog for this locale" path). Both are

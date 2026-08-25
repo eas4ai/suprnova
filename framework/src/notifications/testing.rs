@@ -1,4 +1,4 @@
-//! `Notify::fake()` — installs an in-memory recorder that captures
+//! `Notify::fake()` - installs an in-memory recorder that captures
 //! dispatched notifications without invoking any channel.
 //!
 //! Records keyed by `(notification_name, route, channel)`. Suprnova's
@@ -25,7 +25,7 @@ pub struct FakeRecord {
     pub channel: String,
     /// Per-channel route returned by the recipient.
     pub route: String,
-    /// JSON-serializable payload — the same blob channels would have seen.
+    /// JSON-serializable payload - the same blob channels would have seen.
     pub data: Value,
 }
 
@@ -93,7 +93,7 @@ pub fn assert_sent(pred: impl Fn(&FakeRecord) -> bool) {
 
 /// Laravel-shape `assertSentTo` keyed on per-channel route. Asserts the
 /// named notification was dispatched to a recipient whose `route_for(any)`
-/// equals `route`. Channel-agnostic — pass [`assert_sent_to_on`] to pin
+/// equals `route`. Channel-agnostic - pass [`assert_sent_to_on`] to pin
 /// the channel.
 pub fn assert_sent_to(route: &str, notification_name: &str) {
     assert_sent(|r| r.route == route && r.notification == notification_name);

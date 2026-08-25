@@ -6,8 +6,8 @@
 //! `UserFactory::new().create()` must insert a row and return the
 //! post-insert model (auto-incremented id resolved).
 //!
-//! `#[serial]` because `TestContainer::fake()`'s guard is process-wide
-//! — concurrent tests would clobber each other's bound connection.
+//! `#[serial]` because `TestContainer::fake()`'s guard is process-wide -
+//! concurrent tests would clobber each other's bound connection.
 
 use fake::{Fake, Faker};
 use sea_orm::{ConnectionTrait, Database, DbBackend, EntityTrait, Schema};
@@ -61,7 +61,7 @@ impl Factory for UserFactory {
 
 /// Wire up `DB::connection()` to a fresh sqlite::memory: connection
 /// with the `toy_users` table created. Returns the
-/// `TestContainerGuard` keepalive — DO NOT drop it before the test
+/// `TestContainerGuard` keepalive - DO NOT drop it before the test
 /// completes, or `DB::connection()` will lose the binding mid-test.
 async fn fresh_db() -> (
     suprnova::container::testing::TestContainerGuard,
@@ -160,12 +160,12 @@ async fn factory_create_one_forces_single_even_if_count_was_set() {
         .expect("create_one persists exactly one");
     assert!(user.id > 0);
 
-    // Only one row landed in the DB — count was discarded.
+    // Only one row landed in the DB - count was discarded.
     let row_count = toy_user::Entity::find().all(&conn).await.unwrap().len();
     assert_eq!(row_count, 1, "create_one ignored count(5) and inserted 1");
 }
 
-/// Explicit-connection variant — bypass `DB::connection()` entirely
+/// Explicit-connection variant - bypass `DB::connection()` entirely
 /// and persist against a connection the caller controls. Useful for
 /// integration tests that need to coordinate two distinct databases
 /// or for non-framework consumers.

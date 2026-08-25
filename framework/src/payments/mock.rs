@@ -1,7 +1,7 @@
 //! In-memory mock payment provider for tests.
 //!
-//! [`MockPaymentProvider`] implements all four universal traits — [`Checkout`],
-//! [`Subscription`], [`CustomerStore`], and [`WebhookHandler`] — entirely in memory,
+//! [`MockPaymentProvider`] implements all four universal traits - [`Checkout`],
+//! [`Subscription`], [`CustomerStore`], and [`WebhookHandler`] - entirely in memory,
 //! with no external dependencies. It deliberately does NOT implement [`Payment`](super::traits::Payment)
 //! (server-capture) to exercise the Paddle-style "optional Payment" invariant: callers
 //! that query `provider.as_payment()` will receive `None`.
@@ -52,7 +52,7 @@ use tokio::sync::RwLock;
 pub struct MockPaymentProvider {
     customers: Arc<RwLock<HashMap<String, CustomerRef>>>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionResult>>>,
-    /// Every `start_session` request, in call order — lets tests assert on
+    /// Every `start_session` request, in call order - lets tests assert on
     /// mode/price_refs/URLs without intercepting the wire.
     sessions: Arc<RwLock<Vec<(String, StartSessionRequest)>>>,
     /// Scripted `session_status` results, keyed by provider session id.
@@ -105,7 +105,7 @@ impl PaymentProvider for MockPaymentProvider {
     fn name(&self) -> &'static str {
         "mock"
     }
-    // `as_payment()` intentionally uses the default `None` — no `Payment` impl.
+    // `as_payment()` intentionally uses the default `None` - no `Payment` impl.
 
     /// The mock mints promotion codes so app tests can drive upsell flows.
     fn as_promotions(&self) -> Option<&dyn Promotions> {
@@ -290,7 +290,7 @@ impl CustomerStore for MockPaymentProvider {
 
 #[async_trait]
 impl WebhookHandler for MockPaymentProvider {
-    /// The mock signs nothing — it accepts every webhook so local dev and
+    /// The mock signs nothing - it accepts every webhook so local dev and
     /// the test bed can exercise the ingress path without a real provider
     /// secret. That makes it a no-op verifier, so it must never run as a
     /// registered provider outside development: a forged
@@ -506,7 +506,7 @@ mod tests {
                 );
             });
         }
-        // Unset APP_ENV defaults to Local — also permissive.
+        // Unset APP_ENV defaults to Local - also permissive.
         with_app_env(None, || {
             let ctx = empty_ctx(&headers, b"{}");
             assert!(provider.verify(&ctx).is_ok());
@@ -631,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_session_status_is_not_supported() {
-        /// A provider that only implements `start_session` — exercises the
+        /// A provider that only implements `start_session` - exercises the
         /// trait's default `session_status` body.
         struct MinimalCheckout;
 

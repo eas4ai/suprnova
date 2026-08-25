@@ -1,7 +1,7 @@
-//! Role model — Phase 10B T10 dogfood for `BelongsToMany`.
+//! Role model - Phase 10B T10 dogfood for `BelongsToMany`.
 //!
 //! Pairs with [`RoleUser`](super::role_user::RoleUser) as the pivot.
-//! `roles` is the "right side" of a many-to-many — every User can hold
+//! `roles` is the "right side" of a many-to-many - every User can hold
 //! many Roles via the `role_user` pivot table. The matching declaration
 //! on `User` carries `with_pivot = ["assigned_at"]` so the pivot's
 //! own non-key column flows back as `roles[0].pivot::<RoleUser>()`.

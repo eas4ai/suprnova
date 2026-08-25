@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Request payload for [`Promotions::create_promotion_code`].
 ///
 /// The discount itself (percent or amount off) lives in a provider-side
-/// coupon object created ahead of time — typically once, by hand, in the
+/// coupon object created ahead of time - typically once, by hand, in the
 /// provider's dashboard. This request mints a *code* off that coupon,
 /// scoped to one customer and one redemption window, which is the shape
 /// win-back and upsell campaigns need: each recipient gets their own
@@ -37,7 +37,7 @@ pub struct PromotionCode {
     pub provider_promotion_id: String,
 }
 
-/// Promotion-code minting. An optional provider capability — query it via
+/// Promotion-code minting. An optional provider capability - query it via
 /// [`super::PaymentProvider::as_promotions`], which returns `None` for
 /// providers without promotion support.
 #[async_trait]

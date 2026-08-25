@@ -34,14 +34,14 @@ pub fn models() -> impl Iterator<Item = &'static ModelEntry> {
 /// that table.
 ///
 /// Errors when two or more entries register the same table name from
-/// different modules — `inventory` iteration order is link-time and
+/// different modules - `inventory` iteration order is link-time and
 /// not deterministic, so silently returning whichever entry happened
 /// to be discovered first would route table-keyed operations
 /// (admin lookup, ad-hoc tooling) to a non-deterministic model. The
 /// error names both colliding modules so the dev can rename or alias
 /// one. Duplicate registrations of the SAME `(table, module_path,
 /// type_name)` triple (which happens on macro re-expansion within
-/// the same crate) are NOT a collision — they reference the same
+/// the same crate) are NOT a collision - they reference the same
 /// logical model.
 pub fn find_model_by_table(table: &str) -> Result<Option<&'static ModelEntry>, FrameworkError> {
     find_entry_by_table(models(), table)
@@ -72,7 +72,7 @@ where
                 if prev.module_path != entry.module_path || prev.type_name != entry.type_name {
                     return Err(FrameworkError::internal(format!(
                         "model registry: table `{table}` is registered by both \
-                         `{}::{}` and `{}::{}` — rename one model or alias its \
+                         `{}::{}` and `{}::{}` - rename one model or alias its \
                          table via `#[model(table = \"...\")]` so table-keyed \
                          lookups stay deterministic",
                         prev.module_path, prev.type_name, entry.module_path, entry.type_name,

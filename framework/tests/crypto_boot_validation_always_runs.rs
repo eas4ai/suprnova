@@ -1,6 +1,6 @@
 #![cfg(feature = "testing")]
 
-//! Regression: HIGH audit finding `crypto` #334 — production APP_KEY
+//! Regression: HIGH audit finding `crypto` #334 - production APP_KEY
 //! validation is bypassed after any earlier key install in the same
 //! process.
 //!
@@ -50,7 +50,7 @@ fn production_validation_runs_even_when_crypt_is_pre_initialized() {
     let err = match result {
         Ok(_) => panic!(
             "production boot with pre-initialized Crypt and missing APP_KEY \
-             must STILL fail closed — the pre-init must not bypass the env-var \
+             must STILL fail closed - the pre-init must not bypass the env-var \
              validation"
         ),
         Err(e) => e,

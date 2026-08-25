@@ -1,9 +1,9 @@
-//! Phase 10C T14 — `audit_log` table for the transaction dogfood.
+//! Phase 10C T14 - `audit_log` table for the transaction dogfood.
 //!
 //! The closeout dogfood demonstrates `DB::transaction` by wrapping a
 //! user creation alongside an `audit_log` insert in a single
 //! transaction. If the transaction body returns an error after the
-//! audit row is written, the rollback must un-write it — that's the
+//! audit row is written, the rollback must un-write it - that's the
 //! pin the test exercises.
 //!
 //! Tiny denormalised schema on purpose: this is a dogfood
@@ -12,7 +12,7 @@
 //! optional FK back to `users` (NULL when the actor is the system),
 //! `payload` is a free-form text blob (JSON if the caller wants to
 //! structure it). Real apps reach for a Phase 8-shaped admin table
-//! design — this table just proves the transactional path holds.
+//! design - this table just proves the transactional path holds.
 
 use sea_orm_migration::prelude::*;
 

@@ -1,4 +1,4 @@
-//! Echo WebSocket handler — Phase 7A dogfood.
+//! Echo WebSocket handler - Phase 7A dogfood.
 
 use async_trait::async_trait;
 use suprnova::FrameworkError;

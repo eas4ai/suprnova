@@ -1,5 +1,5 @@
 //! Tests for the `SessionConfig` knobs added in the Laravel-13 parity
-//! sweep — `expire_on_close`, `cookie_domain`, `cookie_partitioned`,
+//! sweep - `expire_on_close`, `cookie_domain`, `cookie_partitioned`,
 //! `connection`. Each knob is exercised by building a config, building
 //! the outbound session cookie via the public `Cookie` builder shape,
 //! and asserting the `Set-Cookie` header value emits / omits the right
@@ -9,7 +9,7 @@ use std::time::Duration;
 use suprnova::Cookie;
 use suprnova::session::SessionConfig;
 
-/// Helper — build a session cookie the same way `SessionMiddleware`
+/// Helper - build a session cookie the same way `SessionMiddleware`
 /// does, exercising every config flag.
 fn build_session_cookie(cfg: &SessionConfig, value: &str) -> Cookie {
     let mut cookie = Cookie::new(&cfg.cookie_name, value)

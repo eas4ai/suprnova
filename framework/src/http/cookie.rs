@@ -10,7 +10,7 @@ use std::time::Duration;
 /// value into a Set-Cookie header per RFC 6265 cookie-octet rules.
 ///
 /// `CONTROLS` covers 0x00–0x1F + 0x7F, so CR (`\r`), LF (`\n`), NUL, and
-/// every other ASCII control character is encoded — closing the
+/// every other ASCII control character is encoded - closing the
 /// header-injection class of bugs where an attacker-controlled cookie
 /// name or value containing CRLF would split the response.
 ///
@@ -51,12 +51,12 @@ const COOKIE_ENCODE: &AsciiSet = &CONTROLS
 /// SameSite cookie attribute
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum SameSite {
-    /// `Strict` — never sent on cross-site requests.
+    /// `Strict` - never sent on cross-site requests.
     Strict,
-    /// `Lax` — sent on top-level navigations but not on cross-site subresource requests. The default.
+    /// `Lax` - sent on top-level navigations but not on cross-site subresource requests. The default.
     #[default]
     Lax,
-    /// `None` — sent on every cross-site request. Browsers require `Secure` to be set when `None` is used.
+    /// `None` - sent on every cross-site request. Browsers require `Secure` to be set when `None` is used.
     None,
 }
 
@@ -196,11 +196,11 @@ pub struct CookieOptions {
     pub secure: bool,
     /// `SameSite` attribute controlling cross-site send behaviour.
     pub same_site: SameSite,
-    /// Path scope — the cookie is only sent for requests under this path prefix.
+    /// Path scope - the cookie is only sent for requests under this path prefix.
     pub path: String,
-    /// Domain scope — `None` defaults to the origin host.
+    /// Domain scope - `None` defaults to the origin host.
     pub domain: Option<String>,
-    /// `Max-Age` lifetime — `None` makes the cookie a session cookie.
+    /// `Max-Age` lifetime - `None` makes the cookie a session cookie.
     pub max_age: Option<Duration>,
     /// Emit the `Partitioned` (CHIPS) attribute. Independent of
     /// `SameSite`; browsers that don't recognise it silently ignore
@@ -338,7 +338,7 @@ impl Cookie {
         // (every session site sets `.secure()` / `.path()` / `.domain()`
         // after the base cookie) and could not reach `Cookie::queue` at
         // all. A prefixed cookie violating a rule is silently rejected by
-        // the browser — no error, no log, "login is broken" — so rewriting
+        // the browser - no error, no log, "login is broken" - so rewriting
         // here plus a warning is more observable than emitting an invalid
         // header faithfully.
         let host_prefixed = self.name.starts_with("__Host-");
@@ -468,7 +468,7 @@ impl Cookie {
     /// # Errors
     ///
     /// Returns a `FrameworkError::Internal` if encryption fails (most
-    /// commonly because `Crypt` has not been initialized — `APP_KEY`
+    /// commonly because `Crypt` has not been initialized - `APP_KEY`
     /// not set at server boot).
     pub fn encrypted(
         name: impl Into<String>,
@@ -506,7 +506,7 @@ impl Cookie {
     }
 
     /// Queue a cookie to attach to the *next* outgoing response
-    /// instead of the one being built right now — Laravel's
+    /// instead of the one being built right now - Laravel's
     /// `Cookie::queue()`. Useful from code with no `HttpResponse` in
     /// hand: an event listener, a container-bound service, middleware
     /// that runs ahead of the handler.
@@ -524,12 +524,12 @@ impl Cookie {
     /// boundary; [`SessionMiddleware`](crate::session::SessionMiddleware)
     /// drains it onto the response right after the session cookie.
     /// Queuing a second cookie under a name already queued replaces
-    /// the first — the jar is keyed by name, not by name *and* path
+    /// the first - the jar is keyed by name, not by name *and* path
     /// the way Laravel's `CookieJar` is.
     ///
     /// Silently does nothing when no `SessionMiddleware` is installed
     /// for the current request, or there is no request scope at all
-    /// (e.g. a plain unit test) — the same posture `App::flash` takes
+    /// (e.g. a plain unit test) - the same posture `App::flash` takes
     /// outside a flash scope.
     pub fn queue(cookie: Cookie) {
         crate::session::middleware::queue_cookie(cookie);
@@ -548,7 +548,7 @@ impl Cookie {
         crate::session::middleware::unqueue_cookie(name);
     }
 
-    /// Queue a deletion cookie for `name` — Laravel's
+    /// Queue a deletion cookie for `name` - Laravel's
     /// `Cookie::expire()`. Builds the deletion cookie with
     /// [`Self::forget_with`], so `path`/`domain` scope it exactly like
     /// a direct `forget_with` call would; `None` for either keeps the
@@ -587,7 +587,7 @@ pub fn parse_cookies(header: &str) -> HashMap<String, String> {
 ///
 /// The previous hand-rolled version only encoded ASCII printables and
 /// passed CR/LF, control characters, and non-ASCII bytes through
-/// unchanged — a header-injection class bug. Routing through
+/// unchanged - a header-injection class bug. Routing through
 /// `percent_encoding::utf8_percent_encode` guarantees:
 ///
 /// - Every CTL byte (including CR `\r`, LF `\n`) is percent-encoded.
@@ -611,7 +611,7 @@ fn url_encode(s: &str) -> String {
 /// by another system that legitimately contains a `+`.
 fn url_decode(s: &str) -> String {
     // Cookie values are NOT `application/x-www-form-urlencoded`, so `+` is a
-    // literal plus sign, not an encoded space — decoding it as a space would
+    // literal plus sign, not an encoded space - decoding it as a space would
     // corrupt a cookie like `a+b` into `a b`. Our own encoder percent-encodes
     // a real space as `%20` and a literal `+` as `%2B`, so round-tripping
     // through this decoder is unaffected.
@@ -746,7 +746,7 @@ mod tests {
     /// chars (`Ã©`) instead of `é`.
     #[test]
     fn cookie_utf8_round_trip_preserves_multi_byte_chars() {
-        let original = "café — naïve façade";
+        let original = "café - naïve façade";
         let encoded = url_encode(original);
         let decoded = url_decode(&encoded);
         assert_eq!(
@@ -824,7 +824,7 @@ mod tests {
             .split("; ")
             .find(|p| p.starts_with("Domain="))
             .expect("a Domain attribute was set");
-        // Only host characters survive — the injected `;HttpOnly=x` collapses
+        // Only host characters survive - the injected `;HttpOnly=x` collapses
         // into the host text rather than becoming its own attribute.
         assert_eq!(dom, "Domain=evil.comHttpOnlyx");
     }

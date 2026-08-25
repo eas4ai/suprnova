@@ -27,7 +27,7 @@ fn limiter() -> Arc<dyn RateLimiterDriver> {
 ///
 /// The `/ping` demo used to read `x-forwarded-for` directly, which any
 /// client can set. A bucket keyed on a header the caller controls is not
-/// a rate limit — a fresh value per request means a fresh bucket per
+/// a rate limit - a fresh value per request means a fresh bucket per
 /// request. `Request::ip()`'s own doc comment names this hazard, and the
 /// demo bypassed it; since `app/` is the worked example people copy, the
 /// bypass was the part most likely to spread.
@@ -72,10 +72,10 @@ routes! {
     ),
     get!("/config", controllers::config_example::show).name("config.show"),
 
-    // Task 11 — localization dogfood. GET renders a translated greeting
+    // Task 11 - localization dogfood. GET renders a translated greeting
     // (`__!("welcome", app: ...)`); POST demonstrates a translated
     // `validation-required` failure on a missing `name` field. Kept
-    // stateless like `/api/ping` and `/api/welcome` — excepted from CSRF
+    // stateless like `/api/ping` and `/api/welcome` - excepted from CSRF
     // below for the same reason.
     get!("/lang-demo", controllers::lang_demo::show).name("lang-demo.show"),
     post!("/lang-demo", controllers::lang_demo::submit).name("lang-demo.submit"),
@@ -87,7 +87,7 @@ routes! {
         post!("/", controllers::user::store).name("users.store"),
     }),
 
-    // Authenticated user routes — session-gated via the framework's
+    // Authenticated user routes - session-gated via the framework's
     // `AuthMiddleware`. The avatar upload exercises the full multipart
     // + storage + Auth stack end-to-end.
     group!("/users", {
@@ -105,28 +105,28 @@ routes! {
         post!("/random", controllers::todo::create_random).name("todos.create_random"),
     }),
 
-    // SSE dogfood — streams UserRegistered broadcast events
+    // SSE dogfood - streams UserRegistered broadcast events
     get!("/events/stream", controllers::sse_example::stream).name("events.stream"),
 
-    // Phase 7A WebSocket dogfood — echo handler at /ws/echo.
+    // Phase 7A WebSocket dogfood - echo handler at /ws/echo.
     // Round-trips text messages with an "echo: " prefix; exits on peer close.
     ws!("/ws/echo", app_ws::echo::EchoHandler),
 
-    // Phase 7B WebSocket broadcasting — JSON-envelope subscribe/publish.
+    // Phase 7B WebSocket broadcasting - JSON-envelope subscribe/publish.
     // Clients send {"type":"subscribe","channel":"user_registered"} to
     // receive UserRegistered events; ChatChannel requires a token in data.
     ws!("/ws/broadcast", broadcasting_handler()),
 
-    // Phase 2 dogfood — cursor pagination over a 100-user fixture
+    // Phase 2 dogfood - cursor pagination over a 100-user fixture
     get!("/api/users", controllers::paginated_users::index).name("api.users.index"),
 
-    // Phase 3 dogfood — JSON:API resources + Gate-authorized deletion
+    // Phase 3 dogfood - JSON:API resources + Gate-authorized deletion
     // GET  /api/users/{id}  → JSON:API single resource (sparse fieldsets via ?fields[users]=...)
     // GET  /api/v3/users    → JSON:API collection
     // DELETE /api/posts/{id} → Gate::authorize("delete-post", ...) demo
     // Session-gated: `UserResource` serialises `email`, so these two
     // endpoints hand out every user's address to whoever asks unless
-    // something stops them. Nothing did — they sat at the top level with
+    // something stops them. Nothing did - they sat at the top level with
     // no middleware, which is the same defect Group 0 fixed in the `--api`
     // scaffold (`api_user_routes_are_behind_an_auth_gate`). The scaffold
     // got the fix; the dogfood, which is the other thing people copy,
@@ -137,7 +137,7 @@ routes! {
     }).middleware(SessionAuthMiddleware::new()),
     delete!("/api/posts/{id}", controllers::admin::delete_post).name("api.posts.destroy"),
 
-    // Codex finding #17 — real Post model. Public GET listing remains
+    // Codex finding #17 - real Post model. Public GET listing remains
     // open; create/show require a session (the controllers also enforce
     // Gate::authorize through PostPolicy for show). The framework's
     // middleware map is keyed by `(method, path)` so the public GET
@@ -149,15 +149,15 @@ routes! {
         post!("/", controllers::posts::store).name("api.posts.store"),
     }).middleware(SessionAuthMiddleware::new()),
 
-    // Phase 5B Task 20 — mail dogfood. `POST /api/welcome?email=...&name=...`
+    // Phase 5B Task 20 - mail dogfood. `POST /api/welcome?email=...&name=...`
     // queues a WelcomeEmail Mailable onto the mail queue via Mail::queue.
     // The Mailable + SendMailJob are registered in bootstrap::register so
     // the worker can re-hydrate and dispatch.
     post!("/api/welcome", controllers::welcome::queue).name("api.welcome"),
 
-    // Phase 11 — auth-flows dogfood.
+    // Phase 11 - auth-flows dogfood.
     //
-    // Public endpoints (no session middleware — they consume tokens
+    // Public endpoints (no session middleware - they consume tokens
     // minted out-of-band or implement anti-enumeration responses for
     // arbitrary input):
     //   POST /auth/verify/resend?email=...  → 200, anti-enumeration
@@ -170,7 +170,7 @@ routes! {
     //   POST /auth/2fa/enroll   → 200 JSON {otpauth_url, qr_code_svg, recovery_codes}
     //   POST /auth/2fa/confirm  → 200 JSON {status:"confirmed"}
     //   POST /auth/2fa/disable  → 200 JSON {status:"disabled"}
-    // P2-02(a)/(c) — the issuance routes mint or consume single-use
+    // P2-02(a)/(c) - the issuance routes mint or consume single-use
     // credentials, so they are the ones worth throttling. They carried no
     // limiter at all; the only throttled route in the app was the `/ping`
     // demo.
@@ -216,7 +216,7 @@ routes! {
         // whereas three reset mails to the *same* address in fifteen
         // minutes is already more than anyone needs.
         //
-        // Of the four routes here only two name a recipient —
+        // Of the four routes here only two name a recipient -
         // `/verify/resend` in the query string, `/password/request` in
         // the form body. `identity_key` reads either. The other two
         // consume a token the caller must already hold, so they have no
@@ -234,7 +234,7 @@ routes! {
         // caller can make us buffer before the quota check.
         .key_reads_body(4096)
         // Stand aside for the two token-consuming routes. They name no
-        // recipient, so this limiter has nothing to say about them — and
+        // recipient, so this limiter has nothing to say about them - and
         // without this, its tighter quota (3/15min) would quietly become
         // their binding limit instead of the 10/5min chosen above. Behind
         // one office NAT that is a lockout. The per-IP limiter still
@@ -248,7 +248,7 @@ routes! {
         post!("/disable", controllers::auth_2fa::disable).name("auth.2fa.disable"),
     }).middleware(SessionAuthMiddleware::new()),
 
-    // Phase 5A dogfood — rate-limited ping endpoint.
+    // Phase 5A dogfood - rate-limited ping endpoint.
     // 5 requests per 60-second window, keyed by X-Forwarded-For header
     // (falls back to "anon"). The in-memory limiter is bootstrapped in
     // bootstrap::register() so it is available here at route-build time.

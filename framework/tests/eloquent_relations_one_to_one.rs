@@ -1,4 +1,4 @@
-//! Phase 10B T2 — `HasOne` / `BelongsTo` + `with_default` + custom
+//! Phase 10B T2 - `HasOne` / `BelongsTo` + `with_default` + custom
 //! FK/LK + eager-load dispatcher arm.
 //!
 //! T1 shipped the relation infrastructure (sealed trait,
@@ -172,7 +172,7 @@ async fn belongs_to_with_default_returns_closure_when_fk_null() {
 
 #[tokio::test]
 async fn belongs_to_with_default_returns_closure_when_parent_missing() {
-    // FK present but no matching parent row — `with_default` still
+    // FK present but no matching parent row - `with_default` still
     // fires. Mirrors Laravel's `->withDefault()` semantics.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -183,7 +183,7 @@ async fn belongs_to_with_default_returns_closure_when_parent_missing() {
     .await
     .unwrap();
 
-    // 999 is a bogus FK — no oto_users row matches.
+    // 999 is a bogus FK - no oto_users row matches.
     let p = OtoPost::create(attrs! { title: "Ghost", oto_user_id: 999i64 })
         .await
         .unwrap();
@@ -208,7 +208,7 @@ pub struct OtoOwner {
 
 #[tokio::test]
 async fn has_one_custom_fk_lk_resolves() {
-    // Explicit FK / LK overrides — when the user names them
+    // Explicit FK / LK overrides - when the user names them
     // identical to the defaults, the relation must still resolve.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -231,7 +231,7 @@ async fn has_one_custom_fk_lk_resolves() {
     assert_eq!(loaded.bio, "owner-bio");
 }
 
-// ---- Eager loading exercise — verifies T2 dispatcher arms -----------
+// ---- Eager loading exercise - verifies T2 dispatcher arms -----------
 
 #[tokio::test]
 async fn has_one_eager_load_fills_cache() {
@@ -282,7 +282,7 @@ async fn belongs_to_eager_load_fills_cache() {
 #[tokio::test]
 async fn belongs_to_eager_load_honours_with_default_for_null_fk() {
     // Eager load must invoke `with_default` per row when the FK is
-    // null — same semantics as the lazy `.first()` path.
+    // null - same semantics as the lazy `.first()` path.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     _db.execute_unprepared(
@@ -326,7 +326,7 @@ async fn has_one_aggregate_sum_avg_zero_on_empty() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let _u = OtoUser::create(attrs! { name: "lonely" }).await.unwrap();
-    // No profile created — empty aggregate group.
+    // No profile created - empty aggregate group.
 
     let mut users = OtoUser::query().get().await.unwrap();
     assert_eq!(users.len(), 1);
@@ -370,7 +370,7 @@ async fn has_one_aggregate_sum_avg_zero_on_empty() {
 
 #[tokio::test]
 async fn has_one_aggregate_min_max_none_on_empty() {
-    // Min/Max over zero rows must store Option::<f64>::None — the
+    // Min/Max over zero rows must store Option::<f64>::None - the
     // pre-fix behaviour stored `0.0_f64` which conflicts with SQL
     // semantics and the existing Builder::min/max Option<T> return.
     let _db = TestDatabase::sqlite_memory().await.unwrap();

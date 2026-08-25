@@ -1,30 +1,30 @@
-//! Phase 10C T6 — Serialization with hidden / visible / appends.
+//! Phase 10C T6 - Serialization with hidden / visible / appends.
 //!
 //! Pins the six contracts the task's plan calls out:
 //!
-//! 1. [`to_array_returns_full_map_by_default`] — the trait default
+//! 1. [`to_array_returns_full_map_by_default`] - the trait default
 //!    serialises the whole struct, stripping the macro-injected
 //!    `__eager` / `__pivot` scratch fields.
-//! 2. [`to_json_returns_serialized_string`] — `to_json` returns the
+//! 2. [`to_json_returns_serialized_string`] - `to_json` returns the
 //!    string form of `to_array`.
-//! 3. [`hidden_fields_are_removed_from_to_array`] — declared
+//! 3. [`hidden_fields_are_removed_from_to_array`] - declared
 //!    `hidden = [...]` columns drop out of the serialised map.
-//! 4. [`visible_keeps_only_listed_fields`] — declared
+//! 4. [`visible_keeps_only_listed_fields`] - declared
 //!    `visible = [...]` columns are the only survivors.
-//! 5. [`appends_invoke_accessors_and_inject_into_to_array`] —
+//! 5. [`appends_invoke_accessors_and_inject_into_to_array`] -
 //!    `#[suprnova::accessor]`-tagged methods named in `appends = [...]`
 //!    are called and their values inserted after the filter passes.
-//! 6. [`eager_cache_stays_out_of_serialization`] — the Phase 10B P6
+//! 6. [`eager_cache_stays_out_of_serialization`] - the Phase 10B P6
 //!    contract holds under the new filter pipeline: eager-loaded
 //!    relation rows never leak into the parent's `to_array`.
 //!
 //! Plus two contract pins beyond the plan that capture invariants
 //! easy to regress when someone touches the macro:
 //!
-//! 7. [`appends_win_over_hidden_when_names_collide`] — when a name
+//! 7. [`appends_win_over_hidden_when_names_collide`] - when a name
 //!    appears in both `hidden` and `appends`, the append wins (it
 //!    runs after the hidden strip). Laravel parity.
-//! 8. [`collection_to_array_applies_per_row_filters`] — a
+//! 8. [`collection_to_array_applies_per_row_filters`] - a
 //!    `Collection<M>` serialises through each row's `to_array`, so
 //!    hidden columns are dropped on every row of the array output
 //!    (regression guard for the load-bearing change in
@@ -95,7 +95,7 @@ impl T6AppendUser {
 }
 
 /// Collision: `secret` appears in BOTH `hidden` and `appends`. The
-/// hidden strip runs first, then the append injects — so the append
+/// hidden strip runs first, then the append injects - so the append
 /// wins. Matches Laravel.
 #[model(
     table = "t6_collide",
@@ -217,7 +217,7 @@ async fn to_array_returns_full_map_by_default() {
     assert!(map.contains_key("created_at"));
     assert!(map.contains_key("updated_at"));
     // Trait default explicitly strips the macro-injected scratch fields
-    // even though they carry #[serde(skip)] — belt-and-braces against a
+    // even though they carry #[serde(skip)] - belt-and-braces against a
     // future hand-rolled Serialize impl.
     assert!(!map.contains_key("__eager"));
     assert!(!map.contains_key("__pivot"));
@@ -228,7 +228,7 @@ async fn to_json_returns_serialized_string() {
     let _db = basic_fixture().await;
     let m = T6Basic::create(attrs! { name: "alice" }).await.unwrap();
     let json = m.to_json();
-    // String shape — to_json delegates to to_array and stringifies.
+    // String shape - to_json delegates to to_array and stringifies.
     assert!(json.contains("\"name\":\"alice\""));
     // Round-trip pin: parsing the string back to a Value yields the
     // same shape as to_array().
@@ -268,7 +268,7 @@ async fn hidden_fields_are_removed_from_to_array() {
     assert!(m.contains_key("id"));
     assert!(!m.contains_key("password_hash"));
     assert!(!m.contains_key("ssn"));
-    // Non-listed columns survive — hidden is a denylist, not a
+    // Non-listed columns survive - hidden is a denylist, not a
     // whitelist.
     assert!(m.contains_key("created_at"));
 }
@@ -289,7 +289,7 @@ async fn visible_keeps_only_listed_fields() {
     assert!(m.contains_key("id"));
     assert!(m.contains_key("name"));
     assert!(!m.contains_key("internal_notes"));
-    // Auto-timestamps are dropped — visible is an exact allowlist.
+    // Auto-timestamps are dropped - visible is an exact allowlist.
     assert!(!m.contains_key("created_at"));
     assert!(!m.contains_key("updated_at"));
 
@@ -322,7 +322,7 @@ async fn appends_invoke_accessors_and_inject_into_to_array() {
         Some("30 years old"),
     );
 
-    // Base columns still present — appends inject in addition to the
+    // Base columns still present - appends inject in addition to the
     // base map, they don't replace it.
     assert_eq!(m.get("first_name").and_then(|v| v.as_str()), Some("Alice"));
     assert_eq!(m.get("age").and_then(|v| v.as_i64()), Some(30));
@@ -379,7 +379,7 @@ async fn appends_win_over_hidden_when_names_collide() {
     let arr = u.to_array();
     let m = arr.as_object().unwrap();
 
-    // The append wins — the value is the accessor's output, not the
+    // The append wins - the value is the accessor's output, not the
     // raw column value.
     assert_eq!(m.get("secret").and_then(|v| v.as_str()), Some("[redacted]"));
 }

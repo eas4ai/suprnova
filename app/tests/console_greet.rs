@@ -1,4 +1,4 @@
-//! `greet` console command — integration test via `dispatch_argv`.
+//! `greet` console command - integration test via `dispatch_argv`.
 //!
 //! The dogfood greet command uses the typed-command path
 //! (`#[derive(Command)] + TypedCommand`). This test pins:
@@ -13,7 +13,7 @@
 //!     handlers don't need to thread argv strings)
 //!
 //! Spawning the actual `console` binary as a subprocess is doable
-//! but overkill — the framework's dispatch path is the contract;
+//! but overkill - the framework's dispatch path is the contract;
 //! the binary just hands argv to it. The framework's own tests
 //! cover the binary-equivalent path.
 

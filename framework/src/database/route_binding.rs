@@ -26,7 +26,7 @@
 //!
 //! # Security: binding is identity, not authorization
 //!
-//! Route model binding answers **"does this row exist?"** — it does **not**
+//! Route model binding answers **"does this row exist?"** - it does **not**
 //! answer **"is the current user allowed to see this row?"**. Mirrors Laravel
 //! semantics, but the implication is easy to miss:
 //!
@@ -64,7 +64,7 @@
 //! when denied. See `framework/tests/authorization.rs` and
 //! `app/src/controllers/admin.rs` for working examples.
 //!
-//! The 404 returned on a missing row does NOT prevent IDOR probing — a 404
+//! The 404 returned on a missing row does NOT prevent IDOR probing - a 404
 //! vs. 403 split discloses existence. If existence-disclosure matters in
 //! your threat model, return 404 from the policy too (so unauthorized rows
 //! look identical to non-existent ones).
@@ -75,7 +75,7 @@ use sea_orm::{EntityTrait, ModelTrait as SeaModelTrait, PrimaryKeyTrait};
 use std::ops::{Deref, DerefMut};
 
 /// Newtype wrapper that opts a route-bound model into Eloquent's
-/// SCOPED `find` path — global scopes, soft-delete filter, and
+/// SCOPED `find` path - global scopes, soft-delete filter, and
 /// per-model `#[model(connection = "...")]` routing all apply.
 ///
 /// Wrap your Eloquent model struct in `RouteParam<M>` in the
@@ -97,13 +97,13 @@ use std::ops::{Deref, DerefMut};
 /// # Two binding paths, two contracts
 ///
 /// The framework ships two route-binding shapes with different scope
-/// policies — mirroring Laravel's `Route::model(...)->withTrashed()`
+/// policies - mirroring Laravel's `Route::model(...)->withTrashed()`
 /// opt-in. Pick by intent:
 ///
 /// | Handler signature                | Scope policy |
 /// |----------------------------------|--------------|
-/// | `user: user::Model`              | **Unscoped** — bypasses Eloquent scopes; soft-deleted rows are exposed. The explicit raw escape hatch (mirrors Laravel's `->withTrashed()`). |
-/// | `RouteParam(user): RouteParam<User>` | **Scoped** — applies global scopes + soft-delete filter; the safe default. |
+/// | `user: user::Model`              | **Unscoped** - bypasses Eloquent scopes; soft-deleted rows are exposed. The explicit raw escape hatch (mirrors Laravel's `->withTrashed()`). |
+/// | `RouteParam(user): RouteParam<User>` | **Scoped** - applies global scopes + soft-delete filter; the safe default. |
 ///
 /// New code should prefer `RouteParam<User>`. The bare `user::Model`
 /// path remains supported as the explicit escape hatch for admin
@@ -314,7 +314,7 @@ macro_rules! route_binding {
 ///
 /// Routes through `M::find(id)` (the Eloquent CRUD entrypoint) so the
 /// hydrated row applies the model's global scopes, soft-delete
-/// filter, and per-model connection — see [`RouteParam`] for the full
+/// filter, and per-model connection - see [`RouteParam`] for the full
 /// rationale. The bounds mirror the [`crate::eloquent::Model`] trait
 /// surface so any `#[suprnova::model]`-generated struct fits.
 #[async_trait]

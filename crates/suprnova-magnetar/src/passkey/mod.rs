@@ -2,7 +2,7 @@
 //! storage, and the binding invariants that keep them honest.
 //!
 //! Ported from the deployed division of labor: storage never claims to
-//! authenticate (the `968b0be` honesty discipline — lookups by credential
+//! authenticate (the `968b0be` honesty discipline - lookups by credential
 //! id are lookups over a public value), and webauthn verification is the
 //! only path that treats a row as authenticated. Existing-account
 //! enrollment is bound to the exact authenticated owner within the
@@ -157,7 +157,7 @@ impl PasskeyAuthService {
     /// A brand-new email is a signup and needs no authentication. An email
     /// with an account on file is an enrollment: the caller must be the
     /// exact authenticated owner with a password-confirmation stamp no
-    /// older than three hours — identity comes from the authenticated
+    /// older than three hours - identity comes from the authenticated
     /// actor, never from the caller-supplied email alone (SEC-01).
     pub async fn begin_registration(
         &self,
@@ -286,7 +286,7 @@ impl PasskeyAuthService {
         if !normalize_email(email).eq_ignore_ascii_case(&ceremony.email) {
             return Err(Error::InvalidInput {
                 field: "email".to_owned(),
-                message: "passkey registration email mismatch — the ceremony was begun for a \
+                message: "passkey registration email mismatch - the ceremony was begun for a \
                           different account"
                     .to_owned(),
             });
@@ -389,7 +389,7 @@ impl PasskeyAuthService {
         if !normalize_email(email).eq_ignore_ascii_case(&ceremony.email) {
             return Err(Error::InvalidInput {
                 field: "email".to_owned(),
-                message: "passkey authentication email mismatch — the ceremony was begun for a \
+                message: "passkey authentication email mismatch - the ceremony was begun for a \
                           different account"
                     .to_owned(),
             });

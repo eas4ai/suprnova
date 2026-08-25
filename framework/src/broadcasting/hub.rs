@@ -29,7 +29,7 @@ use tokio::sync::broadcast;
 const CHANNEL_CAPACITY: usize = 256;
 
 /// Reject publishes to channels whose names begin with `"__"`. The
-/// double-underscore prefix is reserved for framework meta-channels —
+/// double-underscore prefix is reserved for framework meta-channels -
 /// `__presence__` carries cross-process presence replication and is
 /// fed by the hub itself via a dedicated producer path, never through
 /// `publish`. Letting application code (or a compromised handler) call
@@ -64,12 +64,12 @@ pub struct BroadcastEnvelope {
     pub event: String,
     /// Event payload, opaque to the hub.
     pub data: Value,
-    /// Optional connection `socket_id` to exclude from delivery — the basis
+    /// Optional connection `socket_id` to exclude from delivery - the basis
     /// for [`Broadcastable::broadcast_to_others`](crate::broadcasting::Broadcastable::broadcast_to_others).
     /// The forwarder for the matching connection skips this envelope; every
     /// other subscriber still receives it. `None` (the default) delivers to
     /// all. It rides the cross-process fanout so exclusion holds there too, but
-    /// is never forwarded to clients — it is a server-side routing concern.
+    /// is never forwarded to clients - it is a server-side routing concern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub except: Option<String>,
 }
@@ -108,13 +108,13 @@ pub trait BroadcastHub: Send + Sync + 'static {
 
     /// Publish an envelope to all subscribers of `envelope.channel`.
     ///
-    /// Returning `Ok(())` with zero local subscribers is normal — channels
+    /// Returning `Ok(())` with zero local subscribers is normal - channels
     /// are created on demand. `Err(_)` signals that the publish could not
     /// be reliably delivered: for in-process hubs that's effectively never
     /// (`Ok(())` always), but for cross-process implementations it covers
     /// fanout backend failures (broker disconnect, stream closed) so the
-    /// caller — typically `Event::dispatch` via
-    /// [`BroadcastListener`](crate::broadcasting::BroadcastListener) — can
+    /// caller - typically `Event::dispatch` via
+    /// [`BroadcastListener`](crate::broadcasting::BroadcastListener) - can
     /// surface the loss instead of swallowing it. Local fanout, when it
     /// happens, runs before the error is returned and is unaffected.
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError>;
@@ -154,7 +154,7 @@ pub trait BroadcastHub: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Return the current member list for a channel — each element is
+    /// Return the current member list for a channel - each element is
     /// the `info` value passed to [`Self::track_member`] for a live member.
     /// Default: empty vec.
     async fn list_members(&self, _channel: &str) -> Vec<Value> {
@@ -186,7 +186,7 @@ impl InMemoryBroadcastHub {
     /// uses the write lock the prune path also needs, making this
     /// atomic w.r.t. eviction.
     fn subscribe_for(&self, channel: &str) -> broadcast::Receiver<BroadcastEnvelope> {
-        // Fast path — read lock, sender already exists. Subscribe under
+        // Fast path - read lock, sender already exists. Subscribe under
         // the read guard so the sender can't be swept between clone and
         // subscribe.
         if let Ok(map) = self.channels.read()
@@ -194,7 +194,7 @@ impl InMemoryBroadcastHub {
         {
             return tx.subscribe();
         }
-        // Slow path — create the channel under a write lock and sweep
+        // Slow path - create the channel under a write lock and sweep
         // any dead siblings while we hold it.
         match lock::write(&self.channels, "broadcast hub channels") {
             Ok(mut map) => {
@@ -218,9 +218,9 @@ impl InMemoryBroadcastHub {
     }
 
     /// Resolve the sender for a publish. Unlike `subscribe_for`, this
-    /// path never creates the channel — publishing to a channel with no
-    /// subscribers is a deliberate no-op (the alternative — creating an
-    /// orphan sender per publish — is the leak we're trying to avoid).
+    /// path never creates the channel - publishing to a channel with no
+    /// subscribers is a deliberate no-op (the alternative - creating an
+    /// orphan sender per publish - is the leak we're trying to avoid).
     fn sender_for_publish(&self, channel: &str) -> Option<broadcast::Sender<BroadcastEnvelope>> {
         self.channels.read().ok()?.get(channel).cloned()
     }
@@ -238,7 +238,7 @@ impl InMemoryBroadcastHub {
         map.retain(|k, tx| k == keep || tx.receiver_count() > 0);
     }
 
-    /// Number of distinct channels currently held in the map — both live
+    /// Number of distinct channels currently held in the map - both live
     /// and (until the next sweep) idle. Exposed for tests that exercise
     /// the eviction policy; `subscriber_count` can't distinguish "no
     /// channel" from "channel exists with 0 receivers".
@@ -326,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn publish_without_subscribers_does_not_create_channel() {
         // Publishes to never-subscribed names must not park senders
-        // forever — that was the original growth vector (`user.{id}` etc.).
+        // forever - that was the original growth vector (`user.{id}` etc.).
         let hub = InMemoryBroadcastHub::new();
         for i in 0..100 {
             hub.publish(BroadcastEnvelope::new(
@@ -365,7 +365,7 @@ mod tests {
         // The double-underscore prefix is reserved for framework meta-channels
         // such as __presence__. The ChannelRegistry blocks `__`-prefixed names
         // at registration; the matching guard at the publish boundary keeps a
-        // server-side caller — or a compromised handler — from injecting
+        // server-side caller - or a compromised handler - from injecting
         // phantom envelopes onto a reserved meta-channel.
         let hub = InMemoryBroadcastHub::new();
 
@@ -402,7 +402,7 @@ mod tests {
         // Receiver minted **before** the read lock is released. If the
         // sender were cloned and the lock dropped, a concurrent sweep
         // could see receiver_count == 0 and evict before .subscribe()
-        // runs — the new subscriber would silently miss every event.
+        // runs - the new subscriber would silently miss every event.
         let hub = Arc::new(InMemoryBroadcastHub::new());
 
         let live = hub.subscribe("hot.chan");
@@ -413,7 +413,7 @@ mod tests {
         let race = tokio::spawn(async move {
             // Subscribe under the read-lock fast path.
             let mut rx = racer.subscribe("hot.chan");
-            // Publish from the same task — the receiver was created
+            // Publish from the same task - the receiver was created
             // under the read guard so it MUST see the event.
             racer
                 .publish(BroadcastEnvelope::new("hot.chan", "Ping", json!({})))

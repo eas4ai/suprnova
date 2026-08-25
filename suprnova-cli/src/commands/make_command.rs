@@ -1,4 +1,4 @@
-//! `suprnova make:command <name>` — scaffold a new console command.
+//! `suprnova make:command <name>` - scaffold a new console command.
 //!
 //! Creates `src/commands/<snake>.rs` with a `#[command]`-annotated
 //! async fn, then ensures `src/commands/mod.rs` declares the new
@@ -111,7 +111,7 @@ pub fn run(name: String) {
     // Guardrail: if `src/lib.rs` doesn't declare `pub mod commands;`,
     // the generated file is invisible to the console binary at link
     // time (inventory::submit! never reaches the registry). Don't
-    // auto-edit lib.rs — too magical for a generator — but emit a
+    // auto-edit lib.rs - too magical for a generator - but emit a
     // loud warning so the user knows to add the line.
     let lib_rs = Path::new("src/lib.rs");
     if lib_rs.exists() {
@@ -122,7 +122,7 @@ pub fn run(name: String) {
         if !has_commands_mod {
             ui::br();
             ui::warning(
-                "src/lib.rs does not declare `pub mod commands;` — the new command \
+                "src/lib.rs does not declare `pub mod commands;` - the new command \
                  will NOT be linked into the console binary until you add this line.",
             );
             ui::hint(

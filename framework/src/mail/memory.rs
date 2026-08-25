@@ -1,4 +1,4 @@
-//! In-memory mail transport — captures messages without sending.
+//! In-memory mail transport - captures messages without sending.
 
 use crate::error::FrameworkError;
 use crate::mail::transport::{MailTransport, OutgoingMessage};

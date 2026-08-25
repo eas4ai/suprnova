@@ -1,4 +1,4 @@
-//! Phase 9A — Memory vector driver smoke tests.
+//! Phase 9A - Memory vector driver smoke tests.
 //!
 //! Pins the trait contract end-to-end via the in-process driver:
 //! - upsert round-trips
@@ -130,7 +130,7 @@ async fn similar_skips_mismatched_dimension_silently() {
         ])
         .await
         .unwrap();
-    // Query is 2-dim — only the d2 point matches the dimension.
+    // Query is 2-dim - only the d2 point matches the dimension.
     let hits = store.similar(vec![1.0, 0.0], 10).await.unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "d2");

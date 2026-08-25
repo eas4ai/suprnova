@@ -14,7 +14,7 @@ use suprnova::inertia::Prop;
 use suprnova::{InertiaRequestExt, InertiaResponse};
 
 // ---------------------------------------------------------------------------
-// Test request fixture — mirrors the MockReq used in framework/tests/inertia.rs
+// Test request fixture - mirrors the MockReq used in framework/tests/inertia.rs
 // ---------------------------------------------------------------------------
 
 struct MockReq {
@@ -50,7 +50,7 @@ impl InertiaRequestExt for MockReq {
 }
 
 // ---------------------------------------------------------------------------
-// Body reader helper — equivalent to the one in tests/inertia.rs
+// Body reader helper - equivalent to the one in tests/inertia.rs
 // ---------------------------------------------------------------------------
 
 async fn body_to_string(
@@ -124,7 +124,7 @@ async fn partial_data_filters_after_include_resolves() {
 // Test A2: the partial-data gate skips the resolver entirely, not just its
 // result. `InertiaResponse::prop_lazy_with_owner`'s doc describes both the
 // include-set gate and the partial-data filter as applied ahead of
-// resolution — a counting resolver proves it: its counter must stay at
+// resolution - a counting resolver proves it: its counter must stay at
 // zero for a field the partial-data gate excludes, the same way Test A's
 // "albums" never reaches `props`.
 // ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ async fn no_partial_data_returns_full_include_resolved_set() {
         ..Default::default()
     });
 
-    // No X-Inertia-Partial-Data header — full set returned.
+    // No X-Inertia-Partial-Data header - full set returned.
     let req = MockReq::new("/artist/1").inertia();
 
     let resp = REQUEST_INCLUDE_SET
@@ -214,7 +214,7 @@ async fn no_partial_data_returns_full_include_resolved_set() {
     let body = body_to_string(resp.into_hyper().into_body()).await;
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // Both props present — no partial-data filter active.
+    // Both props present - no partial-data filter active.
     assert_eq!(
         page["props"]["name"], "Beethoven",
         "expected 'name' prop, got: {:?}",
@@ -267,7 +267,7 @@ async fn partial_data_and_include_both_request_same_key() {
     let body = body_to_string(resp.into_hyper().into_body()).await;
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-    // "albums" passes both gates — present.
+    // "albums" passes both gates - present.
     assert_eq!(
         page["props"]["albums"],
         serde_json::json!(["Symphony 9"]),
@@ -293,7 +293,7 @@ async fn partial_data_and_include_both_request_same_key() {
 
 #[tokio::test]
 async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
-    // `lyrics` is NOT on the allowlist — only `albums` is allowed.
+    // `lyrics` is NOT on the allowlist - only `albums` is allowed.
     registry::register("_test_ArtistDto_t6d", &["albums"]);
 
     let set = Arc::new(RequestIncludeSet {
@@ -303,7 +303,7 @@ async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
 
     // Partial-data only asks for `name`. Without the correct gate order, the
     // partial-data filter would silently skip `lyrics` before
-    // `resolve_with_owner` can raise the 400 — masking the security error.
+    // `resolve_with_owner` can raise the 400 - masking the security error.
     let req = MockReq::new("/artist/1")
         .inertia()
         .header("X-Inertia-Partial-Component", "Artist/Show")
@@ -323,7 +323,7 @@ async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
         )
         .await;
 
-    // Spec requires 400 on disallowed include — must fire even when
+    // Spec requires 400 on disallowed include - must fire even when
     // partial-data would have filtered the field out before resolution.
     match result {
         Ok(_) => panic!("expected Err(400 disallowed include), got Ok response"),
@@ -341,7 +341,7 @@ async fn disallowed_include_returns_400_even_when_partial_data_narrower() {
 //         allowlist gate as a plain lazy one.
 //
 // `#[data(lazy(deferred))]` emits `PropEntry::DeferredOwned`, whose `Prop`
-// carries `Visibility::Deferred` — so `Prop::is_lazy()` is false for it and
+// carries `Visibility::Deferred` - so `Prop::is_lazy()` is false for it and
 // the owner-tagged fast path in `resolve_props` used to skip it entirely.
 // The field then resolved off the ordinary prop path, with no include-set
 // check anywhere in it: the DTO's opt-in field shipped to any client that
@@ -514,7 +514,7 @@ async fn a_deferred_owner_tagged_field_resolves_when_include_names_it() {
 #[tokio::test]
 async fn a_deferred_owner_tagged_field_with_a_disallowed_include_returns_400() {
     // `lyrics` is not on the allowlist. The 400 must fire on the initial
-    // visit too — the flag-free path raises it regardless of what
+    // visit too - the flag-free path raises it regardless of what
     // `X-Inertia-Partial-Data` says (Test D), and a flag on the prop
     // cannot be what buys an attacker silence.
     registry::register("_test_ArtistDto_t6h", &["albums"]);

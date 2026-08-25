@@ -1,7 +1,7 @@
 //! ICU4X-backed locale-aware formatting: numbers, currency, dates, times,
 //! lists, and relative time.
 //!
-//! This module is pure formatting — it never consults a `Translator` or a
+//! This module is pure formatting - it never consults a `Translator` or a
 //! Fluent catalog (see `functions.rs` for the `DATETIME()` Fluent function
 //! that calls back into it). Every entry point takes the caller's data
 //! plus a resolved [`Locale`] and hands back `Result<String,
@@ -10,7 +10,7 @@
 //! back to a plain, non-localized rendering on any ICU failure.
 //!
 //! ICU4X 2.x's `icu_experimental` crate (currency, relative time) is used
-//! only in this file — nothing outside `localization/` needs to know
+//! only in this file - nothing outside `localization/` needs to know
 //! about it.
 
 use super::locale::Locale;
@@ -39,7 +39,7 @@ use writeable::Writeable;
 /// Mirrors the four CLDR date lengths, though ICU4X 2.x's own `Length`
 /// type collapses "full" into "long" (it has no fourth variant).
 /// [`DateStyle::Full`] is rendered here as a long-length date with the
-/// weekday prepended — the same distinction Java's `DateFormat.FULL` vs
+/// weekday prepended - the same distinction Java's `DateFormat.FULL` vs
 /// `.LONG` and JS's `Intl.DateTimeFormat` make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateStyle {
@@ -99,8 +99,8 @@ pub enum RelativeUnit {
 /// Convert the framework's [`Locale`] to the `icu_locale_core::Locale`
 /// every ICU4X formatter constructor here wants.
 ///
-/// This should essentially never fail — every [`Locale`] was already
-/// validated as a BCP-47 identifier by `unic-langid` when it was parsed —
+/// This should essentially never fail - every [`Locale`] was already
+/// validated as a BCP-47 identifier by `unic-langid` when it was parsed -
 /// but a divergence between the two parsers is surfaced as a normal `Err`
 /// rather than a panic.
 fn icu_locale(locale: &Locale) -> Result<icu_locale_core::Locale, FrameworkError> {
@@ -145,7 +145,7 @@ pub(crate) fn try_number(locale: &Locale, n: f64) -> Result<String, FrameworkErr
 /// Renders with the short currency symbol (`$19.99`, not the narrow or
 /// spelled-out forms). Fraction digits are resolved from `iso_currency`'s
 /// ISO 4217 minor-unit table (`Currency::exponent()`; already an
-/// unconditional framework dependency) — `JPY` renders with 0 decimals,
+/// unconditional framework dependency) - `JPY` renders with 0 decimals,
 /// `BHD`/`KWD`-class currencies with 3, and everything else with
 /// whatever CLDR says (2, for the large majority). An `iso_code` that
 /// doesn't resolve to a known `Currency` falls back to 2 fraction digits,
@@ -240,7 +240,7 @@ pub(crate) fn try_datetime(
         time: iso_time(dt)?,
     };
     // Each arm below instantiates `DateTimeFormatter` over a different
-    // concrete field-set type (`YMDT`/`YMDET`, at a different `Length`) —
+    // concrete field-set type (`YMDT`/`YMDET`, at a different `Length`) -
     // `icu_datetime`'s static field sets are types, not runtime values, so
     // there is no single generic path through this match. The macro just
     // removes the boilerplate that's identical across all eight arms.
@@ -285,8 +285,8 @@ pub(crate) fn try_list(
 /// Locale-aware relative time formatting, e.g. `-3` with
 /// [`RelativeUnit::Day`] renders as `"3 days ago"` in `en`.
 ///
-/// Always renders numerically — `RelativeTimeFormatterOptions`'s default
-/// `Numeric::Always` — rather than substituting special forms like
+/// Always renders numerically - `RelativeTimeFormatterOptions`'s default
+/// `Numeric::Always` - rather than substituting special forms like
 /// "yesterday"/"today" for small offsets.
 pub(crate) fn try_relative(
     locale: &Locale,

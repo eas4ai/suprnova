@@ -23,7 +23,7 @@ struct WorkflowContextInner {
     workflow_id: i64,
     lock_timeout: Duration,
     step_index: AtomicI32,
-    /// Fencing token from the claim that started this run — presented back
+    /// Fencing token from the claim that started this run - presented back
     /// to `store::refresh_lock` on every pre/post-step lease refresh so a
     /// context whose lease was reclaimed by another worker cannot extend
     /// the new owner's lease. See `ClaimedWorkflow` and `store::refresh_lock`.

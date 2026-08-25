@@ -19,7 +19,7 @@ pub struct AppConfig {
     /// [`Request::ip`](crate::Request::ip) and the related host /
     /// scheme / port accessors.
     ///
-    /// Defaults to an **empty** allowlist — proxy headers are ignored
+    /// Defaults to an **empty** allowlist - proxy headers are ignored
     /// on every request unless the operator opts in. Behind a real
     /// terminating proxy (nginx, ALB, Cloudflare), list the addresses
     /// from which the proxy hops can reach the framework.
@@ -36,12 +36,12 @@ impl AppConfig {
     ///
     /// `APP_DEBUG` is environment-aware: if the variable is set, its
     /// explicit value wins; if unset, the default is derived from
-    /// `APP_ENV` — `true` in local/development/testing, `false`
+    /// `APP_ENV` - `true` in local/development/testing, `false`
     /// otherwise (including production and any unrecognized
     /// environment). This keeps local zero-config DX while making
     /// production fail-safe.
     ///
-    /// This helper is lenient — a typo in `APP_DEBUG` falls back to
+    /// This helper is lenient - a typo in `APP_DEBUG` falls back to
     /// the environment-derived default (with a `tracing::warn!`).
     /// It is used by `impl Default`, the builder fallback path, and
     /// the lenient `Config::is_debug` fallback. The strict variant
@@ -125,7 +125,7 @@ impl Default for AppConfig {
 /// Pick the default value for `APP_DEBUG` when the env var is unset.
 ///
 /// `true` in environments where developers want loud, helpful errors
-/// (local, development, testing). `false` everywhere else — production,
+/// (local, development, testing). `false` everywhere else - production,
 /// staging, and any unrecognized custom environment fall closed.
 fn default_debug_for_env(env: &Environment) -> bool {
     matches!(
@@ -134,7 +134,7 @@ fn default_debug_for_env(env: &Environment) -> bool {
     )
 }
 
-/// Parse `APP_TRUSTED_PROXIES` lenient — bad entries fall back to an
+/// Parse `APP_TRUSTED_PROXIES` lenient - bad entries fall back to an
 /// empty allowlist with a `tracing::warn!`. Used by `from_env`.
 fn parse_trusted_proxies_lenient() -> TrustedProxiesConfig {
     let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {
@@ -153,7 +153,7 @@ fn parse_trusted_proxies_lenient() -> TrustedProxiesConfig {
     }
 }
 
-/// Parse `APP_TRUSTED_PROXIES` strict — bad entries abort boot. Used
+/// Parse `APP_TRUSTED_PROXIES` strict - bad entries abort boot. Used
 /// by `try_from_env` (`Config::init` calls this).
 fn parse_trusted_proxies_strict() -> Result<TrustedProxiesConfig, FrameworkError> {
     let Ok(raw) = std::env::var("APP_TRUSTED_PROXIES") else {

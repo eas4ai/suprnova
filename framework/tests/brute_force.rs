@@ -188,7 +188,7 @@ fn unlock_account_on_unknown_email_returns_false() {
 }
 
 // ============================================================================
-// LoginThrottleMiddleware — HTTP-layer integration tests
+// LoginThrottleMiddleware - HTTP-layer integration tests
 // ============================================================================
 //
 // We exercise the middleware end-to-end through a real `Router` server,
@@ -196,7 +196,7 @@ fn unlock_account_on_unknown_email_returns_false() {
 //
 // The email is extracted from a request header (`X-Login-Email`). Reading
 // the request body would consume `Request`, so the middleware's email
-// extractor closure is sync-over-`&Request` — header / query / route param
+// extractor closure is sync-over-`&Request` - header / query / route param
 // are the available extraction surfaces. The login form's email is
 // expected to be mirrored to a header by the framework's session /
 // CSRF middleware in practice, or by the user-supplied extractor.
@@ -326,7 +326,7 @@ fn middleware_passes_through_when_account_not_locked() {
             .await
             .unwrap();
 
-        // Fresh user — no failed attempts → not locked.
+        // Fresh user - no failed attempts → not locked.
         let router = Router::new()
             .post("/login", |_req| async { text("login-ok") })
             .middleware(header_throttle());
@@ -375,7 +375,7 @@ fn middleware_429s_when_account_locked() {
             "locked account must short-circuit with 429 before the handler runs"
         );
         let retry = retry.expect("429 must carry a Retry-After header");
-        // Default lockout_period is 15 minutes — retry-after should be
+        // Default lockout_period is 15 minutes - retry-after should be
         // a positive integer in seconds, near 900 but bounded by clock
         // drift between record-attempts and the middleware fetching
         // status. Accept any value in (0, 900].

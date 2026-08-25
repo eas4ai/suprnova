@@ -12,7 +12,7 @@
 //! 2. Confirm that a freshly scaffolded project compiles end-to-end by
 //!    rewriting its `suprnova` dependency to point at the in-tree
 //!    framework crate and running `cargo check`. Marked `#[ignore]` so
-//!    `cargo test --workspace` stays fast — run with
+//!    `cargo test --workspace` stays fast - run with
 //!    `cargo test --workspace -- --ignored` to exercise them.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 /// Substring markers that must NEVER appear in scaffolder output. We
 /// search literal substrings rather than comment-only patterns because
 /// the production templates have no legitimate reason to include any
-/// of these — every prior occurrence was a punted implementation.
+/// of these - every prior occurrence was a punted implementation.
 const FORBIDDEN_MARKERS: &[&str] = &[
     "TODO",
     "FIXME",
@@ -36,7 +36,7 @@ const FORBIDDEN_MARKERS: &[&str] = &[
 
 /// File extensions whose contents we audit. The scaffolder writes
 /// frontend files (`.tsx`, `.svelte`, `.vue`, `.ts`, `.json`,
-/// `.html`, `.css`) plus Rust source and TOML manifests — every one is
+/// `.html`, `.css`) plus Rust source and TOML manifests - every one is
 /// fair game for stub markers. We deliberately do *not* audit binary
 /// blobs or lockfiles.
 const AUDITED_EXTENSIONS: &[&str] = &[
@@ -132,7 +132,7 @@ fn assert_no_marker_hits(root: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// Stub-marker audits (fast — no compilation involved).
+// Stub-marker audits (fast - no compilation involved).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -164,13 +164,13 @@ fn default_starter_has_no_stub_markers_vue() {
 }
 
 // ---------------------------------------------------------------------------
-// Auth contract audits — the scaffolded model must keep the trait overrides
+// Auth contract audits - the scaffolded model must keep the trait overrides
 // the login flow depends on.
 // ---------------------------------------------------------------------------
 
 /// The scaffolded `User` must override `Authenticatable::get_auth_password`
 /// to expose the stored hash. The trait default returns `None`, which makes
-/// `EloquentUserProvider::validate_credentials` reject every password — a
+/// `EloquentUserProvider::validate_credentials` reject every password - a
 /// freshly scaffolded app's `Auth::attempt` login 422s on correct
 /// credentials. The project still compiles without the override, so only a
 /// content check catches the regression.
@@ -192,7 +192,7 @@ fn scaffolded_user_model_exposes_auth_password() {
 }
 
 // ---------------------------------------------------------------------------
-// Inertia client pin — the scaffolds must ship a current `@inertiajs/*`
+// Inertia client pin - the scaffolds must ship a current `@inertiajs/*`
 // adapter. A typo or accidental downgrade compiles fine (npm isn't part of
 // `cargo check`), so only a content assertion catches drift.
 // ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ fn scaffold_pins_current_inertia_client() {
 }
 
 // ---------------------------------------------------------------------------
-// make:* generator audits — ensure the in-place commands emit clean code.
+// make:* generator audits - ensure the in-place commands emit clean code.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -274,7 +274,7 @@ fn make_task_generates_clean_code() {
         .expect("`suprnova make:task` should run");
     assert!(status.success(), "make:task should succeed");
 
-    // Walk the project — the generated task file is what we want clean,
+    // Walk the project - the generated task file is what we want clean,
     // but a broader sweep also confirms nothing else regressed.
     assert_no_marker_hits(&project);
 }
@@ -318,7 +318,7 @@ fn without_portless_omits_portless_json() {
 }
 
 // ---------------------------------------------------------------------------
-// Compile checks — slow (full transitive build); ignored by default.
+// Compile checks - slow (full transitive build); ignored by default.
 // ---------------------------------------------------------------------------
 
 /// Rewrite the scaffolded `Cargo.toml` so it builds against the
@@ -386,7 +386,7 @@ fn run_cargo_check(project: &Path) {
 }
 
 #[test]
-#[ignore = "compile check — runs `cargo check` on a scaffolded project; slow"]
+#[ignore = "compile check - runs `cargo check` on a scaffolded project; slow"]
 fn api_starter_compiles_with_cargo_check() {
     let tmp = TempDir::new().unwrap();
     scaffold(&tmp, "compile_api", &["--api"]);
@@ -396,7 +396,7 @@ fn api_starter_compiles_with_cargo_check() {
 }
 
 #[test]
-#[ignore = "compile check — runs `cargo check` on a scaffolded project; slow"]
+#[ignore = "compile check - runs `cargo check` on a scaffolded project; slow"]
 fn default_starter_compiles_with_cargo_check() {
     let tmp = TempDir::new().unwrap();
     scaffold(&tmp, "compile_default", &["--frontend", "svelte"]);

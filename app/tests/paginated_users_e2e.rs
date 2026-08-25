@@ -4,13 +4,13 @@
 //! tree via the framework's `handle_request` adapter, then drives real
 //! HTTP requests with a hyper client.
 //!
-//! - `GET /api/users` — cursor pagination. Both branches: the default
+//! - `GET /api/users` - cursor pagination. Both branches: the default
 //!   Inertia path (`Inertia::paginate("Users/Index", "users", ...)` → a
 //!   page object with `props.users` plus scroll metadata) and the
 //!   `?format=json` path (raw paginator JSON).
-//! - `GET /users` — offset pagination via `simple_paginate`, so the
+//! - `GET /users` - offset pagination via `simple_paginate`, so the
 //!   scroll metadata is page numbers rather than cursors.
-//! - `GET /users/{id}` — primary-key fetch with the `profile` HasOne
+//! - `GET /users/{id}` - primary-key fetch with the `profile` HasOne
 //!   eager-loaded, including the absent-profile and missing-user cases.
 //!
 //! All three read the database. They used to serve fixtures, which is
@@ -95,7 +95,7 @@ async fn ensure_seeded_db() {
             .expect("seed user");
         }
 
-        // User 1 gets a profile, user 2 deliberately does not — the HasOne
+        // User 1 gets a profile, user 2 deliberately does not - the HasOne
         // is `Option`, and both arms of that need covering on the wire.
         Profile::create(suprnova::attrs! {
             user_id: 1_i64,
@@ -186,7 +186,7 @@ async fn get(
 async fn inertia_path_emits_users_prop_and_scroll_metadata() {
     let addr = spawn_app_server(2).await;
 
-    // Request 1: as an Inertia XHR (X-Inertia: true) — expect JSON page object.
+    // Request 1: as an Inertia XHR (X-Inertia: true) - expect JSON page object.
     let (status, headers, body) = get(addr, "/api/users?per_page=20", true).await;
     assert_eq!(status.as_u16(), 200, "Inertia route should 200");
     // X-Inertia echo confirms the response came from the Inertia builder.
@@ -313,7 +313,7 @@ async fn public_listing_does_not_leak_email() {
 }
 
 /// `GET /users` pages with `simple_paginate`, so its scroll metadata is
-/// page numbers under the `page` name — not cursors. That difference is
+/// page numbers under the `page` name - not cursors. That difference is
 /// the point of having both routes.
 #[tokio::test]
 async fn users_index_pages_with_page_numbers() {
@@ -393,7 +393,7 @@ async fn users_show_returns_the_eager_loaded_profile() {
 }
 
 /// User 2 was seeded without a profile. The HasOne must report that as
-/// `null` rather than borrowing user 1's — the failure mode the
+/// `null` rather than borrowing user 1's - the failure mode the
 /// `relations_dogfood` eager-load test pins at the model layer, asserted
 /// here at the HTTP layer.
 #[tokio::test]

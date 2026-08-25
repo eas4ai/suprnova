@@ -1,4 +1,4 @@
-//! Terminable middleware — Laravel-style post-response hooks.
+//! Terminable middleware - Laravel-style post-response hooks.
 //!
 //! In Laravel, a middleware class with a `terminate($request, $response)`
 //! method is invoked after the response has been sent to the client. The
@@ -8,7 +8,7 @@
 //!
 //! Suprnova ships the equivalent as a dedicated [`Terminable`] trait. A
 //! middleware that wants post-response work implements `Terminable` and
-//! gets registered separately from its `handle` registration —
+//! gets registered separately from its `handle` registration -
 //! [`Middleware`] and [`Terminable`] are orthogonal so the request-path
 //! and the termination-path stay clearly typed.
 //!
@@ -16,7 +16,7 @@
 //! to hyper. The server iterates the registered [`Terminable`]
 //! implementations in registration order and awaits each one. Errors
 //! returned by `terminate` are logged via `tracing::error!` and
-//! swallowed — the response has already left the building, so there's
+//! swallowed - the response has already left the building, so there's
 //! nobody left to surface them to.
 //!
 //! [`Middleware`]: crate::middleware::Middleware
@@ -28,7 +28,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 /// A middleware-shaped post-response hook.
 ///
-/// Implementers don't have to also implement [`crate::middleware::Middleware`] —
+/// Implementers don't have to also implement [`crate::middleware::Middleware`] -
 /// the two surfaces are independent. A type that wants both must
 /// implement both traits and register itself in both places.
 ///
@@ -36,7 +36,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// registered as `Arc<dyn Terminable>` and reused across requests
 /// without per-request allocation. `request_method`, `request_path`,
 /// and the response status / headers / body are the post-response
-/// snapshot — there is no live `Request` body here because hyper has
+/// snapshot - there is no live `Request` body here because hyper has
 /// already streamed it to the client.
 #[async_trait]
 pub trait Terminable: Send + Sync {
@@ -76,7 +76,7 @@ impl TerminationSnapshot {
     }
 }
 
-/// Stored shape of the terminable registry — extracted to a `type`
+/// Stored shape of the terminable registry - extracted to a `type`
 /// alias so the static declaration below doesn't trip
 /// `clippy::type_complexity`.
 type TerminableMap = Vec<(TypeId, Arc<dyn Terminable>)>;
@@ -90,7 +90,7 @@ fn registry_lock() -> &'static RwLock<TerminableMap> {
     TERMINABLE_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Register a terminable hook. Idempotent per concrete type — the
+/// Register a terminable hook. Idempotent per concrete type - the
 /// second registration of a given `T: Terminable` is dropped with a
 /// debug log, the same way [`crate::middleware::register_global_middleware`]
 /// handles its double-registration case.

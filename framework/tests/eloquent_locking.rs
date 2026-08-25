@@ -1,11 +1,11 @@
-//! Phase 10C T9 — Row locking SQL emission.
+//! Phase 10C T9 - Row locking SQL emission.
 //!
 //! `Builder::lock_for_update` and `Builder::shared_lock` set a flag
 //! that the SQL renderer materialises as the per-backend lock clause
 //! at the very end of the compound statement (after every UNION arm
 //! and every ORDER BY / LIMIT / OFFSET).
 //!
-//! These tests assert SQL shape only — no live database is required.
+//! These tests assert SQL shape only - no live database is required.
 //! Locking semantics ("does this actually block a concurrent writer?")
 //! belong in an integration test against a real Postgres or MySQL
 //! sidecar; SQLite cannot exercise row-level locking at all because
@@ -75,7 +75,7 @@ fn shared_lock_renders_postgres_for_share() {
         sql.contains("FOR SHARE"),
         "expected `FOR SHARE` in Postgres SQL, got: {sql}"
     );
-    // FOR SHARE != FOR UPDATE — make sure we didn't accidentally emit the
+    // FOR SHARE != FOR UPDATE - make sure we didn't accidentally emit the
     // wrong clause for the shared variant.
     assert!(
         !sql.contains("FOR UPDATE"),
@@ -142,7 +142,7 @@ fn sqlite_lock_is_no_op_in_sql() {
 
 #[test]
 fn no_lock_method_emits_no_lock_clause() {
-    // Default Builder<M> has LockMode::None — no lock clause should appear
+    // Default Builder<M> has LockMode::None - no lock clause should appear
     // regardless of backend.
     for backend in [
         DatabaseBackend::Postgres,
@@ -169,8 +169,8 @@ fn no_lock_method_emits_no_lock_clause() {
 
 #[test]
 fn lock_appears_once_after_union_postgres() {
-    // The lock clause is appended at the OUTER scope — after both
-    // union arms render — so a `UNION` query has exactly one
+    // The lock clause is appended at the OUTER scope - after both
+    // union arms render - so a `UNION` query has exactly one
     // `FOR UPDATE` at the very end, never one per arm. This guards
     // against regressing the union-arm-inlining behaviour in
     // `render_select_into` vs the outer wrap in `render_select_for`.

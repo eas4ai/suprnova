@@ -1,10 +1,10 @@
-//! Regression — Eloquent typed-model READ terminals must emit
+//! Regression - Eloquent typed-model READ terminals must emit
 //! `QueryExecuted`, so model SELECTs surface in `DB::listen` / the query
 //! log exactly like Laravel's. Before this fix `Builder::get`,
 //! `Model::find`, `Model::find_many`, and `Model::all` executed SeaORM
 //! `.all()` / `.one()` straight at the connection, bypassing the
-//! `ExecutorChoice` instrumentation that every write — and the
-//! model-less `DB::table(...).get()` path — already flowed through. That
+//! `ExecutorChoice` instrumentation that every write - and the
+//! model-less `DB::table(...).get()` path - already flowed through. That
 //! left ORM reads invisible to query logging and `DB::listen`.
 //!
 //! Each test installs the recorder AFTER seeding, so only the single

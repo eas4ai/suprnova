@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `cache` #251 — production Redis
+//! Regression: HIGH audit finding `cache` #251 - production Redis
 //! failures silently downgrade the app to per-process memory cache.
 //!
 //! The fix makes `CACHE_DRIVER` an explicit knob (defaulting to
@@ -76,14 +76,14 @@ fn cache_config_builder_threads_driver_through() {
 /// unreachable. The previous behaviour was to silently install
 /// `InMemoryCache` and pretend everything was fine.
 ///
-/// We exercise this via the `RedisCache::connect` path directly — it's
+/// We exercise this via the `RedisCache::connect` path directly - it's
 /// what `Cache::bootstrap` calls, and it lets us check the error
 /// without touching the global `App` (which would taint other tests).
 #[tokio::test]
 async fn redis_connect_fails_loudly_when_url_is_unreachable() {
     let cfg = CacheConfig::builder()
         .driver(CacheDriver::Redis)
-        // 127.0.0.1:1 — well-known unbound port; connect must fail
+        // 127.0.0.1:1 - well-known unbound port; connect must fail
         // promptly rather than hanging.
         .url("redis://127.0.0.1:1/0")
         .prefix("test-bootstrap:")
@@ -99,7 +99,7 @@ async fn redis_connect_fails_loudly_when_url_is_unreachable() {
 
     assert!(
         res.is_err(),
-        "RedisCache::connect against an unreachable URL must Err — \
+        "RedisCache::connect against an unreachable URL must Err - \
          bootstrap relies on this Err to fail closed (HIGH #251)"
     );
 }

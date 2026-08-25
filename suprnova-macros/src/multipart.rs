@@ -1,10 +1,10 @@
-//! `#[derive(MultipartRequest)]` — strongly-typed multipart extractor.
+//! `#[derive(MultipartRequest)]` - strongly-typed multipart extractor.
 //!
 //! Emits two impls per struct:
-//! 1. `impl FromRequest` — calls hooks, parses the body once via
+//! 1. `impl FromRequest` - calls hooks, parses the body once via
 //!    `parse_multipart_streaming_with_cap`, dispatches each `(name, value)`
 //!    to the right field, then constructs `Self`.
-//! 2. `impl MultipartRequestHooks` — empty default unless the struct
+//! 2. `impl MultipartRequestHooks` - empty default unless the struct
 //!    carries `#[multipart(custom_hooks)]`, in which case the user
 //!    provides their own impl.
 //!
@@ -30,8 +30,8 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
 
     // Parse struct-level `#[multipart(...)]` options.
     //
-    // `custom_hooks`         — caller provides the `MultipartRequestHooks` impl.
-    // `max_body_bytes = N`   — per-struct cap on total request body size, in bytes.
+    // `custom_hooks`         - caller provides the `MultipartRequestHooks` impl.
+    // `max_body_bytes = N`   - per-struct cap on total request body size, in bytes.
     //                          When absent, the macro falls through to the
     //                          process-global cap at runtime.
     let mut emit_default_hooks = true;
@@ -416,7 +416,7 @@ fn expand_inner(input: DeriveInput) -> proc_macro2::TokenStream {
                 // Construct one validator instance per file field, ONCE.
                 // The non-`move` closure below and the post-parse field
                 // loop both borrow these via `&#v_<ident>`, so stateful
-                // validators (interior mutability — `Mutex`, `AtomicUsize`,
+                // validators (interior mutability - `Mutex`, `AtomicUsize`,
                 // etc.) see coherent state across every chunk + the final
                 // call. Without this hoist a fresh instance would be
                 // constructed inside each match arm and any accumulated
@@ -554,7 +554,7 @@ mod tests {
     //! `#[multipart(...)]` must surface as compile errors. Before the
     //! fix, `let _ = attr.parse_nested_meta(|meta| { ... })` silently
     //! discarded the `Err(meta.error("unknown ..."))` returned for
-    //! typos like `max_body_byte` — operators thought they'd set a
+    //! typos like `max_body_byte` - operators thought they'd set a
     //! larger per-struct cap but production kept the default.
     //!
     //! These tests also lock in the existing rejection paths

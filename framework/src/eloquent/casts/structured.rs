@@ -1,4 +1,4 @@
-//! Structured casts — `Vec`, `HashMap`-shaped struct, `Collection`,
+//! Structured casts - `Vec`, `HashMap`-shaped struct, `Collection`,
 //! `serde_json::Value`, and `IndexMap<String, T>`.
 //!
 //! All five casts serialise the runtime value to JSON text and store
@@ -8,7 +8,7 @@
 //! cleanly through SeaORM's `Value::String` boundary. Postgres /
 //! MySQL accept JSON-in-TEXT just as cleanly; users who want native
 //! `JSONB` / `JSON` column types in Postgres / MySQL can write a
-//! manual column definition — the cast layer doesn't constrain it.
+//! manual column definition - the cast layer doesn't constrain it.
 //!
 //! ## `AsArrayObject` vs `AsObject`
 //!
@@ -64,12 +64,12 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // The TEXT column round-trips as a JSON string — `v.as_str()`
+        // The TEXT column round-trips as a JSON string - `v.as_str()`
         // gives us the encoded payload; parse it back into `Vec<T>`
         // then re-emit as a JSON array so downstream deserialization
         // into the user model's `Vec<T>` field succeeds.
         //
-        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("[]")` which
+        // Domain 7 audit D7-A - was `v.as_str().unwrap_or("[]")` which
         // silently treated non-string storage as an empty array. Now
         // strict so a misconfigured column produces an explicit type
         // mismatch rather than a silent empty Vec<T>.
@@ -133,7 +133,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let s = v.as_str().ok_or_else(|| {
             FrameworkError::validation(
                 "AsObject",
@@ -201,7 +201,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let s = v.as_str().ok_or_else(|| {
             FrameworkError::validation(
                 "AsCollection",
@@ -232,7 +232,7 @@ where
 // ---- AsJson<T> ------------------------------------------------------------
 
 /// Cast any `Serialize + DeserializeOwned` type ↔ JSON-encoded `TEXT`.
-/// Pass-through both directions — the cast exists so the storage shape
+/// Pass-through both directions - the cast exists so the storage shape
 /// is uniform (TEXT) across backends. Use when the field is a
 /// `serde_json::Value` or a user-defined struct that's already
 /// serde-describable.
@@ -264,7 +264,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let s = v.as_str().ok_or_else(|| {
             FrameworkError::validation(
                 "AsJson",
@@ -333,7 +333,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let s = v.as_str().ok_or_else(|| {
             FrameworkError::validation(
                 "AsArrayObject",

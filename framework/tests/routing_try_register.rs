@@ -1,4 +1,4 @@
-//! #380d (Augment) — route registration no longer forces a panic on a
+//! #380d (Augment) - route registration no longer forces a panic on a
 //! recoverable `matchit` insert error (duplicate or malformed pattern).
 //!
 //! Closes the Codex MEDIUM "infallible public surfaces still convert
@@ -7,7 +7,7 @@
 //! hatches: route registration runs once at startup and a duplicate route is
 //! a programmer error worth crashing on. The new fallible siblings return
 //! `Err(FrameworkError)` (naming the method + path) so registration driven by
-//! a source you don't control at compile time — dynamic config, plugins —
+//! a source you don't control at compile time - dynamic config, plugins -
 //! becomes a recoverable error instead of a process-ending panic:
 //!
 //! - HTTP: `Router::{get,post,put,delete}` gain `try_*` siblings (returning
@@ -32,7 +32,7 @@ use suprnova::routing::try_register_route_name;
 use suprnova::ws::{WebSocketHandler, WsSocket};
 use suprnova::{FrameworkError, Response, Router};
 
-/// Minimal HTTP handler — the body is irrelevant; we only exercise
+/// Minimal HTTP handler - the body is irrelevant; we only exercise
 /// registration, not dispatch.
 async fn h(_req: Request) -> Response {
     text("ok")

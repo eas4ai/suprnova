@@ -1,14 +1,14 @@
-//! Phase 9A — Qdrant vector driver tests.
+//! Phase 9A - Qdrant vector driver tests.
 //!
 //! Two layers:
 //!
-//! 1. **Pure-function tests** (no `#[ignore]`) — always run; cover id
+//! 1. **Pure-function tests** (no `#[ignore]`) - always run; cover id
 //!    resolution, payload encode/decode round-trips, and the trait
 //!    surface's short-circuit paths (empty inputs, `k = 0`). These
-//!    don't touch the network — the driver short-circuits before any
+//!    don't touch the network - the driver short-circuits before any
 //!    RPC call.
 //!
-//! 2. **Integration tests** (`#[ignore]`) — exercise the driver
+//! 2. **Integration tests** (`#[ignore]`) - exercise the driver
 //!    against a real Qdrant server. Skipped by default; run via
 //!
 //!    ```bash
@@ -69,7 +69,7 @@ async fn drop_collection(driver: &QdrantVectorDriver, collection: &str) {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — id resolution
+// Pure-function tests - id resolution
 // ---------------------------------------------------------------------
 
 #[test]
@@ -117,7 +117,7 @@ fn resolve_point_id_distinct_strings_get_distinct_ids() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — payload encode (build_point)
+// Pure-function tests - payload encode (build_point)
 // ---------------------------------------------------------------------
 
 #[test]
@@ -180,7 +180,7 @@ fn build_point_overrides_caller_supplied_reserved_key() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — match decode (decode_match)
+// Pure-function tests - match decode (decode_match)
 // ---------------------------------------------------------------------
 
 #[test]
@@ -248,7 +248,7 @@ fn decode_match_falls_back_to_uuid_variant_when_no_payload_key() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — short-circuits (no real network)
+// Pure-function tests - short-circuits (no real network)
 // ---------------------------------------------------------------------
 
 #[tokio::test]
@@ -323,7 +323,7 @@ async fn upsert_with_zero_dim_first_item_errors_locally() {
 }
 
 // ---------------------------------------------------------------------
-// Pure-function tests — config / constants
+// Pure-function tests - config / constants
 // ---------------------------------------------------------------------
 
 #[test]
@@ -340,7 +340,7 @@ fn suprnova_id_payload_key_uses_reserved_double_underscore_prefix() {
 }
 
 // ---------------------------------------------------------------------
-// Integration tests — env-gated, require a running Qdrant
+// Integration tests - env-gated, require a running Qdrant
 // ---------------------------------------------------------------------
 
 #[tokio::test]

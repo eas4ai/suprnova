@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 /// Provider-side customer record management.
 ///
-/// Every provider implements this — the provider holds the canonical
+/// Every provider implements this - the provider holds the canonical
 /// billing record (email, name, default payment instrument), and the
 /// framework's mirror table holds the `(provider, user_id)` join back
 /// to the app's identity.

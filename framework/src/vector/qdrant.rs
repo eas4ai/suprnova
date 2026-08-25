@@ -1,4 +1,4 @@
-//! Phase 9A — Qdrant vector driver via the official `qdrant-client` SDK.
+//! Phase 9A - Qdrant vector driver via the official `qdrant-client` SDK.
 //!
 //! Talks to Qdrant over gRPC (default port 6334). A thin adapter that
 //! satisfies [`VectorDriver`] while preserving the framework's `String`
@@ -19,13 +19,13 @@
 //! In all three cases the original caller-side string is stashed in
 //! the point's payload under [`SUPRNOVA_ID_PAYLOAD_KEY`] so similarity
 //! hits can round-trip back to the caller. That key is stripped from
-//! the metadata returned by [`VectorDriver::similar`] — consumers
+//! the metadata returned by [`VectorDriver::similar`] - consumers
 //! never see it through the trait surface. It IS visible if you query
 //! Qdrant directly (see [`QdrantVectorDriver::client`]).
 //!
 //! Note that this mapping is asymmetric per-id: in one collection,
 //! "42" (Num) and "0e2c3d…" (Uuid) and "foo" (derived Uuid) occupy
-//! disjoint id buckets. That mirrors Qdrant's native model — we
+//! disjoint id buckets. That mirrors Qdrant's native model - we
 //! don't try to "fix" it.
 //!
 //! # Auto-create
@@ -39,8 +39,8 @@
 //!
 //! # Trapdoor
 //!
-//! When you outgrow the trait surface — filter expressions, scroll,
-//! quantization, multi-vector — drop down to
+//! When you outgrow the trait surface - filter expressions, scroll,
+//! quantization, multi-vector - drop down to
 //! [`QdrantVectorDriver::client`] for the underlying
 //! `qdrant_client::Qdrant`. [`QdrantVectorDriver::resolve_point_id`]
 //! and [`QdrantVectorDriver::build_point`] /
@@ -69,7 +69,7 @@ pub const SUPRNOVA_ID_PAYLOAD_KEY: &str = "__suprnova_id";
 
 /// Stable namespace UUID used to derive deterministic v5 IDs from
 /// arbitrary user-supplied strings. Versions of Suprnova MUST NOT
-/// change this — derived point IDs would shift, orphaning data
+/// change this - derived point IDs would shift, orphaning data
 /// written by older versions.
 const SUPRNOVA_VECTOR_NAMESPACE: Uuid =
     Uuid::from_u128(0xab8e_7d4a_5f9b_4034_a8e7_72f6_a8b3_c0d9_u128);
@@ -77,7 +77,7 @@ const SUPRNOVA_VECTOR_NAMESPACE: Uuid =
 /// Distance metric for auto-created Qdrant collections.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum QdrantDistance {
-    /// Cosine similarity — default; matches the in-process Memory driver.
+    /// Cosine similarity - default; matches the in-process Memory driver.
     #[default]
     Cosine,
     /// Euclidean (L2) distance.
@@ -122,7 +122,7 @@ impl QdrantVectorDriver {
     }
 
     /// Construct against an unauthenticated Qdrant at `url`. `url` is
-    /// a gRPC URL — by default port 6334.
+    /// a gRPC URL - by default port 6334.
     pub fn from_url(url: &str) -> Result<Self, FrameworkError> {
         let client = Qdrant::from_url(url)
             .build()
@@ -158,7 +158,7 @@ impl QdrantVectorDriver {
     }
 
     /// Borrow the underlying `qdrant_client::Qdrant`. Use this when
-    /// the trait surface isn't enough — filter expressions on
+    /// the trait surface isn't enough - filter expressions on
     /// search, scroll, snapshots, quantization knobs.
     pub fn client(&self) -> &Qdrant {
         &self.client
@@ -298,7 +298,7 @@ impl QdrantVectorDriver {
     }
 
     // qdrant-client 1.18 does not surface a typed `CollectionNotFound`
-    // variant on `QdrantError` — server-side missing-collection errors
+    // variant on `QdrantError` - server-side missing-collection errors
     // come back as `ResponseError { status }` where the inner gRPC
     // status carries the meaningful detail. We fall back to a string
     // heuristic over the full error display. If a future qdrant-client
@@ -486,7 +486,7 @@ mod tests {
     /// `looks_like_collection_missing`. Pin its substring set so a
     /// silent variant rename in qdrant-client (or a server-side message
     /// rewording) doesn't quietly cause every recovery arm to stop
-    /// firing — which would re-introduce the L32 leak of stale cache
+    /// firing - which would re-introduce the L32 leak of stale cache
     /// entries on read paths.
     #[test]
     fn looks_like_collection_missing_matches_known_messages() {
@@ -502,7 +502,7 @@ mod tests {
         assert!(QdrantVectorDriver::looks_like_collection_missing(&err(
             "Not found: collection users"
         )));
-        // Should NOT match unrelated errors — e.g. dimension mismatch
+        // Should NOT match unrelated errors - e.g. dimension mismatch
         // is a different recovery class entirely.
         assert!(!QdrantVectorDriver::looks_like_collection_missing(&err(
             "Wrong vector size: expected 768, got 1536"

@@ -1,4 +1,4 @@
-//! Polymorphic relations — `MorphTo` / `MorphOne` / `MorphMany`.
+//! Polymorphic relations - `MorphTo` / `MorphOne` / `MorphMany`.
 //!
 //! `MorphTo` lives on the morph-table side (e.g. `Comment.commentable`):
 //! a polymorphic FK column pair (`commentable_id` + `commentable_type`)
@@ -13,7 +13,7 @@
 //!
 //! [`MorphOne`] / [`MorphMany`] live on the parent side. They mirror
 //! [`HasOne`](super::HasOne) / [`HasMany`](super::HasMany) but layer
-//! the morph-type discriminator on top — the inner [`Builder<R>`] is
+//! the morph-type discriminator on top - the inner [`Builder<R>`] is
 //! pre-filtered with both `<morph>_id = <parent_id>` and
 //! `<morph>_type = <parent_morph_type>`, so polymorphic children
 //! pointing at OTHER families never appear in `.get()` / `.first()` /
@@ -68,7 +68,7 @@ where
         Send + Into<sea_orm::Value>,
 {
     /// Parent row's PK value, JSON-encoded. Same reasoning as
-    /// [`HasMany`](super::HasMany) — JSON is the
+    /// [`HasMany`](super::HasMany) - JSON is the
     /// [`Builder::filter`] storage shape, and converting once at
     /// construction keeps the wrapper's chainable surface free of
     /// `T: IntoVal` bounds.
@@ -80,7 +80,7 @@ where
     /// morph metadata.
     #[allow(dead_code)]
     parent_key_value: serde_json::Value,
-    /// Morph family name — e.g. `"commentable"`. Controls both the
+    /// Morph family name - e.g. `"commentable"`. Controls both the
     /// `<name>_id` and `<name>_type` column names on the child table.
     /// Read by the [`Relation`] impl + the eager-load dispatcher.
     morph_name: String,
@@ -92,7 +92,7 @@ where
     /// (cloned into the inner builder's WHERE clause).
     #[allow(dead_code)]
     morph_type_value: String,
-    /// Pre-filtered builder against the child table — both
+    /// Pre-filtered builder against the child table - both
     /// `<name>_id = <parent_id>` AND `<name>_type = <morph_type>`
     /// applied at construction.
     inner: Builder<R>,
@@ -135,7 +135,7 @@ where
         let id_col = format!("{morph_name}_id");
         let type_col = format!("{morph_name}_type");
         // Builder::filter() takes anything `IntoVal`, which is the same
-        // JSON-shaped path HasMany / HasOne use — we wrap the
+        // JSON-shaped path HasMany / HasOne use - we wrap the
         // type-string in `serde_json::Value::String` so the inner
         // WhereTerm storage stays homogeneous with the rest of the
         // dual-API.
@@ -171,13 +171,13 @@ where
         self
     }
 
-    /// `ORDER BY created_at DESC` — Laravel-shape sugar. Only resolves
+    /// `ORDER BY created_at DESC` - Laravel-shape sugar. Only resolves
     /// against children that declare a `created_at` column.
     pub fn latest(self) -> Self {
         self.order_by("created_at", Direction::Desc)
     }
 
-    /// `ORDER BY created_at ASC` — Laravel-shape sugar.
+    /// `ORDER BY created_at ASC` - Laravel-shape sugar.
     pub fn oldest(self) -> Self {
         self.order_by("created_at", Direction::Asc)
     }
@@ -209,14 +209,14 @@ where
 
     /// Count children. Returns `i64` to match the inner
     /// [`Builder::count`] surface. Server-side aggregation through the
-    /// builder — no client-side row buffering.
+    /// builder - no client-side row buffering.
     pub async fn count(self) -> Result<i64, FrameworkError> {
         self.inner.count().await
     }
 }
 
 /// Soft-delete forwarding for `MorphMany<L, R>` when `R: SoftDeletes`.
-/// Mirrors [`HasMany`](super::HasMany)'s equivalent block — both wrap
+/// Mirrors [`HasMany`](super::HasMany)'s equivalent block - both wrap
 /// an inner `Builder<R>` and need only one-liner forwarding to the
 /// underlying `Builder::with_trashed` / `only_trashed`.
 impl<L, R> MorphMany<L, R>
@@ -285,7 +285,7 @@ where
     }
 
     fn foreign_key(&self) -> &str {
-        // Surface the morph name as the "foreign key" name — admin
+        // Surface the morph name as the "foreign key" name - admin
         // tooling reading the [`RelationEntry`](super::RelationEntry)
         // surfaces this as the child-side column root; the actual
         // column is `<morph_name>_id`. The morph-type discriminator
@@ -295,8 +295,8 @@ where
 }
 
 /// Single-row morph relation from parent `L` to child `R`. Same shape
-/// as [`MorphMany`] internally — pre-filtered builder with both
-/// `<name>_id` and `<name>_type` predicates applied — but the public
+/// as [`MorphMany`] internally - pre-filtered builder with both
+/// `<name>_id` and `<name>_type` predicates applied - but the public
 /// surface returns `Option<R>` from `.first()` rather than a Vec from
 /// `.get()`.
 ///
@@ -460,7 +460,7 @@ where
 ///    declaration site and isn't reachable from the inventory entry).
 /// 2. The framework re-exports a symbol users can name for advanced
 ///    cases (custom relation impls, third-party integrations).
-/// 3. The seal contract through `Relation` stays uniform — every
+/// 3. The seal contract through `Relation` stays uniform - every
 ///    declared relation has an impl.
 ///
 /// The per-family enum dispatch in `<Name>MorphFetch::get()` calls
@@ -473,7 +473,7 @@ where
 /// must therefore use `i64` primary keys, and the morph table's
 /// `<name>_id` column must also be `i64`. Models whose primary key
 /// is `String` or a UUID-as-string cannot be `MorphTo` targets in
-/// v1 — the per-family fetch helper calls
+/// v1 - the per-family fetch helper calls
 /// `<Target as Model>::find(self.morph_id)` with an `i64`, which
 /// will fail to type-check at the user's call site against a target
 /// whose `Model::Key` is anything other than `i64`.
@@ -498,7 +498,7 @@ where
     C: EloquentModel,
 {
     /// Construct a `MorphTo` metadata carrier. Invoked by macro-
-    /// emitted code only — user code uses the per-family fetch helper
+    /// emitted code only - user code uses the per-family fetch helper
     /// instead of touching this struct directly.
     #[doc(hidden)]
     pub fn __new(morph_id: i64, morph_type: String) -> Self {
@@ -515,7 +515,7 @@ where
     C: EloquentModel,
 {
     type Parent = C;
-    /// `MorphTo` doesn't have a single concrete target — the per-family
+    /// `MorphTo` doesn't have a single concrete target - the per-family
     /// enum at the declaration site stands in. The unit type signals
     /// "look at the macro-generated per-family enum, not a single
     /// target" to admin tooling and the eager-load dispatcher.

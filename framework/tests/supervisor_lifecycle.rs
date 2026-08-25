@@ -1,7 +1,7 @@
 //! Integration tests for the supervisor restart lifecycle.
 //!
 //! These tests exercise `run_with_restart_for_testing` (and the cancel-token
-//! variant) directly — bypassing the inventory registry — so they can
+//! variant) directly - bypassing the inventory registry - so they can
 //! construct supervisors with test state.
 
 use async_trait::async_trait;
@@ -41,7 +41,7 @@ impl Supervisor for CountingSupervisor {
     }
 }
 
-/// Always returns Ok — useful for verifying Always policy keeps running.
+/// Always returns Ok - useful for verifying Always policy keeps running.
 struct AlwaysOkSupervisor {
     counter: Arc<AtomicUsize>,
     /// Stop actually restarting after this many runs by parking indefinitely.
@@ -152,7 +152,7 @@ async fn never_policy_runs_once() {
     // Should finish well within 500 ms.
     tokio::time::timeout(Duration::from_millis(500), handle)
         .await
-        .expect("Never supervisor timed out — it should have returned")
+        .expect("Never supervisor timed out - it should have returned")
         .expect("Never supervisor task panicked");
 
     assert_eq!(
@@ -201,7 +201,7 @@ async fn start_all_does_not_panic() {
 }
 
 /// A supervisor that honours the cancel token exits cleanly within the
-/// grace window — no timeout, no abort needed.
+/// grace window - no timeout, no abort needed.
 #[tokio::test]
 async fn supervisor_exits_when_cancel_token_fires() {
     struct ExitOnCancel {
@@ -232,7 +232,7 @@ async fn supervisor_exits_when_cancel_token_fires() {
     let cancel = CancellationToken::new();
     let handle = tokio::spawn(run_with_restart_for_testing_with_cancel(sv, cancel.clone()));
 
-    // Sanity check: the supervisor is parked waiting for the token — not yet exited.
+    // Sanity check: the supervisor is parked waiting for the token - not yet exited.
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         !exited.load(Ordering::SeqCst),
@@ -281,7 +281,7 @@ async fn cancel_prevents_restart_under_always_policy() {
     });
     let cancel = CancellationToken::new();
 
-    // Cancel before spawning — the restart loop should exit immediately after
+    // Cancel before spawning - the restart loop should exit immediately after
     // the first run (cancel.is_cancelled() is true at the top of loop #2).
     cancel.cancel();
     let handle = tokio::spawn(run_with_restart_for_testing_with_cancel(sv, cancel));

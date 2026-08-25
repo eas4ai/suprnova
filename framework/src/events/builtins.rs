@@ -8,7 +8,7 @@ use super::Event;
 ///
 /// Delivery is not guaranteed. The dispatch is spawned (not awaited) so it
 /// never blocks response conversion, and if no Tokio runtime is active at
-/// conversion time — e.g. a 5xx path exercised by a non-async unit test — it
+/// conversion time - e.g. a 5xx path exercised by a non-async unit test - it
 /// is dropped. Inside a running server every 5xx triggers it. Treat it as a
 /// high-signal error feed, not a complete audit log: a listener that must
 /// observe every error should also consume the structured `tracing` 5xx logs,

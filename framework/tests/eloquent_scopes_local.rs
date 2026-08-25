@@ -1,4 +1,4 @@
-//! Phase 10C T3 — local scopes via `#[suprnova::scopes(Model)]`.
+//! Phase 10C T3 - local scopes via `#[suprnova::scopes(Model)]`.
 //!
 //! Pins the four shipped behaviours plus the non-scope passthrough:
 //!
@@ -8,12 +8,12 @@
 //!    composes after an existing filter clause.
 //! 3. **Extra args thread through**: `T3User::popular(500)` and
 //!    `Builder.popular(500)` both bind the `threshold` parameter.
-//! 4. **Scopes chain**: `T3User::active().popular(500).get()` — the
+//! 4. **Scopes chain**: `T3User::active().popular(500).get()` - the
 //!    static helper returns a builder, the trait extension carries the
 //!    second scope onto it.
 //! 5. **Non-scope methods pass through**: an ordinary `&self` method
 //!    declared in the same `impl` block keeps compiling and stays
-//!    callable on instances — proving the macro's signature filter is
+//!    callable on instances - proving the macro's signature filter is
 //!    strict.
 
 use suprnova::Model;
@@ -41,7 +41,7 @@ impl T3User {
         query.filter_op("followers_count", ">", threshold)
     }
 
-    /// Non-scope method — shape doesn't match the scope signature
+    /// Non-scope method - shape doesn't match the scope signature
     /// (first arg is `&self`, return is `String`). Must pass through
     /// the macro unchanged so it stays callable on instances.
     pub fn display_name(&self) -> String {

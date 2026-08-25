@@ -143,7 +143,7 @@ fn no_scaffold_template_pins_a_literal_version_tag() {
     });
     assert!(
         seen > 0,
-        "walked zero template files — did src/templates/files move? \
+        "walked zero template files - did src/templates/files move? \
          This test passes vacuously when the tree is not found."
     );
     assert!(
@@ -179,7 +179,7 @@ fn rendered_backend_cargo_toml_pins_the_running_version() {
     );
     assert!(
         !rendered.contains("{framework_tag}"),
-        "placeholder left unsubstituted — check the format! argument name"
+        "placeholder left unsubstituted - check the format! argument name"
     );
 }
 
@@ -193,7 +193,7 @@ fn rendered_api_cargo_toml_pins_the_running_version() {
     );
     assert!(
         !rendered.contains("{framework_tag}"),
-        "placeholder left unsubstituted — check the .replace() call"
+        "placeholder left unsubstituted - check the .replace() call"
     );
 }
 
@@ -216,7 +216,7 @@ fn api_starter_does_not_claim_the_torii_users_table() {
     // correct fix.
     assert!(
         !migration.contains("\"users\"") && !migration.contains("enum Users {"),
-        "the api starter must not create a table named `users` — Torii owns \
+        "the api starter must not create a table named `users` - Torii owns \
          that name and creates it with an incompatible schema; migration was:\n{migration}"
     );
 
@@ -234,7 +234,7 @@ fn api_starter_does_not_claim_the_torii_users_table() {
 /// `SessionToken`'s `Display`/`to_string()` deliberately prints the
 /// literal string `[REDACTED]` (torii-core `session/mod.rs`) so a secret
 /// never leaks into logs. The login handler must call `expose_secret()`
-/// instead — the accessor Torii documents for "transmission to client" —
+/// instead - the accessor Torii documents for "transmission to client" -
 /// or the API starter's login endpoint hands every client the literal
 /// string `[REDACTED]` as its bearer token, which can never authenticate
 /// anything. Caught by curling a running scaffold: `POST /api/auth/login`
@@ -244,7 +244,7 @@ fn api_starter_login_exposes_the_real_token() {
     let tpl = read("src/templates/files/api/src/controllers/users.rs.tpl");
     assert!(
         !tpl.contains("token.to_string()"),
-        "login must not call SessionToken::to_string() — Display redacts \
+        "login must not call SessionToken::to_string() - Display redacts \
          the value to \"[REDACTED]\" by design; template was:\n{tpl}"
     );
     assert!(
@@ -257,7 +257,7 @@ fn api_starter_login_exposes_the_real_token() {
 #[test]
 fn api_user_routes_are_behind_an_auth_gate() {
     // `BearerTokenMiddleware` populates the authenticated user when a valid
-    // token is present and *never* rejects — it documents this at
+    // token is present and *never* rejects - it documents this at
     // torii_integration/middleware.rs:18-19. So a route that carries no
     // explicit gate is anonymous, and `UserResource` serializes `email`.
     // Through v0.7.2 a stock `suprnova new x --api` served every user's
@@ -272,7 +272,7 @@ fn api_user_routes_are_behind_an_auth_gate() {
 
     // Slice the group's BALANCED body, not "everything after `group!`".
     // A to-end-of-file slice passes even when the routes sit outside the
-    // group entirely — a false pass on the test guarding a security fix.
+    // group entirely - a false pass on the test guarding a security fix.
     let after = tpl
         .split_once("group!")
         .expect("template must contain a group!")
@@ -304,7 +304,7 @@ fn api_user_routes_are_behind_an_auth_gate() {
 
 #[test]
 fn api_auth_routes_stay_public() {
-    // Register and login must NOT be gated — gating them would make the
+    // Register and login must NOT be gated - gating them would make the
     // starter impossible to bootstrap.
     let tpl = read("src/templates/files/api/src/routes.rs.tpl");
     let public = tpl
@@ -342,7 +342,7 @@ fn every_scaffold_mail_key_is_read_by_the_framework() {
     visit(&framework_src, &mut |_, body| framework_body.push_str(body));
     assert!(
         !framework_body.is_empty(),
-        "could not read framework/src — check the relative path"
+        "could not read framework/src - check the relative path"
     );
 
     for template in ["env.tpl", "env.example.tpl"] {
@@ -366,7 +366,7 @@ fn every_scaffold_mail_key_is_read_by_the_framework() {
 
         assert!(
             checked >= 5,
-            "{template} yielded only {checked} MAIL_* keys — the scan is \
+            "{template} yielded only {checked} MAIL_* keys - the scan is \
              broken and this assertion would pass vacuously"
         );
         assert!(
@@ -384,19 +384,19 @@ fn scaffold_env_ships_the_required_mail_from_key() {
     let env_tpl = read("src/templates/files/root/env.tpl");
     assert!(
         env_tpl.lines().any(|l| l.trim().starts_with("MAIL_FROM=")),
-        "env.tpl must ship MAIL_FROM — auth_flows/mod.rs:83-90 returns Err when \
+        "env.tpl must ship MAIL_FROM - auth_flows/mod.rs:83-90 returns Err when \
          it is unset, breaking password reset and email verification"
     );
 }
 
 // ============================================================================
-// Generated Docker Compose — exposure and credentials
+// Generated Docker Compose - exposure and credentials
 // ============================================================================
 
 /// Collect every `ports:` publish line across the compose templates.
 ///
 /// Reads the raw templates rather than the rendered output so a service
-/// that is off by default (mailpit, minio) is still covered — the point
+/// that is off by default (mailpit, minio) is still covered - the point
 /// is that no template can reintroduce a wide bind, including one nobody
 /// enables in the default scaffold.
 fn compose_publish_lines() -> Vec<(String, String)> {
@@ -418,7 +418,7 @@ fn compose_publish_lines() -> Vec<(String, String)> {
     }
     assert!(
         !lines.is_empty(),
-        "found no publish lines at all — did the compose templates move? \
+        "found no publish lines at all - did the compose templates move? \
          This test passes vacuously when it cannot find them."
     );
     lines
@@ -428,13 +428,13 @@ fn compose_publish_lines() -> Vec<(String, String)> {
 /// on a shared network, or any cloud VM without a firewall, `suprnova new`
 /// followed by `docker compose up` then publishes a development database,
 /// an unauthenticated Redis, an open SMTP relay (Mailpit accepts any
-/// credentials), and MinIO — to the internet.
+/// credentials), and MinIO - to the internet.
 #[test]
 fn compose_publishes_every_port_on_loopback() {
     for (file, line) in compose_publish_lines() {
         assert!(
             line.contains("127.0.0.1") || line.contains("HOST_BIND"),
-            "{file}: publish line binds every interface — prefix it with a \
+            "{file}: publish line binds every interface - prefix it with a \
              loopback bind: {line}"
         );
         assert!(
@@ -461,7 +461,7 @@ fn compose_templates_carry_no_literal_credentials() {
             );
         }
     }
-    // And the placeholder the generator substitutes must still be there —
+    // And the placeholder the generator substitutes must still be there -
     // otherwise the previous assertion passes simply because the field was
     // deleted.
     let compose = read("src/templates/files/docker/docker-compose.yml.tpl");
@@ -477,7 +477,7 @@ fn compose_templates_carry_no_literal_credentials() {
 }
 
 // ============================================================================
-// REL-01b — a scaffolded project must be runnable and buildable
+// REL-01b - a scaffolded project must be runnable and buildable
 // ============================================================================
 
 /// Cargo refuses `cargo run` on a multi-binary package with no
@@ -491,7 +491,7 @@ fn compose_templates_carry_no_literal_credentials() {
 /// ```
 ///
 /// Ten CLI wrappers shell out to `cargo run` inside the user's project, so
-/// without this key `suprnova migrate` — and every sibling — failed on a
+/// without this key `suprnova migrate` - and every sibling - failed on a
 /// fresh scaffold before doing any work. `scaffold_snapshot` never caught
 /// it because `cargo check` does not resolve a default binary.
 #[test]
@@ -517,7 +517,7 @@ fn multi_binary_templates_declare_a_default_run() {
 /// The Docker dependency-cache stage stubs a `main` for each binary so the
 /// manifest resolves. It stubbed only `cmd/main.rs` while the manifest also
 /// declared `console` at `src/bin/console.rs`, so `cargo build` failed in
-/// that stage — a hard build failure, not a missed cache.
+/// that stage - a hard build failure, not a missed cache.
 #[test]
 fn docker_cache_stage_stubs_every_declared_binary() {
     let dockerfile = read("src/templates/files/docker/Dockerfile.tpl");
@@ -548,7 +548,7 @@ fn docker_cache_stage_stubs_every_declared_binary() {
         assert!(
             instructions.contains(path),
             "the Docker cache stage never creates `{path}`, which the manifest \
-             declares as a binary — `cargo build` fails there on the missing target"
+             declares as a binary - `cargo build` fails there on the missing target"
         );
     }
     assert!(
@@ -559,7 +559,7 @@ fn docker_cache_stage_stubs_every_declared_binary() {
 }
 
 /// `npm ci` requires a lockfile and errors without one. The COPY globs the
-/// lock as optional, so on a fresh scaffold — which ships no lock — the
+/// lock as optional, so on a fresh scaffold - which ships no lock - the
 /// unconditional `npm ci` failed every image build.
 #[test]
 fn docker_frontend_install_tolerates_a_missing_lockfile() {
@@ -570,7 +570,7 @@ fn docker_frontend_install_tolerates_a_missing_lockfile() {
         assert!(
             dockerfile.contains("if [ -f package-lock.json ]"),
             "the Dockerfile treats package-lock.json as optional in its COPY but \
-             runs `npm ci`, which requires one — a fresh scaffold cannot build"
+             runs `npm ci`, which requires one - a fresh scaffold cannot build"
         );
     }
 }
@@ -589,7 +589,7 @@ fn docker_copies_the_rust_lockfile_optionally() {
 
 /// `Cargo.lock` was in the scaffold's .gitignore. The generated project is
 /// an application, and Cargo's guidance is that applications commit their
-/// lockfile — otherwise CI and the production image resolve a different
+/// lockfile - otherwise CI and the production image resolve a different
 /// dependency graph than the developer tested.
 #[test]
 fn scaffold_gitignore_does_not_exclude_the_lockfile() {
@@ -641,7 +641,7 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
         let config = read(&format!(
             "src/templates/files/frontend/{frontend}/vite.config.ts.tpl"
         ));
-        // T31: vite.config.ts.tpl now declares two outDirs — the SSR
+        // T31: vite.config.ts.tpl now declares two outDirs - the SSR
         // build's (`bootstrap/ssr`, under the `isSsrBuild` branch) and
         // the client build's (`../public/assets`, what the Docker copy
         // step below actually depends on). Only the latter is relative
@@ -674,7 +674,7 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
         assert_eq!(
             dir, first,
             "{frontend} writes its build to `{dir}` while another frontend uses \
-             `{first}` — the single Dockerfile cannot copy from both"
+             `{first}` - the single Dockerfile cannot copy from both"
         );
     }
 
@@ -704,7 +704,7 @@ fn docker_copies_the_frontend_build_from_the_vite_output_dir() {
 ///
 /// The Dockerfile copied only `cmd/` and `src/` into the backend stage,
 /// so through v0.7.2 every scaffolded app died there with "Inertia
-/// component 'Home' not found" — the four generated controllers all
+/// component 'Home' not found" - the four generated controllers all
 /// render a page. Building the frontend in stage 1 does not help; this is
 /// a dependency of the *Rust* compile.
 ///
@@ -718,7 +718,7 @@ fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
     assert!(
         macro_src.contains(r#".join("frontend").join("src").join("pages")"#),
         "validate_component_exists no longer resolves frontend/src/pages the \
-         way this test assumes — re-derive the expected COPY from its new path"
+         way this test assumes - re-derive the expected COPY from its new path"
     );
     let pages_dir = "frontend/src/pages";
 
@@ -758,14 +758,14 @@ fn docker_backend_stage_has_the_pages_the_inertia_macro_resolves() {
 }
 
 // ---------------------------------------------------------------------------
-// CI-03 — assertions against a real scaffold on disk, before any rewriting
+// CI-03 - assertions against a real scaffold on disk, before any rewriting
 // ---------------------------------------------------------------------------
 //
 // Everything above reads template files or calls a `templates::*` render
 // function directly. Both stop short of the thing a user actually gets:
 // `scaffold_snapshot` scaffolds for real but immediately rewrites the
 // `suprnova` dependency to a local path before it compiles anything, so the
-// tag that ships has never been asserted on disk — which is precisely how
+// tag that ships has never been asserted on disk - which is precisely how
 // REL-01a shipped a stale pin.
 //
 // These scaffold a project and assert against the bytes on disk, with no
@@ -796,7 +796,7 @@ fn scaffold_to_disk(tmp: &tempfile::TempDir, name: &str, extra: &[&str]) -> Path
 /// keys, so adding a placeholder to a template without teaching the writer
 /// about it emits the literal `{package_name}` into the user's source. That
 /// is a compile error at best and a silently wrong value at worst, and
-/// nothing checked for it — the render-function tests only assert the two
+/// nothing checked for it - the render-function tests only assert the two
 /// placeholders they already know about.
 ///
 /// Scanning the whole tree catches the ones nobody thought to name.
@@ -836,7 +836,7 @@ fn a_scaffolded_project_contains_no_unsubstituted_placeholders() {
 
         assert!(
             scanned > 0,
-            "scanned zero files in the {name} scaffold — the walk found \
+            "scanned zero files in the {name} scaffold - the walk found \
              nothing, so this test would pass vacuously"
         );
         assert!(
@@ -888,7 +888,7 @@ fn a_scaffolded_manifest_on_disk_pins_the_running_tag() {
 // Env templates must name variables the code actually reads.
 // ---------------------------------------------------------------------
 
-/// Walk a directory for `.rs` files, skipping the template tree — a
+/// Walk a directory for `.rs` files, skipping the template tree - a
 /// template must not be allowed to vouch for itself.
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
@@ -908,8 +908,8 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Every `SCREAMING_SNAKE` string literal appearing in framework or CLI
 /// source, outside comments.
 ///
-/// Deliberately loose. The precise question — "does something read this
-/// variable?" — has no cheap syntactic answer, because the reads go
+/// Deliberately loose. The precise question - "does something read this
+/// variable?" - has no cheap syntactic answer, because the reads go
 /// through at least five different call shapes (`std::env::var`, `env`,
 /// `env_optional`, `env_strict`, `bool_env`) plus `envy`, which derives
 /// names from struct fields and leaves no literal at all. A scanner tight
@@ -920,7 +920,7 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// weaker, never wrong. A name that appears nowhere in any source file is
 /// unambiguously dead, and that is exactly the defect this catches.
 /// Comment lines are stripped so prose mentioning a variable cannot vouch
-/// for it — the dead keys below were all named in doc comments.
+/// for it - the dead keys below were all named in doc comments.
 fn env_names_mentioned_in_source() -> std::collections::BTreeSet<String> {
     let root = cli_root()
         .parent()
@@ -932,7 +932,7 @@ fn env_names_mentioned_in_source() -> std::collections::BTreeSet<String> {
     rust_sources(&root.join("suprnova-cli").join("src"), &mut files);
     assert!(
         files.len() > 50,
-        "expected to scan the framework and CLI sources, found only {} files — \
+        "expected to scan the framework and CLI sources, found only {} files - \
          the walk is broken and this test would pass vacuously",
         files.len()
     );
@@ -983,14 +983,14 @@ fn env_keys_assigned(template: &str) -> Vec<String> {
 ///
 /// This shipped twice. First in the `.env` template, fixed in `a56a1a9e`
 /// ("scaffold .env advertised mail keys the framework never reads"). Then
-/// it turned out **`.env.example` still carried the same dead keys** —
+/// it turned out **`.env.example` still carried the same dead keys** -
 /// `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` and
 /// `MAIL_FROM_ADDRESS`, against a transport that reads `MAIL_SMTP_HOST`,
 /// `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` and `MAIL_FROM`.
 ///
 /// That was the worse half to miss. `.env` is gitignored; `.env.example`
 /// is committed, so it is the file a teammate copies and the file CI
-/// reads. And `MAIL_FROM` is not cosmetic — the auth flows refuse to send
+/// reads. And `MAIL_FROM` is not cosmetic - the auth flows refuse to send
 /// without it, so a developer following `.env.example` got password reset
 /// failing with "MAIL_FROM environment variable is not set" while their
 /// `.env.example` plainly showed a from-address configured.
@@ -1006,7 +1006,7 @@ fn env_templates_only_name_variables_the_code_reads() {
         let keys = env_keys_assigned(&src);
         assert!(
             keys.len() > 5,
-            "{template} parsed to only {} assignments — the parser is broken \
+            "{template} parsed to only {} assignments - the parser is broken \
              and this test would pass vacuously",
             keys.len()
         );
@@ -1026,8 +1026,8 @@ fn env_templates_only_name_variables_the_code_reads() {
 /// Variables that are live (substituted per-project) in `env.tpl` but can
 /// only ever be a comment in `env.example.tpl`.
 ///
-/// `templates::env_example()` returns `env.example.tpl` verbatim — no
-/// substitution runs over it — so a variable whose useful value is chosen
+/// `templates::env_example()` returns `env.example.tpl` verbatim - no
+/// substitution runs over it - so a variable whose useful value is chosen
 /// per-project at scaffold time (as opposed to a fixed default like
 /// `APP_LOCALE=en`) cannot be shown there as a live assignment without
 /// misstating it for every project that doesn't match. `SUPRNOVA_FRONTEND`
@@ -1083,7 +1083,7 @@ fn the_two_env_templates_agree_on_which_variables_exist() {
 
 /// `docker:init` emitted one Dockerfile for every project shape, and it
 /// was the full-stack one. On a project scaffolded with `--api` its very
-/// first instruction — `COPY frontend/package.json` — failed outright,
+/// first instruction - `COPY frontend/package.json` - failed outright,
 /// so `suprnova new --api` + `docker:init` + `docker build` could not
 /// succeed. The API scaffold has no `frontend/`, no `cmd/`, and produces
 /// no `public/assets`.
@@ -1102,7 +1102,7 @@ fn the_api_dockerfile_references_no_path_the_api_scaffold_lacks() {
         .collect();
     assert!(
         instructions.len() > 10,
-        "parsed only {} instructions out of the API Dockerfile — the \
+        "parsed only {} instructions out of the API Dockerfile - the \
          comment filter is broken and this test would pass vacuously",
         instructions.len()
     );
@@ -1115,7 +1115,7 @@ fn the_api_dockerfile_references_no_path_the_api_scaffold_lacks() {
         assert!(
             !body.contains(absent),
             "the API Dockerfile references `{absent}`, which a \
-             `suprnova new --api` project does not contain — the build \
+             `suprnova new --api` project does not contain - the build \
              fails on that instruction. Full template:\n{tpl}"
         );
     }
@@ -1151,7 +1151,7 @@ fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
         declared.len(),
         2,
         "expected the API manifest to declare two binaries, found {declared:?} \
-         — if that changed, the Dockerfile's stub step needs changing too"
+         - if that changed, the Dockerfile's stub step needs changing too"
     );
 
     for path in declared {
@@ -1165,7 +1165,7 @@ fn the_api_dockerfile_stubs_every_binary_its_manifest_declares() {
 }
 
 // ---------------------------------------------------------------------------
-// SEC-06 — entry points must load `.env` before the runtime exists
+// SEC-06 - entry points must load `.env` before the runtime exists
 // ---------------------------------------------------------------------------
 
 /// Strip line comments so an assertion cannot match prose that *explains*
@@ -1214,7 +1214,7 @@ fn entry_points() -> Vec<(&'static str, String)> {
 /// `#[tokio::main]` builds the runtime around the whole of `main`, so
 /// every worker thread exists before the first statement runs. Loading
 /// `.env` from there writes to the process environment while other
-/// threads may be reading it — unsound, and silent when it goes wrong.
+/// threads may be reading it - unsound, and silent when it goes wrong.
 #[test]
 fn every_entry_point_uses_the_suprnova_main_attribute() {
     for (what, src) in entry_points() {
@@ -1233,7 +1233,7 @@ fn every_entry_point_uses_the_suprnova_main_attribute() {
 }
 
 /// The console binaries called `dotenvy::dotenv()` as their first
-/// statement — inside the runtime `#[tokio::main]` had already built.
+/// statement - inside the runtime `#[tokio::main]` had already built.
 /// That is the same defect as the server's, reached by a different path,
 /// and it survived the server-side fix once already.
 #[test]

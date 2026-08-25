@@ -14,7 +14,7 @@ readme = "README.md"
 [[bin]]
 name = "suprnova"
 path = "src/main.rs"
-# Skip rustdoc for the bin — the lib at `framework/suprnova` already
+# Skip rustdoc for the bin - the lib at `framework/suprnova` already
 # emits docs at `target/doc/suprnova/`, and rustdoc tries to write
 # this bin's doc to the same path (cargo issue #6313). The CLI's
 # user-facing reference is `suprnova --help`, not docs.rs.
@@ -36,7 +36,7 @@ notify = "8.2"
 dotenvy = "0.15"
 # `generate-types` parses `lang/<locale>/*.ftl` catalogs into the
 # `MessageKey` TS union (see `commands/generate_types.rs`). Independent of
-# the framework's own (optional) `fluent-syntax` dep — the CLI can't
+# the framework's own (optional) `fluent-syntax` dep - the CLI can't
 # depend on the `suprnova` crate at runtime (see the `rand`/`base64`
 # comment above), so this is its own minimal parse-only dependency.
 fluent-syntax = "0.12"
@@ -47,7 +47,7 @@ chrono = "0.4"
 toml = "1.1.2"
 regex = "1"
 # `key:generate` mints a 32-byte AES-256 key encoded URL-safe-no-pad
-# base64 — same wire format as `suprnova::EncryptionKey::to_base64`.
+# base64 - same wire format as `suprnova::EncryptionKey::to_base64`.
 # We duplicate the six primitives instead of pulling `suprnova` into
 # the CLI binary, which would drag every framework transitive dep
 # along (`tokio`-full + `reqwest` + SeaORM, etc).

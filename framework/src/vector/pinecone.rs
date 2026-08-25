@@ -1,4 +1,4 @@
-//! Phase 9A — Pinecone vector driver, over Pinecone's REST API.
+//! Phase 9A - Pinecone vector driver, over Pinecone's REST API.
 //!
 //! A thin adapter that satisfies [`VectorDriver`] while preserving the
 //! framework's `String` IDs and `serde_json::Value` payload contract.
@@ -8,7 +8,7 @@
 //! Pinecone account; each `store` name passed via the trait surface
 //! maps to a single Pinecone index inside that account. Index hosts are
 //! resolved lazily on first use via the control plane's
-//! `GET /indexes/{name}`, then cached — or pinned up front with
+//! `GET /indexes/{name}`, then cached - or pinned up front with
 //! [`PineconeVectorDriver::with_index_host`].
 //!
 //! # Why REST and not the SDK
@@ -33,13 +33,13 @@
 //!
 //! Pinecone versions its REST API by date and requires the version to be
 //! pinned in an `X-Pinecone-Api-Version` header. This driver pins
-//! [`DEFAULT_API_VERSION`] — the version whose request and response
+//! [`DEFAULT_API_VERSION`] - the version whose request and response
 //! shapes it was written and tested against. Newer versions are opt-in
 //! via [`PineconeVectorDriver::with_api_version`] rather than automatic,
 //! because a silent version float is exactly how a wire-shape change
 //! becomes a production outage.
 //!
-//! # ID mapping — there is none
+//! # ID mapping - there is none
 //!
 //! Unlike Qdrant, Pinecone accepts arbitrary `String` ids natively.
 //! [`VectorItem::id`] passes through to Pinecone unchanged; similarity
@@ -50,7 +50,7 @@
 //!
 //! Pinecone indexes carry namespaces (multi-tenant partitions inside
 //! one index). One driver instance binds to one namespace
-//! (default: empty, i.e. the unnamed namespace) — set via
+//! (default: empty, i.e. the unnamed namespace) - set via
 //! [`PineconeVectorDriver::with_namespace`]. To target several
 //! namespaces of the same index, register one driver per namespace
 //! under different store names:
@@ -73,7 +73,7 @@
 //!
 //! The driver does **not** auto-create indexes. Pinecone index
 //! creation requires picking a cloud (AWS/GCP/Azure), region, vector
-//! dimension, distance metric, and deletion-protection setting — too
+//! dimension, distance metric, and deletion-protection setting - too
 //! many trade-offs to default well. Create the index via the Pinecone
 //! console, the Pinecone CLI, or a
 //! [`control_plane_post`](PineconeVectorDriver::control_plane_post) call,
@@ -81,13 +81,13 @@
 //!
 //! # Trapdoor
 //!
-//! When you outgrow the trait surface — filter expressions, sparse
-//! vectors, fetch-by-id, index management — drop down to
+//! When you outgrow the trait surface - filter expressions, sparse
+//! vectors, fetch-by-id, index management - drop down to
 //! [`PineconeVectorDriver::control_plane_get`],
 //! [`PineconeVectorDriver::control_plane_post`] or
 //! [`PineconeVectorDriver::data_plane_post`]. They handle auth, the
 //! version header, host resolution, timeouts and error mapping, and
-//! leave the request and response bodies entirely to you — so any
+//! leave the request and response bodies entirely to you - so any
 //! endpoint Pinecone ships is reachable without waiting on this driver.
 //!
 //! # Batch limits
@@ -120,7 +120,7 @@ pub const DEFAULT_CONTROL_PLANE: &str = "https://api.pinecone.io";
 /// verified a newer version against your own workload. Pinecone's
 /// namespace-key convention in `describe_index_stats` is one of the
 /// things that has changed between versions, and [`VectorDriver::count`]
-/// reads that map — so a version bump is a change worth making
+/// reads that map - so a version bump is a change worth making
 /// deliberately.
 pub const DEFAULT_API_VERSION: &str = "2025-04";
 
@@ -199,7 +199,7 @@ impl PineconeVectorDriver {
     /// Construct against Pinecone with an explicit API key.
     ///
     /// Rejects an empty key here rather than letting every later call
-    /// fail with a 401 — a missing environment variable should name
+    /// fail with a 401 - a missing environment variable should name
     /// itself at boot, not at first search.
     pub fn from_api_key(api_key: impl Into<String>) -> Result<Self, FrameworkError> {
         let api_key = Zeroizing::new(api_key.into());
@@ -222,9 +222,9 @@ impl PineconeVectorDriver {
     /// official SDKs use:
     ///
     /// - `PINECONE_API_KEY` (required)
-    /// - `PINECONE_CONTROLLER_HOST` (optional) — control-plane base URL,
+    /// - `PINECONE_CONTROLLER_HOST` (optional) - control-plane base URL,
     ///   defaulting to [`DEFAULT_CONTROL_PLANE`]
-    /// - `PINECONE_API_VERSION` (optional) — overrides
+    /// - `PINECONE_API_VERSION` (optional) - overrides
     ///   [`DEFAULT_API_VERSION`]
     pub fn from_env() -> Result<Self, FrameworkError> {
         let api_key = std::env::var("PINECONE_API_KEY").map_err(|_| {
@@ -251,7 +251,7 @@ impl PineconeVectorDriver {
     }
 
     /// Point the control plane somewhere other than
-    /// [`DEFAULT_CONTROL_PLANE`] — a proxy, a regional endpoint, or a
+    /// [`DEFAULT_CONTROL_PLANE`] - a proxy, a regional endpoint, or a
     /// local emulator. A bare host gains an `https://` scheme; any
     /// trailing slash is trimmed.
     pub fn with_control_plane(mut self, base_url: impl Into<String>) -> Self {
@@ -271,12 +271,12 @@ impl PineconeVectorDriver {
     /// Pinecone's own guidance is to target an index by its host once you
     /// know it; doing so removes a round trip from cold start and one
     /// dependency from the request path. Unlike a host learned from the
-    /// control plane — which is always contacted over `https` — a host
+    /// control plane - which is always contacted over `https` - a host
     /// pinned here is taken as given, so an emulator on `http://` works.
     pub fn with_index_host(mut self, store: impl Into<String>, host: impl Into<String>) -> Self {
         let base = normalize_base_url(&host.into(), false);
         // `get_mut` rather than `write().await`: the builder owns `self`
-        // exclusively, so this needs no lock and no async context — which
+        // exclusively, so this needs no lock and no async context - which
         // is what keeps the builder chain usable outside a runtime.
         self.hosts.get_mut().insert(store.into(), Arc::new(base));
         self
@@ -303,7 +303,7 @@ impl PineconeVectorDriver {
     /// matching the Qdrant and MariaDB drivers.
     ///
     /// Pinecone itself constrains metadata *values* to strings, numbers,
-    /// booleans and lists of strings — it rejects nested objects and
+    /// booleans and lists of strings - it rejects nested objects and
     /// mixed-type lists server-side. The driver does not re-implement
     /// that check: Pinecone's rules are versioned and ours would drift.
     pub fn metadata_from_json(
@@ -349,8 +349,8 @@ impl PineconeVectorDriver {
     /// Resolve (and cache) the data-plane base URL for `store`.
     ///
     /// This used to take the cache's write lock and hold it across *both*
-    /// `describe_index` and the SDK's index handshake — two network round
-    /// trips — so every other acquisition queued behind it. Because
+    /// `describe_index` and the SDK's index handshake - two network round
+    /// trips - so every other acquisition queued behind it. Because
     /// `tokio::sync::RwLock` is fair, a waiting writer also blocks
     /// subsequent readers: one cold index stalled every warm one, and a
     /// caller that would simply have hit the cache for an unrelated index
@@ -358,8 +358,8 @@ impl PineconeVectorDriver {
     ///
     /// The internal `vector::handle_cache::get_or_build` helper builds
     /// outside the lock and takes it only to insert. See that module for
-    /// why the trade — a possible duplicate `describe_index` on a genuine
-    /// race — is the right one.
+    /// why the trade - a possible duplicate `describe_index` on a genuine
+    /// race - is the right one.
     pub async fn index_host(&self, store: &str) -> Result<Arc<String>, FrameworkError> {
         crate::vector::handle_cache::get_or_build(&self.hosts, store, || async {
             let described: IndexDescription = self
@@ -387,7 +387,7 @@ impl PineconeVectorDriver {
     /// `GET {control plane}{path}`, authenticated and version-pinned,
     /// decoding the JSON response into `R`.
     ///
-    /// `path` starts with `/` and is used verbatim — percent-encode any
+    /// `path` starts with `/` and is used verbatim - percent-encode any
     /// interpolated segment yourself.
     pub async fn control_plane_get<R: DeserializeOwned>(
         &self,
@@ -415,7 +415,7 @@ impl PineconeVectorDriver {
     /// host first, and decoding the JSON response into `R`.
     ///
     /// Use this for the data-plane endpoints the trait surface doesn't
-    /// cover — `/vectors/fetch`, `/vectors/update`, `/query` with a
+    /// cover - `/vectors/fetch`, `/vectors/update`, `/query` with a
     /// metadata filter or a sparse vector, `/vectors/list`.
     pub async fn data_plane_post<B, R>(
         &self,
@@ -576,7 +576,7 @@ impl VectorDriver for PineconeVectorDriver {
             .await?;
         // Count is per-namespace: Pinecone returns a summary keyed by
         // name, and the unnamed default namespace lives under an
-        // empty-string key. A missing key means zero vectors — a
+        // empty-string key. A missing key means zero vectors - a
         // namespace that has never been written to is simply absent.
         Ok(stats
             .namespaces
@@ -588,7 +588,7 @@ impl VectorDriver for PineconeVectorDriver {
 
 // ----------------------------------------------------------------------
 // Wire types. Private because they are this driver's request shapes, not
-// a surface to program against — `data_plane_post` takes your own types.
+// a surface to program against - `data_plane_post` takes your own types.
 // ----------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -688,7 +688,7 @@ mod tests {
         );
     }
 
-    /// A pinned host keeps the scheme the operator chose — that is the
+    /// A pinned host keeps the scheme the operator chose - that is the
     /// whole point of pinning one.
     #[test]
     fn an_operator_pinned_http_host_is_left_alone() {

@@ -6,10 +6,10 @@
 //! [`UserProvider`](suprnova::UserProvider) whether the authenticated user has
 //! verified their email, via
 //! `active_user_provider()?.is_email_verified(&id).await?`. When the provider
-//! **cannot answer** that question — the storage layer is down, OR the active
+//! **cannot answer** that question - the storage layer is down, OR the active
 //! provider is *token-only* and doesn't support email verification (the
 //! default [`UserProvider::is_email_verified`] returns
-//! `FrameworkError::internal(...)`) — the `?` propagates that error and the
+//! `FrameworkError::internal(...)`) - the `?` propagates that error and the
 //! request collapses to a **500**. The unverified/unknowable user MUST NOT
 //! pass through to the protected handler.
 //!
@@ -20,7 +20,7 @@
 //! `unwrap_or(true)` would silently open a hole. This test fails CI if the
 //! fail-closed branch ever breaks: it registers a token-only provider (one that
 //! inherits the erroring `is_email_verified` default), authenticates a user,
-//! and asserts the response is 500 — **not** 200 — and that the protected
+//! and asserts the response is 500 - **not** 200 - and that the protected
 //! handler was never reached.
 //!
 //! # Why this is a SEPARATE integration binary
@@ -30,7 +30,7 @@
 //! **global**, and the thread-local layer that `TestContainer` installs does
 //! NOT cross into the worker thread. So `active_user_provider()` (which
 //! resolves the `AuthManager`) must be bound **globally** for the worker to see
-//! it — and the provider is registered globally via `Auth::register_provider`.
+//! it - and the provider is registered globally via `Auth::register_provider`.
 //! That global binding would race/bleed into the four parallel tests in
 //! `framework/tests/email_verified_middleware.rs`, which register a *different*
 //! (Eloquent) provider under the same `"users"` name. Keeping this test in its
@@ -38,7 +38,7 @@
 //!
 //! The HTTP plumbing mirrors `email_verified_middleware.rs`: a `LoginAs` global
 //! middleware installs a fixed user id into request state (what `Auth::id()`
-//! reads), then the middleware under test consults the provider — which here
+//! reads), then the middleware under test consults the provider - which here
 //! errors, driving the 500.
 
 use std::any::Any;
@@ -74,7 +74,7 @@ static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 static HANDLER_REACHED: AtomicBool = AtomicBool::new(false);
 
 /// Set true iff the token-only provider's `is_email_verified` is actually
-/// invoked. This proves the 500 comes from the PROVIDER ERROR — not from no
+/// invoked. This proves the 500 comes from the PROVIDER ERROR - not from no
 /// provider being registered or some unrelated cause. `is_email_verified` is
 /// the only method overridden here purely so we can flip this flag; the
 /// override still returns the same unsupported error the default would, so the
@@ -83,10 +83,10 @@ static PROVIDER_CONSULTED: AtomicBool = AtomicBool::new(false);
 
 /// A minimal **token-only** user provider: it satisfies the only required
 /// `UserProvider` method (`retrieve_by_id`) and otherwise inherits the trait
-/// defaults — including the `is_email_verified` default that returns
+/// defaults - including the `is_email_verified` default that returns
 /// `FrameworkError::internal(...)` ("not supported"). The only override below
 /// is a thin wrapper that records that the provider was consulted, then returns
-/// that same unsupported error — so the middleware's fail-closed `?` fires for
+/// that same unsupported error - so the middleware's fail-closed `?` fires for
 /// exactly the production reason.
 struct TokenOnlyProvider;
 
@@ -113,7 +113,7 @@ impl UserProvider for TokenOnlyProvider {
 }
 
 /// One-time GLOBAL setup: bind an `AuthManager` and register the token-only
-/// provider as the active `"users"` provider — globally, so the worker thread
+/// provider as the active `"users"` provider - globally, so the worker thread
 /// resolving `active_user_provider()` can see it. No DB is bound: this path
 /// errors before any storage read.
 static SETUP: Lazy<()> = Lazy::new(|| {
@@ -121,7 +121,7 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     Auth::register_provider("users", Arc::new(TokenOnlyProvider)).expect("register provider");
 });
 
-/// `Authenticatable` whose `get_auth_identifier()` returns a fixed id string —
+/// `Authenticatable` whose `get_auth_identifier()` returns a fixed id string -
 /// installed into request state by `LoginAs` so `Auth::id()` is `Some(id)`.
 struct UserById(String);
 
@@ -232,7 +232,7 @@ async fn get(addr: SocketAddr) -> (u16, HashMap<String, String>, String) {
 
 /// When the active provider cannot answer `is_email_verified` (here: a
 /// token-only provider that returns the unsupported error), the middleware
-/// fails CLOSED — the request collapses to a 500 and the protected handler is
+/// fails CLOSED - the request collapses to a 500 and the protected handler is
 /// never reached. This is the security property: an unverified/unknowable user
 /// must NOT pass through.
 #[test]
@@ -243,7 +243,7 @@ fn provider_error_fails_closed_with_500() {
         HANDLER_REACHED.store(false, Ordering::SeqCst);
         PROVIDER_CONSULTED.store(false, Ordering::SeqCst);
 
-        // Authenticate a user so `Auth::id()` is `Some(...)` — this gets the
+        // Authenticate a user so `Auth::id()` is `Some(...)` - this gets the
         // middleware PAST its `id`-None short-circuit and into the provider
         // call that errors. Without this, a 500 could not be attributed to the
         // provider error (the None branch returns a 403 instead).
@@ -260,15 +260,15 @@ fn provider_error_fails_closed_with_500() {
             "provider error must fail CLOSED with 500, never let the user through (200)"
         );
 
-        // The provider WAS the thing consulted — proves the 500 is from the
+        // The provider WAS the thing consulted - proves the 500 is from the
         // provider error, not from no-provider-registered or another cause.
         assert!(
             PROVIDER_CONSULTED.load(Ordering::SeqCst),
-            "the token-only provider's is_email_verified must have been called — \
+            "the token-only provider's is_email_verified must have been called - \
              otherwise the 500 is not attributable to the provider error"
         );
 
-        // And the protected handler never ran — the user did NOT pass through.
+        // And the protected handler never ran - the user did NOT pass through.
         assert!(
             !HANDLER_REACHED.load(Ordering::SeqCst),
             "protected handler must NOT be reached when the provider errors"

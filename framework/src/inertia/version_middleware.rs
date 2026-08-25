@@ -7,7 +7,7 @@
 //! current URL. The client then performs a full-page visit to pick up the
 //! new assets.
 //!
-//! Non-GET requests are exempt — the spec says version mismatch on
+//! Non-GET requests are exempt - the spec says version mismatch on
 //! POST/PUT/PATCH/DELETE resolves naturally on the redirect that follows
 //! the request (which IS a GET, and that GET will trigger the 409).
 //!
@@ -27,7 +27,7 @@
 //! }
 //! ```
 //!
-//! Without this middleware, asset-version mismatch is silent — clients
+//! Without this middleware, asset-version mismatch is silent - clients
 //! continue to use the cached SPA bundle against a server emitting a
 //! newer version.
 //!
@@ -100,7 +100,7 @@ impl Middleware for InertiaVersionMiddleware {
             return next(request).await;
         }
 
-        // Mismatch — bounce the client to do a full-page visit at the
+        // Mismatch - bounce the client to do a full-page visit at the
         // same URL so it picks up the new assets. Preserve the query
         // string: a 409 on `/search?q=rust` must redirect back to the
         // same search, not bare `/search` (which would silently drop
@@ -112,15 +112,15 @@ impl Middleware for InertiaVersionMiddleware {
         // middleware ages `_flash.old.*` away before the destination page
         // can read it. Without this, a validation error or success toast
         // flashed by the previous request disappears purely because the
-        // asset version moved — the user submits a form, deploys race
+        // asset version moved - the user submits a form, deploys race
         // them, and the error message is silently eaten. Laravel does the
         // same (`Middleware.php:171-175`). No-op outside a session scope,
         // which also means `SessionMiddleware` has to be registered ahead
         // of this one for it to bite.
         crate::session::session_mut(|session| session.reflash());
 
-        // Goes through `InertiaRequestExt::path_and_query` — the same
-        // trait method the Inertia page object's `url` field uses — so the
+        // Goes through `InertiaRequestExt::path_and_query` - the same
+        // trait method the Inertia page object's `url` field uses - so the
         // bounce and the page object it bounces to name the same URL
         // whenever the page object uses the default derivation. A
         // configured `url_resolver` changes only the page object; the

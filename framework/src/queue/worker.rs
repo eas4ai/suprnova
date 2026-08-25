@@ -2,13 +2,13 @@
 //!
 //! Each `Job` impl registers a deserialize-and-run shim keyed by its
 //! `job_name`. Drivers call `dispatch_by_name` to run an inbound payload.
-//! Re-registering the same name is allowed (last writer wins) — useful
+//! Re-registering the same name is allowed (last writer wins) - useful
 //! for tests; deterministic in production because each Job has exactly
 //! one registration site.
 //!
 //! # At-least-once delivery and job idempotency
 //!
-//! Redis-backed queue drivers cannot make `nack` atomic — the
+//! Redis-backed queue drivers cannot make `nack` atomic - the
 //! re-publish (XADD) and ack (XACK) are two separate commands. A
 //! crash between them re-delivers the message. The in-memory driver
 //! and database driver are exactly-once-per-attempt, but the worker
@@ -301,7 +301,7 @@ pub struct WorkerConfig {
     /// `--queue=default` still drains unrouted jobs.
     ///
     /// Drivers that cannot filter reject a non-empty value at the first poll
-    /// rather than silently draining everything — see
+    /// rather than silently draining everything - see
     /// [`QueueDriver::pop_from`].
     pub queues: Vec<String>,
 }
@@ -335,22 +335,22 @@ enum DispatchOutcome {
 
 /// Which queues this loop iteration may poll, after applying
 /// `Queue::pause` / `Queue::pause_all`. `None` means "nothing to poll this
-/// iteration" — the caller treats it exactly like an empty `pop_from`
+/// iteration" - the caller treats it exactly like an empty `pop_from`
 /// result: sleep, loop again, never touch the driver.
 ///
 /// `pausable == false` skips the check entirely and returns `cfg_queues`
 /// unfiltered, mirroring Laravel's `Worker::getPausedQueues` returning
 /// `[]` (nothing paused) when `Worker::$pausable` is false.
 ///
-/// A cache error fails OPEN — folded into "nothing is paused" via
+/// A cache error fails OPEN - folded into "nothing is paused" via
 /// `.unwrap_or(...)`, the same contract `run_worker`'s restart-signal
 /// check applies a few lines above via `if let Ok(Some(ts)) = ...`. An
 /// unreachable cache must not silently freeze every worker in the fleet
 /// over what is, from the worker's point of view, an optional control
 /// signal.
 ///
-/// `cfg_queues.is_empty()` — a worker started without `--queue`, which
-/// drains every queue the driver holds — can only honor the *global*
+/// `cfg_queues.is_empty()` - a worker started without `--queue`, which
+/// drains every queue the driver holds - can only honor the *global*
 /// pause. There is nothing to intersect a per-queue pause against:
 /// `QueueDriver::pop_from` never reports which queue names exist. Name
 /// queues with `--queue=a,b` to make them individually pausable.
@@ -465,7 +465,7 @@ pub async fn run_worker(
 
         // Pause gate: sits right before the claim, after everything
         // above it, so a job already popped by a previous iteration has
-        // long since finished — pausing never interrupts one in flight,
+        // long since finished - pausing never interrupts one in flight,
         // it only stops the NEXT claim. `None` means every eligible
         // queue is paused this iteration; behave exactly like an empty
         // poll, without touching the driver.
@@ -480,7 +480,7 @@ pub async fn run_worker(
             continue;
         };
 
-        // Pop OR cancel — whichever happens first. `biased` makes cancel win
+        // Pop OR cancel - whichever happens first. `biased` makes cancel win
         // a tie so a queue under load can still exit promptly.
         let popped = tokio::select! {
             biased;
@@ -522,7 +522,7 @@ pub async fn run_worker(
         // Spend the budget *before* running, not only when settling.
         //
         // Every other dead-letter decision happens after the handler
-        // returns — which assumes the handler returns. A job that kills
+        // returns - which assumes the handler returns. A job that kills
         // its worker (OOM, abort, segfault, or the SIGKILL a supervisor
         // sends when a stop times out) never reaches settlement, so the
         // check at the bottom of this loop never runs for exactly the jobs
@@ -539,7 +539,7 @@ pub async fn run_worker(
                 id = %env.id,
                 attempts = env.attempts,
                 max_tries = env.max_tries,
-                "queue job exhausted its attempts without ever settling — \
+                "queue job exhausted its attempts without ever settling - \
                  dead-lettering before it takes another worker down"
             );
             handle_dead_letter(
@@ -668,7 +668,7 @@ pub async fn run_worker(
                 // stuck with pending_jobs > 0 forever.
                 //
                 // DATA-02a: that decrement runs BEFORE the ack, for the same
-                // reason documented on [`handle_completed`] — acking first
+                // reason documented on [`handle_completed`] - acking first
                 // makes a crash in the window drop the reservation with the
                 // decrement never applied, and a batch stuck on a non-zero
                 // pending count has no recovery path.
@@ -824,9 +824,9 @@ impl SettlementDeps {
 /// # Terminal settlement (DATA-02)
 ///
 /// Finishing a chained job means enqueuing the next link *and* releasing the
-/// job just finished. As two separate operations there is no safe order —
+/// job just finished. As two separate operations there is no safe order -
 /// ack-first can lose the rest of the chain permanently, push-first can run the
-/// successor twice — so the framework hands both to the driver and lets it
+/// successor twice - so the framework hands both to the driver and lets it
 /// commit them together. [`DatabaseQueueDriver`](crate::queue::DatabaseQueueDriver)
 /// does exactly that, with the reservation-keyed delete acting as a fence: a
 /// worker whose visibility expired mid-run commits nothing at all.
@@ -842,9 +842,9 @@ impl SettlementDeps {
 /// deletes the batch row when a mid-loop push fails, and the envelopes that
 /// already landed then get `Err(batch not found)` forever. Refusing to settle
 /// on that would spin those orphans on visibility expiry with no exit. So the
-/// batch step runs before the settlement — a crash replays it rather than
+/// batch step runs before the settlement - a crash replays it rather than
 /// losing it, and replay is harmless because settlement is idempotent per
-/// `(batch_id, job_id)` — but its error never holds the reservation.
+/// `(batch_id, job_id)` - but its error never holds the reservation.
 ///
 /// Batch accounting is *not* part of the settlement transaction, and
 /// deliberately so: the repository is separately installable and may address a
@@ -879,7 +879,7 @@ async fn handle_completed(
         follow_ups.push(next_env);
     }
 
-    // 2. Notify batch repository (best-effort — see the doc comment). This
+    // 2. Notify batch repository (best-effort - see the doc comment). This
     // runs before the settlement so a crash replays it rather than losing it;
     // replay is harmless because settlement is idempotent per `(batch_id,
     // job_id)`.
@@ -899,7 +899,7 @@ async fn handle_completed(
         }
     }
 
-    // 3. Enqueue the successor and drop the reservation — in one transaction
+    // 3. Enqueue the successor and drop the reservation - in one transaction
     // where the driver can, push-then-ack where it cannot.
     match driver.settle(token, &follow_ups).await {
         Ok(Settled::Atomically) => {
@@ -927,7 +927,7 @@ async fn handle_completed(
         }
     }
 
-    // 4. Observation only — these carry no recovery value, so they run after
+    // 4. Observation only - these carry no recovery value, so they run after
     // the reservation is settled and never gate it.
     let _ = EventFacade::dispatch(queue_events::JobProcessed {
         job: queue_events::JobIdentity::from_env(env, connection),
@@ -940,14 +940,14 @@ async fn handle_completed(
 }
 
 /// Push-then-ack settlement for drivers that answer [`QueueDriver::settle`]
-/// with [`Settled::Unsupported`] — Redis, in-memory, and any driver written
+/// with [`Settled::Unsupported`] - Redis, in-memory, and any driver written
 /// before the protocol existed.
 ///
 /// # Why the push goes first (DATA-02a)
 ///
 /// Acking first drops the reservation while the follow-up is still unwritten.
-/// A crash in that window — and a rolling restart samples it once per in-flight
-/// job, so it is not theoretical — leaves the job gone from the queue with its
+/// A crash in that window - and a rolling restart samples it once per in-flight
+/// job, so it is not theoretical - leaves the job gone from the queue with its
 /// successor never enqueued. The chain then stalls permanently: nothing is left
 /// in the queue to retry from, and no operator action recovers it.
 ///
@@ -955,7 +955,7 @@ async fn handle_completed(
 /// detectable duplicate. The reservation stays live, visibility expiry
 /// redelivers the envelope, and the handler runs a second time. That trade is
 /// deliberate and it is safe because duplicate execution is already the
-/// framework's delivery contract — see the module header: every production
+/// framework's delivery contract - see the module header: every production
 /// handler must be idempotent. When the duplication is caused by a failing
 /// `ack` it is counted by [`METRIC_SETTLEMENT_FAILURES`], so operators can
 /// alert on the rate; when it is caused by a failing push it is logged at
@@ -991,7 +991,7 @@ async fn fallback_settle(
     }
 }
 
-/// Settle a job that asked to be retried later without spending an attempt —
+/// Settle a job that asked to be retried later without spending an attempt -
 /// a busy `WithoutOverlapping` lock, a throttle, or an explicit
 /// `JobOutcome::Released`.
 ///
@@ -1003,8 +1003,8 @@ async fn fallback_settle(
 /// [`DatabaseQueueDriver`](crate::queue::database::DatabaseQueueDriver) the id
 /// is the `jobs` primary key, so the push collided with the row still holding
 /// the live reservation and came back `UNIQUE constraint failed: jobs.id`. The
-/// push error then took the early return below — correct, given the evidence,
-/// since a lost push must never be followed by an ack — and the release
+/// push error then took the early return below - correct, given the evidence,
+/// since a lost push must never be followed by an ack - and the release
 /// silently became a no-op: no delay applied, no `JobReleased` event, the job
 /// simply parked until visibility expiry redelivered it. Every release on a
 /// database-backed queue behaved that way.
@@ -1051,7 +1051,7 @@ async fn handle_released(
 /// failed-jobs record *is* the recovery path. `queue:retry` re-pushes the
 /// envelope stored by [`FailedJobStore::log`](crate::queue::FailedJobStore::log),
 /// so acking first and crashing before the write leaves the envelope in neither
-/// the queue nor the failed store — permanently and silently gone, with no
+/// the queue nor the failed store - permanently and silently gone, with no
 /// operator action that brings it back.
 ///
 /// Writing the record before dropping the reservation trades that away for a
@@ -1059,13 +1059,13 @@ async fn handle_released(
 /// redelivers the envelope, the handler runs (and presumably fails) again, and
 /// the write is retried. Duplicate execution is already the framework's
 /// documented delivery contract (see the module header), and the failure is
-/// visible — an ERROR log per cycle carrying driver, job and envelope id, plus
+/// visible - an ERROR log per cycle carrying driver, job and envelope id, plus
 /// [`METRIC_SETTLEMENT_FAILURES`] whenever the duplication comes from a failing
 /// `ack` rather than a failing write.
 ///
-/// **Operator note:** a store that fails *permanently* — a
+/// **Operator note:** a store that fails *permanently* - a
 /// [`DatabaseFailedJobStore`](crate::queue::DatabaseFailedJobStore) pointed at
-/// a missing or unmigrated `failed_jobs` table — now recycles dead-lettered
+/// a missing or unmigrated `failed_jobs` table - now recycles dead-lettered
 /// jobs on visibility expiry instead of discarding them. That is intentional:
 /// a misconfigured failure store should be loud rather than quietly eat every
 /// dead letter. Install
@@ -1082,7 +1082,7 @@ async fn handle_released(
 /// that can drive `pending_jobs` to zero has to agree on this, which is
 /// exactly what went wrong before it was a shared function: the
 /// `JobOutcome::Deleted` arm branched on `failed_jobs > 0` alone and fired
-/// `Then` for a cancelled batch — despite a comment on the other copy
+/// `Then` for a cancelled batch - despite a comment on the other copy
 /// saying the paths must agree. That arm is the likeliest way to reach the
 /// case, too, since `SkipIfBatchCancelled` settles every remaining job of a
 /// cancelled batch as `Deleted`, leaving `failed_jobs` at zero while the
@@ -1115,7 +1115,7 @@ async fn handle_dead_letter(
     );
 
     // 1. Persist to failed-jobs store. The queue recorded is the one the
-    // envelope actually died on — `queue:retry` re-pushes the stored
+    // envelope actually died on - `queue:retry` re-pushes the stored
     // envelope, and an operator triaging a dedicated pool filters failed
     // jobs by this column, so writing "default" for a routed job would
     // hide its failures from the very pool that owns them.
@@ -1146,14 +1146,14 @@ async fn handle_dead_letter(
         None => {
             // No store bound. This used to fall straight through to the ack
             // below, so a dead-lettered job was deleted with no record
-            // anywhere — quieter than the failure case above, which at
+            // anywhere - quieter than the failure case above, which at
             // least leaves the reservation intact. An absent store was
             // treated as more successful than a broken one.
             //
             // The job still has to leave the queue: it is out of attempts,
             // and putting it back is how a poison job becomes immortal. So
             // the envelope goes to the log at ERROR, in full, because a
-            // serialised envelope is what `queue:retry` re-pushes — this
+            // serialised envelope is what `queue:retry` re-pushes - this
             // line is the difference between work that can be recovered by
             // hand and work that silently ceased to exist.
             let payload = env
@@ -1166,7 +1166,7 @@ async fn handle_dead_letter(
                 attempts = env.attempts,
                 reason = %reason,
                 envelope = %payload,
-                "queue job dead-lettered with NO failed-jobs store configured — the \
+                "queue job dead-lettered with NO failed-jobs store configured - the \
                  envelope is logged here because there is nowhere else to put it. \
                  Bind a FailedJobStore so failures are queryable instead of \
                  grep-able."
@@ -1175,7 +1175,7 @@ async fn handle_dead_letter(
     }
 
     // 2. Notify batch repository of failure (and cancel if !allow_failures).
-    // Best-effort — see the doc comment.
+    // Best-effort - see the doc comment.
     if let Some(batch_id) = env.batch_id.as_deref()
         && let Some(repo) = deps.batches.as_ref()
     {
@@ -1205,7 +1205,7 @@ async fn handle_dead_letter(
         settlement_failure(driver, env, "ack", outcome, &ack_err);
     }
 
-    // 4. Observation only — never gates the settlement.
+    // 4. Observation only - never gates the settlement.
     let _ = EventFacade::dispatch(queue_events::JobFailed {
         job: queue_events::JobIdentity::from_env(env, connection),
         exception: reason.to_string(),
@@ -1276,8 +1276,8 @@ fn settlement_failure(
     ]);
 }
 
-// `PartialEq`/`Debug` so `terminal_batch_phase` can be asserted on directly
-// — the phase choice is a correctness rule (a cancelled batch must never
+// `PartialEq`/`Debug` so `terminal_batch_phase` can be asserted on directly -
+// the phase choice is a correctness rule (a cancelled batch must never
 // report success), and asserting it needs the value, not a side effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BatchPhase {
@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     /// Real [`MemoryBatchRepository`] behaviour plus shared-log recording and
-    /// a knob that makes the two settlement writes fail — the shape of a
+    /// a knob that makes the two settlement writes fail - the shape of a
     /// batch row deleted by `PendingBatch::dispatch`'s rollback, which
     /// returns `Err(batch not found)` for every envelope that already landed.
     struct RecordingBatchRepo {
@@ -1564,7 +1564,7 @@ mod tests {
         }
     }
 
-    /// No failed-jobs store and no batch repository installed — the wiring a
+    /// No failed-jobs store and no batch repository installed - the wiring a
     /// bare `run_worker` sees before `bootstrap_default`.
     fn no_deps() -> SettlementDeps {
         SettlementDeps {
@@ -1622,7 +1622,7 @@ mod tests {
 
     /// A cancelled batch must never report success, no matter which
     /// settlement path drove its last job to zero. The `JobOutcome::Deleted`
-    /// arm used to branch on `failed_jobs` alone and fired `Then` here —
+    /// arm used to branch on `failed_jobs` alone and fired `Then` here -
     /// and `SkipIfBatchCancelled` makes that the *normal* way a cancelled
     /// batch finishes, since it settles every remaining job as `Deleted`
     /// and so leaves `failed_jobs` at zero.
@@ -1636,7 +1636,7 @@ mod tests {
         assert_eq!(
             terminal_batch_phase(&cancelled),
             BatchPhase::Catch,
-            "a cancelled batch fires Catch — Then would tell the caller a \
+            "a cancelled batch fires Catch - Then would tell the caller a \
              batch they cancelled had succeeded"
         );
     }
@@ -1748,7 +1748,7 @@ mod tests {
         assert_eq!(
             (driver.ops.count("push"), driver.ops.count("ack")),
             (0, 0),
-            "the worker must not also push the successor or ack separately — \
+            "the worker must not also push the successor or ack separately - \
              doing both is the two-step settlement this replaces"
         );
 
@@ -1794,7 +1794,7 @@ mod tests {
         assert_eq!(
             (driver.ops.count("push"), driver.ops.count("ack")),
             (0, 0),
-            "a stale settlement must not be retried as push-then-ack — that \
+            "a stale settlement must not be retried as push-then-ack - that \
              would re-open the fork the fence just closed"
         );
     }
@@ -1838,7 +1838,7 @@ mod tests {
     // ---- release: the worker delegates, the default impl still holds -----
     //
     // `RecordingDriver` deliberately does NOT override `QueueDriver::release`,
-    // so these two exercise the trait's default push-then-ack fallback — the
+    // so these two exercise the trait's default push-then-ack fallback - the
     // path every third-party driver written before `release` existed still
     // takes. In-tree drivers override it and are covered by
     // `queue_database::release_*` and `queue_memory::*`.
@@ -1903,7 +1903,7 @@ mod tests {
         let copy = pushed.first().expect("a released copy was pushed");
         assert_eq!(
             copy.attempts, 1,
-            "release does not burn an attempt — the pre-dispatch count is restored"
+            "release does not burn an attempt - the pre-dispatch count is restored"
         );
         assert!(
             copy.available_at > before,
@@ -1913,7 +1913,7 @@ mod tests {
 
     /// The worker must call [`QueueDriver::release`] rather than open-coding
     /// push-then-ack, or a driver that CAN release atomically never gets the
-    /// chance — which is precisely how the database driver ended up answering
+    /// chance - which is precisely how the database driver ended up answering
     /// every release with a primary-key collision.
     #[tokio::test]
     async fn the_worker_delegates_the_release_to_the_driver() {
@@ -2000,7 +2000,7 @@ mod tests {
         assert_eq!(
             ops.ops(),
             vec!["push", "ack"],
-            "the successor must be enqueued before the reservation is dropped — \
+            "the successor must be enqueued before the reservation is dropped - \
              acking first means a crash in the window loses the chain forever"
         );
         let pushed = driver.pushed.lock().unwrap_or_else(|e| e.into_inner());
@@ -2011,7 +2011,7 @@ mod tests {
         );
     }
 
-    /// DATA-02b — the duplicate the pre-ack push ordering deliberately
+    /// DATA-02b - the duplicate the pre-ack push ordering deliberately
     /// trades for, made identifiable.
     ///
     /// Settlement pushes the successor before acking, so a crash or a failed
@@ -2020,7 +2020,7 @@ mod tests {
     /// visibility expiry would, and assert both pushes carry one id.
     ///
     /// With `Uuid::new_v4()` the two ids differed, which meant no handler,
-    /// driver, or outbox could tell a redelivered step from a new one — the
+    /// driver, or outbox could tell a redelivered step from a new one - the
     /// framework's "handlers must be idempotent" contract was unsatisfiable
     /// for chained jobs, because the only identifier a handler is given was
     /// fresh every time.
@@ -2068,7 +2068,7 @@ mod tests {
     #[tokio::test]
     async fn completed_chain_push_failure_leaves_the_job_redeliverable() {
         // Failure mode: the follow-up cannot land. The reservation must stay
-        // live so visibility expiry redelivers the envelope — a duplicate run
+        // live so visibility expiry redelivers the envelope - a duplicate run
         // is recoverable, a dropped chain is not.
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(true, ops.clone());
@@ -2127,7 +2127,7 @@ mod tests {
             ops.ops(),
             vec!["batch.record_success", "ack"],
             "the batch must see the job settled before the reservation is \
-             dropped — otherwise a crash strands the batch on pending > 0"
+             dropped - otherwise a crash strands the batch on pending > 0"
         );
         let snap = repo.find(&batch_id).await.unwrap().expect("batch exists");
         assert_eq!(snap.pending_jobs, 1, "the decrement actually applied");
@@ -2191,7 +2191,7 @@ mod tests {
         assert_eq!(
             ops.ops(),
             vec!["failed_store.log", "ack"],
-            "the failed-jobs record IS the recovery path — it must be durable \
+            "the failed-jobs record IS the recovery path - it must be durable \
              before the queue copy is dropped"
         );
         assert_eq!(
@@ -2208,7 +2208,7 @@ mod tests {
     #[tokio::test]
     async fn dead_letter_store_failure_leaves_the_job_redeliverable() {
         // Failure mode: an unmigrated `failed_jobs` table. Pre-fix this
-        // silently swallowed the job — acked first, record never written, no
+        // silently swallowed the job - acked first, record never written, no
         // `queue:retry` possible. Now the reservation survives.
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(false, ops.clone());
@@ -2258,7 +2258,7 @@ mod tests {
 
     #[tokio::test]
     async fn dead_letter_records_failure_and_batch_before_acking() {
-        // Both follow-ups, in order, ahead of the ack — and a failing batch
+        // Both follow-ups, in order, ahead of the ack - and a failing batch
         // write still does not hold the reservation.
         let ops = Arc::new(OpLog::default());
         let driver = RecordingDriver::with_log(false, ops.clone());

@@ -4,13 +4,13 @@
 #
 # An API project (`suprnova new --api`) has no `frontend/` and no `cmd/`.
 # Its server binary is `src/main.rs`, and it serves JSON, not Inertia
-# pages — so there is nothing to build with node, no page sources for
+# pages - so there is nothing to build with node, no page sources for
 # `inertia_response!` to validate against, and no `public/assets` to
 # carry into the runtime image.
 #
 # Through v0.7.2, `docker:init` emitted the full-stack Dockerfile for
-# every project shape. On an API project its first instruction —
-# `COPY frontend/package.json` — failed outright, so `suprnova new --api`
+# every project shape. On an API project its first instruction -
+# `COPY frontend/package.json` - failed outright, so `suprnova new --api`
 # followed by `docker:init` followed by `docker build` could not succeed.
 FROM rust:1.94.0-slim-bookworm AS backend-builder
 
@@ -32,7 +32,7 @@ WORKDIR /app/{package_name}
 COPY Cargo.toml Cargo.lock* ./
 
 # Build dependencies only, for layer caching. EVERY binary the manifest
-# declares needs a stub here — cargo resolves all targets, so a missing
+# declares needs a stub here - cargo resolves all targets, so a missing
 # `src/bin/console.rs` fails this stage outright rather than merely
 # missing the cache. The API scaffold's server bin is `src/main.rs`,
 # which `cargo new --bin` already created.

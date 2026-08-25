@@ -2,7 +2,7 @@
 //!
 //! Exercises the Phase 3 `#[derive(Data)] #[json_resource("users")]` pipeline.
 //!
-//! Phase 10A T11 — `User` now carries real identity columns (name,
+//! Phase 10A T11 - `User` now carries real identity columns (name,
 //! email, …) since the dogfood migrated to `#[suprnova::model]`. The
 //! resource projects only the fields safe for serialisation; the
 //! `password` column stays input-only.
@@ -45,7 +45,7 @@ pub struct UserResource {
     /// its existing string-typed `created_at` shape.
     pub created_at: String,
 
-    /// Raw password — accepted on input, never serialised to output.
+    /// Raw password - accepted on input, never serialised to output.
     #[data(input_only)]
     pub password: String,
 }

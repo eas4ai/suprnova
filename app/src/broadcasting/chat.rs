@@ -1,11 +1,11 @@
-//! Private chat channel — gates subscription on the authenticated
+//! Private chat channel - gates subscription on the authenticated
 //! session, not on anything the client sends.
 //!
 //! This channel used to accept any subscriber whose `data` carried a
 //! token starting with `"chat_"`. That is not a gate: the value comes
 //! from the client's own subscribe frame, so `{"token":"chat_x"}` from
 //! anyone at all passed it. It was written as a placeholder for "until
-//! the auth stack covers WebSocket upgrades" — but the upgrade path
+//! the auth stack covers WebSocket upgrades" - but the upgrade path
 //! already runs the full middleware chain, session middleware included,
 //! so the authenticated identity existed the whole time. It simply had
 //! no way to reach a handler that runs after the chain unwinds, until
@@ -19,7 +19,7 @@ use suprnova::serde_json::Value;
 /// Private channel for chat rooms.
 ///
 /// Subscribers must arrive with an authenticated session on the upgrade
-/// request — the same session cookie every other route requires. There
+/// request - the same session cookie every other route requires. There
 /// is deliberately no token to put in the subscribe frame: a credential
 /// the client chooses for itself is not a credential.
 pub struct ChatChannel;
@@ -98,7 +98,7 @@ mod tests {
             ChatChannel
                 .authorize(&req, &ChannelParams::default(), &json!({}))
                 .await,
-            "an authenticated session is the credential — there is deliberately \
+            "an authenticated session is the credential - there is deliberately \
              nothing to put in the subscribe frame"
         );
     }
@@ -135,7 +135,7 @@ mod tests {
     }
 
     /// Publishing re-checks identity rather than trusting that `authorize`
-    /// ran earlier — a publish frame arrives later on a long-lived socket.
+    /// ran earlier - a publish frame arrives later on a long-lived socket.
     #[tokio::test]
     async fn publishing_requires_identity_and_a_known_event() {
         let authed = upgrade_request().with_auth_user_id("42");

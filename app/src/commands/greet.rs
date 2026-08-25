@@ -1,4 +1,4 @@
-//! `greet` — dogfood for the typed-command path (`#[derive(Command)]`
+//! `greet` - dogfood for the typed-command path (`#[derive(Command)]`
 //! + `TypedCommand`).
 //!
 //! Demonstrates the structured shape every non-trivial console

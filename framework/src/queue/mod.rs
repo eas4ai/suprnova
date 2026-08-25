@@ -146,7 +146,7 @@ impl Queue {
     /// to end: stamped on the envelope, stored by the driver, and filtered by
     /// `queue:work --queue=...`. The **connection** currently resolves only
     /// the connection *name* carried on [`events::JobQueueing`] /
-    /// [`events::JobQueued`] — a single process-global driver still receives
+    /// [`events::JobQueued`] - a single process-global driver still receives
     /// every push, so routing the connection does not yet select a different
     /// driver.
     ///
@@ -185,7 +185,7 @@ impl Queue {
     /// Honors [`Job::delay`]: when the job declares one, `available_at`
     /// is `now + J::delay()` instead of `now`. Use
     /// [`Queue::push_later`] / [`Queue::later`] for a delay that varies
-    /// per dispatch — those take an explicit timestamp and never consult
+    /// per dispatch - those take an explicit timestamp and never consult
     /// `Job::delay`.
     ///
     /// Honors [`Job::after_commit`]: inside a
@@ -218,7 +218,7 @@ impl Queue {
     /// Push a typed job available at `available_at`. Driver is responsible
     /// for honoring the timestamp.
     ///
-    /// Does **not** consult [`Job::delay`] — the explicit `available_at`
+    /// Does **not** consult [`Job::delay`] - the explicit `available_at`
     /// always wins over the job's own default. [`Queue::push`] is the
     /// entry point that honors `Job::delay`.
     ///
@@ -388,23 +388,23 @@ impl Queue {
     /// Honors [`Job::delay`], the same as [`Queue::push`]: when the job
     /// declares one, `available_at` is `now + J::delay()` instead of `now`.
     /// Use [`Queue::push_unique_later`] / [`Queue::later_unique`] for a
-    /// delay that varies per dispatch — those take an explicit timestamp
+    /// delay that varies per dispatch - those take an explicit timestamp
     /// and never consult `Job::delay`.
     ///
     /// Three outcomes, two of which are `Ok(true)`:
     ///
-    /// - `Ok(true)` — the envelope was pushed under an unbroken dedupe
+    /// - `Ok(true)` - the envelope was pushed under an unbroken dedupe
     ///   lease. Uniqueness held.
-    /// - `Ok(true)`, **plus a logged warning** — the envelope was pushed,
+    /// - `Ok(true)`, **plus a logged warning** - the envelope was pushed,
     ///   but the dedupe lease was lost mid-push
     ///   ([`Idempotent::FreshUnfenced`](crate::idempotency::Idempotent::FreshUnfenced)),
     ///   so a concurrent caller may have pushed a duplicate for the same
     ///   unique id. The job is on the queue either way; only the uniqueness
     ///   claim is unproven. Handlers are already required to tolerate
-    ///   redelivery, which is what makes `true` the honest answer here —
+    ///   redelivery, which is what makes `true` the honest answer here -
     ///   the alternative, `false`, would tell the caller a job that is
     ///   about to run was never queued.
-    /// - `Ok(false)` — a live dedupe key already existed for this
+    /// - `Ok(false)` - a live dedupe key already existed for this
     ///   `(job_name, unique_id)`, so nothing was pushed.
     ///
     /// Backed by [`Idempotency::commit_on_success`](crate::idempotency::Idempotency::commit_on_success):
@@ -445,13 +445,13 @@ impl Queue {
         Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
     }
 
-    /// Common path for the three `*_unique*` entrypoints — builds the
+    /// Common path for the three `*_unique*` entrypoints - builds the
     /// dedupe key, runs the enqueue under `Idempotency::commit_on_success`,
     /// and reports `true` for `Fresh` and `FreshUnfenced` (the envelope
     /// reached the driver either way), `false` only for `Duplicate`.
     async fn push_unique_at<J: Job>(job: J, when: AvailableAt) -> Result<bool, FrameworkError> {
         if testing::is_active() {
-            // In fake mode, dedupe is irrelevant — record and report fresh.
+            // In fake mode, dedupe is irrelevant - record and report fresh.
             testing::record::<J>(&job, when.resolve::<J>()?)?;
             return Ok(true);
         }
@@ -506,8 +506,8 @@ impl Queue {
             .await?;
 
         // Exhaustive on purpose. `matches!(outcome, Fresh(()))` collapsed
-        // `FreshUnfenced` — the body ran, the envelope IS on the queue, only
-        // the dedupe lease was lost — into `false`, which this function
+        // `FreshUnfenced` - the body ran, the envelope IS on the queue, only
+        // the dedupe lease was lost - into `false`, which this function
         // documents as "suppressed as a duplicate". A `match` also means a
         // future `Idempotent` variant fails to compile here instead of
         // silently joining whichever arm `matches!` happened to exclude.
@@ -711,12 +711,12 @@ impl Queue {
     /// Pause job processing for one queue on one connection. Mirrors
     /// Laravel's `Queue::pause($connection, $queue)`.
     ///
-    /// Backed by [`Cache::forever`](crate::cache::Cache::forever) — the
+    /// Backed by [`Cache::forever`](crate::cache::Cache::forever) - the
     /// same cache-backed worker-control-signal shape as [`Queue::restart`].
     /// Dispatches [`events::QueuePaused`].
     ///
     /// A worker only honors this when it was started with an explicit
-    /// `--queue=...` list that names `queue` — see
+    /// `--queue=...` list that names `queue` - see
     /// [`WorkerConfig`](crate::queue::worker::WorkerConfig) and the
     /// "Pausing queues" section of the queue manual chapter for why an
     /// unfiltered worker cannot apply a per-queue pause.
@@ -731,7 +731,7 @@ impl Queue {
     }
 
     /// Resume one queue previously paused with [`Queue::pause`]. Mirrors
-    /// Laravel's `Queue::resume($connection, $queue)`. Idempotent —
+    /// Laravel's `Queue::resume($connection, $queue)`. Idempotent -
     /// resuming a queue that isn't paused is not an error. Dispatches
     /// [`events::QueueResumed`].
     pub async fn resume(connection: &str, queue: &str) -> Result<(), FrameworkError> {
@@ -759,7 +759,7 @@ impl Queue {
     /// Laravel's `Queue::resumeAll()`.
     ///
     /// **Does not clear a per-queue pause set by [`Queue::pause`].** A
-    /// queue paused individually stays paused after a global resume — this
+    /// queue paused individually stays paused after a global resume - this
     /// is Laravel's own semantics (`QueueManager::resumeAll` only forgets
     /// the global key), kept here so the two pause dimensions stay
     /// independently controllable: an operator who paused `billing` on
@@ -771,7 +771,7 @@ impl Queue {
         Ok(())
     }
 
-    /// True if `queue` on `connection` is paused — either individually via
+    /// True if `queue` on `connection` is paused - either individually via
     /// [`Queue::pause`], or because [`Queue::pause_all`] paused everything.
     /// Mirrors Laravel's `Queue::isPaused($connection, $queue)`.
     pub async fn is_paused(connection: &str, queue: &str) -> Result<bool, FrameworkError> {
@@ -925,7 +925,7 @@ impl Queue {
         // The driver registry is a single-slot `Option<Arc<dyn QueueDriver>>`;
         // the critical section is a single assignment. Recover in place
         // on poison so a panic in some other registry user doesn't kill
-        // the boot path for every future caller — matches the framework's
+        // the boot path for every future caller - matches the framework's
         // hot-registry convention (data::registry, payments registry).
         *DRIVER.write().unwrap_or_else(|e| e.into_inner()) = Some(driver);
     }
@@ -968,7 +968,7 @@ pub(crate) fn current_driver() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
 
 /// The global pause switch's current state. A free function (not a `Queue`
 /// method) because both [`Queue::is_paused`] / [`Queue::paused_queues`]
-/// and the worker's pause gate need it without a `queue` argument — there
+/// and the worker's pause gate need it without a `queue` argument - there
 /// is nothing left to filter once the answer is already "everything is
 /// paused." Propagates a cache error faithfully; callers on the fail-open
 /// path (the worker gate) fold it with `.unwrap_or(false)` themselves.
@@ -980,7 +980,7 @@ pub(crate) async fn is_globally_paused() -> Result<bool, FrameworkError> {
 
 /// Whether queue workers, and the `queue:pause` command, honor pause
 /// signals at all. Mirrors Laravel's `Worker::$pausable`. Reads
-/// `QUEUE_PAUSABLE` fresh — unset, or anything other than `"false"` /
+/// `QUEUE_PAUSABLE` fresh - unset, or anything other than `"false"` /
 /// `"0"`, means enabled. `queue:resume` never checks this: disabling the
 /// ability to *create* a pause must not also disable the ability to
 /// *clear* one.
@@ -1006,7 +1006,7 @@ pub async fn bootstrap_default() {
 /// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
 ///
 /// Unlike [`bootstrap_default`], this call **always replaces** the registered
-/// driver — long-running processes (workers, tests) that re-invoke
+/// driver - long-running processes (workers, tests) that re-invoke
 /// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
 /// Redis/database boot) will pick up the new driver instead of being pinned to
 /// the first one installed.
@@ -1041,12 +1041,12 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 ))
             })?;
             // DatabaseConnection is Arc-backed (SeaORM pool), so clone is cheap.
-            // `new` validates QUEUE_DB_TABLE as a SQL identifier — a malformed
+            // `new` validates QUEUE_DB_TABLE as a SQL identifier - a malformed
             // env value fails here instead of reaching SQL composition.
             let driver = database::DatabaseQueueDriver::new(db.inner().clone(), table)?;
             Queue::set_driver(Arc::new(driver));
 
-            // The `failed_jobs` table is part of this driver's contract —
+            // The `failed_jobs` table is part of this driver's contract -
             // `queue:retry` reads it, and `Queue::retry_failed` fails
             // without it. Binding the driver and leaving the failed-jobs
             // store unset meant a database-backed queue dead-lettered into
@@ -1062,7 +1062,7 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 Ok(store) => Queue::set_failed_store(Arc::new(store)),
                 Err(e) => {
                     // A malformed table name is a misconfiguration, not a
-                    // reason to take the queue down — the worker now logs
+                    // reason to take the queue down - the worker now logs
                     // the whole envelope when no store is bound, so
                     // failures stay recoverable either way.
                     tracing::error!(
@@ -1158,7 +1158,7 @@ fn envelope_for<J: Job>(
 }
 
 /// Overlay `overrides` onto an already-resolved envelope, after
-/// `envelope_for` — see [`EnvelopeOverrides`]. No schema change: every
+/// `envelope_for` - see [`EnvelopeOverrides`]. No schema change: every
 /// touched field already exists on the frozen envelope.
 fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides) {
     if let Some(queue) = &overrides.queue {

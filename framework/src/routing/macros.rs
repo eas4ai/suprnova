@@ -64,7 +64,7 @@ use std::sync::Arc;
 /// # Segment-start matching
 ///
 /// A `:` is only treated as a parameter opener when it sits at the start
-/// of a path segment — either at the start of the pattern or immediately
+/// of a path segment - either at the start of the pattern or immediately
 /// after a `/`. A colon embedded *inside* a segment is preserved verbatim
 /// so literal colons in path text (e.g. `/files/note:draft`) survive
 /// untouched. This mirrors the Express / Rails convention where parameters
@@ -85,13 +85,13 @@ pub(crate) fn convert_route_params(path: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         // Treat `:` as a parameter opener only at the start of a path
-        // segment — first byte of the pattern, or the byte immediately
+        // segment - first byte of the pattern, or the byte immediately
         // after a `/`. Mid-segment colons are literal text.
         let at_segment_start = i == 0 || bytes[i - 1] == b'/';
         if b == b':' && at_segment_start {
             result.push('{');
             i += 1;
-            // Walk by UTF-8 code points, not raw bytes — `bytes[i] as char`
+            // Walk by UTF-8 code points, not raw bytes - `bytes[i] as char`
             // truncates each continuation byte into a stray Latin-1
             // codepoint, mojibaking any multi-byte param name (`/:café`
             // → `/{cafÃ©}`). Find the end of the segment, then slice the
@@ -104,7 +104,7 @@ pub(crate) fn convert_route_params(path: &str) -> String {
             result.push('}');
         } else {
             // Single-byte ASCII or the leading byte of a multi-byte UTF-8
-            // sequence — either way, copy through to the next iteration.
+            // sequence - either way, copy through to the next iteration.
             // Using char_indices would be safer for non-ASCII, but route
             // patterns are conventionally ASCII; fall back to slicing by
             // char boundary so any non-ASCII byte is still preserved.
@@ -123,7 +123,7 @@ pub(crate) fn convert_route_params(path: &str) -> String {
 ///
 /// Plain concatenation is wrong at the `/` boundary: a root group
 /// (`group!("/", { get!("/login", …) })`) would register `//login`, which
-/// matchit treats as containing an empty segment — no real request path
+/// matchit treats as containing an empty segment - no real request path
 /// ever matches it, so every route in the group silently 404s. A
 /// trailing-slash prefix (`/api/` + `/users`) has the same problem.
 ///
@@ -157,19 +157,19 @@ pub(crate) fn join_paths(prefix: &str, child: &str) -> String {
 /// [`Router::match_route`] per RFC 9110 §9.3.2.
 #[derive(Clone, Copy)]
 pub enum HttpMethod {
-    /// `GET` — safe, idempotent reads.
+    /// `GET` - safe, idempotent reads.
     Get,
-    /// `POST` — create / non-idempotent submissions.
+    /// `POST` - create / non-idempotent submissions.
     Post,
-    /// `PUT` — idempotent full replacement.
+    /// `PUT` - idempotent full replacement.
     Put,
-    /// `PATCH` — partial updates.
+    /// `PATCH` - partial updates.
     Patch,
-    /// `DELETE` — resource removal.
+    /// `DELETE` - resource removal.
     Delete,
-    /// `HEAD` — `GET` without a body. Falls back to the `GET` registry when no explicit `HEAD` route is registered.
+    /// `HEAD` - `GET` without a body. Falls back to the `GET` registry when no explicit `HEAD` route is registered.
     Head,
-    /// `OPTIONS` — capabilities discovery and CORS preflight.
+    /// `OPTIONS` - capabilities discovery and CORS preflight.
     Options,
 }
 
@@ -472,7 +472,7 @@ where
 ///
 /// CORS preflight (`OPTIONS` + `Access-Control-Request-Method`) is
 /// answered by `CorsMiddleware` at the global-middleware layer, before
-/// the router. Use `options!()` for non-preflight uses — advertising
+/// the router. Use `options!()` for non-preflight uses - advertising
 /// allowed verbs (`Accept-Patch`), public API discovery, programmatic
 /// resource description.
 ///
@@ -507,7 +507,7 @@ where
     RouteDefBuilder::new(HttpMethod::Options, path, handler)
 }
 
-/// Create a route that responds to every common HTTP method —
+/// Create a route that responds to every common HTTP method -
 /// `any!()` is the Laravel `Route::any(...)` equivalent. The handler
 /// is registered against GET, POST, PUT, PATCH, DELETE, HEAD, and
 /// OPTIONS sharing one matchit slot per method (per-method O(1)
@@ -564,7 +564,7 @@ where
 /// Macro-layer builder for `any!()` routes. Symmetric with
 /// [`RouteDefBuilder`] but registers across all seven common HTTP
 /// methods at `register()` time. The `.name()` and `.middleware()`
-/// chain methods accumulate state for the eventual fan-out — name
+/// chain methods accumulate state for the eventual fan-out - name
 /// fires once, middleware fans out across every verb's
 /// `(method, path)` middleware slot.
 pub struct AnyRouteDefBuilder<H> {
@@ -640,7 +640,7 @@ where
 /// ```
 ///
 /// Note: WebSocket routes do NOT support `.name()` or `.middleware()`
-/// chaining in v1 — those land in Phase 7B alongside broadcasting
+/// chaining in v1 - those land in Phase 7B alongside broadcasting
 /// (specifically for per-WS-route auth middleware).
 ///
 /// # Compile Error
@@ -657,7 +657,7 @@ macro_rules! ws {
 /// Internal implementation for WebSocket routes (used by the `ws!` macro).
 ///
 /// Type-erases the handler at the call site so `WsRouteDef` doesn't need
-/// a generic parameter — the comma-separated `routes! { ... }` list can
+/// a generic parameter - the comma-separated `routes! { ... }` list can
 /// then mix HTTP `RouteDefBuilder<H>` items and `WsRouteDef` items
 /// without inference fights at the macro boundary.
 #[doc(hidden)]
@@ -1038,7 +1038,7 @@ impl GroupDef {
     /// Prefix and route path are joined with a single canonical `/`
     /// boundary (see `join_paths`): a route path of `/` resolves to the
     /// group prefix itself, and a root prefix (`/`) contributes nothing,
-    /// so `group!("/", { get!("/login", …) })` registers `/login` — never
+    /// so `group!("/", { get!("/login", …) })` registers `/login` - never
     /// `//login`.
     ///
     /// # Middleware Inheritance
@@ -1060,7 +1060,7 @@ impl GroupDef {
         // Build the full prefix for this group. join_paths keeps the
         // `/` boundary canonical so a root parent (`group!("/")`) or a
         // trailing-slash prefix can't smuggle `//` into child routes.
-        // The recursion seeds parent_prefix with "" — join_paths treats
+        // The recursion seeds parent_prefix with "" - join_paths treats
         // that the same as a root `/` prefix.
         let full_prefix = join_paths(parent_prefix, self.prefix);
 
@@ -1079,8 +1079,8 @@ impl GroupDef {
                     // {param} for matchit compatibility. Conversion runs
                     // AFTER joining so a group prefix containing
                     // `:param` (e.g. `group!("/api/:version", { ... })`)
-                    // gets normalised the same way the route segment does
-                    // — without that, `:version` would reach matchit as a
+                    // gets normalised the same way the route segment does -
+                    // without that, `:version` would reach matchit as a
                     // literal segment instead of a parameter.
                     let raw_full = join_paths(&full_prefix, route.path);
                     let full_path = convert_route_params(&raw_full);
@@ -1118,7 +1118,7 @@ impl GroupDef {
                     }
 
                     // Apply combined middleware (inherited + group), then route-specific.
-                    // The middleware map is keyed by `(method, path)` — middleware
+                    // The middleware map is keyed by `(method, path)` - middleware
                     // belongs to *this* route's method, never to siblings on the
                     // same path under a different method.
                     let http_method = route.method.as_hyper();
@@ -1149,7 +1149,7 @@ impl GroupDef {
                     router.insert_head(full_path, any_route.handler.clone());
                     router.insert_options(full_path, any_route.handler);
 
-                    // Name is registered once — the path is shared
+                    // Name is registered once - the path is shared
                     // across all seven verbs so reverse-lookup returns
                     // the same URL no matter which method the caller
                     // is looking up.
@@ -1642,14 +1642,14 @@ mod tests {
         assert_eq!(join_paths("/api", ""), "/api");
         assert_eq!(join_paths("/", "/"), "/");
         assert_eq!(join_paths("", ""), "/");
-        // Params pass through untouched — conversion runs on the result.
+        // Params pass through untouched - conversion runs on the result.
         assert_eq!(
             join_paths("/api/:version", "/users/:id"),
             "/api/:version/users/:id"
         );
     }
 
-    /// Root-prefix group — the scaffold's `group!("/", { ... })` shape.
+    /// Root-prefix group - the scaffold's `group!("/", { ... })` shape.
     /// Raw concatenation registered `//login`, which matchit treats as
     /// an empty segment: every route in the group 404'd over real HTTP.
     #[test]

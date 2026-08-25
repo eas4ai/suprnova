@@ -21,15 +21,15 @@ type TaskFuture = Pin<Box<dyn Future<Output = Result<TaskOutcome, FrameworkError
 
 /// A single prop entry returned by `#[derive(Data)]`'s `__into_inertia_props`.
 ///
-/// - `Eager` — the field's value is already serialized; inserted directly
+/// - `Eager` - the field's value is already serialized; inserted directly
 ///   into the response prop bag.
-/// - `LazyOwned` — standard lazy / `#[data(lazy)]` / `#[data(lazy(inertia))]`.
+/// - `LazyOwned` - standard lazy / `#[data(lazy)]` / `#[data(lazy(inertia))]`.
 ///   Must pass the `?include=` + allowlist gate before resolution.
-/// - `DeferredOwned` — `#[data(lazy(deferred))]`. Same `?include=` gate as
+/// - `DeferredOwned` - `#[data(lazy(deferred))]`. Same `?include=` gate as
 ///   `LazyOwned`; the variant tag signals Inertia deferred-props protocol to
 ///   the client (follow-up XHR). For v1, resolved via the same code path as
 ///   `LazyOwned`.
-/// - `ClosureOwned` — `#[data(lazy(closure))]`. Same `?include=` gate for v1;
+/// - `ClosureOwned` - `#[data(lazy(closure))]`. Same `?include=` gate for v1;
 ///   future releases will resolve eagerly on the initial visit. The variant
 ///   tag is preserved for downstream protocol differentiation.
 #[derive(Debug)]
@@ -67,7 +67,7 @@ pub enum PropEntry {
 
 /// Marker trait implemented by `#[derive(Data)]`-derived types so
 /// `Inertia::data` can dispatch on them. Carries the macro-generated
-/// `__into_inertia_props` surface — users should not implement this
+/// `__into_inertia_props` surface - users should not implement this
 /// manually.
 pub trait IntoInertiaData {
     /// Drain `self` into the macro-emitted `(prop_name, entry)` pairs the
@@ -169,7 +169,7 @@ impl InertiaResponse {
     /// resolves the version [`Inertia::install`](crate::Inertia::install)
     /// was given, so a config here that doesn't carry the same
     /// `.version(...)` makes the page object advertise a version the
-    /// middleware will bounce — the client takes one extra full page load
+    /// middleware will bounce - the client takes one extra full page load
     /// after visiting that page. Set `.version(...)` on the override to
     /// match.
     pub fn with_config(mut self, config: InertiaConfig) -> Self {
@@ -179,7 +179,7 @@ impl InertiaResponse {
 
     /// Set the `<title>` for the HTML shell on this response.
     ///
-    /// On Inertia XHR responses the title is ignored — `<Head>` on the
+    /// On Inertia XHR responses the title is ignored - `<Head>` on the
     /// client manages document title for SPA visits. The configured title
     /// is only used for the initial HTML render.
     pub fn title(mut self, title: impl Into<String>) -> Self {
@@ -188,7 +188,7 @@ impl InertiaResponse {
     }
 
     /// Attach an eager prop. Honors partial-reload filtering per the v3
-    /// protocol — when the client sends `X-Inertia-Partial-Data` matching
+    /// protocol - when the client sends `X-Inertia-Partial-Data` matching
     /// the same component, this key is included only if it's in that list
     /// (and not in `X-Inertia-Partial-Except`).
     pub fn with<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
@@ -197,7 +197,7 @@ impl InertiaResponse {
         self
     }
 
-    /// Attach an always-included prop. Bypasses partial-reload filtering —
+    /// Attach an always-included prop. Bypasses partial-reload filtering -
     /// always returned in the response, even when the client requested a
     /// narrower set. Maps to Laravel's `Inertia::always($value)`.
     pub fn always<V: Serialize>(mut self, key: impl Into<String>, value: V) -> Self {
@@ -206,13 +206,13 @@ impl InertiaResponse {
         self
     }
 
-    /// Attach an always-included prop backed by an async resolver — the
+    /// Attach an always-included prop backed by an async resolver - the
     /// resolver sibling of [`always`](Self::always). Maps to Laravel's
     /// `Inertia::always(fn () => ...)`: `AlwaysProp` accepts any value,
     /// closures included (`AlwaysProp.php`), and Suprnova splits that into
     /// two methods the way it already splits `.with`/`.lazy` and
     /// `.once`/`.once_with`. Reach for this when the always-included
-    /// value is worth computing lazily — a DB read, an HTTP call — not
+    /// value is worth computing lazily - a DB read, an HTTP call - not
     /// when you already have the value in hand (`.always` covers that).
     pub fn always_with<F, Fut, V>(mut self, key: impl Into<String>, resolver: F) -> Self
     where
@@ -227,16 +227,16 @@ impl InertiaResponse {
     }
 
     /// Attach a lazy prop. The async closure runs only when the prop will
-    /// actually be sent to the client — typically once on the initial visit
+    /// actually be sent to the client - typically once on the initial visit
     /// or when explicitly requested via `X-Inertia-Partial-Data`. Maps to
     /// Laravel's `fn () => ...` prop pattern.
     ///
-    /// Despite the name, this is **not** Laravel's `Inertia::lazy()` —
+    /// Despite the name, this is **not** Laravel's `Inertia::lazy()` -
     /// that method is deprecated and behaves like `optional()` (skipped
     /// entirely on the initial visit; `LazyProp` is a straight alias for
     /// `OptionalProp`, `ResponseFactory.php:174-181`). Suprnova's `.lazy`
     /// is the plain-closure convention Laravel itself uses for a callable
-    /// prop with no wrapper at all — included whenever the key passes
+    /// prop with no wrapper at all - included whenever the key passes
     /// partial-reload filtering, standard visits included. Reach for
     /// [`optional`](Self::optional) for the initial-visit-skipped
     /// behavior the name "lazy" suggests if you're coming from Laravel.
@@ -255,8 +255,8 @@ impl InertiaResponse {
     ///
     /// The prop key is `field` (they are always identical in the DTO
     /// pattern). `resolve_props` looks the key up in the sidecar map this
-    /// method populates and runs `Prop::passes_include_gate(owner, field)`
-    /// — which consults the `RequestIncludeSet` task-local — ahead of
+    /// method populates and runs `Prop::passes_include_gate(owner, field)` -
+    /// which consults the `RequestIncludeSet` task-local - ahead of
     /// every other block: the closure runs only when `field` appears in
     /// `?include=` AND is on the DTO's allowlist. Returns `400` to the
     /// client if the include set asks for a field not in the allowlist,
@@ -266,7 +266,7 @@ impl InertiaResponse {
     /// gate above passes, the prop reaches the same partial-reload check
     /// every other prop does (`PartialFilter::should_include`, which
     /// dispatches to `should_include_eager` for a plain lazy field or
-    /// `should_include_optional` for a deferred one) — synchronously,
+    /// `should_include_optional` for a deferred one) - synchronously,
     /// before the resolver closure is ever invoked. So a field must pass
     /// both gates to be resolved and returned; failing either skips the
     /// closure entirely rather than running it and discarding the result.
@@ -285,7 +285,7 @@ impl InertiaResponse {
     /// Attach a fully composed [`Prop`] under `key`.
     ///
     /// The other builder methods each set one flag. This is how you set
-    /// more than one — a deferred prop that also merges, a merge prop the
+    /// more than one - a deferred prop that also merges, a merge prop the
     /// client caches, an optional prop with a custom cache key:
     ///
     /// ```rust,no_run
@@ -422,14 +422,14 @@ impl InertiaResponse {
     }
 
     /// Attach a mergeable prop whose value comes from an async resolver
-    /// instead of being materialized eagerly — append strategy, no
+    /// instead of being materialized eagerly - append strategy, no
     /// `match_on`. The resolver sibling of [`InertiaResponse::merge`].
     /// Maps to `Inertia::merge(fn () => ...)` (`MergeProp` resolves a
     /// `Closure` value via `ResolvesCallables`,
     /// `inertia-laravel-2.0.25/src/MergeProp.php:24-29`).
     ///
-    /// The resolver runs only when the merge prop will actually be sent
-    /// — skipped by partial-reload filtering and by [`Prop::defer`] like
+    /// The resolver runs only when the merge prop will actually be sent -
+    /// skipped by partial-reload filtering and by [`Prop::defer`] like
     /// any other resolver-backed prop. Reach for
     /// `.prop(key, Prop::lazy(...).merge())` instead when the prop also
     /// needs a visibility or cache flag.
@@ -513,8 +513,8 @@ impl InertiaResponse {
     /// client's `<InfiniteScroll>` component reads both to drive
     /// next/previous fetches.
     ///
-    /// A scroll prop always carries merge metadata — unlike a plain
-    /// merge prop, it needs no explicit `.merge()` — defaulting to
+    /// A scroll prop always carries merge metadata - unlike a plain
+    /// merge prop, it needs no explicit `.merge()` - defaulting to
     /// append and switching to prepend only when the client sends
     /// `X-Inertia-Infinite-Scroll-Merge-Intent: prepend`. This matches
     /// `ScrollProp::configureMergeIntent`
@@ -522,7 +522,7 @@ impl InertiaResponse {
     /// unconditionally on every response, fresh visits included.
     ///
     /// `scrollProps[key].reset` is `true` exactly when the client named
-    /// `key` in `X-Inertia-Reset` — the same header a regular merge prop
+    /// `key` in `X-Inertia-Reset` - the same header a regular merge prop
     /// reads, and independent of the merge-intent header above
     /// (`Response.php:700-716`). A reset key is also excluded from
     /// `mergeProps` / `prependProps` for that response, so the client
@@ -546,7 +546,7 @@ impl InertiaResponse {
 
     /// Attach an infinite-scroll prop whose value is produced by an
     /// async resolver. Useful when the paginated data requires a DB
-    /// query or other async work — common for real scroll loaders.
+    /// query or other async work - common for real scroll loaders.
     pub fn scroll_with<F, Fut, V>(
         self,
         key: impl Into<String>,
@@ -563,7 +563,7 @@ impl InertiaResponse {
     }
 
     /// Attach an infinite-scroll prop whose merge instruction targets a
-    /// nested field of the value instead of the value itself —
+    /// nested field of the value instead of the value itself -
     /// `key.wrap_key` rather than bare `key`. Use this when the value is
     /// an envelope (`{ data: [...], meta: {...} }`) and only the array
     /// inside should fold into what the client already holds; a plain
@@ -754,8 +754,8 @@ impl InertiaResponse {
     /// history entries fail and the client refetches them.
     ///
     /// Use this when the response you are returning *is* the page that
-    /// should clear. When the clearing handler redirects — logout is the
-    /// canonical case — reach for [`App::clear_history`](crate::App::clear_history)
+    /// should clear. When the clearing handler redirects - logout is the
+    /// canonical case - reach for [`App::clear_history`](crate::App::clear_history)
     /// instead: the redirect's own response is discarded by the browser,
     /// so the flag has to ride the redirect and land on the page that
     /// actually renders. Maps to `Inertia::clearHistory()`, which is
@@ -785,18 +785,18 @@ impl InertiaResponse {
     /// (not an Inertia SPA visit). Maps to `Inertia::location($url)`.
     ///
     /// **When to use which redirect form:**
-    /// - [`Redirect::to`](crate::Redirect::to) — standard 302/303 with
+    /// - [`Redirect::to`](crate::Redirect::to) - standard 302/303 with
     ///   `Location` header. The normal case for redirects after form
     ///   submission inside the Inertia app.
-    /// - [`InertiaResponse::redirect`](Self::redirect) — 409 +
+    /// - [`InertiaResponse::redirect`](Self::redirect) - 409 +
     ///   `X-Inertia-Redirect` for soft Inertia SPA navigation; use
     ///   when the redirect must carry a `#fragment` (server `Location`
     ///   headers can't carry fragments through Inertia XHR).
-    /// - [`InertiaResponse::location`](Self::location) — 409 +
+    /// - [`InertiaResponse::location`](Self::location) - 409 +
     ///   `X-Inertia-Location` for full-page reload via
     ///   `window.location`; use to leave the Inertia app entirely.
     ///   Always returns the 409 form, so only reach for it where the
-    ///   request is already known to be an Inertia visit — otherwise use
+    ///   request is already known to be an Inertia visit - otherwise use
     ///   [`location_for`](Self::location_for), which falls back to a plain
     ///   `302` for a hard navigation.
     pub fn location(url: impl AsRef<str>) -> HttpResponse {
@@ -805,7 +805,7 @@ impl InertiaResponse {
             .header("X-Inertia-Location", url.as_ref())
     }
 
-    /// Request-aware external redirect — Laravel's `Inertia::location($url)`.
+    /// Request-aware external redirect - Laravel's `Inertia::location($url)`.
     ///
     /// - Inertia XHR (`X-Inertia: true`) → `409` + `X-Inertia-Location`,
     ///   which the client turns into `window.location = url`.
@@ -840,7 +840,7 @@ impl InertiaResponse {
     /// Maps to the Inertia v3 `X-Inertia-Redirect` protocol header.
     /// For standard server-side redirects (no fragment, plain
     /// post-form-submission) use [`Redirect::to`](crate::Redirect::to)
-    /// instead — the auto-303 middleware will rewrite 302→303 for non-GET.
+    /// instead - the auto-303 middleware will rewrite 302→303 for non-GET.
     pub fn redirect(url: impl AsRef<str>) -> HttpResponse {
         HttpResponse::new()
             .status(409)
@@ -867,7 +867,7 @@ impl InertiaResponse {
     /// - Otherwise returns the HTML shell with the JSON page object
     ///   embedded in a sibling `<script type="application/json"
     ///   data-page="app">` element next to the empty `<div id="app">`
-    ///   mount node — the Inertia 3 contract that `getInitialPageFromDOM`
+    ///   mount node - the Inertia 3 contract that `getInitialPageFromDOM`
     ///   reads.
     pub async fn resolve<R: InertiaRequestExt>(
         self,
@@ -879,7 +879,7 @@ impl InertiaResponse {
         // (`Response.php:307`). Honouring the client's "I already have
         // this cached" claim during an explicit partial reload means
         // `router.reload({ only: ['stats'] })` returns nothing at all for
-        // the one key the user just asked for — the client asked BECAUSE
+        // the one key the user just asked for - the client asked BECAUSE
         // it wants a fresh value. A non-Inertia visit renders the page
         // from scratch and has no client cache to honour either.
         let except_once: Vec<String> = if is_inertia_request && !filter.matched {
@@ -907,7 +907,7 @@ impl InertiaResponse {
         // `X-Inertia-Infinite-Scroll-Merge-Intent` tells the server
         // whether a follow-up infinite-scroll fetch wants the new chunk
         // appended or prepended to the existing accumulator; absent, it
-        // defaults to append. It does not drive `reset` — that comes
+        // defaults to append. It does not drive `reset` - that comes
         // from `X-Inertia-Reset` alone (`reset_keys` above), exactly
         // like a regular merge prop.
         let scroll_intent: Option<String> = req
@@ -932,7 +932,7 @@ impl InertiaResponse {
         // resets pagination / sort / filter state on every back-forward
         // navigation. Laravel's `Response::getUrl` does the same, and
         // `InertiaVersionMiddleware` derives its `X-Inertia-Location`
-        // from the same expression — so by default the two agree; a
+        // from the same expression - so by default the two agree; a
         // `url_resolver` intentionally moves only this one, because the
         // 409 bounce has to name a URL the browser can actually fetch.
         let url = match config.url_resolver.as_ref() {
@@ -957,7 +957,7 @@ impl InertiaResponse {
         let resolved_preserve_fragment = preserve_fragment.unwrap_or(flashed_preserve_fragment);
 
         // clear-history precedence: per-response override OR the session
-        // flash set by `App::clear_history()`. Either alone is enough —
+        // flash set by `App::clear_history()`. Either alone is enough -
         // unlike `preserve_fragment` there is no "force off" case, because
         // the only reason to ask for a history clear is that the previous
         // session must stop being readable. `get_flash` removes the entry,
@@ -977,7 +977,7 @@ impl InertiaResponse {
         //
         // Track the union of (1) + (2) as `shared_keys` so the page
         // object can advertise them under `sharedProps` (the client
-        // uses this for instant-swap during navigation — see
+        // uses this for instant-swap during navigation - see
         // `inertia-3.1.1/packages/core/src/router.ts` `performInstantSwap`).
         //
         // A dotted share key contributes only its ROOT segment. The
@@ -988,7 +988,7 @@ impl InertiaResponse {
         // into the page it renders mid-swap
         // (`inertia-3.6.1/packages/core/src/router.ts:624-633`). A raw
         // `"user.name"` entry fails that lookup, so `user` would be
-        // *absent* — not stale — for that frame and any layout reading
+        // *absent* - not stale - for that frame and any layout reading
         // `props.user.name` throws. Laravel never hits this because
         // `Inertia::share` runs `Arr::set` at share time
         // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`), so its
@@ -1015,7 +1015,7 @@ impl InertiaResponse {
         }
         for (k, v) in props {
             // Note: when user props override a shared key, we keep the
-            // key in `shared_keys` per the Inertia v3 client contract —
+            // key in `shared_keys` per the Inertia v3 client contract -
             // the client reads the value from `props` (user's override)
             // and uses `sharedProps` only as a key list.
             merged.insert(k, v);
@@ -1037,11 +1037,11 @@ impl InertiaResponse {
         // Combine flash from three sources, in precedence order
         // (later writes override earlier so same-request entries win
         // over inherited cross-redirect entries):
-        //   1. Session `_flash.old.*` — bridged from the previous
+        //   1. Session `_flash.old.*` - bridged from the previous
         //      request via `From<Redirect> for Response` then aged by
         //      `SessionMiddleware`.
-        //   2. Task-local flash bag — same-request `App::flash`.
-        //   3. Builder flash — same-request `InertiaResponse::flash`.
+        //   2. Task-local flash bag - same-request `App::flash`.
+        //   3. Builder flash - same-request `InertiaResponse::flash`.
         let mut flash = flash::drain_session_flash_for_page();
         for (k, v) in flash::drain() {
             flash.insert(k, v);
@@ -1078,7 +1078,7 @@ impl InertiaResponse {
         }
     }
 
-    /// Build the page object without producing an HTTP response — used by
+    /// Build the page object without producing an HTTP response - used by
     /// tests that want to inspect the page object directly.
     #[cfg(test)]
     pub(crate) async fn build_page_object_for_test(
@@ -1112,7 +1112,7 @@ impl InertiaResponse {
         .expect("test resolver should not fail");
         let resolved_encrypt_history = encrypt_history.unwrap_or(config.encrypt_history_default);
         // Test helper doesn't run inside a session scope by default,
-        // so we never pick up a flashed flag here — only the explicit
+        // so we never pick up a flashed flag here - only the explicit
         // override. Tests that DO drive a session scope via
         // `session_scope_for_test` pick up `_flash.old.*` via the
         // shared session-flash merge below.
@@ -1156,8 +1156,8 @@ impl InertiaResponse {
 
 /// Accumulator for Inertia v3 page-object metadata fields.
 ///
-/// Each field corresponds to an optional top-level page-object property
-/// — `deferredProps`, `rescuedProps`, `mergeProps`, etc. — and stays
+/// Each field corresponds to an optional top-level page-object property -
+/// `deferredProps`, `rescuedProps`, `mergeProps`, etc. - and stays
 /// empty when no props of that flavor are used in the response. The
 /// `build_page_object` step only emits non-empty fields, so simple
 /// responses keep their JSON small.
@@ -1217,8 +1217,8 @@ fn parse_csv_header<R: InertiaRequestExt>(req: &R, name: &str) -> Vec<String> {
 ///
 /// Laravel emits `$errors[0]` unless `$withAllErrors` is set
 /// (`inertia-laravel-2.0.25/src/Middleware.php:196`), and Inertia's
-/// `ErrorValue` is `string` by default (`inertia-3.6.1/packages/core/src/types.ts:59,100`)
-/// — a bare string is what `useForm().errors.email` resolves to.
+/// `ErrorValue` is `string` by default (`inertia-3.6.1/packages/core/src/types.ts:59,100`) -
+/// a bare string is what `useForm().errors.email` resolves to.
 /// Emitting an array meant every page had to index `[0]`, which on a
 /// string silently yields its first character.
 ///
@@ -1262,8 +1262,8 @@ fn collapse_error_bags(
 ///
 /// Metadata and values are decided separately, on purpose. A prop's
 /// merge, once, and deferred metadata is gated by the only/except lists
-/// alone — Laravel computes each block from the unfiltered prop bag
-/// (`inertia-laravel-2.0.25/src/Response.php:553-560`, `:725-736`) —
+/// alone - Laravel computes each block from the unfiltered prop bag
+/// (`inertia-laravel-2.0.25/src/Response.php:553-560`, `:725-736`) -
 /// while whether the value itself ships goes through
 /// [`PartialFilter::should_include`]. That split is what makes
 /// `Prop::…defer().merge()` land its `deferredProps` entry on the first
@@ -1274,9 +1274,9 @@ fn collapse_error_bags(
 /// value normally but suppress the merge metadata, so the client
 /// treats the value as a replacement rather than an append.
 ///
-/// A scroll prop folds into that same merge protocol unconditionally —
+/// A scroll prop folds into that same merge protocol unconditionally -
 /// unlike a plain merge prop, its direction defaults to append rather
-/// than needing an explicit `.merge()` flag — and its per-key `reset`
+/// than needing an explicit `.merge()` flag - and its per-key `reset`
 /// flag is read straight from `reset_keys` too, independent of the
 /// client's `X-Inertia-Infinite-Scroll-Merge-Intent` header.
 /// The one prop key the Inertia v3 contract guarantees on every page
@@ -1303,9 +1303,9 @@ async fn resolve_props(
 
     // `errors` is always present per the Inertia v3 contract. Seed
     // with whatever the session has flashed under the canonical bag
-    // keys (`errors.<bag>` — written by [`crate::http::Redirect::with_errors`]),
+    // keys (`errors.<bag>` - written by [`crate::http::Redirect::with_errors`]),
     // or an empty object when nothing flashed. The `X-Inertia-Error-Bag`
-    // wrapping happens AFTER all props resolve — see the bottom of this
+    // wrapping happens AFTER all props resolve - see the bottom of this
     // function. Doing it post-resolution means a handler that injects
     // errors via `.with("errors", {...})` still gets correctly scoped.
     //
@@ -1319,7 +1319,7 @@ async fn resolve_props(
     //    post-pass below re-wraps them (and any handler-injected errors)
     //    under the bag name.
     //  - no header, `default` bag present → that bag's errors, flat
-    //    (`{field: [...]}`) — what the Inertia client binds to directly
+    //    (`{field: [...]}`) - what the Inertia client binds to directly
     //    (`page.props.errors.field`), not nested under `"default"`.
     //  - no header, no default bag → every bag, keyed by name.
     let session_errors: serde_json::Map<String, Value> =
@@ -1348,24 +1348,24 @@ async fn resolve_props(
             continue;
         }
 
-        // OWNER-TAGGED INCLUDE GATE (`#[derive(Data)]`) — Stage 1.
+        // OWNER-TAGGED INCLUDE GATE (`#[derive(Data)]`) - Stage 1.
         //
         // Gate order (spec):
-        //   Stage 1 — include-set membership + per-DTO allowlist. A
+        //   Stage 1 - include-set membership + per-DTO allowlist. A
         //     field the request never opted into is dropped outright:
         //     no value, no metadata, no `deferredProps` announcement,
         //     because it is not part of this response at all. A field
         //     that IS named by `?include=` but is off the allowlist
         //     raises Err(400), and that error MUST propagate before
         //     partial-data can silently swallow it.
-        //   Stage 2 — everything below: metadata, the deferred announce,
+        //   Stage 2 - everything below: metadata, the deferred announce,
         //     the partial-data filter, and narrowing, all reached the
         //     same way an ordinary prop reaches them.
         //
         // The gate sits here, ahead of every other block, rather than
         // inside a fast path keyed on `Prop::is_lazy()`. `is_lazy()` is
-        // false for any *flagged* prop — a `#[data(lazy(deferred))]`
-        // field is `Visibility::Deferred` — so a fast path conditioned on
+        // false for any *flagged* prop - a `#[data(lazy(deferred))]`
+        // field is `Visibility::Deferred` - so a fast path conditioned on
         // it never saw the flagged props at all and they resolved off the
         // ordinary path with no include check anywhere in it. Running the
         // gate for every owner-tagged prop closes that, and leaves the
@@ -1429,7 +1429,7 @@ async fn resolve_props(
             let paths = prop.merge_paths();
             match mode {
                 // A prop merging at one or more nested paths never also
-                // merges its whole value — Laravel's
+                // merges its whole value - Laravel's
                 // `MergesProps::mergesAtRoot` (`MergesProps.php:126-129`)
                 // turns root merging off the moment a path is named, so
                 // the two are mutually exclusive per prop, never additive.
@@ -1446,7 +1446,7 @@ async fn resolve_props(
                     }
                 }
                 // Deep merge already recurses into every nested field on
-                // its own, so a path has nothing to narrow — Laravel
+                // its own, so a path has nothing to narrow - Laravel
                 // excludes deep-merge props from the root/path partition
                 // entirely (`Response.php:590`, `:610`) and always emits
                 // the bare key.
@@ -1463,7 +1463,7 @@ async fn resolve_props(
         // client's intent header says so
         // (`inertia-laravel-2.0.25/src/ScrollProp.php:72-79`). `reset`
         // is decided independently, straight off `X-Inertia-Reset`
-        // (`Response.php:700-716`) — not off the intent header, and a
+        // (`Response.php:700-716`) - not off the intent header, and a
         // reset key is excluded from the merge lists entirely, the
         // same exclusion a regular merge prop already gets.
         //
@@ -1474,7 +1474,7 @@ async fn resolve_props(
         // and `resolveScrollProps` from the *unfiltered* prop bag and
         // narrows them with the only/except lists alone
         // (`Response.php:553-560`, `:700-716`), never asking whether the
-        // value resolved — which is exactly why the once and merge
+        // value resolved - which is exactly why the once and merge
         // blocks above sit here too. Sitting below those `continue`s is
         // what used to drop the `scrollProps` entry of a
         // `once()+scroll()` prop the moment the client reported the
@@ -1484,13 +1484,13 @@ async fn resolve_props(
         // so infinite scroll silently stopped after the first
         // navigation.
         //
-        // Gate: `passes_lists`, the same as the once/merge blocks above
-        // — not `filter.should_include(&key, &prop)`. Those two
+        // Gate: `passes_lists`, the same as the once/merge blocks above -
+        // not `filter.should_include(&key, &prop)`. Those two
         // questions diverge for an `Always` prop: `should_include` is
         // unconditionally `true` for one (it bypasses partial-reload
         // filtering by design), but Laravel's
         // `resolveScrollProps`/`resolveMergeProps` still narrow by
-        // `only`/`except` — an `Always` scroll prop outside the
+        // `only`/`except` - an `Always` scroll prop outside the
         // requested set must still ship its value (so `should_include`
         // is right to let it through below) but must not also emit a
         // merge instruction for a key the client never fetched fresh
@@ -1503,7 +1503,7 @@ async fn resolve_props(
         // `resolveScrollProps` rejects a deferred scroll prop on a
         // non-partial visit (`reject(fn (ScrollProp $prop) => !
         // $isPartial && $prop->shouldDefer())`,
-        // `Response.php:704-718`) — the value has not shipped yet, so
+        // `Response.php:704-718`) - the value has not shipped yet, so
         // there is no accumulator for a cursor to describe.
         // `getMergePropsForRequest` carries no matching rejection, so
         // the merge instruction still ships on that first visit: the
@@ -1514,7 +1514,7 @@ async fn resolve_props(
         // `match_on` folds in too, exactly the way Laravel's
         // `resolveMergeMatchingKeys` folds a `ScrollProp`'s
         // `matchesOn()` in alongside any other `Mergeable`
-        // (`Response.php:558,641-652` — `getMergePropsForRequest`
+        // (`Response.php:558,641-652` - `getMergePropsForRequest`
         // gates only on `instanceof Mergeable && shouldMerge()`, no
         // scroll exclusion, and `resolveMergeMatchingKeys` doesn't
         // special-case `ScrollProp` either). This block keys every
@@ -1527,18 +1527,18 @@ async fn resolve_props(
         // single-argument `append($wrapper)` (`ScrollProp.php:72-79`),
         // never the two-argument `append($path, $matchOn)` overload
         // that prefixes `matchOn` with the path
-        // (`MergesProps.php:136-151`) — so a wrapped Laravel
+        // (`MergesProps.php:136-151`) - so a wrapped Laravel
         // `ScrollProp` given a bare `matchOn('id')` emits an
         // unprefixed `"key.id"` match entry against a merge target of
         // `"key.wrapper"`, which the client's `mergeOrMatchItems`
         // prefix check (`inertia-3.6.1/.../response.ts:524-546`) can
-        // never match — the entry is silently inert. T27's
+        // never match - the entry is silently inert. T27's
         // `merge_with_path` has to leave that prefixing to the caller
         // because a prop can carry several paths at once and the
         // crate can't guess which one a given `match_on` field belongs
         // to (`spec-t27.md` design note 4). `.scroll_wrap` carries no
-        // such ambiguity — it's a single `Option<String>`, the one
-        // nesting point a scroll prop can have — so this block derives
+        // such ambiguity - it's a single `Option<String>`, the one
+        // nesting point a scroll prop can have - so this block derives
         // the correct prefix itself instead of reproducing a match
         // that would silently never fire.
         //
@@ -1546,14 +1546,14 @@ async fn resolve_props(
         // is NOT redundant: Laravel's `ScrollProp` constructor already
         // sets `$this->merge = true` (`ScrollProp.php:60`), so a
         // caller's own `->merge()`/`->prepend()` call has nothing left
-        // to change — but `shouldDeepMerge()` routes the prop into
+        // to change - but `shouldDeepMerge()` routes the prop into
         // `resolveDeepMergeProps`, a completely different list, ahead
         // of the append/prepend computation
         // (`resolveAppendMergeProps`/`resolvePrependMergeProps` both
         // `reject(fn ($p) => $p->shouldDeepMerge())` first,
         // `Response.php:590,610`). A wrap key has nothing to narrow
         // under deep merge, same reasoning as the general merge
-        // block's `MergeMode::Deep` arm above ignoring `merge_paths` —
+        // block's `MergeMode::Deep` arm above ignoring `merge_paths` -
         // deep merge already recurses through the entire value, so
         // this block deep-merges at the bare key even when
         // `.scroll_wrap(...)` is also set.
@@ -1604,7 +1604,7 @@ async fn resolve_props(
             // not ask for this round would send it back for them again.
             //
             // A deferred prop the client already holds is not announced
-            // again either — otherwise it refetches on every navigation
+            // again either - otherwise it refetches on every navigation
             // and `once` buys nothing (`Response.php:653-673`).
             if !filter.matched && !client_has_cached {
                 metadata
@@ -1636,7 +1636,7 @@ async fn resolve_props(
         // where no filter can reach it. A handler-supplied
         // `.with("errors", …)` prop arrives here instead, and without
         // this exemption a partial reload that filtered it out fell back
-        // to the seeded bag — usually `{}` — handing the client an
+        // to the seeded bag - usually `{}` - handing the client an
         // *empty* errors object rather than omitting the key. That is
         // the destructive shape: the client folds a partial response in
         // with `{...current.props, ...response.props}`
@@ -1644,7 +1644,7 @@ async fn resolve_props(
         // wipes the errors it was already displaying, while an absent
         // key would have left them alone.
         //
-        // An explicit visibility flag still wins — `.optional()` on the
+        // An explicit visibility flag still wins - `.optional()` on the
         // errors key means the caller wants it withheld, the same way
         // `Inertia::optional(...)` under the `errors` key overrides the
         // middleware's `AlwaysProp` in Laravel's merged bag.
@@ -1656,7 +1656,7 @@ async fn resolve_props(
 
         // ---- value ----
         let rescue = prop.is_defer() && prop.rescues();
-        // `Always` bypasses partial-reload filtering entirely — dot
+        // `Always` bypasses partial-reload filtering entirely - dot
         // notation included. Laravel re-injects the raw, unfiltered
         // `AlwaysProp` value after the only/except rebuild rather than
         // narrowing it (`inertia-laravel-2.0.25/src/Response.php:406-416`,
@@ -1705,9 +1705,9 @@ async fn resolve_props(
                             // REQUEST_ID task-local is in scope (a spawned
                             // task wouldn't inherit it). The dispatch
                             // itself is spawned per the documented
-                            // ErrorOccurred best-effort contract — see
+                            // ErrorOccurred best-effort contract - see
                             // `events/builtins.rs` and the matching
-                            // pattern in `http/response.rs` — so we do
+                            // pattern in `http/response.rs` - so we do
                             // not block the Inertia partial-response
                             // collector on listener execution.
                             let evt = crate::events::ErrorOccurred {
@@ -1748,7 +1748,7 @@ async fn resolve_props(
     // builder for `max_concurrent_resolvers(0)`) disables it.
     //
     // `buffered` (vs. `buffer_unordered`) preserves input ordering in
-    // the output stream — outcome order does not actually matter for
+    // the output stream - outcome order does not actually matter for
     // the materialized map / metadata population below, but stable
     // ordering keeps test snapshots predictable.
     use futures::stream::{self, StreamExt, TryStreamExt};
@@ -1782,15 +1782,15 @@ async fn resolve_props(
         materialized.insert(ERRORS_KEY.to_string(), Value::Object(wrapper));
     }
 
-    // Dot-key nesting — Laravel's `Arr::set`-based `resolveArrayableProperties`
+    // Dot-key nesting - Laravel's `Arr::set`-based `resolveArrayableProperties`
     // unpack step (`reference/inertia-laravel-2.0.25/src/Response.php:344-368`),
     // applied once to the fully resolved, fully filtered prop bag so it sees
     // exactly what's about to ship: eager, lazy, deferred-and-resolved,
     // merged, once, and scroll values alike, whether they came from the
-    // response builder or the shared registry — both stored under their
+    // response builder or the shared registry - both stored under their
     // literal (possibly dotted) key up to this point. A key with no dot
     // passes through as a plain insert. This never recurses into a prop's
-    // *value* — the `errors` object above keeps whatever dotted validation
+    // *value* - the `errors` object above keeps whatever dotted validation
     // field names it carries internally; only top-level prop keys nest.
     let materialized = dotted::unpack_map(materialized);
 
@@ -2004,14 +2004,14 @@ where
 /// # Panics
 ///
 /// Panics if `value`'s `Serialize` impl returns `Err`. This is a bug
-/// in the value's type — a hand-written custom `Serialize`
+/// in the value's type - a hand-written custom `Serialize`
 /// implementation returning `Err` is the only path that triggers this.
 ///
 /// The panic is caught by the request-level panic-recovery middleware
 /// (`framework/src/middleware/chain.rs`, Domain 2 M1) and converted to
 /// a 500 response, so the process stays up. To handle serialization
-/// failure explicitly — required off the HTTP path, where no panic net
-/// exists — use the fallible sibling of the builder method
+/// failure explicitly - required off the HTTP path, where no panic net
+/// exists - use the fallible sibling of the builder method
 /// ([`try_with`](InertiaResponse::try_with),
 /// [`try_always`](InertiaResponse::try_always), etc.), which returns
 /// `Result<Self, FrameworkError>`. [`InertiaResponse::lazy`] is an
@@ -2066,13 +2066,13 @@ fn build_html_response(
     // - SSR path: the worker's `body` is already wrapped by
     //   `buildSSRBody`, which emits the `<script>` + `<div
     //   data-server-rendered="true" id="app">` pair as one string. We
-    //   inject it raw — wrapping it in another `<div id="app">` would
+    //   inject it raw - wrapping it in another `<div id="app">` would
     //   produce duplicate IDs and break hydration.
     // - Non-SSR path: we emit the same shape ourselves with an empty
     //   mount div. Inside the script tag the JSON is raw (NOT
     //   HTML-attribute-encoded) and every `/` is backslash-escaped so a
     //   literal `</script>` substring inside a string field can't
-    //   terminate the tag — this matches `buildSSRBody`'s escape.
+    //   terminate the tag - this matches `buildSSRBody`'s escape.
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
     let mount_block = if let Some(ssr) = ssr {
         ssr.body.clone()
@@ -2188,7 +2188,7 @@ fn render_prod_head(config: &InertiaConfig) -> String {
         }
         out
     } else {
-        // Manifest absent or entry not present — legacy fallback.
+        // Manifest absent or entry not present - legacy fallback.
         format!(
             "<script type=\"module\" src=\"{base}/main.js\"></script>\n\
              <link rel=\"stylesheet\" href=\"{base}/main.css\">\n"

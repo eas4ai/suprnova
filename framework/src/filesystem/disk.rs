@@ -2,7 +2,7 @@
 //!
 //! The [`DiskExt`] trait is blanket-implemented on [`opendal::Operator`] and
 //! re-exported under [`crate::filesystem::DiskExt`] and at the crate root. It
-//! sits on top of the operator surface — every method ultimately calls back
+//! sits on top of the operator surface - every method ultimately calls back
 //! through the operator (and therefore through the `PathGuardLayer` for local
 //! filesystem disks), so the guard against `..` escape is preserved.
 //!
@@ -29,7 +29,7 @@
 //! | `make_directory(p)`  | `create_dir(p)` |
 //! | `delete_directory(p)`| `remove_all(p)` |
 //!
-//! No methods *shadow* an existing opendal method — that would silently
+//! No methods *shadow* an existing opendal method - that would silently
 //! redirect internal callers (e.g. [`crate::filesystem::streaming`]) to a
 //! different implementation. The Laravel names sit alongside.
 
@@ -44,15 +44,15 @@ use std::time::SystemTime;
 /// Algorithms supported by [`DiskExt::checksum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChecksumAlgorithm {
-    /// MD5 — Laravel's historical default. Cryptographically broken; provided
+    /// MD5 - Laravel's historical default. Cryptographically broken; provided
     /// for parity with Laravel's `checksum($path, ['checksum_algo' => 'md5'])`
     /// and for compatibility with object stores that surface MD5 ETags. For
     /// any new integrity check choose [`ChecksumAlgorithm::Sha256`] instead.
     Md5,
-    /// SHA-1 — also broken for collision resistance; included for parity with
+    /// SHA-1 - also broken for collision resistance; included for parity with
     /// Git/S3 toolchains that still rely on it. Prefer SHA-256.
     Sha1,
-    /// SHA-256 — recommended default for any new integrity check.
+    /// SHA-256 - recommended default for any new integrity check.
     Sha256,
 }
 
@@ -71,7 +71,7 @@ pub trait DiskExt {
     ///
     /// Returns `Ok(true)` if the path is *not* present. Surfaces the same
     /// error as `exists` if the backend cannot answer the question (network
-    /// failure, permission denied, etc.) — a backend error is not "missing".
+    /// failure, permission denied, etc.) - a backend error is not "missing".
     fn missing(&self, path: &str) -> impl Future<Output = Result<bool, FrameworkError>> + Send;
 
     /// File-only existence check.
@@ -188,7 +188,7 @@ pub trait DiskExt {
     /// when the backend has none.
     ///
     /// Returns `Ok(None)` only when both the backend and the sniffer come up
-    /// empty — i.e. an unknown binary or text format.
+    /// empty - i.e. an unknown binary or text format.
     fn mime_type(
         &self,
         path: &str,
@@ -206,7 +206,7 @@ pub trait DiskExt {
     /// List file paths in `directory`. With `recursive = true`, descends into
     /// subdirectories.
     ///
-    /// Returns only file entries — directories are filtered out. Use
+    /// Returns only file entries - directories are filtered out. Use
     /// [`DiskExt::directories`] for the inverse.
     fn files(
         &self,
@@ -539,7 +539,7 @@ impl DiskExt for Operator {
     }
 
     async fn move_to(&self, from: &str, to: &str) -> Result<(), FrameworkError> {
-        // Try the backend's native rename first — it's atomic on filesystems
+        // Try the backend's native rename first - it's atomic on filesystems
         // and a single API call on S3 / Azure when supported. Some backends
         // (notably opendal's in-memory `services::Memory`) do not implement
         // rename or copy, so we fall back to read + write + delete so
@@ -622,7 +622,7 @@ async fn list_entries(
 
     // opendal includes the directory entry itself in the list (e.g. listing
     // "foo/" yields "foo/" as one of the results). Skip self-entries so the
-    // caller only sees children — matches Laravel's `files()`/`directories()`.
+    // caller only sees children - matches Laravel's `files()`/`directories()`.
     let prefix_for_compare = prefix.clone();
     let mut paths: Vec<String> = entries
         .into_iter()

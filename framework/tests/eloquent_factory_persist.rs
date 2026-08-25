@@ -1,4 +1,4 @@
-//! Phase 10A T11 polish — `Persistable` covers Eloquent-facing
+//! Phase 10A T11 polish - `Persistable` covers Eloquent-facing
 //! `#[suprnova::model]` structs, not just SeaORM `Model` rows.
 //!
 //! Before this polish landed, `Persistable` was blanket-implemented
@@ -49,11 +49,11 @@ impl Factory for FactoryUserFactory {
     type Model = FactoryUser;
 
     fn definition() -> FactoryUser {
-        // Runtime shape — exactly what a developer would write
+        // Runtime shape - exactly what a developer would write
         // by hand. No knowledge of storage-side INTEGER-for-bool or
         // RFC-3339-string-for-DateTime leaks into the factory.
         FactoryUser {
-            // `0` is the placeholder — `persist_via_seaorm` flips
+            // `0` is the placeholder - `persist_via_seaorm` flips
             // PK columns to `NotSet` so SQLite assigns the real id.
             id: 0,
             name: "Default Name".into(),
@@ -121,7 +121,7 @@ async fn factory_create_many_persists_multiple_eloquent_rows() {
     }
 
     // Confirm the rows landed in the database via the Eloquent
-    // read path — closes the round-trip loop.
+    // read path - closes the round-trip loop.
     let count = FactoryUser::count().await.unwrap();
     assert_eq!(count, 3);
 }
@@ -141,7 +141,7 @@ async fn direct_persistable_call_on_eloquent_struct_works() {
         ..Default::default()
     };
 
-    // Direct `.persist()` call — the per-struct impl is what makes
+    // Direct `.persist()` call - the per-struct impl is what makes
     // this compile without `as ::sea_orm::ModelTrait` shenanigans.
     let inserted = user.persist().await.unwrap();
     assert!(inserted.id > 0);

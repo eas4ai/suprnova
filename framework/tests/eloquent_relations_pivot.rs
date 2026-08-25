@@ -1,9 +1,9 @@
-//! Phase 10B T4 — `BelongsToMany<L, R, P>` + first-class Pivot model.
+//! Phase 10B T4 - `BelongsToMany<L, R, P>` + first-class Pivot model.
 //!
 //! Exercises the full m2m surface:
 //!
 //! - `.attach(id)` / `.attach_with(id, attrs!{...})` / `.detach(id)` /
-//!   `.sync([...])` mutate the pivot table. `sync` is transactional —
+//!   `.sync([...])` mutate the pivot table. `sync` is transactional -
 //!   a failing INSERT rolls back the corresponding DELETE.
 //! - `.get()` runs the two-query strategy (related rows by IN, pivot
 //!   rows separately) and stamps `__pivot = Some(Arc::new(pivot))` on
@@ -11,7 +11,7 @@
 //! - `.count()` is a single `SELECT COUNT(*)` against the pivot table.
 //! - The eager `__eager_load("roles", ...)` dispatcher clones R per
 //!   attachment so multiple parents sharing one R each get their own
-//!   pivot context — pin this with the
+//!   pivot context - pin this with the
 //!   `belongs_to_many_eager_load_clones_per_attachment` test.
 //! - `__count_relation` and `__aggregate_relation` use server-side
 //!   GROUP BY against the pivot (count) / pivot+related JOIN
@@ -150,7 +150,7 @@ async fn belongs_to_many_sync_attaches_missing_and_detaches_extra() {
 
 #[tokio::test]
 async fn belongs_to_many_pivot_accessor_returns_pivot_data() {
-    // THE key test — verifies `.pivot::<P>()` works after `.get()`.
+    // THE key test - verifies `.pivot::<P>()` works after `.get()`.
     // The Arc<dyn Any + Send + Sync> stamped on __pivot must downcast
     // to the user's Pivot type cleanly.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -210,7 +210,7 @@ async fn belongs_to_many_attach_with_explicit_null_pivot_extra_round_trips() {
 #[tokio::test]
 async fn belongs_to_many_attach_idempotent_or_explicit() {
     // attach twice = UNIQUE-constraint violation, surfaced as Err.
-    // The framework doesn't dedupe at the Rust layer — users
+    // The framework doesn't dedupe at the Rust layer - users
     // requiring dedup use `sync()`.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -222,7 +222,7 @@ async fn belongs_to_many_attach_idempotent_or_explicit() {
     let result2 = u.roles().attach(r.id).await;
     assert!(result1.is_ok(), "first attach must succeed");
     let err = result2.expect_err("second attach must violate UNIQUE(btm_user_id, btm_role_id)");
-    // Pin the error MESSAGE — a generic "table not found" would
+    // Pin the error MESSAGE - a generic "table not found" would
     // satisfy `is_err()` but wouldn't prove the contract that the
     // UNIQUE constraint is what rejected the duplicate. SQLite's
     // exact wording is "UNIQUE constraint failed: btm_role_user...",
@@ -323,7 +323,7 @@ async fn belongs_to_many_eager_load_populates_loaded_accessor() {
 #[tokio::test]
 async fn belongs_to_many_eager_load_empty_parent_gets_empty_slice() {
     // Parent with no attached roles must still get an empty slice on
-    // `roles_loaded()` — the dispatcher explicitly seeds every parent's
+    // `roles_loaded()` - the dispatcher explicitly seeds every parent's
     // cache so the accessor's "not eager-loaded" panic doesn't fire.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -344,7 +344,7 @@ async fn belongs_to_many_eager_load_stamps_pivot_per_attachment() {
     // CRITICAL: when one R is attached to multiple Ls via different
     // pivot rows, each L's copy of R must carry its OWN pivot context.
     // The dispatcher arm must clone R per attachment and stamp the
-    // matching pivot row — NOT share a single instance.
+    // matching pivot row - NOT share a single instance.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let u1 = BtmUser::create(attrs! { name: "u1" }).await.unwrap();
@@ -389,7 +389,7 @@ async fn belongs_to_many_eager_load_stamps_pivot_per_attachment() {
 #[tokio::test]
 async fn belongs_to_many_count_dispatcher_uses_server_side_group_by() {
     // The dispatcher emits a single SELECT/GROUP BY against the pivot
-    // table — no client-side counting. The test checks the result
+    // table - no client-side counting. The test checks the result
     // surface (which is identical to a client-side counter); the
     // contract is the SQL shape, pinned by code review and the
     // workspace gate.
@@ -433,7 +433,7 @@ async fn belongs_to_many_count_dispatcher_uses_server_side_group_by() {
 
 #[tokio::test]
 async fn belongs_to_many_aggregate_sum_over_related_column() {
-    // Aggregate is over R's columns (Laravel parity — users want
+    // Aggregate is over R's columns (Laravel parity - users want
     // sum(role.weight), not sum(pivot.assigned_at)). The dispatcher
     // JOINs pivot to related and groups by pivot's FK.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -545,7 +545,7 @@ async fn belongs_to_many_sync_rolls_back_on_attach_failure() {
     //
     // Cleanest approach: use a SECOND pivot table whose schema forces
     // an attach-time failure. We define a sibling model with a NOT
-    // NULL column the framework doesn't fill — the INSERT fails on
+    // NULL column the framework doesn't fill - the INSERT fails on
     // every attach attempt, and we can observe the pre-state survives.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     _db.execute_unprepared(
@@ -589,9 +589,9 @@ async fn belongs_to_many_sync_rolls_back_on_attach_failure() {
     .await
     .unwrap();
 
-    // sync([r2]) — plans detach(r1), attach(r2). The attach(r2) fails
+    // sync([r2]) - plans detach(r1), attach(r2). The attach(r2) fails
     // on the NOT NULL constraint. The transaction rollback restores
-    // (u, r1) — the detach must NOT commit.
+    // (u, r1) - the detach must NOT commit.
     let result = u.roles_tx().sync([r2.id]).await;
     assert!(
         result.is_err(),
@@ -609,16 +609,16 @@ async fn belongs_to_many_sync_rolls_back_on_attach_failure() {
         .collect();
     assert!(
         after.contains(&r1.id),
-        "r1 must still be attached after sync failure — detach rolled back transactionally; \
+        "r1 must still be attached after sync failure - detach rolled back transactionally; \
          got: {after:?}",
     );
     assert!(
         !after.contains(&r2.id),
-        "r2 must NOT be attached — attach failed",
+        "r2 must NOT be attached - attach failed",
     );
 }
 
-// Tx-rollback models — separate from the main BtmUser/Role/Pivot so
+// Tx-rollback models - separate from the main BtmUser/Role/Pivot so
 // the NOT NULL column doesn't pollute every other test.
 #[model(table = "btm_tx_users", relations = {
     roles_tx: BelongsToMany<BtmTxRole, BtmTxRoleUserPivot>,
@@ -775,7 +775,7 @@ async fn migrate_uuid(db: &TestDatabase) {
 
 #[tokio::test]
 async fn belongs_to_many_respects_custom_related_pk() {
-    // Raw-SQL inserts for the UUID model bypass `create()` — the
+    // Raw-SQL inserts for the UUID model bypass `create()` - the
     // `key_type = "String", auto_increment = false` round-trip is
     // orthogonal to T4, so we don't gate this test on it.
     let db = TestDatabase::sqlite_memory().await.unwrap();
@@ -803,7 +803,7 @@ async fn belongs_to_many_respects_custom_related_pk() {
     .unwrap();
 
     // `.get()` must JOIN on btm_uuid_things.uuid (NOT the hardcoded
-    // "id") — without the fix this errors with "no such column: id".
+    // "id") - without the fix this errors with "no such column: id".
     let things = u
         .things()
         .get()
@@ -837,10 +837,10 @@ async fn belongs_to_many_respects_custom_related_pk() {
 #[tokio::test]
 async fn belongs_to_many_malicious_key_rejected_before_db_io() {
     // Verify that validate_meta() fires before any DB connection is
-    // attempted — no TestDatabase setup needed.
+    // attempted - no TestDatabase setup needed.
     use suprnova::BelongsToMany;
 
-    // Malicious pivot_table — should be rejected immediately.
+    // Malicious pivot_table - should be rejected immediately.
     let rel: BelongsToMany<BtmUser, BtmRole, BtmRoleUserPivot> = BelongsToMany::__new(
         serde_json::Value::from(1i64),
         "btm_role_user; DROP TABLE btm_users--".to_string(),

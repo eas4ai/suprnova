@@ -10,7 +10,7 @@
 //!   pulling the name from a `const Feature` here surfaces the typo
 //!   at the declaration),
 //! * the right place for a code reviewer to see the default-when-absent
-//!   value — the second argument to `Feature::new` is what
+//!   value - the second argument to `Feature::new` is what
 //!   `is_enabled!` returns when no row exists in the `features` table
 //!   or no evaluator is installed.
 //!

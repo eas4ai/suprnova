@@ -27,7 +27,7 @@ impl Parse for RedirectInput {
 /// name (`redirect()->route('users.index')` → [`Redirect::route`]).
 /// Route names never start with `/` and never contain `://`, so the
 /// dispatch is unambiguous. Only the name arm gets compile-time
-/// route-existence validation — a literal path can point anywhere,
+/// route-existence validation - a literal path can point anywhere,
 /// including routes another service owns.
 pub fn redirect_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RedirectInput);

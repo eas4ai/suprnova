@@ -1,4 +1,4 @@
-//! Length-aware paginator — knows the total row count, so it can
+//! Length-aware paginator - knows the total row count, so it can
 //! compute `last_page` and emit a numeric page UI.
 
 use serde::Serialize;
@@ -30,13 +30,13 @@ use serde::Serialize;
 /// `path` is omitted when unset.
 ///
 /// This shape is **not** identical to Laravel's
-/// `LengthAwarePaginator::toArray()` — Laravel additionally emits
+/// `LengthAwarePaginator::toArray()` - Laravel additionally emits
 /// `first_page_url`, `last_page_url`, `next_page_url`,
 /// `prev_page_url`, and a `links` array of `{url, label, page,
 /// active}` descriptors. Suprnova's URL generation lives on the
 /// response-shape constructors that own URL context:
 /// [`Inertia::paginate`](crate::inertia::Inertia::paginate) (Inertia
-/// scroll metadata — page identifiers, not absolute URLs) and
+/// scroll metadata - page identifiers, not absolute URLs) and
 /// [`Resource::paginated`](crate::resources::Resource::paginated)
 /// (JSON:API `links.{self,first,last,prev,next}`). The raw `Serialize`
 /// shape is for explicit-shape consumers (custom JSON envelopes, test
@@ -68,7 +68,7 @@ pub struct LengthAwarePaginator<T> {
     pub path: Option<String>,
     /// Query-string parameter name used by [`Self::url_for_page`] when
     /// constructing page URLs. `None` resolves to `"page"`. Not
-    /// serialized — clients receive `current_page` and reconstruct
+    /// serialized - clients receive `current_page` and reconstruct
     /// the URL on their side using whatever param name they've been
     /// instructed to use. Set automatically by
     /// [`Builder::paginate_using`](crate::eloquent::Builder::paginate_using)
@@ -200,7 +200,7 @@ impl<T> LengthAwarePaginator<T> {
     /// `?page=N` will yield rows). Equivalent to Laravel's
     /// `AbstractPaginator::onLastPage`.
     ///
-    /// An empty result set (`total == 0`) returns `true` — there is
+    /// An empty result set (`total == 0`) returns `true` - there is
     /// no "next page" to fetch, which is what Laravel returns too
     /// (`onLastPage` ↔ `!hasMorePages`, and `hasMorePages` is `false`
     /// when `lastPage == 0`).
@@ -230,7 +230,7 @@ impl<T> LengthAwarePaginator<T> {
 
     /// Number of rows on the current page slice. Equivalent to
     /// Laravel's `AbstractPaginator::count` (the `Countable`
-    /// implementation). Not the total — for that use the `total`
+    /// implementation). Not the total - for that use the `total`
     /// field directly.
     pub fn count(&self) -> usize {
         self.data.len()
@@ -306,7 +306,7 @@ mod tests {
             .with_page_name("posts_page");
         assert_eq!(p.url_for_page(2), "/api/users?posts_page=2");
 
-        // No path — fallback also picks up the custom name.
+        // No path - fallback also picks up the custom name.
         let p2 = LengthAwarePaginator::new(vec![1], 10, 10, 1).with_page_name("p");
         assert_eq!(p2.url_for_page(3), "?p=3");
     }
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn url_for_page_appends_to_existing_query_string() {
         // A base that already has a query string must get `&page=`, not a
-        // second `?` — `/users?sort=name?page=2` is a malformed URL.
+        // second `?` - `/users?sort=name?page=2` is a malformed URL.
         let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1).with_path("/users?sort=name");
         assert_eq!(p.url_for_page(2), "/users?sort=name&page=2");
     }
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn page_name_not_serialized() {
-        // `page_name` is `#[serde(skip)]` — clients receive
+        // `page_name` is `#[serde(skip)]` - clients receive
         // `current_page` and reconstruct the URL on their side.
         let p = LengthAwarePaginator::new(vec![1, 2], 20, 10, 1).with_page_name("posts_page");
         let json = serde_json::to_value(&p).unwrap();

@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 static TRANSPORT: RwLock<Option<Arc<dyn MailTransport>>> = RwLock::new(None);
 
-/// Global Mail-level defaults applied to every dispatched message — the
+/// Global Mail-level defaults applied to every dispatched message - the
 /// Rust analogue of Laravel's `Mailer::always_from`, `always_reply_to`,
 /// `always_to`, `always_return_path`.
 #[derive(Default, Debug, Clone)]
@@ -64,7 +64,7 @@ static ALWAYS: RwLock<AlwaysDefaults> = RwLock::new(AlwaysDefaults {
 /// without requiring callers to also install `Queue::fake`.
 static QUEUE_CAPTURE: Mutex<Vec<QueuedMailable>> = Mutex::new(Vec::new());
 
-/// Explicit "MailFake guard is live" flag — incremented when the fake
+/// Explicit "MailFake guard is live" flag - incremented when the fake
 /// installs, decremented on drop. We use a counter rather than a bool so
 /// nested calls (which the public API doesn't recommend but can happen
 /// in misbehaving tests) don't leave the flag stuck.
@@ -208,7 +208,7 @@ impl Mail {
 
     /// Install an in-memory capture transport for the duration of the
     /// returned guard. Mirrors `Bus::fake()` / `Queue::fake()` /
-    /// `Cache::fake()` — tests call `Mail::fake()`, dispatch mail
+    /// `Cache::fake()` - tests call `Mail::fake()`, dispatch mail
     /// normally, then assert against the captured messages.
     ///
     /// The previously-bound transport (if any) is saved and restored
@@ -221,7 +221,7 @@ impl Mail {
     /// Mail::to("alice@example.org").send(welcome).await?;
     /// fake.assert_sent(|m| m.subject.contains("Welcome"));
     /// fake.assert_sent_count(1);
-    /// // fake drops here — previous transport (or absence) is restored.
+    /// // fake drops here - previous transport (or absence) is restored.
     /// ```
     pub fn fake() -> MailFake {
         clear_queue_capture();
@@ -279,7 +279,7 @@ impl Mail {
 /// Builder returned by `Mail::to(...)`, `Mail::cc(...)`, `Mail::bcc(...)`.
 ///
 /// Beyond the recipient block, the builder accepts the same per-message
-/// hints Laravel's Mailable exposes — tags, metadata, priority, custom
+/// hints Laravel's Mailable exposes - tags, metadata, priority, custom
 /// headers, return-path, and a one-off subject/html/text body for the
 /// `Mail::raw` / `Mail::html` shortcut paths.
 #[derive(Default, Debug, Clone)]
@@ -340,7 +340,7 @@ impl MailBuilder {
 
     /// Route this mailable's queued dispatch (`.queue(...)` / `.later(...)`)
     /// to `queue`, outranking `Mailable::queue()` and any `Queue::route`
-    /// registered for the mail-dispatch job. No effect on `.send(...)` —
+    /// registered for the mail-dispatch job. No effect on `.send(...)` -
     /// the synchronous path has no queue concept. Mirrors Laravel's
     /// `Mailable::onQueue($queue)` (Q8, #61066).
     pub fn on_queue(mut self, queue: impl Into<String>) -> Self {
@@ -398,7 +398,7 @@ impl MailBuilder {
         self
     }
 
-    // --- Laravel-side aliases — re-spelled to match the PHP names ---
+    // --- Laravel-side aliases - re-spelled to match the PHP names ---
 
     /// Alias for [`MailBuilder::reply_to`]. Matches Laravel's
     /// camel-cased `replyTo` after the snake-case translation.
@@ -420,7 +420,7 @@ impl MailBuilder {
 
         if html.is_none() && text.is_none() {
             return Err(FrameworkError::internal(format!(
-                "mail: {} has no text or html body — define text_template_source or html_template_source on the Mailable",
+                "mail: {} has no text or html body - define text_template_source or html_template_source on the Mailable",
                 M::mailable_name()
             )));
         }
@@ -477,7 +477,7 @@ impl MailBuilder {
         // paths all converge on identical precedence rules.
         let msg = Mail::apply_always_defaults(msg);
         // Fire MessageSending event (best-effort; cancellation is not
-        // modeled — Laravel uses events->until, which Suprnova's
+        // modeled - Laravel uses events->until, which Suprnova's
         // dispatcher doesn't expose. Listeners observe pre-send shape.).
         events::fire_sending(&msg).await;
         let result = transport::dispatch_with_telemetry(transport.as_ref(), &msg).await;
@@ -490,11 +490,11 @@ impl MailBuilder {
     /// Build a [`SendMailJob`] and push it onto the queue. The mailable's
     /// concrete type must be registered via [`register_mailable_factory`]
     /// before the worker dispatches the job. Resolves its queue via
-    /// `.on_queue(...)`, else `Mailable::queue()`, else the routing table
-    /// — see [`Queue::push_with`](crate::queue::Queue::push_with).
+    /// `.on_queue(...)`, else `Mailable::queue()`, else the routing table -
+    /// see [`Queue::push_with`](crate::queue::Queue::push_with).
     ///
     /// Fails fast (push-time) if the mailable defines neither
-    /// `html_template_source` nor `text_template_source` — mirrors
+    /// `html_template_source` nor `text_template_source` - mirrors
     /// `MailBuilder::send`'s empty-body guard.
     pub async fn queue<M: Mailable>(self, mailable: M) -> Result<(), FrameworkError> {
         let overrides = self.envelope_overrides(&mailable);
@@ -607,7 +607,7 @@ impl MailBuilder {
         let text = mailable.render_text()?;
         if html.is_none() && text.is_none() {
             return Err(FrameworkError::internal(format!(
-                "mail: {} has no text or html body — define text_template_source or html_template_source on the Mailable",
+                "mail: {} has no text or html body - define text_template_source or html_template_source on the Mailable",
                 M::mailable_name()
             )));
         }
@@ -636,7 +636,7 @@ impl MailBuilder {
 /// outgoing message in memory and restores the previously-bound
 /// transport when dropped.
 ///
-/// `MailFake` is `Send + Sync` — tests can share it across awaits or
+/// `MailFake` is `Send + Sync` - tests can share it across awaits or
 /// threads if they need to, though the typical pattern is a single
 /// `let fake = Mail::fake();` at the top of the test.
 pub struct MailFake {
@@ -809,8 +809,8 @@ impl MailFake {
     }
 
     /// Assert the queued mailable with the given name matches `predicate`.
-    /// The predicate receives the deserialized payload as `serde_json::Value`
-    /// — callers wanting typed access can `serde_json::from_value::<M>(...)`
+    /// The predicate receives the deserialized payload as `serde_json::Value` -
+    /// callers wanting typed access can `serde_json::from_value::<M>(...)`
     /// inside the predicate.
     pub fn assert_queued_with<F>(&self, mailable_name: &str, predicate: F)
     where
@@ -901,7 +901,7 @@ impl MailFake {
 
     /// All queued mailables routed to `connection` (exact match).
     /// [`QueuedSnapshot::connection`] carries a `.on_connection(...)`
-    /// override — the same field
+    /// override - the same field
     /// [`assert_pushed_on_connection`](crate::queue::testing::assert_pushed_on_connection)
     /// reads on the plain-job path under `Queue::fake`.
     pub fn queued_on_connection(&self, connection: &str) -> Vec<QueuedSnapshot> {
@@ -915,7 +915,7 @@ impl MailFake {
     /// routed to `connection` via `.on_connection(...)`. The connection
     /// counterpart to [`assert_queued_on`](Self::assert_queued_on), added
     /// for parity with `Queue::fake`'s `assert_pushed_on_queue` /
-    /// `assert_pushed_on_connection` pair — before this, `on_connection`
+    /// `assert_pushed_on_connection` pair - before this, `on_connection`
     /// was unassertable through `Mail::fake` even though the override was
     /// already resolved and applied to the real dispatch.
     pub fn assert_queued_on_connection(&self, mailable_name: &str, connection: &str) {
@@ -962,12 +962,12 @@ impl MailFake {
 impl Drop for MailFake {
     fn drop(&mut self) {
         // Restore the previous transport. If a poisoned lock would
-        // panic during drop we accept that — losing transport state
+        // panic during drop we accept that - losing transport state
         // during teardown is preferable to silently leaving the fake
         // bound (which would corrupt every subsequent test).
         *lock::write(&TRANSPORT, "mail transport").expect("mail transport lock poisoned") =
             self.previous.take();
-        // Clear queued capture — siblings tests should not see this
+        // Clear queued capture - siblings tests should not see this
         // suite's queued buffer.
         clear_queue_capture();
         MAIL_FAKE_DEPTH.fetch_sub(1, Ordering::SeqCst);
@@ -997,7 +997,7 @@ pub struct QueuedSnapshot {
     pub queue: Option<String>,
     /// Connection override this dispatch declared via
     /// `.on_connection(...)`; `None` when the push relied on the routing
-    /// table / driver default instead. Mirrors [`queue`](Self::queue) —
+    /// table / driver default instead. Mirrors [`queue`](Self::queue) -
     /// see [`MailBuilder::on_connection`](crate::mail::MailBuilder::on_connection).
     pub connection: Option<String>,
 }
@@ -1090,11 +1090,11 @@ mod tests {
         let _ = Mail::forget_always();
         let _ = Mail::always_reply_to(Address::new("support@example.com"));
         let mut msg = OutgoingMessage::new(Address::new("from@example.com"));
-        // No reply_to on the message — default applies.
+        // No reply_to on the message - default applies.
         let out = Mail::apply_always_defaults(msg.clone());
         assert_eq!(out.reply_to.len(), 1);
         assert_eq!(out.reply_to[0].email, "support@example.com");
-        // Explicit reply_to — default does NOT override.
+        // Explicit reply_to - default does NOT override.
         msg.reply_to = vec![Address::new("override@example.com")];
         let out = Mail::apply_always_defaults(msg);
         assert_eq!(out.reply_to.len(), 1);

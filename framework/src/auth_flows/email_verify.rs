@@ -1,4 +1,4 @@
-//! `EmailVerification` — provider-backed email-verification facade.
+//! `EmailVerification` - provider-backed email-verification facade.
 //!
 //! Mints, checks, and consumes verification tokens through the
 //! provider-agnostic [`TokenStore`]
@@ -15,7 +15,7 @@
 //! particular auth backend, and the user lookup goes through whichever
 //! [`UserProvider`](crate::auth::UserProvider) the app registered (the same
 //! one [`Auth::user`](crate::auth::Auth::user) resolves against). There is no
-//! global-instance initialization step and no provider-specific coupling — a
+//! global-instance initialization step and no provider-specific coupling - a
 //! `send_link` takes any [`MustVerifyEmail`] user, and `resend` / `verify`
 //! work purely by email and token.
 //!
@@ -26,7 +26,7 @@
 //! listener panic or transient event-dispatcher error therefore cannot
 //! un-verify the user. We discard the dispatch error (the dispatcher logs
 //! listener failures via its own tracing instrumentation) but return the
-//! user id regardless — a side-effect on a notification path must never roll
+//! user id regardless - a side-effect on a notification path must never roll
 //! back a successful verification.
 
 use crate::auth::active_user_provider;
@@ -39,7 +39,7 @@ use crate::mail::Mail;
 /// Facade for email-verification token operations.
 ///
 /// All methods operate over the framework's `auth_flow_tokens` table and the
-/// application's configured [`UserProvider`](crate::auth::UserProvider) — no
+/// application's configured [`UserProvider`](crate::auth::UserProvider) - no
 /// global auth instance to initialise first. Mail goes out through the
 /// [`crate::Mail`] facade.
 ///
@@ -89,7 +89,7 @@ impl EmailVerification {
     /// [`TokenPurpose::EmailVerification`]'s default TTL (24h).
     ///
     /// Reads `APP_NAME` (defaults to `"Suprnova"`) and `MAIL_FROM`
-    /// (required — errors if unset) from the process environment. Defaulting
+    /// (required - errors if unset) from the process environment. Defaulting
     /// `MAIL_FROM` to a placeholder breaks DMARC/SPF in production, so the
     /// facade fails closed instead of silently sending from a domain the
     /// operator doesn't control.
@@ -149,7 +149,7 @@ impl EmailVerification {
         Mail::to(email).send(mail).await
     }
 
-    /// Resend a verification link by email — the anti-enumeration entry point.
+    /// Resend a verification link by email - the anti-enumeration entry point.
     ///
     /// Looks the user up through the active
     /// [`UserProvider`](crate::auth::UserProvider) and only mints + sends a
@@ -201,7 +201,7 @@ impl EmailVerification {
     ///
     /// Note: the token is consumed (single-use) before the provider marks the
     /// user verified; if the mark step errors, the token is already spent and a
-    /// fresh verification link is required. The ordering is deliberate —
+    /// fresh verification link is required. The ordering is deliberate -
     /// reversing it would leave a reusable token behind a failed mark.
     ///
     /// # Errors
@@ -233,7 +233,7 @@ impl EmailVerification {
         active_user_provider()?
             .mark_email_verified(&user_id)
             .await?;
-        // Intentionally discard the dispatch error — verification has already
+        // Intentionally discard the dispatch error - verification has already
         // committed; a downstream listener failure must not surface as a
         // verification failure to the caller. The dispatcher itself logs
         // listener errors via tracing.
@@ -294,7 +294,7 @@ mod tests {
 
     // `send_link` mints a token (needs the `auth_flow_tokens` table) and sends
     // through `Mail::fake`. We assert the recipient + that the rendered link
-    // carries the issued token through `append_token_query` — the full
+    // carries the issued token through `append_token_query` - the full
     // facade-to-mail wiring on the generic user path.
     #[tokio::test]
     #[serial_test::serial]

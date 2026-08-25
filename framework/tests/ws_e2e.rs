@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// The tokio-tungstenite test client doesn't send an `Origin` header by
 /// default, so the production-default `OriginPolicy::SameOrigin` would
-/// 403 every test. Opt into `AllowAny` for these tests — they're not
+/// 403 every test. Opt into `AllowAny` for these tests - they're not
 /// exercising browser CSRF semantics. See `ws_origin_policy.rs` for the
 /// dedicated coverage of `SameOrigin` / `AllowList`.
 fn open_ws_config() -> WsConfig {
@@ -43,7 +43,7 @@ impl WebSocketHandler for EchoHandler {
 }
 
 async fn spawn_test_server() -> u16 {
-    // Router::ws returns Router directly — no .build() / .into() needed.
+    // Router::ws returns Router directly - no .build() / .into() needed.
     let router = Arc::new(Router::new().ws_with_config("/ws/echo", EchoHandler, open_ws_config()));
     let middleware = Arc::new(MiddlewareRegistry::new());
 
@@ -71,7 +71,7 @@ async fn spawn_test_server() -> u16 {
                         )
                     }
                 });
-                // .with_upgrades() is essential — without it the
+                // .with_upgrades() is essential - without it the
                 // OnUpgrade future never resolves and the handler
                 // task hangs.
                 let _ = hyper::server::conn::http1::Builder::new()
@@ -157,7 +157,7 @@ async fn missing_ws_route_returns_normal_404() {
 
     // tokio-tungstenite's connect_async will fail because the path
     // falls through to normal HTTP routing which 404s. We assert the
-    // connection is rejected — the exact error shape varies across
+    // connection is rejected - the exact error shape varies across
     // tungstenite versions.
     let url = format!("ws://127.0.0.1:{port}/ws/nope");
     let result = tokio_tungstenite::connect_async(&url).await;
@@ -261,7 +261,7 @@ async fn generous_config_round_trips_a_2_mib_message() {
             .await
             .expect("connect to generous endpoint");
 
-    // 2 MiB payload — comfortably over the 1 MiB public default,
+    // 2 MiB payload - comfortably over the 1 MiB public default,
     // comfortably under the 64 MiB generous cap.
     let payload: String = "x".repeat(2 * 1024 * 1024);
     ws.send(Message::text(payload.clone())).await.expect("send");
@@ -278,7 +278,7 @@ async fn idle_connection_survives_quiet_period_and_can_still_send() {
     // Verify the heartbeat machinery's presence doesn't BREAK an
     // otherwise-idle connection. The default ping interval is 30s
     // (we don't wait that long); we just confirm the connection
-    // stays usable across a short quiet period — proving the
+    // stays usable across a short quiet period - proving the
     // forwarder task and the heartbeat coexistence are correct.
     let port = spawn_test_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/echo");
@@ -287,7 +287,7 @@ async fn idle_connection_survives_quiet_period_and_can_still_send() {
         .await
         .expect("connect");
 
-    // Idle for >150ms — significantly longer than the spawn delay
+    // Idle for >150ms - significantly longer than the spawn delay
     // and any plausible network blip but well under the 30s ping.
     tokio::time::sleep(Duration::from_millis(150)).await;
 

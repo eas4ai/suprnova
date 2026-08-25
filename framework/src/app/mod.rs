@@ -383,7 +383,7 @@ pub(crate) fn format_schedule_listing(
             }
             let _ = write!(out, " next: {next_text}");
             let _ = match &entry.description {
-                Some(desc) => writeln!(out, " — {desc}"),
+                Some(desc) => writeln!(out, " - {desc}"),
                 None => writeln!(out),
             };
         }
@@ -419,8 +419,8 @@ pub(crate) const AUTO_MIGRATE_BEST_EFFORT_ENV: &str = "SUPRNOVA_AUTO_MIGRATE_BES
 /// Parse the truthiness of [`AUTO_MIGRATE_BEST_EFFORT_ENV`].
 ///
 /// Accepts `true`, `1`, `yes`, `on` (case-insensitive, surrounding whitespace
-/// stripped). Everything else — including `false`, `0`, empty strings, and the
-/// `None` returned by [`std::env::var`] when the variable is unset — yields
+/// stripped). Everything else - including `false`, `0`, empty strings, and the
+/// `None` returned by [`std::env::var`] when the variable is unset - yields
 /// `false` so the production-safe fail-closed path is the default.
 ///
 /// Extracted as a pure function so the parsing contract is unit-testable
@@ -455,7 +455,7 @@ pub(crate) fn resolve_auto_migration(
         Ok(()) => Ok(()),
         Err(e) if best_effort => {
             eprintln!(
-                "suprnova: WARNING — auto-migrate failed in best-effort mode, server will boot \
+                "suprnova: WARNING - auto-migrate failed in best-effort mode, server will boot \
                  against the current schema: {e}"
             );
             Ok(())
@@ -486,8 +486,8 @@ fn report_background_outcome(
 /// shutdown before aborting them.
 ///
 /// Longer than the server's 5s connection drain on purpose: a background
-/// scheduled task is explicitly the long-running kind — a nightly report,
-/// a batch export — and cutting it off in five seconds would abandon work
+/// scheduled task is explicitly the long-running kind - a nightly report,
+/// a batch export - and cutting it off in five seconds would abandon work
 /// that was about to finish. It is still bounded, because the alternative
 /// was worse: the drain awaited every task with no deadline at all, so one
 /// task that never returns held the process open until somebody sent
@@ -501,7 +501,7 @@ const SCHEDULER_DRAIN_GRACE: Duration = Duration::from_secs(30);
 /// The post-abort `join_next` loop is not redundant: `abort_all` only
 /// *requests* cancellation, and a task is not actually stopped until it is
 /// polled again. Returning without draining leaves those tasks live while
-/// the caller proceeds to exit — the same defect the server's connection
+/// the caller proceeds to exit - the same defect the server's connection
 /// drain documents, where abandoned tasks kept emitting spans after the
 /// telemetry flush.
 async fn drain_with_grace(
@@ -561,7 +561,7 @@ where
     /// This async function is called to register services, middleware,
     /// and other application components. It is process-wide: every
     /// subcommand runs it, not only the server. Register HTTP-only
-    /// components — global middleware, `Inertia::install` — with
+    /// components - global middleware, `Inertia::install` - with
     /// [`http_bootstrap`](Self::http_bootstrap) instead, which only the
     /// server path runs.
     ///
@@ -594,11 +594,11 @@ where
     ///
     /// The split exists because HTTP boot can only succeed on a machine that
     /// serves HTTP: `Inertia::install` fails closed in production when the
-    /// built frontend manifest is missing — which is precisely the state of a
+    /// built frontend manifest is missing - which is precisely the state of a
     /// worker or console container image that ships no `public/assets`.
     /// Register global middleware and the Inertia layer here; keep
-    /// process-wide work — `DB::init`, container bindings, event listeners,
-    /// job registration — in [`bootstrap`](Self::bootstrap), which every
+    /// process-wide work - `DB::init`, container bindings, event listeners,
+    /// job registration - in [`bootstrap`](Self::bootstrap), which every
     /// subcommand runs.
     ///
     /// # Example
@@ -752,14 +752,14 @@ where
         // Configuration is loaded by `#[suprnova::main]` *before* the
         // runtime exists, not here. Loading it writes to the process
         // environment, which is only sound while the process is
-        // single-threaded — and by the time this async fn runs, every
+        // single-threaded - and by the time this async fn runs, every
         // Tokio worker thread already exists. See `crate::boot`.
         //
         // This is a hard refusal rather than a warning because the
         // failure it prevents is a silent data race, not a crash: an
         // app that boots "fine" under `#[tokio::main]` is exactly the
         // one that corrupts an env read on some unrelated thread weeks
-        // later. A malformed `.env` still fails loudly, just earlier —
+        // later. A malformed `.env` still fails loudly, just earlier -
         // `load_env_or_exit` owns that message now.
         if let Err(message) = crate::boot::boot_precondition(crate::boot::env_loaded_pre_runtime())
         {
@@ -769,7 +769,7 @@ where
 
         // Register all #[policy] gates collected via inventory::submit!.
         // Called here (before the subcommand match) so background workers,
-        // CLI commands, and scheduled tasks all see registered gates — not
+        // CLI commands, and scheduled tasks all see registered gates - not
         // only the web server path. The inner `Once` makes this idempotent.
         crate::authorization::init_policies();
 
@@ -816,7 +816,7 @@ where
             Some(Commands::MigrateFresh { force }) => {
                 // The CLI's `suprnova migrate:fresh` gained this gate first,
                 // but production deploys run migrations through *this*
-                // binary, not the dev CLI — so without the same check here
+                // binary, not the dev CLI - so without the same check here
                 // the guard was bypassable by the path that matters most.
                 let env = crate::config::Environment::detect();
                 if let Err(message) = authorize_migrate_fresh(
@@ -1126,7 +1126,7 @@ where
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Long-lived JoinSet for `.run_in_background()` tasks. These tasks
-        // are fire-and-forget within a tick — the loop polls completed ones
+        // are fire-and-forget within a tick - the loop polls completed ones
         // before each tick and on shutdown awaits the rest before exit, so a
         // slow background task never gets dropped mid-flight.
         let mut bg_tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
@@ -1136,7 +1136,7 @@ where
             tokio::select! {
                 _ = tick.tick() => {
                     // Surface any background tasks that completed since the
-                    // last tick. `try_join_next` is non-blocking — anything
+                    // last tick. `try_join_next` is non-blocking - anything
                     // still running stays in the set for the next sweep.
                     while let Some(joined) = bg_tasks.try_join_next() {
                         report_background_outcome(joined);
@@ -1184,7 +1184,7 @@ where
     ) {
         // Logging only. `schedule:run` evaluates the due tasks once and
         // exits, so there is no long-lived loop for a stop signal to
-        // interrupt — the default disposition is right for a one-shot
+        // interrupt - the default disposition is right for a one-shot
         // command, and installing a handler it never reads would only
         // make Ctrl-C stop working.
         Self::install_daemon_logging();
@@ -1373,7 +1373,7 @@ where
     /// `queue:pause`: mark a queue (or, with `--all`, every queue on every
     /// connection) as paused.
     ///
-    /// Refuses and exits non-zero when `QUEUE_PAUSABLE=false` — Laravel's
+    /// Refuses and exits non-zero when `QUEUE_PAUSABLE=false` - Laravel's
     /// `PauseCommand` refuses the same way when `Worker::$pausable` is
     /// false, so an operator who disabled pausing finds out immediately
     /// rather than issuing a pause a running worker will ignore.
@@ -1419,7 +1419,7 @@ where
     }
 
     /// `queue:resume` (alias `queue:continue`): clear a queue's pause (or,
-    /// with `--all`, the global pause). Never gated by `QUEUE_PAUSABLE` —
+    /// with `--all`, the global pause). Never gated by `QUEUE_PAUSABLE` -
     /// disabling the ability to *create* a pause must not also disable the
     /// ability to *clear* one, which would leave an operator stuck with no
     /// way to undo an earlier pause once the switch is off.
@@ -1491,7 +1491,7 @@ where
     /// `serve` gets one from `init_telemetry`; the daemons come through a
     /// different path and used to get nothing, so every `tracing::` line
     /// they emit went nowhere and `LOG_LEVEL` was inert for them. That is
-    /// most of what they have to say — a worker dead-lettering a job, a
+    /// most of what they have to say - a worker dead-lettering a job, a
     /// scheduler skipping a tick it lost, a lock it could not release. In
     /// a container the only visible output was the startup banner, and the
     /// process looked idle while it was doing all of it.
@@ -1519,7 +1519,7 @@ where
     /// seconds and before the banner that promises SIGTERM works. It used
     /// to be created just above the `select!`, several awaits later, and
     /// a stop arriving in that window found no handler and killed the
-    /// process outright — losing the drain in exactly the situation the
+    /// process outright - losing the drain in exactly the situation the
     /// drain exists for, a supervisor stopping a container mid-start.
     ///
     /// Safe to create this early because the listener publishes through a
@@ -1542,7 +1542,7 @@ where
     /// Run the boot hooks for an HTTP server process: the process-wide hook
     /// first, then the HTTP-only one.
     ///
-    /// The order is the contract — everything the HTTP hook registers may
+    /// The order is the contract - everything the HTTP hook registers may
     /// assume the process-wide hook has already run. Worker processes never
     /// come through here; [`Self::boot_worker_process`] takes only the
     /// process-wide hook, which is what keeps the HTTP stack (and its
@@ -1641,7 +1641,7 @@ where
 
 /// Decide whether a `migrate:fresh` may proceed.
 ///
-/// Outside production this is always `Ok` — dropping a local database is
+/// Outside production this is always `Ok` - dropping a local database is
 /// routine. In production it demands two *different* kinds of proof:
 ///
 /// 1. `--force`, which proves intent at the moment the command was typed.
@@ -1651,7 +1651,7 @@ where
 /// The TTY requirement is the point of the second condition. Without it,
 /// `echo production | app migrate:fresh --force` in a deploy script would
 /// satisfy the prompt automatically and the confirmation would be just
-/// another flag — which is exactly what this guard exists to prevent.
+/// another flag - which is exactly what this guard exists to prevent.
 ///
 /// Split out from the subcommand arm and given the reader as a parameter
 /// so the policy is testable without a terminal, a database, or a
@@ -1694,7 +1694,7 @@ fn authorize_migrate_fresh(
     let typed = read_confirmation()?;
     if typed.trim() != expected {
         return Err(
-            "Confirmation did not match — nothing was dropped and no migrations ran.".to_string(),
+            "Confirmation did not match - nothing was dropped and no migrations ran.".to_string(),
         );
     }
     Ok(())
@@ -1720,8 +1720,8 @@ enum PauseTarget {
 }
 
 /// Validate a `queue:pause` / `queue:resume` invocation's `[queue]` /
-/// `--all` arguments. Both commands require exactly one of them — `--all`
-/// on its own, or a non-empty queue name — and share this validation.
+/// `--all` arguments. Both commands require exactly one of them - `--all`
+/// on its own, or a non-empty queue name - and share this validation.
 ///
 /// Split out from the subcommand arms and given plain arguments, for the
 /// same reason [`authorize_migrate_fresh`] is split out just above: the
@@ -1781,8 +1781,8 @@ mod worker_boot_order_tests {
 
     /// `QUEUE_DRIVER=database` is the ordering tripwire: the driver resolves
     /// its connection from `DB`, so it can only be built after the app's
-    /// bootstrap ran `DB::init`. Booting the drivers first — which every
-    /// worker subcommand used to do — fails here with "requires DB::init()
+    /// bootstrap ran `DB::init`. Booting the drivers first - which every
+    /// worker subcommand used to do - fails here with "requires DB::init()
     /// to run first", so a green run *is* the ordering assertion.
     #[tokio::test]
     #[serial]
@@ -1823,7 +1823,7 @@ mod migrate_fresh_gate_tests {
     use super::authorize_migrate_fresh;
     use crate::config::Environment;
 
-    /// Never called — reaching it means the gate asked for a confirmation
+    /// Never called - reaching it means the gate asked for a confirmation
     /// on a path that should have refused before prompting.
     fn unreachable_reader() -> Result<String, String> {
         panic!("the gate must refuse before prompting on this path");
@@ -1839,7 +1839,7 @@ mod migrate_fresh_gate_tests {
         ] {
             assert!(
                 authorize_migrate_fresh(&env, false, false, &mut unreachable_reader).is_ok(),
-                "{env} must not be gated — dropping a non-production database is routine"
+                "{env} must not be gated - dropping a non-production database is routine"
             );
         }
     }
@@ -1899,7 +1899,7 @@ mod migrate_fresh_gate_tests {
 mod queue_pause_target_tests {
     //! `resolve_pause_target` is what `queue:pause` / `queue:resume`
     //! delegate to before touching the queue driver or exiting the
-    //! process. Tested here — not in `framework/tests/queue_pause.rs` —
+    //! process. Tested here - not in `framework/tests/queue_pause.rs` -
     //! for the same reason `migrate_fresh_gate_tests` above is: it's a
     //! private free function, invisible to an integration-test crate,
     //! and the process-exit paths wrapping it can't be exercised without
@@ -2026,7 +2026,7 @@ mod tests {
         assert!(out.starts_with("Registered scheduled tasks:\n"));
         assert!(out.contains("nightly-cleanup"));
         assert!(out.contains("[* * * * *]"));
-        assert!(out.contains("— Remove stale upload temp files"));
+        assert!(out.contains(" - Remove stale upload temp files"));
         assert!(out.contains("plain-hourly"));
         assert!(out.contains("[0 * * * *]"));
         // No task pinned a zone, so no zone label is printed - but the
@@ -2251,7 +2251,7 @@ mod tests {
     }
 
     /// Trait-based tasks must reach the same registration / listing /
-    /// evaluation pipeline as closure-based ones — proves
+    /// evaluation pipeline as closure-based ones - proves
     /// `Schedule::task(T)` and `Schedule::call(|| ...)` both round-trip
     /// through the CLI helpers.
     #[tokio::test]
@@ -2333,7 +2333,7 @@ mod tests {
     ///
     /// Without the empty-migrations short-circuit in `run_migrations_silent`,
     /// `get_database_connection()` calls `std::process::exit(1)` when the
-    /// env var is missing — that would terminate the entire test binary,
+    /// env var is missing - that would terminate the entire test binary,
     /// not just fail this single test, so a passing run is itself the
     /// regression signal.
     ///
@@ -2528,8 +2528,8 @@ mod tests {
         );
     }
 
-    /// An empty set is the common case — most shutdowns have no background
-    /// work in flight — and must not cost a scheduler timer at all.
+    /// An empty set is the common case - most shutdowns have no background
+    /// work in flight - and must not cost a scheduler timer at all.
     #[tokio::test]
     async fn draining_an_empty_set_is_free() {
         let mut tasks: tokio::task::JoinSet<crate::schedule::ScheduledTaskJoin> =
@@ -2546,7 +2546,7 @@ mod boot_hook_tests {
     //! The serve path runs the process-wide hook then the HTTP hook, in
     //! that order; worker paths compile against a signature that cannot
     //! receive the HTTP hook at all. These tests pin the runtime half of
-    //! that contract — ordering and None-tolerance — because a regression
+    //! that contract - ordering and None-tolerance - because a regression
     //! here strands either the middleware chain (HTTP hook skipped) or
     //! everything that assumes `DB::init` ran first (order flipped),
     //! without any compile error.

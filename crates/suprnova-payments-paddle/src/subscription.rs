@@ -1,6 +1,6 @@
 //! Implementation of the `Subscription` trait for `PaddleProvider`.
 //!
-//! `subscribe()` returns `NotSupported` — Paddle subscriptions are created
+//! `subscribe()` returns `NotSupported` - Paddle subscriptions are created
 //! indirectly via checkout completion, NOT directly. Domain code should call
 //! `Checkout::start_session` with `SessionMode::Subscription` and react to
 //! the `SubscriptionCreated` webhook for the resulting subscription_id.
@@ -54,7 +54,7 @@ impl Subscription for PaddleProvider {
                 // distinct Paddle API surface (the resume endpoint) and was
                 // not wired in v1. Falling through to subscription_get would
                 // silently return success while leaving the cancellation
-                // scheduled — a dual-API fail-loud violation. Surface it
+                // scheduled - a dual-API fail-loud violation. Surface it
                 // honestly so callers know to route through the dedicated
                 // resume call when it lands.
                 Err(PaymentError::NotSupported(
@@ -87,7 +87,7 @@ impl Subscription for PaddleProvider {
         // Paddle's SubscriptionCancel takes an EffectiveFrom enum (NextBillingPeriod | Immediately)
         // but that enum is private in 0.18.0. The default (NextBillingPeriod) covers cape=true;
         // immediate cancel requires accessing the private enum and is not viable in v1.
-        // Callers requesting immediate cancel get the scheduled-cancel behavior — Paddle's webhook
+        // Callers requesting immediate cancel get the scheduled-cancel behavior - Paddle's webhook
         // still fires SubscriptionCanceled when the period actually ends.
         let resp = self
             .client()

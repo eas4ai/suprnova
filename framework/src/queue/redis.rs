@@ -14,7 +14,7 @@
 //! (sea-streamer batches commits under `AutoCommit::Disabled`); if the
 //! process crashes before the next flush, the message re-enters the
 //! pending entries list and is re-delivered. Idempotency belongs at the
-//! job level — see `framework/src/idempotency/mod.rs`.
+//! job level - see `framework/src/idempotency/mod.rs`.
 //!
 //! Similarly, `nack` performs two non-atomic Redis commands (XADD +
 //! XACK). If XACK fails after XADD succeeds, the original message stays
@@ -30,7 +30,7 @@
 //! settles nothing, and XAUTOCLAIM redelivers the identical entry.
 //!
 //! Redis's own per-entry delivery counter is the only record of those
-//! redeliveries, and sea-streamer does not carry it through — it merges
+//! redeliveries, and sea-streamer does not carry it through - it merges
 //! XREADGROUP and XAUTOCLAIM into one message stream with no redelivery
 //! flag. So `pop` asks `XPENDING` for the entry's delivery count and adds
 //! `count - 1` to the envelope before handing it to the worker.
@@ -39,13 +39,13 @@
 //! `max_tries` and so could never be dead-lettered: it would kill each
 //! worker that claimed it, be redelivered unchanged, and kill the next
 //! one. The database and memory drivers charge the same event in their own
-//! reclaim paths — the semantics have to match, because swapping
+//! reclaim paths - the semantics have to match, because swapping
 //! `QUEUE_DRIVER` must not change whether a poison job can be stopped.
 //!
 //! ## Reclaim latency
 //!
 //! Two clocks, not one. `visibility_timeout` sets XAUTOCLAIM's *idle
-//! threshold* — how long an entry must sit unacked before it qualifies —
+//! threshold* - how long an entry must sit unacked before it qualifies -
 //! while a separate interval governs how often a consumer looks. The
 //! driver ties the second to the first (clamped to 1s..=30s), so a lost
 //! job is redelivered within roughly `2 x visibility_timeout` rather than
@@ -73,7 +73,7 @@
 //!
 //! Redis Streams has no native scheduling. Envelopes whose `available_at` is in
 //! the future (`Queue::later`, `Queue::push_later`, or a `nack` with non-zero
-//! `requeue_delay`) are NOT published to the stream immediately — they go into
+//! `requeue_delay`) are NOT published to the stream immediately - they go into
 //! a companion sorted set `<stream>:delayed` keyed by `available_at` (unix
 //! seconds). On every `pop`, the driver runs a Lua script under `EVAL` that
 //! atomically claims all ZSET entries with `score <= now`, `XADD`s them onto
@@ -140,8 +140,8 @@ use uuid::Uuid;
 ///
 /// The script runs on every `pop`, so a backlog drains across successive
 /// polls rather than in one pass. Bounding it matters because Lua runs
-/// single-threaded and atomically: an unbounded pass over a backlog — a
-/// worker down for hours, a burst of long delays all coming due at once —
+/// single-threaded and atomically: an unbounded pass over a backlog - a
+/// worker down for hours, a burst of long delays all coming due at once -
 /// blocks *every* Redis client, not just this queue, for as long as the
 /// script takes to `XADD` the lot.
 const PROMOTE_DUE_BATCH: usize = 128;
@@ -178,7 +178,7 @@ pub struct RedisQueueDriver {
     producer: RedisProducer,
     consumer: RedisConsumer,
     stream_key: StreamKey,
-    /// `<stream>:delayed` — the sorted set holding envelopes whose
+    /// `<stream>:delayed` - the sorted set holding envelopes whose
     /// `available_at` is still in the future. Promoted into the stream by
     /// every `pop` via `PROMOTE_DUE_SCRIPT`.
     delayed_key: String,
@@ -203,11 +203,11 @@ impl RedisQueueDriver {
     ///
     /// # Arguments
     ///
-    /// * `url` — Redis URL, e.g. `"redis://127.0.0.1:6379"`.
-    /// * `stream` — Redis stream key name.
-    /// * `group` — Consumer group name (created with `MKSTREAM` if absent).
-    /// * `consumer_id` — Unique consumer ID within the group.
-    /// * `visibility_timeout` — How long a message can remain unacknowledged
+    /// * `url` - Redis URL, e.g. `"redis://127.0.0.1:6379"`.
+    /// * `stream` - Redis stream key name.
+    /// * `group` - Consumer group name (created with `MKSTREAM` if absent).
+    /// * `consumer_id` - Unique consumer ID within the group.
+    /// * `visibility_timeout` - How long a message can remain unacknowledged
     ///   before another consumer may re-claim it (`XAUTOCLAIM` idle threshold).
     pub async fn connect(
         url: &str,
@@ -226,13 +226,13 @@ impl RedisQueueDriver {
         let stream_key = StreamKey::new(stream)
             .map_err(|e| FrameworkError::internal(format!("redis stream key error: {e}")))?;
 
-        // Producer — not anchored; we call send_to explicitly with the stream key.
+        // Producer - not anchored; we call send_to explicitly with the stream key.
         let producer: RedisProducer = streamer
             .create_generic_producer(Default::default())
             .await
             .map_err(|e| FrameworkError::internal(format!("redis producer error: {e}")))?;
 
-        // Consumer — LoadBalanced for consumer-group semantics, manual ack.
+        // Consumer - LoadBalanced for consumer-group semantics, manual ack.
         let mut opts = RedisConsumerOptions::new(ConsumerMode::LoadBalanced);
         opts.set_consumer_group(ConsumerGroup::new(group))
             .map_err(|e| FrameworkError::internal(format!("redis set group error: {e}")))?;
@@ -385,7 +385,7 @@ impl QueueDriver for RedisQueueDriver {
             }
             let wait = remaining.min(probe);
             match tokio::time::timeout(wait, self.consumer.next()).await {
-                // This probe timed out — loop and check deadline.
+                // This probe timed out - loop and check deadline.
                 Err(_elapsed) => continue,
                 // Consumer returned an error.
                 Ok(Err(e)) => {
@@ -411,7 +411,7 @@ impl QueueDriver for RedisQueueDriver {
         //
         // A message reaches a second delivery only through XAUTOCLAIM,
         // which fires when the consumer holding it went idle past the
-        // visibility window — i.e. the worker died without acking, nacking
+        // visibility window - i.e. the worker died without acking, nacking
         // or releasing. The stream entry is immutable, so the `attempts`
         // it carries is whatever was true at publication; Redis's own
         // delivery counter is the only record that the job was handed out
@@ -521,7 +521,7 @@ impl QueueDriver for RedisQueueDriver {
     /// `XLEN` counts every entry that's been XADD'd minus those XDEL'd or
     /// XTRIM'd. Acknowledged entries remain in the stream until trimmed, so
     /// this is an upper bound on "live work" rather than a strict count of
-    /// undelivered jobs — adequate for the same dashboarding role Laravel's
+    /// undelivered jobs - adequate for the same dashboarding role Laravel's
     /// `Queue::size()` plays. For "ready to pop" backlog use
     /// `pending_size()` (subtracts the PEL); for explicit reserved counts
     /// use `reserved_size()`.
@@ -531,7 +531,7 @@ impl QueueDriver for RedisQueueDriver {
         Ok(stream_len.saturating_add(delayed))
     }
 
-    /// Envelopes on the stream that no consumer has claimed yet —
+    /// Envelopes on the stream that no consumer has claimed yet -
     /// approximated as `XLEN(stream) - XPENDING(group)`.
     ///
     /// This is the closest analogue to "available for the next pop" on
@@ -551,7 +551,7 @@ impl QueueDriver for RedisQueueDriver {
     }
 
     /// Envelopes currently held in the consumer group's Pending Entries
-    /// List — i.e. delivered to some consumer but not yet `XACK`'d.
+    /// List - i.e. delivered to some consumer but not yet `XACK`'d.
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
         self.xpending_count().await
     }
@@ -608,7 +608,7 @@ impl RedisQueueDriver {
 
         let (mut envelope, shared_msg) = match entry {
             Some(e) => e,
-            // Already acked / unknown token — silently succeed.
+            // Already acked / unknown token - silently succeed.
             None => return Ok(()),
         };
 
@@ -622,7 +622,7 @@ impl RedisQueueDriver {
         envelope.available_at = available_at;
 
         if requeue_delay.is_zero() {
-            // Immediate retry — straight to the stream.
+            // Immediate retry - straight to the stream.
             let json = envelope.to_json().map_err(|e| {
                 FrameworkError::internal(format!("envelope encode error ({op}): {e}"))
             })?;
@@ -636,7 +636,7 @@ impl RedisQueueDriver {
                 FrameworkError::internal(format!("redis {op} re-publish receipt error: {e}"))
             })?;
         } else {
-            // Deferred retry — park on the delayed ZSET; pop will promote.
+            // Deferred retry - park on the delayed ZSET; pop will promote.
             self.zadd_delayed(&envelope).await?;
         }
 
@@ -648,7 +648,7 @@ impl RedisQueueDriver {
         Ok(())
     }
 
-    /// `XLEN <stream>` — total entries currently held by the stream
+    /// `XLEN <stream>` - total entries currently held by the stream
     /// (including acknowledged-but-not-trimmed ones).
     async fn xlen_stream(&self) -> Result<u64, FrameworkError> {
         let mut conn = self.conn.clone();
@@ -660,7 +660,7 @@ impl RedisQueueDriver {
         Ok(n.max(0) as u64)
     }
 
-    /// `ZCARD <stream>:delayed` — entries parked awaiting their
+    /// `ZCARD <stream>:delayed` - entries parked awaiting their
     /// `available_at` deadline.
     async fn zcard_delayed(&self) -> Result<u64, FrameworkError> {
         let mut conn = self.conn.clone();
@@ -687,7 +687,7 @@ impl RedisQueueDriver {
     /// buys the only signal that distinguishes a job whose worker died
     /// from a job being delivered for the first time.
     ///
-    /// Returns 1 — "treat as a first delivery" — for anything unexpected:
+    /// Returns 1 - "treat as a first delivery" - for anything unexpected:
     /// a missing group, an entry already acked, a reply shape this does
     /// not recognise. Guessing high here would burn attempts off healthy
     /// jobs and dead-letter work that never failed, which is worse than
@@ -734,7 +734,7 @@ impl RedisQueueDriver {
         }
     }
 
-    /// `XPENDING <stream> <group>` summary — first element is the total
+    /// `XPENDING <stream> <group>` summary - first element is the total
     /// count of entries in the group's Pending Entries List (delivered but
     /// not yet acked). Returns 0 if the group does not exist (cleared
     /// stream, never-popped driver instance).

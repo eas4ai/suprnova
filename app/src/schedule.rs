@@ -2,7 +2,7 @@
 //!
 //! Registered from `cmd/main.rs` via `Application::schedule`. The app had
 //! no scheduled work at all before these, which is why the replica
-//! question — three `schedule:work` processes against one database — had
+//! question - three `schedule:work` processes against one database - had
 //! never been exercised.
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, Value};
@@ -20,8 +20,8 @@ fn placeholder(backend: DatabaseBackend, n: usize) -> String {
 /// The instrument for the scheduler experiment. Run N `schedule:work`
 /// processes against one database and group by `(task_name, tick_minute)`:
 ///
-/// * exactly one row per minute — one replica ran that tick;
-/// * N rows per minute — every replica independently decided the tick was
+/// * exactly one row per minute - one replica ran that tick;
+/// * N rows per minute - every replica independently decided the tick was
 ///   theirs, so every scheduled side effect is multiplied by the replica
 ///   count.
 ///
@@ -79,7 +79,7 @@ pub const ONE_SERVER_TASK: &str = "bench:tick-one-server";
 /// Register the app's scheduled tasks.
 ///
 /// Two tasks, deliberately, running in the same window against the same
-/// replicas and the same clock — so the only difference between the arms
+/// replicas and the same clock - so the only difference between the arms
 /// is the one builder call under test.
 ///
 /// Single-server execution is opt-in, so the plain arm is expected to
@@ -97,14 +97,14 @@ pub fn register(schedule: &mut Schedule) {
     let plain = schedule
         .call(|| async { record_tick(PLAIN_TASK).await })
         .name(PLAIN_TASK)
-        .description("control arm — no coordination requested")
+        .description("control arm - no coordination requested")
         .every_minute();
     schedule.add(plain);
 
     let elected = schedule
         .call(|| async { record_tick(ONE_SERVER_TASK).await })
         .name(ONE_SERVER_TASK)
-        .description("the arm under test — one execution per tick across replicas")
+        .description("the arm under test - one execution per tick across replicas")
         .every_minute()
         .on_one_server();
     schedule.add(elected);

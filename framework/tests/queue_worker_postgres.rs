@@ -107,7 +107,7 @@ impl EnvGuard {
             .map(|(k, _)| (*k, std::env::var(k).ok()))
             .collect();
         for (k, v) in pairs {
-            // SAFETY: serial test — no other thread reads or writes these
+            // SAFETY: serial test - no other thread reads or writes these
             // process-global vars concurrently.
             unsafe {
                 std::env::set_var(k, v);
@@ -199,13 +199,13 @@ async fn postgres_queue_worker_boots_after_db_init_and_drains_a_job() {
         ("QUEUE_DB_TABLE", "pg_worker_jobs"),
     ]);
 
-    // Step 1 — the app's bootstrap. `DB::init_with` is what a scaffolded
+    // Step 1 - the app's bootstrap. `DB::init_with` is what a scaffolded
     // `bootstrap::register()` calls; the driver bootstrap must come after it.
     DB::init_with(DatabaseConfig::builder().url(pg_url()).build())
         .await
         .expect("DB::init_with must succeed before the drivers boot");
 
-    // Step 2 — the env-driven driver bootstrap the worker subcommands run.
+    // Step 2 - the env-driven driver bootstrap the worker subcommands run.
     bootstrap_from_env()
         .await
         .expect("QUEUE_DRIVER=database must resolve the initialised connection");

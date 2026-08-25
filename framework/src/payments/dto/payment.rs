@@ -1,4 +1,4 @@
-//! Payment / charge DTOs — request, status, and result shapes exchanged
+//! Payment / charge DTOs - request, status, and result shapes exchanged
 //! with [`super::super::traits::Payment`].
 
 use crate::payments::Money;
@@ -60,7 +60,7 @@ pub struct ChargeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChargeResult {
-    /// Charge settled server-side — no further customer action needed.
+    /// Charge settled server-side - no further customer action needed.
     Completed {
         /// Provider transaction identifier (e.g. Stripe's `pi_…`).
         provider_transaction_id: String,
@@ -75,7 +75,7 @@ pub enum ChargeResult {
     /// navigates to `url`; provider redirects back to `return_to` once
     /// the customer completes the step.
     RedirectRequired {
-        /// Provider transaction identifier — used for status polling
+        /// Provider transaction identifier - used for status polling
         /// once the customer returns.
         provider_transaction_id: String,
         /// Absolute URL the customer is redirected to.

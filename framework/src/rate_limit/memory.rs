@@ -3,23 +3,23 @@
 //! ## Bucket-map growth and the periodic sweep
 //!
 //! The driver records one bucket per distinct key. When the keying
-//! closure is attacker-controlled — historically the documented
+//! closure is attacker-controlled - historically the documented
 //! "rate-limit by `X-Forwarded-For`" pattern, which an attacker could
 //! abuse by rotating the header on a deployment without trusted-proxy
-//! gating — the map can grow without bound.
+//! gating - the map can grow without bound.
 //!
 //! [`InMemoryRateLimiter::purge_inactive`] is the manual sweep
 //! primitive: it drops every bucket whose last recorded hit aged out
 //! past the supplied window. The constructor pair makes the choice
 //! explicit:
 //!
-//! - [`InMemoryRateLimiter::new`] is sweep-free and runtime-free —
+//! - [`InMemoryRateLimiter::new`] is sweep-free and runtime-free -
 //!   the default for unit tests, `bootstrap_default`, and any other
 //!   call site that doesn't need (or want) a background task.
 //! - [`InMemoryRateLimiter::with_periodic_sweep`] spawns a `tokio`
 //!   task that calls `purge_inactive` on a fixed interval. The task
 //!   holds a `Weak` reference back to the shared bucket map, so the
-//!   sweep self-terminates once the last `Arc<Self>` drops — no
+//!   sweep self-terminates once the last `Arc<Self>` drops - no
 //!   leaked task, no shutdown plumbing needed by the embedder.
 
 use crate::error::FrameworkError;
@@ -65,7 +65,7 @@ impl InMemoryRateLimiter {
     /// the driver lives in the [`crate::container::App`] container
     /// for the process lifetime.
     ///
-    /// Must be called from within a tokio runtime — the spawn happens
+    /// Must be called from within a tokio runtime - the spawn happens
     /// via [`tokio::spawn`] and will panic if no runtime is
     /// installed. The sweep-free [`Self::new`] constructor is the
     /// right choice for unit tests that don't already have a runtime.
@@ -82,7 +82,7 @@ impl InMemoryRateLimiter {
             loop {
                 ticker.tick().await;
                 let Some(buckets) = weak.upgrade() else {
-                    // Driver dropped — self-terminate.
+                    // Driver dropped - self-terminate.
                     break;
                 };
                 let now = Instant::now();
@@ -91,7 +91,7 @@ impl InMemoryRateLimiter {
                 }
             }
         });
-        // Construction-time set on a freshly-created Mutex — poison is
+        // Construction-time set on a freshly-created Mutex - poison is
         // unreachable here unless something panicked while holding the
         // guard at a previous point in `with_periodic_sweep`, which is
         // structurally impossible. Recover in place anyway for
@@ -215,7 +215,7 @@ mod tests {
         // Hit "fresh" at t=0.
         assert!(limiter.try_acquire("fresh", &cfg).await.unwrap());
 
-        // Jump forward 30s — still inside the inactivity window — and
+        // Jump forward 30s - still inside the inactivity window - and
         // hit "fresh" again.
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(limiter.try_acquire("fresh", &cfg).await.unwrap());
@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn periodic_sweep_runs_and_self_terminates_on_drop() {
         // Use REAL time so tokio's `interval` ticker observes the
-        // wall-clock advance — `start_paused` makes the interval
+        // wall-clock advance - `start_paused` makes the interval
         // arm/disarm under the test's control, which loses races
         // against `yield_now`. A short interval keeps the test cheap.
         let limiter = InMemoryRateLimiter::with_periodic_sweep(
@@ -259,7 +259,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        // Verify drop cleanly aborts the task — no panic, no leak.
+        // Verify drop cleanly aborts the task - no panic, no leak.
         drop(limiter);
     }
 }

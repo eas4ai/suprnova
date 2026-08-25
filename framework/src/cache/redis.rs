@@ -13,7 +13,7 @@ use crate::error::FrameworkError;
 
 /// How many forward-index members `flush_tags` pulls per `SSCAN` round.
 ///
-/// A hint, not a guarantee — Redis may return more or fewer. It bounds the
+/// A hint, not a guarantee - Redis may return more or fewer. It bounds the
 /// per-round allocation and the size of one Lua invocation, which is the
 /// whole point of scanning instead of `SMEMBERS`.
 const TAG_SCAN_BATCH: usize = 256;
@@ -27,7 +27,7 @@ const TAG_SCAN_BATCH: usize = 256;
 /// Why a script rather than the SISMEMBER-then-DEL it replaces: those were
 /// two round trips with a gap between them. A concurrent untagged
 /// `put_raw` landing in that gap dropped the aux entry, and the flush went
-/// on to delete a value that was no longer tagged — silent data loss, and
+/// on to delete a value that was no longer tagged - silent data loss, and
 /// only under load, which is the worst way to find it.
 ///
 /// The `SREM` is per observed member instead of a `DEL` of the whole index
@@ -94,7 +94,7 @@ impl RedisCache {
         // CLOSED promptly instead of hanging. The redis-rs
         // defaults are 6 reconnect retries with an UNCAPPED exponential
         // backoff (max_delay = None), so against a down/unreachable host the
-        // connect future can take well over 10s to resolve with an error —
+        // connect future can take well over 10s to resolve with an error -
         // blocking `Cache::bootstrap` at startup for that whole window.
         //
         // We cap it: at most 3 retries, =<500ms between them, each connection
@@ -135,7 +135,7 @@ impl RedisCache {
     /// so they cannot collide with any user-supplied cache key. User
     /// keys are always passed through `prefixed_key(...)` which does not
     /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
-    /// targets `<prefix>lock:foo` — distinct from the lock's
+    /// targets `<prefix>lock:foo` - distinct from the lock's
     /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
     /// `put` from releasing or overwriting a held distributed lock.
     fn locked_key(&self, key: &str) -> String {
@@ -203,7 +203,7 @@ impl CacheStore for RedisCache {
         pipe.cmd("DEL").arg(&aux).ignore();
         // `None` ttl means **no expiration** per the CacheStore contract.
         // The facade resolves any configured default before calling this
-        // method — otherwise `Cache::forever` would not be forever on
+        // method - otherwise `Cache::forever` would not be forever on
         // Redis.
         if let Some(duration) = ttl {
             pipe.cmd("SET")
@@ -234,7 +234,7 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let pkey = self.prefixed_key(key);
 
-        // Atomic via SET NX [PX ttl] — Redis writes the value only when
+        // Atomic via SET NX [PX ttl] - Redis writes the value only when
         // the key does not exist. Returns the string "OK" on success and
         // nil (Option::None) on contention.
         let res: Option<String> = if let Some(d) = ttl {
@@ -288,7 +288,7 @@ impl CacheStore for RedisCache {
         let pkey = self.prefixed_key(key);
 
         // Drop the value AND its tag aux set. The forward `tag:{t}` set
-        // may still list this key; that's harmless — flush_tags validates
+        // may still list this key; that's harmless - flush_tags validates
         // membership via the aux set and skips a key whose aux set says
         // "no longer tagged with t" (or no longer exists at all).
         let aux = self.key_tags_set(&pkey);
@@ -296,7 +296,7 @@ impl CacheStore for RedisCache {
         // value and its aux bookkeeping key together would report `true` even
         // when only the aux key survived (e.g. the value expired first while
         // its aux entry lagged). Delete both in one pipeline but report
-        // existence based on the VALUE key's own DEL result — the aux delete is
+        // existence based on the VALUE key's own DEL result - the aux delete is
         // ignored so it doesn't inflate the count.
         let (value_deleted,): (i64,) = redis::pipe()
             .atomic()
@@ -383,11 +383,11 @@ impl CacheStore for RedisCache {
 
         let mut pipe = redis::pipe();
         pipe.atomic();
-        // Rewrite the aux set from scratch — replaces (not unions with)
+        // Rewrite the aux set from scratch - replaces (not unions with)
         // any prior tag memberships. This is what protects a tagged
         // overwrite from carrying old tags.
         pipe.cmd("DEL").arg(&aux).ignore();
-        // `None` ttl honoured literally — see put_raw for rationale.
+        // `None` ttl honoured literally - see put_raw for rationale.
         if let Some(d) = ttl {
             let pxms = redis_ttl_ms(d);
             pipe.cmd("SET")
@@ -437,8 +437,8 @@ impl CacheStore for RedisCache {
             let tag_key = self.tag_index_key(t);
             let mut cursor: u64 = 0;
             loop {
-                // SSCAN, not SMEMBERS. A tag's forward index is unbounded —
-                // it grows with every key ever written under that tag — and
+                // SSCAN, not SMEMBERS. A tag's forward index is unbounded -
+                // it grows with every key ever written under that tag - and
                 // SMEMBERS materialises all of it, in Redis and again in this
                 // process. On a large tag that is a multi-megabyte allocation
                 // behind a command that blocks the whole server while it
@@ -487,7 +487,7 @@ impl CacheStore for RedisCache {
         let pkey = self.locked_key(key);
         let token = uuid::Uuid::new_v4().to_string();
 
-        // SET key token NX PX ttl_ms — atomic: only sets if key does not
+        // SET key token NX PX ttl_ms - atomic: only sets if key does not
         // exist. PX preserves sub-second precision (EX truncates and a
         // sub-second TTL would round to 0, which Redis rejects).
         let res: Option<String> = redis::cmd("SET")
@@ -529,7 +529,7 @@ impl CacheStore for RedisCache {
         let mut conn = self.conn.clone();
         let pkey = self.locked_key(key);
         // Atomically: if GET key == token then PEXPIRE key ttl_ms, else
-        // return 0. PEXPIRE preserves sub-second precision — EXPIRE
+        // return 0. PEXPIRE preserves sub-second precision - EXPIRE
         // would truncate, and `EXPIRE key 0` deletes the key, which
         // would silently release the lock on a sub-second refresh.
         let script = redis::Script::new(
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn redis_ttl_ms_clamps_zero_to_one_ms() {
-        // Redis rejects PX 0 and PEXPIRE key 0 deletes the key — clamp
+        // Redis rejects PX 0 and PEXPIRE key 0 deletes the key - clamp
         // to 1 ms so neither failure mode is reachable from this layer.
         assert_eq!(redis_ttl_ms(Duration::ZERO), 1);
     }
@@ -589,7 +589,7 @@ mod tests {
             redis_ttl_ms(Duration::from_secs(365 * 24 * 60 * 60)),
             one_year_ms
         );
-        // u64::MAX milliseconds is a hard ceiling — anything past it
+        // u64::MAX milliseconds is a hard ceiling - anything past it
         // saturates rather than wrapping or panicking.
         assert_eq!(redis_ttl_ms(Duration::MAX), u64::MAX);
     }

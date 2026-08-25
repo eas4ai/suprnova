@@ -42,8 +42,8 @@ impl FormRequest for LargeForm {
 
 /// Override via the derive macro's struct-level attribute. Verifies the
 /// derive composes with `#[form_request(max_body_bytes = N)]` (users
-/// can't write a separate `impl FormRequest` block — that conflicts with
-/// the one the derive emits — so the macro attribute is the supported
+/// can't write a separate `impl FormRequest` block - that conflicts with
+/// the one the derive emits - so the macro attribute is the supported
 /// path for derive users).
 #[derive(Deserialize, Validate, suprnova::FormRequestDerive)]
 #[form_request(max_body_bytes = 4 * 1024 * 1024)] // 4 MiB
@@ -56,7 +56,7 @@ struct TinyDerivedForm {
 //
 // These tests mutate a process-global atomic; Cargo runs integration tests in
 // parallel within the same binary by default. The guard pattern mirrors
-// `BodyCapGuard` in `uploads.rs` — same poison-tolerant Mutex, same RAII
+// `BodyCapGuard` in `uploads.rs` - same poison-tolerant Mutex, same RAII
 // reset-to-default-on-drop so a panicking test doesn't leak overrides into the
 // next.
 
@@ -98,7 +98,7 @@ fn json_payload(payload_len: usize) -> Vec<u8> {
 async fn default_cap_rejects_oversize_payload() {
     let _g = ReqBodyCapGuard::acquire();
 
-    // 9 MiB payload — clears the 8 MiB compile-time default.
+    // 9 MiB payload - clears the 8 MiB compile-time default.
     let body = json_payload(9 * 1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
 
@@ -113,7 +113,7 @@ async fn default_cap_rejects_oversize_payload() {
 async fn content_length_pre_check_rejects_without_reading_body() {
     let _g = ReqBodyCapGuard::acquire();
 
-    // Declare 20 MiB in the header but send a 1 KiB body — pre-check fires
+    // Declare 20 MiB in the header but send a 1 KiB body - pre-check fires
     // on the header alone, so the server never reads past the headers.
     let small_body = json_payload(1024);
     let req =
@@ -130,7 +130,7 @@ async fn content_length_pre_check_rejects_without_reading_body() {
 async fn per_form_request_override_allows_larger_body() {
     let _g = ReqBodyCapGuard::acquire();
 
-    // 12 MiB payload — over the default 8 MiB cap, under LargeForm's 32 MiB.
+    // 12 MiB payload - over the default 8 MiB cap, under LargeForm's 32 MiB.
     let body = json_payload(12 * 1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
 
@@ -147,8 +147,8 @@ async fn global_override_raises_default_for_unannotated_form() {
     let _g = ReqBodyCapGuard::acquire();
 
     // Raise the process-global to 16 MiB. DefaultForm has no override, so
-    // it now inherits 16 MiB. A 10 MiB body — previously rejected by the
-    // 8 MiB default — should now succeed.
+    // it now inherits 16 MiB. A 10 MiB body - previously rejected by the
+    // 8 MiB default - should now succeed.
     suprnova::http::body::set_global_max_request_body_bytes(16 * 1024 * 1024);
 
     let body = json_payload(10 * 1024 * 1024);
@@ -221,7 +221,7 @@ async fn derive_with_form_request_attribute_lowers_cap() {
     let _g = ReqBodyCapGuard::acquire();
 
     // TinyDerivedForm caps itself at 4 MiB via the macro attribute. A 5 MiB
-    // body — well under the 8 MiB default — should still be rejected
+    // body - well under the 8 MiB default - should still be rejected
     // because the per-struct override wins.
     let body = json_payload(5 * 1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
@@ -237,7 +237,7 @@ async fn derive_with_form_request_attribute_lowers_cap() {
 async fn derive_with_form_request_attribute_accepts_in_range_body() {
     let _g = ReqBodyCapGuard::acquire();
 
-    // 1 MiB body — under TinyDerivedForm's 4 MiB cap.
+    // 1 MiB body - under TinyDerivedForm's 4 MiB cap.
     let body = json_payload(1024 * 1024);
     let req = request_with_body("/", "application/json", &body).await;
 

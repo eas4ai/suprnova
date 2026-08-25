@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `data` #336 — `#[data(from_route_param)]`
+//! Regression: HIGH audit finding `data` #336 - `#[data(from_route_param)]`
 //! DTOs did not run the full `FormRequest` lifecycle.
 //!
 //! Before the fix, the macro emitted a custom `extract` for any DTO
@@ -186,7 +186,7 @@ async fn non_object_json_body_is_rejected_not_silently_emptied() {
 #[tokio::test]
 async fn precognition_header_short_circuits_with_route_param_dto() {
     // Before the fix: `Precognition: true` requests went through the
-    // custom extractor that ignored the header — they ran normal
+    // custom extractor that ignored the header - they ran normal
     // extraction and either succeeded (`Ok(dto)`) or failed with
     // ordinary validation errors. Post-fix: the header triggers the
     // PrecognitionSuccess short-circuit (204 No Content) when all

@@ -4,8 +4,8 @@
 //! `fake`-only tests run in parallel without explicit locking.
 //!
 //! Tests that touch the real network (`spawn_echo` / `spawn_canned`) or
-//! the process-global `fail_on_real_calls` flag — added in codex review
-//! finding #14 — serialize through `NETWORK_LOCK`. The flag is process-
+//! the process-global `fail_on_real_calls` flag - added in codex review
+//! finding #14 - serialize through `NETWORK_LOCK`. The flag is process-
 //! global by design (it's how Laravel's `Http::preventStrayRequests()`
 //! works), so two parallel tests with conflicting expectations about
 //! the flag's value would race. Holding the lock for the duration of
@@ -26,7 +26,7 @@ use suprnova::{Http, RetryOutcome, assert_not_sent, assert_sent, fake_response};
 
 /// Serializes every test that touches real-network IO or the
 /// `FAIL_ON_REAL_CALLS` flag. Pure-fake tests don't need to hold
-/// this lock — they're isolated via `tokio::task_local!`.
+/// this lock - they're isolated via `tokio::task_local!`.
 static NETWORK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// One-shot echo server. Accepts a single connection, captures the
@@ -248,7 +248,7 @@ async fn fake_response_text_round_trips_verbatim() {
 #[tokio::test]
 async fn fake_assert_not_sent_passes_when_clean() {
     Http::fake(|| async {
-        // No requests sent — assert_not_sent must not panic.
+        // No requests sent - assert_not_sent must not panic.
         assert_not_sent(|r| r.url.contains("anything"));
     })
     .await;
@@ -262,7 +262,7 @@ async fn fake_unmatched_request_returns_default_200() {
     // shared network lock.
     let _net = NETWORK_LOCK.lock().await;
     Http::fake(|| async {
-        // No canned response queued — request still succeeds with 200 {}
+        // No canned response queued - request still succeeds with 200 {}
         let resp = Http::get("https://example.com/anything")
             .send()
             .await
@@ -441,7 +441,7 @@ async fn retry_honors_retry_after_header_on_503() {
     let _net = NETWORK_LOCK.lock().await;
     // First response: 503 with Retry-After: 1 (1 second).
     // Second response: 200.
-    // Base backoff is 1ms — far below the 1s Retry-After. We assert
+    // Base backoff is 1ms - far below the 1s Retry-After. We assert
     // the wait between attempts honors the larger of the two by
     // checking the elapsed wall clock.
     let mut canned: Vec<(u16, Option<u64>, &'static str)> =
@@ -470,7 +470,7 @@ async fn retry_honors_retry_after_header_on_503() {
 async fn retry_skips_non_idempotent_post_by_default() {
     let _net = NETWORK_LOCK.lock().await;
     // A 500 that WOULD be retried for an idempotent method. POST is not
-    // idempotent, so `.retry()` must NOT replay it — exactly one attempt,
+    // idempotent, so `.retry()` must NOT replay it - exactly one attempt,
     // and the 500 is returned to the caller.
     let (addr, count) = spawn_canned(vec![(500, None, "{\"err\":1}")]).await;
     let url = format!("http://{}/x", addr);
@@ -642,7 +642,7 @@ async fn into_inner_returns_err_for_fake_response() {
     .await;
 }
 
-// ── Codex review finding 8 — W3C trace context injection ─────────────────
+// ── Codex review finding 8 - W3C trace context injection ─────────────────
 //
 // `Http::send` must inject `traceparent` (and `tracestate` when
 // non-empty) into outbound requests when an OTel context is active.
@@ -658,7 +658,7 @@ async fn outbound_request_includes_traceparent_when_otel_context_active() {
         FutureExt as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
     };
 
-    // Install the W3C TraceContext propagator. Idempotent — safe even
+    // Install the W3C TraceContext propagator. Idempotent - safe even
     // if other tests in this run also called it.
     suprnova::telemetry::propagation::install_trace_context_propagator();
 
@@ -730,7 +730,7 @@ async fn outbound_request_includes_traceparent_when_otel_context_active() {
 #[tokio::test]
 async fn outbound_request_omits_traceparent_without_active_context() {
     let _net = NETWORK_LOCK.lock().await;
-    // No `with_context` wrapper here — `Context::current()` is empty,
+    // No `with_context` wrapper here - `Context::current()` is empty,
     // so the propagator should inject nothing and the echo server
     // sees no `traceparent` header.
     suprnova::telemetry::propagation::install_trace_context_propagator();
@@ -748,7 +748,7 @@ async fn outbound_request_omits_traceparent_without_active_context() {
     );
 }
 
-// ── Codex review finding 14 — fail-closed guard + inherited fakes ────────
+// ── Codex review finding 14 - fail-closed guard + inherited fakes ────────
 //
 // `Http::fake` stores its state in a `tokio::task_local!`, which is
 // scoped to the current task. Two known divergences from Laravel-style
@@ -776,7 +776,7 @@ async fn fail_on_real_calls_blocks_unfaked_outbound() {
     let _net = NETWORK_LOCK.lock().await;
     let _guard = suprnova::FailOnRealCallsGuard::install();
 
-    // 127.0.0.1:9 is the Discard protocol port — nothing listens. We
+    // 127.0.0.1:9 is the Discard protocol port - nothing listens. We
     // never want to actually try to connect to it, because the test
     // must prove the guard short-circuits BEFORE any network IO. If
     // the guard were broken, the request would fail with a connection
@@ -803,7 +803,7 @@ async fn fail_on_real_calls_lets_fakes_through() {
     let _net = NETWORK_LOCK.lock().await;
     let _guard = suprnova::FailOnRealCallsGuard::install();
 
-    // The guard MUST defer to fakes — if a fake matches, the request
+    // The guard MUST defer to fakes - if a fake matches, the request
     // is intercepted and the fail-closed branch never runs.
     Http::fake(|| async {
         fake_response("GET", "/api", 204, serde_json::json!({}));
@@ -820,7 +820,7 @@ async fn fail_on_real_calls_lets_fakes_through() {
 async fn fail_on_real_calls_guard_resets_on_drop() {
     let _net = NETWORK_LOCK.lock().await;
 
-    // Start clean — default is real calls allowed.
+    // Start clean - default is real calls allowed.
     assert!(!Http::is_guarded(), "default must be unguarded");
 
     {
@@ -857,7 +857,7 @@ async fn spawn_with_fake_inheritance_carries_fakes_to_child_task() {
 
         // Recorded requests from the child are visible to the parent
         // because the Arc<Mutex<FakeState>> is shared. `assert_sent`
-        // reads the parent's task-local — which the helper inherited
+        // reads the parent's task-local - which the helper inherited
         // by Arc-cloning, not by snapshotting.
         assert_sent(|r| r.url.contains("/child"));
     })
@@ -869,7 +869,7 @@ async fn spawn_with_fake_inheritance_falls_back_to_regular_spawn_outside_scope()
     let _net = NETWORK_LOCK.lock().await;
     let _guard = suprnova::FailOnRealCallsGuard::install();
 
-    // No active Http::fake — the helper must degrade to a regular
+    // No active Http::fake - the helper must degrade to a regular
     // tokio::spawn rather than panicking on the missing task-local.
     // We layer the guard so the spawned task fails closed if it
     // tries to hit the real network, proving the spawned future
@@ -899,7 +899,7 @@ async fn regular_spawn_does_not_inherit_fakes() {
     let result = Http::fake(|| async {
         fake_response("GET", "/parent", 200, serde_json::json!({}));
         let handle = tokio::spawn(async {
-            // Inside the spawned task — no fake context is visible.
+            // Inside the spawned task - no fake context is visible.
             // The guard catches the escape.
             Http::get("https://parent.test/parent").send().await
         });
@@ -963,7 +963,7 @@ async fn no_redirects_surfaces_the_3xx_unfollowed() {
     let addr = spawn_redirect_server().await;
     let url = format!("http://{}/redirect", addr);
 
-    // Opt out: the 302 is returned as-is, never followed — the SSRF guard
+    // Opt out: the 302 is returned as-is, never followed - the SSRF guard
     // for user-influenced URLs.
     let resp = Http::get(&url).no_redirects().send().await.expect("send");
     assert_eq!(
@@ -1061,7 +1061,7 @@ async fn retry_when_predicate_sees_the_attempt_number_increment() {
 async fn retry_when_sees_transport_error_outcome() {
     let _net = NETWORK_LOCK.lock().await;
     use std::sync::{Arc, Mutex};
-    // 127.0.0.1:9 (Discard port, nothing listens) fails at connect — a
+    // 127.0.0.1:9 (Discard port, nothing listens) fails at connect - a
     // transport error, not a response. `Http::fake` can't produce this
     // path, so this test runs unfaked.
     let outcome: Arc<Mutex<Option<RetryOutcome>>> = Arc::new(Mutex::new(None));
@@ -1072,7 +1072,7 @@ async fn retry_when_sees_transport_error_outcome() {
         .retry_when(move |ctx| {
             *o.lock().unwrap() = Some(ctx.outcome);
             *m.lock().unwrap() = Some(ctx.method);
-            false // veto — one predicate call proves the outcome it saw
+            false // veto - one predicate call proves the outcome it saw
         })
         .send()
         .await;

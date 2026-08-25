@@ -32,7 +32,7 @@ pub mod workflow_work;
 /// Build a `cargo run` invocation that names the project's server binary
 /// explicitly, then forwards `app_args` to it.
 ///
-/// Scaffolded projects declare two binaries — the server and `console` —
+/// Scaffolded projects declare two binaries - the server and `console` -
 /// and `cargo run` refuses to guess between them:
 ///
 /// ```text
@@ -48,7 +48,7 @@ pub mod workflow_work;
 /// scaffolded before this fix, or one whose manifest a user has edited,
 /// still needs to work. Naming the binary is what makes it independent.
 ///
-/// Falls back to a bare `cargo run` when the package name cannot be read —
+/// Falls back to a bare `cargo run` when the package name cannot be read -
 /// a single-binary project resolves fine without `--bin`, and a two-binary
 /// one gets cargo's own message above, which says exactly what to do.
 pub(crate) fn cargo_run(app_args: &[&str]) -> std::process::Command {
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn cargo_run_names_the_server_binary_explicitly() {
         // cwd during tests is the crate root, so `Cargo.toml` resolves to
-        // suprnova-cli's own manifest — a real file with a real package
+        // suprnova-cli's own manifest - a real file with a real package
         // name, which is exactly the shape the helper reads in a user's
         // project.
         let command = cargo_run(&["migrate"]);

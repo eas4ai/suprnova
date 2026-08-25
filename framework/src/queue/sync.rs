@@ -1,9 +1,9 @@
-//! Synchronous queue driver — runs jobs inline on `push`.
+//! Synchronous queue driver - runs jobs inline on `push`.
 //!
 //! Mirrors Laravel's `SyncQueue`. The envelope runs inline through the
 //! worker's middleware pipeline (`run_through_middleware`) before `push`
 //! returns; there is no background worker, no retry, and no delayed-job
-//! support — `push` for an
+//! support - `push` for an
 //! envelope with `available_at` in the future runs immediately anyway, just
 //! like Laravel's sync driver (a "fake" queue for development).
 //!
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 /// [`QueueDriver`] that runs each pushed job inline on the calling
-/// task. Mirrors Laravel's `sync` driver — useful in tests and in
+/// task. Mirrors Laravel's `sync` driver - useful in tests and in
 /// configurations where no background worker is desired.
 #[derive(Default)]
 pub struct SyncQueueDriver;
@@ -38,7 +38,7 @@ impl QueueDriver for SyncQueueDriver {
         // Sync drivers run the job inline through the SAME middleware
         // pipeline the worker uses (`run_through_middleware`), so
         // `WithoutOverlapping`, `RateLimited`, `ThrottlesExceptions`, etc.
-        // apply here exactly as they would on a background worker — running
+        // apply here exactly as they would on a background worker - running
         // the bare dispatcher would silently bypass every registered
         // `JobMiddleware`. If no dispatcher is registered for this job_name,
         // the pipeline's terminal returns the same "unknown job" error a

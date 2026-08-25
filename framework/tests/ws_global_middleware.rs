@@ -3,7 +3,7 @@
 //! rate-limit / logging middleware protects `/ws/*` routes exactly as it
 //! protects any other route. Before this was wired, `handle_ws_upgrade`
 //! ignored the global registry entirely and only ran per-route WS
-//! middleware — a globally installed auth gate did nothing for upgrades.
+//! middleware - a globally installed auth gate did nothing for upgrades.
 //!
 //! These drive the real `handle_request` over a loopback socket with
 //! `.with_upgrades()` (modeled on `ws_e2e.rs`) and a real
@@ -42,7 +42,7 @@ impl WebSocketHandler for EchoHandler {
 }
 
 /// Global middleware that rejects every request with 401 before it can
-/// reach the handler — stands in for an auth / session gate.
+/// reach the handler - stands in for an auth / session gate.
 struct RejectingGlobalMiddleware;
 
 #[async_trait]
@@ -117,7 +117,7 @@ async fn spawn_test_server(registry: MiddlewareRegistry) -> u16 {
     port
 }
 
-/// A global middleware returning 401 must abort the upgrade — proving
+/// A global middleware returning 401 must abort the upgrade - proving
 /// globals are applied to the WS path. The 401 must also echo
 /// `X-Request-Id`, proving the RequestId + global chain (not just
 /// per-route middleware) ran ahead of the handler.
@@ -141,7 +141,7 @@ async fn global_middleware_can_reject_a_ws_upgrade() {
             );
         }
         Ok(_) => panic!(
-            "upgrade succeeded despite a global 401 middleware — global middleware \
+            "upgrade succeeded despite a global 401 middleware - global middleware \
              is not being applied to WS upgrades"
         ),
         Err(other) => panic!("expected an HTTP 401 rejection, got: {other:?}"),
@@ -180,14 +180,14 @@ async fn global_middleware_runs_on_a_successful_ws_upgrade() {
 }
 
 // ---------------------------------------------------------------------------
-// P2-04 — the authenticated identity must survive into the WS session
+// P2-04 - the authenticated identity must survive into the WS session
 // ---------------------------------------------------------------------------
 //
 // Global middleware running on the upgrade was only half the story. The
 // chain's ambient auth state unwinds when `chain.execute` returns, and
 // `handle_ws_upgrade` deliberately carries only `REQUEST_ID` into the
 // spawned session task. So a handler could be behind a fully authenticated
-// upgrade and still have no way to learn who connected — which is why the
+// upgrade and still have no way to learn who connected - which is why the
 // dogfood chat channel ended up gating on a client-supplied token string.
 //
 // `Request::auth_user_id` closes that gap: the terminator captures the

@@ -258,7 +258,7 @@ async fn throttle_after_callback_only_counts_on_failure_response() {
         .middleware(mw);
     let addr = spawn_server(router, 8).await;
 
-    // Two 200s — shouldn't consume the limit.
+    // Two 200s - shouldn't consume the limit.
     let (s1, _) = get_with_headers(addr, "/maybe-fail").await;
     let (s2, _) = get_with_headers(addr, "/maybe-fail").await;
     assert_eq!(s1, 200);
@@ -272,7 +272,7 @@ async fn throttle_after_callback_only_counts_on_failure_response() {
         "successful responses must not consume the limit"
     );
 
-    // Two 500s — both pass through (the limit isn't tripped yet); the
+    // Two 500s - both pass through (the limit isn't tripped yet); the
     // third call would be throttled.
     let (s3, _) = get_with_headers(addr, "/maybe-fail").await;
     let (s4, _) = get_with_headers(addr, "/maybe-fail").await;

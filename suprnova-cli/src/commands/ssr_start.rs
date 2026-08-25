@@ -1,4 +1,4 @@
-//! `suprnova ssr:start` — launch the Inertia SSR worker.
+//! `suprnova ssr:start` - launch the Inertia SSR worker.
 //!
 //! Foreground process. Picks up `SUPRNOVA_SSR_BUNDLE` and
 //! `SUPRNOVA_SSR_RUNTIME` from the environment (or `--bundle` /
@@ -8,7 +8,7 @@
 //!
 //! Daemonization, PID files, log rotation, restart-on-crash, and
 //! `:stop`/`:check` subcommands are deliberately *not* in the
-//! framework — those are operator-stack concerns.
+//! framework - those are operator-stack concerns.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -117,7 +117,7 @@ mod tests {
         // No flag, no env → "node".
         // SAFETY: We don't touch the env so other parallel tests are
         // unaffected. If SUPRNOVA_SSR_RUNTIME happens to be set in the
-        // test environment, this assertion would skip — we explicitly
+        // test environment, this assertion would skip - we explicitly
         // check unset.
         if std::env::var("SUPRNOVA_SSR_RUNTIME").is_err() {
             let r = resolve_runtime(None);

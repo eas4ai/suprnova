@@ -1,4 +1,4 @@
-//! Integration tests for `Cookie::queue`/`queued`/`unqueue`/`expire` —
+//! Integration tests for `Cookie::queue`/`queued`/`unqueue`/`expire` -
 //! Laravel's `Cookie::queue()` family. The jar is the existing
 //! `PENDING_COOKIES` task-local in `session::middleware` (already used
 //! by `Auth::login_remember`), drained onto the response by
@@ -8,12 +8,12 @@
 //!
 //! - `run` / a directly-driven `middleware.handle(...)` call: drives
 //!   `SessionMiddleware::handle` against a fake `SessionStore` with a
-//!   hand-rolled `Next` closure standing in for the rest of the chain —
+//!   hand-rolled `Next` closure standing in for the rest of the chain -
 //!   no router, no `MiddlewareRegistry`, no database. Mirrors
 //!   `tests/session_lazy_persistence.rs`. Covers the majority of cases
 //!   here, including the two internal fail-closed 500 paths
 //!   (`ReadFailsStore`, `WriteFailsStore`) that need a store which
-//!   actually fails a read or a write — `NullStore` never does.
+//!   actually fails a read or a write - `NullStore` never does.
 //! - `incoming_get_request` + `handle_request`: builds a genuine
 //!   `hyper::Request<Incoming>` over an in-memory `tokio::io::duplex`
 //!   pipe and drives it through a real `Router` + `MiddlewareRegistry`
@@ -33,7 +33,7 @@
 //! The one exception is the `serve_connection` await inside each
 //! helper's `tokio::spawn`ed connection loop: it's a detached
 //! background task the test itself never awaits, so a hang there
-//! leaks a task rather than blocking test completion —
+//! leaks a task rather than blocking test completion -
 //! `incoming_get_request`'s handler is even built to run forever on
 //! purpose (see its doc comment).
 
@@ -57,7 +57,7 @@ fn ensure_crypt() {
     INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
 }
 
-/// No session ever exists to find and no write ever fails — most tests
+/// No session ever exists to find and no write ever fails - most tests
 /// in this file drive a cookieless request with no session mutation,
 /// so persistence itself is out of scope (`session_lazy_persistence.rs`
 /// covers that in depth).
@@ -82,7 +82,7 @@ impl SessionStore for NullStore {
     }
 }
 
-/// A `SessionStore` whose `read` always fails — drives the
+/// A `SessionStore` whose `read` always fails - drives the
 /// `session_read_failed && session.is_dirty()` fail-closed path in
 /// `SessionMiddleware::handle` (existing session couldn't be loaded,
 /// but the handler mutated the fallback session anyway).
@@ -107,7 +107,7 @@ impl SessionStore for ReadFailsStore {
     }
 }
 
-/// A `SessionStore` whose `write` always fails — drives the "session
+/// A `SessionStore` whose `write` always fails - drives the "session
 /// write failed for a mutated session" fail-closed path in
 /// `SessionMiddleware::handle`.
 struct WriteFailsStore;
@@ -150,8 +150,8 @@ fn percent_encode_cookie_value(value: &str) -> String {
     encoded
 }
 
-/// Build a real `suprnova::Request` over an in-memory duplex connection
-/// — `hyper::body::Incoming` cannot be constructed by hand. `cookie`
+/// Build a real `suprnova::Request` over an in-memory duplex connection -
+/// `hyper::body::Incoming` cannot be constructed by hand. `cookie`
 /// optionally carries an inbound session cookie (name, raw value),
 /// needed to exercise the existing-session-read path. Mirrors
 /// `tests/session_lazy_persistence.rs::post_request`.
@@ -274,8 +274,8 @@ fn config() -> SessionConfig {
 }
 
 /// Serializes this file's tests that touch the process-wide `Crypt`
-/// test hooks — `Cookie::encrypted` directly, or
-/// `crypto::_test_force_next_encrypt_failure` indirectly — against
+/// test hooks - `Cookie::encrypted` directly, or
+/// `crypto::_test_force_next_encrypt_failure` indirectly - against
 /// each other. `#[tokio::test]` functions in one binary run
 /// concurrently by default, so without this, one test's genuine
 /// `Crypt::encrypt_string` call could spuriously consume another
@@ -460,7 +460,7 @@ async fn queued_cookie_does_not_leak_into_the_next_request() {
 
 #[test]
 fn queue_outside_a_request_scope_is_a_silent_no_op() {
-    // No SessionMiddleware, no task-local scope of any kind — this is
+    // No SessionMiddleware, no task-local scope of any kind - this is
     // what code outside `handle_request` looks like. None of the four
     // calls may panic, and `queued` must report nothing queued.
     Cookie::queue(Cookie::new("promo", "10OFF"));
@@ -609,7 +609,7 @@ async fn queued_cookie_survives_a_session_write_failure_500() {
     // Fix round 1, IMPORTANT 1: `WriteFailsStore` fails every write, so
     // a handler that dirties the session (here, `set_auth_user`) drives
     // `SessionMiddleware::handle`'s fail-closed 500 for an unpersisted
-    // mutation — the second of the two paths that used to drop
+    // mutation - the second of the two paths that used to drop
     // `pending_cookies` before the drain loop ever ran.
     let next: Next = Arc::new(|_req| {
         Box::pin(async {
@@ -647,7 +647,7 @@ async fn queued_cookie_survives_a_session_write_failure_500() {
 /// `Router` + `MiddlewareRegistry` chain via `handle_request`, not the
 /// hand-rolled `Next` closure the rest of this file uses. Registering
 /// `CorsMiddleware` alongside `SessionMiddleware` proves two things at
-/// once — the request actually reached the router (only a matched
+/// once - the request actually reached the router (only a matched
 /// route produces this body), and a second, response-mutating
 /// middleware in the real chain does not strip or reorder the queued
 /// cookie's `Set-Cookie` header.
@@ -696,7 +696,7 @@ async fn queued_cookie_survives_the_router_and_middleware_chain() {
 
 /// Fix round 2, IMPORTANT 2: the third fail-closed path
 /// (`create_session_cookie`'s own `Err` branch, `middleware.rs`) has no
-/// seam through `SessionStore`/`SessionConfig` — the shared cookie
+/// seam through `SessionStore`/`SessionConfig` - the shared cookie
 /// encryption path always succeeds given a real installed key, the
 /// resolved AAD label, and caller-controlled plaintext, so nothing
 /// reachable from a `SessionStore` fake can make it fail. `crypto::
@@ -720,7 +720,7 @@ async fn queued_cookie_survives_a_session_cookie_encryption_failure_500() {
     });
 
     // `NullStore` reads `None` and writes `Ok(())`, so the dirtied
-    // session reaches `create_session_cookie` — the request has no
+    // session reaches `create_session_cookie` - the request has no
     // inbound cookie and hydrates no remember-me token, so
     // `create_session_cookie`'s `Cookie::encrypted` call (which uses
     // `Crypt::encrypt_string_for`) is the only cookie encryption this

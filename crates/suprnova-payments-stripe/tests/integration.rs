@@ -60,7 +60,7 @@ async fn integration_create_get_delete_customer() {
     let fetched = provider.get_customer(&cus_id).await.unwrap();
     assert_eq!(fetched.provider_customer_id, cus_id);
 
-    // Cleanup — always run so test infrastructure stays tidy.
+    // Cleanup - always run so test infrastructure stays tidy.
     provider.delete_customer(&cus_id).await.unwrap();
 }
 
@@ -118,7 +118,7 @@ fn webhook_verify_accepts_valid_signature() {
     let secret = "whsec_test_secret";
     let body = br#"{"id":"evt_test","type":"payment_intent.succeeded"}"#;
     // Use the current wall clock so the verify path's timestamp-tolerance
-    // check passes alongside the HMAC check — a fixed historical timestamp
+    // check passes alongside the HMAC check - a fixed historical timestamp
     // would be rejected as outside the default 300-second window.
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let sig_hex = compute_stripe_v1(secret, &timestamp, body);
@@ -147,7 +147,7 @@ fn webhook_verify_rejects_signature_with_stale_timestamp() {
     install_crypto_provider();
     let secret = "whsec_test_secret";
     let body = br#"{"id":"evt_test","type":"payment_intent.succeeded"}"#;
-    // 24 hours in the past — well outside the 300s default window.
+    // 24 hours in the past - well outside the 300s default window.
     let timestamp = (chrono::Utc::now().timestamp() - 24 * 60 * 60).to_string();
     let sig_hex = compute_stripe_v1(secret, &timestamp, body);
 

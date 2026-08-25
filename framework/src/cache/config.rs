@@ -6,7 +6,7 @@ use crate::error::FrameworkError;
 /// Which cache backend to bootstrap.
 ///
 /// Selected via the `CACHE_DRIVER` env var (parsed case-insensitively).
-/// Defaults to [`CacheDriver::Memory`] when unset — single-process dev
+/// Defaults to [`CacheDriver::Memory`] when unset - single-process dev
 /// loops don't need Redis, and the previous "try Redis, silently fall
 /// back to memory on failure" behaviour was actively dangerous in
 /// production. Operators choosing Redis MUST set the driver explicitly
@@ -41,7 +41,7 @@ impl CacheDriver {
 ///
 /// # Environment Variables
 ///
-/// - `CACHE_DRIVER` — `memory` (default) or `redis`. Selects the
+/// - `CACHE_DRIVER` - `memory` (default) or `redis`. Selects the
 ///   bootstrap target. Memory keeps everything in this process; Redis
 ///   requires `REDIS_URL` and fails boot if unreachable.
 /// - `REDIS_URL` - Redis connection URL (default: redis://127.0.0.1:6379)
@@ -106,7 +106,7 @@ impl CacheConfig {
 }
 
 impl Default for CacheConfig {
-    /// In-memory driver, framework default URL/prefix/TTL — designed to
+    /// In-memory driver, framework default URL/prefix/TTL - designed to
     /// succeed without env vars set. Use `CacheConfig::from_env()` (which
     /// returns a `Result`) when the caller wants `CACHE_DRIVER` parsing
     /// errors to surface.

@@ -128,7 +128,7 @@ async fn paddle_delete_customer_returns_not_supported() {
 /// surface (the resume endpoint) and was not wired in v1. Passing
 /// `cancel_at_period_end: Some(false)` previously fell through to
 /// `subscription_get`, silently returning success while the scheduled
-/// cancellation remained in place — a dual-API fail-loud violation.
+/// cancellation remained in place - a dual-API fail-loud violation.
 /// The branch must now surface `PaymentError::NotSupported` honestly.
 #[tokio::test]
 async fn paddle_update_unschedule_cancel_returns_not_supported() {

@@ -1,4 +1,4 @@
-//! Mailable registry — maps `mailable_name` to a deserializer for queue dispatch.
+//! Mailable registry - maps `mailable_name` to a deserializer for queue dispatch.
 //!
 //! [`AnyMailable`] is the object-safe shadow of [`Mailable`]: it forwards
 //! `render_html` / `render_text` / `subject` / `from` / `attachments` /
@@ -15,7 +15,7 @@
 //! `Factory` is a `fn(...)` function pointer, not `Box<dyn Fn>`. This
 //! covers every callsite today (the registered factories never capture
 //! state). If a future caller needs to capture (e.g. a per-app context
-//! handle), bump this to `Arc<dyn Fn>` — that change is local to this
+//! handle), bump this to `Arc<dyn Fn>` - that change is local to this
 //! module and the call sites in `send_job::SendMailJob::handle`.
 
 use crate::error::FrameworkError;
@@ -34,7 +34,7 @@ pub(crate) type Factory = fn(serde_json::Value) -> Result<Box<dyn AnyMailable>, 
 
 /// Object-safe view of [`Mailable`]. The blanket impl below forwards every
 /// method to the concrete `M`, including the Tera-backed `render_html` /
-/// `render_text` / `render_subject` defaults — so the queued path never
+/// `render_text` / `render_subject` defaults - so the queued path never
 /// sees raw template source, only rendered output.
 pub trait AnyMailable: Send + Sync {
     /// Render the message subject through the Mailable's Tera context.
@@ -111,7 +111,7 @@ pub fn register<M: Mailable>() -> Result<(), FrameworkError> {
 }
 
 /// Decode a payload using the factory registered under `name`. Returns
-/// `Err` if `name` is unknown — the worker surfaces that error and either
+/// `Err` if `name` is unknown - the worker surfaces that error and either
 /// retries or dead-letters per the envelope's backoff policy.
 pub fn build(
     name: &str,
@@ -129,7 +129,7 @@ pub fn build(
 
 /// Build an [`OutgoingMessage`] from a registered mailable. The mailable's
 /// `render_html` / `render_text` (defaulted on the trait) run Tera with the
-/// mailable's serialized fields as the context — identical to the sync
+/// mailable's serialized fields as the context - identical to the sync
 /// `Mail::send` path.
 ///
 /// `mailable_name` is passed in so the empty-body guard can report the
@@ -160,7 +160,7 @@ pub fn render_outgoing(
     let text = any.render_text()?;
     if html.is_none() && text.is_none() {
         return Err(FrameworkError::internal(format!(
-            "mail: {mailable_name} has no text or html body — define text_template_source or html_template_source on the Mailable"
+            "mail: {mailable_name} has no text or html body - define text_template_source or html_template_source on the Mailable"
         )));
     }
 
@@ -185,7 +185,7 @@ pub fn render_outgoing(
     let priority = extra_priority.or_else(|| any.priority());
     let return_path = return_path_override.or_else(|| any.return_path());
 
-    // Subject: builder override wins over mailable's render_subject —
+    // Subject: builder override wins over mailable's render_subject -
     // only call render_subject when there is no override. Mirrors the
     // send path (`MailBuilder::send`).
     let subject = match subject_override {

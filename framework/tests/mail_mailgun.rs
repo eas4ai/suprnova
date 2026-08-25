@@ -208,7 +208,7 @@ async fn mailgun_uses_multipart_form_data_when_attachments_present() {
 }
 
 // Mailgun's protocol for multiple attachments is repeated `attachment=` parts
-// in the same multipart envelope. Verify both files land — a future refactor
+// in the same multipart envelope. Verify both files land - a future refactor
 // that hoists `form.part(...)` out of the loop or resets the Form would
 // silently lose all but one attachment.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -271,7 +271,7 @@ async fn mailgun_carries_all_attachments_in_repeated_multipart_parts() {
 
     let body = String::from_utf8_lossy(&reqs[0].body);
 
-    // Both attachment parts must use the repeated `attachment` field name —
+    // Both attachment parts must use the repeated `attachment` field name -
     // Mailgun's documented protocol for multi-file uploads.
     let invoice_disposition =
         "Content-Disposition: form-data; name=\"attachment\"; filename=\"invoice.pdf\"";
@@ -330,7 +330,7 @@ async fn mailgun_routes_to_eu_region_endpoint() {
         .mount(&server)
         .await;
 
-    // The mock server's URI stands in for `https://api.eu.mailgun.net` —
+    // The mock server's URI stands in for `https://api.eu.mailgun.net` -
     // what matters for routing is that the constructor preserved the host
     // and built `<host>/v3/<domain>/messages` exactly.
     let transport =

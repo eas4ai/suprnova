@@ -1,12 +1,12 @@
-//! Phase 10C T14 — `Builder::dump()` + `Builder::dd()` interactive
+//! Phase 10C T14 - `Builder::dump()` + `Builder::dd()` interactive
 //! debugging helpers.
 //!
 //! Mirrors Laravel's `Builder::dump()` (logs SQL and returns the
 //! builder so the call stays in the chain) and `Builder::dd()`
-//! ("dump-and-die" — logs then panics with the SQL in the message).
+//! ("dump-and-die" - logs then panics with the SQL in the message).
 //!
 //! Both fall back to SQLite when no DB connection is initialised so
-//! they remain useful at REPL or in a test without `TestDatabase` —
+//! they remain useful at REPL or in a test without `TestDatabase` -
 //! exactly the moments interactive debugging happens.
 
 use suprnova::Model;
@@ -47,7 +47,7 @@ async fn dump_returns_builder_for_chaining() {
 
 #[test]
 fn dump_without_connection_falls_back_to_sqlite() {
-    // No `TestDatabase` here — dump should NOT panic. It logs at
+    // No `TestDatabase` here - dump should NOT panic. It logs at
     // info!, picks SQLite as the fallback dialect, and returns self.
     let _b = T14X::query().filter("active", true).dump();
 }
@@ -55,7 +55,7 @@ fn dump_without_connection_falls_back_to_sqlite() {
 #[test]
 #[should_panic(expected = "eloquent dd")]
 fn dd_panics_with_sql_in_message() {
-    // No DB connection needed — dd renders with the SQLite fallback
+    // No DB connection needed - dd renders with the SQLite fallback
     // backend and panics with the rendered SQL embedded in the
     // panic message.
     T14X::query().filter("id", 1).dd();

@@ -1,4 +1,4 @@
-//! Job middleware — wraps `Job::handle` with reusable cross-cutting logic.
+//! Job middleware - wraps `Job::handle` with reusable cross-cutting logic.
 //!
 //! Mirrors Laravel 13's `Illuminate\Queue\Middleware\*`. A middleware sees
 //! the popped envelope **before** dispatch and decides whether to forward
@@ -8,15 +8,15 @@
 //! [`Job::middleware`](super::job::Job::middleware) method.
 //!
 //! Concrete middleware bundled here:
-//! - [`WithoutOverlapping`] — `Cache::lock` around the handler, release on
+//! - [`WithoutOverlapping`] - `Cache::lock` around the handler, release on
 //!   contention.
-//! - [`RateLimited`] — `RateLimiter::hit_and_check` against a key (atomic
+//! - [`RateLimited`] - `RateLimiter::hit_and_check` against a key (atomic
 //!   increment-and-test), release on over-budget.
-//! - [`ThrottlesExceptions`] — exponential back-off on consecutive
+//! - [`ThrottlesExceptions`] - exponential back-off on consecutive
 //!   failures (rate-limit on errors, not requests).
-//! - [`Skip`] — apply `when`/`unless` conditions before reaching the
+//! - [`Skip`] - apply `when`/`unless` conditions before reaching the
 //!   handler.
-//! - [`FailOnException`] — convert specific exception classes to permanent
+//! - [`FailOnException`] - convert specific exception classes to permanent
 //!   failures even within `max_tries`.
 
 use crate::cache::Cache;
@@ -31,7 +31,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The "next layer" in the middleware pipeline — call this to run the
+/// The "next layer" in the middleware pipeline - call this to run the
 /// remaining middleware and (eventually) the typed handler.
 ///
 /// `Box<dyn FnOnce>` so closures can capture by move; the resulting
@@ -139,14 +139,14 @@ impl JobMiddleware for WithoutOverlapping {
                 // `LockGuard` has no `Drop` auto-release (cross-process Redis
                 // semantics demand an explicit acknowledgement), so a panic
                 // unwinding through this call would skip `release()` and strand
-                // the lock until its TTL expires — blocking every other holder
+                // the lock until its TTL expires - blocking every other holder
                 // of the same key for up to `expires_after`. Catch the unwind,
                 // release on every exit path, then resume the panic so the
                 // worker's own boundary still converts it to a failed attempt.
                 let result = AssertUnwindSafe(next(env)).catch_unwind().await;
 
                 // Log the release failure; do NOT propagate it. The
-                // handler has already run at this point — its side
+                // handler has already run at this point - its side
                 // effects are committed, its rows are written, its mail
                 // is sent. Turning a Redis blip on the way out into an
                 // `Err` discarded that success and handed the worker a
@@ -391,7 +391,7 @@ impl FailOnException {
     /// Convenience: fail on every error whose display contains one of the
     /// given substrings. Mirrors Laravel's class-array form (since we
     /// can't dispatch on PHP class names, we match on the formatted
-    /// message — call sites can use `FailOnException::new(|e| matches!
+    /// message - call sites can use `FailOnException::new(|e| matches!
     /// (...))` for typed matching).
     pub fn on_substring<S: Into<String>>(substrings: Vec<S>) -> Self {
         let needles: Vec<String> = substrings.into_iter().map(Into::into).collect();
@@ -455,13 +455,13 @@ mod tests {
 
     /// Install a cache that belongs to this test alone.
     ///
-    /// This used to `App::bind` — a *process-global* swap — which leaked
+    /// This used to `App::bind` - a *process-global* swap - which leaked
     /// into every other test in the binary. `#[serial]` did not help:
     /// serial_test only serialises tests that opt in, and
     /// `app::maintenance::tests::cache_driver_full_lifecycle` does not,
     /// so it ran in parallel and had the cache yanked out from under it
     /// between `activate()` and `active()`. It failed roughly one gate
-    /// run in ten, which is the worst frequency — often enough to erode
+    /// run in ten, which is the worst frequency - often enough to erode
     /// trust in the gate, rare enough to be dismissed as a fluke.
     ///
     /// The caller must hold the returned guard for the test's duration;
@@ -553,7 +553,7 @@ mod tests {
             "the panic must propagate out of handle (resume_unwind), not be swallowed"
         );
 
-        // The lock must be free immediately — re-acquiring the same key proves
+        // The lock must be free immediately - re-acquiring the same key proves
         // `release()` ran on the panic path rather than waiting on the TTL.
         let relock = Cache::lock(&full_key, Duration::from_secs(30))
             .await
@@ -666,13 +666,13 @@ mod tests {
 
 #[cfg(test)]
 mod release_failure_tests {
-    //! P2-06(c) — a lock-release failure must not undo a job that already
+    //! P2-06(c) - a lock-release failure must not undo a job that already
     //! succeeded.
     //!
     //! `WithoutOverlapping::handle` ran the handler, then did
     //! `guard.release().await?`. The `?` discarded the handler's
     //! `JobOutcome` and returned the release error instead, so a Redis
-    //! blip on the way out turned a completed job into a failed one — and
+    //! blip on the way out turned a completed job into a failed one - and
     //! the worker retried it, re-running every side effect the handler had
     //! already committed.
 
@@ -688,7 +688,7 @@ mod release_failure_tests {
     use uuid::Uuid;
 
     /// Acquires locks normally; fails every release. Models the real
-    /// failure — the lock was taken, the handler ran, and the backend went
+    /// failure - the lock was taken, the handler ran, and the backend went
     /// away before the release landed.
     struct ReleaseErroringCache(InMemoryCache);
 
@@ -805,7 +805,7 @@ mod release_failure_tests {
             "the handler must have run exactly once"
         );
         let outcome = outcome.expect(
-            "a release failure must not surface as a job failure — the handler \
+            "a release failure must not surface as a job failure - the handler \
              already committed its side effects, and returning Err here makes \
              the worker retry and run them again",
         );

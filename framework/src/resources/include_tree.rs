@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 /// allowlist: if multiple invalid include paths are present in one
 /// request, the first one rejected is now stable across runs (instead
 /// of varying with `HashMap`'s randomised iteration). The JSON:API
-/// response itself does not surface this order — `included` is a set,
+/// response itself does not surface this order - `included` is a set,
 /// and the spec assigns no semantic meaning to its member order.
 #[derive(Debug, Default, Clone)]
 pub struct IncludeTree {
@@ -42,7 +42,7 @@ impl IncludeTree {
         root
     }
 
-    /// Empty tree — no relationships requested.
+    /// Empty tree - no relationships requested.
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
     }

@@ -1,8 +1,8 @@
-//! P2-02 — production must not boot on a per-process rate limiter.
+//! P2-02 - production must not boot on a per-process rate limiter.
 //!
 //! `rate_limit::bootstrap_from_env` defaulted to `InMemoryRateLimiter`
-//! when `RATE_LIMIT_DRIVER` was unset, and fell back to it — with a
-//! single `warn!` — for any value it did not recognise.
+//! when `RATE_LIMIT_DRIVER` was unset, and fell back to it - with a
+//! single `warn!` - for any value it did not recognise.
 //!
 //! Behind more than one replica that is not a rate limit. Each process
 //! keeps its own bucket map, so a "5 attempts per 15 minutes"
@@ -16,8 +16,8 @@
 //! hatch idiom, because an operator should learn this pattern once.
 //!
 //! `Environment::detect()` reads process-wide `APP_ENV` and these tests
-//! mutate it alongside `RATE_LIMIT_DRIVER`, so — like
-//! `mail_production_fail_closed.rs` — they live in their own test binary
+//! mutate it alongside `RATE_LIMIT_DRIVER`, so - like
+//! `mail_production_fail_closed.rs` - they live in their own test binary
 //! and serialise against each other. The env-free half of the matrix
 //! (`select_limiter_driver` with explicit arguments) is unit-tested in
 //! `framework/src/rate_limit/mod.rs`.
@@ -131,7 +131,7 @@ async fn production_boot_on_an_unknown_driver_fails_instead_of_falling_back() {
 
     assert!(
         format!("{err}").contains("Redis"),
-        "the error must quote the operator's literal value — it is usually \
+        "the error must quote the operator's literal value - it is usually \
          the typo itself: {err}"
     );
 }
@@ -167,7 +167,7 @@ async fn the_override_lets_a_single_process_deployment_boot() {
         .expect("the override exists precisely to permit this");
 }
 
-/// Development must be untouched — a fresh `suprnova new` has no
+/// Development must be untouched - a fresh `suprnova new` has no
 /// `RATE_LIMIT_DRIVER` and must keep working with zero configuration.
 #[tokio::test]
 #[serial(rate_limit_env)]

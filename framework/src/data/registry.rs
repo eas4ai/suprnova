@@ -7,16 +7,16 @@
 //! fields)` helper below stays available for tests that need to inject
 //! ad-hoc allowlists. Default-deny: a DTO not registered allows nothing.
 //!
-//! # Key shape — fully-qualified type names
+//! # Key shape - fully-qualified type names
 //!
 //! Keys are the fully-qualified type name produced by
-//! `concat!(module_path!(), "::", stringify!(StructName))` — the same
+//! `concat!(module_path!(), "::", stringify!(StructName))` - the same
 //! expression the derive macro emits at the `inventory::submit!` call
 //! site. This prevents collisions between two same-named DTOs in
 //! different modules.
 //!
-//! Callers — both for `register` (writes) and `is_allowed` /
-//! `allowed_for` (reads) — MUST use the same key shape:
+//! Callers - both for `register` (writes) and `is_allowed` /
+//! `allowed_for` (reads) - MUST use the same key shape:
 //!
 //! ```rust,no_run
 //! # use suprnova::data::registry;
@@ -28,7 +28,7 @@
 //! # }
 //! ```
 //!
-//! Bare struct names (`"AlbumDto"`) will silently miss every lookup —
+//! Bare struct names (`"AlbumDto"`) will silently miss every lookup -
 //! the registry treats them as a different key entirely.
 
 use once_cell::sync::Lazy;
@@ -61,13 +61,13 @@ fn ensure_initialized() {
     });
 }
 
-/// Register the allowed-include list for a DTO. Idempotent — re-registering
+/// Register the allowed-include list for a DTO. Idempotent - re-registering
 /// the same struct overwrites the prior list.
 ///
 /// Calls `ensure_initialized()` first so that the inventory-collected entries
 /// (from `#[derive(Data)]` link-time submissions) are drained into the map
 /// before the manual write. This guarantees that a caller's explicit
-/// registration is the final, authoritative state — it is never silently
+/// registration is the final, authoritative state - it is never silently
 /// overwritten by a later `ensure_initialized` call (the `Once` guard
 /// prevents that anyway, but the pre-drain makes the ordering explicit).
 ///
@@ -88,7 +88,7 @@ pub fn register(struct_name: &'static str, fields: &'static [&'static str]) {
 }
 
 /// Check whether `field` is includable on `struct_name`. The
-/// `struct_name` must be the fully-qualified type name — see the
+/// `struct_name` must be the fully-qualified type name - see the
 /// [module docs](self) for the key shape.
 pub fn is_allowed(struct_name: &str, field: &str) -> bool {
     ensure_initialized();
@@ -102,7 +102,7 @@ pub fn is_allowed(struct_name: &str, field: &str) -> bool {
 
 /// Returns the full allowed-include list for a DTO. Empty when the DTO
 /// has not been registered. The `struct_name` must be the
-/// fully-qualified type name — see the [module docs](self) for the
+/// fully-qualified type name - see the [module docs](self) for the
 /// key shape.
 pub fn allowed_for(struct_name: &str) -> Vec<&'static str> {
     ensure_initialized();

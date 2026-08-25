@@ -8,14 +8,14 @@
 //!    *successfully* processed (`processed_at IS NOT NULL`) returns 200
 //!    `duplicate` immediately. A duplicate of an event that previously
 //!    *failed* (`processed_at IS NULL`, `process_error` set) re-attempts
-//!    hydration — the provider's retry is the recovery mechanism.
+//!    hydration - the provider's retry is the recovery mechanism.
 //! 2. **Atomic, serialized hydration.** All mirror-table writes for one
 //!    event happen inside a single DB transaction along with
 //!    `mark_processed`. Partial state is not observable: either the mirror
 //!    catches up AND `processed_at` is set, or both are rolled back
 //!    together. Concurrent retries of the *same* unprocessed event are
 //!    serialized by taking a `FOR UPDATE` lock on the audit row before
-//!    re-checking `processed_at` — the second arrival blocks until the
+//!    re-checking `processed_at` - the second arrival blocks until the
 //!    first commits, then sees `processed_at` set and short-circuits
 //!    instead of double-applying. Mirror-table `UNIQUE` violations from a
 //!    racing apply are treated as benign already-applied (200, not 503).
@@ -24,7 +24,7 @@
 //!    outside the rolled-back transaction so operators can see the
 //!    failure across retries.
 //! 4. **Auditability.** Every accepted event lands in
-//!    `payments_webhook_events` before hydration begins — even failures
+//!    `payments_webhook_events` before hydration begins - even failures
 //!    leave an audit trail.
 
 use crate::Request;
@@ -51,7 +51,7 @@ fn err_response(status: u16, body: &str) -> Response {
 /// A `UNIQUE` violation surfaces differently per backend (SQLite says
 /// `UNIQUE constraint failed`, Postgres says `duplicate key value violates
 /// unique constraint`, MySQL says `Duplicate entry`). This catches all
-/// three by substring — the alternative is per-driver SQLSTATE matching,
+/// three by substring - the alternative is per-driver SQLSTATE matching,
 /// which SeaORM abstracts away.
 fn is_unique_violation(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
@@ -120,13 +120,13 @@ async fn handle_webhook_inner(
         tracing::debug!(
             provider = %provider_name,
             event_id = %event.provider_event_id,
-            "duplicate webhook — already processed"
+            "duplicate webhook - already processed"
         );
         return err_response(200, "duplicate");
     }
 
     // 6. Ensure audit row exists. INSERT race on (provider, event_id) UNIQUE
-    //    is treated as a concurrent duplicate — return 200 so the racing
+    //    is treated as a concurrent duplicate - return 200 so the racing
     //    caller can retry against the now-existing row if it later fails.
     if existing.is_none() {
         let neutral_str = event.neutral.and_then(|k| {
@@ -161,7 +161,7 @@ async fn handle_webhook_inner(
             am.process_error = Set(None);
             if let Err(e) = am.update(db).await {
                 tracing::error!(error = %e, "failed to clear stale process_error before retry");
-                // Continue — the retry can still succeed and overwrite this.
+                // Continue - the retry can still succeed and overwrite this.
             }
         }
     }
@@ -171,7 +171,7 @@ async fn handle_webhook_inner(
     //
     //    Provider HTTP calls (currently: subscription `provider.get`) run
     //    BEFORE the transaction opens so the DB connection isn't pinned for
-    //    the duration of an external round-trip — a webhook burst against a
+    //    the duration of an external round-trip - a webhook burst against a
     //    degraded provider would otherwise exhaust the pool. The pre-fetched
     //    snapshot is passed through to `process_webhook`, which then does
     //    only pure-DB work inside the transaction.
@@ -220,14 +220,14 @@ enum HydrationOutcome {
     /// This attempt performed the mirror writes and set `processed_at`.
     Processed,
     /// A concurrent attempt had already set `processed_at` by the time this
-    /// one acquired the audit-row lock — no work was done and the caller
+    /// one acquired the audit-row lock - no work was done and the caller
     /// should report a duplicate, not re-apply.
     AlreadyProcessed,
 }
 
 /// Pre-fetch any provider-side state the hydration path needs BEFORE opening
 /// the DB transaction. Today the only network call is
-/// `Subscription::get(sub_id)` for the subscription event family — payment
+/// `Subscription::get(sub_id)` for the subscription event family - payment
 /// and customer events derive their state entirely from the webhook payload.
 /// Returning `Err` here short-circuits to the 503/mark_failed path the same
 /// way an in-transaction error would.
@@ -302,8 +302,8 @@ async fn try_hydrate(
         }
     };
     if locked.as_ref().is_some_and(|r| r.processed_at.is_some()) {
-        // A concurrent retry committed while we waited on the lock. Roll back
-        // — we have nothing to add — and report the duplicate.
+        // A concurrent retry committed while we waited on the lock. Roll back -
+        // we have nothing to add - and report the duplicate.
         let _ = txn.rollback().await;
         return Ok(HydrationOutcome::AlreadyProcessed);
     }
@@ -329,11 +329,11 @@ async fn try_hydrate(
 
 /// Dispatch a parsed [`WebhookEvent`] to the mirror-table hydration paths.
 ///
-/// Unmapped events (no `neutral`) are no-ops — the audit row is the only
+/// Unmapped events (no `neutral`) are no-ops - the audit row is the only
 /// effect. Mapped events extract IDs / snapshots from the provider, look up
 /// or fetch the canonical entity state, then upsert the relevant mirror rows.
 /// Missing IDs in events whose neutral kind requires one are treated as
-/// validation errors — silent success would leave the mirror stale without
+/// validation errors - silent success would leave the mirror stale without
 /// operator visibility.
 ///
 /// `subscription_snapshot` is the pre-fetched [`SubscriptionResult`] from
@@ -568,7 +568,7 @@ where
     }
 
     // Remove items that no longer exist on the provider side. The
-    // subscription is the source of truth — once an item is removed by the
+    // subscription is the source of truth - once an item is removed by the
     // upstream subscription update, the mirror should reflect that.
     for stale in existing_items
         .iter()
@@ -609,7 +609,7 @@ where
             am.amount_tax_minor = Set(snapshot.amount_tax_minor);
             am.currency = Set(snapshot.currency.clone());
             am.status = Set(snapshot.status.clone());
-            // Preserve original paid_at across refund/dispute events — the
+            // Preserve original paid_at across refund/dispute events - the
             // original payment time is the canonical reference.
             if snapshot.paid_at.is_some() {
                 am.paid_at = Set(snapshot.paid_at.map(|t| t.to_rfc3339()));
@@ -672,7 +672,7 @@ where
         tracing::info!(
             provider = %provider,
             provider_customer_id = %provider_customer_id,
-            "customer webhook for unknown customer — no mirror row to update"
+            "customer webhook for unknown customer - no mirror row to update"
         );
         return Ok(());
     };
@@ -855,7 +855,7 @@ mod tests {
         let event_id = "evt_concurrent_retry";
         let txn_id = "txn_concurrent_retry";
 
-        // Seed an existing, UNPROCESSED audit row — this is the retry precondition:
+        // Seed an existing, UNPROCESSED audit row - this is the retry precondition:
         // a prior delivery landed the audit row but hydration has not completed.
         let seed = webhook_event::ActiveModel {
             provider: Set("mock".into()),
@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(status_of(&r1), 200, "first retry must return 200");
         assert_eq!(status_of(&r2), 200, "second retry must return 200");
 
-        // Exactly one mirror transaction row — no double-insert.
+        // Exactly one mirror transaction row - no double-insert.
         let txns = transaction::Entity::find()
             .filter(transaction::Column::ProviderTransactionId.eq(txn_id))
             .all(&*conn)

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// A mail address — email plus an optional display name.
+/// A mail address - email plus an optional display name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Address {
     /// The raw email address (e.g. `"alice@example.org"`).

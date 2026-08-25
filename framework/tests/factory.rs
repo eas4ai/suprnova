@@ -19,7 +19,7 @@ struct User {
 }
 
 // Inline fake::Dummy implementation so this test file doesn't have
-// to derive it — the integration test for the Factory derive macro
+// to derive it - the integration test for the Factory derive macro
 // in a later task does the derive-driven path. Here we want the
 // trait surface itself under test, not the generator picks.
 impl fake::Dummy<Faker> for User {
@@ -130,13 +130,13 @@ fn factory_prepend_runs_before_with_so_with_wins() {
         .make();
     assert_eq!(
         user.name, "Late",
-        "prepend(...) runs first, with(...) runs after — so the with override wins"
+        "prepend(...) runs first, with(...) runs after - so the with override wins"
     );
 }
 
 #[test]
 fn factory_prepend_chain_preserves_relative_order_of_each_group() {
-    // Two prepends + two withs — prepends in reverse-call order at
+    // Two prepends + two withs - prepends in reverse-call order at
     // the front (last prepended ends up index 0), withs at the back
     // in call order. Concrete: prepend "A" then prepend "B" → order
     // is [B, A, …withs…]. The final name reflects the last override
@@ -228,7 +228,7 @@ fn sequence_under_concurrent_threads_returns_distinct_values() {
     }
 }
 
-/// `Sequence` is intended to be held as a `static` — pin that the
+/// `Sequence` is intended to be held as a `static` - pin that the
 /// `const fn new()` works in const context and the resulting handle
 /// is usable across threads via `&'static Sequence`.
 #[test]

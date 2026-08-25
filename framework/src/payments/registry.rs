@@ -2,11 +2,11 @@
 //!
 //! Two registration mechanisms are supported:
 //!
-//! 1. **Compile-time** — via `inventory::submit!(PaymentProviderEntry { ... })`. Entries are
+//! 1. **Compile-time** - via `inventory::submit!(PaymentProviderEntry { ... })`. Entries are
 //!    collected at link time. This is the recommended mechanism for driver crates that want
 //!    zero-config registration.
 //!
-//! 2. **Runtime** — via `PaymentProviderRegistry::bind(name, provider)`. Used by tests and by
+//! 2. **Runtime** - via `PaymentProviderRegistry::bind(name, provider)`. Used by tests and by
 //!    apps that construct providers with runtime config (API keys from environment variables).
 //!
 //! # Example
@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 /// A compile-time registry entry for a payment provider.
 ///
-/// Submitted via `inventory::submit!` — typically at the bottom of the file
+/// Submitted via `inventory::submit!` - typically at the bottom of the file
 /// that defines the [`PaymentProvider`] implementation:
 ///
 /// ```rust,ignore
@@ -114,7 +114,7 @@ impl PaymentProviderRegistry {
     /// config (e.g. API keys from environment variables). Overwrites any
     /// previously registered provider with the same name.
     ///
-    /// On lock poison the bind is skipped and a `tracing::error!` is emitted —
+    /// On lock poison the bind is skipped and a `tracing::error!` is emitted -
     /// next `get()` call will then miss, matching the read-path policy.
     pub fn bind(name: &'static str, provider: Arc<dyn PaymentProvider>) {
         match crate::lock::write(ensure_built(), "payments registry") {

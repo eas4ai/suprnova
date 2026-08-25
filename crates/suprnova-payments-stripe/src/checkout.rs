@@ -14,7 +14,7 @@
 //! return its url so the frontend redirects.
 //!
 //! `session_status` retrieves a Checkout Session and maps it to the
-//! provider-neutral `CheckoutSessionState` — the verification primitive
+//! provider-neutral `CheckoutSessionState` - the verification primitive
 //! return pages and reconciliation sweeps run against.
 
 use async_trait::async_trait;
@@ -59,7 +59,7 @@ struct CreateCheckoutSessionParams<'a> {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_promotion_codes: bool,
     /// Stripe Managed Payments (merchant-of-record) flag. Omitted entirely
-    /// when off — accounts not enrolled in the program reject the field.
+    /// when off - accounts not enrolled in the program reject the field.
     #[serde(
         rename = "managed_payments[enabled]",
         skip_serializing_if = "std::ops::Not::not"
@@ -80,7 +80,7 @@ where
     // Stripe wire format for arrays: line_items[0][price]=...&line_items[0][quantity]=...
     // serde_urlencoded handles this naturally via tuple-serialization, but the array-index
     // syntax requires a flat string. We emit a single comma-separated price list as
-    // line_items[0][price] for v1 — most subscriptions are single-price.
+    // line_items[0][price] for v1 - most subscriptions are single-price.
     use serde::ser::SerializeSeq;
     let mut seq = s.serialize_seq(Some(items.len()))?;
     for item in items {
@@ -118,7 +118,7 @@ fn session_to_state(session: CheckoutSession) -> PaymentResult<CheckoutSessionSt
                 amount_total,
             })
         }
-        // CheckoutSessionStatus is #[non_exhaustive] — surface unrecognized
+        // CheckoutSessionStatus is #[non_exhaustive] - surface unrecognized
         // statuses honestly rather than guessing a mapping.
         other => Err(PaymentError::Provider(format!(
             "CheckoutSession has unrecognized status: {}",
@@ -289,7 +289,7 @@ mod tests {
     use suprnova::payments::{Currency, Money};
 
     // -----------------------------------------------------------------
-    // Param serialization — field names and skip behavior. serde_json
+    // Param serialization - field names and skip behavior. serde_json
     // sees the same serde attributes the wire encoder does, so renames
     // and skip_serializing_if gates are exercised without a network.
     // -----------------------------------------------------------------
@@ -342,7 +342,7 @@ mod tests {
             false,
         );
         let v = serde_json::to_value(&p).unwrap();
-        // Off must mean ABSENT, not false — non-enrolled accounts reject
+        // Off must mean ABSENT, not false - non-enrolled accounts reject
         // the field outright.
         assert!(v.get("managed_payments[enabled]").is_none());
     }
@@ -365,7 +365,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // session_to_state mapping — fixtures parsed through stripe-shared's
+    // session_to_state mapping - fixtures parsed through stripe-shared's
     // own Deserialize impl (dev-only `deserialize` feature).
     // -----------------------------------------------------------------
 

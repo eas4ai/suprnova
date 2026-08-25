@@ -43,7 +43,7 @@ pub fn banner() {
     println!();
 }
 
-/// Section header — used to group related output
+/// Section header - used to group related output
 pub fn header(text: &str) {
     println!();
     println!("  {}", style(text).cyan().bold().underlined());
@@ -163,7 +163,7 @@ pub fn br() {
     println!();
 }
 
-/// Custom help output — replaces clap's default
+/// Custom help output - replaces clap's default
 pub fn print_help() {
     banner();
 

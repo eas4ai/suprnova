@@ -1,6 +1,6 @@
 //! Paddle reference adapter for Suprnova's generic Payments surface.
 //!
-//! Paddle is a Merchant of Record — it owns subscription lifecycle, tax,
+//! Paddle is a Merchant of Record - it owns subscription lifecycle, tax,
 //! dunning. Consequently Paddle does NOT expose server-side capture, so
 //! the `Payment` trait is intentionally NOT implemented for `PaddleProvider`.
 //! `PaymentProvider::as_payment()` returns `None`, and a test enforces this
@@ -23,7 +23,7 @@ use paddle_rust_sdk::Paddle;
 use std::sync::Arc;
 use suprnova::payments::PaymentProvider;
 
-/// Paddle environment selector — Sandbox for testing, Production for live.
+/// Paddle environment selector - Sandbox for testing, Production for live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaddleEnvironment {
     Sandbox,
@@ -38,7 +38,7 @@ pub struct PaddleProvider {
     /// the signed-envelope signature on incoming webhook payloads via
     /// `Paddle::unmarshal`.
     webhook_key: String,
-    /// Paddle client-side token (`live_…` / `test_…`) — surfaced in
+    /// Paddle client-side token (`live_…` / `test_…`) - surfaced in
     /// `SessionPayload::PaddleInline` so the frontend can initialise paddle.js
     /// without a separate config lookup.
     client_token: String,
@@ -47,7 +47,7 @@ pub struct PaddleProvider {
 
 /// Reject a present-but-blank credential. `std::env::var` returns `Ok("")`
 /// for a variable that is set but empty, so `PADDLE_WEBHOOK_KEY=` would
-/// otherwise produce an empty-key HMAC — forgeable by anyone — and boot
+/// otherwise produce an empty-key HMAC - forgeable by anyone - and boot
 /// perfectly happily. Fail closed at construction instead.
 ///
 /// Mirrors `require_nonempty` in the Stripe adapter; the two adapter crates
@@ -64,10 +64,10 @@ fn require_nonempty(name: &str, val: String) -> Result<String, String> {
 impl PaddleProvider {
     /// Construct a new provider.
     ///
-    /// * `api_key`      — Paddle API key (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`).
-    /// * `webhook_key`  — Notification destination secret (`pdl_ntfset_…`).
-    /// * `client_token` — Client-side token (`live_…` / `test_…`).
-    /// * `environment`  — Sandbox or Production.
+    /// * `api_key`      - Paddle API key (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`).
+    /// * `webhook_key`  - Notification destination secret (`pdl_ntfset_…`).
+    /// * `client_token` - Client-side token (`live_…` / `test_…`).
+    /// * `environment`  - Sandbox or Production.
     #[allow(clippy::result_large_err)] // paddle_rust_sdk::Error is large; not worth boxing.
     pub fn new(
         api_key: impl Into<String>,
@@ -136,6 +136,6 @@ impl PaymentProvider for PaddleProvider {
     fn name(&self) -> &'static str {
         "paddle"
     }
-    // Intentionally NOT overriding `as_payment` — defaults to None.
+    // Intentionally NOT overriding `as_payment` - defaults to None.
     // Paddle is Merchant-of-Record and does not expose server-side capture.
 }

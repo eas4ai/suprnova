@@ -2,7 +2,7 @@
 
 //! Bearer-token auth must work with NO `SessionMiddleware` installed.
 //!
-//! This is the ordinary shape of a token-only API — it is exactly what
+//! This is the ordinary shape of a token-only API - it is exactly what
 //! `suprnova new x --api` generates, and it never registers
 //! `SessionMiddleware`. `BearerTokenMiddleware` used to publish the
 //! authenticated id only through `set_auth_user`, which routes through
@@ -148,7 +148,7 @@ async fn request(
 }
 
 /// The stack under test: `BearerTokenMiddleware` then the sync,
-/// session-backed `AuthMiddleware::new()` gate — with no `SessionMiddleware`
+/// session-backed `AuthMiddleware::new()` gate - with no `SessionMiddleware`
 /// anywhere in the chain. This is exactly the shape of the `--api` scaffold.
 fn token_only_registry() -> MiddlewareRegistry {
     MiddlewareRegistry::new()
@@ -158,7 +158,7 @@ fn token_only_registry() -> MiddlewareRegistry {
 
 /// Assertion 1: a request carrying a VALID bearer token, through
 /// `BearerTokenMiddleware -> AuthMiddleware::new() -> handler`, with no
-/// `SessionMiddleware` installed, must reach the handler — and `Auth::id()`
+/// `SessionMiddleware` installed, must reach the handler - and `Auth::id()`
 /// inside the handler must equal the token's user id.
 ///
 /// This is the assertion that fails today: `BearerTokenMiddleware` only
@@ -180,7 +180,7 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
             .await
             .unwrap();
 
-        // Freshly authenticated sessions always carry the plaintext token —
+        // Freshly authenticated sessions always carry the plaintext token -
         // `None` is reserved for sessions loaded from storage (hash only).
         let token_str = magnetar_session
             .token
@@ -213,7 +213,7 @@ fn valid_bearer_token_reaches_handler_without_session_middleware() {
 }
 
 /// Assertion 2: the same stack with NO `Authorization` header returns 401.
-/// Passes before and after the fix — proves the fix did not simply disable
+/// Passes before and after the fix - proves the fix did not simply disable
 /// the gate.
 #[test]
 fn missing_authorization_header_returns_401_without_session_middleware() {
@@ -229,7 +229,7 @@ fn missing_authorization_header_returns_401_without_session_middleware() {
 }
 
 /// Assertion 3: the same stack with a syntactically valid but unknown
-/// bearer token returns 401. Passes before and after the fix — proves the
+/// bearer token returns 401. Passes before and after the fix - proves the
 /// fix did not simply disable the gate.
 #[test]
 fn unknown_bearer_token_returns_401_without_session_middleware() {

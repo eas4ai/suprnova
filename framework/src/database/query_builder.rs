@@ -47,7 +47,7 @@
 
 use sea_orm::{ColumnTrait, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect, Select};
 
-// `DB::connection()` is no longer called directly here — Phase 10C T11
+// `DB::connection()` is no longer called directly here - Phase 10C T11
 // routes through `ExecutorChoice::resolve()` so the same code path
 // honours an active `DB::transaction` scope without explicit threading.
 use crate::error::FrameworkError;

@@ -1,4 +1,4 @@
-//! Pure sliding-window logic — separate from storage so both drivers reuse it.
+//! Pure sliding-window logic - separate from storage so both drivers reuse it.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -56,7 +56,7 @@ impl Bucket {
 
     /// Whether every recorded hit on this bucket has aged out beyond
     /// `window` as of `now`. Used by the in-memory driver's periodic
-    /// sweep to evict buckets that no longer carry any state — without
+    /// sweep to evict buckets that no longer carry any state - without
     /// this, attacker-controlled keying (e.g. `X-Forwarded-For` with
     /// no trusted-proxy gating) can grow the bucket map unboundedly.
     pub fn is_inactive(&self, window: Duration, now: Instant) -> bool {

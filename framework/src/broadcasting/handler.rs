@@ -1,4 +1,4 @@
-//! `BroadcastingWsHandler` — wires the JSON-envelope subscribe
+//! `BroadcastingWsHandler` - wires the JSON-envelope subscribe
 //! protocol against a `BroadcastHub` + `ChannelRegistry`.
 //!
 //! Drop into `ws!()` with the resolved hub and registry:
@@ -27,8 +27,8 @@
 //! 1. The connection MUST hold an authorized subscription to the
 //!    target channel (i.e. an entry in the per-connection forwarders
 //!    map placed there by a successful `Subscribe`). Publishes from
-//!    connections that never subscribed — or whose subscription was
-//!    rejected — are refused even if `authorize_publish` would have
+//!    connections that never subscribed - or whose subscription was
+//!    rejected - are refused even if `authorize_publish` would have
 //!    returned `true`. This mirrors the Pusher client-event contract
 //!    where client events require an established private/presence
 //!    subscription.
@@ -130,8 +130,8 @@ impl BroadcastingWsHandler {
     /// Override the per-connection subscription cap. Once a connection
     /// holds `max` distinct channel keys in its forwarder map, further
     /// `Subscribe` frames for *new* channel names are rejected with a
-    /// `ServerFrame::Error { reason: "subscription limit reached" }`
-    /// — re-subscribes to an already-active channel are still allowed
+    /// `ServerFrame::Error { reason: "subscription limit reached" }` -
+    /// re-subscribes to an already-active channel are still allowed
     /// (they replace the forwarder in place and don't grow the map).
     ///
     /// The default is [`DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION`]
@@ -178,8 +178,8 @@ impl WebSocketHandler for BroadcastingWsHandler {
         // (clean break on `Ok(None)`, `?` on outbound/inbound IO, `?` from
         // helper functions) lands here in `result`, after which the
         // teardown loop below runs unconditionally. Without this wrapping
-        // the typical browser disconnect — tab close, network drop, OS
-        // RST — would skip teardown entirely: presence members would leak
+        // the typical browser disconnect - tab close, network drop, OS
+        // RST - would skip teardown entirely: presence members would leak
         // forever, forwarder tasks would detach blocked on `rx.recv()`,
         // and the hub channel would stay pinned by their receiver count.
         let result: Result<(), FrameworkError> = async {
@@ -256,7 +256,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
                                         )
                                         .await?;
                                 } else {
-                                    // Client publishes are not socket-excluded — the
+                                    // Client publishes are not socket-excluded - the
                                     // publisher receives its own event like any other
                                     // subscriber (see broadcasting docs).
                                     let chan_for_err = channel.clone();
@@ -299,8 +299,8 @@ impl WebSocketHandler for BroadcastingWsHandler {
 
         // Teardown runs on every exit path, not just the clean `Ok(None)`
         // break above. Publish `presence.left` for any remaining presence
-        // subscriptions, then abort each forwarder task deterministically
-        // — relying on `JoinHandle`'s detach-on-drop semantics would let
+        // subscriptions, then abort each forwarder task deterministically -
+        // relying on `JoinHandle`'s detach-on-drop semantics would let
         // the task block on `rx.recv().await` indefinitely if the broadcast
         // sender is kept alive elsewhere. A hub publish failure on shutdown
         // is logged but doesn't replace the original exit reason in
@@ -309,7 +309,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
         for (channel, entry) in map.drain() {
             if let Some(ps) = entry.presence {
                 // Shutdown path: a presence-untrack failure here is
-                // informational — the WS session is already closing,
+                // informational - the WS session is already closing,
                 // so the only place to surface it is the log.
                 if let Err(e) = self.hub.untrack_member(&channel, &ps.member_id).await {
                     tracing::warn!(
@@ -356,7 +356,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
 ///
 /// It used to run the other way round: `list_members` first, then
 /// `subscribe`. Anyone who joined in the gap between those two calls
-/// appeared in *neither* — not in the snapshot, because they had not
+/// appeared in *neither* - not in the snapshot, because they had not
 /// joined when it was taken; and not in the event stream, because the
 /// subscription did not exist yet when their `presence.joined` was
 /// published. The new subscriber's roster was then permanently short, with
@@ -365,7 +365,7 @@ impl WebSocketHandler for BroadcastingWsHandler {
 ///
 /// Subscribing first cannot lose anyone. A member who joins in the window
 /// is published into the now-live receiver, and may *also* appear in the
-/// snapshot taken a moment later — so the failure mode inverts from a
+/// snapshot taken a moment later - so the failure mode inverts from a
 /// silent omission to an at-most-once duplicate join for a member already
 /// in the roster. Presence rosters are keyed by member id, so that
 /// duplicate is idempotent. Trading a permanent omission for an idempotent
@@ -403,15 +403,15 @@ async fn handle_subscribe(
     socket: &mut WsSocket,
 ) -> Result<(), FrameworkError> {
     // Per-connection subscription cap. Re-subscribes to an existing
-    // channel are exempt (they REPLACE the forwarder in place — see
-    // the `map.remove(channel)` below — so the map size doesn't grow);
+    // channel are exempt (they REPLACE the forwarder in place - see
+    // the `map.remove(channel)` below - so the map size doesn't grow);
     // first-time subscribes to a brand-new channel name count against
     // the cap. Without this gate a malicious client could subscribe
     // to `orders.{id}` with thousands of distinct ids on one socket
     // and inflate the per-connection forwarder map to exhaust memory
     // and tokio task slots. Check this BEFORE `hub.subscribe` and the
     // `tokio::spawn` so we never spawn a forwarder we'd refuse to
-    // register — frames on a single connection are processed
+    // register - frames on a single connection are processed
     // sequentially in the `select!` loop, so reading the map here and
     // inserting later is race-free per connection.
     {
@@ -463,7 +463,7 @@ async fn handle_subscribe(
         None
     };
 
-    // Subscribe to the hub, then snapshot the roster — in that order, and
+    // Subscribe to the hub, then snapshot the roster - in that order, and
     // the order is the whole point. See `subscribe_then_snapshot`.
     let (mut rx, roster) = subscribe_then_snapshot(hub, channel, presence_identity.is_some()).await;
 
@@ -496,7 +496,7 @@ async fn handle_subscribe(
                         Err(_) => continue,
                     };
                     if tx.send(text).await.is_err() {
-                        return; // outbound channel closed — connection gone
+                        return; // outbound channel closed - connection gone
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -504,7 +504,7 @@ async fn handle_subscribe(
                     // The subscriber fell behind the per-channel ring
                     // buffer; `skipped` envelopes were dropped on this
                     // connection. Surface this so the client knows its
-                    // local state is stale and must refetch — silently
+                    // local state is stale and must refetch - silently
                     // skipping events would let bugs hide as "we lost a
                     // tick" rather than "the client's state diverged
                     // from the server's".
@@ -523,7 +523,7 @@ async fn handle_subscribe(
         }
     });
 
-    // Destructure bootstrap data — used after the forwarder is inserted.
+    // Destructure bootstrap data - used after the forwarder is inserted.
     let (presence_here_members, presence_member_id, presence_info) =
         if let Some((existing, mid, info)) = presence_bootstrap {
             (Some(existing), Some(mid), Some(info))
@@ -535,7 +535,7 @@ async fn handle_subscribe(
     {
         let mut map = forwarders.lock().await;
         if let Some(old) = map.remove(channel) {
-            // Existing subscription being replaced — clean up presence if needed.
+            // Existing subscription being replaced - clean up presence if needed.
             if let Some(ps) = old.presence {
                 if let Err(e) = hub.untrack_member(channel, &ps.member_id).await {
                     tracing::warn!(
@@ -545,7 +545,7 @@ async fn handle_subscribe(
                         "presence untrack failed during re-subscribe cleanup"
                     );
                 }
-                // Cleanup-path publish: log a hub failure but continue —
+                // Cleanup-path publish: log a hub failure but continue -
                 // the user just re-subscribed, we shouldn't fail the new
                 // sub because the prior presence.left couldn't be
                 // forwarded cross-process.
@@ -592,7 +592,7 @@ async fn handle_subscribe(
         .send_text(serde_json::to_string(&ack).unwrap_or_default())
         .await?;
 
-    // Presence post-subscribe steps — forwarder is now live so
+    // Presence post-subscribe steps - forwarder is now live so
     // hub.subscribe() receiver is already active.
     if let (Some(existing), Some(mid), Some(info)) =
         (presence_here_members, presence_member_id, presence_info)
@@ -604,7 +604,7 @@ async fn handle_subscribe(
         // channel that peer instances will never learn about.
         hub.track_member(channel, &mid, info.clone()).await?;
 
-        // presence.here — sent directly to this socket only (not via hub).
+        // presence.here - sent directly to this socket only (not via hub).
         let here = ServerFrame::Event {
             channel: channel.to_string(),
             event: "presence.here".into(),
@@ -614,8 +614,8 @@ async fn handle_subscribe(
             .send_text(serde_json::to_string(&here).unwrap_or_default())
             .await?;
 
-        // presence.joined — published via hub so all subscribers receive it
-        // (including the new subscriber via their forwarder — that's the
+        // presence.joined - published via hub so all subscribers receive it
+        // (including the new subscriber via their forwarder - that's the
         // standard Pusher self-join behaviour; clients filter by member_id).
         // A hub failure here is the subscriber being announced; surface
         // via an Error frame on this socket. The local member entry
@@ -656,7 +656,7 @@ async fn handle_unsubscribe(
     if let Some(e) = entry {
         if let Some(ps) = e.presence {
             // Unsubscribe path: a presence-untrack failure here is
-            // informational — we'd rather still send the
+            // informational - we'd rather still send the
             // Unsubscribed ack to the client than abort on a
             // producer hiccup.
             if let Err(err) = hub.untrack_member(channel, &ps.member_id).await {
@@ -698,14 +698,14 @@ async fn handle_unsubscribe(
 
 #[cfg(test)]
 mod presence_ordering_tests {
-    //! P2-08 — a member joining between the roster snapshot and the
+    //! P2-08 - a member joining between the roster snapshot and the
     //! subscription used to vanish from the new subscriber's roster
     //! permanently.
     //!
     //! The window is a genuine race, so these do not try to hit it by
     //! timing. `JoinDuringSnapshotHub` wraps a real hub and performs the
     //! interleaving join *itself*, immediately after delegating
-    //! `list_members` — modelling "somebody joined the instant after the
+    //! `list_members` - modelling "somebody joined the instant after the
     //! snapshot was taken" exactly, on every run. The same decorator trick
     //! as `queue_fault_injection.rs`: make the race a scripted step rather
     //! than a sleep and a prayer.
@@ -717,7 +717,7 @@ mod presence_ordering_tests {
     const LATE_JOINER: &str = "late-joiner";
 
     /// Delegates everything, but stages a join right after the roster is
-    /// read — inside the window the old ordering left open.
+    /// read - inside the window the old ordering left open.
     struct JoinDuringSnapshotHub {
         inner: InMemoryBroadcastHub,
     }
@@ -775,7 +775,7 @@ mod presence_ordering_tests {
     /// The regression. Somebody joins in the window; the new subscriber
     /// must learn about them one way or the other.
     ///
-    /// It does not matter *which* way — a roster is a set, and a member
+    /// It does not matter *which* way - a roster is a set, and a member
     /// present in the snapshot or announced on the stream ends up in the
     /// same place. What matters is that "neither" is impossible.
     #[tokio::test]
@@ -802,7 +802,7 @@ mod presence_ordering_tests {
             "a member who joined between the subscribe and the snapshot \
              appeared in neither. Their join is gone for good: the roster \
              is permanently short and only a re-subscribe repairs it. This \
-             is the defect — `list_members` ran before `subscribe`."
+             is the defect - `list_members` ran before `subscribe`."
         );
     }
 
@@ -839,7 +839,7 @@ mod presence_ordering_tests {
         assert!(roster.is_none(), "no roster was asked for");
         assert!(
             rx.try_recv().is_err(),
-            "`list_members` must not have been called at all — the \
+            "`list_members` must not have been called at all - the \
              decorator's staged join is the proof it was"
         );
     }

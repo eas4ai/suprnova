@@ -9,7 +9,7 @@ use async_trait::async_trait;
 /// supports recurring billing.
 ///
 /// Merchant-of-Record providers (Paddle, etc.) and gateway providers
-/// (Stripe, etc.) both implement this — the differentiation is the
+/// (Stripe, etc.) both implement this - the differentiation is the
 /// optional [`super::payment::Payment`] trait, not this one.
 #[async_trait]
 pub trait Subscription: Send + Sync {

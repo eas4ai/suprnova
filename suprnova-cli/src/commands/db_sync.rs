@@ -2,8 +2,8 @@
 //!
 //! # Trust boundary
 //!
-//! Everything this command learns about the schema — table names, column
-//! names, column types — comes back from the database, and the database is
+//! Everything this command learns about the schema - table names, column
+//! names, column types - comes back from the database, and the database is
 //! not necessarily trustworthy: a developer runs `db:sync` against a dump
 //! someone handed them, a shared staging box, or a container image from a
 //! registry. Two of those names then reach dangerous places:
@@ -92,7 +92,7 @@ fn generate_entities(regenerate_models: bool) -> Result<(), String> {
     rt.block_on(discover_and_generate(&database_url, regenerate_models))
 }
 
-/// Every Rust keyword — strict, reserved, and weak — plus the path
+/// Every Rust keyword - strict, reserved, and weak - plus the path
 /// qualifiers. A schema name matching one of these is a perfectly legal SQL
 /// identifier that cannot be emitted as `pub mod <name>;` or `pub <name>:`,
 /// so it is rejected rather than silently producing a file that will not
@@ -117,7 +117,7 @@ const MAX_SCHEMA_NAME_LEN: usize = 100;
 /// One rule covers both jobs, which is why they share a type: an ASCII
 /// identifier (`[A-Za-z][A-Za-z0-9_]*`) contains no path separator, no `..`,
 /// no quote, no newline, no terminal escape, and no shell metacharacter. The
-/// alternative — sanitising by replacing bad characters — silently maps two
+/// alternative - sanitising by replacing bad characters - silently maps two
 /// distinct tables onto one file, so this refuses instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SafeName(String);
@@ -152,7 +152,7 @@ impl SafeName {
         for c in chars {
             if !(c.is_ascii_alphanumeric() || c == '_') {
                 return Err(format!(
-                    "`{}` is not allowed — only ASCII letters, digits and `_` are",
+                    "`{}` is not allowed - only ASCII letters, digits and `_` are",
                     display_name(&c.to_string())
                 ));
             }
@@ -199,8 +199,8 @@ fn vet_table(table: &TableInfo) -> Result<(), String> {
     SafeName::parse(&table.name).map_err(|e| format!("table name rejected: {e}"))?;
 
     // `user_model_template` names its type `to_pascal_case(singularize(table))`.
-    // That transform can turn an accepted table name into an unusable one —
-    // `selfs` becomes `Self`, `___` becomes the empty string — so the derived
+    // That transform can turn an accepted table name into an unusable one -
+    // `selfs` becomes `Self`, `___` becomes the empty string - so the derived
     // name gets the same check as the source name.
     let struct_name = to_pascal_case(&singularize(&table.name));
     SafeName::parse(&struct_name).map_err(|e| {
@@ -318,7 +318,7 @@ fn write_generated_file(path: &Path, contents: &str) -> Result<(), String> {
 /// Which introspection dialect a `DATABASE_URL` selects.
 ///
 /// Previously this was a bare `starts_with("sqlite")` boolean whose `else`
-/// branch issued Postgres `information_schema` statements — so a MySQL URL
+/// branch issued Postgres `information_schema` statements - so a MySQL URL
 /// silently ran the wrong dialect. Naming the third case turns that into a
 /// clear refusal.
 enum SyncBackend {
@@ -333,7 +333,7 @@ fn classify_backend(database_url: &str) -> Result<SyncBackend, String> {
         Ok(SyncBackend::Postgres)
     } else if database_url.starts_with("mysql") {
         Err(
-            "db:sync does not support MySQL yet — its schema introspection \
+            "db:sync does not support MySQL yet - its schema introspection \
              uses Postgres-specific information_schema queries. Use \
              hand-written SeaORM migrations for MySQL projects."
                 .to_string(),
@@ -394,7 +394,7 @@ async fn discover_and_generate(database_url: &str, regenerate_models: bool) -> R
     if tables.is_empty() {
         return Err(format!(
             "None of the {discovered} discovered table(s) can be turned into Rust \
-             models — every one was skipped for the reason printed above. Rename \
+             models - every one was skipped for the reason printed above. Rename \
              them to plain identifiers (letters, digits and underscores) or write \
              the models by hand."
         ));
@@ -501,7 +501,7 @@ async fn discover_sqlite_columns(
     // `PRAGMA table_info(x)` takes no bind parameters, so the table name used
     // to be interpolated into the statement. The `pragma_table_info(?)`
     // table-valued function is the same introspection behind an ordinary
-    // SELECT, which *does* bind — so the name travels as a value and can
+    // SELECT, which *does* bind - so the name travels as a value and can
     // never be read as SQL, whatever quoting the schema was created with.
     let rows = db
         .query_all_raw(Statement::from_sql_and_values(
@@ -565,7 +565,7 @@ async fn discover_postgres_columns(
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, String> {
     // The table name is compared against `information_schema` *values*, not
-    // used as an identifier — so it binds as a parameter. Hand-escaping a
+    // used as an identifier - so it binds as a parameter. Hand-escaping a
     // literal into the statement (the previous `''`-doubling) is one review
     // slip away from an injection; `$1` cannot be misread as SQL at all.
     // Postgres allows the same placeholder in both predicates.
@@ -675,7 +675,7 @@ fn update_models_mod(tables: &[TableInfo], models_dir: &Path) -> Result<(), Stri
     let mod_file = contained_path(models_dir, "mod.rs")?;
 
     // Read existing content (or seed default if absent).  Surface real read
-    // failures — silently defaulting on EPERM/EIO would obliterate the user's
+    // failures - silently defaulting on EPERM/EIO would obliterate the user's
     // mod.rs on the subsequent write.
     let existing_content = if mod_file.exists() {
         fs::read_to_string(&mod_file).map_err(|e| {
@@ -742,7 +742,7 @@ fn to_pascal_case(s: &str) -> String {
             capitalize_next = true;
         } else if capitalize_next {
             // `char::to_uppercase` yields at least one char by the std::char
-            // documented contract — this `.next()` is infallible on any char.
+            // documented contract - this `.next()` is infallible on any char.
             result.push(c.to_uppercase().next().unwrap_or(c));
             capitalize_next = false;
         } else {
@@ -868,7 +868,7 @@ mod tests {
     fn vet_table_rejects_a_table_whose_derived_struct_name_is_a_keyword() {
         // `selfs` is a legal identifier and a legal file name, but
         // singularize+pascal-case turns it into `Self`, which cannot be a type
-        // name — the failure only shows up in the *derived* name.
+        // name - the failure only shows up in the *derived* name.
         let err = vet_table(&table("selfs", &["id"]))
             .expect_err("a derived struct name of `Self` must be caught");
         assert!(

@@ -3,7 +3,7 @@
 //! A [`Supervisor`] is a user-defined daemon that the framework spawns at boot
 //! and keeps alive according to its [`RestartPolicy`]. Typical use cases:
 //! background pollers, scheduled aggregators, presence reconcilers, heartbeat
-//! emitters — anything that should "always be running" during the lifetime of
+//! emitters - anything that should "always be running" during the lifetime of
 //! the process.
 //!
 //! # Quick start
@@ -46,7 +46,7 @@
 //!
 //! | Policy | Behaviour |
 //! |--------|-----------|
-//! | `OnError` (default) | Restart only when `run()` returns `Err`. An `Ok` return means the task finished cleanly — don't restart. |
+//! | `OnError` (default) | Restart only when `run()` returns `Err`. An `Ok` return means the task finished cleanly - don't restart. |
 //! | `Always` | Restart on both `Ok` and `Err`. Use for daemons that should never return. |
 //! | `Never` | One-shot. Run once; never restart regardless of outcome. |
 //!
@@ -54,7 +54,7 @@
 //!
 //! Each call to `run()` is wrapped in a dedicated `tokio::spawn`. If the task
 //! panics, the join handle captures the panic as a `JoinError` and the restart
-//! loop treats it as an `Err` — the supervisor is restarted with exponential
+//! loop treats it as an `Err` - the supervisor is restarted with exponential
 //! backoff rather than dying silently.
 //!
 //! # Backoff
@@ -73,7 +73,7 @@
 //! CancellationToken. Every supervisor task is spawned into the JoinSet.
 //! On Ctrl-C / SIGTERM, `Server::run` cancels the token and drains the
 //! JoinSet with a 5-second grace window, then `abort_all` for any
-//! stragglers — the same pattern used by the WebSocket task drain.
+//! stragglers - the same pattern used by the WebSocket task drain.
 //!
 //! Supervisors that `tokio::select!` on `cancel.cancelled()` exit cleanly
 //! within the grace window. Supervisors that ignore the token get aborted
@@ -90,7 +90,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Recover the panic payload from a `JoinError` so the observed
 /// `panic: <msg>` log line carries the actual `panic!("...")` message
-/// instead of `JoinError::Panic { id: TaskId(N), .. }` — which loses
+/// instead of `JoinError::Panic { id: TaskId(N), .. }` - which loses
 /// every operator-readable signal about what crashed.
 ///
 /// `panic_any` accepts arbitrary payloads, so we try `String` then
@@ -133,7 +133,7 @@ static SUPERVISOR_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
 /// [`SupervisorRegistry::start_all`] so it runs at most once.
 ///
 /// The `SUPERVISOR_TASKS` / `SUPERVISOR_CANCEL` `OnceLock`s only make
-/// the *statics* idempotent — they don't stop a second `start_all` from
+/// the *statics* idempotent - they don't stop a second `start_all` from
 /// iterating the inventory again and double-spawning every registered
 /// supervisor into the existing JoinSet. This flag closes that gap: the
 /// first caller flips it and drains the inventory; later callers observe
@@ -206,7 +206,7 @@ pub trait Supervisor: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartPolicy {
     /// Restart only when `run()` returns `Err` (or panics).
-    /// An `Ok` return means the task finished cleanly — do not restart.
+    /// An `Ok` return means the task finished cleanly - do not restart.
     OnError,
     /// Always restart: on `Err`, on panic, *and* on `Ok`.
     /// Use for daemons that are never expected to return normally.
@@ -233,11 +233,11 @@ impl SupervisorRegistry {
     /// supervisors can exit cleanly on shutdown.
     ///
     /// Call this once at application boot, e.g. inside `bootstrap::register`.
-    /// Subsequent calls are idempotent — the statics are `OnceLock`s and
+    /// Subsequent calls are idempotent - the statics are `OnceLock`s and
     /// the inventory drain is guarded by `SUPERVISORS_SPAWNED`, so a
     /// second call does not double-spawn the registered supervisors.
     pub async fn start_all() {
-        // OnceLock::set silently fails if already initialized — idempotent.
+        // OnceLock::set silently fails if already initialized - idempotent.
         let _ = SUPERVISOR_TASKS.set(TokioMutex::new(JoinSet::new()));
         let cancel = SUPERVISOR_CANCEL
             .get_or_init(CancellationToken::new)
@@ -245,7 +245,7 @@ impl SupervisorRegistry {
 
         // Claim the spawn loop exactly once. A second `start_all` (or a
         // race between two callers) finds the flag already set and skips
-        // the inventory drain — otherwise every supervisor would be
+        // the inventory drain - otherwise every supervisor would be
         // spawned twice into the shared JoinSet.
         if SUPERVISORS_SPAWNED
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -303,7 +303,7 @@ impl SupervisorRegistry {
     /// [`start_all`](Self::start_all) outside of `Server::run` must call
     /// `shutdown` themselves to avoid leaking supervisor tasks.
     pub async fn shutdown(timeout: std::time::Duration) {
-        // Cancel the token — supervisors watching it will exit within the
+        // Cancel the token - supervisors watching it will exit within the
         // grace window.
         if let Some(token) = SUPERVISOR_CANCEL.get() {
             token.cancel();
@@ -360,7 +360,7 @@ const HEALTHY_RUNTIME_RESET: Duration = Duration::from_millis(MAX_BACKOFF_MS);
 /// just finished lasted.
 ///
 /// A run that stayed up at least `healthy_reset` is healthy and resets to
-/// [`INITIAL_BACKOFF_MS`] — so a daemon that ran cleanly for a long stretch
+/// [`INITIAL_BACKOFF_MS`] - so a daemon that ran cleanly for a long stretch
 /// and then blipped restarts promptly instead of inheriting backoff that
 /// climbed during an earlier burst of failures. A shorter run carries
 /// `current_ms` forward unchanged; the caller doubles it after sleeping, so a
@@ -392,7 +392,7 @@ fn backoff_after_run(current_ms: u64, ran_for: Duration, healthy_reset: Duration
 /// Aborts the task it holds when dropped.
 ///
 /// `run_with_restart` parks on `handle.await`, so cancelling it drops the
-/// `JoinHandle` — and dropping a `JoinHandle` *detaches* the task, it does
+/// `JoinHandle` - and dropping a `JoinHandle` *detaches* the task, it does
 /// not abort it. That made `SupervisorRegistry::shutdown`'s `abort_all`
 /// a lie: it stopped every wrapper, logged "aborting remaining", and left
 /// the actual `run()` bodies executing, detached from the JoinSet that was
@@ -416,7 +416,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         let cancel_for_run = cancel.clone();
         let started = Instant::now();
         let handle = tokio::spawn(async move { sv.run(cancel_for_run).await });
-        // Must outlive the `handle.await` below — see `AbortChildOnDrop`.
+        // Must outlive the `handle.await` below - see `AbortChildOnDrop`.
         let _abort_child = AbortChildOnDrop(handle.abort_handle());
 
         let outcome: Result<(), String> = match handle.await {
@@ -432,7 +432,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         // Decide whether to restart. Never / OnError+Ok return early here.
         match (supervisor.restart_policy(), &outcome) {
             (RestartPolicy::Never, _) => {
-                // One-shot — never restart regardless of outcome.
+                // One-shot - never restart regardless of outcome.
                 return;
             }
             (RestartPolicy::OnError, Ok(())) => {
@@ -461,7 +461,7 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         }
 
         // If cancel fired while run() was executing (or was already set when
-        // we reach this point), don't restart — exit cleanly.
+        // we reach this point), don't restart - exit cleanly.
         if cancel.is_cancelled() {
             tracing::info!(
                 supervisor = supervisor.name(),
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn backoff_resets_after_healthy_run() {
         // A run lasting at least the threshold drops back to the floor,
-        // however high the backoff had climbed — including the exact boundary.
+        // however high the backoff had climbed - including the exact boundary.
         assert_eq!(
             backoff_after_run(MAX_BACKOFF_MS, HEALTHY_RUNTIME_RESET, HEALTHY_RUNTIME_RESET),
             INITIAL_BACKOFF_MS,
@@ -631,8 +631,8 @@ mod tests {
 
     /// A second `start_all` must not re-drain the inventory and
     /// double-spawn every registered supervisor. The lib-test binary
-    /// has exactly one registered `SupervisorEntry` — the
-    /// `CountingInventorySupervisor` factory above — whose factory bumps
+    /// has exactly one registered `SupervisorEntry` - the
+    /// `CountingInventorySupervisor` factory above - whose factory bumps
     /// `SPAWN_FACTORY_COUNT` on each invocation. Before the spawn-loop
     /// guard, two `start_all` calls invoked the factory twice (and
     /// spawned two restart loops); after it, the factory runs once.
@@ -649,7 +649,7 @@ mod tests {
             "first start_all must spawn the single registered supervisor exactly once"
         );
 
-        // Second boot must be a no-op for the spawn loop — the factory
+        // Second boot must be a no-op for the spawn loop - the factory
         // must not run again.
         SupervisorRegistry::start_all().await;
         let after_second = SPAWN_FACTORY_COUNT.load(Ordering::SeqCst);
@@ -660,7 +660,7 @@ mod tests {
         );
 
         // The JoinSet must hold exactly the one spawned restart loop, not
-        // two — a direct check that nothing was double-spawned.
+        // two - a direct check that nothing was double-spawned.
         {
             let sv_tasks = supervisor_tasks().expect("start_all initialises SUPERVISOR_TASKS");
             let guard = sv_tasks.lock().await;
@@ -725,7 +725,7 @@ mod tests {
 
     /// Ticks forever until cancelled through the token.
     ///
-    /// Deliberately ignores the `CancellationToken` — the point is what
+    /// Deliberately ignores the `CancellationToken` - the point is what
     /// happens when the *wrapper* is aborted, which is the path
     /// `SupervisorRegistry::shutdown` takes once its grace window expires.
     struct NeverEndingSupervisor {
@@ -749,7 +749,7 @@ mod tests {
     }
 
     /// `run_with_restart` parks on `handle.await`. Aborting it drops that
-    /// `JoinHandle` — and dropping a `JoinHandle` *detaches* the task
+    /// `JoinHandle` - and dropping a `JoinHandle` *detaches* the task
     /// rather than aborting it. So `shutdown`'s `abort_all` stopped every
     /// wrapper, logged "aborting remaining", and left the actual `run()`
     /// bodies executing with nothing left holding a handle to them.
@@ -784,7 +784,7 @@ mod tests {
             ticks.load(Ordering::SeqCst),
             at_abort,
             "the supervisor body kept running after its wrapper was aborted and \
-             the JoinSet reported itself drained — `shutdown` logged \
+             the JoinSet reported itself drained - `shutdown` logged \
              \"aborting remaining\" while the work carried on detached"
         );
     }

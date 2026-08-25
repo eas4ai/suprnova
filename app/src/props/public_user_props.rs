@@ -1,11 +1,11 @@
-//! Props for the two **unauthenticated** user routes — `GET /users` and
-//! `GET /users/{id}` — plus the public cursor listing at `GET /api/users`.
+//! Props for the two **unauthenticated** user routes - `GET /users` and
+//! `GET /users/{id}` - plus the public cursor listing at `GET /api/users`.
 //!
 //! These exist as separate types from [`UserProps`](super::UserProps) for
 //! one reason: `UserProps` serialises `email`, and none of these three
 //! routes requires a session. Whatever they emit is world-readable.
 //!
-//! That distinction is invisible while the routes serve fixtures — a
+//! That distinction is invisible while the routes serve fixtures - a
 //! hardcoded `user-001@example.com` leaks nothing. It stops being
 //! invisible the moment they read the real `users` table, which is
 //! exactly what the benchmark work does to them. Against a seeded table
@@ -18,7 +18,7 @@
 //!
 //! Both types are outbound-only, so they derive `InertiaProps` (which
 //! emits `Serialize` and feeds `suprnova generate-types`) rather than
-//! `Data` — there is no inbound body to deserialise or validate.
+//! `Data` - there is no inbound body to deserialise or validate.
 
 use suprnova::InertiaProps;
 
@@ -33,8 +33,8 @@ pub struct PublicUserProps {
 ///
 /// `bio` is `Option` because the relation is a `HasOne`: a user may have
 /// no profile row, and the eager loader reports that as `None` rather
-/// than borrowing a neighbour's. Serving `null` here is the honest answer
-/// — the alternative, substituting an empty string, would make "no
+/// than borrowing a neighbour's. Serving `null` here is the honest answer -
+/// the alternative, substituting an empty string, would make "no
 /// profile" and "empty profile" indistinguishable to the frontend.
 #[derive(Debug, Clone, InertiaProps)]
 pub struct UserDetailProps {

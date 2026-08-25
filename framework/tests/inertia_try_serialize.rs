@@ -1,4 +1,4 @@
-//! #380b (Augment) — Inertia eager-prop serialization no longer forces a
+//! #380b (Augment) - Inertia eager-prop serialization no longer forces a
 //! panic on recoverable `Serialize` failures.
 //!
 //! Closes the Codex MEDIUM "infallible public surfaces still convert
@@ -27,7 +27,7 @@ use suprnova::serde::ser::Error as _;
 use suprnova::serde::{Deserialize, Deserializer, Serialize, Serializer};
 use suprnova::{Inertia, InertiaResponse, MergeStrategy, ScrollMetadata};
 
-/// A field type whose `Serialize` impl always fails — the only way to drive
+/// A field type whose `Serialize` impl always fails - the only way to drive
 /// `serde_json::to_value` to `Err` for an otherwise-ordinary type. The
 /// `Deserialize` impl trivially succeeds so `#[derive(Data)]` (which consumes
 /// the eager fields on its input side) is satisfied.
@@ -55,7 +55,7 @@ struct BoomDto {
     bad: BoomSerialize,
 }
 
-/// DTO whose fields all serialize cleanly — exercises the happy path.
+/// DTO whose fields all serialize cleanly - exercises the happy path.
 #[derive(suprnova::Data, validator::Validate)]
 struct OkDto {
     id: i32,

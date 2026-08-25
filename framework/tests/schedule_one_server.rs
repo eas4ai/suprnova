@@ -1,4 +1,4 @@
-//! F-3 — a scheduled task runs once per tick across replicas, not once
+//! F-3 - a scheduled task runs once per tick across replicas, not once
 //! per replica.
 //!
 //! # The defect
@@ -9,7 +9,7 @@
 //! running a tick twice; it says nothing about the other replicas, because
 //! it is an atomic in this process's memory.
 //!
-//! Measured with three replicas over four minutes — `runs=3, instances=3`
+//! Measured with three replicas over four minutes - `runs=3, instances=3`
 //! on every single minute, no variance. A nightly billing job on three
 //! replicas bills every customer three times.
 //!
@@ -38,7 +38,7 @@ use suprnova::{CacheStore, InMemoryCache, Schedule};
 /// dedup state, one coordination backend. It reproduces the measured
 /// failure without needing three containers.
 ///
-/// The guard must outlive the test body — dropping it restores the
+/// The guard must outlive the test body - dropping it restores the
 /// previous container, and these tests run in parallel in one binary.
 #[must_use]
 fn install_shared_cache() -> TestContainerGuard {
@@ -48,7 +48,7 @@ fn install_shared_cache() -> TestContainerGuard {
 }
 
 /// A distinct task name per test. The election lock key is derived from
-/// the name, and these tests run in one binary in parallel — a shared name
+/// the name, and these tests run in one binary in parallel - a shared name
 /// would make one test's claim decide another's outcome.
 fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4())
@@ -197,13 +197,13 @@ async fn without_overlapping_alone_does_not_elect_one_replica() {
         runs.load(Ordering::SeqCst),
         2,
         "without_overlapping releases its lock when the handler returns, so a \
-         second replica finds it free and runs the same tick — this is the gap \
+         second replica finds it free and runs the same tick - this is the gap \
          on_one_server exists to close, not a bug in this test"
     );
 }
 
 /// The lock must not outlive its tick. A TTL longer than the interval
-/// would make the *next* due run find the lock still held and skip it —
+/// would make the *next* due run find the lock still held and skip it -
 /// turning "runs on one server" into "runs once, ever".
 #[tokio::test]
 async fn a_later_tick_is_a_separate_election() {
@@ -271,7 +271,7 @@ async fn a_later_tick_is_a_separate_election() {
 //
 // The election is a `Cache::lock`. Under `CACHE_DRIVER=memory` that lock
 // lives in one process's heap, so every replica wins its own election and
-// every replica runs the task — the exact outcome `on_one_server` was
+// every replica runs the task - the exact outcome `on_one_server` was
 // called to prevent, with nothing in the logs to say so.
 //
 // Same shape as the in-memory rate limiter, same answer: fail the boot in
@@ -302,7 +302,7 @@ fn a_schedule_without_single_server_tasks_is_never_blocked() {
 }
 
 /// Outside production the memory driver is the useful default for a
-/// single-process dev loop, so the guard must not fire there — it warns
+/// single-process dev loop, so the guard must not fire there - it warns
 /// instead.
 #[test]
 fn outside_production_a_memory_cache_is_allowed() {

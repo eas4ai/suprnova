@@ -97,7 +97,7 @@ async fn retagging_drops_old_tag_membership() {
     store.flush_tags(&["a"]).await.unwrap();
     assert!(
         store.has("k").await.unwrap(),
-        "k re-tagged to b — flushing a must not touch it"
+        "k re-tagged to b - flushing a must not touch it"
     );
 
     store.flush_tags(&["b"]).await.unwrap();
@@ -107,7 +107,7 @@ async fn retagging_drops_old_tag_membership() {
     );
 }
 
-/// `flush()` must clear the tag index as well as the value store —
+/// `flush()` must clear the tag index as well as the value store -
 /// otherwise a later `flush_tags` walks a stale forward index against a
 /// fresh, unrelated keyspace.
 #[tokio::test]
@@ -120,7 +120,7 @@ async fn flush_clears_tag_index_so_subsequent_flush_tags_is_clean() {
         .unwrap();
     store.flush().await.unwrap();
 
-    // Recreate u:1 untagged — flush_tags("users") must not touch it.
+    // Recreate u:1 untagged - flush_tags("users") must not touch it.
     store.put_raw("u:1", "v2", None).await.unwrap();
     store.flush_tags(&["users"]).await.unwrap();
 
@@ -131,7 +131,7 @@ async fn flush_clears_tag_index_so_subsequent_flush_tags_is_clean() {
 }
 
 /// Expired tagged keys must not be silently revived by `flush_tags`
-/// (the value is already gone — the validation gate sees no entry and
+/// (the value is already gone - the validation gate sees no entry and
 /// nothing is deleted) and the forward index entry must drop with the
 /// flush so it can't haunt a future write.
 #[tokio::test]
@@ -163,7 +163,7 @@ async fn forget_prunes_tag_index() {
     store.tagged_put_raw(&["t"], "k", "v", None).await.unwrap();
     assert!(store.forget("k").await.unwrap(), "k existed");
 
-    // Recreate untagged and flush — must survive.
+    // Recreate untagged and flush - must survive.
     store.put_raw("k", "v2", None).await.unwrap();
     store.flush_tags(&["t"]).await.unwrap();
     assert!(

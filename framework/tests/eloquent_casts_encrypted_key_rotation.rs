@@ -1,6 +1,6 @@
 #![cfg(feature = "testing")]
 
-//! Phase 10B P7 — Encrypted-cast key rotation.
+//! Phase 10B P7 - Encrypted-cast key rotation.
 //!
 //! Pins the rotation story end-to-end:
 //!
@@ -10,7 +10,7 @@
 //!    with-previous when fallback is configured).
 //! 3. Multi-step rotation works (current + N previous keys).
 //! 4. With no fallback installed, wrong-key decrypt fails LOUDLY
-//!    (returns Err, not silent garbage) — this is the v1 minimum.
+//!    (returns Err, not silent garbage) - this is the v1 minimum.
 //! 5. The macro-generated `Model::find` path round-trips a row that
 //!    was written under an old key once the ring is configured.
 //! 6. `APP_KEY_PREVIOUS` env parsing tolerates empty entries and
@@ -50,10 +50,10 @@ use suprnova::{
 /// installed ring is `current = B`, `previous = [A, A2]` (A2 for the
 /// multi-step-rotation test, harmless for the single-fallback tests).
 ///
-/// `current` (B) — used for any new encrypt issued via `Crypt::encrypt_string`.
-/// `previous[0]` (A) — the oldest fallback; tests that simulate "data
+/// `current` (B) - used for any new encrypt issued via `Crypt::encrypt_string`.
+/// `previous[0]` (A) - the oldest fallback; tests that simulate "data
 ///                     was written under A" use this.
-/// `previous[1]` (A2) — a second fallback to prove the ring walks the
+/// `previous[1]` (A2) - a second fallback to prove the ring walks the
 ///                      full list instead of stopping at index 0.
 struct RotationKeys {
     current: EncryptionKey,
@@ -86,7 +86,7 @@ fn rotation_keys() -> &'static RotationKeys {
 fn current_key_decrypts_and_reports_current_origin() {
     let keys = rotation_keys();
 
-    // Encrypt through the facade — uses current. Bind to the Cast
+    // Encrypt through the facade - uses current. Bind to the Cast
     // purpose so the helper-minted ciphertext below (same purpose)
     // also passes AEAD authentication.
     let wire =
@@ -97,7 +97,7 @@ fn current_key_decrypts_and_reports_current_origin() {
     assert_eq!(origin.key, KeyOrigin::Current);
     assert_eq!(origin.aad, AadVersion::Current);
 
-    // Sanity: the wire was actually produced under `current` — confirm
+    // Sanity: the wire was actually produced under `current` - confirm
     // by minting an equivalent payload via the test helper directly.
     let wire_via_helper = suprnova::crypto::_test_encrypt_with(
         &keys.current,
@@ -138,7 +138,7 @@ fn previous_key_decrypts_and_reports_previous_origin() {
 #[test]
 fn ring_walks_full_previous_list_to_find_match() {
     // Multi-step rotation: data written under the *middle* fallback
-    // key (not the oldest) must still decrypt — proves the ring
+    // key (not the oldest) must still decrypt - proves the ring
     // doesn't stop at index 0.
     let keys = rotation_keys();
     let wire = suprnova::crypto::_test_encrypt_with(
@@ -163,7 +163,7 @@ fn unrelated_key_fails_loudly_not_silently() {
     // a third unrelated key minting the ciphertext, decrypt MUST
     // surface Err.
     //
-    // Force the ring into existence before we start — under parallel
+    // Force the ring into existence before we start - under parallel
     // `cargo test` scheduling this test may be the first to run.
     let _ = rotation_keys();
     let stranger = EncryptionKey::generate();
@@ -192,11 +192,11 @@ fn unrelated_key_fails_loudly_not_silently() {
 fn encrypt_always_uses_current_even_when_previous_configured() {
     // If `encrypt_string` accidentally reached for a previous key,
     // the resulting ciphertext would decrypt under that previous key
-    // alone — and `Crypt::decrypt_string_inner` would report
+    // alone - and `Crypt::decrypt_string_inner` would report
     // `origin.key == KeyOrigin::Previous(_)` instead of `Current`.
     // This test pins the invariant.
     //
-    // Force the ring into existence before we start — under parallel
+    // Force the ring into existence before we start - under parallel
     // `cargo test` scheduling this test may be the first to run.
     let _ = rotation_keys();
     for i in 0..5 {
@@ -208,7 +208,7 @@ fn encrypt_always_uses_current_even_when_previous_configured() {
         assert_eq!(
             origin.key,
             KeyOrigin::Current,
-            "encrypt must always use current key — got rotation origin {origin:?} for payload {plaintext:?}"
+            "encrypt must always use current key - got rotation origin {origin:?} for payload {plaintext:?}"
         );
         assert_eq!(origin.aad, AadVersion::Current);
     }
@@ -216,7 +216,7 @@ fn encrypt_always_uses_current_even_when_previous_configured() {
 
 #[test]
 fn decrypt_t_round_trip_via_fallback() {
-    // The other public decrypt entrypoint — JSON-decoding variant.
+    // The other public decrypt entrypoint - JSON-decoding variant.
     // Same rotation semantics: previous keys are tried, origin
     // surfaces via `_inner`.
     let keys = rotation_keys();
@@ -236,7 +236,7 @@ fn decrypt_t_round_trip_via_fallback() {
     // `Crypt::encrypt` would, but under the previous (oldest) key.
     let aead_wire = {
         // We reuse `_test_encrypt_with` by feeding it the JSON bytes
-        // as a UTF-8 string — JSON output is always valid UTF-8 for
+        // as a UTF-8 string - JSON output is always valid UTF-8 for
         // safe primitives, so this is fine.
         let plaintext = std::str::from_utf8(&json).expect("json is utf-8");
         suprnova::crypto::_test_encrypt_with(&keys.previous_oldest, CryptPurpose::Cookie, plaintext)
@@ -293,7 +293,7 @@ async fn model_round_trips_row_written_under_previous_key() {
 
     // The cast routes through `Crypt::decrypt_string` with the Cast
     // purpose. With the fallback ring installed, this should succeed
-    // and yield the original plaintext — proving rotation works for
+    // and yield the original plaintext - proving rotation works for
     // the public model surface, not just the facade.
     let read = RotationEnc::find(1).await.unwrap().unwrap();
     assert_eq!(read.secret, "social-security-number-legacy");
@@ -328,7 +328,7 @@ async fn model_save_re_encrypts_under_current_key() {
     .await
     .unwrap();
 
-    // Read + save — the cast layer rewrites the column under current.
+    // Read + save - the cast layer rewrites the column under current.
     let mut row = RotationEnc::find(1).await.unwrap().unwrap();
     // Touch the field so the active model definitely registers a
     // change (some ORMs no-op on a value-identity save; force a
@@ -362,8 +362,8 @@ async fn model_save_re_encrypts_under_current_key() {
 //
 // To verify these tests actually exercise the fallback loop (and aren't
 // accidentally green because every key happens to decrypt the same
-// ciphertext — which it cannot, because AEAD authentication tags are
-// 128 bits wide and 2^128 collisions are infeasible — but defence in
+// ciphertext - which it cannot, because AEAD authentication tags are
+// 128 bits wide and 2^128 collisions are infeasible - but defence in
 // depth):
 //
 // 1. In `framework/src/crypto/mod.rs`, mutate `decrypt_with_ring` so

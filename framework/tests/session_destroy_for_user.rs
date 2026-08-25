@@ -1,4 +1,4 @@
-//! Phase 11 R1 — verify `SessionStore::destroy_for_user` revokes every
+//! Phase 11 R1 - verify `SessionStore::destroy_for_user` revokes every
 //! session row for a given user id, leaving rows belonging to other
 //! users untouched. The wire-up from `PasswordReset::complete` →
 //! `session::destroy_all_for_user` → `DatabaseSessionDriver::destroy_for_user`
@@ -17,7 +17,7 @@ use std::time::Duration;
 use suprnova::session::{DatabaseSessionDriver, SessionData, SessionStore};
 use suprnova::testing::TestDatabase;
 
-/// Migrator containing just the sessions table — matches the schema
+/// Migrator containing just the sessions table - matches the schema
 /// the example app installs in production via
 /// `app/src/migrations/m20251208_220000_create_sessions_table.rs`.
 struct TestMigrator;
@@ -168,7 +168,7 @@ async fn write_does_not_resurrect_a_concurrently_deleted_row() {
     sess.user_id = Some("victim-uid".into());
     driver.write(&sess).await.unwrap();
 
-    // A request reads it — this is the point `loaded_from_store` gets
+    // A request reads it - this is the point `loaded_from_store` gets
     // set, proving the row existed when THIS request observed it.
     let mut reloaded = driver
         .read("resurrection-sess")
@@ -181,7 +181,7 @@ async fn write_does_not_resurrect_a_concurrently_deleted_row() {
     );
 
     // Concurrently, a security-team forced reset (or password-reset
-    // completion) revokes every session for this user — deleting the
+    // completion) revokes every session for this user - deleting the
     // row out from under the in-flight request above.
     let revoked = driver.destroy_for_user("victim-uid").await.unwrap();
     assert_eq!(revoked, 1);
@@ -191,8 +191,8 @@ async fn write_does_not_resurrect_a_concurrently_deleted_row() {
     );
 
     // The original request's handler mutates the (now stale, in-memory)
-    // session and the middleware persists it at the end of the request
-    // — exactly the sequence at session/middleware.rs's end-of-handle
+    // session and the middleware persists it at the end of the request -
+    // exactly the sequence at session/middleware.rs's end-of-handle
     // persistence step.
     reloaded.put("touched", "yes");
     driver.write(&reloaded).await.unwrap();
@@ -200,7 +200,7 @@ async fn write_does_not_resurrect_a_concurrently_deleted_row() {
     // SEC-02(c): the write must NOT have resurrected the row. Before the
     // fix, the unconditional `INSERT ... ON CONFLICT DO UPDATE` would
     // have recreated it here, carrying `user_id` (and every other
-    // field) right back — undoing the revocation this same test just
+    // field) right back - undoing the revocation this same test just
     // performed.
     assert!(
         driver.read("resurrection-sess").await.unwrap().is_none(),

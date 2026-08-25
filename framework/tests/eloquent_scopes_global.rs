@@ -1,4 +1,4 @@
-//! Phase 10C T4 — global scopes via `GlobalScope<M>` + `ScopeRegistry`.
+//! Phase 10C T4 - global scopes via `GlobalScope<M>` + `ScopeRegistry`.
 //!
 //! Pins:
 //!
@@ -149,12 +149,12 @@ async fn without_global_scope_by_type_excludes_only_that_scope() {
 
     T4_ORDER_TENANT.store(1, Ordering::SeqCst);
 
-    // Both scopes apply — tenant=1 AND title NOT LIKE 't1%' → 0 rows
+    // Both scopes apply - tenant=1 AND title NOT LIKE 't1%' → 0 rows
     // because every tenant-1 row is titled 't1-*'.
     let with_both = T4Order::query().get().await.unwrap();
     assert_eq!(with_both.len(), 0);
 
-    // Opt out of DraftScope — tenant=1 alone returns 2 rows.
+    // Opt out of DraftScope - tenant=1 alone returns 2 rows.
     let no_draft = T4Order::without_global_scope::<T4OrderDraftScope>()
         .get()
         .await
@@ -164,7 +164,7 @@ async fn without_global_scope_by_type_excludes_only_that_scope() {
     no_draft_titles.sort();
     assert_eq!(no_draft_titles, vec!["t1-a", "t1-b"]);
 
-    // Opt out of TenantScope — DraftScope still applies, so the only
+    // Opt out of TenantScope - DraftScope still applies, so the only
     // surviving row is the tenant=2 one titled 't2-a'.
     let no_tenant = T4Order::without_global_scope::<T4OrderTenantScope>()
         .get()
@@ -191,7 +191,7 @@ pub struct T4AuditTenantScope;
 
 impl GlobalScope<T4Audit> for T4AuditTenantScope {
     fn apply(&self, query: Builder<T4Audit>) -> Builder<T4Audit> {
-        // Hard-coded tenant=1 filter; doesn't matter for this test —
+        // Hard-coded tenant=1 filter; doesn't matter for this test -
         // we just need a registered scope so without_global_scopes()
         // has something to bypass.
         query.filter("tenant_id", 1)
@@ -239,7 +239,7 @@ async fn without_global_scopes_excludes_all() {
 // Uses `limit` as the order-sensitive observable: SeaORM's limit is
 // last-write-wins, so registering ScopeLimit3 then ScopeLimit1 caps
 // the result at 1, while the opposite order caps at 3. AND-composed
-// filters alone wouldn't pin this — they're commutative — so this
+// filters alone wouldn't pin this - they're commutative - so this
 // test wouldn't catch a regression that swapped `Vec` storage for
 // a `HashMap` and re-introduced non-deterministic iteration.
 // ============================================================
@@ -335,7 +335,7 @@ async fn scopes_apply_in_registration_order() {
     assert_eq!(
         rows.len(),
         1,
-        "limit(1) registered LAST should win — last-write-wins on Builder::limit",
+        "limit(1) registered LAST should win - last-write-wins on Builder::limit",
     );
 
     // Order B (on a sibling model with separate registry entry):
@@ -347,7 +347,7 @@ async fn scopes_apply_in_registration_order() {
     assert_eq!(
         rows.len(),
         3,
-        "limit(3) registered LAST should win — proves order is preserved both ways",
+        "limit(3) registered LAST should win - proves order is preserved both ways",
     );
 }
 
@@ -355,7 +355,7 @@ async fn scopes_apply_in_registration_order() {
 // Test 5: PK lookup paths bypass the registry.
 //
 // Pins the locked decision: global scopes apply through `query()`,
-// not through `find` / `find_many` / `all`. Matches Laravel — those
+// not through `find` / `find_many` / `all`. Matches Laravel - those
 // PK paths go through SeaORM directly.
 // ============================================================
 
@@ -383,7 +383,7 @@ impl GlobalScope<T4Pk> for T4PkTenantScope {
 //
 // Soft-deletes use a separate (string-tag) bypass mechanism, not
 // the typed registry. Verify both apply on `query()` and that
-// `without_global_scopes()` only drops registry scopes — soft-
+// `without_global_scopes()` only drops registry scopes - soft-
 // delete filtering is preserved.
 // ============================================================
 
@@ -442,7 +442,7 @@ async fn soft_deletes_and_global_scopes_coexist() {
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].id, live_t1.id);
 
-    // without_global_scopes() drops the typed registry scope only —
+    // without_global_scopes() drops the typed registry scope only -
     // the soft-delete filter still applies. Expect both live rows
     // (both tenants), but NOT the trashed tenant-1 row.
     let no_typed_scopes = T4SoftArticle::without_global_scopes().get().await.unwrap();
@@ -484,17 +484,17 @@ async fn find_and_all_bypass_global_scopes() {
     assert_eq!(via_query.len(), 2);
     assert!(via_query.iter().all(|r| r.tenant_id == 1));
 
-    // find() goes through SeaORM directly — global scope does NOT
+    // find() goes through SeaORM directly - global scope does NOT
     // apply. The tenant=2 row IS reachable by its primary key.
     let by_id = T4Pk::find(row3.id).await.unwrap();
     assert!(by_id.is_some(), "find() must reach tenant=2 row by PK");
     assert_eq!(by_id.unwrap().tenant_id, 2);
 
-    // all() goes through SeaORM directly too — should return every row.
+    // all() goes through SeaORM directly too - should return every row.
     let everything = T4Pk::all().await.unwrap();
     assert_eq!(everything.len(), 3);
 
-    // find_many() also bypasses scopes — returns rows for both
+    // find_many() also bypasses scopes - returns rows for both
     // tenants when PKs span them.
     let many = T4Pk::find_many([row1.id, row2.id, row3.id]).await.unwrap();
     assert_eq!(many.len(), 3);

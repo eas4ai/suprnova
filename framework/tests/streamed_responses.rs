@@ -1,11 +1,11 @@
-//! `HttpResponse::event_stream` and `HttpResponse::stream_json` —
+//! `HttpResponse::event_stream` and `HttpResponse::stream_json` -
 //! Laravel's `ResponseFactory::eventStream` / `streamJson`.
 //!
 //! Three harnesses, each earning its own keep:
 //!
 //! - `spawn_server` + `fetch`: a one-shot real-socket server that calls
 //!   `HttpResponse::into_hyper()` directly inside a bare `service_fn`,
-//!   bypassing the `Router` and `MiddlewareRegistry` entirely — same
+//!   bypassing the `Router` and `MiddlewareRegistry` entirely - same
 //!   shape as `framework/tests/sse.rs`, because hyper's `body::Incoming`
 //!   can't be constructed outside its own connection machinery. Used
 //!   where the thing under test is response-building and wire framing
@@ -13,8 +13,8 @@
 //!   serialization failure mid-stream), not routing.
 //! - `incoming_get_request` + `handle_request`: builds a genuine
 //!   `hyper::Request<Incoming>` by parsing real HTTP/1.1 bytes through
-//!   an in-memory `tokio::io::duplex` pipe — no TCP port bound, same
-//!   idiom as `framework/tests/common.rs::request_from_http_bytes` —
+//!   an in-memory `tokio::io::duplex` pipe - no TCP port bound, same
+//!   idiom as `framework/tests/common.rs::request_from_http_bytes` -
 //!   then drives it through the real `Router` + `MiddlewareRegistry`
 //!   chain via `handle_request`, the in-process adapter `Server::run`
 //!   itself calls per connection. This is the coverage the first
@@ -26,9 +26,9 @@
 //!   socket mid-stream, because that's the one thing an in-memory pipe
 //!   can't simulate: a genuine, OS-level disconnect.
 //!
-//! Every await that waits on a response — the thing that could actually
+//! Every await that waits on a response - the thing that could actually
 //! hang if `event_stream`/`stream_json`'s `.chain()`/`.scan()` composition
-//! regressed and stopped signaling completion — is bounded by
+//! regressed and stopped signaling completion - is bounded by
 //! `tokio::time::timeout`. The exception is the handful of foreground
 //! `connect`/`write_all` calls that only get request bytes onto the wire
 //! before that bounded wait begins: `fetch`'s `connect`,
@@ -87,7 +87,7 @@ where
 }
 
 /// GET `/`, fully collecting the response body. Mirrors `sse.rs::fetch`.
-/// Both awaits are bounded — a regression that stops the response from
+/// Both awaits are bounded - a regression that stops the response from
 /// signaling completion fails this test instead of hanging the suite.
 async fn fetch(addr: SocketAddr) -> hyper::Response<Bytes> {
     let stream_tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -123,7 +123,7 @@ async fn fetch(addr: SocketAddr) -> hyper::Response<Bytes> {
 /// an in-memory `tokio::io::duplex` pipe rather than binding a TCP
 /// port. `hyper::body::Incoming` is privately constructed in hyper
 /// 1.x, so this is the only way to obtain a genuine one without a live
-/// connection — same idiom as
+/// connection - same idiom as
 /// `framework/tests/common.rs::request_from_http_bytes` (see that
 /// file's doc comment for the full rationale).
 async fn incoming_get_request(
@@ -150,7 +150,7 @@ async fn incoming_get_request(
             {
                 let _ = tx.send(req);
             }
-            // Never resolve — the caller only wants the parsed
+            // Never resolve - the caller only wants the parsed
             // `Incoming` request, not a response over this connection.
             // Returning `Ok` here would stop hyper from pumping any
             // remaining body bytes (see `common.rs` for the same note).
@@ -312,7 +312,7 @@ async fn stream_json_round_trips_three_items() {
 }
 
 /// The documented failure mode in `response.rs::stream_json`: an item
-/// that fails `serde_json::to_vec` (here, `f64::NAN` — JSON has no NaN
+/// that fails `serde_json::to_vec` (here, `f64::NAN` - JSON has no NaN
 /// literal) is dropped with a `tracing::warn!` rather than corrupting
 /// the array with a stray comma, an empty slot, or a panic.
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn stream_json_drops_an_item_that_fails_to_serialize_without_corrupting_th
 /// things at once: the request actually reached the router (only a
 /// matched route produces this body) and the middleware chain actually
 /// ran on the way out (the CORS header is middleware-applied, not part
-/// of `event_stream` itself) — without disturbing the streamed body.
+/// of `event_stream` itself) - without disturbing the streamed body.
 #[tokio::test]
 async fn event_stream_survives_the_router_and_middleware_chain() {
     let router: Router = Router::new()

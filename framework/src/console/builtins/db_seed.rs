@@ -1,8 +1,8 @@
-//! `db:seed` — runs every registered seeder via
+//! `db:seed` - runs every registered seeder via
 //! [`crate::seed::run_all`].
 //!
 //! On an empty seeder registry this emits a single
-//! `tracing::warn!` and returns `Ok(())` — that's the correct product
+//! `tracing::warn!` and returns `Ok(())` - that's the correct product
 //! behavior for "user ran the command before registering anything"
 //! and it makes the command safe to invoke from test suites that
 //! haven't seeded anything specific.
@@ -13,7 +13,7 @@
 //! `db:seed UserSeeder`) runs only the named seeder via
 //! [`crate::seed::run_one`]. Unknown names surface as
 //! `FrameworkError::not_found("no seeder registered for `X`")`
-//! through the normal dispatch path — non-zero exit + diagnostic on
+//! through the normal dispatch path - non-zero exit + diagnostic on
 //! stderr. Matches Laravel's `php artisan db:seed --class=UserSeeder`.
 
 use crate::error::FrameworkError;
@@ -32,8 +32,8 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
         // sees feedback in the absence of a configured tracing
         // subscriber; tracing::warn so observability tools still
         // pick it up in production.
-        eprintln!("db:seed: no seeders registered — nothing to run");
-        tracing::warn!("db:seed: no seeders registered — nothing to run");
+        eprintln!("db:seed: no seeders registered - nothing to run");
+        tracing::warn!("db:seed: no seeders registered - nothing to run");
         return Ok(());
     }
 
@@ -77,7 +77,7 @@ fn parse_class_arg(args: &[String]) -> Result<Option<String>, FrameworkError> {
             return Ok(Some(name.clone()));
         }
         if !arg.starts_with("--") {
-            // Bare positional name — Laravel-compatible form.
+            // Bare positional name - Laravel-compatible form.
             return Ok(Some(arg.clone()));
         }
     }

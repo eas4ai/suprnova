@@ -11,7 +11,7 @@ use crate::props::{PublicUserProps, UserDetailProps};
 /// plain HTML/Inertia directory and has no reason to expose the knob.
 const PER_PAGE: u64 = 20;
 
-/// `GET /users` — one page of the public user directory.
+/// `GET /users` - one page of the public user directory.
 ///
 /// `simple_paginate`, not `paginate`: the length-aware paginator issues a
 /// `COUNT(*)` beside the page query, and counting a users table of any
@@ -31,7 +31,7 @@ async fn index_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
 
     // Rebuild rather than map: `Paginator` has no `map`/`through` (see
     // the note in `controllers::paginated_users`). The counters carry
-    // across unchanged — they describe the query, not the row shape.
+    // across unchanged - they describe the query, not the row shape.
     let projected = Paginator::new(
         page.data
             .into_iter()
@@ -50,7 +50,7 @@ async fn index_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         .await
 }
 
-/// `GET /users/{id}` — one user, with their profile eager-loaded.
+/// `GET /users/{id}` - one user, with their profile eager-loaded.
 ///
 /// The eager load is the point of this route in the dogfood: it is a
 /// primary-key fetch plus a `HasOne` in a single round trip, which is the
@@ -73,7 +73,7 @@ async fn show_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
         .ok_or_else(|| FrameworkError::not_found("user"))?;
 
     // `None` here means "this user has no profile row", not "the eager
-    // load missed" — the loader distinguishes the two, and the HasOne
+    // load missed" - the loader distinguishes the two, and the HasOne
     // test in `relations_dogfood` pins that it does not borrow a
     // neighbour's profile to fill the gap.
     let bio = user.profile_loaded().map(|p| p.bio.clone());

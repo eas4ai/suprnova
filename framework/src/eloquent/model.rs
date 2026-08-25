@@ -1,4 +1,4 @@
-//! Eloquent Model trait — the CRUD lifecycle layer.
+//! Eloquent Model trait - the CRUD lifecycle layer.
 //!
 //! Implemented by the `#[suprnova::model]` macro on every annotated
 //! struct, this trait carries the bulk of the Eloquent API surface:
@@ -15,7 +15,7 @@
 //!
 //! ## delete vs force_delete
 //!
-//! T4 ships hard-delete only — both methods call SeaORM's DELETE. T10
+//! T4 ships hard-delete only - both methods call SeaORM's DELETE. T10
 //! introduces soft-deletes; once that lands, `delete` honours the
 //! `soft_deletes` attribute (sets `deleted_at` instead of removing the
 //! row) while `force_delete` always removes the row.
@@ -81,7 +81,7 @@ where
         "id"
     }
 
-    /// The table-qualified primary-key column — `"users.id"`.
+    /// The table-qualified primary-key column - `"users.id"`.
     ///
     /// Laravel's `getQualifiedKeyName()`. Terminals that project the key
     /// alone emit this rather than the bare column so the statement stays
@@ -98,15 +98,15 @@ where
     /// `fillable = [...]` / `guarded = [...]` attributes.
     fn fillable_filter() -> Fillable;
 
-    /// Fallible hydration of an inner SeaORM row into this model — the
+    /// Fallible hydration of an inner SeaORM row into this model - the
     /// `?`-propagating analogue of the infallible
     /// `From<<Self::Entity>::Model>` bridge the macro also emits.
     ///
     /// The framework's own read paths (`find`, `find_many`, `all`,
     /// [`Builder::get`](crate::eloquent::Builder), ...) route through
-    /// this method so a cast that fails to decode a stored value — a
+    /// this method so a cast that fails to decode a stored value - a
     /// corrupt column, a deprecated enum variant left in old rows,
-    /// schema drift — surfaces as a recoverable [`FrameworkError`]
+    /// schema drift - surfaces as a recoverable [`FrameworkError`]
     /// rather than a panic. That matters off the HTTP path: a queue
     /// worker, the scheduler, or a CLI command has no panic-recovery
     /// middleware to turn a panic into a 500, so an unguarded panic
@@ -122,7 +122,7 @@ where
         Ok(Self::from(row))
     }
 
-    /// Fallible dehydration of this model into its inner SeaORM row —
+    /// Fallible dehydration of this model into its inner SeaORM row -
     /// the `?`-propagating analogue of the infallible
     /// `From<Self> for <Self::Entity>::Model` bridge.
     ///
@@ -137,19 +137,19 @@ where
         Ok(self.into())
     }
 
-    /// Phase 10C T5b — read this row's field by column name and
+    /// Phase 10C T5b - read this row's field by column name and
     /// serialise it to a `serde_json::Value`. Returns `None` when the
     /// column name doesn't match any declared field on the model (and
     /// when the per-field serialisation fails, which the macro's
     /// arms lower to `None`).
     ///
     /// The default returns `None` so non-`#[suprnova::model]` types
-    /// that meet the supertrait bounds (rare — almost nothing else
+    /// that meet the supertrait bounds (rare - almost nothing else
     /// satisfies them) don't break. The macro overrides this with one
     /// match arm per declared column field.
     ///
     /// Powers the string-keyed surface on
-    /// [`Collection<M>`](crate::eloquent::Collection) —
+    /// [`Collection<M>`](crate::eloquent::Collection) -
     /// `pluck("col")`, `group_by("col")`, `sort_by("col")`,
     /// `where_eq("col", v)`, `sum::<T>("col")`, etc. The macro emission
     /// lives in `suprnova-macros/src/model/serialization.rs`.
@@ -157,13 +157,13 @@ where
         ::core::option::Option::None
     }
 
-    /// Phase 10C T6 — serialise this row to a JSON object.
+    /// Phase 10C T6 - serialise this row to a JSON object.
     ///
     /// Default implementation serialises the whole struct via
     /// `serde_json::to_value(self)` and explicitly removes the
     /// macro-injected `__eager` / `__pivot` scratch fields. Both
     /// fields carry `#[serde(skip)]` on the struct definition, so the
-    /// removal is belt-and-braces — it pins the [Phase 10B P6
+    /// removal is belt-and-braces - it pins the [Phase 10B P6
     /// contract](../../docs/superpowers/specs/phase-10/phase-10b.md)
     /// (eager-load cache stays out of serialisation) even against a
     /// hypothetical future model with a hand-rolled `Serialize` impl.
@@ -183,14 +183,14 @@ where
         v
     }
 
-    /// Phase 10C T6 — serialise this row to a JSON string. Delegates
+    /// Phase 10C T6 - serialise this row to a JSON string. Delegates
     /// to [`Self::to_array`] so the same hidden/visible/appends
     /// filters apply when callers reach for the string shape directly.
     fn to_json(&self) -> String {
         serde_json::to_string(&self.to_array()).unwrap_or_default()
     }
 
-    /// Phase 10C T6 — append-accessor dispatcher. The macro overrides
+    /// Phase 10C T6 - append-accessor dispatcher. The macro overrides
     /// this with a `match` block when `appends = [...]` is non-empty,
     /// dispatching each declared name to the user's
     /// `#[suprnova::accessor]`-tagged method. The default returns
@@ -203,7 +203,7 @@ where
 
     /// Look up a row by primary key. `None` if no row matches.
     ///
-    /// The trait default uses SeaORM's `find_by_id` directly — no
+    /// The trait default uses SeaORM's `find_by_id` directly - no
     /// global scopes apply. Models that declare `#[model(soft_deletes)]`
     /// receive an inherent `find` override emitted by the macro that
     /// routes through [`Self::query`] (which applies the
@@ -221,7 +221,7 @@ where
         // T11/T12: route through resolve_read so the read honours any
         // ambient `DB::transaction` closure scope, per-model
         // `connection = "..."` default, and `__read_replica__`
-        // auto-routing. No builder-level overrides at this layer —
+        // auto-routing. No builder-level overrides at this layer -
         // `Model::find` doesn't take a Builder.
         let exec = crate::database::transaction::ExecutorChoice::resolve_read(
             None,
@@ -372,8 +372,8 @@ where
     ///
     /// Dispatched in this order:
     ///
-    /// 1. `Creating { attrs }` — cancellable
-    /// 2. `Saving { attrs, is_creating: true }` — cancellable
+    /// 1. `Creating { attrs }` - cancellable
+    /// 2. `Saving { attrs, is_creating: true }` - cancellable
     /// 3. *INSERT lands*
     /// 4. `Created { model }`
     /// 5. `Saved { model }`
@@ -396,7 +396,7 @@ where
         // Arc<Mutex<_>> handle is dropped once we leave this scope.
         let final_attrs = shared.lock().await.clone();
         let am = Self::active_model_from_attrs(final_attrs)?;
-        // T11/T12: route through resolve_write — insert lands in the
+        // T11/T12: route through resolve_write - insert lands in the
         // active transaction when called inside `DB::transaction`,
         // honours per-model `connection = "..."`, and skips
         // `__read_replica__` (writes always go to primary unless the
@@ -420,12 +420,12 @@ where
     }
 
     /// Persist any field changes on this row. The full row is sent to
-    /// the database — T4 doesn't track per-field dirty state.
+    /// the database - T4 doesn't track per-field dirty state.
     ///
     /// ## Lifecycle events (Phase 10C T1)
     ///
-    /// 1. `Updating { previous, attrs }` — cancellable
-    /// 2. `Saving { attrs, is_creating: false }` — cancellable
+    /// 1. `Updating { previous, attrs }` - cancellable
+    /// 2. `Saving { attrs, is_creating: false }` - cancellable
     /// 3. *UPDATE lands*
     /// 4. `Updated { previous, current }`
     /// 5. `Saved { model: current }`
@@ -447,7 +447,7 @@ where
         Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
 
-        // Audit HIGH `eloquent` #2 — read the (possibly listener-
+        // Audit HIGH `eloquent` #2 - read the (possibly listener-
         // mutated) attrs back from the shared map and overlay onto
         // the ActiveModel. The earlier code built the ActiveModel
         // straight from `self.clone()` and silently dropped any
@@ -479,7 +479,7 @@ where
     ///
     /// ## Lifecycle events (Phase 10C T1)
     ///
-    /// Same event sequence as [`Self::save`] — `Updating` /
+    /// Same event sequence as [`Self::save`] - `Updating` /
     /// `Saving { is_creating: false }` before the UPDATE, then
     /// `Updated` / `Saved` after.
     async fn update(self, attrs: Attrs) -> Result<Self, FrameworkError> {
@@ -520,7 +520,7 @@ where
     ///
     /// ## Lifecycle events (Phase 10C T1)
     ///
-    /// 1. `Deleting { model, is_force: false }` — cancellable
+    /// 1. `Deleting { model, is_force: false }` - cancellable
     /// 2. *DELETE lands*
     /// 3. `Deleted { model, is_force: false }`
     ///
@@ -553,7 +553,7 @@ where
     /// annotated `#[suprnova::model(soft_deletes)]` get an inherent
     /// override that ALSO fires `ForceDeleting` / `ForceDeleted` and
     /// `Deleting { is_force: true }` / `Deleted { is_force: true }`
-    /// (Trashed is NOT fired — the row is gone, not tombstoned).
+    /// (Trashed is NOT fired - the row is gone, not tombstoned).
     async fn force_delete(self) -> Result<(), FrameworkError> {
         Self::__dispatch_deleting(&self, true).await?;
         Self::__dispatch_force_deleting(&self).await?;
@@ -622,7 +622,7 @@ where
     /// `UPDATE <owner> SET <updated_at> = ? WHERE <key> = ?` per
     /// declared touch relation.
     ///
-    /// Type-erased on purpose — the owner is reached through its
+    /// Type-erased on purpose - the owner is reached through its
     /// [`RelationEntry`](crate::eloquent::RelationEntry), never
     /// hydrated. That makes the cascade one level deep: Laravel
     /// recurses to grandparents by loading the parent model, and we
@@ -657,7 +657,7 @@ where
                     Self::TABLE,
                 )));
             };
-            // laravel/framework#61073 — an owner whose model disclaims
+            // laravel/framework#61073 - an owner whose model disclaims
             // timestamps is skipped. Not an error, not a write.
             if entry.related_updated_at_column.is_empty() {
                 continue;
@@ -709,7 +709,7 @@ where
         Ok(())
     }
 
-    // ---- Phase 10C T11 — manual-transaction shims --------------------
+    // ---- Phase 10C T11 - manual-transaction shims --------------------
     //
     // `DB::begin_transaction()` returns a `Transaction` handle and
     // does NOT install the [`CURRENT_TX`] task-local; callers must
@@ -718,7 +718,7 @@ where
     // with `Builder::with_tx(&tx)` for read paths.
     //
     // The shims route through `ExecutorChoice::from_tx(tx)` which
-    // bypasses CURRENT_TX consultation entirely — the explicit
+    // bypasses CURRENT_TX consultation entirely - the explicit
     // handle is authoritative. Lifecycle events still fire in the
     // same order as the non-tx variant.
 
@@ -739,7 +739,7 @@ where
         Self::__dispatch_updating(self, shared.clone()).await?;
         Self::__dispatch_saving(shared.clone(), false).await?;
 
-        // Audit HIGH `eloquent` #2 — match `save()`'s lifecycle: read
+        // Audit HIGH `eloquent` #2 - match `save()`'s lifecycle: read
         // the listener-mutated attrs back and apply them to the
         // ActiveModel before the UPDATE fires.
         let final_attrs = shared.lock().await.clone();
@@ -813,7 +813,7 @@ where
     }
 
     /// Create a row through `tx`. Phase 10C audit-fix AF5 closes the
-    /// manual-transaction shim inventory — every CRUD entry point on
+    /// manual-transaction shim inventory - every CRUD entry point on
     /// [`Self`] except `create` previously had a `*_with_tx`
     /// counterpart, so a user inside [`DB::begin_transaction`](crate::database::DB::begin_transaction) who
     /// wanted to `create` had to fall back to building an
@@ -893,9 +893,9 @@ where
     /// Eager-loaded relations and pivot context are preserved on the
     /// replica (Laravel parity: `clone $user` retains `$user->posts`).
     /// The macro-emitted `replicate_with` clones the source's
-    /// `__eager` cache via `EagerLoadCache::clone` — each cell
+    /// `__eager` cache via `EagerLoadCache::clone` - each cell
     /// carries a clone trampoline so the replica's loaded rows are
-    /// independent of the source's — and `Arc`-clones the pivot slot.
+    /// independent of the source's - and `Arc`-clones the pivot slot.
     /// Use [`Self::replicate_except`] if a specific relation should
     /// be dropped on the replica (column names only; relation cache
     /// keys are out of scope for the `except` filter).
@@ -944,7 +944,7 @@ where
     }
 
     /// Replicate this row into a different model type. Suprnova
-    /// divergence from Laravel — Laravel can't do this because PHP
+    /// divergence from Laravel - Laravel can't do this because PHP
     /// has no static types. The transfer goes via JSON: `self` is
     /// serialised to a `serde_json::Value`, then deserialised into
     /// `T`. After deserialisation, the target's PK is reset to its
@@ -965,7 +965,7 @@ where
     /// `Replicating` is per-source-type (the event struct holds an
     /// `Arc<Mutex<Self>>`). For cross-type replication the source's
     /// `Replicating` listener would receive an `Arc<Mutex<Self>>`,
-    /// not `Arc<Mutex<T>>` — which can't mutate the cross-type
+    /// not `Arc<Mutex<T>>` - which can't mutate the cross-type
     /// replica that's about to be returned. We deliberately skip the
     /// dispatch: callers wanting per-T setup should run it on the
     /// returned `T` value before calling `T::save`. Inside `T::save`
@@ -998,18 +998,18 @@ where
     }
 
     /// Atomic `UPDATE table SET col = col + by WHERE pk = ?`. Safe
-    /// against concurrent updates — no read-modify-write race.
+    /// against concurrent updates - no read-modify-write race.
     ///
     /// # Security
     ///
     /// `column` is interpolated as a SQL identifier (not a bound
-    /// parameter — SQL doesn't allow that). The call validates
+    /// parameter - SQL doesn't allow that). The call validates
     /// `column` via [`crate::database::validate_identifier`] before
     /// rendering, so attacker-controlled strings are rejected at the
     /// I/O boundary with [`FrameworkError`]. Same contract as
     /// Laravel's `Model::increment($column, $by)`.
     async fn increment(&self, column: &str, by: i64) -> Result<(), FrameworkError> {
-        // Audit HIGH `eloquent` #1 — column is interpolated raw into
+        // Audit HIGH `eloquent` #1 - column is interpolated raw into
         // the SQL string and cannot be parameterised. Validate
         // against the framework's SQL identifier rules before render.
         crate::database::validate_identifier(column)?;
@@ -1025,7 +1025,7 @@ where
         .await?;
         let backend = exec.backend();
         // Rendered after the executor resolves, because only it knows the
-        // backend — and Postgres rejects `?`, so a hard-coded placeholder
+        // backend - and Postgres rejects `?`, so a hard-coded placeholder
         // made increment/decrement (and every counter built on them) fail
         // outright there.
         let by_ph = crate::database::placeholder::placeholder(backend, 1)?;
@@ -1054,7 +1054,7 @@ where
     /// `Model::destroy([1,2,3])` analogue. Returns the count of rows
     /// actually removed.
     ///
-    /// Per-row lifecycle events fire — internally this hydrates each
+    /// Per-row lifecycle events fire - internally this hydrates each
     /// matching row via [`Self::find`] and calls `.delete()` on it.
     /// That preserves the soft-delete inherent override behaviour and
     /// dispatches `Deleting` / `Deleted` for each row.
@@ -1076,7 +1076,7 @@ where
 
     /// Static force-mass-delete by primary key set. Mirrors
     /// `Model::forceDestroy([1,2,3])`. Bypasses soft-delete tombstone
-    /// semantics — every matched row is physically removed.
+    /// semantics - every matched row is physically removed.
     async fn force_destroy<I, K>(ids: I) -> Result<u64, FrameworkError>
     where
         I: IntoIterator<Item = K> + Send,
@@ -1093,7 +1093,7 @@ where
         Ok(removed)
     }
 
-    /// Whether two model rows refer to the same database row — same
+    /// Whether two model rows refer to the same database row - same
     /// `type_name` AND same primary-key value. Mirrors Laravel's
     /// `Model::is($other)` (which compares both class + key).
     fn is(&self, other: &Self) -> bool {
@@ -1105,7 +1105,7 @@ where
         !self.is(other)
     }
 
-    /// Filtered serialisation — emit a JSON object minus the named
+    /// Filtered serialisation - emit a JSON object minus the named
     /// columns. Suprnova's Rust-native equivalent of Laravel's
     /// per-instance `$model->makeHidden($cols)`. The default doesn't
     /// carry a runtime attribute bag, so the hide list is supplied
@@ -1124,7 +1124,7 @@ where
         v
     }
 
-    /// Filtered serialisation — emit a JSON object containing ONLY
+    /// Filtered serialisation - emit a JSON object containing ONLY
     /// the named columns. Suprnova's Rust-native equivalent of
     /// Laravel's `$model->makeVisible($cols)` invoked alongside a
     /// reset.
@@ -1141,14 +1141,14 @@ where
         serde_json::Value::Object(out)
     }
 
-    /// Quiet variant of [`Self::save`] — runs the UPDATE inside a
+    /// Quiet variant of [`Self::save`] - runs the UPDATE inside a
     /// [`crate::seed::without_events`] scope so no model lifecycle
     /// events fire. Mirrors Laravel's `Model::saveQuietly`.
     async fn save_quietly(&self) -> Result<(), FrameworkError> {
         crate::seed::without_events(async { self.save().await }).await
     }
 
-    /// Quiet variant of [`Self::update`] — runs the UPDATE inside a
+    /// Quiet variant of [`Self::update`] - runs the UPDATE inside a
     /// [`crate::seed::without_events`] scope.
     async fn update_quietly(self, attrs: Attrs) -> Result<Self, FrameworkError> {
         crate::seed::without_events(async { self.update(attrs).await }).await
@@ -1184,7 +1184,7 @@ where
     /// 404 rather than a generic 500).
     async fn update_or_fail(self, attrs: Attrs) -> Result<Self, FrameworkError> {
         if crate::database::after_commit::in_transaction() {
-            // Already inside `DB::transaction` — the surrounding
+            // Already inside `DB::transaction` - the surrounding
             // closure owns atomicity. Run the UPDATE through the
             // ambient tx and translate SeaORM's missing-row signals
             // (`RecordNotUpdated` on the WHERE miss,
@@ -1200,7 +1200,7 @@ where
             });
         }
 
-        // No ambient transaction — open one so a concurrent DELETE
+        // No ambient transaction - open one so a concurrent DELETE
         // can't slip between the pre-flight existence check and the
         // write. Inside the closure the UPDATE acquires the write
         // lock atomically with no separate read step, eliminating
@@ -1225,12 +1225,12 @@ where
     /// Mirrors Laravel's `Model::deleteOrFail`.
     ///
     /// Atomicity follows the same shape as
-    /// [`Self::update_or_fail`] — the existence check and the DELETE
+    /// [`Self::update_or_fail`] - the existence check and the DELETE
     /// share a transaction (ambient when one is in scope, otherwise a
     /// freshly opened one). SeaORM's `ActiveModelTrait::delete`
     /// returns `Ok` even when the WHERE clause matched zero rows, so
     /// we additionally inspect [`sea_orm::DeleteResult::rows_affected`]
-    /// after the DELETE lands and surface `0` as 404 — matching what
+    /// after the DELETE lands and surface `0` as 404 - matching what
     /// the caller would have seen had the pre-flight observed the
     /// missing row.
     async fn delete_or_fail(self) -> Result<(), FrameworkError> {
@@ -1238,7 +1238,7 @@ where
             return delete_one_or_fail::<Self>(self, None).await;
         }
 
-        // No ambient transaction — wrap the DELETE in one so the
+        // No ambient transaction - wrap the DELETE in one so the
         // row-existence check and the write are atomic. Unlike
         // `Self::delete`, this helper inspects
         // `DeleteResult::rows_affected` and surfaces `0` as 404
@@ -1310,7 +1310,7 @@ pub fn json_value_to_sea_value(v: &serde_json::Value) -> sea_orm::Value {
     }
 }
 
-/// Inverse of [`json_value_to_sea_value`] — best-effort conversion of
+/// Inverse of [`json_value_to_sea_value`] - best-effort conversion of
 /// the variants commonly used as cursor / PK boundaries
 /// (`Int`/`BigInt`/`Float`/`Double`/`String`/`Uuid`/`Bool`) into a
 /// JSON form the Builder's `filter_op` chain can rebind through its
@@ -1342,7 +1342,7 @@ pub fn sea_value_to_json_loose(v: &sea_orm::Value) -> serde_json::Value {
         Value::String(Some(s)) => J::String(s.clone()),
         Value::Char(Some(c)) => J::String(c.to_string()),
         Value::Uuid(Some(u)) => J::String(u.to_string()),
-        // Datetimes / decimals stringify — they round-trip back through
+        // Datetimes / decimals stringify - they round-trip back through
         // `json_value_to_sea_value` as Value::String, which the dialect
         // adapter then re-binds via SQL string coercion. Sufficient for
         // a cursor boundary comparison since the underlying column
@@ -1361,7 +1361,7 @@ pub fn sea_value_to_json_loose(v: &sea_orm::Value) -> serde_json::Value {
         }
         Value::Decimal(Some(d)) => J::String(d.to_string()),
         Value::BigDecimal(Some(d)) => J::String(d.to_string()),
-        // Null variants (Some=None) or unsupported variants — emit
+        // Null variants (Some=None) or unsupported variants - emit
         // JSON null so the rebind lands on `WHERE col > NULL`. SQL's
         // three-valued logic treats that as "no rows match", which is
         // a safer-than-silent-mismatch failure mode.
@@ -1444,7 +1444,7 @@ where
         }
     }
 
-    /// Laravel's `findOr($id, $callback)` — look up by PK; when no row
+    /// Laravel's `findOr($id, $callback)` - look up by PK; when no row
     /// matches, run `fallback` and return its result.
     async fn find_or<K, F, Fut>(id: K, fallback: F) -> Result<Self, FrameworkError>
     where
@@ -1458,7 +1458,7 @@ where
         }
     }
 
-    /// Laravel's `findOrNew($id)` — look up by PK; when no row matches,
+    /// Laravel's `findOrNew($id)` - look up by PK; when no row matches,
     /// build an unsaved in-memory instance from `defaults`. The
     /// defaults map seeds the new instance the same way
     /// [`Self::first_or_new`] does.
@@ -1472,7 +1472,7 @@ where
         }
     }
 
-    /// Laravel's `createOrFirst` — race-safe insert. Try to create the
+    /// Laravel's `createOrFirst` - race-safe insert. Try to create the
     /// row; if it conflicts on a unique constraint, return the
     /// existing row. The conflict detection narrows on
     /// `FrameworkError::Database` only: validation failures,
@@ -1507,7 +1507,7 @@ where
 /// to translate a TOCTOU loss into HTTP 404 instead of a generic 500.
 ///
 /// `FrameworkError::From<DbErr>` flattens the variant to its
-/// `Display` form, so the match is by message prefix — both messages
+/// `Display` form, so the match is by message prefix - both messages
 /// are stable across SeaORM 1.x and unique enough to avoid
 /// collisions with user error text.
 fn is_record_missing(err: &FrameworkError) -> bool {
@@ -1529,7 +1529,7 @@ fn is_record_missing(err: &FrameworkError) -> bool {
 /// transaction (the `delete_or_fail` no-ambient-tx path uses this
 /// after opening its own `DB::transaction`). When `tx` is `None` the
 /// DELETE flows through whatever the ambient `CURRENT_TX` /
-/// per-model default connection routing resolves to — which inside
+/// per-model default connection routing resolves to - which inside
 /// `delete_or_fail`'s ambient-tx branch is the surrounding closure
 /// transaction.
 async fn delete_one_or_fail<M>(

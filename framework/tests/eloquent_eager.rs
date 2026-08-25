@@ -1,4 +1,4 @@
-//! Phase 10B T9 — eager-load orchestrator end-to-end.
+//! Phase 10B T9 - eager-load orchestrator end-to-end.
 //!
 //! Pins the full eager-load surface the user calls:
 //!
@@ -19,12 +19,12 @@
 //!   (None on empty group).
 //!
 //! Aggregate cache keys are the wide `<rel>_<kind>_<col>` form (e.g.
-//! `"posts_sum_views"`) — built by
+//! `"posts_sum_views"`) - built by
 //! `eloquent::relations::aggregate_cache_key`. Multiple aggregates on
 //! the same relation (e.g. `with_sum` then `with_avg` over the same
 //! column) coexist on the same row without colliding on the cache
-//! cell. The macro also emits per-kind-per-col accessors —
-//! `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` — which
+//! cell. The macro also emits per-kind-per-col accessors -
+//! `<rel>_sum_of(col)` / `_avg_of` / `_min_of` / `_max_of` - which
 //! read using the same helper.
 
 use suprnova::testing::TestDatabase;
@@ -99,7 +99,7 @@ async fn migrate(db: &TestDatabase) {
 async fn fixture() -> TestDatabase {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;
-    // Two users — u1 (with two posts and a profile), u2 (one post + a
+    // Two users - u1 (with two posts and a profile), u2 (one post + a
     // profile). All three posts have at least one comment authored by
     // the corresponding owner so nested `posts.comments.author` paths
     // resolve cleanly.
@@ -177,7 +177,7 @@ async fn nested_three_levels() {
         .map(|p| p.comments_loaded().len())
         .sum();
     assert_eq!(total_comments, 3); // 2 (p1) + 1 (p2)
-    // Each comment's author was loaded — BelongsTo single-value
+    // Each comment's author was loaded - BelongsTo single-value
     // relation. The author IS u1 for all three; the test just
     // confirms the BelongsTo recursion stored a Some(_) on each.
     let mut author_loaded_count = 0;
@@ -203,7 +203,7 @@ async fn with_count() {
 
 #[tokio::test]
 async fn with_sum_aggregate() {
-    // Sum over views: u1 has p1(10) + p2(5) = 15 — but storage shape
+    // Sum over views: u1 has p1(10) + p2(5) = 15 - but storage shape
     // is f64 regardless of column type (the dispatcher arm coerces
     // INTEGER sums to f64 via `try_get::<i64>().map(|n| n as f64)`).
     let _db = fixture().await;
@@ -220,7 +220,7 @@ async fn with_sum_aggregate() {
 async fn with_sum_rejects_malicious_aggregate_column() {
     // The aggregate column flows into `SUM(<col>)` inside the eager-load
     // dispatcher. `Builder::validate_inputs` never walks eager specs, so the
-    // identifier guard lives in the aggregate load path — a column carrying
+    // identifier guard lives in the aggregate load path - a column carrying
     // anything but a bare identifier must be rejected before it reaches SQL.
     let _db = fixture().await;
     let result = EgUser::with_sum(("posts", "views); DROP TABLE posts;--"))
@@ -269,7 +269,7 @@ async fn with_min_max() {
 #[tokio::test]
 async fn with_where_filters_loaded_relation() {
     // The predicate is applied to the inner Builder<EgPost> before
-    // the IN-query lands — only views=10 posts reach the cache.
+    // the IN-query lands - only views=10 posts reach the cache.
     let _db = fixture().await;
     let users = EgUser::query()
         .with_where(("posts", |q: Builder<EgPost>| q.filter("views", 10i64)))
@@ -280,7 +280,7 @@ async fn with_where_filters_loaded_relation() {
     let posts = u1.posts_loaded();
     assert_eq!(posts.len(), 1, "only views=10 posts should be loaded");
     assert_eq!(posts[0].views, 10);
-    // u2's single post has views=20 — predicate filters it out.
+    // u2's single post has views=20 - predicate filters it out.
     let u2 = users.iter().find(|u| u.name == "u2").unwrap();
     assert_eq!(u2.posts_loaded().len(), 0);
 }
@@ -317,7 +317,7 @@ async fn load_missing_idempotent_when_all_have_relation() {
 async fn load_missing_per_row_loads_only_uncached_rows() {
     // Mixed-state collection: u1 was fetched with `with(["posts"])`,
     // u2 was fetched plain. After `load_missing(["posts"])`, BOTH
-    // rows must have posts cached — the per-row partition loads
+    // rows must have posts cached - the per-row partition loads
     // posts on u2 only, u1 stays untouched.
     //
     // Pre-P3 (collection-wide skip): the call would silently no-op
@@ -374,7 +374,7 @@ async fn load_missing_nested_partitions_at_every_level() {
     assert_eq!(u1_with_posts.len(), 1);
 
     // Now hand-cache comments on u1's first post only. We do this by
-    // querying u1 fresh through the relation chain — fetching with
+    // querying u1 fresh through the relation chain - fetching with
     // `posts.comments` then surgically clearing the comments cache on
     // p2 isn't possible without poking internals. The cleanest
     // route: fetch a separate u1 with `posts.comments` so we know the
@@ -451,13 +451,13 @@ async fn load_loads_when_no_row_has_it() {
 async fn load_missing_recurses_into_loaded_head_to_fill_tail() {
     // After `with(["posts"])`, calling `load_missing(["posts.comments"])`
     // must skip the (cached) head bulk-load but still drive the tail
-    // load on each cached post — the previous flat-skip behaviour
+    // load on each cached post - the previous flat-skip behaviour
     // silently dropped the comments load and left `comments_loaded()`
     // panic-on-read.
     let _db = fixture().await;
     let mut users = EgUser::with(["posts"]).get().await.unwrap();
 
-    // Posts are loaded but comments aren't — calling
+    // Posts are loaded but comments aren't - calling
     // `comments_loaded()` on any loaded post must panic.
     {
         let u1 = users.iter().find(|u| u.name == "u1").unwrap();
@@ -498,7 +498,7 @@ async fn load_missing_dotted_no_head_loads_full_path() {
 #[tokio::test]
 async fn with_where_on_belongs_to_filters_loaded_parent() {
     // The closure runs against `Builder<EgUser>` because `user` is a
-    // BelongsTo<EgUser> on EgPost. Predicate matches `name = "u1"` —
+    // BelongsTo<EgUser> on EgPost. Predicate matches `name = "u1"` -
     // posts whose user is u2 should resolve to a None parent.
     let _db = fixture().await;
     let posts = EgPost::query()
@@ -522,7 +522,7 @@ async fn with_where_on_belongs_to_filters_loaded_parent() {
 #[tokio::test]
 async fn with_where_typed_method_infers_closure_target() {
     // P4: the macro emits `<Self>::with_where_<rel>(closure)` so the
-    // closure's parameter type is inferred from the method signature —
+    // closure's parameter type is inferred from the method signature -
     // users no longer need to spell out `Builder<EgPost>` on the
     // closure param.
     let _db = fixture().await;
@@ -558,7 +558,7 @@ async fn with_where_typed_method_then_chain_filter() {
 #[tokio::test]
 async fn static_helpers_match_query_chain() {
     // The macro emits static `Self::with_count` / `Self::with_sum`
-    // helpers — they should be equivalent to `Self::query().with_count(...)`.
+    // helpers - they should be equivalent to `Self::query().with_count(...)`.
     let _db = fixture().await;
     let via_static = EgUser::with_count(["posts"]).get().await.unwrap();
     let via_chain = EgUser::query().with_count(["posts"]).get().await.unwrap();
@@ -574,7 +574,7 @@ async fn with_where_closure_type_mismatch_is_loud() {
     // boxes the closure type-erased, and the per-relation dispatcher
     // arm downcasts to the statically-known `Builder<EgPost>`. The
     // wrong-typed box must NOT silently drop the predicate (which
-    // would run an unfiltered IN-query against `eg_posts`) — it must
+    // would run an unfiltered IN-query against `eg_posts`) - it must
     // return a loud `FrameworkError` naming the relation and the
     // expected target type.
     let _db = fixture().await;
@@ -606,12 +606,12 @@ async fn with_where_closure_type_mismatch_is_loud() {
 }
 
 // ============================================================================
-// P2-09(a) — cloning a builder must carry the eager-load plan
+// P2-09(a) - cloning a builder must carry the eager-load plan
 // ============================================================================
 
 /// `Builder::clone` used to set `eager_specs: Vec::new()`, dropping the
 /// whole plan. The drop was justified by the chunking entry points
-/// checking `eager_specs.is_empty()` first — true, but that only covers
+/// checking `eager_specs.is_empty()` first - true, but that only covers
 /// the paths the *framework* clones on. `Clone` is public, and the
 /// natural "build a base query, derive two queries from it" pattern went
 /// straight through it: rows came back with no relations loaded and no
@@ -629,7 +629,7 @@ async fn cloning_a_builder_keeps_the_eager_load_plan() {
         .expect("u1 must be present");
     assert!(
         !u1.posts_loaded().is_empty(),
-        "a cloned builder must still eager-load `posts` — this is the \
+        "a cloned builder must still eager-load `posts` - this is the \
          silent-wrong-data case: before the fix the query succeeded and \
          simply returned no relations"
     );
@@ -649,7 +649,7 @@ async fn cloning_a_builder_keeps_the_eager_load_plan() {
 
 /// The `WithWhere` variant is the one that forced the old design: its
 /// payload was a non-`Clone` `Box<dyn Any>`. It is now an `Arc<dyn Fn>`,
-/// so it clones like every other spec — and the predicate really runs on
+/// so it clones like every other spec - and the predicate really runs on
 /// both copies rather than being silently skipped on one.
 #[tokio::test]
 async fn cloning_carries_a_with_where_predicate_to_both_copies() {
@@ -679,7 +679,7 @@ async fn cloning_carries_a_with_where_predicate_to_both_copies() {
             .unwrap_or_else(|| panic!("{label}: u2 must be present"));
         assert!(
             u2.posts_loaded().is_empty(),
-            "{label}: u2's views=20 post must be filtered out — if the \
+            "{label}: u2's views=20 post must be filtered out - if the \
              predicate were dropped this would load it instead"
         );
     }

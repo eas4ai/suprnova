@@ -1,13 +1,13 @@
 #![cfg(feature = "web-push")]
 
-//! WebPushChannel — end-to-end through the vendored web-push client.
+//! WebPushChannel - end-to-end through the vendored web-push client.
 //!
 //! These tests stand a `wiremock` mock server in for a real push service
 //! (FCM / Mozilla autopush / Apple) and exercise four contracts:
 //!
 //! 1. Happy path: a 201 from the push service drives delivery through to
 //!    completion with exactly one HTTP request.
-//! 2. Subscription gone (404): treated as a non-fatal warn — callers are
+//! 2. Subscription gone (404): treated as a non-fatal warn - callers are
 //!    expected to remove the dead subscription, but dispatch succeeds.
 //! 3. Malformed subscription JSON: surfaces as a `FrameworkError`
 //!    carrying enough context to identify the decode failure.
@@ -50,7 +50,7 @@ impl Notification for PingNote {
 }
 
 /// Notifiable that returns a JSON-encoded `SubscriptionInfo` for the
-/// `"webpush"` channel — the shape callers will receive from the browser
+/// `"webpush"` channel - the shape callers will receive from the browser
 /// via `PushSubscription.toJSON()` and store verbatim.
 struct Subscriber {
     endpoint: String,
@@ -118,7 +118,7 @@ async fn webpush_channel_posts_to_subscription_endpoint() {
 #[serial]
 #[traced_test]
 async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
-    // The push service replies 404 — per WebPushClient that maps to
+    // The push service replies 404 - per WebPushClient that maps to
     // WebPushError::SubscriptionGone, which the channel translates into
     // Ok(()) plus a warn. The caller's contract is "remove the stored
     // subscription from your DB"; the dispatch itself does not fail.
@@ -146,7 +146,7 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
     let reqs = server.received_requests().await.unwrap();
     assert_eq!(reqs.len(), 1, "channel attempted exactly one POST");
 
-    // Pin the operator-paper-trail contract — the doc comment promises a
+    // Pin the operator-paper-trail contract - the doc comment promises a
     // structured warn on subscription gone so ops can act on dead
     // subscriptions even though dispatch returned Ok. If a future
     // refactor silently drops the warn, this test must fail.
@@ -168,11 +168,11 @@ async fn webpush_channel_treats_subscription_gone_as_non_fatal() {
 #[serial]
 async fn webpush_channel_returns_error_for_malformed_subscription_json() {
     // The "route" the Notifiable returns must be valid SubscriptionInfo
-    // JSON. A garbage route surfaces as a contextual decode error —
+    // JSON. A garbage route surfaces as a contextual decode error -
     // callers can match on the "subscription JSON decode" substring to
     // distinguish bad routes from upstream push-service failures.
     // This test exercises the JSON-decode error path, which fires before
-    // the endpoint policy runs — so the policy choice is moot here, but we
+    // the endpoint policy runs - so the policy choice is moot here, but we
     // keep AllowAny for consistency with the other tests in this file.
     let channel = WebPushChannel::new(
         Arc::new(
@@ -205,7 +205,7 @@ async fn webpush_channel_returns_error_for_malformed_subscription_json() {
 #[tokio::test]
 #[serial]
 async fn webpush_channel_propagates_push_service_5xx() {
-    // 500 from the push service is a real failure — the channel surfaces
+    // 500 from the push service is a real failure - the channel surfaces
     // it as Err so the dispatcher returns it to the caller for retry /
     // metrics. Assert the error string mentions the status so operators
     // triaging logs can tell upstream errors from local errors apart.

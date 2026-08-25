@@ -1,4 +1,4 @@
-//! Phase 10C T14 — end-to-end coverage that wires every 10C feature
+//! Phase 10C T14 - end-to-end coverage that wires every 10C feature
 //! through the example app's real `Migrator` schema + real
 //! `app::models::User` + the `UserObserver` + the `#[scopes(User)]`
 //! local scope.
@@ -12,20 +12,20 @@
 //!
 //! What each test pins:
 //!
-//! 1. `create_normalises_email_via_observer` — `UserObserver::creating`
+//! 1. `create_normalises_email_via_observer` - `UserObserver::creating`
 //!    lowercases the email column before insert; `UserObserver::created`
 //!    fires after the row lands.
-//! 2. `active_scope_filters_to_active_rows` — both the static helper
+//! 2. `active_scope_filters_to_active_rows` - both the static helper
 //!    `User::active()` and the `Builder<User>` extension method
 //!    `.active()` filter to `active = true` rows.
-//! 3. `paginate_returns_inertia_ready_shape` — `User::query().paginate(n)`
+//! 3. `paginate_returns_inertia_ready_shape` - `User::query().paginate(n)`
 //!    returns a `LengthAwarePaginator<User>` with the Laravel-shape
 //!    `data` / `total` / `last_page` / `current_page` fields populated.
-//! 4. `chunk_by_id_walks_full_dataset` — `User::query().chunk_by_id(n, ...)`
+//! 4. `chunk_by_id_walks_full_dataset` - `User::query().chunk_by_id(n, ...)`
 //!    visits every row exactly once across the batched cursor walks.
-//! 5. `collection_pluck_extracts_emails` — `Collection<User>::pluck("email")`
+//! 5. `collection_pluck_extracts_emails` - `Collection<User>::pluck("email")`
 //!    materialises a `Collection<String>` of the column values.
-//! 6. `transaction_commits_then_rolls_back_audit_row` — `DB::transaction`
+//! 6. `transaction_commits_then_rolls_back_audit_row` - `DB::transaction`
 //!    commits a User + audit_log pair atomically. The companion error
 //!    path proves the audit row is rolled back when the closure errors.
 
@@ -34,7 +34,7 @@ use app::models::users::User;
 // Bring the `#[scopes(User)]` macro-emitted trait into scope so the
 // `Builder<User>::active()` extension method resolves. The trait is
 // `pub` so test code outside `app::models::users` can opt into the
-// extension; explicit `use` is by design — Rust's orphan rules and
+// extension; explicit `use` is by design - Rust's orphan rules and
 // the test harness's module boundaries mean it can't auto-import.
 use app::models::users::HasScope_active_User;
 use suprnova::eloquent::observers::bootstrap_observers;
@@ -45,7 +45,7 @@ use tokio::sync::OnceCell;
 /// Process-wide guard so concurrent tests await ONE *completed*
 /// observer registration. In a real app `bootstrap_observers()` runs
 /// once at boot; here every test calls it, and the macro's per-observer
-/// gate marks registration *started*, not *finished* — so under load a
+/// gate marks registration *started*, not *finished* - so under load a
 /// second caller could return before the dispatcher wiring lands and
 /// race its `create()` ahead of the observer (mixed-case email slips
 /// through un-lowered). `OnceCell::get_or_init` makes every caller await
@@ -106,7 +106,7 @@ async fn active_scope_filters_to_active_rows() {
 
     // Two users: one explicitly active, one flagged inactive via
     // raw UPDATE (because `active` is not in `fillable`, the
-    // attrs!-driven create path can't set it directly — see the
+    // attrs!-driven create path can't set it directly - see the
     // dogfood-eloquent test for the fillable check).
     let alice = User::create(attrs! {
         name: "Alice",
@@ -123,7 +123,7 @@ async fn active_scope_filters_to_active_rows() {
     .await
     .unwrap();
 
-    // Mark Bob inactive via raw DB::update — the dogfood needs both
+    // Mark Bob inactive via raw DB::update - the dogfood needs both
     // active and inactive rows to prove the scope filters. The
     // facade takes `IntoIterator<Item = SeaValue>` for the bindings;
     // build the SeaValue explicitly because the bool variant of
@@ -144,7 +144,7 @@ async fn active_scope_filters_to_active_rows() {
     assert_eq!(actives_via_static.len(), 1);
     assert_eq!(actives_via_static[0].id, alice.id);
 
-    // Builder extension form — chains onto an existing builder.
+    // Builder extension form - chains onto an existing builder.
     let actives_via_chain: Vec<User> = User::query()
         .order_by_asc("id")
         .active()
@@ -205,7 +205,7 @@ async fn chunk_by_id_walks_full_dataset() {
         .unwrap();
     }
 
-    // PK-cursor chunking — concurrent-insert-safe and the recommended
+    // PK-cursor chunking - concurrent-insert-safe and the recommended
     // shape for bulk processing. We accumulate ids in `seen` and
     // assert at the end that every row appeared exactly once.
     let mut seen: Vec<i64> = Vec::new();

@@ -141,10 +141,10 @@ async fn push_unique_re_enqueues_after_ttl_expires() {
 
     assert!(Queue::push_unique(ShortTtlJob { id: 1 }).await.unwrap());
 
-    // Within the 700ms window — still a duplicate.
+    // Within the 700ms window - still a duplicate.
     assert!(!Queue::push_unique(ShortTtlJob { id: 1 }).await.unwrap());
 
-    // Past the window — the dedupe key has expired so a fresh push lands.
+    // Past the window - the dedupe key has expired so a fresh push lands.
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(Queue::push_unique(ShortTtlJob { id: 1 }).await.unwrap());
 
@@ -229,7 +229,7 @@ async fn push_unique_honors_job_delay() {
     assert_eq!(
         drv.delayed_size().await.unwrap(),
         1,
-        "Queue::push_unique must honor Job::delay() the same way Queue::push does — \
+        "Queue::push_unique must honor Job::delay() the same way Queue::push does - \
          the same job pushed via push vs push_unique must not disagree on timing"
     );
 }
@@ -242,8 +242,8 @@ async fn push_unique_honors_job_delay() {
 // to completion but the lock's lease was lost partway through. For
 // `push_unique` the body IS the driver push, so `FreshUnfenced` means the
 // envelope is on the queue and only the uniqueness claim is unproven.
-// Reporting `false` — which this API documents as "suppressed as a
-// duplicate" — tells the caller the opposite of what happened.
+// Reporting `false` - which this API documents as "suppressed as a
+// duplicate" - tells the caller the opposite of what happened.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use suprnova::queue::Envelope;
@@ -347,7 +347,7 @@ impl CacheStore for LeaseLostCache {
 /// has fired, then completes. `Idempotency::commit_on_success` polls the
 /// body and the lease-renewal task with a biased `select!` that always
 /// checks the body first, so the renewal task only gets to run refresh_lock
-/// while the body is still pending — which `push` guarantees here by
+/// while the body is still pending - which `push` guarantees here by
 /// waiting on the same signal `refresh_lock` sends.
 struct SlowPushDriver {
     inner: MemoryQueueDriver,
@@ -423,8 +423,8 @@ impl Job for UnfencedJob {
     fn unique_for() -> Duration {
         // The lease renewal interval is `ttl / 3`, floored at 50ms, so 150ms
         // keeps the first refresh (and this test) fast. The push no longer
-        // needs to outlast that interval — `SlowPushDriver::push` waits on
-        // the refresh signal directly — so this value only needs to be
+        // needs to outlast that interval - `SlowPushDriver::push` waits on
+        // the refresh signal directly - so this value only needs to be
         // short, not tuned against a race.
         Duration::from_millis(150)
     }
@@ -449,7 +449,7 @@ async fn push_unique_reports_true_when_the_lease_is_lost_mid_push() {
     assert!(
         pushed,
         "the envelope WAS published to the driver. FreshUnfenced means the \
-         dedupe lease was lost, not that the push was suppressed — reporting \
+         dedupe lease was lost, not that the push was suppressed - reporting \
          false tells the caller a job that is about to run was skipped"
     );
 
@@ -482,7 +482,7 @@ async fn duplicate_unique_push_dispatches_unique_job_skipped_once() {
     assert_eq!(
         skipped.len(),
         1,
-        "exactly one UniqueJobSkipped — the fresh push must not fire it"
+        "exactly one UniqueJobSkipped - the fresh push must not fire it"
     );
     assert_eq!(skipped[0].job_name, "UniqueJob");
     assert_eq!(skipped[0].unique_id, "77");

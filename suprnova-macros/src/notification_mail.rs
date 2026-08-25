@@ -1,4 +1,4 @@
-//! `#[derive(NotificationMailable)]` — auto-generate `to_mail` for a
+//! `#[derive(NotificationMailable)]` - auto-generate `to_mail` for a
 //! Notification.
 //!
 //! The derive reads a `#[mail(...)]` outer attribute describing the
@@ -9,8 +9,8 @@
 //!
 //! Templates ride compile-time: inline strings end up in the binary
 //! verbatim, and file paths embed via `include_str!` (relative to the
-//! source file containing the derive). The empty-body invariant —
-//! "at least one of `html` / `text` must be present" — is enforced at
+//! source file containing the derive). The empty-body invariant -
+//! "at least one of `html` / `text` must be present" - is enforced at
 //! macro-expansion time so a misconfigured notification fails to build
 //! instead of failing at dispatch.
 //!
@@ -83,7 +83,7 @@ fn parse_mail_attr(input: &DeriveInput) -> syn::Result<MailAttrs> {
                 "reply_to" => attrs.reply_to = Some(v),
                 other => {
                     return Err(nested.error(format!(
-                        "unknown key `{other}` in #[mail(...)] — \
+                        "unknown key `{other}` in #[mail(...)] - \
                          supported keys: subject, html, html_template, text, \
                          text_template, from, from_name, cc, bcc, reply_to"
                     )));
@@ -120,13 +120,13 @@ fn validate(attrs: &MailAttrs, input: &DeriveInput) -> syn::Result<()> {
     if attrs.html.is_some() && attrs.html_template.is_some() {
         return Err(syn::Error::new(
             span,
-            "#[mail(...)] — `html` and `html_template` are mutually exclusive",
+            "#[mail(...)] - `html` and `html_template` are mutually exclusive",
         ));
     }
     if attrs.text.is_some() && attrs.text_template.is_some() {
         return Err(syn::Error::new(
             span,
-            "#[mail(...)] — `text` and `text_template` are mutually exclusive",
+            "#[mail(...)] - `text` and `text_template` are mutually exclusive",
         ));
     }
 
@@ -135,7 +135,7 @@ fn validate(attrs: &MailAttrs, input: &DeriveInput) -> syn::Result<()> {
     if !has_html && !has_text {
         return Err(syn::Error::new(
             span,
-            "#[mail(...)] — must specify at least one of `html`, `text`, \
+            "#[mail(...)] - must specify at least one of `html`, `text`, \
              `html_template`, or `text_template` (an empty-body mail is \
              refused at dispatch; fail at compile time instead)",
         ));
@@ -144,7 +144,7 @@ fn validate(attrs: &MailAttrs, input: &DeriveInput) -> syn::Result<()> {
     if attrs.from_name.is_some() && attrs.from.is_none() {
         return Err(syn::Error::new(
             span,
-            "#[mail(...)] — `from_name` requires `from`",
+            "#[mail(...)] - `from_name` requires `from`",
         ));
     }
 
@@ -296,8 +296,8 @@ pub fn derive_notification_mailable_impl(input: TokenStream) -> TokenStream {
                 // `MailRendering` field is set explicitly above, and any
                 // future field (e.g. `headers`, `tags`) Defaults rather
                 // than wedging this generated code into requiring an
-                // explicit value. `MailRendering` already derives Default
-                // — that's the contract this lean on.
+                // explicit value. `MailRendering` already derives Default -
+                // that's the contract this lean on.
                 ::std::result::Result::Ok(
                     ::suprnova::notifications::channels::mail::MailRendering {
                         subject: __subject,

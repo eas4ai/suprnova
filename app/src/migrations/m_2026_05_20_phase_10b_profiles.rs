@@ -1,4 +1,4 @@
-//! Phase 10B P5 — schema for the HasOne dogfood.
+//! Phase 10B P5 - schema for the HasOne dogfood.
 //!
 //! Adds a `profiles` table so `User.profile: HasOne<Profile>` can be
 //! exercised end-to-end against the example app's real `Migrator`.
@@ -9,7 +9,7 @@
 //!   convention for `HasOne` is `<snake(parent)>_id`, so the column
 //!   name matches `default_has_fk("User") == "user_id"` without
 //!   requiring a `fk = "..."` override on the relation declaration.
-//! - The column is `UNIQUE` — a User has AT MOST one Profile, by
+//! - The column is `UNIQUE` - a User has AT MOST one Profile, by
 //!   definition of HasOne. The unique key turns "violated invariant"
 //!   into a constraint error rather than letting two profiles per
 //!   user slip through.

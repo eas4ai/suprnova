@@ -1,18 +1,18 @@
-//! UUID / ULID primary-key generation — Laravel's `HasUuids` /
+//! UUID / ULID primary-key generation - Laravel's `HasUuids` /
 //! `HasUlids` / `HasVersion4Uuids` trait family.
 //!
 //! Suprnova exposes the same concept via the `#[model(unique_id = "...")]`
 //! attribute. The macro recognises three values:
 //!
-//! - `"uuid"` (default UUID v7 — timestamp-ordered, matches Laravel 11+'s
+//! - `"uuid"` (default UUID v7 - timestamp-ordered, matches Laravel 11+'s
 //!   `Str::uuid7()` shape; the same flavour Laravel ships in `HasUuids`)
-//! - `"uuid_v4"` (random UUID — matches Laravel's `HasVersion4Uuids`)
+//! - `"uuid_v4"` (random UUID - matches Laravel's `HasVersion4Uuids`)
 //! - `"ulid"` (lowercase ULID, 26 chars, matches Laravel's `HasUlids`)
 //!
 //! When set, the macro overrides the `Creating` lifecycle hook so that
 //! before INSERT, the PK column receives a freshly-generated string ID
 //! if the caller didn't supply one. The string ID lands in the same
-//! cast pipeline as any other column — typing the PK as `String` on the
+//! cast pipeline as any other column - typing the PK as `String` on the
 //! Rust struct is enough; the macro injects the generator into the
 //! ActiveModel build path.
 //!
@@ -30,23 +30,23 @@ use uuid::Uuid;
 /// Generator strategy for a model's auto-populated string PK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UniqueIdKind {
-    /// UUID v7 — timestamp-ordered. Laravel-11+ default and the
+    /// UUID v7 - timestamp-ordered. Laravel-11+ default and the
     /// recommended choice for primary keys (index locality without
     /// sacrificing uniqueness). Encoded as a lowercase hyphenated
     /// 36-char string.
     UuidV7,
-    /// UUID v4 — fully random. Mirrors Laravel's
+    /// UUID v4 - fully random. Mirrors Laravel's
     /// `HasVersion4Uuids` / `Str::orderedUuid` legacy path. Encoded as
     /// a lowercase hyphenated 36-char string.
     UuidV4,
-    /// Lowercase ULID — 26 characters of Crockford base32 with a 48-bit
+    /// Lowercase ULID - 26 characters of Crockford base32 with a 48-bit
     /// timestamp prefix. Mirrors Laravel's `HasUlids`.
     Ulid,
 }
 
 impl UniqueIdKind {
     /// Parse a `unique_id = "..."` attribute value to a [`UniqueIdKind`].
-    /// Accepts `"uuid"` (treated as v7 — matches Laravel 11+),
+    /// Accepts `"uuid"` (treated as v7 - matches Laravel 11+),
     /// `"uuid_v7"`, `"uuid_v4"`, and `"ulid"`.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -62,7 +62,7 @@ impl UniqueIdKind {
     ///
     /// This is a caller-invokable helper, not an automatic gate inside
     /// [`crate::eloquent::Model::find`]. `Model::find<K>` is generic
-    /// over `K: Into<<PrimaryKey as PrimaryKeyTrait>::ValueType>` — the
+    /// over `K: Into<<PrimaryKey as PrimaryKeyTrait>::ValueType>` - the
     /// key type is opaque at that layer, so there is no type-safe way to
     /// view it as `&str` and run this check without breaking the trait
     /// contract for non-string keys. Call it explicitly when you want to
@@ -149,7 +149,7 @@ fn generate_ulid_lowercase() -> String {
 /// lowercased.
 ///
 /// Pulled out of [`generate_ulid_lowercase`] so the bit-packing logic
-/// is deterministic and testable against known vectors — the
+/// is deterministic and testable against known vectors - the
 /// timestamp + random source in `generate_ulid_lowercase` is not.
 ///
 /// ULID encodes 128 bits into 26 base32 characters; the leading char
@@ -169,7 +169,7 @@ fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
     out.push(CROCKFORD[((buf[4] & 0x7C) >> 2) as usize] as char);
     out.push(CROCKFORD[(((buf[4] & 0x03) << 3) | ((buf[5] & 0xE0) >> 5)) as usize] as char);
     out.push(CROCKFORD[(buf[5] & 0x1F) as usize] as char);
-    // Randomness section — 16 chars from the 10 random bytes.
+    // Randomness section - 16 chars from the 10 random bytes.
     out.push(CROCKFORD[((buf[6] & 0xF8) >> 3) as usize] as char);
     out.push(CROCKFORD[(((buf[6] & 0x07) << 2) | ((buf[7] & 0xC0) >> 6)) as usize] as char);
     out.push(CROCKFORD[((buf[7] & 0x3E) >> 1) as usize] as char);
@@ -192,7 +192,7 @@ fn encode_ulid_lowercase(buf: &[u8; 16]) -> String {
 
 /// Is `value` a valid lowercase Crockford-base32 ULID? Length must be
 /// exactly 26 and every character must appear in [`CROCKFORD`]
-/// (case-insensitive — Laravel emits lowercase but lib readers may
+/// (case-insensitive - Laravel emits lowercase but lib readers may
 /// accept either).
 fn is_valid_ulid(value: &str) -> bool {
     if value.len() != 26 {
@@ -216,7 +216,7 @@ mod tests {
         }
     }
 
-    /// All-zero payload encodes to 26 `'0'` characters — the canonical
+    /// All-zero payload encodes to 26 `'0'` characters - the canonical
     /// minimum ULID. Verifies the bit-packing handles the zero edge
     /// case across every 5-bit slice without offset bugs.
     #[test]
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(encode_ulid_lowercase(&buf), "00000000000000000000000000");
     }
 
-    /// All-ones payload encodes to `"7zzzzzzzzzzzzzzzzzzzzzzzzz"` — the
+    /// All-ones payload encodes to `"7zzzzzzzzzzzzzzzzzzzzzzzzz"` - the
     /// canonical maximum ULID per the spec. The leading char is `'7'`
     /// (not `'Z'`) because the first character carries only the top 2
     /// bits of `buf[0]`; the remaining 25 chars each span a full 5-bit
@@ -282,7 +282,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("decode failed for {encoded}"));
             assert_eq!(
                 &decoded, buf,
-                "round-trip mismatch — input {buf:02x?}, encoded {encoded}, decoded {decoded:02x?}",
+                "round-trip mismatch - input {buf:02x?}, encoded {encoded}, decoded {decoded:02x?}",
             );
         }
     }
@@ -290,7 +290,7 @@ mod tests {
     /// Independent reference decoder for round-trip verification.
     /// Pulls 5 bits at a time off the front of an accumulator. The
     /// leading character contributes 3 bits, every subsequent
-    /// character contributes 5 bits — 3 + 25*5 = 128 bits, the exact
+    /// character contributes 5 bits - 3 + 25*5 = 128 bits, the exact
     /// ULID width.
     ///
     /// A well-formed ULID's leading char satisfies `index <= 7`
@@ -338,7 +338,7 @@ mod tests {
         let mut ts_be = [0u8; 8];
         ts_be[2..].copy_from_slice(&bytes[..6]);
         let ts = u64::from_be_bytes(ts_be);
-        // 2 seconds of tolerance — plenty of slack for any CI scheduler hiccup.
+        // 2 seconds of tolerance - plenty of slack for any CI scheduler hiccup.
         const TOLERANCE_MS: u64 = 2_000;
         let diff = ts.abs_diff(captured_ms);
         assert!(
@@ -400,8 +400,8 @@ mod tests {
 
         let fresh_ulid = <UlidModel as HasUniqueId>::new_unique_id();
         assert!(<UlidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&fresh_ulid));
-        // A valid UUID is the wrong shape for a ULID model — 36 chars,
-        // not 26 — so the per-kind check rejects it.
+        // A valid UUID is the wrong shape for a ULID model - 36 chars,
+        // not 26 - so the per-kind check rejects it.
         assert!(!<UlidModel as HasUniqueId>::UNIQUE_ID_KIND.is_valid(&fresh_uuid));
     }
 }

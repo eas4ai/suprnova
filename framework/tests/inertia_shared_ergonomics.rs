@@ -6,7 +6,7 @@
 //! (static registry < trait provider < builder) and lazy/once shares. This
 //! file covers what T25 adds on top of that, driving `InertiaResponse::resolve`
 //! through the same in-test `InertiaRequestExt` mock `inertia.rs` and
-//! `inertia_prop_composition.rs` use — `hyper::body::Incoming` cannot be
+//! `inertia_prop_composition.rs` use - `hyper::body::Incoming` cannot be
 //! constructed outside hyper's connection machinery.
 //!
 //! Tests that touch the shared registry use `TestContainer::fake()` for
@@ -146,7 +146,7 @@ async fn dotted_share_keys_advertise_their_root_segment_in_shared_props() {
     // the intermediate page it renders during an instant swap
     // (`inertia-3.6.1/packages/core/src/router.ts:624-633`), so a raw
     // `"user.name"` entry never matches and `user` vanishes from that
-    // frame entirely — a layout reading `props.user.name` throws.
+    // frame entirely - a layout reading `props.user.name` throws.
     // Laravel has the same top-level shape because `Inertia::share`
     // runs `Arr::set` at share time
     // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`).
@@ -363,7 +363,7 @@ async fn a_bare_only_entry_reaches_a_dotted_share_beneath_that_root() {
     // The registry stores `auth.user` as one literal key and `unpack_map`
     // nests it only after every prop has resolved, so the only/except
     // gates see the still-flat key. A client asking for `only=auth` is
-    // asking for that root and everything under it — Laravel's
+    // asking for that root and everything under it - Laravel's
     // `Arr::get($props, 'auth')` returns the whole subtree because
     // `Inertia::share` already ran `Arr::set` at share time
     // (`inertia-laravel-2.0.25/src/ResponseFactory.php:94`).
@@ -438,7 +438,7 @@ async fn a_bare_except_entry_drops_every_dotted_share_beneath_it() {
 #[tokio::test]
 async fn a_bare_only_entry_resolves_a_lazily_shared_dotted_key() {
     // The lazy share is the case that cannot be nested at registration
-    // time — the value does not exist yet — so the ancestor rule in the
+    // time - the value does not exist yet - so the ancestor rule in the
     // include gate is the only thing that lets `only=auth` run its
     // resolver.
     let _guard = suprnova::testing::TestContainer::fake();

@@ -74,7 +74,7 @@ fn subscription_status_serializes_snake_case() {
     );
 }
 
-// Phase 12.1 — Mobile Money + status fidelity additions ---------------------
+// Phase 12.1 - Mobile Money + status fidelity additions ---------------------
 
 #[test]
 fn phone_number_validates_and_normalizes_e164() {

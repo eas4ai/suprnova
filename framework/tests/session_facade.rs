@@ -1,4 +1,4 @@
-//! `SessionData` facade completion tests — exercises the Laravel
+//! `SessionData` facade completion tests - exercises the Laravel
 //! `Store` parity surface shipped by the session module: pull, push,
 //! increment, decrement, remember, missing, has_any, has_all, all,
 //! only, except, replace, put_many, forget_many, now, reflash, keep,
@@ -286,7 +286,7 @@ fn is_valid_session_id_accepts_minted_shape() {
 fn is_valid_session_id_rejects_wrong_length_and_chars() {
     assert!(!is_valid_session_id("short"));
     assert!(!is_valid_session_id(&"a".repeat(41)));
-    // Uppercase is rejected — generate_session_id only emits lowercase.
+    // Uppercase is rejected - generate_session_id only emits lowercase.
     assert!(!is_valid_session_id(
         "ABCDEFGHIJ0123456789abcdefghij0123456789"
     ));
@@ -312,6 +312,6 @@ async fn regenerate_csrf_token_rotates_token_inside_scope() {
 
 #[tokio::test]
 async fn regenerate_csrf_token_outside_scope_returns_none() {
-    // Not inside SESSION_CONTEXT — returns None rather than panic.
+    // Not inside SESSION_CONTEXT - returns None rather than panic.
     assert!(regenerate_csrf_token().is_none());
 }

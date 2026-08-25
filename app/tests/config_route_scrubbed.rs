@@ -2,7 +2,7 @@
 //! connection strings.
 //!
 //! The example endpoint at `controllers::config_example::show` exists
-//! to demonstrate "how to read config from a handler" — a tempting
+//! to demonstrate "how to read config from a handler" - a tempting
 //! pattern to copy into real apps. This test pins the scrubbing
 //! contract so the demo can't accidentally regress to dumping the
 //! database URL, SMTP host, password, or any other secret that would
@@ -168,7 +168,7 @@ async fn config_route_scrubs_secrets_and_connection_strings() {
     let body_str = String::from_utf8_lossy(&body).to_string();
     let lower = body_str.to_lowercase();
 
-    // Section 1 — the URL must not leak. The driver-scheme prefixes are
+    // Section 1 - the URL must not leak. The driver-scheme prefixes are
     // the structural fingerprint of a leak; flagging them here catches
     // *any* connection-string copy regardless of which credentials
     // happen to be in env.
@@ -178,7 +178,7 @@ async fn config_route_scrubs_secrets_and_connection_strings() {
         "mysql://",
         "sqlite://",
         "sqlite:",
-        "@", // user@host or addr@host in any URL or email — none of those belong here
+        "@", // user@host or addr@host in any URL or email - none of those belong here
     ] {
         assert!(
             !body_str.contains(fingerprint),
@@ -187,7 +187,7 @@ async fn config_route_scrubs_secrets_and_connection_strings() {
         );
     }
 
-    // Section 2 — the specific sentinels we registered must not appear.
+    // Section 2 - the specific sentinels we registered must not appear.
     // If any of these surfaces we know exactly which field leaked.
     for (label, sentinel) in [
         ("db user", SENTINEL_DB_USER),
@@ -204,7 +204,7 @@ async fn config_route_scrubs_secrets_and_connection_strings() {
         );
     }
 
-    // Section 3 — credential field names must not appear as JSON keys.
+    // Section 3 - credential field names must not appear as JSON keys.
     // We assert on the *quoted* form so a future controller that names
     // a field "password" or "secret" trips this even if the value is
     // sanitised. Bare-substring checks would false-positive on legit
@@ -219,22 +219,22 @@ async fn config_route_scrubs_secrets_and_connection_strings() {
         );
     }
 
-    // Section 4 — positive assertions. Prove the scrub kept the
+    // Section 4 - positive assertions. Prove the scrub kept the
     // educational payload alive. The driver type (debug-formatted
     // `DatabaseType` variant) and the mail driver name should both
     // surface so users learn the right pattern, not the empty one.
     assert!(
         body_str.contains("Postgres"),
-        "response body should expose the database TYPE (driver family) — \
+        "response body should expose the database TYPE (driver family) - \
          got body=`{body_str}`",
     );
     assert!(
         body_str.contains("\"smtp\""),
-        "response body should expose the mail driver name — got body=`{body_str}`",
+        "response body should expose the mail driver name - got body=`{body_str}`",
     );
     assert!(
         body_str.contains("safe fields only"),
         "response body should carry the scrub-principle marker so the demo \
-         documents itself — got body=`{body_str}`",
+         documents itself - got body=`{body_str}`",
     );
 }

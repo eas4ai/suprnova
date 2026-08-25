@@ -73,7 +73,7 @@ pub struct JsonApiBuilder {
     pub(crate) included: Vec<Value>,
     links: Map<String, Value>,
     meta: Map<String, Value>,
-    /// `additional()` top-level keys — merged into the envelope root
+    /// `additional()` top-level keys - merged into the envelope root
     /// alongside (not under) `data`/`included`/`links`/`meta`.
     additional: Map<String, Value>,
     /// Optional `jsonapi` member (spec §5.1.1).
@@ -230,7 +230,7 @@ impl JsonApiBuilder {
     }
 }
 
-/// Render a single resource object — used by `Resource::single` and
+/// Render a single resource object - used by `Resource::single` and
 /// recursively by `PushIncluded` impls for nested includes.
 ///
 /// Emits `{type, id, attributes, relationships?, links?, meta?}` per
@@ -257,7 +257,7 @@ pub fn render_resource_object<T: IntoJsonResource>(
     // JSON:API spec §6.3: sparse fieldsets apply to a resource object's
     // fields, which includes BOTH attributes and relationships. When the
     // request constrained `fields[<type>]`, drop any relationship whose
-    // name is not in the allowlist. Same per-type set governs both —
+    // name is not in the allowlist. Same per-type set governs both -
     // the spec treats attributes and relationships as a single field
     // namespace at the resource level.
     let rels = resource.resource_relationships();
@@ -279,20 +279,20 @@ pub fn render_resource_object<T: IntoJsonResource>(
             };
             rels_map.insert(name, v);
         }
-        // Emit only when the post-filter map is non-empty — `relationships: {}`
+        // Emit only when the post-filter map is non-empty - `relationships: {}`
         // would violate the spec's non-empty-member expectation.
         if !rels_map.is_empty() {
             data.insert("relationships".into(), Value::Object(rels_map));
         }
     }
 
-    // Per-resource links — emit only when non-empty (spec §5.2.7).
+    // Per-resource links - emit only when non-empty (spec §5.2.7).
     let links = resource.resource_links();
     if !links.is_empty() {
         data.insert("links".into(), Value::Object(links));
     }
 
-    // Per-resource meta — emit only when non-empty (spec §5.2.7).
+    // Per-resource meta - emit only when non-empty (spec §5.2.7).
     let meta = resource.resource_meta();
     if !meta.is_empty() {
         data.insert("meta".into(), Value::Object(meta));

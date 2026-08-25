@@ -15,9 +15,9 @@ use suprnova::{
 };
 
 // The app's `User` shape: a typed model that is also Authenticatable.
-// The table carries an extra `is_admin` column the model doesn't map —
+// The table carries an extra `is_admin` column the model doesn't map -
 // it exists only to prove the credential allowlist never filters on it.
-// `email_verified_at` is a nullable datetime — the model macro auto-injects
+// `email_verified_at` is a nullable datetime - the model macro auto-injects
 // `AsOptionalDateTime` on `Option<DateTime<Utc>>` fields, so no explicit cast
 // is needed.
 #[model(table = "users", fillable = ["email", "password"])]
@@ -81,8 +81,8 @@ async fn setup() -> TestDatabase {
     .await
     .unwrap();
 
-    // bcrypt hashes contain `$`, `/`, `.` and alphanumerics — never a
-    // single quote — so direct interpolation is safe here.
+    // bcrypt hashes contain `$`, `/`, `.` and alphanumerics - never a
+    // single quote - so direct interpolation is safe here.
     let hash = suprnova::hash("secret").unwrap();
     db.execute_unprepared(&format!(
         "INSERT INTO users (email, password, is_admin) VALUES ('a@b.com', '{hash}', 0)"
@@ -155,7 +155,7 @@ async fn validate_credentials_checks_the_password_hash() {
 }
 
 // A hostile `{email, is_admin: true}` (the seeded user is NOT admin) must
-// still resolve by email alone — `is_admin` is not in the allowlist.
+// still resolve by email alone - `is_admin` is not in the allowlist.
 #[tokio::test]
 async fn credential_allowlist_ignores_non_allowlisted_keys() {
     let _db = setup().await;
@@ -182,7 +182,7 @@ async fn no_allowlisted_credential_returns_none() {
 }
 
 // The auth-flow surface: lookup-by-email, the AuthFlowUser id round-trip,
-// the email-verification toggle, and a password reset — all against the real
+// the email-verification toggle, and a password reset - all against the real
 // SQLite-backed model, end to end.
 #[tokio::test]
 async fn eloquent_provider_supports_auth_flow_methods() {

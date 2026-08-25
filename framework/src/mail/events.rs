@@ -1,9 +1,9 @@
-//! Mail dispatch events — `MessageSending` (pre-send observability) and
+//! Mail dispatch events - `MessageSending` (pre-send observability) and
 //! `MessageSent` (post-send observability).
 //!
 //! These mirror Laravel's `Illuminate\Mail\Events\MessageSending` and
 //! `MessageSent`. The dispatcher's `events->until()` cancellation model
-//! used by Laravel is NOT exposed here — Suprnova's event dispatcher
+//! used by Laravel is NOT exposed here - Suprnova's event dispatcher
 //! delivers observers without a short-circuit return channel. Listeners
 //! that need to suppress a send should refuse at the Mailable layer
 //! (override `render_html`/`render_text` to return an error) or wrap
@@ -48,7 +48,7 @@ impl Event for MessageSending {
 }
 
 /// Fired immediately AFTER a successful `MailTransport::send`. Fired only
-/// when the transport returned `Ok(())` — failed sends do not emit this
+/// when the transport returned `Ok(())` - failed sends do not emit this
 /// event (the `warn`-level `mail send failed` line from the dispatch
 /// span is the failure-side record).
 #[derive(Debug, Clone)]
@@ -127,7 +127,7 @@ async fn dispatch_or_log<E: Event>(event: E) -> Result<(), FrameworkError> {
     // Mail event dispatch is best-effort: a missing listener registry
     // or a failing observer must NOT block the underlying send. We
     // forward through `EventFacade::dispatch` (which routes through the
-    // test fake when active) and swallow any listener-side error —
+    // test fake when active) and swallow any listener-side error -
     // observability events are not part of the mail send contract.
     let result = EventFacade::dispatch(event).await;
     if let Err(e) = &result {

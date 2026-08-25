@@ -1,5 +1,5 @@
-//! Integration tests for the HTTP auth middlewares — `BasicAuthMiddleware`
-//! and the per-guard `AuthMiddleware::for_guard` — driven end-to-end through
+//! Integration tests for the HTTP auth middlewares - `BasicAuthMiddleware`
+//! and the per-guard `AuthMiddleware::for_guard` - driven end-to-end through
 //! `handle_request` over a real loopback socket.
 //!
 //! This is the established middleware test pattern (`hyper::body::Incoming`
@@ -302,7 +302,7 @@ async fn basic_wrong_password_challenges_401() {
 #[tokio::test]
 async fn basic_stateful_valid_credentials_reach_handler() {
     Lazy::force(&SETUP);
-    // BasicAuthMiddleware::new() is the stateful variant — on a credential
+    // BasicAuthMiddleware::new() is the stateful variant - on a credential
     // match it persists the user into the session via `Auth::login_id`.
     // That now requires a SessionMiddleware-equivalent task-local scope
     // upstream; FakeSessionScope provides the slot without binding a real

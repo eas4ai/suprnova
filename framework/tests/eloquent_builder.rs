@@ -1,4 +1,4 @@
-//! Phase 10A T5 — Builder<M> dual-API + full where surface.
+//! Phase 10A T5 - Builder<M> dual-API + full where surface.
 //!
 //! Asserts every where-shape method has both Rust-shape and Laravel-
 //! shape aliases that produce identical SQL. Each test sets up an
@@ -287,7 +287,7 @@ async fn order_by_asc_desc_random_raw() {
         .await
         .unwrap();
     assert_eq!(by_raw[0].name, "C");
-    // in_random_order — verify it runs without panic:
+    // in_random_order - verify it runs without panic:
     let _ = T5User::query().in_random_order().get().await.unwrap();
 }
 
@@ -506,7 +506,7 @@ async fn to_delete_sql_renders_delete_from_where() {
     assert!(sql.contains("WHERE"));
     assert!(sql.contains("active = ?"));
     assert!(sql.contains("age < ?"));
-    // No SELECT, no ORDER BY, no LIMIT — DELETE form only.
+    // No SELECT, no ORDER BY, no LIMIT - DELETE form only.
     assert!(!sql.contains("SELECT"));
     assert!(!sql.contains("ORDER BY"));
     assert!(!sql.contains("LIMIT"));
@@ -665,7 +665,7 @@ async fn filter_column_and_filter_raw() {
 #[tokio::test]
 async fn union_postgres_placeholders_are_monotonic() {
     // Regression: render_select_for used to reset `n` on each recursive
-    // union call, so the second SELECT's $N restarted at $1 — colliding
+    // union call, so the second SELECT's $N restarted at $1 - colliding
     // with the outer SELECT's bound parameters. The shared counter
     // version threads `n` through, yielding $1, $2, $3, $4 across the
     // combined statement.
@@ -684,7 +684,7 @@ async fn union_postgres_placeholders_are_monotonic() {
     assert!(sql.contains("$2"), "got: {sql}");
     assert!(sql.contains("$3"), "got: {sql}");
     assert!(sql.contains("$4"), "got: {sql}");
-    // No `$1` placeholder should appear twice — that would mean the
+    // No `$1` placeholder should appear twice - that would mean the
     // inner SELECT restarted numbering. Count occurrences as a whole
     // word (i.e., not as part of `$10`, `$11`, ...).
     let count_dollar_one =
@@ -773,7 +773,7 @@ async fn migrate_tickets(db: &TestDatabase) {
 #[test]
 fn qualified_key_name_is_table_dot_primary_key() {
     // Laravel's getQualifiedKeyName(). This is the projection
-    // `model_keys` emits, so pin it directly — the terminal itself
+    // `model_keys` emits, so pin it directly - the terminal itself
     // consumes the builder and never exposes its SQL.
     assert_eq!(T5User::qualified_key_name(), "t5_users.id");
     assert_eq!(T5Ticket::qualified_key_name(), "t5_tickets.uid");

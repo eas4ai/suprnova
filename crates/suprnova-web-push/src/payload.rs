@@ -7,7 +7,7 @@ use base64::Engine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentEncoding {
-    /// RFC 8188 + RFC 8291 — the current Web Push standard.
+    /// RFC 8188 + RFC 8291 - the current Web Push standard.
     Aes128Gcm,
 }
 
@@ -19,7 +19,7 @@ impl ContentEncoding {
     }
 }
 
-/// Maximum plaintext bytes — leaves headroom for the ~85-byte AES128GCM
+/// Maximum plaintext bytes - leaves headroom for the ~85-byte AES128GCM
 /// encryption overhead so the final payload fits the 4096-byte push-service cap.
 pub const MAX_PLAINTEXT_BYTES: usize = 3992;
 

@@ -6,7 +6,7 @@
 //! ([`Operator::writer`], [`Operator::reader`], [`Operator::presign_read`],
 //! [`Operator::list`], [`Operator::stat`], …) without us proxying each method.
 //!
-//! Drivers are first-class peers — there is no "default backend" the others
+//! Drivers are first-class peers - there is no "default backend" the others
 //! degrade into. `register_fs`, `register_memory`, `register_s3`,
 //! `register_azblob`, and `register_gcs` each translate an explicit config
 //! struct into the matching `opendal::services::*` builder.
@@ -14,7 +14,7 @@
 //! Azure and GCS are behind the `filesystem-azure` and `filesystem-gcs`
 //! features. Both drivers pull `rsa`, which carries RUSTSEC-2023-0071 with
 //! no fixed release upstream, so they are opt-in rather than a cost every
-//! consumer pays. S3 is not gated — it never depended on `rsa`. The
+//! consumer pays. S3 is not gated - it never depended on `rsa`. The
 //! rationale is in `framework/Cargo.toml` under those features.
 //!
 //! # Example
@@ -56,14 +56,14 @@ use std::path::Path;
 /// The `# Testing` notes below name `Storage::fake` as a code span rather
 /// than an intra-doc link on purpose: it lives in the `testing` module,
 /// gated on `any(test, feature = "testing")`, so a link to it fails to
-/// resolve under e.g. `--no-default-features --features filesystem` — and
+/// resolve under e.g. `--no-default-features --features filesystem` - and
 /// `lib.rs` denies broken intra-doc links, so that is a build failure, not
 /// a cosmetic one. Don't promote them back to links.
 pub struct Storage;
 
 /// Configuration for the S3 driver.
 ///
-/// Mirrors `opendal::services::S3` — credentials and region are optional so
+/// Mirrors `opendal::services::S3` - credentials and region are optional so
 /// the underlying SDK can fall back to its credential providers (environment,
 /// IMDS, profile chain) when omitted.
 ///
@@ -189,7 +189,7 @@ impl std::fmt::Debug for GcsConfig {
 
 /// Default resilience layer applied by the cloud convenience constructors
 /// ([`Storage::register_s3`], and `register_azblob` / `register_gcs` when
-/// their features are on — named here as plain code rather than intra-doc
+/// their features are on - named here as plain code rather than intra-doc
 /// links precisely because they may not exist in this build, and
 /// `lib.rs` denies broken links).
 ///
@@ -197,7 +197,7 @@ impl std::fmt::Debug for GcsConfig {
 /// convenience constructors retry by default. Callers who need a different
 /// policy (more retries, timeouts, logging, metrics) use the `_with` variants,
 /// which apply no default layer and hand over full control of the stack. Local
-/// filesystem and in-memory disks are not wrapped — they have no transient
+/// filesystem and in-memory disks are not wrapped - they have no transient
 /// failures worth retrying.
 fn default_cloud_resilience(op: Operator) -> Operator {
     op.layer(opendal::layers::RetryLayer::new().with_max_times(3))
@@ -223,7 +223,7 @@ impl Storage {
     /// # Testing
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
-    /// method directly race on this shared state when run in parallel — wrap
+    /// method directly race on this shared state when run in parallel - wrap
     /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_fs(
@@ -241,16 +241,16 @@ impl Storage {
     /// Suprnova enables these `suprnova::opendal::layers::*` types out of the
     /// box (each gated behind one `opendal` feature in `framework/Cargo.toml`):
     ///
-    /// - [`RetryLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.RetryLayer.html) —
+    /// - [`RetryLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.RetryLayer.html) -
     ///   exponential-backoff retries on transient 5xx / throttling.
-    /// - [`TimeoutLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TimeoutLayer.html) —
+    /// - [`TimeoutLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TimeoutLayer.html) -
     ///   per-operation timeout.
-    /// - [`LoggingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.LoggingLayer.html) —
+    /// - [`LoggingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.LoggingLayer.html) -
     ///   debug-level structured logs for every operation.
-    /// - [`TracingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TracingLayer.html) —
+    /// - [`TracingLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.TracingLayer.html) -
     ///   `tracing` spans per operation; bridges to OTel through
     ///   `tracing-opentelemetry` when the framework's `otel` feature is on.
-    /// - [`PrometheusClientLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.PrometheusClientLayer.html) —
+    /// - [`PrometheusClientLayer`](https://docs.rs/opendal/0.58/opendal/layers/struct.PrometheusClientLayer.html) -
     ///   histograms + counters for the `prometheus-client` registry.
     ///
     /// Layer order matters: outermost layer wraps everything inside it. The
@@ -307,7 +307,7 @@ impl Storage {
     /// # Testing
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
-    /// method directly race on this shared state when run in parallel — wrap
+    /// method directly race on this shared state when run in parallel - wrap
     /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_memory(name: impl Into<String>) {
@@ -353,7 +353,7 @@ impl Storage {
     /// # Testing
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
-    /// method directly race on this shared state when run in parallel — wrap
+    /// method directly race on this shared state when run in parallel - wrap
     /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     pub fn register_s3(name: impl Into<String>, config: S3Config) -> Result<(), FrameworkError> {
@@ -438,7 +438,7 @@ impl Storage {
     /// # Testing
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
-    /// method directly race on this shared state when run in parallel — wrap
+    /// method directly race on this shared state when run in parallel - wrap
     /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     ///
@@ -506,7 +506,7 @@ impl Storage {
     /// # Testing
     ///
     /// The disk registry is process-global. Tests that call any `register_*`
-    /// method directly race on this shared state when run in parallel — wrap
+    /// method directly race on this shared state when run in parallel - wrap
     /// them in a `Storage::fake` guard, which serializes fake-using tests
     /// process-wide and wipes the registry on drop.
     ///

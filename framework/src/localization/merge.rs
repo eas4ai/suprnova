@@ -1,7 +1,7 @@
 //! AST-level merge of two Fluent catalogs into one flattened catalog.
 //!
 //! Some locales differ from a sibling in vocabulary rather than in
-//! substance — European Portuguese and Brazilian Portuguese share most of
+//! substance - European Portuguese and Brazilian Portuguese share most of
 //! a catalog and diverge on a handful of words (`ficheiro`/`arquivo`,
 //! `utilizador`/`usuário`, `tu`/`você`). Translating both catalogs in
 //! full would mean maintaining the same strings twice forever, and every
@@ -21,7 +21,7 @@
 //!   value keeps the parent's value.
 //! - **Patterns are replaced wholesale.** A select expression lives
 //!   inside a pattern and goes with it; variants are never merged one by
-//!   one. That is not just fragility avoidance — CLDR plural categories
+//!   one. That is not just fragility avoidance - CLDR plural categories
 //!   are locale dependent, so a variant-merged selector is semantically
 //!   incoherent.
 //! - **Terms follow the same rule.** (`Term::value` is a `Pattern`, not
@@ -34,10 +34,10 @@
 //!   parent position carrying the merged value and attributes; entries
 //!   only the child defines append at the end in child order.
 //! - **Comments belong to the parent entry.** The override unit is the
-//!   pattern, and a comment is not one — a child's comment on an
+//!   pattern, and a comment is not one - a child's comment on an
 //!   overridden entry is dropped; the parent's is kept.
 //! - **Serialization goes through `fluent_syntax::serializer`** with
-//!   `Options::default()` (`with_junk: false`) — the single knob on the
+//!   `Options::default()` (`with_junk: false`) - the single knob on the
 //!   serializer, and therefore the only way two correct implementations
 //!   could still disagree on bytes.
 //! - **Parse errors are fatal.** `fluent_syntax::parser::parse` hands
@@ -52,7 +52,7 @@ use std::collections::{HashMap, HashSet};
 /// Parse `source` strictly: any parser error is `Err`, never the
 /// recovered-with-`Junk` resource that `fluent_syntax::parser::parse`
 /// also returns on failure. `origin` names the source in the error
-/// message — a file path, a `"<locale>/<domain>"` label, or similar —
+/// message - a file path, a `"<locale>/<domain>"` label, or similar -
 /// so a caller merging many catalogs can tell which one was malformed.
 pub(crate) fn parse_strict(source: &str, origin: &str) -> Result<Resource<String>, FrameworkError> {
     fluent_syntax::parser::parse(source.to_string()).map_err(|(_, errors)| {
@@ -65,7 +65,7 @@ pub(crate) fn parse_strict(source: &str, origin: &str) -> Result<Resource<String
     })
 }
 
-/// An empty catalog — the identity element for [`merge`]: merging it
+/// An empty catalog - the identity element for [`merge`]: merging it
 /// with any resource on either side returns the other resource, modulo
 /// serializer normalization (whitespace, blank-line collapsing).
 pub(crate) fn empty() -> Resource<String> {
@@ -73,7 +73,7 @@ pub(crate) fn empty() -> Resource<String> {
 }
 
 /// Merge `child` over `parent` per the contract documented at module
-/// level. Infallible — both resources have already been parsed via
+/// level. Infallible - both resources have already been parsed via
 /// [`parse_strict`], so there is nothing left that can fail.
 pub(crate) fn merge(parent: &Resource<String>, child: &Resource<String>) -> Resource<String> {
     // Index the child's messages and terms. Terms and messages live in
@@ -147,7 +147,7 @@ fn merge_message(parent: &Message<String>, child: &Message<String>) -> Message<S
     Message {
         id: parent.id.clone(),
         // A child entry with attributes but no value keeps the parent's
-        // value — the override unit is the pattern, and no pattern was
+        // value - the override unit is the pattern, and no pattern was
         // given.
         value: child.value.clone().or_else(|| parent.value.clone()),
         attributes: merge_attributes(&parent.attributes, &child.attributes),
@@ -197,7 +197,7 @@ fn merge_attributes(
 }
 
 /// Serialize a merged resource back to FTL bytes. Always goes through
-/// `Options::default()` (`with_junk: false`) — the single serializer
+/// `Options::default()` (`with_junk: false`) - the single serializer
 /// knob, and therefore the only way two correct implementations could
 /// still disagree on bytes for the same AST.
 pub(crate) fn serialize(resource: &Resource<String>) -> String {
@@ -325,7 +325,7 @@ mod tests {
     }
 
     /// A child message overriding a parent term of the same name must not
-    /// suppress that message from the child-only append pass — messages
+    /// suppress that message from the child-only append pass - messages
     /// and terms are separate namespaces, and each needs its own
     /// used-set to keep that true.
     #[test]
@@ -344,7 +344,7 @@ mod tests {
     }
 
     /// A comment attached to a child-only entry travels with it into the
-    /// child-only append region, in child order — the append pass clones
+    /// child-only append region, in child order - the append pass clones
     /// child entries whole, and a comment directly above a message is
     /// part of that message's own `comment` field at parse time.
     #[test]

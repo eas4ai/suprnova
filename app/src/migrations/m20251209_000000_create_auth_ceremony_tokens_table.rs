@@ -12,17 +12,17 @@
 //! `framework/src/magnetar_integration/ceremony.rs::entity::Model`:
 //!
 //! - `id`         BIGINT PK auto-increment
-//! - `selector`   VARCHAR not null UNIQUE — the ceremony id
-//! - `kind`       VARCHAR not null — discriminator ("oauth",
+//! - `selector`   VARCHAR not null UNIQUE - the ceremony id
+//! - `kind`       VARCHAR not null - discriminator ("oauth",
 //!   "passkey_register", "passkey_authenticate")
-//! - `payload`    TEXT not null — opaque JSON
-//! - `expires_at` TIMESTAMP not null — token TTL boundary
+//! - `payload`    TEXT not null - opaque JSON
+//! - `expires_at` TIMESTAMP not null - token TTL boundary
 //! - `created_at` TIMESTAMP not null
 //!
 //! Indexes:
 //!
-//! - `idx_auth_ceremony_tokens_selector` — UNIQUE, primary lookup
-//! - `idx_auth_ceremony_tokens_expires_at` — for `prune_expired`
+//! - `idx_auth_ceremony_tokens_selector` - UNIQUE, primary lookup
+//! - `idx_auth_ceremony_tokens_expires_at` - for `prune_expired`
 
 use sea_orm_migration::prelude::*;
 

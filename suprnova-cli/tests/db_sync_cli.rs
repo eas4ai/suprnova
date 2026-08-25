@@ -9,7 +9,7 @@
 //! `fs::create_dir_all(...).expect("Failed to create entities directory")`,
 //! so the process aborted with `thread 'main' panicked at ...` and a
 //! backtrace. The assertions below require a non-zero exit, a human-readable
-//! message, AND the absence of `"panicked"` — the last is what proves the
+//! message, AND the absence of `"panicked"` - the last is what proves the
 //! panic became a user-facing error.
 
 use std::fs;
@@ -105,7 +105,7 @@ fn db_sync_missing_database_url_exits_clean() {
 
     // Make this a "Suprnova project" (src/models present) so we sail past the
     // project-detection guard and hit `env::var("DATABASE_URL")`.  We isolate
-    // DATABASE_URL away — both as a process env var and by writing an empty
+    // DATABASE_URL away - both as a process env var and by writing an empty
     // .env so dotenvy can't backfill it from anywhere.
     fs::create_dir_all(root.join("src/models")).expect("mkdir src/models");
     fs::write(root.join(".env"), "").expect("write empty .env");
@@ -141,8 +141,8 @@ fn db_sync_unreachable_database_exits_clean() {
     // pass it anyway for determinism.
     fs::create_dir_all(root.join("src/models")).expect("mkdir src/models");
 
-    // Point DATABASE_URL at a sqlite file in a directory that does NOT exist
-    // — `Database::connect` then fails on the open call, and we need that to
+    // Point DATABASE_URL at a sqlite file in a directory that does NOT exist -
+    // `Database::connect` then fails on the open call, and we need that to
     // surface as a clean error.
     let unreachable = root.join("does-not-exist-dir").join("nope.db");
 
@@ -175,7 +175,7 @@ fn db_sync_unreadable_models_mod_exits_clean() {
     // Cover the previously-silent fs::read_to_string fallback in
     // update_models_mod: a permission-blocked `src/models/mod.rs` used to be
     // swallowed by `.unwrap_or_default()`, then overwritten on the next
-    // `fs::write` — silently destroying the user's customizations.  Now it
+    // `fs::write` - silently destroying the user's customizations.  Now it
     // must surface as a clean error.
     use std::os::unix::fs::PermissionsExt;
 
@@ -199,7 +199,7 @@ fn db_sync_unreadable_models_mod_exits_clean() {
 
     // Strip read permission so fs::read_to_string fails. If we're root the
     // OS ignores this (root bypasses DAC) and the test is a no-op assertion
-    // on a clean run — skip cleanly in that case to keep CI portable.
+    // on a clean run - skip cleanly in that case to keep CI portable.
     let mut perms = fs::metadata(&mod_path).expect("metadata").permissions();
     perms.set_mode(0o000);
     fs::set_permissions(&mod_path, perms).expect("set perms");
@@ -267,7 +267,7 @@ fn db_sync_rejects_mysql_instead_of_running_postgres_sql() {
 
 /// The schema is untrusted input. A table name is used both as a path
 /// component (`src/models/entities/<name>.rs`) and inside generated Rust, so
-/// `db:sync` must refuse names that escape the entity directory — while still
+/// `db:sync` must refuse names that escape the entity directory - while still
 /// syncing the well-named tables sitting next to them.
 ///
 /// Teeth: with the `SafeName`/`contained_path` guards removed, the hostile
@@ -379,7 +379,7 @@ fn db_sync_refuses_hostile_schema_names_but_syncs_the_rest() {
     }
 }
 
-/// Every table being unusable is a failure, not a silent success — the user
+/// Every table being unusable is a failure, not a silent success - the user
 /// asked for models and got none.
 #[test]
 fn db_sync_errors_when_every_table_is_rejected() {
@@ -515,7 +515,7 @@ fn db_sync_discovers_columns_against_real_postgres() {
         .expect("db:sync must have written an entity for probe_widgets");
     assert!(
         entity.contains("pub label"),
-        "column discovery must find `label` — an empty column list is the \
+        "column discovery must find `label` - an empty column list is the \
          signature of the identifier-quoting bug; entity was:\n{entity}"
     );
 }

@@ -69,7 +69,7 @@ pub async fn register() {
     // application uses Magnetar-owned credentials and sessions.
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
-    // Inertia shared data — visible on every Inertia response.
+    // Inertia shared data - visible on every Inertia response.
     //
     // Static values: process-global, set once at boot.
     App::inertia_share("appName", "Suprnova");
@@ -77,22 +77,22 @@ pub async fn register() {
 
     // Per-request shared data via the trait. The framework awaits
     // `share(&req)` on every Inertia response so this can read headers,
-    // session, etc. — see `AppSharedData` below.
+    // session, etc. - see `AppSharedData` below.
     App::register_inertia_shared(std::sync::Arc::new(AppSharedData));
 
     // The `lang` prop (active locale, fallback, and where to fetch its
-    // Fluent catalog) on every Inertia response — mirrors the scaffold
+    // Fluent catalog) on every Inertia response - mirrors the scaffold
     // template's `bootstrap.rs.tpl`, which registers this the same way
     // right after its own shared data. The frontend kits' `lib/lang`
     // wrapper reads this via `initLang(page)`.
     App::register_inertia_shared(std::sync::Arc::new(LocaleShare));
 
-    // Broadcasting hub — in-process pub/sub. Registered in the container
+    // Broadcasting hub - in-process pub/sub. Registered in the container
     // as `dyn BroadcastHub` so SSE + WS handlers resolve it uniformly.
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
-    // Channel registry — lists every named channel the WS handler accepts.
+    // Channel registry - lists every named channel the WS handler accepts.
     // Registered as a concrete singleton so routes::register() can resolve
     // it when constructing BroadcastingWsHandler.
     let mut registry = ChannelRegistry::new();
@@ -116,15 +116,15 @@ pub async fn register() {
 
     // Bootstrap rate-limit driver so App::resolve_make::<dyn RateLimiterDriver>()
     // succeeds when routes::register() runs immediately after bootstrap.
-    // Server::run also calls bootstrap_from_env() later — that call is
+    // Server::run also calls bootstrap_from_env() later - that call is
     // idempotent (guarded by has_binding) so there is no double-init.
     suprnova::rate_limit::bootstrap_default().await;
 
     // Bind a queue driver from `QUEUE_DRIVER` (memory when unset).
     //
     // Registering job types is not the same as having somewhere to put
-    // them: without this, anything that enqueues outside the `serve` path
-    // — every console command, in particular — fails with "queue driver
+    // them: without this, anything that enqueues outside the `serve` path -
+    // every console command, in particular - fails with "queue driver
     // not initialized". The serve and `queue:work` paths install their own
     // driver, which is why the gap stayed invisible.
     if let Err(e) = suprnova::queue::bootstrap_from_env().await {
@@ -141,7 +141,7 @@ pub async fn register() {
     register_job::<crate::jobs::bench::BenchAbort>();
     register_job::<crate::jobs::bench::BenchRecord>();
 
-    // Phase 5B Task 20 — mail dogfood.
+    // Phase 5B Task 20 - mail dogfood.
     //
     // Register the WelcomeEmail mailable factory so the worker can
     // re-hydrate it from a `SendMailJob` envelope, and register
@@ -151,7 +151,7 @@ pub async fn register() {
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // Phase 5B Task 20 — notifications dogfood.
+    // Phase 5B Task 20 - notifications dogfood.
     //
     // Register an OrderShipped factory so `SendNotificationJob` can rebuild
     // the notification from its JSON payload at dispatch time, and register
@@ -163,21 +163,21 @@ pub async fn register() {
     .expect("register at boot");
     register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
 
-    // Phase 6A T7 — factory + seeder dogfood. Registers `BaseSeeder`
+    // Phase 6A T7 - factory + seeder dogfood. Registers `BaseSeeder`
     // so a `suprnova db:seed` invocation (Phase 6B) will populate 50
     // users + 200 posts via the framework's Factory / Persistable
     // path. Tests reach the same path through `seed::run_all()`
     // directly without the CLI.
     suprnova::seed::register::<crate::seeders::BaseSeeder>();
 
-    // Phase 7B T10 — supervised long-running tasks.
+    // Phase 7B T10 - supervised long-running tasks.
     //
     // Spawn every supervisor registered via `inventory::submit!` into its own
     // restart-loop task. The tasks are detached (v1 does not drain them on
     // shutdown); they run for the lifetime of the process.
     SupervisorRegistry::start_all().await;
 
-    // Phase 10C T14 — install every `#[suprnova::observer(M)]` impl in
+    // Phase 10C T14 - install every `#[suprnova::observer(M)]` impl in
     // the binary. `bootstrap_observers()` drains the
     // `inventory::iter::<ObserverEntry>` set built up at compile time
     // and registers each observer's listener adapters with the
@@ -193,7 +193,7 @@ pub async fn register() {
         .await
         .expect("observer install failed");
 
-    // Phase 13 — feature flags.
+    // Phase 13 - feature flags.
     //
     // Wire the canonical Cached(Database) chain. After this call:
     //
@@ -219,7 +219,7 @@ pub async fn register() {
 ///
 /// One function rather than an inline literal at the install site so the
 /// version the server advertises and the version a protocol test sends
-/// can never drift apart — both read it from here.
+/// can never drift apart - both read it from here.
 pub fn inertia_config() -> InertiaConfig {
     InertiaConfig::new()
 }
@@ -239,7 +239,7 @@ pub fn inertia_version() -> String {
 /// Register the global middleware chain, in order.
 ///
 /// This is now both the test-harness entry point and the
-/// `.http_bootstrap` hook wired in `cmd/main.rs` — the worker subcommands
+/// `.http_bootstrap` hook wired in `cmd/main.rs` - the worker subcommands
 /// and the console binary never call it, since they only run
 /// [`register`]. That is what lets a worker or console container image
 /// boot without a built frontend manifest: `Inertia::install` below fails
@@ -248,7 +248,7 @@ pub fn inertia_version() -> String {
 ///
 /// Split out of [`register`] for the same reason as
 /// [`register_storage_disks`]: a test harness needs the real stack without
-/// the rest of bootstrap — `DB::init`, event listeners, the feature-flag
+/// the rest of bootstrap - `DB::init`, event listeners, the feature-flag
 /// chain. Every HTTP test in this crate used to build
 /// `MiddlewareRegistry::new()` by hand, so no global middleware had ever
 /// run in one: session, CSRF and the feature context were absent from all
@@ -257,7 +257,7 @@ pub fn inertia_version() -> String {
 /// `MiddlewareRegistry::from_global()`.
 ///
 /// `Inertia::install` belongs here rather than beside the other container
-/// wiring because it registers four middlewares of its own — hoisting the
+/// wiring because it registers four middlewares of its own - hoisting the
 /// `global_middleware!` calls around it would silently move the Inertia
 /// layer to the front of the chain. It also needs to sit *after*
 /// `SessionMiddleware`: the version-mismatch bounce re-flashes the
@@ -267,17 +267,17 @@ pub fn inertia_version() -> String {
 ///
 /// Ordering, and why each sits where it does:
 ///
-/// 1. `LoggingMiddleware` — outermost, so everything below is logged.
-/// 2. `TimeoutMiddleware` — a 30s ceiling on time-to-response so a slow
+/// 1. `LoggingMiddleware` - outermost, so everything below is logged.
+/// 2. `TimeoutMiddleware` - a 30s ceiling on time-to-response so a slow
 ///    handler or hung query cannot hold a connection open indefinitely.
 ///    Right after logging, so timed-out 503s are still logged on the way
 ///    out, and ahead of the rest so it bounds session/feature/handler
 ///    work. Streaming responses (SSE) and WebSocket upgrades are exempt by
-///    design — see `suprnova::timeout`. A per-route
+///    design - see `suprnova::timeout`. A per-route
 ///    `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint.
-/// 3. `IncludeMiddleware` — scopes `?include=` and `?fields[type]=` into
+/// 3. `IncludeMiddleware` - scopes `?include=` and `?fields[type]=` into
 ///    task-local state for JSON:API resource handlers.
-/// 4. `SessionMiddleware` — global so every route shares one session
+/// 4. `SessionMiddleware` - global so every route shares one session
 ///    lifecycle. `AuthMiddleware` and `Auth::user_as` both read state it
 ///    sets up, which is what makes auth-aware controllers work. Ahead of
 ///    the Inertia protocol middleware for the reason above.
@@ -292,26 +292,26 @@ pub fn inertia_version() -> String {
 ///    turned into the redirect-back the Inertia client expects, so a
 ///    failed validation restores the form with its messages rather than
 ///    surfacing a raw `422`. `inertia_config()` installs the default version
-///    resolver — a hash of the Vite build manifest — so the version
+///    resolver - a hash of the Vite build manifest - so the version
 ///    string tracks the built frontend rather than a literal that
 ///    someone has to remember to bump.
-/// 6. `LocaleMiddleware` — immediately after the session it depends on:
+/// 6. `LocaleMiddleware` - immediately after the session it depends on:
 ///    detection runs Session -> Cookie -> Header, and the session slot
 ///    it reads first only exists once `SessionMiddleware` has run.
 ///    Scopes the detected locale (via `scope_locale`) for the rest of
 ///    the request, so `Lang::get` / `__!` / translated validation
-///    messages all resolve against it downstream. `LocaleShare` — the
-///    Inertia `lang` shared prop — is not part of the middleware chain;
+///    messages all resolve against it downstream. `LocaleShare` - the
+///    Inertia `lang` shared prop - is not part of the middleware chain;
 ///    it is registered in [`register`] alongside `AppSharedData`, since
 ///    Inertia shared-data providers run inside the Inertia response path
 ///    rather than as global middleware.
-/// 7. `CsrfMiddleware` — immediately after the session it depends on.
+/// 7. `CsrfMiddleware` - immediately after the session it depends on.
 ///    `/api/ping`, `/api/welcome` and `/lang-demo` are excepted as
 ///    stateless demo endpoints with nothing ambient for a cross-site
 ///    POST to abuse. Every cookie-authenticated state change stays
 ///    protected, including `POST /api/posts` and `DELETE
 ///    /api/posts/{id}`.
-/// 8. `FeatureMiddleware` — opens a `featureflag::Context` per request so
+/// 8. `FeatureMiddleware` - opens a `featureflag::Context` per request so
 ///    user-scoped `is_enabled!` calls resolve against the right scope.
 ///    After the session, so `Auth::id()` returns the live user id.
 pub fn register_http_stack() {
@@ -341,7 +341,7 @@ pub fn register_http_stack() {
 ///
 /// `public` is a local-filesystem disk rooted at `./storage/public`, suitable
 /// for development. `uploads` is an S3-backed disk that is only registered
-/// when `S3_BUCKET` is set in the environment — production deployments wire
+/// when `S3_BUCKET` is set in the environment - production deployments wire
 /// it via env vars, while local dev and tests skip it.
 ///
 /// Split out of `register()` so test harnesses can re-target the `public`

@@ -2,17 +2,17 @@
 //! `AppConfig.debug` flag, not bypass it by re-reading `APP_DEBUG`
 //! from process env on every call.
 //!
-//! Two call sites mattered before this sweep —
+//! Two call sites mattered before this sweep -
 //! `framework/src/http/response.rs` (`From<FrameworkError> for HttpResponse`)
 //! and `framework/src/resources/errors.rs` (JSON:API renderer). Both
 //! used `AppConfig::from_env().is_debug()` directly, which meant a
 //! programmatic `Config::register(AppConfig { debug: false, .. })`
-//! was silently ignored on every 5xx — even though `Config::is_debug()`
+//! was silently ignored on every 5xx - even though `Config::is_debug()`
 //! the facade method existed.
 //!
 //! After the fix, both call sites go through `Config::is_debug()`,
 //! which checks the registered config first and falls back to
-//! `AppConfig::from_env()` (env-aware default — fail-closed in
+//! `AppConfig::from_env()` (env-aware default - fail-closed in
 //! production-shaped envs) only when the repository is empty.
 //!
 //! Three regressions are guarded here:
@@ -23,7 +23,7 @@
 //!    to INCLUDE `debug_message`, even when `APP_DEBUG=false` and
 //!    `APP_ENV=production` in the process env.
 //! 3. With NO registered AppConfig and `APP_ENV=production`
-//!    (`APP_DEBUG` unset), the renderer omits `debug_message` —
+//!    (`APP_DEBUG` unset), the renderer omits `debug_message` -
 //!    i.e. the uninitialized-repository fallback is fail-closed.
 //!    Before the fix, `Config::is_debug()` defaulted to `true` here,
 //!    which would have silently leaked debug bodies on the
@@ -75,7 +75,7 @@ fn response_body_json(resp: HttpResponse) -> Value {
 #[test]
 #[serial]
 fn registered_debug_false_overrides_app_debug_true_in_env() {
-    // Set the loud env state — but register a quiet AppConfig.
+    // Set the loud env state - but register a quiet AppConfig.
     set_env("APP_ENV", "local");
     set_env("APP_DEBUG", "true");
     install_app_config(Environment::Production, false);
@@ -135,14 +135,14 @@ fn unregistered_repo_in_production_env_is_fail_closed() {
     // back to `AppConfig::from_env()` (env-aware default: false in
     // production).
     //
-    // We can't actually empty the global repository — earlier
+    // We can't actually empty the global repository - earlier
     // `#[serial]` tests registered an AppConfig and the registry has
     // no `unregister`. We APPROXIMATE the fail-closed path by
     // registering a Production AppConfig with no APP_DEBUG override,
     // which is the same code path as the uninitialized fallback
     // (both resolve to env-derived AppConfig with production
-    // defaults). The semantic invariant under test — "production +
-    // no explicit debug = no debug_message" — holds either way, and
+    // defaults). The semantic invariant under test - "production +
+    // no explicit debug = no debug_message" - holds either way, and
     // this is what the fix guarantees.
     clear_env(&["APP_DEBUG"]);
     set_env("APP_ENV", "production");
@@ -185,7 +185,7 @@ fn registered_debug_false_also_suppresses_jsonapi_renderer_debug_message() {
     assert_eq!(resp.status_code(), 500);
 
     let body = response_body_json(resp);
-    // JSON:API shape — { errors: [{ ..., meta: { request_id, ... } }] }
+    // JSON:API shape - { errors: [{ ..., meta: { request_id, ... } }] }
     let meta = &body["errors"][0]["meta"];
     assert!(
         meta.get("debug_message").is_none(),

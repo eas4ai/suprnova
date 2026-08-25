@@ -1,4 +1,4 @@
-//! VAPID — Voluntary Application Server Identification (RFC 8292).
+//! VAPID - Voluntary Application Server Identification (RFC 8292).
 //!
 //! ES256 (P-256 ECDSA) signing per spec.
 
@@ -101,9 +101,9 @@ impl VapidSigner {
 
     /// Sign a VAPID JWT.
     ///
-    /// `audience` — push service origin, e.g. `"https://fcm.googleapis.com"`.
-    /// `subject` — contact URI, e.g. `"mailto:admin@example.org"`.
-    /// `ttl_secs` — token lifetime in seconds. Must be strictly positive and
+    /// `audience` - push service origin, e.g. `"https://fcm.googleapis.com"`.
+    /// `subject` - contact URI, e.g. `"mailto:admin@example.org"`.
+    /// `ttl_secs` - token lifetime in seconds. Must be strictly positive and
     /// at most 24 h per RFC 8292; out-of-range values are rejected before
     /// signing.
     pub fn sign(

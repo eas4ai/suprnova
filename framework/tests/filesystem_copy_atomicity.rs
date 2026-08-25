@@ -4,7 +4,7 @@
 //! transfer fails mid-stream.
 //!
 //! The source disk here is a memory backend wrapped in a layer whose reader
-//! yields exactly one chunk and then errors — simulating a source that fails
+//! yields exactly one chunk and then errors - simulating a source that fails
 //! after the destination writer has already received data. The destination is
 //! a real filesystem disk, so a partial write is visible on disk: the test
 //! proves the file is gone after the failed copy.
@@ -170,7 +170,7 @@ async fn copy_cleans_up_partial_destination_on_midstream_failure() {
     );
 
     // The one chunk that was written before the failure must have been cleaned
-    // up — a failed copy must never be observable as a partial/truncated file.
+    // up - a failed copy must never be observable as a partial/truncated file.
     assert!(
         !tmp.path().join("partial.bin").exists(),
         "a failed copy must not leave a partial destination file"

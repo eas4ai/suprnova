@@ -63,7 +63,7 @@ async fn ses_emits_sigv4_signed_request() {
     assert!(auth.starts_with("AWS4-HMAC-SHA256"), "got: {auth}");
 
     // A message that sets no custom headers must not grow a
-    // `Content.Simple.Headers` field at all — `skip_serializing_if` on
+    // `Content.Simple.Headers` field at all - `skip_serializing_if` on
     // `SesSimple::headers` keeps the request body byte-identical to what
     // it was before this task's header support landed.
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
@@ -101,7 +101,7 @@ async fn ses_maps_4xx_to_framework_error() {
     );
 }
 
-// Attachments must ride the Raw MIME path — SES `Content.Simple` has no
+// Attachments must ride the Raw MIME path - SES `Content.Simple` has no
 // attachment support, so dropping silently is a data-loss bug.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 struct MWithPdf {
@@ -155,7 +155,7 @@ async fn ses_uses_raw_mime_when_attachments_present() {
     assert_eq!(reqs.len(), 1);
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
 
-    // Must use the Raw variant when attachments are present — Simple has
+    // Must use the Raw variant when attachments are present - Simple has
     // no attachment support and would silently drop them.
     assert!(
         body["Content"]["Simple"].is_null(),
@@ -257,7 +257,7 @@ async fn ses_simple_content_carries_custom_headers() {
         .as_array()
         .unwrap_or_else(|| panic!("Content.Simple.Headers must be a list: {body}"));
 
-    // SES v2 spells a MessageHeader `{"Name": ..., "Value": ...}` — the same
+    // SES v2 spells a MessageHeader `{"Name": ..., "Value": ...}` - the same
     // pair Postmark uses. A field-name typo here fails the whole send call at
     // AWS, so assert the exact JSON shape rather than "contains the string".
     assert!(
@@ -345,8 +345,8 @@ async fn ses_raw_mime_carries_custom_headers() {
 
     // Line-anchored, not a bare substring match: lettre terminates each
     // header line with CRLF (`lettre::message::header::Headers`'s `Display`
-    // impl), so a real header line — as opposed to the value merely
-    // appearing inside another header or the body — starts right after one.
+    // impl), so a real header line - as opposed to the value merely
+    // appearing inside another header or the body - starts right after one.
     assert!(
         mime_str.contains("\r\nList-Unsubscribe: <https://example.org/unsub/abc>"),
         "raw MIME dropped List-Unsubscribe: {mime_str}"
@@ -454,8 +454,8 @@ async fn ses_rejects_a_header_name_carrying_crlf() {
 #[tokio::test]
 #[serial]
 async fn ses_rejects_a_header_name_with_space_or_colon() {
-    // `HeaderName::new_from_ascii` — the check the raw MIME path runs when
-    // it builds a real header line — rejects a `:` or a space in a name in
+    // `HeaderName::new_from_ascii` - the check the raw MIME path runs when
+    // it builds a real header line - rejects a `:` or a space in a name in
     // addition to CR/LF/NUL. The up-front guard in `send` has to reject the
     // same names on the Simple path, or "X-Foo: bar" would be forwarded to
     // AWS today and only start failing the day somebody attaches a file.

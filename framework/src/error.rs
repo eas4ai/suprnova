@@ -163,8 +163,8 @@ impl From<AppError> for FrameworkError {
 ///
 /// # Localization
 ///
-/// Entries are [`ValidationMessage`]s — a catalog key, its arguments,
-/// and an English fallback — not finished strings. Translation happens
+/// Entries are [`ValidationMessage`]s - a catalog key, its arguments,
+/// and an English fallback - not finished strings. Translation happens
 /// once, in [`to_json`](Self::to_json), against the locale in effect
 /// for the current request. Messages added from a `&str` or `String`
 /// are keyless and render verbatim in every locale.
@@ -254,7 +254,7 @@ impl ValidationErrors {
     ///
     /// A field annotated `#[validate(..., message = "…")]` produces a
     /// **keyless** message carrying exactly that text, so no catalog id
-    /// can override it — Laravel's precedence, where a custom message
+    /// can override it - Laravel's precedence, where a custom message
     /// beats the lang file. Such a message is not translated: it is the
     /// string the author wrote. Delete the `message = …` to get the
     /// translatable catalog wording instead.
@@ -262,7 +262,7 @@ impl ValidationErrors {
     /// # Params that never become arguments
     ///
     /// `value` (the crate's echo of the submitted input) and `other`
-    /// (`must_match`'s *sibling field value* — a password, in the
+    /// (`must_match`'s *sibling field value* - a password, in the
     /// canonical use) are dropped rather than carried, so no catalog
     /// override can interpolate a submitted value into a response body.
     ///
@@ -270,7 +270,7 @@ impl ValidationErrors {
     /// objects': `#[validate(length(min = 8))]` reports `length`, where
     /// the equivalent rule object [`Min`](crate::Min) reports
     /// `validation-min`. Both vocabularies ship in the embedded English
-    /// catalog, but they are separate ids — an app that wants one
+    /// catalog, but they are separate ids - an app that wants one
     /// wording for both must define both. Codes with no embedded entry
     /// (`contains`, `credit_card`, `custom`, …) render their fallback
     /// until an app defines the id.
@@ -285,8 +285,8 @@ impl ValidationErrors {
     ///
     /// `#[validate(nested)]` failures arrive as `Struct` (a nested struct)
     /// or `List` (a `Vec<T>` of them) rather than `Field`. Both are walked
-    /// recursively and flattened into Laravel's dotted notation —
-    /// `address.street`, `items.1.name`, `order.items.2.sku` — so the
+    /// recursively and flattened into Laravel's dotted notation -
+    /// `address.street`, `items.1.name`, `order.items.2.sku` - so the
     /// client can address the offending value. Before this recursion
     /// existed, a nested-only failure produced a 422 whose `errors` map
     /// was empty: the request was correctly rejected, but nothing on the
@@ -301,8 +301,8 @@ impl ValidationErrors {
     /// into `self` under a Laravel-shaped dotted key.
     ///
     /// `validator::ValidationErrors::field_errors()` yields only the
-    /// `Field` leaves. `Struct` and `List` — which is *every*
-    /// `#[validate(nested)]` failure — used to be dropped on the floor
+    /// `Field` leaves. `Struct` and `List` - which is *every*
+    /// `#[validate(nested)]` failure - used to be dropped on the floor
     /// here, so a form whose only invalid value was nested came back as a
     /// 422 with an empty `errors` map: rejected, but with nothing the
     /// client could render and no field to point at. Recursing is what
@@ -345,7 +345,7 @@ impl ValidationErrors {
     /// Render one message for `field` against the current locale.
     ///
     /// This is the single translation point in the whole validation
-    /// stack — and the single place the `localization` feature is
+    /// stack - and the single place the `localization` feature is
     /// consulted, which is why the field-label lookup is nested here
     /// rather than living in its own method. A keyless message, a key
     /// no catalog defines, or a build with the feature off all fall
@@ -402,7 +402,7 @@ impl ValidationErrors {
     /// Convert to JSON Value for response.
     ///
     /// Both the banner and every per-field message are rendered against
-    /// the locale in effect for the current request — this is where
+    /// the locale in effect for the current request - this is where
     /// keyed messages become text.
     pub fn to_json(&self) -> serde_json::Value {
         let errors: serde_json::Map<String, serde_json::Value> = self
@@ -426,7 +426,7 @@ impl ValidationErrors {
 
     /// Return a new `ValidationErrors` containing only the entries whose
     /// field name appears in `keep`. Used by Precognition's
-    /// `Precognition-Validate-Only` header — the server runs full
+    /// `Precognition-Validate-Only` header - the server runs full
     /// validation but reports errors only for the fields the client
     /// asked about.
     pub fn retain_fields(&self, keep: &[String]) -> Self {
@@ -443,12 +443,12 @@ impl ValidationErrors {
 /// Translate one `validator::ValidationError` into a [`ValidationMessage`].
 ///
 /// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
-/// the generic fallback names the actual path — two nested `name` fields
+/// the generic fallback names the actual path - two nested `name` fields
 /// otherwise render byte-identical messages.
 fn validator_error_message(field: &str, error: &validator::ValidationError) -> ValidationMessage {
     // An explicit `#[validate(..., message = "…")]` is the author's final
     // word. Laravel resolves a custom message ahead of the lang file, and
-    // keyless is the only shape a catalog id cannot override — so the text
+    // keyless is the only shape a catalog id cannot override - so the text
     // the author wrote is the text that ships, untranslated by design.
     if let Some(text) = error.message.as_ref() {
         return ValidationMessage::from(text.to_string());
@@ -462,7 +462,7 @@ fn validator_error_message(field: &str, error: &validator::ValidationError) -> V
         // Two params never become message arguments:
         //
         // `value` is the validator crate's echo of the input under test,
-        // and `other` — which only `must_match` sets — is the *sibling
+        // and `other` - which only `must_match` sets - is the *sibling
         // field's value*, which for the canonical password-confirmation
         // use is a secret. Dropping both here means no catalog override
         // can interpolate a submitted value into a 422 body. `other` is
@@ -529,7 +529,7 @@ mod validation_tests {
         );
 
         // Labelling the bag is the entire reason `.context()` exists on
-        // this variant — the label has to survive into the log line.
+        // this variant - the label has to survive into the log line.
         let labelled = match FrameworkError::Validation(errs).context("registration") {
             FrameworkError::Validation(v) => v,
             other => panic!("expected Validation, got {other:?}"),
@@ -543,7 +543,7 @@ mod validation_tests {
     #[test]
     fn must_match_sibling_value_never_reaches_the_args_map() {
         // `must_match` reports the *value* of the field being matched
-        // against — the password, in the canonical confirmation case.
+        // against - the password, in the canonical confirmation case.
         // It must not land in args, where a catalog override could
         // interpolate it straight into a 422 body.
         let mut ve = validator::ValidationErrors::new();
@@ -573,7 +573,7 @@ mod validation_tests {
         // `#[validate(nested)] address: Address` produces a `Struct`
         // kind. `field_errors()` drops it, so before this fix a form
         // whose ONLY failure was nested came back 422 with an empty
-        // errors map — a rejection the client could not render.
+        // errors map - a rejection the client could not render.
         let mut inner = validator::ValidationErrors::new();
         inner.add("street", validator::ValidationError::new("required"));
 
@@ -617,7 +617,7 @@ mod validation_tests {
         );
         assert!(
             !ours.errors.contains_key("items.0.name"),
-            "index 0 was valid — no phantom key for it"
+            "index 0 was valid - no phantom key for it"
         );
     }
 
@@ -729,11 +729,11 @@ impl Default for ValidationErrors {
 }
 
 impl std::fmt::Display for ValidationErrors {
-    /// Renders the English fallbacks — with any context prefix, which is
+    /// Renders the English fallbacks - with any context prefix, which is
     /// the whole point of labelling a bag with
-    /// [`FrameworkError::context`] — but never the catalog. `Display` is
-    /// reached from logs, `Box<dyn Error>` chains, and panic messages —
-    /// contexts with no request locale — so it must not depend on one.
+    /// [`FrameworkError::context`] - but never the catalog. `Display` is
+    /// reached from logs, `Box<dyn Error>` chains, and panic messages -
+    /// contexts with no request locale - so it must not depend on one.
     /// Translated text is [`ValidationErrors::to_json`]'s job.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let plain: HashMap<&str, Vec<String>> = self
@@ -869,7 +869,7 @@ pub enum FrameworkError {
     ///
     /// Returned by `FormRequest::extract` when the request body's
     /// `Content-Type` is neither form-urlencoded nor a JSON media type
-    /// (`application/json` or an `application/*+json` suffix) — including a
+    /// (`application/json` or an `application/*+json` suffix) - including a
     /// missing or empty `Content-Type`. The framework refuses to guess at
     /// the body format rather than silently parsing an unknown body as JSON.
     #[error("Unsupported Media Type")]
@@ -897,7 +897,7 @@ pub enum FrameworkError {
     /// CLI sentinel: the failure has already been reported to the user
     /// (e.g. clap formatted and printed its own parse error). Callers
     /// translate this to a non-zero exit code without printing
-    /// anything — see [`Self::silent`] / [`Self::is_silent`] for the
+    /// anything - see [`Self::silent`] / [`Self::is_silent`] for the
     /// pair used by the console dispatcher. Has no HTTP meaning;
     /// `status_code()` returns 500 only because the enum is
     /// HTTP-flavored.
@@ -988,13 +988,13 @@ impl FrameworkError {
     /// CLI sentinel: returns a [`Self::AlreadyReported`] variant signaling
     /// "the user has already seen the message." The console dispatcher
     /// uses this when clap's `try_get_matches_from` produces an error
-    /// that clap formatted and printed itself — the binary's `main`
+    /// that clap formatted and printed itself - the binary's `main`
     /// translates this to a non-zero exit code without `eprintln`,
     /// avoiding a double-print.
     ///
     /// Pair with [`Self::is_silent`] at the consume site. Type-safe:
     /// constructing `FrameworkError::internal("")` directly does NOT
-    /// produce a silent error — only this constructor does.
+    /// produce a silent error - only this constructor does.
     pub fn silent() -> Self {
         Self::AlreadyReported
     }
@@ -1051,7 +1051,7 @@ impl FrameworkError {
     /// rather than a `From` impl. The status code and message are
     /// taken from [`HttpError::status_code`] and
     /// [`HttpError::error_message`] and stored in a [`Self::Domain`]
-    /// variant — response rendering follows the normal Domain path.
+    /// variant - response rendering follows the normal Domain path.
     pub fn from_http_error<E: HttpError>(err: E) -> Self {
         Self::Domain {
             message: err.error_message(),
@@ -1206,7 +1206,7 @@ impl FrameworkError {
     /// Use the advisory [`Unique`] rule for a friendly pre-submit message
     /// (and Precognition), and this helper at the write site for the
     /// authoritative answer. Backend coverage is whatever SeaORM's
-    /// [`DbErr::sql_err`] recognises — MySQL, Postgres, and SQLite all
+    /// [`DbErr::sql_err`] recognises - MySQL, Postgres, and SQLite all
     /// map their duplicate-key errors to
     /// [`SqlErr::UniqueConstraintViolation`].
     ///
@@ -1254,7 +1254,7 @@ impl FrameworkError {
     }
 
     /// Return the per-variant payload string (param name, model name,
-    /// inner message, etc.) — NOT the formatted Display.
+    /// inner message, etc.) - NOT the formatted Display.
     ///
     /// This accessor exists so callers can inspect the variant's
     /// payload field uniformly without matching every variant. For a
@@ -1329,8 +1329,8 @@ impl FrameworkError {
             // The prefix rides along on each message rather than being
             // baked into its text, so a contexted bag still translates:
             // the catalog produces the message, then the prefix goes in
-            // front of it. In English — and in a build with the feature
-            // off — the result is byte-identical to the flattened
+            // front of it. In English - and in a build with the feature
+            // off - the result is byte-identical to the flattened
             // string this used to produce.
             Self::Validation(errors) => Self::Validation(prefix_messages(errors, &prefix)),
             Self::PrecognitionFailure(errors) => {
@@ -1351,7 +1351,7 @@ impl FrameworkError {
                 expected_type,
             },
             // Preserve the structured retry hint when contexting a
-            // rate-limit error — collapsing to Domain would strip the
+            // rate-limit error - collapsing to Domain would strip the
             // duration and defeat the whole point of the variant.
             Self::RateLimited {
                 retry_after,
@@ -1391,7 +1391,7 @@ impl FrameworkError {
 }
 
 /// Rebuild an error bag with `prefix` attached to every message. Keys
-/// and arguments survive, so the messages still translate — see the
+/// and arguments survive, so the messages still translate - see the
 /// call site in [`FrameworkError::context`].
 fn prefix_messages(errors: ValidationErrors, prefix: &str) -> ValidationErrors {
     let mut prefixed = ValidationErrors::new();
@@ -1572,7 +1572,7 @@ mod context_tests {
         let err =
             FrameworkError::rate_limited(Some(std::time::Duration::from_secs(12)), "push service");
         let wrapped = err.context("delivering notification");
-        // Variant and the structured duration must survive the wrap —
+        // Variant and the structured duration must survive the wrap -
         // otherwise upstream retry logic loses the hint.
         assert_eq!(
             wrapped.retry_after(),

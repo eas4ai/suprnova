@@ -5,7 +5,7 @@
 //! open indefinitely; [`TimeoutMiddleware`] gives the request pipeline a
 //! hard deadline and returns `503 Service Unavailable` when it is exceeded.
 //!
-//! # What is — and is not — bounded
+//! # What is - and is not - bounded
 //!
 //! The deadline races [`next(request)`](crate::middleware::Next), which
 //! resolves the moment the handler **returns its [`HttpResponse`]**. It does
@@ -18,7 +18,7 @@
 //!   [`stream_bytes`](crate::http::HttpResponse::stream_bytes)) return
 //!   *immediately* with a lazy body that hyper drains after the middleware
 //!   chain has already completed. The deadline never observes the stream's
-//!   lifetime. ✔ naturally excluded — an SSE stream can stay open for hours
+//!   lifetime. ✔ naturally excluded - an SSE stream can stay open for hours
 //!   under a 30-second timeout.
 //! - **WebSocket upgrades** are skipped explicitly (see below) and, today,
 //!   also take a separate server path that bypasses global middleware
@@ -26,7 +26,7 @@
 //!
 //! # WebSocket carve-out
 //!
-//! [`TimeoutMiddleware`] returns early — without arming the deadline — for
+//! [`TimeoutMiddleware`] returns early - without arming the deadline - for
 //! any request carrying `Upgrade: websocket`. Currently WS upgrades are
 //! dispatched by [`server::handle_ws_upgrade`](crate::server) which never
 //! runs global middleware, so this guard is **defense in depth** for the day
@@ -36,7 +36,7 @@
 //!
 //! When the deadline elapses the in-flight handler future is **dropped** at
 //! its current await point. Anything held across that point is released by
-//! its `Drop` impl — open database transactions roll back, `Mutex`/`RwLock`
+//! its `Drop` impl - open database transactions roll back, `Mutex`/`RwLock`
 //! guards release, file handles close. Work moved off the request via
 //! [`tokio::spawn`] is detached and will **not** be cancelled, so keep
 //! handlers cancel-safe: don't rely on code after a long `.await` running if

@@ -1,4 +1,4 @@
-//! Channel trait + ChannelRegistry — registration + lookup + the
+//! Channel trait + ChannelRegistry - registration + lookup + the
 //! authorize / member_info hooks.
 //!
 //! Note: `hyper::body::Incoming` cannot be constructed outside hyper

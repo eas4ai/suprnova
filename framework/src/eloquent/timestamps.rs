@@ -13,7 +13,7 @@
 //! Auto-detect honours `#[model(timestamps = false)]` (opt-out) and
 //! `#[model(created_at = "creado_en", updated_at = "actualizado_en")]`
 //! (custom column names). When the struct has only ONE of the two
-//! columns, the macro emits a `compile_error!` — almost always a
+//! columns, the macro emits a `compile_error!` - almost always a
 //! typo (e.g. `craeted_at`) we want to surface loudly rather than
 //! silently swallow.
 //!
@@ -50,7 +50,7 @@ pub fn touches_disabled() -> bool {
     TOUCHES_DISABLED.try_with(|b| *b).unwrap_or(false)
 }
 
-/// Run `fut` with touches disabled for the current async task —
+/// Run `fut` with touches disabled for the current async task -
 /// every `model.touch()` call inside the scope short-circuits. Suprnova
 /// analogue of Laravel's `Model::withoutTouching(closure)`.
 ///
@@ -123,8 +123,8 @@ where
 /// covering `type_id`.
 ///
 /// Called by the parent-touch cascade in
-/// [`Model::touch_owners`](crate::eloquent::Model::touch_owners) — which
-/// only ever holds the owner's `TypeId`, never its concrete type — and
+/// [`Model::touch_owners`](crate::eloquent::Model::touch_owners) - which
+/// only ever holds the owner's `TypeId`, never its concrete type - and
 /// by the macro-emitted [`Touchable::touch`] impl in the user's crate,
 /// which is why this is `pub` rather than `pub(crate)`.
 pub fn touches_ignored_for(type_id: std::any::TypeId) -> bool {
@@ -138,7 +138,7 @@ pub fn touches_ignored_for(type_id: std::any::TypeId) -> bool {
 /// Implemented by the `#[suprnova::model]` macro on every struct that
 /// has timestamps enabled (the default when both `created_at` and
 /// `updated_at` fields are present). Models without timestamp columns
-/// don't get a `Touchable` impl — calling `.touch()` on them fails to
+/// don't get a `Touchable` impl - calling `.touch()` on them fails to
 /// compile.
 ///
 /// # Example

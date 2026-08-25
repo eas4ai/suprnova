@@ -1,7 +1,7 @@
-//! Hashing drivers — `Hasher` trait + bcrypt + Argon2i + Argon2id impls.
+//! Hashing drivers - `Hasher` trait + bcrypt + Argon2i + Argon2id impls.
 //!
 //! Mirrors Laravel's `BcryptHasher`/`ArgonHasher`/`Argon2IdHasher` trio.
-//! The trait is what the facade dispatches through — adding a new
+//! The trait is what the facade dispatches through - adding a new
 //! algorithm later (e.g. `Scrypt`) means a new impl + a new
 //! [`Algorithm`] variant, nothing else.
 
@@ -14,7 +14,7 @@ use crate::error::FrameworkError;
 ///
 /// Implementations are `Send + Sync` because the facade caches a
 /// `Box<dyn Hasher>` in a process-wide `OnceLock`. Methods must not
-/// panic on user input — return `FrameworkError` for any failure mode.
+/// panic on user input - return `FrameworkError` for any failure mode.
 pub trait Hasher: Send + Sync + 'static {
     /// Algorithm this hasher produces. Hashes from other algorithms may
     /// still verify (driven by [`HashConfig::verify_algorithm`]) but
@@ -92,7 +92,7 @@ impl Default for BcryptOptions {
 
 /// Bcrypt password hasher. The default driver.
 ///
-/// Honours the 72-byte block-size cap — passwords longer than
+/// Honours the 72-byte block-size cap - passwords longer than
 /// [`MAX_BCRYPT_PASSWORD_BYTES`] are rejected by [`Hasher::hash`] and
 /// fail verification (`Ok(false)`) in [`Hasher::verify`].
 pub struct BcryptHasher {
@@ -156,7 +156,7 @@ impl Hasher for BcryptHasher {
                 return Ok(false);
             }
         }
-        // Defense in depth — only attempt bcrypt verify against $2*$ inputs.
+        // Defense in depth - only attempt bcrypt verify against $2*$ inputs.
         // The bcrypt crate errors on non-bcrypt hashes; we treat that as
         // `false` (the user's stored hash is from a different algorithm).
         match bcrypt::verify(password, hash) {
@@ -181,12 +181,12 @@ impl Hasher for BcryptHasher {
             AlgoName::Bcrypt => {
                 // Algo matches. Now check variant + cost.
                 if info.bcrypt_variant != Some("2b") {
-                    // Legacy $2a$/$2x$/$2y$ — rotate to canonical $2b$.
+                    // Legacy $2a$/$2x$/$2y$ - rotate to canonical $2b$.
                     return true;
                 }
                 info.rounds.map(|c| c < self.opts.rounds).unwrap_or(true)
             }
-            // Different algorithm — caller should rehash with us.
+            // Different algorithm - caller should rehash with us.
             _ => true,
         }
     }
@@ -400,7 +400,7 @@ fn argon_verify(
     }
     let parsed = match PasswordHash::new(hash) {
         Ok(p) => p,
-        // Non-PHC input — treat as failed verify (could be bcrypt or
+        // Non-PHC input - treat as failed verify (could be bcrypt or
         // garbage; we don't error out so the auth flow stays uniform).
         Err(_) => return Ok(false),
     };
@@ -417,7 +417,7 @@ fn argon_verify(
         }
     }
     // `verify_password` checks the digest using Argon2's constant-time
-    // primitives. Verifier is constructed with defaults — the hash
+    // primitives. Verifier is constructed with defaults - the hash
     // string carries its own params, so the verifier's defaults are
     // ignored for the cost check.
     Ok(argon2::Argon2::default()
@@ -427,11 +427,11 @@ fn argon_verify(
 
 fn argon_needs_rehash(own_algo: Algorithm, opts: &Argon2Options, hash: &str) -> bool {
     let info = parse(hash);
-    // Algorithm mismatch — rotate.
+    // Algorithm mismatch - rotate.
     if info.algo.supported() != Some(own_algo) {
         return true;
     }
-    // Argon — compare m/t/p against current; if any is weaker, rehash.
+    // Argon - compare m/t/p against current; if any is weaker, rehash.
     let m = info.memory.unwrap_or(0);
     let t = info.time.unwrap_or(0);
     let p = info.threads.unwrap_or(0);
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn bcrypt_needs_rehash_on_algorithm_mismatch() {
         // Mint an argon2id hash, then ask the bcrypt driver if it needs
-        // rehashing — must be true.
+        // rehashing - must be true.
         let argon = Argon2idHasher::new(Argon2Options::default()).expect("ctor");
         let h = argon.hash("test").expect("hash");
         let bcrypt = BcryptHasher::new(BcryptOptions { rounds: 12 });
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn driver_verify_is_single_algorithm_only() {
-        // Per-driver `verify` is single-algorithm by design — it tests
+        // Per-driver `verify` is single-algorithm by design - it tests
         // ONLY its own family. Cross-algorithm verification is the
         // facade's job (`crate::hashing::verify_with` dispatches on the
         // stored hash's algorithm). At the driver level, a bcrypt

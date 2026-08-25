@@ -1,4 +1,4 @@
-//! [`FeatureSync`] — keeps live evaluators consistent with persisted flag state.
+//! [`FeatureSync`] - keeps live evaluators consistent with persisted flag state.
 //!
 //! featureflag's `is_enabled` is synchronous, which means every concrete
 //! evaluator we ship keeps some flavour of read-side state ahead of the
@@ -11,7 +11,7 @@
 //!
 //! **The whole point of feature flags is sub-second propagation for
 //! kill-switch toggles.** Waiting on a TTL or a polling reload isn't
-//! good enough — by the time the change is visible, the incident is
+//! good enough - by the time the change is visible, the incident is
 //! already in production. This module is the synchronous-fan-out hook
 //! every write path calls into so live evaluators reflect the persisted
 //! truth before the mutation returns.
@@ -41,15 +41,15 @@
 //! [`CompositeFeatureSync`] guarantees the correct order by splitting
 //! implementors into two named slots:
 //!
-//! 1. `data_sources` — anything whose state is the source-of-truth
+//! 1. `data_sources` - anything whose state is the source-of-truth
 //!    refresh (e.g. `DatabaseEvaluator::reload`).
-//! 2. `caches` — anything memoizing the data-source's answers
+//! 2. `caches` - anything memoizing the data-source's answers
 //!    (e.g. `CachedEvaluator::invalidate`).
 //!
 //! The composite executes all data-source `on_flag_changed` calls
 //! first, awaits them, then executes all cache calls. A
 //! `Vec<Arc<dyn FeatureSync>>` whose order is "whatever the caller
-//! passed" would be a bug magnet — the slot-typed shape prevents it
+//! passed" would be a bug magnet - the slot-typed shape prevents it
 //! at the call site.
 //!
 //! # Wiring
@@ -72,7 +72,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Most apps don't need to do this by hand — [`bootstrap_database_cached`](crate::features::bootstrap_database_cached)
+//! Most apps don't need to do this by hand - [`bootstrap_database_cached`](crate::features::bootstrap_database_cached)
 //! sets up the whole chain in one call. Reach for `CompositeFeatureSync`
 //! directly only when you've got a non-default evaluator topology (a
 //! Redis-backed cache, a remote sync source, etc.).
@@ -82,9 +82,9 @@
 //! [`notify`] is the function every mutation path calls. It resolves
 //! `Arc<dyn FeatureSync>` from the App container (falling back to
 //! [`TestContainer`](crate::testing::TestContainer) overrides for tests)
-//! and awaits `on_flag_changed`. If no `FeatureSync` is bound — which
+//! and awaits `on_flag_changed`. If no `FeatureSync` is bound - which
 //! is the expected state for apps that don't run an in-process
-//! evaluator (e.g. an admin CLI tool that only writes the DB) — the
+//! evaluator (e.g. an admin CLI tool that only writes the DB) - the
 //! call is a no-op.
 
 use async_trait::async_trait;
@@ -94,7 +94,7 @@ use std::sync::Arc;
 ///
 /// Implementations are invoked from [`notify`] every time a flag row
 /// is created, updated, or deleted. The `feature` and `scope_key`
-/// arguments identify the affected row exactly — implementors can use
+/// arguments identify the affected row exactly - implementors can use
 /// them for targeted invalidation, or ignore them and do a full
 /// refresh.
 ///
@@ -102,7 +102,7 @@ use std::sync::Arc;
 ///
 /// Uses `#[async_trait]` so implementors can `.await` inside
 /// `on_flag_changed` (typical: `DatabaseEvaluator::reload()` issues a
-/// SELECT). The trait is intentionally object-safe — apps store and
+/// SELECT). The trait is intentionally object-safe - apps store and
 /// resolve it as `Arc<dyn FeatureSync>` through the App container.
 #[async_trait]
 pub trait FeatureSync: Send + Sync + 'static {
@@ -128,7 +128,7 @@ pub struct CompositeFeatureSync {
 impl CompositeFeatureSync {
     /// Construct a composite with the two slots populated explicitly.
     ///
-    /// The slot order is part of the API contract — passing an empty
+    /// The slot order is part of the API contract - passing an empty
     /// slot is fine ("I have a database but no in-process cache"), but
     /// crossing the slots (putting a cache in `data_sources`) breaks
     /// the staleness invariant the type is here to enforce. The
@@ -159,7 +159,7 @@ impl FeatureSync for CompositeFeatureSync {
 }
 
 /// Resolve `Arc<dyn FeatureSync>` from the App container and dispatch
-/// `on_flag_changed`. If no sync is bound, this is a no-op — the most
+/// `on_flag_changed`. If no sync is bound, this is a no-op - the most
 /// common reason for a missing binding is an out-of-process admin tool
 /// that only mutates the DB and has no live evaluator to refresh.
 ///
@@ -221,7 +221,7 @@ mod tests {
                 "db:flag-a:user:1".to_string(),
                 "cache:flag-a:user:1".to_string()
             ],
-            "data sources must complete before caches invalidate — \
+            "data sources must complete before caches invalidate - \
              the db delay shouldn't let the cache run first",
         );
     }
@@ -230,7 +230,7 @@ mod tests {
     async fn composite_with_empty_slots_is_a_noop() {
         let composite = CompositeFeatureSync::new(vec![], vec![]);
         composite.on_flag_changed("anything", "").await;
-        // No panic, no allocation observable from the test — the
+        // No panic, no allocation observable from the test - the
         // composite tolerates either slot being empty.
     }
 
@@ -259,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn notify_is_noop_when_no_sync_bound() {
         // Without a TestContainer::fake() guard, App::make returns
-        // None and notify just returns — no panic, no error to
+        // None and notify just returns - no panic, no error to
         // propagate. This matches the "admin CLI tool only writes
         // the DB" use case.
         notify("flag", "").await;

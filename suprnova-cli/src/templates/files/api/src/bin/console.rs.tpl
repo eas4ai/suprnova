@@ -1,4 +1,4 @@
-//! {project_name} console — runtime command dispatch.
+//! {project_name} console - runtime command dispatch.
 //!
 //! Per-project entry point for `db:seed`, your own `#[command]`s, and
 //! other one-shot CLI tasks. Calls `{package_name}::bootstrap::register()`
@@ -28,7 +28,7 @@ async fn main() -> ExitCode {
     // dispatch_argv_with_init owns all user-facing stderr (both clap
     // parse errors and handler-returned errors); main is pure
     // Result → ExitCode translation. The bootstrap closure runs only
-    // when clap matches a real registered subcommand — help, version,
+    // when clap matches a real registered subcommand - help, version,
     // and parse-error paths skip it entirely.
     let result = suprnova::console::dispatch_argv_with_init(argv, || async {
         {package_name}::config::register_all();

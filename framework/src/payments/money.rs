@@ -1,4 +1,4 @@
-//! [`Money`] and [`Currency`] — the fixed-precision amount + ISO-4217
+//! [`Money`] and [`Currency`] - the fixed-precision amount + ISO-4217
 //! currency code pair used everywhere a payment value crosses the
 //! framework boundary.
 //!
@@ -12,7 +12,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
-/// Re-export of [`iso_currency::Currency`] — ISO 4217 currency codes.
+/// Re-export of [`iso_currency::Currency`] - ISO 4217 currency codes.
 pub use iso_currency::Currency;
 
 /// A monetary amount stored as i64 minor units (cents/pence/yen/etc.) plus a `Currency`.
@@ -22,7 +22,7 @@ pub use iso_currency::Currency;
 ///
 /// # Invariants
 ///
-/// - Minor units are stored as `i64` — negative values represent debits/refunds.
+/// - Minor units are stored as `i64` - negative values represent debits/refunds.
 /// - `Add` and `Sub` panic on currency mismatch; silent cross-currency arithmetic
 ///   would silently corrupt amounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ impl Money {
     /// threshold is currency-dependent: USD/EUR (exponent 2) overflows above
     /// ~9.2 × 10¹⁶ major units, zero-decimal currencies (JPY/KRW) above
     /// 9.2 × 10¹⁸. Real-world payment-rail amounts are bounded far below
-    /// these limits — `Stripe`, `Paddle`, and every other provider Suprnova
+    /// these limits - `Stripe`, `Paddle`, and every other provider Suprnova
     /// targets cap line items below `i64::MAX / 100`. If you are propagating
     /// untrusted off-rail data through this constructor, validate the
     /// decimal range before calling.
@@ -98,9 +98,9 @@ impl Add for Money {
     ///
     /// # Panics
     ///
-    /// - Currency mismatch — silent cross-currency arithmetic would corrupt
+    /// - Currency mismatch - silent cross-currency arithmetic would corrupt
     ///   amounts, so the type panics rather than producing a wrong number.
-    /// - i64 minor-unit overflow — unreachable for any realistic payment
+    /// - i64 minor-unit overflow - unreachable for any realistic payment
     ///   amount (the threshold is ~9.2 × 10¹⁶ for two-decimal currencies),
     ///   but documented for completeness.
     fn add(self, rhs: Money) -> Money {
@@ -127,7 +127,7 @@ impl Sub for Money {
     ///
     /// # Panics
     ///
-    /// Same conditions as [`Add::add`] — currency mismatch or i64 minor-unit
+    /// Same conditions as [`Add::add`] - currency mismatch or i64 minor-unit
     /// overflow. See the `Add` impl docs above.
     fn sub(self, rhs: Money) -> Money {
         assert!(

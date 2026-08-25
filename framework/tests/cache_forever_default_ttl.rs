@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `cache` #252 — `Cache::forever` is
+//! Regression: HIGH audit finding `cache` #252 - `Cache::forever` is
 //! not forever when `CACHE_DEFAULT_TTL` is set.
 //!
 //! Both stores must honour `put_raw(_, _, None)` as "no expiration",
@@ -7,7 +7,7 @@
 //! store with the facade-resolved default TTL applied.
 //!
 //! These tests exercise the store-level contract (where the audit
-//! divergence lived) rather than the facade — that lets them run
+//! divergence lived) rather than the facade - that lets them run
 //! without an `App` boot, and they catch the exact bug the audit
 //! flagged: a store substituting its own default on `None`.
 
@@ -19,7 +19,7 @@ use suprnova::cache::{CacheDriver, InMemoryCache};
 
 #[tokio::test]
 async fn store_put_raw_none_ttl_means_no_expiration_in_memory() {
-    // Construct a memory store with a 1-second configured default — the
+    // Construct a memory store with a 1-second configured default - the
     // store MUST NOT substitute this when `put_raw` is called with `None`.
     // (Pre-fix Redis did exactly that substitution; in-memory always
     // honoured None, so this test pins the contract uniformly.)
@@ -33,7 +33,7 @@ async fn store_put_raw_none_ttl_means_no_expiration_in_memory() {
 
     store.put_raw("k", "\"v\"", None).await.expect("put_raw");
 
-    // After 1.2s — past the configured default — the key MUST still be
+    // After 1.2s - past the configured default - the key MUST still be
     // present. If the store substituted the default on None, this would
     // already have expired.
     tokio::time::sleep(Duration::from_millis(1_200)).await;
@@ -52,7 +52,7 @@ async fn store_exposes_default_ttl_for_facade_consumption() {
     // The facade reads `default_ttl()` to resolve `Cache::put(None)`.
     // Verify that the in-memory store returns what the config set,
     // converted to Duration. (Pre-fix the in-memory store didn't track
-    // a default at all — the facade had no way to apply it uniformly.)
+    // a default at all - the facade had no way to apply it uniformly.)
     let config = CacheConfig {
         driver: CacheDriver::Memory,
         url: "unused".into(),

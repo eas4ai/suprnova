@@ -1,8 +1,8 @@
 //! Backend-aware positional placeholder rendering for hand-written SQL.
 //!
 //! SeaORM's query builder picks the right dialect on its own, but the
-//! subsystems that compose SQL by hand — the queue driver, the failed-jobs
-//! store, the notification store, the pivot-table relation helpers — have to
+//! subsystems that compose SQL by hand - the queue driver, the failed-jobs
+//! store, the notification store, the pivot-table relation helpers - have to
 //! choose the convention themselves. SQLite and MySQL take `?` in every
 //! position; Postgres takes ordinals (`$1`, `$2`, …) and rejects a bare `?`
 //! as a syntax error at parse time, before a single row is touched.
@@ -16,7 +16,7 @@ use sea_orm::DatabaseBackend;
 
 /// Render the `n`-th (1-based) positional placeholder for `backend`.
 ///
-/// `n` is ignored outside Postgres because `?` carries no ordinal — callers
+/// `n` is ignored outside Postgres because `?` carries no ordinal - callers
 /// still pass it so the same numbering logic reads identically at every site.
 pub(crate) fn placeholder(backend: DatabaseBackend, n: usize) -> Result<String, FrameworkError> {
     match backend {

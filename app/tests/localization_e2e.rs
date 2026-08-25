@@ -1,4 +1,4 @@
-//! Task 11 — localization dogfood, driven end to end through the real
+//! Task 11 - localization dogfood, driven end to end through the real
 //! app stack.
 //!
 //! Harness mirrors `admin_users_bounded_and_gated.rs` (spawn the app's
@@ -8,8 +8,8 @@
 //!
 //! The DB turned out not to be optional: `SessionMiddleware` (global,
 //! ahead of `LocaleMiddleware` in the chain) unconditionally uses
-//! `DatabaseSessionDriver` — the only session driver the framework
-//! ships — and a *successful* `GET` response makes it write the
+//! `DatabaseSessionDriver` - the only session driver the framework
+//! ships - and a *successful* `GET` response makes it write the
 //! session's `_previous.url` (`Redirect::back` bookkeeping), which
 //! fails closed with 500 when there is nowhere to write it. The
 //! DB-less `admin_users_bounded_and_gated.rs` harness never hits this:
@@ -22,8 +22,8 @@
 //! addition to the DB, all process-global state that must not race
 //! across the `#[tokio::test]`s in this file.
 //!
-//! `Localization::bootstrap()` — the call that normally binds the
-//! catalog — is `pub(crate)` to the framework and only runs from
+//! `Localization::bootstrap()` - the call that normally binds the
+//! catalog - is `pub(crate)` to the framework and only runs from
 //! `Server::run()` / the daemon subcommand bootstraps, neither of which
 //! this harness goes through (same reason every other app e2e test
 //! binds `Crypt`/`DB`/`UserProvider` itself rather than calling
@@ -33,7 +33,7 @@
 //! helper uses.
 //!
 //! (a) `Accept-Language: es` -> the Spanish greeting on `GET /lang-demo`.
-//! (b) cookie `locale=en` (+ `Accept-Language: es`) -> English wins —
+//! (b) cookie `locale=en` (+ `Accept-Language: es`) -> English wins -
 //!     cookie precedes header in the default detection chain.
 //! (c) `POST /lang-demo` with no `name` + `Accept-Language: es` -> the
 //!     `validation-required` message for the missing field renders in
@@ -62,7 +62,7 @@ use suprnova::{DbConnection, MiddlewareRegistry, handle_request};
 
 /// `Crypt`, the container's `dyn Translator` binding, and the global
 /// middleware registry are all process-global, so these tests take
-/// turns — the same reason `csrf_protects_state_changes.rs` serializes.
+/// turns - the same reason `csrf_protects_state_changes.rs` serializes.
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Build the same `LocalizationConfig` `LocaleMiddleware::from_env()`
@@ -84,7 +84,7 @@ fn bind_translator() {
 }
 
 /// Stand up the app's real router behind the real global middleware
-/// chain (`register_http_stack()` — the same function
+/// chain (`register_http_stack()` - the same function
 /// `bootstrap::register` calls), so `LocaleMiddleware` and the
 /// translated-validation seam run for real rather than being
 /// hand-mocked.
@@ -95,7 +95,7 @@ async fn spawn_app() -> (SocketAddr, tokio::sync::MutexGuard<'static, ()>) {
     // runs immediately after it in the chain.
     Crypt::init(EncryptionKey::generate());
 
-    // `SessionMiddleware` unconditionally uses `DatabaseSessionDriver` —
+    // `SessionMiddleware` unconditionally uses `DatabaseSessionDriver` -
     // see the module doc comment above for why a successful `GET`
     // needs this even though `/lang-demo` itself never touches the DB.
     let conn = sea_orm::Database::connect("sqlite::memory:")
@@ -221,7 +221,7 @@ async fn accept_language_es_returns_spanish_greeting() {
     assert_eq!(body, "¡Bienvenido a Suprnova!");
 }
 
-/// (b) A `locale=en` cookie beats `Accept-Language: es` — cookie
+/// (b) A `locale=en` cookie beats `Accept-Language: es` - cookie
 /// precedes header in the detection chain (session, which would
 /// otherwise come first, is empty here).
 #[tokio::test]
@@ -240,7 +240,7 @@ async fn cookie_locale_beats_accept_language_header() {
 }
 
 /// (c) A validation failure from `POST /lang-demo` (missing required
-/// `name`) arrives translated when `Accept-Language: es` — proving the
+/// `name`) arrives translated when `Accept-Language: es` - proving the
 /// `validation-<rule>` keyed-message seam, not just plain `Lang::get`.
 #[tokio::test]
 async fn validation_failure_translates_under_accept_language_es() {
@@ -285,7 +285,7 @@ async fn validation_failure_defaults_to_english() {
     );
 }
 
-/// I1 — the dogfood app must actually register `LocaleShare`, not just
+/// I1 - the dogfood app must actually register `LocaleShare`, not just
 /// `LocaleMiddleware`. Drives a real Inertia XHR visit (`X-Inertia:
 /// true` plus a matching `X-Inertia-Version`) through the user
 /// directory route (`GET /users`, a real `InertiaResponse`, unlike
@@ -295,31 +295,31 @@ async fn validation_failure_defaults_to_english() {
 ///
 /// `/users` rather than `/` (`controllers::home::index`): the home
 /// route resolves an `#[injectable]` `ExampleAction` from the
-/// container, which requires `App::boot_services()` to have run — a
+/// container, which requires `App::boot_services()` to have run - a
 /// step this file's harness deliberately skips (see the module doc
 /// comment). `/users` runs `User::query().simple_paginate(...)`
 /// against the migrated-but-empty sqlite database this harness already
 /// sets up, needing no further bootstrap or seed data, and still
-/// exercises a real `InertiaResponse::resolve` — the only thing this
+/// exercises a real `InertiaResponse::resolve` - the only thing this
 /// test cares about.
 ///
 /// `spawn_app()` runs only `register_http_stack()`, not the full
-/// `bootstrap::register()` (see the module doc comment above — that
+/// `bootstrap::register()` (see the module doc comment above - that
 /// also calls `DB::init()` against a real database, which this harness
 /// cannot satisfy). `App::register_inertia_shared(Arc::new(LocaleShare))`
-/// is one of the lines only the fuller `register()` runs, so — exactly
-/// as `bind_translator()` above stands in for `Localization::bootstrap()`
-/// — this test calls it directly: the same registration
+/// is one of the lines only the fuller `register()` runs, so - exactly
+/// as `bind_translator()` above stands in for `Localization::bootstrap()` -
+/// this test calls it directly: the same registration
 /// `app/src/bootstrap.rs::register()` makes, driven through the same
 /// real router and middleware chain the other tests in this file use.
 ///
 /// Registers a `LocalizationConfig` whose `fallback_locale` ("fr") is
 /// distinct from both the env default ("en", what every unpinned
 /// `resolved_config()` call in this binary would otherwise silently
-/// report) and the request's negotiated locale ("es") — the same
+/// report) and the request's negotiated locale ("es") - the same
 /// distinguishing trick
 /// `framework/tests/localization_middleware.rs`'s
-/// `register_config_with_fallback` uses — so a regression that
+/// `register_config_with_fallback` uses - so a regression that
 /// hardcodes `fallback: "en"`, or reads `default_locale` instead of
 /// `fallback_locale`, cannot pass this test by coincidence. This only
 /// affects `LocaleShare` (which reads `resolved_config()`); it does not

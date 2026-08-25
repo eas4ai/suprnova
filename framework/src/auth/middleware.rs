@@ -214,22 +214,22 @@ impl Middleware for GuestMiddleware {
 /// HTTP Basic authentication middleware.
 ///
 /// Authenticates requests from the `Authorization: Basic <base64(user:pass)>`
-/// header against a guard — mirroring Laravel's `Auth::basic` / `onceBasic`.
+/// header against a guard - mirroring Laravel's `Auth::basic` / `onceBasic`.
 /// The decoded username is matched against the `field` credential (default
 /// `"email"`); the password is verified by the guard's provider.
 ///
-/// Every failure mode — a missing or malformed header, or credentials that do
-/// not resolve a user — returns `401 Unauthorized` with a
+/// Every failure mode - a missing or malformed header, or credentials that do
+/// not resolve a user - returns `401 Unauthorized` with a
 /// `WWW-Authenticate: Basic realm="..."` challenge so a browser/client can
 /// prompt for (new) credentials.
 ///
 /// ```rust,ignore
 /// use suprnova::{BasicAuthMiddleware, group};
 ///
-/// // Stateful — logs the user into the session on success (Auth::basic):
+/// // Stateful - logs the user into the session on success (Auth::basic):
 /// group!("/admin").middleware(BasicAuthMiddleware::new()).routes([...]);
 ///
-/// // Stateless — authenticates for this request only (Auth::onceBasic):
+/// // Stateless - authenticates for this request only (Auth::onceBasic):
 /// group!("/api").middleware(BasicAuthMiddleware::once()).routes([...]);
 /// ```
 pub struct BasicAuthMiddleware {
@@ -255,7 +255,7 @@ impl BasicAuthMiddleware {
         }
     }
 
-    /// Stateful HTTP Basic auth against the default guard — logs the user into
+    /// Stateful HTTP Basic auth against the default guard - logs the user into
     /// the session on success. Mirrors Laravel's `Auth::basic()`.
     ///
     /// Persisting the login requires `SessionMiddleware` earlier in the chain
@@ -265,7 +265,7 @@ impl BasicAuthMiddleware {
         Self::build(false)
     }
 
-    /// Stateless HTTP Basic auth against the default guard — authenticates for
+    /// Stateless HTTP Basic auth against the default guard - authenticates for
     /// the current request only (no session). Mirrors Laravel's `Auth::onceBasic()`.
     pub fn once() -> Self {
         Self::build(true)
@@ -328,7 +328,7 @@ impl BasicAuthMiddleware {
 /// Escape the realm string for inclusion inside the `quoted-string`
 /// production of an HTTP `WWW-Authenticate` header (RFC 7230 §3.2.6 /
 /// RFC 7617 §2). The realm originates from the operator's `APP_NAME`
-/// env var, so we don't trust it to be `"`/`\`-clean — a hostname with
+/// env var, so we don't trust it to be `"`/`\`-clean - a hostname with
 /// a stray `"` would otherwise smuggle the closing delimiter and
 /// terminate the auth-scheme parameters early, which some user agents
 /// silently misinterpret as "no realm".
@@ -424,7 +424,7 @@ mod realm_quoting_tests {
 
     #[test]
     fn control_characters_are_dropped() {
-        // CR/LF are the dangerous ones — a CRLF in the realm would
+        // CR/LF are the dangerous ones - a CRLF in the realm would
         // smuggle a header injection if it survived to the wire.
         assert_eq!(quote_realm("Bad\r\nRealm"), "BadRealm");
         // TAB is preserved (it's the one allowed control character

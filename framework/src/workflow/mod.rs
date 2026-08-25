@@ -78,7 +78,7 @@ use tokio_util::sync::CancellationToken;
 /// row carries a lease, so an abandoned step simply lets its lease lapse
 /// and another worker reclaims it. That makes a bounded wait strictly
 /// better than the unbounded one it replaces, where a step that never
-/// returned held the worker open until SIGKILL — and SIGKILL leaves the
+/// returned held the worker open until SIGKILL - and SIGKILL leaves the
 /// same lease to lapse anyway, just without the log line saying so.
 const WORKFLOW_DRAIN_GRACE: Duration = Duration::from_secs(30);
 
@@ -120,7 +120,7 @@ async fn drain_in_flight(in_flight: &mut JoinSet<()>, grace: Duration) -> usize 
 /// RAII guard that aborts the wrapped task on drop.
 ///
 /// Wraps the workflow heartbeat task so the lease-renewal loop is guaranteed
-/// to stop the moment `process_claimed_workflow` returns or panics — even if
+/// to stop the moment `process_claimed_workflow` returns or panics - even if
 /// a later `?` early-returns from one of the settlement arms. Without this,
 /// a leaked heartbeat would keep extending `locked_until` for a workflow no
 /// worker is actually running, blocking reclamation forever.
@@ -140,7 +140,7 @@ impl Drop for AbortOnDrop {
 /// timeouts still produce sane tick rates instead of busy-looping.
 ///
 /// `worker_id` and `attempts` are the fencing token from the claim that
-/// started this run — threaded through to `store::refresh_lock` so a
+/// started this run - threaded through to `store::refresh_lock` so a
 /// heartbeat that fires after another worker has reclaimed this row (this
 /// worker was starved past its lease) cannot extend the new owner's lease
 /// under the old owner's name. See `store::refresh_lock` for the fencing
@@ -230,7 +230,7 @@ impl WorkflowWorker {
 
     /// Create a worker with a custom config.
     ///
-    /// Does **not** validate the config or check the registry — callers
+    /// Does **not** validate the config or check the registry - callers
     /// that need those invariants should run [`WorkflowConfig::validate`]
     /// and [`registry::assert_no_duplicates`] themselves.
     pub fn with_config(config: WorkflowConfig) -> Self {
@@ -286,7 +286,7 @@ impl WorkflowWorker {
             // Drain finished tasks every iteration so the JoinSet never
             // grows without bound between cancellation rounds. This also
             // surfaces any task panic that escaped `process_claimed_workflow`
-            // (it shouldn't — there's a catch_unwind inside — but the
+            // (it shouldn't - there's a catch_unwind inside - but the
             // tracing event makes the leak observable).
             while let Some(joined) = in_flight.try_join_next() {
                 if let Err(err) = joined
@@ -308,9 +308,9 @@ impl WorkflowWorker {
                 // Bounded: the drain used to await every in-flight task with
                 // no deadline, so a single workflow step that never returns
                 // held the worker open until SIGKILL. Cancellation already
-                // closed admission — this arm is only reached once
+                // closed admission - this arm is only reached once
                 // `cancel.is_cancelled()`, and the loop returns rather than
-                // claiming again — so the only question left is how long to
+                // claiming again - so the only question left is how long to
                 // wait for work already running.
                 let abandoned = drain_in_flight(&mut in_flight, WORKFLOW_DRAIN_GRACE).await;
                 if abandoned > 0 {
@@ -327,7 +327,7 @@ impl WorkflowWorker {
             }
 
             // Acquire-or-cancel: if the token fires while every slot is
-            // taken we must not block on the semaphore — the next iter
+            // taken we must not block on the semaphore - the next iter
             // would never see `is_cancelled`. Race the permit against
             // the cancel signal.
             let permit = tokio::select! {
@@ -336,7 +336,7 @@ impl WorkflowWorker {
                 permit = semaphore.clone().acquire_owned() => permit.unwrap(),
             };
 
-            // Race the claim against cancellation too — if the DB is
+            // Race the claim against cancellation too - if the DB is
             // slow and Ctrl-C fires, we shouldn't wait a full claim
             // round-trip to exit.
             let claim = tokio::select! {
@@ -430,7 +430,7 @@ async fn process_claimed_workflow(
     // longer than `lock_timeout_secs` (default 30s) lets
     // `claim_next_workflow` reclaim the workflow under our feet.
     //
-    // The guard aborts the heartbeat task on drop. That's load-bearing —
+    // The guard aborts the heartbeat task on drop. That's load-bearing -
     // each settle arm uses `?`, so an early return must not leak the
     // heartbeat task and have it keep extending `locked_until` for a
     // workflow nobody is running.
@@ -444,7 +444,7 @@ async fn process_claimed_workflow(
     // Run the workflow body inside a panic boundary so a panicking handler
     // does not strand the row. The spawn site only logs Err returns; a panic
     // would otherwise unwind the spawned task and skip the requeue/mark_failed
-    // path entirely, leaving status='running' until the lease expires —
+    // path entirely, leaving status='running' until the lease expires -
     // and the lease itself only matters now that `claim_next_workflow`
     // reclaims expired-running rows. The boundary mirrors the request-path
     // pattern in `server::execute_chain_safely`: catch the unwind, downcast
@@ -461,7 +461,7 @@ async fn process_claimed_workflow(
                 attempts = claimed.attempts,
                 max_attempts = claimed.max_attempts,
                 panic = %msg,
-                "workflow handler panicked — routing through retry/fail path"
+                "workflow handler panicked - routing through retry/fail path"
             );
             Err(FrameworkError::internal(format!(
                 "workflow handler panicked: {msg}"
@@ -603,7 +603,7 @@ mod tests {
             .expect("workflow insert");
 
         // `WorkflowContext::new` now takes the claim's fencing token
-        // (worker_id + attempts) — `refresh_lock` inside `run_step_with_input`
+        // (worker_id + attempts) - `refresh_lock` inside `run_step_with_input`
         // presents it back to the store, so the row must actually be claimed
         // first or every refresh would be a fenced-out no-op.
         let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
@@ -665,7 +665,7 @@ mod tests {
     // Replaying the same step name+index with a *different* serialized input
     // must fail loud rather than silently returning the cached output from
     // the prior input. Without the determinism guard, the second call would
-    // return the cached `42` even though the caller passed input `7` —
+    // return the cached `42` even though the caller passed input `7` -
     // corrupting any downstream step that branches on this step's output.
     #[tokio::test]
     async fn test_step_replay_with_mismatched_input_errors() {
@@ -746,7 +746,7 @@ mod tests {
             msg.contains("deterministic"),
             "error must reference the determinism contract, got: {msg}"
         );
-        // The step closure must NOT have run on the failed replay — the
+        // The step closure must NOT have run on the failed replay - the
         // guard short-circuits before the user function is invoked.
         assert_eq!(
             INPUT_MISMATCH_CALLS.load(Ordering::SeqCst),
@@ -821,7 +821,7 @@ mod tests {
         let input = serde_json::to_string(&()).unwrap();
 
         // max_attempts = 3, attempts will increment to 1 after mark_running,
-        // so 1 < 3 — the requeue arm fires.
+        // so 1 < 3 - the requeue arm fires.
         let handle = store::insert_workflow(&workflow_name, &input, 3)
             .await
             .expect("insert workflow");
@@ -836,7 +836,7 @@ mod tests {
         process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect(
-                "process_claimed_workflow returned Err — the panic boundary should have caught it",
+                "process_claimed_workflow returned Err - the panic boundary should have caught it",
             );
 
         let status = store::get_workflow_status(handle.id()).await.unwrap();
@@ -879,7 +879,7 @@ mod tests {
         process_claimed_workflow(claimed, Arc::new(config))
             .await
             .expect(
-                "process_claimed_workflow returned Err — the panic boundary should have caught it",
+                "process_claimed_workflow returned Err - the panic boundary should have caught it",
             );
 
         let status = store::get_workflow_status(handle.id()).await.unwrap();
@@ -900,7 +900,7 @@ mod tests {
     // inside `process_claimed_workflow` extends `locked_until` at half
     // the lock-timeout interval until the body resolves. Without the
     // heartbeat, the only mid-body lease refreshes are the per-step
-    // pre/post refreshes in `WorkflowContext::run_step_with_input` —
+    // pre/post refreshes in `WorkflowContext::run_step_with_input` -
     // a single step that runs longer than `lock_timeout_secs` would
     // therefore go the entire `f().await` window with the lease frozen
     // at the value set by the pre-step refresh, and another worker can
@@ -956,7 +956,7 @@ mod tests {
 
         // Wait for the pre-step refresh to land (the step row appears
         // with status='running' and started_at set). That value of
-        // locked_until becomes our baseline — anything strictly greater
+        // locked_until becomes our baseline - anything strictly greater
         // than this in the polling loop below can only have been
         // written by the heartbeat.
         let baseline_lock = {
@@ -973,7 +973,7 @@ mod tests {
                     && s.status == StepStatus::Running.as_str()
                     && s.started_at.is_some()
                 {
-                    // Step has started — capture the workflow lease as
+                    // Step has started - capture the workflow lease as
                     // it stands after the pre-step refresh.
                     let record = store::get_workflow_record(workflow_id)
                         .await
@@ -1002,7 +1002,7 @@ mod tests {
                 .await
                 .expect("poll workflow record");
             if record.status != WorkflowStatus::Running.as_str() {
-                // Body has settled — post-step refresh and mark_succeeded
+                // Body has settled - post-step refresh and mark_succeeded
                 // have either fired or are about to. Stop counting; we
                 // only care about mid-body advances.
                 break;
@@ -1020,7 +1020,7 @@ mod tests {
              was executing; baseline (post-pre-step-refresh) = {baseline_lock}, no advance observed"
         );
 
-        // The body must still settle cleanly — the heartbeat guard
+        // The body must still settle cleanly - the heartbeat guard
         // must abort the renewal task on drop, leaving the final
         // `mark_succeeded` write authoritative and the row in
         // Succeeded.
@@ -1085,7 +1085,7 @@ mod tests {
         TestContainer::singleton(conn.clone());
 
         // Insert a workflow row, then manually mark it 'running' with an
-        // already-expired lease — simulating a worker that crashed and
+        // already-expired lease - simulating a worker that crashed and
         // never released its lock.
         let handle = store::insert_workflow("recoverable", "{}", 3)
             .await
@@ -1125,7 +1125,7 @@ mod tests {
     // A cancelled worker must drain in-flight workflows before returning.
     // Spawns a worker that has no rows to claim (so it idles in the
     // poll/sleep path), cancels the token, and asserts run_with_cancel
-    // resolves cleanly to Ok(()) — i.e. the cancellation path exits the
+    // resolves cleanly to Ok(()) - i.e. the cancellation path exits the
     // loop rather than blocking on the semaphore or the next claim.
     #[tokio::test]
     async fn test_worker_run_with_cancel_returns_cleanly() {
@@ -1205,7 +1205,7 @@ mod tests {
             .expect("insert workflow");
 
         // Claim (so the row has a fencing token to settle against), then
-        // mark it Succeeded directly — no full worker run involved.
+        // mark it Succeeded directly - no full worker run involved.
         let claimed = store::mark_running(handle.id(), "test-worker", Duration::from_secs(30))
             .await
             .expect("mark running");
@@ -1230,7 +1230,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     // Happy path: a single worker claims and settles a workflow using its own
-    // fencing token. Must still succeed normally post-fix — the fencing
+    // fencing token. Must still succeed normally post-fix - the fencing
     // predicate must not reject the legitimate, still-current owner.
     #[tokio::test]
     async fn test_fenced_settlement_happy_path_succeeds() {
@@ -1266,12 +1266,12 @@ mod tests {
 
     // Two workers, one lease expiry: worker A claims, its lease lapses
     // (simulated the same way `test_retry_flow` and the crash-recovery test
-    // simulate reclamation — a second `mark_running` call, mirroring what
+    // simulate reclamation - a second `mark_running` call, mirroring what
     // `claim_next_workflow`'s UPDATE does on reclaim: bump attempts, overwrite
     // worker_id), worker B reclaims and settles first. When A's stale run
     // finally finishes and tries to settle with its OLD fencing token, the
-    // write must be a fenced no-op: no error, no retry, and — the actual
-    // defect under test — B's already-committed result must NOT be
+    // write must be a fenced no-op: no error, no retry, and - the actual
+    // defect under test - B's already-committed result must NOT be
     // overwritten.
     #[tokio::test]
     async fn test_stale_worker_settlement_does_not_overwrite_winner() {
@@ -1288,7 +1288,7 @@ mod tests {
         assert_eq!(claimed_a.attempts, 1);
         assert_eq!(claimed_a.worker_id, "worker-a");
 
-        // Worker A's lease lapses and worker B reclaims the row — attempts
+        // Worker A's lease lapses and worker B reclaims the row - attempts
         // increments, worker_id is overwritten, exactly like
         // `claim_next_workflow`'s reclaim arm.
         let claimed_b = store::mark_running(handle.id(), "worker-b", Duration::from_secs(30))
@@ -1311,7 +1311,7 @@ mod tests {
         assert_eq!(record.status, WorkflowStatus::Succeeded.as_str());
         assert_eq!(record.output.as_deref(), Some("\"b-result\""));
 
-        // Worker A — unaware its lease was reclaimed — finally finishes its
+        // Worker A - unaware its lease was reclaimed - finally finishes its
         // stale run and tries to settle with its now-stale token
         // (worker_id="worker-a", attempts=1). Must return Ok (lease lost is
         // not an error condition) and must NOT touch the row B already
@@ -1618,8 +1618,8 @@ mod tests {
 
     /// The workflow drain used to await every in-flight step forever, so a
     /// step that never returns held the worker open until SIGKILL. An
-    /// abandoned step is safe here — its lease lapses and another worker
-    /// reclaims it — but only if the drain actually gives up.
+    /// abandoned step is safe here - its lease lapses and another worker
+    /// reclaims it - but only if the drain actually gives up.
     #[tokio::test]
     async fn the_drain_abandons_steps_that_outlive_the_grace() {
         let mut in_flight: JoinSet<()> = JoinSet::new();

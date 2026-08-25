@@ -1,11 +1,11 @@
-//! Structured validation messages — the seam between rule objects and
+//! Structured validation messages - the seam between rule objects and
 //! the localization module.
 //!
 //! A [`ValidationMessage`] carries three things: a stable message key
 //! (`validation-min`), the arguments the message needs (`min: 3`), and a
 //! pre-rendered English fallback. Translation happens once, at the
 //! serialization boundary (`ValidationErrors::to_json`), never inside
-//! rules — so rules stay pure and the `localization` feature can be
+//! rules - so rules stay pure and the `localization` feature can be
 //! compiled out without touching them.
 
 use serde_json::Value;
@@ -22,7 +22,7 @@ pub type TranslateArgs = crate::indexmap::IndexMap<String, Value>;
 /// optional context prefix.
 ///
 /// Keyless messages (built by the `From<String>` / `From<&str>` impls)
-/// skip translation entirely and render their text as-is — which is what
+/// skip translation entirely and render their text as-is - which is what
 /// keeps user-written custom rules returning `Err("...".into())`
 /// compiling and behaving unchanged.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,7 +67,7 @@ impl ValidationMessage {
 
     /// Prepend context, keeping the key and arguments intact.
     ///
-    /// Repeated calls nest outermost-first — `.prefix("a").prefix("b")`
+    /// Repeated calls nest outermost-first - `.prefix("a").prefix("b")`
     /// renders `"b: a: <message>"`, matching how
     /// [`FrameworkError::context`](crate::FrameworkError::context)
     /// chains on every other error variant.
@@ -104,7 +104,7 @@ impl From<&str> for ValidationMessage {
 }
 
 impl fmt::Display for ValidationMessage {
-    /// The English fallback, with any context prefix applied — the same
+    /// The English fallback, with any context prefix applied - the same
     /// text `ValidationErrors::to_json` produces when no translation is
     /// available.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -144,7 +144,7 @@ mod tests {
             .fallback("required")
             .prefix("registration")
             .prefix("signup");
-        // The key survives contexting — that is the whole point.
+        // The key survives contexting - that is the whole point.
         assert_eq!(m.key, "validation-required");
         assert_eq!(m.prefix.as_deref(), Some("signup: registration"));
         // Display matches the pre-localization flattened string exactly.

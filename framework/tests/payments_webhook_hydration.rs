@@ -243,7 +243,7 @@ async fn subscription_created_webhook_hydrates_mirror_with_items() {
     assert!(!mirror.cancel_at_period_end);
     assert!(mirror.canceled_at.is_none());
 
-    // Subscription items hydrated — one per price_ref.
+    // Subscription items hydrated - one per price_ref.
     let items = subscription_item::Entity::find()
         .filter(subscription_item::Column::SubscriptionId.eq(mirror.id))
         .all(&*conn)
@@ -464,7 +464,7 @@ async fn payment_succeeded_webhook_hydrates_transaction_mirror() {
 }
 
 /// A `payment.refunded` webhook for the SAME transaction id should UPDATE
-/// the existing mirror row (status flips to `refunded`) — proves the upsert
+/// the existing mirror row (status flips to `refunded`) - proves the upsert
 /// path on the transaction table.
 #[tokio::test]
 async fn payment_refunded_webhook_updates_existing_transaction() {
@@ -518,7 +518,7 @@ async fn payment_refunded_webhook_updates_existing_transaction() {
     let (s2, _) = send_webhook(addr, &path, body2).await;
     assert_eq!(s2.as_u16(), 200);
 
-    // Exactly one mirror row for that txn — and status flipped.
+    // Exactly one mirror row for that txn - and status flipped.
     let rows = transaction::Entity::find()
         .filter(transaction::Column::ProviderTransactionId.eq("txn_refundable_1"))
         .all(&*conn)
@@ -660,7 +660,7 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
     let addr = spawn_server(router, 2).await;
     let path = format!("/webhooks/payments/{provider_name}");
 
-    // Payload has data.object but no id — extract_payload_ids returns None.
+    // Payload has data.object but no id - extract_payload_ids returns None.
     let body = Bytes::from(
         json!({
             "id": "evt_bad_sub_id",
@@ -702,7 +702,7 @@ async fn subscription_event_missing_id_returns_503_and_records_error() {
 
 /// Retrying a previously-failed event re-runs hydration. After the bad
 /// payload's first attempt fails, posting a corrected payload with the same
-/// event_id must... hmm — actually Stripe retries the SAME body. The
+/// event_id must... hmm - actually Stripe retries the SAME body. The
 /// retry-recovery semantic is "if our internal state was bad, the next retry
 /// catches up." We model that by posting the same broken body twice and
 /// confirming both return 503 + process_error stays current (no stale data).
@@ -738,7 +738,7 @@ async fn failed_hydration_retry_keeps_process_error_current() {
         "retry must also fail (deterministic bad payload)"
     );
 
-    // Exactly one audit row — retry should NOT insert a second one.
+    // Exactly one audit row - retry should NOT insert a second one.
     let rows = webhook_event::Entity::find()
         .filter(webhook_event::Column::ProviderEventId.eq("evt_retry_failure"))
         .all(&*conn)
@@ -750,7 +750,7 @@ async fn failed_hydration_retry_keeps_process_error_current() {
 }
 
 /// A retry of an event that previously failed but is now recoverable must
-/// SUCCEED — the audit row's `processed_at` is set and `process_error` is
+/// SUCCEED - the audit row's `processed_at` is set and `process_error` is
 /// cleared. This is the recovery path that the 503-on-failure design enables.
 #[tokio::test]
 async fn previously_failed_event_recovers_on_retry_when_provider_state_appears() {
@@ -792,7 +792,7 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
     assert!(audit.processed_at.is_none());
     assert!(audit.process_error.is_some());
 
-    // Now the provider catches up — subscribe with the matching id... we
+    // Now the provider catches up - subscribe with the matching id... we
     // can't directly set the mock's sub_id, so this test instead validates
     // the retry path by registering the subscription via the mock's API.
     // The mock's subscribe generates its own ids, so we drive recovery via
@@ -832,7 +832,7 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
         "mirror row from recovered event must exist"
     );
 
-    // Original broken event's audit row still shows the failure — it remains
+    // Original broken event's audit row still shows the failure - it remains
     // pending until the provider stops sending it. (Stripe gives up after 3
     // days; that's the provider-side recovery contract.)
     let still_broken = webhook_event::Entity::find()
@@ -845,7 +845,7 @@ async fn previously_failed_event_recovers_on_retry_when_provider_state_appears()
 }
 
 /// A webhook whose `neutral` is `None` (unmapped event type) must still
-/// produce an audit row and return 200 — hydration is a no-op.
+/// produce an audit row and return 200 - hydration is a no-op.
 #[tokio::test]
 async fn unmapped_event_records_audit_row_only() {
     let provider_name: &'static str = "mock-hydration-unmapped";

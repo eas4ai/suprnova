@@ -1,4 +1,4 @@
-//! Phase 9A — Vector store abstraction.
+//! Phase 9A - Vector store abstraction.
 //!
 //! Suprnova diverges from Laravel's pgvector-only story by treating
 //! every vector backend as a first-class driver behind a single
@@ -28,7 +28,7 @@
 //! Drivers are registered at bootstrap via [`Vector::register`].
 //! [`Vector::store(name)`](Vector::store) looks the driver up by
 //! the store's configured backend. A single app may register
-//! multiple drivers — one Qdrant deployment for production
+//! multiple drivers - one Qdrant deployment for production
 //! semantic search, an in-process Memory driver for tests against
 //! the same code path.
 
@@ -56,7 +56,7 @@ pub use registry::{VectorRegistry, VectorStore};
 use crate::FrameworkError;
 use std::sync::Arc;
 
-/// Static facade — `Vector::store(name)` resolves a store handle,
+/// Static facade - `Vector::store(name)` resolves a store handle,
 /// `Vector::register(name, driver)` wires drivers at bootstrap.
 pub struct Vector;
 

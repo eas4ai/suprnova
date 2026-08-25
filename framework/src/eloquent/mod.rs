@@ -1,4 +1,4 @@
-//! Eloquent — Laravel-shape API layered over SeaORM.
+//! Eloquent - Laravel-shape API layered over SeaORM.
 //!
 //! See `manual/eloquent.md` for the user guide.
 //!
@@ -70,7 +70,7 @@ pub trait EloquentModel: Sized {
     type Entity: crate::EntityTrait;
     /// Column enum for this model (`<inner_mod>::Column`).
     type Column;
-    /// The Rust type of this model's primary key — whatever
+    /// The Rust type of this model's primary key - whatever
     /// `#[model(key_type = "...")]` names (default `i64`).
     ///
     /// Declared on the trait rather than derived from the SeaORM entity
@@ -91,7 +91,7 @@ pub trait EloquentModel: Sized {
     /// Primary-key column name. The macro emits the value from the
     /// `primary_key = "..."` attribute (default `"id"`). Mirrors
     /// [`crate::eloquent::Model::primary_key_name`] but as a `const`
-    /// so it can be read by `inventory::submit!` initialisers — the
+    /// so it can be read by `inventory::submit!` initialisers - the
     /// has/where-has engine pulls each relation's target PK from here
     /// at link time to render the correct pivot join.
     const PRIMARY_KEY: &'static str = "id";
@@ -108,7 +108,7 @@ pub trait EloquentModel: Sized {
     /// updated, or deleted. Populated by `#[model(touches = [...])]`.
     ///
     /// Read by [`crate::eloquent::Model::touch_owners`], which is a
-    /// trait default — so the list has to live on a trait too, or the
+    /// trait default - so the list has to live on a trait too, or the
     /// generic body couldn't see it.
     const TOUCHES: &'static [&'static str] = &[];
 
@@ -120,7 +120,7 @@ pub trait EloquentModel: Sized {
     /// genuinely differ: a model can name a custom `updated_at` column
     /// and still opt out of managing it. The parent-touch cascade
     /// consults this to skip an opted-out owner rather than writing a
-    /// column the owner disclaims — Laravel's `isIgnoringTouch` gained
+    /// column the owner disclaims - Laravel's `isIgnoringTouch` gained
     /// the same check in 13.25.
     const HAS_TIMESTAMPS: bool = false;
 
@@ -137,7 +137,7 @@ pub trait EloquentModel: Sized {
     /// Consulted by
     /// [`crate::database::transaction::ExecutorChoice::resolve_read`]
     /// / [`resolve_write`](crate::database::transaction::ExecutorChoice::resolve_write)
-    /// as step 4 of the routing chain — after the per-builder
+    /// as step 4 of the routing chain - after the per-builder
     /// `on(name)` override but before `__read_replica__` auto-routing.
     /// `Some("__primary__")` short-circuits to
     /// [`crate::DB::connection`] without consulting the registry; any

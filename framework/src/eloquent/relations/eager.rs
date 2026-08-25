@@ -8,9 +8,9 @@
 //!
 //! Phase 10B T9 ships:
 //!
-//! - [`apply_eager_specs`] — the top-level dispatcher. Walks each
+//! - [`apply_eager_specs`] - the top-level dispatcher. Walks each
 //!   `EagerSpec` and routes to the right per-model entrypoint.
-//! - Nested-path support via [`load_path`] — splits `"posts.comments"`
+//! - Nested-path support via [`load_path`] - splits `"posts.comments"`
 //!   into head + tail, then batches the tail across every parent via
 //!   the `__recurse_eager_load_batched` dispatcher: all parents' cached
 //!   children of the head are gathered into one slice and the next
@@ -22,7 +22,7 @@
 //!
 //! ## Design notes
 //!
-//! - The orchestrator is module-private — users only see
+//! - The orchestrator is module-private - users only see
 //!   `Builder::get` / `Collection::load` / `Collection::load_missing`,
 //!   which call into it.
 //! - Errors propagate from the per-relation arms. The orchestrator
@@ -50,7 +50,7 @@ use crate::error::FrameworkError;
 ///
 /// The trait-level `EagerLoadDispatch::eager_load` signature takes a
 /// `&DatabaseConnection` argument that the macro-emitted leaf arms
-/// largely ignore — every leaf re-resolves via
+/// largely ignore - every leaf re-resolves via
 /// [`ExecutorChoice::resolve_read`] internally so ambient `CURRENT_TX`
 /// (and the per-target-model default connection) take effect at the
 /// SQL leaf. But the orchestrator still has to hand SOMETHING down.
@@ -84,7 +84,7 @@ pub(crate) async fn resolve_eager_connection(
 /// mutably.
 ///
 /// The plan is consumed (`Vec<EagerSpec>` by value) because
-/// `WithWhere`'s `Box<dyn Any>` predicate isn't `Clone` — re-running
+/// `WithWhere`'s `Box<dyn Any>` predicate isn't `Clone` - re-running
 /// the same plan would require boxing a closure copy at build time,
 /// which Rust's type system doesn't help with for `FnOnce`. If a
 /// caller needs to apply the same logical plan twice, build the spec
@@ -141,7 +141,7 @@ where
 ///   stay untouched.
 /// - Dotted (`"posts.comments"`): partition by `has_eager(head)` too.
 ///     - Rows WITHOUT the head: load the FULL path against just that
-///       subset (head + tail) — nothing's cached on these so a normal
+///       subset (head + tail) - nothing's cached on these so a normal
 ///       eager-load drives the whole walk.
 ///     - Rows WITH the head cached: recurse into the cached children
 ///       with `missing_only = true` so the per-child partitioning
@@ -152,7 +152,7 @@ where
 /// `__recurse_eager_load_batched`: all parents' cached children of the
 /// head are gathered into one slice and the next segment is loaded once,
 /// not once per parent (which would be N+1 on a deep path). The
-/// `missing_only` flag propagates through the batched arm — it
+/// `missing_only` flag propagates through the batched arm - it
 /// partitions the combined children the same way before bulk-loading the
 /// next segment. Flat `with(...)` always passes `missing_only = false`,
 /// so the partition is a no-op there (bulk-loads everything every time).
@@ -191,7 +191,7 @@ where
             //
             // The tail recursion runs on every row (needs-full and
             // has-head alike) because freshly-loaded children have
-            // nothing cached at the tail level — the recursion's own
+            // nothing cached at the tail level - the recursion's own
             // partition trivially loads all of them, symmetric with
             // the has-head branch where the partition filters out
             // already-cached tails.
@@ -238,7 +238,7 @@ where
     };
 
     {
-        // Borrow scope — the dispatcher's `&mut [&mut M]` shape
+        // Borrow scope - the dispatcher's `&mut [&mut M]` shape
         // requires a fresh `Vec<&mut M>` per call. Drop the borrow
         // before the batched recursion so the parents slice is free for
         // the `__recurse_eager_load_batched` call below.
@@ -253,7 +253,7 @@ where
         // children of `head` into one combined `&mut [Child]` slice and
         // issues a SINGLE `Child::eager_load(rest_head, ...)` across the
         // lot, then recurses on the remaining tail. Doing this per
-        // parent instead — one `eager_load` per parent — would re-issue
+        // parent instead - one `eager_load` per parent - would re-issue
         // the next-segment query N times (one per parent), the classic
         // N+1. The `false` here means "always bulk-load each segment";
         // the `load_missing` orchestrator passes `true` to skip
@@ -265,7 +265,7 @@ where
 }
 
 /// Drive `__count_relation` for a single relation. No nested-path
-/// support — `with_count(["posts.comments"])` would aggregate
+/// support - `with_count(["posts.comments"])` would aggregate
 /// `posts.comments` against `User`, which has no meaning in Eloquent
 /// either. (`with_count(["posts"]).with(["posts.comments"])` is the
 /// pattern users want; both specs work independently.)
@@ -297,8 +297,8 @@ where
     // macro-emitted `aggregate_relation`. Unlike `Builder::sum`/`avg`/… (which
     // validate their column) and the rest of the builder, `Builder::validate_inputs`
     // never walks `eager_specs`, so this is the one aggregate path with no fence.
-    // Validate the identifier here — the single chokepoint for every aggregate
-    // kind and every model — so a crafted column can't break out of the call.
+    // Validate the identifier here - the single chokepoint for every aggregate
+    // kind and every model - so a crafted column can't break out of the call.
     crate::database::validate_identifier(col)?;
     let mut refs: Vec<&mut M> = parents.iter_mut().collect();
     M::aggregate_relation(rel, col, kind, refs.as_mut_slice(), db).await

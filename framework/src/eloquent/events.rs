@@ -1,4 +1,4 @@
-//! Phase 10C T1 — Model lifecycle events shared types.
+//! Phase 10C T1 - Model lifecycle events shared types.
 //!
 //! Sixteen lifecycle events fire on every `#[suprnova::model]` struct.
 //! The per-type event structs are macro-emitted into each model's
@@ -6,21 +6,21 @@
 //! `user::events::Saving`, ...). This file holds the cross-model
 //! types that don't depend on the concrete model type:
 //!
-//! - [`EventResult`] — `Ok` / `Cancel(reason)` returned by listeners
+//! - [`EventResult`] - `Ok` / `Cancel(reason)` returned by listeners
 //!   on the five cancellable events
 //!   (`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`).
-//! - [`CancellableListener`] — listener trait for those events.
+//! - [`CancellableListener`] - listener trait for those events.
 //!   Distinct from the regular [`crate::events::Listener`] because
 //!   cancel-by-policy and cancel-by-error have different shapes.
-//! - [`dispatch_cancellable`] / [`dispatch_after`] — dispatch helpers
+//! - [`dispatch_cancellable`] / [`dispatch_after`] - dispatch helpers
 //!   the macro-emitted [`ModelEventHooks`] impl calls into.
-//! - [`ModelEventHooks`] — the bridge trait: every `#[suprnova::model]`
+//! - [`ModelEventHooks`] - the bridge trait: every `#[suprnova::model]`
 //!   struct receives a macro-generated impl that wires its CRUD
 //!   methods to the per-type event structs above.
 //!
 //! Cancel signals propagate as
 //! [`FrameworkError::bad_request`](crate::FrameworkError::bad_request)
-//! to the caller — `delete()` / `create()` / `save()` etc. return
+//! to the caller - `delete()` / `create()` / `save()` etc. return
 //! the bad-request error with the listener's reason verbatim. We do
 //! NOT introduce a new `FrameworkError::Cancelled` variant: the public
 //! error surface stays narrow, and "policy refused this operation"
@@ -131,7 +131,7 @@ where
 ///   (or no listeners are registered).
 /// - Returns `Err(FrameworkError::bad_request(reason))` at the FIRST
 ///   listener that returned `EventResult::Cancel(reason)`. Later
-///   listeners are NOT called — the operation is already vetoed.
+///   listeners are NOT called - the operation is already vetoed.
 ///
 /// The macro-emitted [`ModelEventHooks`] impl on each model calls
 /// this from `__dispatch_creating` / `__dispatch_saving` /
@@ -139,7 +139,7 @@ where
 /// `__dispatch_restoring`.
 ///
 /// When the current task is inside a [`crate::seed::without_events`]
-/// scope, the dispatch short-circuits to `Ok(())` — every cancellable
+/// scope, the dispatch short-circuits to `Ok(())` - every cancellable
 /// model event proceeds uncancellable (matches Laravel's
 /// `WithoutModelEvents`).
 pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), FrameworkError> {
@@ -151,7 +151,7 @@ pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), Fram
         return Ok(());
     }
     for l in listeners {
-        // Each listener gets its own clone — the same `event` value
+        // Each listener gets its own clone - the same `event` value
         // is reused across all of them when no listener cancels.
         let event_any: Box<dyn std::any::Any + Send + Sync> = Box::new(event.clone());
         match l.dispatch(&*event_any).await {
@@ -170,7 +170,7 @@ pub async fn dispatch_cancellable<E: Event + Clone>(event: E) -> Result<(), Fram
 /// cancellable counterpart.
 ///
 /// When the current task is inside a [`crate::seed::without_events`]
-/// scope, the dispatch short-circuits to `Ok(())` — listeners are
+/// scope, the dispatch short-circuits to `Ok(())` - listeners are
 /// not invoked and the event is not recorded.
 pub async fn dispatch_after<E: Event>(event: E) -> Result<(), FrameworkError> {
     if crate::seed::events_muted() {
@@ -190,7 +190,7 @@ struct CancellableRegistry {
     listeners: HashMap<TypeId, Vec<Arc<dyn ErasedCancellableListener>>>,
 }
 
-// Phase 10C audit-fix AF4 — std::sync::RwLock so the AF4 clear() helper
+// Phase 10C audit-fix AF4 - std::sync::RwLock so the AF4 clear() helper
 // runs from sync teardown (`TestContainerGuard::drop`). Callers never
 // hold this lock across an `.await`, so the sync flavour is safe.
 static CANCELLABLE_REGISTRY: std::sync::OnceLock<RwLock<CancellableRegistry>> =
@@ -210,7 +210,7 @@ fn registry() -> &'static RwLock<CancellableRegistry> {
 /// `RwLock` is poisoned (a previous writer panicked while holding the
 /// guard), the registration is skipped after a `tracing::error!`.
 /// Production: an app whose registry is poisoned has bigger problems
-/// than a missing listener — the log lets ops surface that.
+/// than a missing listener - the log lets ops surface that.
 pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: Arc<L>) {
     match registry().write() {
         Ok(mut reg) => {
@@ -224,7 +224,7 @@ pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: A
                 event_type = std::any::type_name::<E>(),
                 "cancellable listener registry lock poisoned; \
                  skipping registration. A prior writer panicked under \
-                 the write guard — the framework can no longer dispatch \
+                 the write guard - the framework can no longer dispatch \
                  cancellable events for this type."
             );
         }
@@ -232,7 +232,7 @@ pub async fn listen_cancellable<E: Event, L: CancellableListener<E>>(listener: A
 }
 
 async fn global_cancellable_listeners<E: Event>() -> Vec<Arc<dyn ErasedCancellableListener>> {
-    // Domain 9 audit D9-A — degrade to empty vec on poison rather than
+    // Domain 9 audit D9-A - degrade to empty vec on poison rather than
     // panicking the dispatcher path. Empty == "no listeners registered",
     // which is the safe fallback: dispatch proceeds with no
     // cancellation possible (the operation is allowed by default per
@@ -254,11 +254,11 @@ async fn global_cancellable_listeners<E: Event>() -> Vec<Arc<dyn ErasedCancellab
     }
 }
 
-/// Phase 10C audit-fix AF4 — wipe every registered cancellable
+/// Phase 10C audit-fix AF4 - wipe every registered cancellable
 /// listener. Sync + `#[doc(hidden)]` so it can run from
 /// `TestContainerGuard::drop` for test isolation parity with
 /// [`crate::database::ConnectionRegistry::clear`]. Production code
-/// should never call this — listener registration is process-lifetime
+/// should never call this - listener registration is process-lifetime
 /// in real apps.
 #[doc(hidden)]
 pub fn clear_cancellable_listeners() {
@@ -272,7 +272,7 @@ pub fn clear_cancellable_listeners() {
 /// Macro-implemented hooks bridging each [`Model`](crate::eloquent::Model)
 /// to its per-type [`events`](crate::eloquent::events) submodule.
 ///
-/// Users never implement this — every `#[suprnova::model]` struct
+/// Users never implement this - every `#[suprnova::model]` struct
 /// receives one impl from the macro. The `Model` trait's `create` /
 /// `save` / `update` / `delete` / `force_delete` and related
 /// soft-delete paths call into these hooks at the right lifecycle
@@ -370,7 +370,7 @@ mod tests {
         // If the dispatcher's TypeId keying ever routes a wrong-typed
         // payload to a cancellable listener, the erased wrap must
         // degrade to the safe non-cancelling result (operation proceeds)
-        // rather than panic — a stray panic here would veto a real
+        // rather than panic - a stray panic here would veto a real
         // write via the surrounding `dispatch_cancellable` call site.
         let wrap: Box<dyn ErasedCancellableListener> =
             Box::new(CancellableListenerWrap::<PostCreating, _>::new(Arc::new(

@@ -1,13 +1,13 @@
 // Localization wrapper around `@fluent/bundle`, driven by the `lang`
 // Inertia shared prop (see `LocaleShare` in the Suprnova framework).
 //
-// `initLang`/`t`/`currentLocale` are module-level, not component state —
+// `initLang`/`t`/`currentLocale` are module-level, not component state -
 // `initLang` has to be callable from `main.tsx`'s `setup()`, before any
 // React tree exists, so `await initLang(props.initialPage)` can finish
 // loading the catalog before the first render. `<LangProvider>` +
 // `useLang()` are a thin reactive subscription over that shared module
 // state (via `useSyncExternalStore`, React's own API for this exact
-// case — a store that lives outside React and needs to trigger
+// case - a store that lives outside React and needs to trigger
 // re-renders when it changes).
 //
 // Usage:
@@ -20,7 +20,7 @@
 //   const { t } = useLang()
 //   t('welcome', { app: 'My App' })
 //
-// Plain `.ts` (not `.tsx`) — `<LangProvider>` is built with
+// Plain `.ts` (not `.tsx`) - `<LangProvider>` is built with
 // `createElement` so this file never needs JSX syntax.
 
 import { createContext, createElement, useContext, useSyncExternalStore, type ReactNode } from 'react'
@@ -35,7 +35,7 @@ export interface LangShare {
 }
 
 /**
- * Minimal structural shape of an Inertia page object — matches
+ * Minimal structural shape of an Inertia page object - matches
  * `@inertiajs/react`'s `Page<T>` (and its Vue/Svelte equivalents)
  * without importing `@inertiajs/core` directly.
  */
@@ -50,7 +50,7 @@ let locale = 'en'
 let fallbackLocale = 'en'
 let bundle: FluentBundle | null = null
 // Bumped on every catalog load/failure and used as the `useSyncExternalStore`
-// snapshot — a plain version counter rather than `bundle` itself, so a
+// snapshot - a plain version counter rather than `bundle` itself, so a
 // `catalog: null` result (where `bundle` stays `null` before and after)
 // still registers as a change and re-renders subscribed components.
 let version = 0
@@ -73,7 +73,7 @@ function subscribe(listener: () => void): () => void {
  * Inertia shared prop, and swap it into the module-level `FluentBundle`.
  *
  * `catalog` is `null` when the app has no `Translator` bound (see
- * `LocaleShare`'s doc comment) — in that case `bundle` is cleared and
+ * `LocaleShare`'s doc comment) - in that case `bundle` is cleared and
  * `t()` falls back to returning the raw key, never throwing or blocking
  * render. Never rejects: a fetch failure is caught and degrades the
  * same way.
@@ -105,7 +105,7 @@ export async function initLang(page: LangPage): Promise<void> {
     next.addResource(new FluentResource(source))
     bundle = next
   } catch {
-    // Offline, network failure, etc. — degrade to the raw-key fallback
+    // Offline, network failure, etc. - degrade to the raw-key fallback
     // in `t()` rather than leaving the page unable to render.
     bundle = null
   }
@@ -118,7 +118,7 @@ export async function initLang(page: LangPage): Promise<void> {
  *
  * When no catalog is loaded yet (pre-`initLang`, a translator-less app,
  * or a fetch failure) or `key` has no entry in it, this returns `key`
- * itself rather than throwing — a missing translation should be visibly
+ * itself rather than throwing - a missing translation should be visibly
  * wrong, never a crashed page.
  */
 export function t(key: MessageKey, args?: Record<string, string | number>): string {

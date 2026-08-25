@@ -3,11 +3,11 @@
 //! [`QueuedListener`] is the crash-durable tier of event handling. The event
 //! itself stays in-process (unbounded, not serializable); when it fires, the
 //! listener builds a [`Job`] from it and enqueues that job. Durability,
-//! retries, and backoff then come from the queue — the job is persisted, so it
+//! retries, and backoff then come from the queue - the job is persisted, so it
 //! survives a process crash and is picked up by a worker after restart.
 //!
 //! Contrast the in-process queued-listener path ([`Event::queued`](super::Event::queued)
-//! returning `true`): that is best-effort — bounded and retrying, and drained
+//! returning `true`): that is best-effort - bounded and retrying, and drained
 //! on graceful shutdown, but its work does NOT survive a crash. Reach for
 //! `QueuedListener` when the work must happen no matter what.
 //!
@@ -41,8 +41,8 @@
 //! ```
 //!
 //! Register `QueuedListener` for a synchronous (non-`queued`) event: the
-//! durability lives in the queue, so the listener only needs to enqueue —
-//! which is fast — and the request that fired the event waits just for that
+//! durability lives in the queue, so the listener only needs to enqueue -
+//! which is fast - and the request that fired the event waits just for that
 //! enqueue, not for the job to run.
 
 use super::{Event as EventTrait, Listener};

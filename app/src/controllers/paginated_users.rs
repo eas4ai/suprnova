@@ -1,4 +1,4 @@
-//! `GET /api/users` — cursor pagination over the real `users` table.
+//! `GET /api/users` - cursor pagination over the real `users` table.
 //!
 //! Dogfoods the framework's keyset pagination end-to-end:
 //! `Builder::cursor_paginate` for the query, `Inertia::paginate` for the
@@ -6,13 +6,13 @@
 //! v3 protocol attaches under `scrollProps.<key>`.
 //!
 //! This route used to page a 100-row in-memory `Vec` and reimplement
-//! keyset paging by hand — decoding the cursor, filtering above or below
+//! keyset paging by hand - decoding the cursor, filtering above or below
 //! the boundary, detecting overflow, and re-encoding both neighbours,
 //! about 80 lines of it. All of that is what `cursor_paginate` already
 //! does against a database, so the fixture version was dogfooding a
 //! parallel implementation rather than the framework's. It also could not
-//! answer the question a benchmark asks — how does cursor pagination
-//! behave over a table too large to hold in memory — because the whole
+//! answer the question a benchmark asks - how does cursor pagination
+//! behave over a table too large to hold in memory - because the whole
 //! dataset was rebuilt per request.
 //!
 //! Rows are projected to [`PublicUserProps`], which omits `email`. This
@@ -40,10 +40,10 @@ const MAX_PER_PAGE: u64 = 100;
 /// Fetch one page and project it to the public shape.
 ///
 /// The projection rebuilds the paginator rather than mapping in place:
-/// `CursorPaginator` has no `map`/`through` (Laravel's paginators do —
+/// `CursorPaginator` has no `map`/`through` (Laravel's paginators do -
 /// a parity gap worth closing), but its fields are public, so carrying
 /// the cursors across is a matter of moving them. The cursors stay valid
-/// because they encode the *keyset boundary*, which is the user's `id` —
+/// because they encode the *keyset boundary*, which is the user's `id` -
 /// a property of the query, not of the shape the rows are serialised in.
 async fn build_page(req: &Request) -> Result<CursorPaginator<PublicUserProps>, FrameworkError> {
     let per_page = req

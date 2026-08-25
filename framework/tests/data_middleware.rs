@@ -44,7 +44,7 @@ async fn drive(
                 let req = Request::new(hyper_req);
 
                 // Build a Next that captures the current_include_set() value
-                // then returns 200. Do NOT assert inside the closure —
+                // then returns 200. Do NOT assert inside the closure -
                 // a panic here terminates the connection and produces an
                 // unclean test failure rather than a proper assertion error.
                 let next: Next = Arc::new(move |_req: Request| {
@@ -132,7 +132,7 @@ async fn middleware_passes_through_empty_set() {
 #[tokio::test]
 async fn middleware_parses_array_form_via_hyper() {
     // Mirrors the integration path: hyper request → Request::query() →
-    // RequestIncludeSet::from_query — confirms `?include[]=a&include[]=b`
+    // RequestIncludeSet::from_query - confirms `?include[]=a&include[]=b`
     // accumulates correctly when the value flows through the actual
     // server stack.
     let captured: Arc<Mutex<Option<RequestIncludeSet>>> = Arc::new(Mutex::new(None));

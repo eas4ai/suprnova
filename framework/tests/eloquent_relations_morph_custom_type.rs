@@ -1,4 +1,4 @@
-//! Phase 10B P2 — MorphTo dispatch consults the T8 `MorphTypeEntry`
+//! Phase 10B P2 - MorphTo dispatch consults the T8 `MorphTypeEntry`
 //! registry, not the structural heuristic keys.
 //!
 //! Before P2, the per-family fetch helper matched `self.morph_type`
@@ -6,7 +6,7 @@
 //! (snake / no-underscore / Laravel-prefix-stripped). A user who
 //! declared `#[suprnova::model(morph_type = "blog_post")]` on a
 //! target named `MorphBlogPost` got `"morph_blog_post"` /
-//! `"morphblogpost"` / `"blog_post"` as the candidate keys — the
+//! `"morphblogpost"` / `"blog_post"` as the candidate keys - the
 //! third happened to match by coincidence of the prefix-stripping
 //! rule. Pick almost any other custom `morph_type` string (e.g.
 //! `"article_v2"` on a struct named `LegacyPost`) and dispatch
@@ -24,17 +24,17 @@
 //!
 //! Coverage matrix:
 //!
-//! - `morph_to_dispatches_via_custom_morph_type_string` — happy
+//! - `morph_to_dispatches_via_custom_morph_type_string` - happy
 //!   path, custom morph_type → correct variant via registry.
-//! - `morph_to_dispatches_to_second_target_via_registry` — same,
+//! - `morph_to_dispatches_to_second_target_via_registry` - same,
 //!   second target, ensuring dispatch doesn't bias toward the
 //!   first arm.
-//! - `morph_to_dispatches_via_snake_fallback_for_implicit_default_target`
-//!   — target without an explicit `morph_type` attribute is absent
+//! - `morph_to_dispatches_via_snake_fallback_for_implicit_default_target` -
+//!   target without an explicit `morph_type` attribute is absent
 //!   from the registry; emission falls back to
 //!   `to_snake(target_type_name)`, matching the parent-side write
 //!   convention. Pins the implicit-default contract end-to-end.
-//! - `morph_to_unknown_when_morph_type_string_unknown` —
+//! - `morph_to_unknown_when_morph_type_string_unknown` -
 //!   negative-space check: a stored type string that no target
 //!   registers falls through to `Unknown`. Confirms the dispatcher
 //!   doesn't accidentally match by structural similarity.
@@ -45,10 +45,10 @@ use suprnova::{Model, attrs, model};
 // The "blog_post" morph_type string is NOT one the old heuristic
 // emission would have produced for the type name `MorphBlogPost`.
 // `morph_target_keys(MorphBlogPost)` yielded `["morph_blog_post",
-// "morphblogpost", "blog_post"]` — the third matches by coincidence
+// "morphblogpost", "blog_post"]` - the third matches by coincidence
 // of the `Morph` prefix-stripping rule. To make the test bite, we
 // pick a target struct name whose stripping rule WOULDN'T produce
-// the registered morph_type — `LegacyArticle` with
+// the registered morph_type - `LegacyArticle` with
 // `morph_type = "blog_post"` so heuristic keys are
 // `["legacy_article", "legacyarticle"]`, neither matching the
 // runtime string.
@@ -87,7 +87,7 @@ pub struct P2Comment {
 // for implicit-default targets: `find_morph_type_by_id::<Plain>()`
 // returns None (T8's registry doesn't track non-morph_type models),
 // and dispatch compares `self.morph_type` against
-// `to_snake("Plain") == "plain"` — the same default the parent-side
+// `to_snake("Plain") == "plain"` - the same default the parent-side
 // `MorphMany` / `MorphOne` would use to STAMP the column.
 #[model(table = "p2_plains")]
 pub struct Plain {
@@ -152,7 +152,7 @@ async fn morph_to_dispatches_via_custom_morph_type_string() {
     let a = LegacyArticle::create(attrs! { title: "the future of rust" })
         .await
         .unwrap();
-    // Insert a comment with parent_type = "blog_post" — the CUSTOM
+    // Insert a comment with parent_type = "blog_post" - the CUSTOM
     // morph_type LegacyArticle registers. Before P2, dispatch would
     // try heuristic keys `["legacy_article", "legacyarticle"]` and
     // miss; after P2, the registry resolves
@@ -212,7 +212,7 @@ async fn morph_to_dispatches_via_snake_fallback_for_implicit_default_target() {
     // `morph_type_not_registered_for_non_morph_models`), so
     // `find_morph_type_by_id::<Plain>()` returns None. The
     // emission must fall back to comparing `self.morph_type`
-    // against `to_snake("Plain") == "plain"` — the same default
+    // against `to_snake("Plain") == "plain"` - the same default
     // the parent-side MorphMany / MorphOne uses to write the
     // type-string column. This pins the implicit-default contract
     // documented in `docs/core/eloquent.md#MorphTo` end-to-end:
@@ -243,7 +243,7 @@ async fn morph_to_dispatches_via_snake_fallback_for_implicit_default_target() {
 #[tokio::test]
 async fn morph_to_unknown_when_morph_type_string_unknown() {
     // Negative-space check: a `parent_type` that NO target
-    // registers must surface `Unknown` — confirms the dispatcher
+    // registers must surface `Unknown` - confirms the dispatcher
     // isn't matching by accidental structural similarity. The
     // stored "legacy_article" string happens to be the snake form
     // of LegacyArticle's type name (the structural fallback the
@@ -268,7 +268,7 @@ async fn morph_to_unknown_when_morph_type_string_unknown() {
         }
         other => panic!(
             "expected Unknown for parent_type=\"legacy_article\" (no target registers that string \
-             — LegacyArticle's registered morph_type is \"blog_post\"), got {other:?}"
+             - LegacyArticle's registered morph_type is \"blog_post\"), got {other:?}"
         ),
     }
 }

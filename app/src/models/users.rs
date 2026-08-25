@@ -1,10 +1,10 @@
-//! User model — migrated to `#[suprnova::model]` in Phase 10A T11.
+//! User model - migrated to `#[suprnova::model]` in Phase 10A T11.
 //!
 //! The struct replaces the hand-written SeaORM entity + builder pair
 //! that the old auto-generated `entities/users.rs` shipped. The macro
 //! emits an inner `user` module with the SeaORM `Entity` / `Column` /
 //! `ActiveModel` types alongside the user-facing `User` struct itself
-//! (which carries the Eloquent surface — `create`, `find`, `query`,
+//! (which carries the Eloquent surface - `create`, `find`, `query`,
 //! `update`, `delete`, soft-delete lifecycle, mass-assignment, the
 //! `AsBool` cast on `active`, etc.).
 //!
@@ -28,19 +28,19 @@ use suprnova::{Authenticatable, CanResetPassword, FrameworkError, MustVerifyEmai
     },
     soft_deletes,
     timestamps,
-    // Phase 10B T10 — relations declarations drive `posts()` /
+    // Phase 10B T10 - relations declarations drive `posts()` /
     // `roles()` accessors + the eager-load dispatcher arms.
     //
     // - `posts` is a HasMany over the `author_id` FK. The default
     //   convention would be `user_id`, but the legacy posts schema
     //   uses `author_id` (the column was named for the policy gate
-    //   in Phase 3) — `fk = "author_id"` keeps the dogfood honest
+    //   in Phase 3) - `fk = "author_id"` keeps the dogfood honest
     //   without backfilling the schema.
     // - `roles` is a BelongsToMany via the `RoleUser` pivot. The
     //   `with_pivot = ["assigned_at"]` directive includes the
     //   pivot's extra column in the join so `role.pivot::<RoleUser>()`
     //   surfaces it on the loaded rows.
-    // - `profile` is a HasOne (Phase 10B P5) — exactly one Profile
+    // - `profile` is a HasOne (Phase 10B P5) - exactly one Profile
     //   per User, FK defaults to `user_id` on the child table. The
     //   `profiles.user_id` column carries a UNIQUE constraint at the
     //   schema level so the "at most one" invariant is enforced even
@@ -89,7 +89,7 @@ impl User {
 
     /// Whether this user holds admin privileges.
     ///
-    /// The dogfood schema doesn't persist this flag yet — returning
+    /// The dogfood schema doesn't persist this flag yet - returning
     /// `false` keeps the `PostPolicy` admin-bypass branch covered by
     /// the gate tests without requiring an additional migration. A
     /// real app would migrate an `is_admin` boolean column and read
@@ -115,7 +115,7 @@ impl Authenticatable for User {
 
     // Returning the stored hash is what lets the registered
     // `EloquentUserProvider<User>` verify credentials. The trait default
-    // returns `None` (for models that authenticate by other means —
+    // returns `None` (for models that authenticate by other means -
     // OAuth, passkeys), which makes `Auth::attempt` reject every
     // password.
     fn get_auth_password(&self) -> Option<&str> {
@@ -166,7 +166,7 @@ impl CanResetPassword for User {
     }
 }
 
-// ---- Phase 10C T14 — local scope dogfood ---------------------------------
+// ---- Phase 10C T14 - local scope dogfood ---------------------------------
 //
 // `active` is the canonical Eloquent local-scope demo. The macro emits:
 //
@@ -175,7 +175,7 @@ impl CanResetPassword for User {
 //   2. A `Builder<User>` extension trait method: `User::query().filter(...).active()`
 //      composes onto an existing chain.
 //
-// Pattern follows `framework/tests/eloquent_scopes_local.rs` — the
+// Pattern follows `framework/tests/eloquent_scopes_local.rs` - the
 // dogfood exists to prove the macro path works on a real app model, not
 // just the framework's own test fixtures.
 
@@ -191,7 +191,7 @@ impl User {
     }
 }
 
-// ---- Phase 10C T14 — Observer<User> dogfood ------------------------------
+// ---- Phase 10C T14 - Observer<User> dogfood ------------------------------
 //
 // `UserObserver` exercises T2's observer surface end-to-end against a
 // real app model. Two methods are overridden:
@@ -200,7 +200,7 @@ impl User {
 //   Demonstrates the cancellable family: it returns `EventResult` so an
 //   observer could veto the create by returning `EventResult::cancel`.
 // - `created` logs the new row's id via `tracing::info!`. Demonstrates
-//   the non-cancellable family — fires AFTER the insert lands.
+//   the non-cancellable family - fires AFTER the insert lands.
 //
 // The `#[suprnova::observer(User)]` attribute walks this impl block at
 // parse time and emits exactly the listener adapters for the two
@@ -248,8 +248,8 @@ mod tests {
 
     /// `Authenticatable::get_auth_password` must expose the stored hash.
     /// The trait default returns `None`, which makes
-    /// `EloquentUserProvider::validate_credentials` reject every password
-    /// — the app compiles either way, so this pins the override itself.
+    /// `EloquentUserProvider::validate_credentials` reject every password -
+    /// the app compiles either way, so this pins the override itself.
     #[test]
     fn auth_password_exposes_stored_hash() {
         let user = User {

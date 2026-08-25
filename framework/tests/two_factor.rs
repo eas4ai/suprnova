@@ -25,8 +25,8 @@ fn ensure_crypt() {
 /// Test migrator: ships the framework's 2FA migrations + a local
 /// `remember_tokens` table so `TwoFactor::start_challenge`'s
 /// remember-me revoke has a table to DELETE from. (The framework
-/// does not ship the remember-me migration — consumer apps own that
-/// schema — so we recreate the canonical shape here.)
+/// does not ship the remember-me migration - consumer apps own that
+/// schema - so we recreate the canonical shape here.)
 struct TestMigrator;
 
 #[async_trait::async_trait]
@@ -43,7 +43,7 @@ impl sea_orm_migration::MigratorTrait for TestMigrator {
 /// Local migration mirroring the canonical remember-me schema from
 /// `framework/tests/remember_me.rs`. `TwoFactor::start_challenge`
 /// revokes remember-me tokens for the user before demoting to
-/// pending — without this table that revoke errors out, and tests
+/// pending - without this table that revoke errors out, and tests
 /// that pre-set `auth_user_id` (to prove `start_challenge` clears
 /// it) hit the revoke path.
 struct CreateRememberTokensTable;
@@ -183,7 +183,7 @@ async fn start_challenge_sets_pending_and_clears_auth_user() {
             TwoFactor::pending_user_id(),
             Some("test-user-1".to_string()),
         );
-        // Auth slot was cleared — pending and authed are mutually
+        // Auth slot was cleared - pending and authed are mutually
         // exclusive.
         assert_eq!(suprnova::session::auth_user_id(), None);
     })
@@ -209,7 +209,7 @@ async fn cancel_challenge_clears_pending() {
             None,
             "cancel_challenge must clear the pending slot"
         );
-        // cancel does NOT install the user as authed — that's the
+        // cancel does NOT install the user as authed - that's the
         // whole point of cancelling.
         assert_eq!(suprnova::session::auth_user_id(), None);
     })
@@ -223,7 +223,7 @@ async fn complete_challenge_without_pending_returns_400() {
 
     let slot = suprnova::session::new_session_slot_for_test();
     suprnova::session::session_scope_for_test(slot, async {
-        // No pending — complete_challenge must fail closed with 400.
+        // No pending - complete_challenge must fail closed with 400.
         let err = TwoFactor::complete_challenge("000000").await.unwrap_err();
         assert_eq!(
             err.status_code(),
@@ -238,7 +238,7 @@ async fn complete_challenge_without_pending_returns_400() {
 async fn pending_user_id_outside_session_returns_none() {
     // Outside a `session_scope_for_test` the session task-local is
     // not installed; pending must read as None and start/cancel
-    // must no-op silently — they cannot crash. `start_challenge`'s
+    // must no-op silently - they cannot crash. `start_challenge`'s
     // remember-me revoke also no-ops here because `Auth::id()`
     // returns None outside any session/request scope.
     assert_eq!(TwoFactor::pending_user_id(), None);
@@ -355,7 +355,7 @@ async fn regenerate_recovery_codes_with_recovery_proof_consumes_it() {
     let original_codes = response.recovery_codes.clone();
 
     // Use one of the original recovery codes as proof. The recovery
-    // path is symmetric with re_enroll's proof model — the code is
+    // path is symmetric with re_enroll's proof model - the code is
     // single-use, so it's consumed.
     let proof = original_codes[0].clone();
     let fresh = TwoFactor::regenerate_recovery_codes(&user, &proof)
@@ -398,7 +398,7 @@ async fn regenerate_recovery_codes_rejects_invalid_proof() {
     assert_eq!(err.status_code(), 401);
 
     // The original recovery codes are untouched after a rejected
-    // attempt — a hostile caller that fails proof cannot blow away
+    // attempt - a hostile caller that fails proof cannot blow away
     // the legitimate codes. Skim-test on the first one (consume
     // returns true if the code matches the persisted set).
     let first = original_codes.first().expect("enrollment yields ≥1 code");
@@ -584,7 +584,7 @@ async fn disable_event_fires_only_on_real_transition() {
         email: "fire@example.com".into(),
     };
 
-    // Spying listener — counts dispatches whose user_id matches the
+    // Spying listener - counts dispatches whose user_id matches the
     // target user. Filters out cross-test noise.
     struct ScopedCounter {
         target_user: String,
@@ -608,18 +608,18 @@ async fn disable_event_fires_only_on_real_transition() {
     });
     EventFacade::listen::<TwoFactorDisabled, _>(listener).await;
 
-    // Disable with no row — must NOT fire the event.
+    // Disable with no row - must NOT fire the event.
     TwoFactor::disable(&user).await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 0);
 
-    // Enroll + confirm + disable — fires exactly once.
+    // Enroll + confirm + disable - fires exactly once.
     let response = TwoFactor::enroll(&user).await.unwrap();
     let code = totp_code_for(&response.otpauth_url);
     TwoFactor::confirm(&user, &code).await.unwrap();
     TwoFactor::disable(&user).await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
 
-    // Disable again — must NOT fire (no rows affected).
+    // Disable again - must NOT fire (no rows affected).
     TwoFactor::disable(&user).await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
@@ -690,7 +690,7 @@ async fn verify_rejects_replay_within_same_timestep() {
     let response = TwoFactor::enroll(&user).await.unwrap();
     let code = totp_code_for(&response.otpauth_url);
 
-    // Confirm enrollment with the code — this also exercises check_code
+    // Confirm enrollment with the code - this also exercises check_code
     // but the verify-replay path only kicks in for `verify()`.
     TwoFactor::confirm(&user, &code).await.unwrap();
 
@@ -702,7 +702,7 @@ async fn verify_rejects_replay_within_same_timestep() {
     );
 
     // Replay the SAME code immediately. Within the same 30-second
-    // window, current_timestep == last_used_timestep — must be
+    // window, current_timestep == last_used_timestep - must be
     // rejected even though the code is still structurally valid.
     assert!(
         !TwoFactor::verify(&user, &live).await.unwrap(),
@@ -721,7 +721,7 @@ async fn verify_rejects_replay_within_same_timestep() {
 // Regression gate for the verify replay *race* (not just sequential
 // replay, which `verify_rejects_replay_within_same_timestep` covers).
 //
-// `tokio::join!` polls all five verifies on this one task — `tokio::spawn`
+// `tokio::join!` polls all five verifies on this one task - `tokio::spawn`
 // is deliberately avoided because the DB connection is task-local and a
 // spawned task would not inherit it. The single-connection test pool
 // serves their `find` queries FIFO, so all five read
@@ -792,7 +792,7 @@ async fn enroll_errors_when_2fa_already_confirmed() {
         .unwrap();
     assert!(TwoFactor::is_enabled(&user).await.unwrap());
 
-    // A second enroll must NOT silently overwrite the secret — that
+    // A second enroll must NOT silently overwrite the secret - that
     // would let a session-hijacked attacker pivot. Expect 409.
     let err = TwoFactor::enroll(&user).await.unwrap_err();
     let msg = err.to_string();
@@ -823,7 +823,7 @@ async fn re_enroll_with_valid_recovery_code_succeeds() {
         .await
         .unwrap();
 
-    // Use a recovery code as proof — it consumes the code in the
+    // Use a recovery code as proof - it consumes the code in the
     // process, so the same code can't be re-used as proof later.
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();
@@ -860,7 +860,7 @@ async fn re_enroll_with_invalid_proof_errors() {
         .await
         .unwrap();
 
-    // Garbage proof — neither a valid TOTP code nor any recovery code.
+    // Garbage proof - neither a valid TOTP code nor any recovery code.
     let err = TwoFactor::re_enroll(&user, "garbage-proof-xyz")
         .await
         .unwrap_err();
@@ -933,7 +933,7 @@ async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
     // the timestep twice across the verify is allowed (the
     // current step could have advanced by the time the verify
     // wrote), so the assertion is ">= before_step + 1" rather
-    // than equality — that keeps the test stable across
+    // than equality - that keeps the test stable across
     // 30-second-boundary scheduling without losing the regression
     // signal (any bare-current stamp lands at most at the
     // current step).
@@ -947,7 +947,7 @@ async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
     assert!(
         stamped > before_step,
         "replay stamp must land on `current + 1` (forward skew edge); \
-         pre-verify step={before_step}, stamped={stamped} — a bare-`current` \
+         pre-verify step={before_step}, stamped={stamped} - a bare-`current` \
          stamp would leave the captured code replayable for one more step"
     );
 
@@ -957,11 +957,11 @@ async fn verify_stamps_forward_skew_edge_to_block_next_step_replay() {
     // affect zero rows and report Ok(false). Re-submitting the
     // same code (which TOTP::generate_current produced and which
     // remains valid for the rest of the 30s window plus the ±1
-    // skew) must therefore be rejected — even when the bare
+    // skew) must therefore be rejected - even when the bare
     // `check_code` would still accept it.
     assert!(
         !TwoFactor::verify(&user, &live).await.unwrap(),
-        "the same code must NOT verify a second time — \
+        "the same code must NOT verify a second time - \
          stamping current+1 closes the next-step replay window"
     );
 }
@@ -985,11 +985,11 @@ async fn verify_replay_state_resets_on_re_enrollment() {
     assert!(TwoFactor::verify(&user, &live1).await.unwrap());
 
     // Re-enroll wipes the row's last_used_timestep along with the
-    // secret — the new secret produces different codes anyway, but
+    // secret - the new secret produces different codes anyway, but
     // even within the same timestep window the new verify path must
     // not inherit the old replay block. Proof here is a recovery
     // code (single-use, doesn't trigger replay protection on its
-    // own — TOTP from the old secret would be blocked by the
+    // own - TOTP from the old secret would be blocked by the
     // replay check we just installed).
     let recovery_proof = resp1.recovery_codes[0].clone();
     let resp2 = TwoFactor::re_enroll(&user, &recovery_proof).await.unwrap();

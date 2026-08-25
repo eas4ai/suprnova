@@ -84,15 +84,15 @@ fn required_with_triggers_when_other_field_present() {
 
 #[test]
 fn required_with_triggers_when_any_other_field_present() {
-    // Laravel `required_with:foo,bar` — at least one must be present.
+    // Laravel `required_with:foo,bar` - at least one must be present.
     use suprnova::ContextualRule;
     let rule = RequiredWith {
         others: &["address_line_1", "address_line_2"],
     };
-    // Only the second sibling is present — still triggers.
+    // Only the second sibling is present - still triggers.
     let c = ctx(&[("address_line_2", "Apt 7")]);
     assert!(rule.passes("", &c).is_err());
-    // Neither present — passes.
+    // Neither present - passes.
     let c2 = ctx(&[]);
     assert!(rule.passes("", &c2).is_ok());
 }
@@ -104,10 +104,10 @@ fn required_with_all_only_triggers_when_every_sibling_present() {
     let rule = RequiredWithAll {
         others: &["address_line_1", "city"],
     };
-    // Only one of the two — does NOT trigger.
+    // Only one of the two - does NOT trigger.
     let c = ctx(&[("address_line_1", "1 Main St")]);
     assert!(rule.passes("", &c).is_ok());
-    // Both present — value is required.
+    // Both present - value is required.
     let c2 = ctx(&[("address_line_1", "1 Main St"), ("city", "Springfield")]);
     assert!(rule.passes("", &c2).is_err());
     assert!(rule.passes("12345", &c2).is_ok());
@@ -249,7 +249,7 @@ fn alpha_and_alphanum_check_character_classes() {
     assert!(Alpha.passes("").is_err());
 
     assert!(AlphaNum.passes("hello42").is_ok());
-    // AlphaNum (Laravel `alpha_num`) is letters + digits only — separators
+    // AlphaNum (Laravel `alpha_num`) is letters + digits only - separators
     // belong to AlphaDash.
     assert!(AlphaNum.passes("user_name-42").is_err());
     assert!(AlphaNum.passes("user@name").is_err());
@@ -298,10 +298,10 @@ fn http_url_requires_http_scheme() {
     // `HttpUrl` rejects.
     assert!(HttpUrl.passes("ftp://host/file").is_err());
     assert!(HttpUrl.passes("ssh://host").is_err());
-    // `javascript:` is rejected by BOTH rules now — it is absent from
+    // `javascript:` is rejected by BOTH rules now - it is absent from
     // Laravel's `url` allowlist. Kept here as a belt-and-braces lock.
     assert!(HttpUrl.passes("javascript:alert(1)").is_err());
-    // An empty host is rejected by BOTH rules too — `file:///etc/passwd`
+    // An empty host is rejected by BOTH rules too - `file:///etc/passwd`
     // and `http:///x` fail Laravel's mandatory-host requirement
     // regardless of scheme, so `HttpUrl` doesn't need its own case for
     // it (it delegates to `Url::protocols`, which already enforces this).
@@ -327,7 +327,7 @@ fn url_rejects_schemes_outside_laravels_allowlist() {
         "case-insensitivity cuts both ways"
     );
     assert!(Url.passes("vbscript:msgbox(1)").is_err());
-    // A scheme nobody has ever registered is rejected too — allowlist,
+    // A scheme nobody has ever registered is rejected too - allowlist,
     // not denylist.
     assert!(Url.passes("totally-made-up:whatever").is_err());
 }
@@ -335,13 +335,13 @@ fn url_rejects_schemes_outside_laravels_allowlist() {
 #[test]
 fn url_requires_an_allowlisted_scheme_followed_by_a_nonempty_host() {
     // Laravel's `url` regex is anchored `^(PROTOCOLS)://` with a
-    // MANDATORY (non-optional) host group directly after it — Str::isUrl,
+    // MANDATORY (non-optional) host group directly after it - Str::isUrl,
     // framework-13.25.0 Str.php:633 (pattern start) / :634 (protocol) /
     // :636 (host group, no `?`). Being on the allowlist and being
     // followed by `://` are each necessary but neither is sufficient on
-    // its own — the host itself has to be present too.
+    // its own - the host itself has to be present too.
     //
-    // Allowlisted, `://`, AND a real host — accepted. Laravel's host
+    // Allowlisted, `://`, AND a real host - accepted. Laravel's host
     // alternation covers a domain name, `localhost`, an IPv4 literal, and
     // a bracketed IPv6 literal; each is exercised once here, plus the `+`
     // scheme-form check from before.
@@ -357,11 +357,11 @@ fn url_requires_an_allowlisted_scheme_followed_by_a_nonempty_host() {
         "`+` in a scheme survives the port"
     );
 
-    // Allowlisted and followed by `://`, but the host is EMPTY — rejected.
+    // Allowlisted and followed by `://`, but the host is EMPTY - rejected.
     // This is exactly the case a naive "has an authority" check misses:
     // `url::Url`'s WHATWG parser is forgiving of the extra `/` here
     // (`http:///foo` folds it straight into a host of "foo"), but
-    // Laravel's PCRE match isn't — the character right after `://` has
+    // Laravel's PCRE match isn't - the character right after `://` has
     // to be a host character, and a bare `/` is never one.
     assert!(Url.passes("file:///etc/passwd").is_err());
     assert!(Url.passes("file:///etc/hosts").is_err());
@@ -370,14 +370,14 @@ fn url_requires_an_allowlisted_scheme_followed_by_a_nonempty_host() {
     assert!(Url.passes("ftp:///x").is_err());
     assert!(Url.passes("ssh:///x").is_err());
 
-    // Allowlisted, but NOT followed by `://` at all — rejected. `mailto`,
+    // Allowlisted, but NOT followed by `://` at all - rejected. `mailto`,
     // `data`, and `tel` are all on the list; none of them use an
     // authority component in the first place.
     assert!(Url.passes("mailto:a@b.test").is_err());
     assert!(Url.passes("data:text/plain,hi").is_err());
     assert!(Url.passes("tel:+15551234567").is_err());
 
-    // Not on the allowlist at all — rejected regardless of `://` or host.
+    // Not on the allowlist at all - rejected regardless of `://` or host.
     assert!(Url.passes("javascript:alert(1)").is_err());
     assert!(Url.passes("vbscript:x").is_err());
     assert!(Url.passes("foo://bar").is_err());
@@ -399,11 +399,11 @@ fn url_protocols_restricts_to_the_listed_schemes() {
     assert!(https_only.passes("javascript:alert(1)").is_err());
 
     // The listed schemes are not required to be on Laravel's default
-    // allowlist — the parameterised form replaces it, as in Laravel.
+    // allowlist - the parameterised form replaces it, as in Laravel.
     let custom = UrlProtocols(&["myapp"]);
     assert!(custom.passes("myapp://open/thing").is_ok());
     assert!(custom.passes("https://example.com").is_err());
-    // `UrlProtocols` inherits the same mandatory-host gate as `Url` — a
+    // `UrlProtocols` inherits the same mandatory-host gate as `Url` - a
     // custom scheme still needs a real host, not just `://`.
     assert!(custom.passes("myapp:///thing").is_err());
 
@@ -414,7 +414,7 @@ fn url_protocols_restricts_to_the_listed_schemes() {
             .is_ok()
     );
 
-    // An empty list is not "reject everything" — it falls back to the
+    // An empty list is not "reject everything" - it falls back to the
     // same default allowlist bare `Url` uses, matching Laravel's
     // `empty($protocols) ? $default : implode('|', $protocols)`.
     assert!(Url::protocols(&[]).passes("https://example.com").is_ok());
@@ -766,7 +766,7 @@ mod validate_macro {
             email: "x@example.com".into(),
             name: "ok".into(),
         };
-        // Demonstrates the `$(;)?` tail in the macro matcher — having
+        // Demonstrates the `$(;)?` tail in the macro matcher - having
         // a trailing `;` after the last field row must not error.
         let result: Result<(), ValidationErrors> = validate! { form =>
             email => Required, Email;
@@ -876,7 +876,7 @@ mod validate_macro {
     // The `validate!` macro now dispatches `ContextualRule::check_named`
     // and threads `stringify!($field)` into the rule. `Confirmed`
     // overrides `check_named` to derive `<field>_confirmation` from the
-    // ident, so callers write `password => Confirmed => with ctx;` —
+    // ident, so callers write `password => Confirmed => with ctx;` -
     // the field name appears once, not twice.
 
     use suprnova::Confirmed;
@@ -1061,7 +1061,7 @@ async fn async_rule_check_helper_leaves_empty_on_success() {
     assert!(errs.is_empty(), "no rows → no errors");
 }
 
-// --- FrameworkError::from_unique_violation — map DB constraint to 422 ---
+// --- FrameworkError::from_unique_violation - map DB constraint to 422 ---
 //
 // `Unique` is advisory (TOCTOU); the DB UNIQUE constraint is the real
 // guarantee. These tests prove the write-error → 422 mapping closes the
@@ -1125,7 +1125,7 @@ async fn from_unique_violation_passes_through_non_unique_errors() {
 
     let db = db_with_unique_email().await;
     let backend = db.inner().get_database_backend();
-    // Write to a table that doesn't exist — a real DbErr that is NOT a
+    // Write to a table that doesn't exist - a real DbErr that is NOT a
     // unique-constraint violation.
     let err = db
         .inner()

@@ -44,9 +44,9 @@ pub enum RustType {
     Option(Box<RustType>),
     Vec(Box<RustType>),
     HashMap(Box<RustType>, Box<RustType>),
-    /// `Field<T>` — serialises as `T | null`; optional on the wire
+    /// `Field<T>` - serialises as `T | null`; optional on the wire
     Field(Box<RustType>),
-    /// `Prop<T>` — deferred/lazy prop; optional, never null
+    /// `Prop<T>` - deferred/lazy prop; optional, never null
     Prop(Box<RustType>),
     Custom(String),
 }
@@ -289,7 +289,7 @@ fn visit_path_into(
 ) {
     // `sort_by_file_name` is not cosmetic. The output file is checked in,
     // so the walk order becomes the declaration order in a tracked
-    // artifact — and an unsorted `WalkDir` yields whatever order the
+    // artifact - and an unsorted `WalkDir` yields whatever order the
     // filesystem hands back, which differs between machines and after any
     // directory rewrite. Without it, two developers running the documented
     // command get two different files.
@@ -317,7 +317,7 @@ fn visit_path_into(
 /// degrade to `unknown`, silently weakening a committed types file the moment
 /// anything reran the generator. The struct's definition is right there in
 /// `src/`, so emit its real interface instead; `unknown` (with a warning) is
-/// reserved for types the project genuinely doesn't define — external crate
+/// reserved for types the project genuinely doesn't define - external crate
 /// types, enums, tuple structs. On duplicate names the first definition wins,
 /// matching how emission builds its `known` set.
 fn resolve_reachable(
@@ -356,7 +356,7 @@ fn resolve_reachable(
 /// Convert a RustType to a TypeScript type string.
 ///
 /// A `Custom(name)` keeps its bare name only when the name resolves to a type
-/// the generator actually emits — another InertiaProps/Data struct (`known`) or
+/// the generator actually emits - another InertiaProps/Data struct (`known`) or
 /// one of the current struct's generic parameters (`generics`). Anything else (a
 /// DTO that forgot to derive InertiaProps/Data, an external type the generator
 /// can't see) degrades to `unknown`, so the emitted `.ts` never references an
@@ -406,14 +406,14 @@ fn optional_marker(ty: &RustType) -> &'static str {
 /// Order structs by dependency, dependents first.
 ///
 /// The in-degree here counts how many structs *reference* a given one, so
-/// the queue seeds with the structs nobody references and walks inward —
+/// the queue seeds with the structs nobody references and walks inward -
 /// the reverse of the "dependencies first" this was once documented as
 /// producing. That is fine and deliberate to leave alone: a TypeScript
 /// interface may reference another declared later in the same file, so
 /// declaration order carries no meaning for the consumer. Flipping it now
 /// would reorder a checked-in file to no one's benefit.
 ///
-/// What *does* matter is that the order is a pure function of the input —
+/// What *does* matter is that the order is a pure function of the input -
 /// see `tests/generate_types_deterministic.rs`.
 fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> {
     let struct_map: HashMap<_, _> = structs.iter().map(|s| (s.name.clone(), s)).collect();
@@ -427,7 +427,7 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
             collect_type_deps(&field.ty, &mut s_deps, &struct_names);
         }
         // A struct that references itself (e.g. a tree node with
-        // `children: Vec<Self>`) is not an ordering dependency — a TS interface
+        // `children: Vec<Self>`) is not an ordering dependency - a TS interface
         // can name itself. Dropping the self-edge keeps Kahn's algorithm from
         // pinning the node's in-degree above zero forever, which silently
         // omitted every self-referencing struct from the output.
@@ -449,7 +449,7 @@ fn topological_sort(structs: &[InertiaPropsStruct]) -> Vec<&InertiaPropsStruct> 
     // Both seeds and successors are drawn from hash containers, whose
     // iteration order Rust randomises per process. Left unsorted, this
     // emitted the same interfaces in a different order on every single
-    // run — so the checked-in output showed a diff each time anyone ran
+    // run - so the checked-in output showed a diff each time anyone ran
     // the documented command, and a generated file that churns for no
     // reason is a generated file people stop regenerating.
     let mut queue: Vec<_> = in_degree
@@ -514,7 +514,7 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
     }
 }
 
-/// A field whose type references something the generator can't emit — not an
+/// A field whose type references something the generator can't emit - not an
 /// InertiaProps/Data struct, not a generic parameter. Reported as a warning; the
 /// field itself is emitted as `unknown` (see `rust_type_to_ts`).
 struct UnresolvedRef {
@@ -574,7 +574,7 @@ fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
     for r in collect_unresolved_refs(structs) {
         if seen.insert(r.type_name.clone()) {
             ui::warning(&format!(
-                "Prop type `{}` (referenced by `{}.{}`) isn't a struct this project defines — \
+                "Prop type `{}` (referenced by `{}.{}`) isn't a struct this project defines - \
                  emitting `unknown`. Mirror it as a local struct (or declare it in an ambient \
                  .d.ts) for a precise type.",
                 r.type_name, r.struct_name, r.field_name
@@ -586,7 +586,7 @@ fn warn_unresolved_refs(structs: &[InertiaPropsStruct]) {
 /// Emit paired output + (optionally) input TypeScript interfaces for one struct.
 ///
 /// A paired `<Name>Input` interface is emitted whenever any field carries an
-/// `input_only`, `output_only`, or `lazy` flag — i.e. whenever the input and
+/// `input_only`, `output_only`, or `lazy` flag - i.e. whenever the input and
 /// output shapes differ.
 fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String {
     let has_flags = s
@@ -603,7 +603,7 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
 
     let mut out = String::new();
 
-    // Output interface — what the frontend RECEIVES
+    // Output interface - what the frontend RECEIVES
     out.push_str(&format!("export interface {}{} {{\n", s.name, generics));
     for f in s.fields.iter().filter(|f| !f.data_flags.input_only) {
         out.push_str(&format!(
@@ -615,7 +615,7 @@ fn emit_ts_for_struct(s: &InertiaPropsStruct, known: &HashSet<String>) -> String
     }
     out.push_str("}\n\n");
 
-    // Input interface — what the frontend SENDS (only when shapes differ)
+    // Input interface - what the frontend SENDS (only when shapes differ)
     if has_flags {
         out.push_str(&format!(
             "export interface {}Input{} {{\n",
@@ -739,7 +739,7 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
 /// deduped `Entry::Message` ids it declares.
 ///
 /// `Entry::Term` ids (the leading `-` marks a private, non-exposed
-/// translation unit — e.g. `-brand-name`) and comments are not messages
+/// translation unit - e.g. `-brand-name`) and comments are not messages
 /// and are excluded; only ids a frontend could actually pass to a
 /// translation call belong in `MessageKey`.
 ///
@@ -748,7 +748,7 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
 /// and can hand back a resource with most messages intact even when one
 /// entry is malformed, but a `MessageKey` union that quietly dropped an
 /// id (because it happened to sit next to a typo) is a worse failure mode
-/// than one that's visibly missing everything — the file-scanning caller
+/// than one that's visibly missing everything - the file-scanning caller
 /// (`extract_message_ids_from_file`) applies this same all-or-nothing
 /// policy and is the one that actually reaches disk and warns.
 pub fn extract_message_ids(ftl: &str) -> Vec<String> {
@@ -762,7 +762,7 @@ pub fn extract_message_ids(ftl: &str) -> Vec<String> {
 }
 
 /// Pull the `Entry::Message` ids out of a parsed resource's body, in
-/// declaration order (callers sort/dedup as needed — single-file callers
+/// declaration order (callers sort/dedup as needed - single-file callers
 /// via `extract_message_ids`, multi-file aggregation via
 /// `collect_lang_message_ids`).
 fn message_ids_from_body(body: Vec<fluent_syntax::ast::Entry<&str>>) -> Vec<String> {
@@ -780,7 +780,7 @@ fn message_ids_from_body(body: Vec<fluent_syntax::ast::Entry<&str>>) -> Vec<Stri
 /// No escaping is needed: Fluent identifiers are grammatically restricted
 /// to `[a-zA-Z][a-zA-Z0-9_-]*` (see `fluent_syntax`'s
 /// `get_identifier`/`get_identifier_unchecked`), so an id can never
-/// contain a `"`, a backslash, or a newline — every id that reaches here
+/// contain a `"`, a backslash, or a newline - every id that reaches here
 /// already passed through the parser's identifier grammar.
 ///
 /// Deliberately takes only `ids`, with no locale/header context, so its
@@ -790,7 +790,7 @@ fn message_ids_from_body(body: Vec<fluent_syntax::ast::Entry<&str>>) -> Vec<Stri
 pub fn render_lang_keys(ids: &[String]) -> String {
     if ids.is_empty() {
         // Not reachable from `generate_lang_keys_to_file` (zero ids means
-        // the file isn't written at all — see its doc comment), but this
+        // the file isn't written at all - see its doc comment), but this
         // function is public and callable directly, and `never` is the
         // honest TypeScript spelling of "a union of nothing" rather than
         // a panic on the `ids.len() - 1` below.
@@ -807,7 +807,7 @@ pub fn render_lang_keys(ids: &[String]) -> String {
 }
 
 /// Render the full `lang-keys.ts` file contents: the generated-file
-/// header (naming the locale chain actually scanned — just the default
+/// header (naming the locale chain actually scanned - just the default
 /// locale when it has no configured parents, or the full
 /// `child -> parent -> ...` walk when `APP_LOCALE_PARENTS` gives it one)
 /// plus the `MessageKey` union body from `render_lang_keys`.
@@ -823,7 +823,7 @@ fn render_lang_keys_file(ids: &[String], chain: &[String]) -> String {
         _ => format!("lang/{}/*.ftl (chain: {})", chain[0], chain.join(" -> ")),
     };
     format!(
-        "// Generated by `suprnova generate-types` — do not edit.\n// Message ids from {}.\n{}",
+        "// Generated by `suprnova generate-types` - do not edit.\n// Message ids from {}.\n{}",
         scanned,
         render_lang_keys(ids)
     )
@@ -833,7 +833,7 @@ fn render_lang_keys_file(ids: &[String], chain: &[String]) -> String {
 /// catalogs get scanned: the project's `.env` `APP_LOCALE`, or `en`.
 ///
 /// Reads the `.env` file directly with `dotenvy::from_path_iter` rather
-/// than loading it into the process environment — this runs from the
+/// than loading it into the process environment - this runs from the
 /// watcher on every debounced regeneration, and mutating global env vars
 /// from a background thread on every file save is the kind of thing that
 /// only bites much later. A missing `.env`, an unreadable one, or one
@@ -854,13 +854,13 @@ pub fn resolve_default_locale(project_path: &Path) -> String {
 /// Resolve `APP_LOCALE_PARENTS` the same way `resolve_default_locale`
 /// resolves `APP_LOCALE`: read straight from `.env` with
 /// `dotenvy::from_path_iter` rather than the process environment (same
-/// rationale — this runs from the watcher on every debounced
+/// rationale - this runs from the watcher on every debounced
 /// regeneration).
 ///
 /// Parses comma-separated `child=parent` pairs (`pt-PT=pt-BR,en-AU=en-GB`),
 /// trimming whitespace around both the segment and each side of `=`, same
 /// shape as the framework's `parse_parents`
-/// (`framework/src/localization/config.rs`) — but this crate doesn't
+/// (`framework/src/localization/config.rs`) - but this crate doesn't
 /// depend on the framework at runtime (see the Cargo.toml comment by the
 /// `fluent-syntax`/base64 deps), so this is a small local re-parse rather
 /// than a shared call, and it does not validate each side as a BCP-47
@@ -871,7 +871,7 @@ pub fn resolve_default_locale(project_path: &Path) -> String {
 /// empty child/parent) is skipped rather than erroring the whole
 /// `generate-types` run, exactly how `resolve_default_locale` silently
 /// drops an unparseable `.env` line via `dotenvy`'s per-line `Result`
-/// instead of failing. This function performs no cycle rejection either —
+/// instead of failing. This function performs no cycle rejection either -
 /// a cycle here is left in the map and instead made safe where it's
 /// walked, by `locale_chain`'s visited-set guard.
 fn resolve_locale_parents(project_path: &Path) -> HashMap<String, String> {
@@ -889,7 +889,7 @@ fn resolve_locale_parents(project_path: &Path) -> HashMap<String, String> {
 /// Parse an `APP_LOCALE_PARENTS`-shaped string into a `child -> parent`
 /// map. Pure and file-independent (unlike `resolve_locale_parents`, which
 /// wraps it) so its whitespace-tolerance and malformed-segment handling
-/// are directly testable without fighting `.env` file-syntax quirks —
+/// are directly testable without fighting `.env` file-syntax quirks -
 /// dotenv's own unquoted-value grammar rejects a value that mixes
 /// whitespace with more than one bare `=` (confirmed empirically: only a
 /// quoted `.env` value or one with no internal whitespace at all survives
@@ -898,11 +898,11 @@ fn resolve_locale_parents(project_path: &Path) -> HashMap<String, String> {
 ///
 /// Segments are comma-separated `child=parent` pairs; both the segment and
 /// each side of `=` are trimmed, and a blank segment (a stray comma, or an
-/// empty string overall) is skipped — same shape as the framework's
+/// empty string overall) is skipped - same shape as the framework's
 /// `parse_parents`. Unlike that framework parser, a malformed segment (no
 /// `=`, or an empty child/parent) is skipped rather than erroring the
 /// whole value, and a repeated child is last-wins rather than rejected as
-/// ambiguous — see `resolve_locale_parents`'s doc for why this mirrors
+/// ambiguous - see `resolve_locale_parents`'s doc for why this mirrors
 /// `resolve_default_locale`'s tolerant posture instead.
 fn parse_locale_parents(raw: &str) -> HashMap<String, String> {
     let mut parents = HashMap::new();
@@ -926,7 +926,7 @@ fn parse_locale_parents(raw: &str) -> HashMap<String, String> {
 
 /// Walk `default_locale`'s fallback chain through `parents`: the locale
 /// itself, then its configured parent, then that locale's configured
-/// parent, transitively — the same order `Lang::get`/`try_get` walk in the
+/// parent, transitively - the same order `Lang::get`/`try_get` walk in the
 /// framework (`framework/src/localization/mod.rs`'s `fallback_chain`), and
 /// the same walk `FluentTranslator` flattens into each served catalog
 /// (`framework/src/localization/fluent.rs`'s `catalog_ast`).
@@ -934,7 +934,7 @@ fn parse_locale_parents(raw: &str) -> HashMap<String, String> {
 /// Deliberately stops at the configured-parents boundary: the global
 /// `APP_FALLBACK_LOCALE` is a `Lang`-facade-level, request-time fallback
 /// applied *on top of* a resolved catalog, not something the served
-/// catalog (or this key union) flattens in — mirroring the framework's own
+/// catalog (or this key union) flattens in - mirroring the framework's own
 /// "flattening covers configured parents only" split between
 /// `catalog_ast` and `fallback_chain`.
 ///
@@ -982,14 +982,14 @@ fn extract_message_ids_from_file(path: &Path) -> Vec<String> {
 
     // Parsed once here purely to detect a syntax error worth warning
     // about (which needs the `ParserError`s `extract_message_ids` doesn't
-    // expose), and — only on success — a second time inside
+    // expose), and - only on success - a second time inside
     // `extract_message_ids`, which is the single source of truth for
     // "how does a parsed resource become an id list" shared with its
     // direct unit tests. Two parses of a small `.ftl` file is a
     // non-issue for a dev-time code generator.
     if let Err((_, errors)) = fluent_syntax::parser::parse(content.as_str()) {
         ui::warning(&format!(
-            "{} has {} Fluent syntax error(s) — skipping this catalog",
+            "{} has {} Fluent syntax error(s) - skipping this catalog",
             path.display(),
             errors.len()
         ));
@@ -1040,8 +1040,8 @@ fn collect_lang_message_ids(project_path: &Path, locale: &str) -> Vec<String> {
 
 /// Generate `lang-keys.ts`: parse `lang/<locale>/*.ftl` for
 /// `Entry::Message` ids across the default locale's whole fallback
-/// chain — the default locale itself plus every `APP_LOCALE_PARENTS`
-/// ancestor (`locale_chain`) — and emit the union as a `MessageKey`
+/// chain - the default locale itself plus every `APP_LOCALE_PARENTS`
+/// ancestor (`locale_chain`) - and emit the union as a `MessageKey`
 /// string-union.
 ///
 /// Scanning only the default locale's own directory would be wrong the
@@ -1050,16 +1050,16 @@ fn collect_lang_message_ids(project_path: &Path, locale: &str) -> Vec<String> {
 /// `pt-BR`) is the normal, intended shape once a locale has a configured
 /// parent, and the *served* catalog (`FluentTranslator`'s chain-flattened
 /// `/_suprnova/lang/<locale>.ftl`) already resolves every inherited key
-/// fine — so the generated `MessageKey` type must union across the same
+/// fine - so the generated `MessageKey` type must union across the same
 /// chain, not just scan the child's directory, or it rejects keys the
 /// running app actually serves. The global `APP_FALLBACK_LOCALE` is
-/// deliberately excluded from the union (see `locale_chain`'s doc) — it's
+/// deliberately excluded from the union (see `locale_chain`'s doc) - it's
 /// a request-time `Lang`-facade fallback, not part of what any one
 /// locale's served catalog flattens.
 ///
 /// A project with no `lang/` directory for *any* chain member, or whose
 /// chain-wide catalogs declare zero messages between them, isn't
-/// localized in any way this can see — writing an empty union would be
+/// localized in any way this can see - writing an empty union would be
 /// worse than useless (an uninhabited type nothing can ever satisfy), so
 /// the file is not written at all. This also covers a child locale with no
 /// directory of its own at all (nothing to override yet) as long as some
@@ -1195,7 +1195,7 @@ fn generate_route_types(project_path: &Path) {
 /// `output_path`) and, when the project has a `lang/` directory, watches
 /// it too for `.ftl` changes (regenerating `lang-keys.ts`, at
 /// `lang_keys_output`). A project without `lang/` at watcher-start simply
-/// doesn't get that second watch — `notify` can't watch a path that
+/// doesn't get that second watch - `notify` can't watch a path that
 /// doesn't exist yet, and a project growing a `lang/` dir mid-`serve` is
 /// outside what this needs to handle; rerunning `generate-types --watch`
 /// picks it up.
@@ -1344,7 +1344,7 @@ mod lang_keys_tests {
         );
         assert_eq!(
             out,
-            "// Generated by `suprnova generate-types` — do not edit.\n\
+            "// Generated by `suprnova generate-types` - do not edit.\n\
              // Message ids from lang/en/*.ftl.\n\
              export type MessageKey =\n\
              \u{20}\u{20}| \"welcome\"\n\
@@ -1360,7 +1360,7 @@ mod lang_keys_tests {
         );
         assert_eq!(
             out,
-            "// Generated by `suprnova generate-types` — do not edit.\n\
+            "// Generated by `suprnova generate-types` - do not edit.\n\
              // Message ids from lang/pt-PT/*.ftl (chain: pt-PT -> pt-BR).\n\
              export type MessageKey =\n\
              \u{20}\u{20}| \"welcome\";\n"
@@ -1396,7 +1396,7 @@ mod lang_keys_tests {
     #[test]
     fn resolve_locale_parents_reads_pairs_from_dot_env() {
         // No internal whitespace, matching the manual's
-        // `APP_LOCALE_PARENTS=pt-PT=pt-BR` shape — `.env` file syntax
+        // `APP_LOCALE_PARENTS=pt-PT=pt-BR` shape - `.env` file syntax
         // itself (not this function) is what constrains what's writable
         // here; see `parse_locale_parents_*` below for whitespace
         // tolerance in the parsed value, tested directly against the pure
@@ -1429,7 +1429,7 @@ mod lang_keys_tests {
         // segment is dropped, not fatal, and doesn't take the rest of the
         // value down with it. `no-equals` (missing `=`), the empty child
         // in `=orphan`, and the empty parent in `pt-PT=` are all
-        // individually unusable — skipped, leaving only the one valid
+        // individually unusable - skipped, leaving only the one valid
         // pair.
         let parents = parse_locale_parents("no-equals,=orphan,pt-PT=,en-AU=en-GB");
         assert_eq!(parents.len(), 1);
@@ -1487,7 +1487,7 @@ mod lang_keys_tests {
         fs::create_dir_all(&locale_dir).expect("mkdir lang/en");
         fs::write(locale_dir.join("a.ftl"), "zeta = Z\nshared = one\n").expect("write a.ftl");
         fs::write(locale_dir.join("b.ftl"), "alpha = A\nshared = two\n").expect("write b.ftl");
-        // Not `.ftl` — must be ignored.
+        // Not `.ftl` - must be ignored.
         fs::write(locale_dir.join("notes.txt"), "zzz = should not appear\n")
             .expect("write notes.txt");
 
@@ -1510,7 +1510,7 @@ mod lang_keys_tests {
         .expect("write bad.ftl");
 
         // Must not panic (that alone is most of the assertion), and the
-        // malformed file contributes nothing — not even `also-good`,
+        // malformed file contributes nothing - not even `also-good`,
         // which would otherwise have parsed fine on its own.
         let ids = collect_lang_message_ids(dir.path(), "en");
         assert_eq!(ids, vec!["welcome"]);
@@ -1535,7 +1535,7 @@ mod lang_keys_tests {
         let written = fs::read_to_string(&output_path).expect("read generated file");
         assert_eq!(
             written,
-            "// Generated by `suprnova generate-types` — do not edit.\n\
+            "// Generated by `suprnova generate-types` - do not edit.\n\
              // Message ids from lang/en/*.ftl.\n\
              export type MessageKey =\n\
              \u{20}\u{20}| \"validation-min\"\n\
@@ -1566,7 +1566,7 @@ mod lang_keys_tests {
             .expect("seed a stale lang-keys.ts");
 
         // No lang/ dir this run (e.g. it was deleted, or every catalog now
-        // declares zero messages) — the stale file must be cleaned up, not
+        // declares zero messages) - the stale file must be cleaned up, not
         // left around asserting keys that no longer exist.
         let count = generate_lang_keys_to_file(dir.path(), &output_path)
             .expect("removing a stale file is not an error");
@@ -1577,7 +1577,7 @@ mod lang_keys_tests {
     #[test]
     fn generate_lang_keys_to_file_unions_a_delta_child_with_its_parent() {
         // `pt-PT` only overrides one key; the rest lives in `pt-BR`, its
-        // configured parent. The generated union must cover both — a
+        // configured parent. The generated union must cover both - a
         // frontend referencing a `pt-BR`-only key is valid, because the
         // served, chain-flattened catalog resolves it.
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1615,7 +1615,7 @@ mod lang_keys_tests {
     fn generate_lang_keys_to_file_uses_the_parent_when_the_child_has_no_directory() {
         // `pt-PT` has no `lang/pt-PT/` at all yet (nothing overridden), but
         // its configured parent `pt-BR` has keys. This must resolve to the
-        // parent's keys, not the empty-union delete branch — the served
+        // parent's keys, not the empty-union delete branch - the served
         // catalog for `pt-PT` still resolves every one of them via the
         // fallback chain, so the type must not be deleted out from under a
         // working app.
@@ -1632,7 +1632,7 @@ mod lang_keys_tests {
             .expect("write pt-BR messages.ftl");
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        // Seed a stale file to prove the delete branch is *not* taken —
+        // Seed a stale file to prove the delete branch is *not* taken -
         // it should be overwritten with the parent's keys, not removed.
         fs::create_dir_all(output_path.parent().unwrap()).expect("mkdir output dir");
         fs::write(&output_path, "export type MessageKey =\n  | \"stale\";\n")
@@ -1684,7 +1684,7 @@ mod lang_keys_tests {
     fn generate_lang_keys_to_file_terminates_on_a_cyclic_app_locale_parents() {
         // `a=b,b=a`: a hand-authored cycle. `resolve_locale_parents`
         // performs no cycle rejection (unlike the framework's
-        // `parse_parents`), so this must not hang — `locale_chain`'s
+        // `parse_parents`), so this must not hang - `locale_chain`'s
         // visited-set guard is what stands between this and an infinite
         // loop, and this test is the end-to-end proof it actually holds.
         let dir = tempfile::tempdir().expect("tempdir");

@@ -88,13 +88,13 @@ pub enum OriginPolicy {
 pub struct WsConfig {
     /// Interval between framework-sent pings. Default 30s.
     pub ping_interval: std::time::Duration,
-    /// Max reassembled message size in bytes. Default 1 MiB —
+    /// Max reassembled message size in bytes. Default 1 MiB -
     /// safe for public, browser-facing endpoints. Routes that
     /// expect larger payloads (file upload, audio streaming,
     /// trusted internal feeds) should raise this explicitly, or
     /// start from [`WsConfig::generous`].
     pub max_message_size: usize,
-    /// Max single-frame size in bytes. Default 64 KiB — fits
+    /// Max single-frame size in bytes. Default 64 KiB - fits
     /// typical chat / notification frames with headroom. Routes
     /// sending unfragmented large frames should raise this
     /// explicitly, or start from [`WsConfig::generous`].
@@ -106,7 +106,7 @@ pub struct WsConfig {
     /// Default: [`OriginPolicy::SameOrigin`].
     pub origin_policy: OriginPolicy,
     /// Accepted application-level subprotocols for `Sec-WebSocket-Protocol`
-    /// negotiation. Empty (the default) skips negotiation — the upgrade
+    /// negotiation. Empty (the default) skips negotiation - the upgrade
     /// response omits `Sec-WebSocket-Protocol` and the client falls back
     /// to its default protocol handling.
     ///
@@ -115,7 +115,7 @@ pub struct WsConfig {
     /// preference order per RFC 6455 §4.2.2) that appears in this list,
     /// and echoes it on the 101 handshake response. If the client offered
     /// protocols but none match the accepted list, the upgrade still
-    /// succeeds with no `Sec-WebSocket-Protocol` header — RFC 6455
+    /// succeeds with no `Sec-WebSocket-Protocol` header - RFC 6455
     /// requires browsers to fail the connection in that case, which is
     /// the correct behavior (a server that proceeds without negotiating
     /// would be silently speaking the wrong protocol).
@@ -174,7 +174,7 @@ impl WsConfig {
     /// - `max_missed_pings` is at least 2. The heartbeat increments the
     ///   counter on each ping send and checks the bound before the peer
     ///   has had its grace interval to pong, so a threshold of 1 closes
-    ///   the connection with 1011 on the very first tick — identical to
+    ///   the connection with 1011 on the very first tick - identical to
     ///   the rejected value 0. A usable threshold needs at least one grace
     ///   cycle (ping, then a pong can reset the counter). Routes that want
     ///   to disable close-on-no-pong should set this to [`usize::MAX`],
@@ -206,7 +206,7 @@ impl WsConfig {
     /// defaults.
     ///
     /// Do not use on routes reachable from the public internet
-    /// without an explicit decision — every active connection
+    /// without an explicit decision - every active connection
     /// reserves a buffer sized to `max_message_size`, and these
     /// limits multiply across concurrent sockets.
     ///
@@ -239,7 +239,7 @@ impl WsConfig {
 /// server's canonical spelling is what the client sees on the 101.
 ///
 /// Returns `None` when:
-/// - `accepted` is empty (negotiation disabled — server is protocol-agnostic),
+/// - `accepted` is empty (negotiation disabled - server is protocol-agnostic),
 /// - the client did not send `Sec-WebSocket-Protocol` (`client_offer` is `None`),
 /// - none of the client's offered tokens overlap with `accepted`.
 pub(crate) fn negotiate_subprotocol(
@@ -281,7 +281,7 @@ mod tests {
     fn default_max_message_size_is_safe_for_public_endpoints() {
         assert!(
             WsConfig::default().max_message_size <= 4 * 1024 * 1024,
-            "WsConfig::default().max_message_size = {} — public WS \
+            "WsConfig::default().max_message_size = {} - public WS \
              defaults must stay <= 4 MiB; use WsConfig::generous() for \
              trusted-feed deployments",
             WsConfig::default().max_message_size
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(cfg.max_missed_pings, WsConfig::default().max_missed_pings);
     }
 
-    /// Default config must pass validation — a default ctor that
+    /// Default config must pass validation - a default ctor that
     /// produces an invalid config would block every registration.
     #[test]
     fn default_config_is_valid() {
@@ -322,7 +322,7 @@ mod tests {
 
     /// `max_missed_pings = 0` means the very first ping send increments
     /// past the threshold and closes the connection with 1011 before
-    /// the peer can possibly pong. That's not a useful runtime mode —
+    /// the peer can possibly pong. That's not a useful runtime mode -
     /// to disable close-on-no-pong, use `usize::MAX`.
     #[test]
     fn zero_max_missed_pings_rejected() {
@@ -351,7 +351,7 @@ mod tests {
     }
 
     /// The smallest threshold that affords a grace cycle (ping, then a
-    /// pong can reset the counter) must pass validation — it's the
+    /// pong can reset the counter) must pass validation - it's the
     /// boundary the runtime relies on.
     #[test]
     fn two_max_missed_pings_is_valid() {
@@ -374,7 +374,7 @@ mod tests {
     }
 
     /// Empty `accepted_protocols` skips negotiation regardless of
-    /// what the client offered — the upgrade proceeds protocol-agnostic.
+    /// what the client offered - the upgrade proceeds protocol-agnostic.
     #[test]
     fn negotiate_returns_none_when_accepted_empty() {
         assert_eq!(negotiate_subprotocol(&[], Some("graphql-ws")), None);

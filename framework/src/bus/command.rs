@@ -6,7 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 /// A serializable command dispatched through the [`Bus`](crate::bus::Bus).
 ///
-/// Commands are owned data — the bus serializes them across thread or
+/// Commands are owned data - the bus serializes them across thread or
 /// process boundaries (queued execution, RPC fan-out), so a command must
 /// be `Serialize + DeserializeOwned`. Each command type names its own
 /// [`Handler`] implementation by its [`command_name`](Command::command_name).

@@ -3,18 +3,18 @@
 //! Five events mirroring `Illuminate\Auth\Events`, dispatched by the
 //! guards during the login lifecycle:
 //!
-//! - [`Attempting`] — a credential login attempt began
+//! - [`Attempting`] - a credential login attempt began
 //!   ([`StatefulGuard::attempt`](super::StatefulGuard::attempt) /
 //!   [`once`](super::StatefulGuard::once)).
-//! - [`Authenticated`] — a user was actively authenticated this request
+//! - [`Authenticated`] - a user was actively authenticated this request
 //!   (`login`/`once`/`once_using_id`).
-//! - [`Login`] — a user logged in with session persistence
+//! - [`Login`] - a user logged in with session persistence
 //!   ([`login`](super::StatefulGuard::login)).
-//! - [`Logout`] — a user logged out ([`logout`](super::StatefulGuard::logout)).
-//! - [`Failed`] — a credential attempt failed (bad password or unknown
+//! - [`Logout`] - a user logged out ([`logout`](super::StatefulGuard::logout)).
+//! - [`Failed`] - a credential attempt failed (bad password or unknown
 //!   identifier).
 //!
-//! Every event carries the guard name plus stringy identifiers only — no
+//! Every event carries the guard name plus stringy identifiers only - no
 //! plaintext passwords and no raw credential maps, matching the
 //! `auth_flows` events' "no sensitive data on the wire" contract. Email-
 //! keyed failed-attempt tracking is the job of
@@ -48,7 +48,7 @@ impl Event for Attempting {
     }
 }
 
-/// Fires when a user is actively authenticated this request — after a
+/// Fires when a user is actively authenticated this request - after a
 /// successful `login`, `once`, or `once_using_id`. Mirrors Laravel's
 /// `Authenticated`.
 #[derive(Debug, Clone)]

@@ -1,12 +1,12 @@
 //! Coverage for the Tera-templated subject path on the `Mailable`
-//! trait — `subject_template_source(&self) -> Option<String>`.
+//! trait - `subject_template_source(&self) -> Option<String>`.
 //!
 //! Pins the consistency contract: Mailable's subject + html + text
 //! all support Tera-templated sources, so a developer who writes
 //! `subject_template_source("Hello {{ name }}")` gets the same
 //! substitution semantics they get for the bodies. The fallback when
 //! `subject_template_source` returns `None` is still the literal
-//! `subject()` return value — existing impls are unaffected.
+//! `subject()` return value - existing impls are unaffected.
 //!
 //! Both `MailBuilder::send` (the direct path) and
 //! `mailable_registry::render_outgoing` (the queue worker path) go
@@ -29,7 +29,7 @@ impl Mailable for TeraSubject {
         "TeraSubject"
     }
 
-    /// Plain `subject()` returns a degraded fallback — this path is
+    /// Plain `subject()` returns a degraded fallback - this path is
     /// taken ONLY when `subject_template_source` returns `None`. The
     /// test below would fail loudly if `render_subject` accidentally
     /// chose this branch instead of the templated one.
@@ -39,7 +39,7 @@ impl Mailable for TeraSubject {
 
     /// The Tera template takes priority over `subject()`.
     fn subject_template_source(&self) -> Option<String> {
-        Some("Hi {{ name }} — use code {{ coupon }}".into())
+        Some("Hi {{ name }} - use code {{ coupon }}".into())
     }
 
     fn text_template_source(&self) -> Option<String> {
@@ -69,7 +69,7 @@ async fn mailable_subject_template_source_renders_through_tera() {
     let m = &msgs[0];
 
     assert_eq!(
-        m.subject, "Hi Alice — use code SUMMER25",
+        m.subject, "Hi Alice - use code SUMMER25",
         "subject_template_source must Tera-render with self as context"
     );
     assert_eq!(
@@ -81,7 +81,7 @@ async fn mailable_subject_template_source_renders_through_tera() {
 
 /// Pin the no-template fallback: a Mailable that doesn't override
 /// `subject_template_source` still gets its `subject()` return value
-/// verbatim. This is the path every existing impl takes — the
+/// verbatim. This is the path every existing impl takes - the
 /// convergence must be backward-compatible.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PlainSubject {
@@ -94,7 +94,7 @@ impl Mailable for PlainSubject {
         "PlainSubject"
     }
     fn subject(&self) -> String {
-        // Note the literal `{{ ... }}` here — if the convergence
+        // Note the literal `{{ ... }}` here - if the convergence
         // accidentally piped this through Tera, the assert below
         // would fail with "tera failed to parse" rather than match
         // the verbatim string. That makes this a stronger pin than a
@@ -128,7 +128,7 @@ async fn mailable_without_subject_template_source_uses_subject_verbatim() {
 }
 
 /// Tera errors on the subject template surface as the `subject`
-/// `render_subject` error variant — the dispatch fails before any
+/// `render_subject` error variant - the dispatch fails before any
 /// transport is touched. Mirrors the html/text template error paths.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct BrokenSubject {
@@ -167,6 +167,6 @@ async fn malformed_subject_template_surfaces_tera_error() {
     let msg = format!("{err}");
     assert!(
         msg.contains("Tera template (subject)"),
-        "error must label the subject template branch — same shape as html/text branches: {msg}"
+        "error must label the subject template branch - same shape as html/text branches: {msg}"
     );
 }

@@ -35,7 +35,7 @@ pub use response::TestResponse;
 #[cfg(any(test, feature = "testing"))]
 use crate::crypto::EncryptionKey;
 
-/// Install a deterministic encryption key for tests. Idempotent — the
+/// Install a deterministic encryption key for tests. Idempotent - the
 /// underlying `Crypt` facade is `OnceLock`-backed, so the second call is
 /// a no-op and safe to call from every test that touches an encrypted
 /// cast. The chosen key is a fixed 32-byte zero key encoded as URL-safe
@@ -53,14 +53,14 @@ pub fn install_test_encryption_key() {
     let key = EncryptionKey::from_base64(TEST_KEY_B64)
         .expect("32-byte test key parses from canonical zero-base64");
     // `_test_install_key` (in `crate::crypto`) returns false if a key
-    // was already installed — we ignore the return because idempotent
+    // was already installed - we ignore the return because idempotent
     // installation is the contract.
     let _ = crate::crypto::_test_install_key(key);
 }
 
 /// Install a key *ring* (current + previous fallback list) for tests
 /// that exercise `APP_KEY` rotation. Same one-shot `OnceLock` contract
-/// as [`install_test_encryption_key`] — the first installer in a test
+/// as [`install_test_encryption_key`] - the first installer in a test
 /// binary wins; subsequent calls are no-ops. Returns `true` iff this
 /// call actually installed the ring.
 ///

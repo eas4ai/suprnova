@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `data` #336 (second half) — include
+//! Regression: HIGH audit finding `data` #336 (second half) - include
 //! allowlist registry was keyed by bare struct name, so DTOs with the
 //! same identifier in different modules collided nondeterministically.
 //!
@@ -32,7 +32,7 @@ mod module_b {
     #[allow(dead_code)]
     pub struct UserDto {
         pub id: i64,
-        // Different allowlist field on purpose — if the registry keyed
+        // Different allowlist field on purpose - if the registry keyed
         // on bare names, one of these would silently overwrite the
         // other.
         #[data(allow_include)]
@@ -57,7 +57,7 @@ fn two_same_named_dtos_in_different_modules_keep_distinct_allowlists() {
     assert!(
         !registry::is_allowed(key_a, "team"),
         "module_a::UserDto must NOT have inherited module_b's `team` \
-         entry — that would be the collision the audit flagged"
+         entry - that would be the collision the audit flagged"
     );
 
     // Module B's allowlist: only `team`.
@@ -69,14 +69,14 @@ fn two_same_named_dtos_in_different_modules_keep_distinct_allowlists() {
     assert!(
         !registry::is_allowed(key_b, "profile"),
         "module_b::UserDto must NOT have inherited module_a's `profile` \
-         entry — that would be the collision the audit flagged"
+         entry - that would be the collision the audit flagged"
     );
 
-    // The bare "UserDto" key must NOT match either — the registry no
+    // The bare "UserDto" key must NOT match either - the registry no
     // longer accepts unqualified names.
     assert!(
         !registry::is_allowed("UserDto", "profile"),
-        "bare struct names must not match the registry — the audit fix \
+        "bare struct names must not match the registry - the audit fix \
          requires fully-qualified keys"
     );
     assert!(!registry::is_allowed("UserDto", "team"));

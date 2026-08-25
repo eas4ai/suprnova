@@ -4,7 +4,7 @@
 //!
 //! `NUMBER()` ships with Fluent itself (`FluentBundle::add_builtins`,
 //! called just before [`register`] in `fluent.rs`); `DATETIME()` is the
-//! framework's own addition — upstream `fluent-bundle` has a
+//! framework's own addition - upstream `fluent-bundle` has a
 //! `// TODO: DATETIME()` where it would go.
 
 use super::Lang;
@@ -18,7 +18,7 @@ use std::borrow::Cow;
 ///
 /// Only the registration itself can fail (id already taken); the
 /// function's own runtime behavior never returns `Err` because Fluent
-/// functions can't propagate one — see [`datetime_function`].
+/// functions can't propagate one - see [`datetime_function`].
 pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkError> {
     bundle
         .add_function("DATETIME", datetime_function)
@@ -35,12 +35,12 @@ pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkErr
 /// (`"2026-08-01T14:30:00"`, with or without a UTC offset, or a bare
 /// date) or an epoch-milliseconds number. Named arguments `dateStyle`
 /// and/or `timeStyle` take `"full"`/`"long"`/`"medium"`/`"short"` (only
-/// `"medium"`/`"short"` are meaningful for `timeStyle` — see
+/// `"medium"`/`"short"` are meaningful for `timeStyle` - see
 /// [`TimeStyle`]); supplying both formats a combined date+time, either
 /// alone formats just that part, and neither defaults to
 /// [`DateStyle::Medium`].
 ///
-/// Fluent function signatures can't return `Result` — a malformed or
+/// Fluent function signatures can't return `Result` - a malformed or
 /// unparseable `$value`, or an ICU formatting failure, can only be
 /// signaled by logging (`tracing::warn!`) and returning *something*.
 /// This returns `$value`'s own text verbatim in both cases, which is
@@ -48,7 +48,7 @@ pub(crate) fn register(bundle: &mut ConcurrentBundle) -> Result<(), FrameworkErr
 /// showing the raw value rather than blanking the message or panicking.
 /// An unrecognized `dateStyle`/`timeStyle` keyword gets the same
 /// treatment (warn, then fall back to the default) rather than silently
-/// being ignored — see [`parse_named_date_style`]/[`parse_named_time_style`].
+/// being ignored - see [`parse_named_date_style`]/[`parse_named_time_style`].
 fn datetime_function<'a>(positional: &[FluentValue<'a>], named: &FluentArgs) -> FluentValue<'a> {
     let Some(value) = positional.first() else {
         tracing::warn!("DATETIME(): missing the required $value positional argument");
@@ -128,7 +128,7 @@ fn named_style<'a>(named: &'a FluentArgs<'_>, key: &'a str) -> Option<&'a str> {
 /// absent (the normal "not asking for a date length" case, no log).
 /// When it *is* present but isn't `"full"`/`"long"`/`"medium"`/`"short"`,
 /// logs a `tracing::warn!` naming both the option and the bad value, then
-/// still returns `None` — the caller falls back the same way an absent
+/// still returns `None` - the caller falls back the same way an absent
 /// option would, but the mistake isn't silent.
 fn parse_named_date_style(named: &FluentArgs<'_>) -> Option<DateStyle> {
     let raw = named_style(named, "dateStyle")?;
@@ -175,7 +175,7 @@ fn parse_time_style(s: &str) -> Option<TimeStyle> {
 }
 
 /// A plain-text rendering of `value`, used for the verbatim-passthrough
-/// fallback and for logging. Not locale-aware — this is the last-resort
+/// fallback and for logging. Not locale-aware - this is the last-resort
 /// path where ICU formatting has already failed or was never attempted.
 fn value_text(value: &FluentValue<'_>) -> String {
     match value {

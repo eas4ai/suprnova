@@ -4,7 +4,7 @@
 //! (`authorize`, `after_validation`, `after_validation_async`) that
 //! return defaults from the trait. Overriding any of them requires
 //! writing your own `impl FormRequest`, but the `#[derive(FormRequest)]`
-//! / `#[request]` macros also emit an `impl FormRequest` block — two
+//! / `#[request]` macros also emit an `impl FormRequest` block - two
 //! impls collide and the result fails to compile.
 //!
 //! `#[form_request(custom_hooks)]` is the opt-out that suppresses the
@@ -12,7 +12,7 @@
 //! existing `#[multipart(custom_hooks)]` shape on `MultipartRequest`.
 //!
 //! The hook bodies aren't exercised at runtime in this test (constructing
-//! a `Request` outside hyper is non-trivial — see `data_form_request.rs`
+//! a `Request` outside hyper is non-trivial - see `data_form_request.rs`
 //! for the full integration shape). Instead, this file's value is
 //! compile-time: the fact that it builds at all proves there is exactly
 //! one `impl FormRequest` per struct after macro expansion. A duplicate
@@ -24,7 +24,7 @@ use suprnova_macros::FormRequest as FormRequestDerive;
 // ---- Sanity: default path (no `custom_hooks`) still works ----
 //
 // Without the opt-out the macro emits the default `impl FormRequest`.
-// A user-written `impl FormRequest` here would duplicate — but there
+// A user-written `impl FormRequest` here would duplicate - but there
 // is none, so the file compiles and the default `max_body_bytes()`
 // is reachable.
 
@@ -68,7 +68,7 @@ fn request_attr_with_custom_hooks_uses_user_impl() {
     assert_eq!(
         <RestrictedCreateAttr as FormRequest>::max_body_bytes(),
         9_999,
-        "the user's `impl FormRequest` must be the only one — if the \
+        "the user's `impl FormRequest` must be the only one - if the \
          macro had also emitted its default, this would be a duplicate-impl \
          error at compile time and we'd never reach this test"
     );
@@ -116,5 +116,5 @@ fn max_body_bytes_under_default_hooks_applies() {
     assert_eq!(<CapPlain as FormRequest>::max_body_bytes(), 1024);
 }
 
-// With custom_hooks, the user writes the impl — so they own
+// With custom_hooks, the user writes the impl - so they own
 // `max_body_bytes` themselves. The macro is silent on it.

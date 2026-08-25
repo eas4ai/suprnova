@@ -1,4 +1,4 @@
-//! Cache-backed [`RateLimiter`] facade — mirror of
+//! Cache-backed [`RateLimiter`] facade - mirror of
 //! `Illuminate\Cache\RateLimiter`.
 //!
 //! Implements Laravel's fixed-window counter on top of Suprnova's
@@ -19,9 +19,9 @@
 //!
 //! For an attempt-counter key `K` and a decay of `D` seconds:
 //!
-//! - `K` — i64 counter incremented by every `hit`. Initial seed is 0
+//! - `K` - i64 counter incremented by every `hit`. Initial seed is 0
 //!   (via `Cache::add`).
-//! - `K:timer` — i64 unix-seconds-since-epoch when the window ends. Set
+//! - `K:timer` - i64 unix-seconds-since-epoch when the window ends. Set
 //!   via `Cache::add` so the deadline only seeds once per window (the
 //!   counter resets on expiry, but the timer pinned the original
 //!   deadline).
@@ -30,14 +30,14 @@
 //! automatically when the window ends. This is the same two-key shape
 //! Laravel uses in `Cache/RateLimiter.php:147-181`.
 //!
-//! ## Concurrency — gate on the post-increment count
+//! ## Concurrency - gate on the post-increment count
 //!
 //! A read-then-write gate ([`too_many_attempts`](RateLimiter::too_many_attempts)
 //! followed later by [`hit`](RateLimiter::hit)) has a check-then-act race:
 //! concurrent callers can all observe a count below the limit, then each
 //! increment, over-admitting past the configured ceiling and widening the
 //! brute-force window. The atomic alternative is
-//! [`hit_and_check`](RateLimiter::hit_and_check) — it increments first and
+//! [`hit_and_check`](RateLimiter::hit_and_check) - it increments first and
 //! decides on the returned count, so the decision and the write are a single
 //! step with no gap. The HTTP middleware uses it; prefer it over the
 //! read-gate-then-`hit` pair anywhere correctness under concurrency matters.
@@ -48,7 +48,7 @@
 //! [`InMemoryCache`](crate::cache::InMemoryCache) is **per-process**: each
 //! worker process keeps its own counter map, so a fixed-window limit set to N
 //! admits up to `N × processes` across a multi-process deployment. For correct
-//! limiting across processes (or hosts), back the cache with **Redis** — its
+//! limiting across processes (or hosts), back the cache with **Redis** - its
 //! `INCR` is atomic and the counter is shared by every process pointed at the
 //! same instance. (The sliding-window
 //! [`RateLimiterDriver`](super::RateLimiterDriver) Redis path is likewise
@@ -71,7 +71,7 @@ use super::limit::LimitResult;
 /// attributes (admins → unlimited), or return a fully-formed
 /// [`HttpResponse`](crate::http::HttpResponse) (short-circuit).
 ///
-/// The registry is process-global by design — Laravel apps register
+/// The registry is process-global by design - Laravel apps register
 /// limiters at boot (`AppServiceProvider::boot`) and never mutate them
 /// at runtime. `RateLimiter::define("api", ...)` writes the callback
 /// here; `RateLimiter::limiter("api")` looks it up.
@@ -102,7 +102,7 @@ impl NamedLimiterRegistry {
         F: Fn(&Request) -> LimitResult + Send + Sync + 'static,
     {
         // Hot-path registry: must stay up even after a poisoned lock.
-        // The guarded critical section is a single `HashMap::insert` —
+        // The guarded critical section is a single `HashMap::insert` -
         // poison is essentially unreachable, so recovering in place
         // matches the framework's hot-registry pattern (data::registry,
         // payments registry, etc.): a poisoned lock never aborts the
@@ -134,7 +134,7 @@ pub fn registry() -> &'static NamedLimiterRegistry {
     REGISTRY.get_or_init(NamedLimiterRegistry::new)
 }
 
-/// Laravel-shape rate-limiter facade. All methods are static — no
+/// Laravel-shape rate-limiter facade. All methods are static - no
 /// instance is constructed because the backing store is resolved from
 /// the [`App`] container on every call.
 ///
@@ -144,7 +144,7 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 /// use suprnova::rate_limit::{Limit, RateLimiter};
 /// # use suprnova::http::HttpResponse;
 /// # async fn ex() -> Result<(), HttpResponse> {
-/// // Register a named limiter at boot. Key by `req.ip()` — that goes
+/// // Register a named limiter at boot. Key by `req.ip()` - that goes
 /// // through the trusted-proxy gating in `Request::ip`, so the bucket
 /// // key reflects the real peer unless the operator has explicitly
 /// // configured `APP_TRUSTED_PROXIES`.
@@ -166,7 +166,7 @@ pub fn registry() -> &'static NamedLimiterRegistry {
 /// Never key a limiter directly off `X-Forwarded-For` or `X-Real-IP`:
 /// those headers are client-controlled and any inbound request can
 /// carry them. Use [`Request::ip`](crate::Request::ip), which honours
-/// the configured trusted-proxy allowlist — see
+/// the configured trusted-proxy allowlist - see
 /// [`TrustedProxiesConfig`](crate::http::TrustedProxiesConfig). On a
 /// deployment without a terminating proxy, an XFF-keyed limiter is a
 /// DoS amplifier: an attacker rotates the header to mint unbounded
@@ -196,7 +196,7 @@ impl RateLimiter {
     /// - a [`Limit`](super::Limit) (`Limit::per_minute(5).by(req.ip())`),
     /// - a `Vec<Limit>` (apply every limit; first to trip wins), or
     /// - an [`HttpResponse`](crate::http::HttpResponse) (short-circuit; the request returns this
-    ///   response immediately — used by Laravel's "admin gets
+    ///   response immediately - used by Laravel's "admin gets
     ///   unlimited" pattern via `Limit::none()`, but the response form
     ///   also lets you refuse outright).
     ///
@@ -259,7 +259,7 @@ impl RateLimiter {
         Ok(v.unwrap_or(0))
     }
 
-    /// Clear the counter (but leave the `:timer` deadline alone — the
+    /// Clear the counter (but leave the `:timer` deadline alone - the
     /// `clear` method below clears both). Mirrors
     /// `RateLimiter::resetAttempts($key)`.
     pub async fn reset_attempts(key: &str) -> Result<bool, FrameworkError> {
@@ -307,7 +307,7 @@ impl RateLimiter {
     /// separate [`hit`](Self::hit). Because the increment is the cache's atomic
     /// primitive and the decision uses its return value, concurrent callers
     /// receive distinct sequential counts and the bucket admits at most
-    /// `max_attempts` per window — closing the check-then-act gap that lets a
+    /// `max_attempts` per window - closing the check-then-act gap that lets a
     /// burst over-admit.
     ///
     /// `i64::MAX` is treated as unlimited: the counter is still bumped (so
@@ -317,7 +317,7 @@ impl RateLimiter {
     /// `:timer` deadline, so once the window expires both age out together and
     /// the next call re-seeds the timer and starts the count fresh at 1.
     ///
-    /// The atomicity is per backing store — see the module-level note on
+    /// The atomicity is per backing store - see the module-level note on
     /// needing Redis for correct multi-process limiting.
     pub async fn hit_and_check(
         key: &str,
@@ -335,7 +335,7 @@ impl RateLimiter {
     /// missing. Mirrors `RateLimiter::increment($key, $decaySeconds,
     /// $amount)`. Returns the new counter value.
     ///
-    /// The `:timer` deadline is set via `Cache::add` — only the first
+    /// The `:timer` deadline is set via `Cache::add` - only the first
     /// caller in the window pins the deadline; subsequent callers in
     /// the same window leave it untouched.
     pub async fn increment(
@@ -377,7 +377,7 @@ impl RateLimiter {
     }
 
     /// Alias of [`RateLimiter::remaining`]. Mirrors Laravel's
-    /// `retriesLeft($key, $maxAttempts)` — both are part of the public
+    /// `retriesLeft($key, $maxAttempts)` - both are part of the public
     /// `RateLimiter` API and migrated code may use either spelling.
     pub async fn retries_left(key: &str, max_attempts: i64) -> Result<i64, FrameworkError> {
         Self::remaining(key, max_attempts).await
@@ -401,14 +401,14 @@ impl RateLimiter {
     /// deterministic and idempotent inside Suprnova; consumers who need
     /// byte-identical hashing with a PHP service should run their
     /// `htmlentities` pre-step on the input themselves before calling
-    /// this — Laravel's `htmlentities` step encodes non-ASCII bytes,
+    /// this - Laravel's `htmlentities` step encodes non-ASCII bytes,
     /// which is unnecessary for Rust `String`s but which we deliberately
     /// don't replicate.
     pub fn clean_rate_limiter_key(key: &str) -> String {
-        // Strip `&abc;` entity markers — same shape as Laravel's
+        // Strip `&abc;` entity markers - same shape as Laravel's
         // `preg_replace('/&([a-z])[a-z]+;/i', '$1', htmlentities($key))`.
         // We skip Laravel's preceding `htmlentities` because the binary
-        // range of a Rust `String` is already UTF-8-clean — Laravel's
+        // range of a Rust `String` is already UTF-8-clean - Laravel's
         // `htmlentities` is there to encode binary garbage into a safe
         // ASCII subset before the strip, which is moot here.
         let mut out = String::with_capacity(key.len());
@@ -466,11 +466,11 @@ impl RateLimiter {
     }
 
     /// Whether the Cache binding required by the facade is wired. Mirrors
-    /// `Cache::is_initialized` — useful when bootstrapping environment
+    /// `Cache::is_initialized` - useful when bootstrapping environment
     /// matters (named limiters can register at any time; counter calls
     /// need a Cache store).
     pub fn is_cache_initialized() -> bool {
-        // Resolve the cache store binding — same predicate the facade
+        // Resolve the cache store binding - same predicate the facade
         // uses internally.
         let _ = App::resolve_make::<dyn crate::cache::CacheStore>();
         Cache::is_initialized()
@@ -680,7 +680,7 @@ mod tests {
 
     /// The core anti-TOCTOU property: when many hits race the same bucket at
     /// the boundary, increment-and-check admits at most `max_attempts` of
-    /// them — no over-admission past the configured ceiling. A read-gate
+    /// them - no over-admission past the configured ceiling. A read-gate
     /// (`too_many_attempts` then `hit`) would let concurrent callers all
     /// observe a below-limit count and all pass, over-admitting.
     ///
@@ -714,7 +714,7 @@ mod tests {
         assert_eq!(
             admitted, max,
             "increment-and-check must admit exactly max_attempts under a \
-             concurrent burst — no over-admission"
+             concurrent burst - no over-admission"
         );
         assert!(
             RateLimiter::attempts(key).await.unwrap() >= max,
@@ -740,7 +740,7 @@ mod tests {
         let mut read_gate_admitted = 0_i64;
         let snapshot = RateLimiter::attempts(race_key).await.unwrap(); // 0
         for _ in 0..(max + 4) {
-            // Every caller decides on the SAME stale snapshot, then writes —
+            // Every caller decides on the SAME stale snapshot, then writes -
             // exactly what concurrent read-gate callers do before any write
             // lands.
             if snapshot < max {
@@ -767,12 +767,12 @@ mod tests {
         }
         assert_eq!(
             fixed_admitted, max,
-            "increment-and-check admits exactly max — no over-admission"
+            "increment-and-check admits exactly max - no over-admission"
         );
     }
 
     /// Sequentially driving `hit_and_check` past the limit then waiting for
-    /// the window to expire must reopen the bucket — the increment-and-check
+    /// the window to expire must reopen the bucket - the increment-and-check
     /// path self-heals the window just like the read-gate path.
     #[tokio::test]
     async fn hit_and_check_reopens_after_window_expiry() {
@@ -799,7 +799,7 @@ mod tests {
         );
     }
 
-    /// The counter MUST age out with the window — `attempts(key)` must
+    /// The counter MUST age out with the window - `attempts(key)` must
     /// return 0 once the `:timer` has expired. On the in-memory backend
     /// this requires `CacheStore::increment` to preserve the seeded TTL
     /// (Redis `INCR` already does). Without that, both `attempts` and
@@ -816,14 +816,14 @@ mod tests {
         assert_eq!(RateLimiter::attempts(key).await.unwrap(), 2);
         assert_eq!(RateLimiter::remaining(key, 5).await.unwrap(), 3);
 
-        // Wait past the window. SystemTime + Instant both advance here —
+        // Wait past the window. SystemTime + Instant both advance here -
         // tokio::time::sleep without start_paused sleeps real time.
         tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
 
         assert_eq!(
             RateLimiter::attempts(key).await.unwrap(),
             0,
-            "counter must age out with the window — both backends preserve TTL on increment"
+            "counter must age out with the window - both backends preserve TTL on increment"
         );
         assert_eq!(
             RateLimiter::remaining(key, 5).await.unwrap(),

@@ -1,21 +1,21 @@
-//! Phase 9A — Pinecone vector driver tests.
+//! Phase 9A - Pinecone vector driver tests.
 //!
 //! Requires `--features vector-pinecone` because the driver is
-//! feature-gated. The feature no longer gates a dependency — the driver
+//! feature-gated. The feature no longer gates a dependency - the driver
 //! speaks Pinecone's REST API over the framework's existing `reqwest`
-//! client — it just gates compilation of the module.
+//! client - it just gates compilation of the module.
 
 #![cfg(feature = "vector-pinecone")]
 
 //!
 //! Three layers:
 //!
-//! 1. **Pure-function tests** (always run) — metadata round-trips, vector
+//! 1. **Pure-function tests** (always run) - metadata round-trips, vector
 //!    encoding, match decoding, and the trait's short-circuit paths
 //!    (empty inputs, k = 0, empty/zero-vector queries). None touches the
 //!    network.
 //!
-//! 2. **Wire-contract tests** (always run) — drive the driver against a
+//! 2. **Wire-contract tests** (always run) - drive the driver against a
 //!    `wiremock` server standing in for Pinecone, and assert the exact
 //!    method, path, headers and JSON body it puts on the wire, plus how
 //!    it decodes the documented response shapes. These exist because the
@@ -24,16 +24,16 @@
 //!
 //!    They verify the driver against Pinecone's *documented* REST
 //!    contract for API version `2025-04`. They cannot verify that the
-//!    documentation matches the live service — only layer 3 does that.
+//!    documentation matches the live service - only layer 3 does that.
 //!
-//! 3. **Integration tests** (`#[ignore]`) — drive a real Pinecone
+//! 3. **Integration tests** (`#[ignore]`) - drive a real Pinecone
 //!    account. Require both:
-//!    - `PINECONE_API_KEY` — your account's API key
-//!    - `PINECONE_TEST_INDEX` — a pre-existing serverless index name
+//!    - `PINECONE_API_KEY` - your account's API key
+//!    - `PINECONE_TEST_INDEX` - a pre-existing serverless index name
 //!      (the driver doesn't auto-create indexes; see the module docs).
 //!
 //!    Each integration test uses a unique namespace (timestamp-tagged)
-//!    and deletes it on the way out — your test index is reused but never
+//!    and deletes it on the way out - your test index is reused but never
 //!    polluted.
 //!
 //!    ```bash
@@ -89,7 +89,7 @@ async fn only_request(server: &MockServer) -> wiremock::Request {
 }
 
 // ----------------------------------------------------------------------
-// Pure-function tests — metadata conversion
+// Pure-function tests - metadata conversion
 // ----------------------------------------------------------------------
 
 #[test]
@@ -149,7 +149,7 @@ fn metadata_to_json_empty_map_yields_empty_object() {
 }
 
 // ----------------------------------------------------------------------
-// Pure-function tests — vector encode
+// Pure-function tests - vector encode
 // ----------------------------------------------------------------------
 
 #[test]
@@ -206,7 +206,7 @@ fn build_vector_rejects_non_object_metadata() {
 }
 
 // ----------------------------------------------------------------------
-// Pure-function tests — match decode
+// Pure-function tests - match decode
 // ----------------------------------------------------------------------
 
 #[test]
@@ -234,7 +234,7 @@ fn decode_match_with_metadata_yields_object() {
 }
 
 // ----------------------------------------------------------------------
-// Pure-function tests — short-circuits (no real network)
+// Pure-function tests - short-circuits (no real network)
 // ----------------------------------------------------------------------
 
 #[tokio::test]
@@ -299,7 +299,7 @@ async fn upsert_with_zero_dim_first_item_errors_locally() {
 }
 
 // ----------------------------------------------------------------------
-// Pure-function tests — builder
+// Pure-function tests - builder
 // ----------------------------------------------------------------------
 
 #[test]
@@ -331,7 +331,7 @@ fn debug_redacts_the_api_key() {
 }
 
 // ----------------------------------------------------------------------
-// Wire-contract tests — what actually goes on the wire
+// Wire-contract tests - what actually goes on the wire
 // ----------------------------------------------------------------------
 
 /// Every request carries the API key and a pinned API version. Pinecone
@@ -459,7 +459,7 @@ async fn delete_posts_the_id_list_and_namespace() {
 
 /// `count` reads a per-namespace summary. The default namespace lives
 /// under an empty-string key, and a namespace that has never been written
-/// to is absent rather than zero — so "missing" must mean 0, not an error.
+/// to is absent rather than zero - so "missing" must mean 0, not an error.
 #[tokio::test]
 async fn count_reads_this_drivers_namespace_out_of_the_stats_map() {
     let server = MockServer::start().await;
@@ -501,7 +501,7 @@ async fn count_reads_this_drivers_namespace_out_of_the_stats_map() {
 }
 
 /// The control plane resolves an index host, and the driver must reach it
-/// over TLS regardless of what the response says — a scheme taken from a
+/// over TLS regardless of what the response says - a scheme taken from a
 /// response body is a scheme an attacker who can answer for the control
 /// plane gets to choose.
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn a_host_pinned_by_the_operator_skips_the_control_plane_entirely() {
     );
 }
 
-/// An error must name the status and carry a slice of the body — and must
+/// An error must name the status and carry a slice of the body - and must
 /// never carry the API key, which is the one thing in scope that would be
 /// catastrophic in a log.
 #[tokio::test]
@@ -670,7 +670,7 @@ async fn a_crafted_store_name_cannot_reach_another_control_plane_endpoint() {
         .unwrap()
         .with_control_plane(server.uri());
 
-    // Unmatched by any mock, so this 404s — the point is *which* path was
+    // Unmatched by any mock, so this 404s - the point is *which* path was
     // requested, which `.expect(0)` above asserts on drop.
     let _ = driver.index_host("../api-keys").await;
 
@@ -683,7 +683,7 @@ async fn a_crafted_store_name_cannot_reach_another_control_plane_endpoint() {
 }
 
 // ----------------------------------------------------------------------
-// Integration tests — env-gated, require a real Pinecone account
+// Integration tests - env-gated, require a real Pinecone account
 // ----------------------------------------------------------------------
 
 fn unique_namespace(tag: &str) -> String {
@@ -729,7 +729,7 @@ async fn integration_upsert_and_count_roundtrip() {
         .unwrap()
         .with_namespace(&ns);
 
-    // Use 4-dim vectors — common for small test indexes. If the user's
+    // Use 4-dim vectors - common for small test indexes. If the user's
     // index has a different dim, Pinecone rejects this and the assertion
     // surfaces its message.
     driver

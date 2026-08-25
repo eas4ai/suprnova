@@ -1,11 +1,11 @@
-//! Queue pause / resume — `Queue::pause` / `resume` / `pause_all` /
+//! Queue pause / resume - `Queue::pause` / `resume` / `pause_all` /
 //! `resume_all` / `is_paused` / `paused_queues`, and the worker's claim
 //! gate that gives them teeth.
 //!
 //! The CLI-level "exits non-zero without a queue and without `--all`"
 //! contract is proven separately, inline in `framework/src/app/mod.rs`'s
 //! `queue_pause_target_tests` module (beside `migrate_fresh_gate_tests`,
-//! the same file's existing precedent for this) — the function it guards
+//! the same file's existing precedent for this) - the function it guards
 //! is a private free function, invisible to this integration-test crate,
 //! and its process-exit paths cannot be exercised in-process at all.
 //! Every other "Proves" bullet for this task is a named test below.
@@ -242,7 +242,7 @@ async fn resume_all_does_not_clear_a_per_queue_pause() {
         Queue::is_paused(&connection, "pause_test_billing")
             .await
             .unwrap(),
-        "resume_all must not clear a per-queue pause — Laravel semantics"
+        "resume_all must not clear a per-queue pause - Laravel semantics"
     );
     assert_eq!(
         Queue::paused_queues(
@@ -409,7 +409,7 @@ async fn in_flight_job_completes_after_pause_and_the_next_job_waits_for_resume()
 }
 
 // ============================================================================
-// QUEUE_PAUSABLE=false — the worker ignores pause signals entirely
+// QUEUE_PAUSABLE=false - the worker ignores pause signals entirely
 // ============================================================================
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]

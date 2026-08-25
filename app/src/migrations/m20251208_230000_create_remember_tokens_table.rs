@@ -6,25 +6,25 @@
 //! `framework/src/auth/remember.rs::entity::Model`:
 //!
 //! - `id` BIGINT PK auto-increment
-//! - `user_id` VARCHAR not null — opaque string id (post-Phase-3
+//! - `user_id` VARCHAR not null - opaque string id (post-Phase-3
 //!   String-everywhere refactor; no FK on purpose, so the table is
 //!   usable against any user store)
-//! - `selector` VARCHAR not null UNIQUE — 22-char URL-safe base64
+//! - `selector` VARCHAR not null UNIQUE - 22-char URL-safe base64
 //!   lookup key for O(1) indexed verification (replaces the previous
 //!   full-scan bcrypt design)
-//! - `token_hash` VARCHAR not null — bcrypt hash of the verifier
+//! - `token_hash` VARCHAR not null - bcrypt hash of the verifier
 //!   plaintext (the verifier half of the composite cookie token)
-//! - `expires_at` TIMESTAMP not null — token TTL boundary
+//! - `expires_at` TIMESTAMP not null - token TTL boundary
 //! - `created_at` TIMESTAMP not null
 //! - `last_used_at` TIMESTAMP null
 //!
 //! Three indexes:
 //!
-//! - `idx_remember_tokens_user_id` — revoke-by-user is a DELETE with
+//! - `idx_remember_tokens_user_id` - revoke-by-user is a DELETE with
 //!   `WHERE user_id = ?`; index makes it O(matches) instead of O(table).
-//! - `idx_remember_tokens_expires_at` — `prune_expired` filters
+//! - `idx_remember_tokens_expires_at` - `prune_expired` filters
 //!   `WHERE expires_at <= now()`.
-//! - `idx_remember_tokens_selector` — UNIQUE; verification does
+//! - `idx_remember_tokens_selector` - UNIQUE; verification does
 //!   `SELECT ... WHERE selector = ? LIMIT 1`. The UNIQUE constraint
 //!   also enforces selector collision impossibility at the DB level.
 

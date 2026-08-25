@@ -180,7 +180,7 @@ fn bcrypt_legacy_variants_need_rehash() {
 
 #[tokio::test]
 async fn async_facade_dispatches_through_default_driver() {
-    // No env mutation — just confirm the default path doesn't panic and
+    // No env mutation - just confirm the default path doesn't panic and
     // round-trips on whichever driver is configured (bcrypt under the
     // default workspace test profile).
     let pw = "another good password";
@@ -195,7 +195,7 @@ fn facade_verify_with_argon_driver_still_verifies_legacy_bcrypt() {
     // is set, EXISTING bcrypt hashes must STILL verify so users can log in
     // and the auth flow can rotate the stored hash via `needs_rehash` on
     // success. Pre-fix the facade dispatched through the configured
-    // driver's `verify`, which is single-algorithm — so every legacy
+    // driver's `verify`, which is single-algorithm - so every legacy
     // bcrypt user would get locked out the instant the env flipped.
     use suprnova::hashing::verify_with;
 
@@ -227,7 +227,7 @@ fn facade_verify_with_argon_driver_still_verifies_legacy_bcrypt() {
 
 #[test]
 fn facade_verify_with_bcrypt_driver_verifies_argon_hash() {
-    // The reverse direction — useful if a deployment ever migrates back
+    // The reverse direction - useful if a deployment ever migrates back
     // or runs mixed bcrypt+argon hashes during a partial rollout.
     use suprnova::hashing::verify_with;
 
@@ -249,7 +249,7 @@ fn facade_verify_with_bcrypt_driver_verifies_argon_hash() {
 #[test]
 fn facade_hash_verify_gate_rejects_cross_algo_when_enabled() {
     // With HASH_VERIFY=true, the facade refuses to verify a stored hash
-    // whose algorithm differs from the configured driver — strict mode
+    // whose algorithm differs from the configured driver - strict mode
     // for deployments past the rotation window.
     use suprnova::hashing::verify_with;
 

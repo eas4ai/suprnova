@@ -1,4 +1,4 @@
-//! `SendNotificationJob` — processes `Notify::queue` dispatches via the
+//! `SendNotificationJob` - processes `Notify::queue` dispatches via the
 //! Phase 5A FROZEN envelope.
 //!
 //! The job carries the pre-resolved per-channel routes plus the
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 /// Queue payload produced by `Notify::queue` and consumed by the worker.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendNotificationJob {
-    /// Map of channel name to route — pre-resolved at queue time so the
+    /// Map of channel name to route - pre-resolved at queue time so the
     /// worker does not need to re-acquire a `Notifiable` handle.
     pub notifiable_route_per_channel: HashMap<String, String>,
     /// `Notification::notification_name()` of the queued notification (factory key).
@@ -48,7 +48,7 @@ impl Job for SendNotificationJob {
     async fn handle(self) -> Result<(), FrameworkError> {
         let dispatcher = dispatcher_for_queue()?;
         let factory = factory_for(&self.notification_name)?;
-        // Snapshot the payload before the factory consumes it — it doubles as
+        // Snapshot the payload before the factory consumes it - it doubles as
         // the `data` field on the lifecycle events below.
         let payload = self.notification_payload.clone();
         let notification: Box<dyn DynNotification> = factory(self.notification_payload)?;

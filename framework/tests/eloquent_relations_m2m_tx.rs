@@ -1,9 +1,9 @@
-//! Phase 10C audit-fix AF2 — lazy m2m relation paths honor CURRENT_TX.
+//! Phase 10C audit-fix AF2 - lazy m2m relation paths honor CURRENT_TX.
 //!
 //! `BelongsToMany::attach` / `detach` / `sync` / `count` and the
 //! `MorphToMany` / `MorphedByMany` equivalents currently call
 //! `DB::connection()?` explicitly and run raw `INSERT` / `DELETE` /
-//! `SELECT COUNT` against the pool — bypassing the ambient
+//! `SELECT COUNT` against the pool - bypassing the ambient
 //! `CURRENT_TX`. Under a `DB::transaction` closure, that means
 //! pivot writes silently auto-commit on a separate pool connection
 //! while the closure's BEGIN holds its own connection, so a
@@ -111,8 +111,8 @@ async fn belongs_to_many_attach_inside_tx_rolls_back() {
     .await;
     assert!(result.is_err());
 
-    // Pre-fix: attach silently committed on a pool connection — count is 1.
-    // Post-fix: attach landed on the tx and rolled back — count is 0.
+    // Pre-fix: attach silently committed on a pool connection - count is 1.
+    // Post-fix: attach landed on the tx and rolled back - count is 0.
     let user = Af2User::find(u.id).await.unwrap().unwrap();
     let count = user.tags().count().await.unwrap();
     assert_eq!(
@@ -144,8 +144,8 @@ async fn belongs_to_many_detach_inside_tx_rolls_back() {
     .await;
     assert!(result.is_err());
 
-    // Pre-fix: detach silently committed on the pool — count is 0.
-    // Post-fix: detach rolled back — count is back to 1.
+    // Pre-fix: detach silently committed on the pool - count is 0.
+    // Post-fix: detach rolled back - count is back to 1.
     let user = Af2User::find(u.id).await.unwrap().unwrap();
     let count = user.tags().count().await.unwrap();
     assert_eq!(
@@ -189,7 +189,7 @@ async fn belongs_to_many_sync_inside_tx_rolls_back() {
     assert_eq!(
         labels,
         vec!["alpha"],
-        "sync must roll back atomically — t1 still attached, t2/t3 not"
+        "sync must roll back atomically - t1 still attached, t2/t3 not"
     );
 }
 

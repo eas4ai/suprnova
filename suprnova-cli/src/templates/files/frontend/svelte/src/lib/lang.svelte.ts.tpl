@@ -1,7 +1,7 @@
 // Localization wrapper around `@fluent/bundle`, driven by the `lang`
 // Inertia shared prop (see `LocaleShare` in the Suprnova framework).
 //
-// `$state` runes, not a store — this needs the `.svelte.ts` extension
+// `$state` runes, not a store - this needs the `.svelte.ts` extension
 // (a plain `.ts` module can't use runes).
 //
 // Usage, once per navigation (e.g. from `router.on('navigate', ...)` in
@@ -22,7 +22,7 @@ export interface LangShare {
 }
 
 /**
- * Minimal structural shape of an Inertia page object — matches
+ * Minimal structural shape of an Inertia page object - matches
  * `@inertiajs/svelte`'s page store value (and its Vue/React equivalents)
  * without importing `@inertiajs/core` directly.
  */
@@ -38,14 +38,14 @@ let fallbackLocale = $state('en')
 let bundle: FluentBundle | null = null
 
 // Bumped on every catalog load/failure. `bundle` stays a plain (non-rune)
-// variable — a `FluentBundle` instance doesn't behave correctly wrapped
-// in Svelte's reactive Proxy — so `t()` reads this rune to register as a
+// variable - a `FluentBundle` instance doesn't behave correctly wrapped
+// in Svelte's reactive Proxy - so `t()` reads this rune to register as a
 // reactive dependency for callers inside a component/template.
 let catalogVersion = $state(0)
 
 /**
  * Read the `lang` shared prop off `page`, then fetch and parse its
- * Fluent catalog. Safe to call on every Inertia navigation — the
+ * Fluent catalog. Safe to call on every Inertia navigation - the
  * `?v=<hash>` cache-buster on `catalog.url` makes a repeat fetch for an
  * unchanged locale a browser cache hit.
  *
@@ -79,7 +79,7 @@ export async function initLang(page: LangPage): Promise<void> {
     next.addResource(new FluentResource(source))
     bundle = next
   } catch {
-    // Offline, network failure, etc. — degrade to the raw-key fallback
+    // Offline, network failure, etc. - degrade to the raw-key fallback
     // below rather than leaving the page unable to render.
     bundle = null
   }
@@ -89,7 +89,7 @@ export async function initLang(page: LangPage): Promise<void> {
 /**
  * Translate `key`, formatting `args` into the message's Fluent
  * placeables. When no catalog is loaded (pre-`initLang`, a translator-less
- * app, or a fetch failure) or `key` has no entry, returns `key` itself —
+ * app, or a fetch failure) or `key` has no entry, returns `key` itself -
  * a missing translation should be visibly wrong, never a crashed page.
  */
 export function t(key: MessageKey, args?: Record<string, string | number>): string {
@@ -111,7 +111,7 @@ export function currentLocale(): string {
 
 /**
  * The configured fallback locale. Exposed as a getter function rather
- * than a plain exported binding — Svelte 5's cross-module `$state`
+ * than a plain exported binding - Svelte 5's cross-module `$state`
  * reactivity for primitives is only observed by components that read it
  * through a function call at render time, not a destructured import.
  */

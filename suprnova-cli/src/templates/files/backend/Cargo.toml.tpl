@@ -6,8 +6,8 @@ rust-version = "1.94.0"
 description = "{description}"
 {authors_line}
 # Two binaries are declared below, so `cargo run` has to be told which
-# one it means. Without `default-run` it refuses outright — it does NOT
-# fall back to the binary sharing the package name — and every wrapper
+# one it means. Without `default-run` it refuses outright - it does NOT
+# fall back to the binary sharing the package name - and every wrapper
 # (`suprnova migrate`, `schedule:work`, `web:run`, …) fails before doing
 # any work.
 default-run = "{package_name}"
@@ -16,7 +16,7 @@ default-run = "{package_name}"
 name = "{package_name}"
 path = "cmd/main.rs"
 
-# Per-project console binary — runtime command dispatch (db:seed,
+# Per-project console binary - runtime command dispatch (db:seed,
 # user-defined `#[command]` async fns, etc.). Same crate, different
 # `fn main` because console commands exit when their handler returns
 # whereas the server binary loops forever.

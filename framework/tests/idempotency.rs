@@ -63,7 +63,7 @@ async fn once_consumes_the_window_even_when_body_errors() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
 
-    // First caller's body errors. `once` does NOT release on error — the TTL
+    // First caller's body errors. `once` does NOT release on error - the TTL
     // is the dedupe window regardless of outcome (this is the contract that
     // distinguishes it from `commit_on_success`).
     let r1 = Idempotency::once::<_, _, i32>("once-err", Duration::from_secs(60), || async {
@@ -95,7 +95,7 @@ async fn commit_on_success_releases_lock_when_body_errors() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
 
-    // First call — body returns Err, lock must be released.
+    // First call - body returns Err, lock must be released.
     let r1 =
         Idempotency::commit_on_success::<_, _, i32>("cos-1", Duration::from_secs(60), || async {
             RAN.fetch_add(1, Ordering::SeqCst);
@@ -105,7 +105,7 @@ async fn commit_on_success_releases_lock_when_body_errors() {
     assert!(r1.is_err());
     assert_eq!(RAN.load(Ordering::SeqCst), 1);
 
-    // Second call — lock was released, so body runs again.
+    // Second call - lock was released, so body runs again.
     let r2: Idempotent<i32> =
         Idempotency::commit_on_success("cos-1", Duration::from_secs(60), || async {
             RAN.fetch_add(1, Ordering::SeqCst);
@@ -137,7 +137,7 @@ async fn commit_on_success_keeps_lock_when_body_succeeds() {
     assert!(matches!(r1, Idempotent::Fresh(42)));
     assert_eq!(RAN.load(Ordering::SeqCst), 1);
 
-    // Duplicate caller after success — still Duplicate.
+    // Duplicate caller after success - still Duplicate.
     let r2: Idempotent<i32> =
         Idempotency::commit_on_success("cos-2", Duration::from_secs(60), || async {
             RAN.fetch_add(1, Ordering::SeqCst);
@@ -188,7 +188,7 @@ async fn remember_error_does_not_replay_and_is_retryable() {
     RAN.store(0, Ordering::SeqCst);
     install_memory_cache();
 
-    // First call errors — nothing is recorded and the lock is released.
+    // First call errors - nothing is recorded and the lock is released.
     let r1 = Idempotency::remember::<_, _, i32>("rem-err", Duration::from_secs(60), || async {
         RAN.fetch_add(1, Ordering::SeqCst);
         Err(suprnova::FrameworkError::internal("boom"))
@@ -417,11 +417,11 @@ async fn commit_on_success_surfaces_body_error_even_when_release_fails() {
 }
 
 // ---------------------------------------------------------------------------
-// DATA-03b — a lost lease must reach the caller
+// DATA-03b - a lost lease must reach the caller
 // ---------------------------------------------------------------------------
 //
 // `run_under_lease` used to log a warning, stop renewing, park forever, and
-// let the body run to completion *unfenced* — returning `Fresh(v)` with no
+// let the body run to completion *unfenced* - returning `Fresh(v)` with no
 // signal that exclusivity had been lost. `Ok(false)` from `refresh_lock`
 // means specifically that another holder now owns the lock, so at that point
 // two callers can be executing the same idempotent body simultaneously and
@@ -430,7 +430,7 @@ async fn commit_on_success_surfaces_body_error_even_when_release_fails() {
 /// How `refresh_lock` should misbehave.
 #[derive(Clone, Copy)]
 enum RefreshFault {
-    /// Report the token as no longer ours — somebody else holds the lock.
+    /// Report the token as no longer ours - somebody else holds the lock.
     LostImmediately,
     /// Fail with a backend error `n` times, then behave normally.
     ErrorsThenRecovers(u32),
@@ -553,7 +553,7 @@ async fn a_lost_lease_surfaces_as_unfenced_rather_than_fresh() {
 
     assert!(
         matches!(outcome, Idempotent::FreshUnfenced(9)),
-        "a lost lease must be reported as FreshUnfenced — reporting Fresh \
+        "a lost lease must be reported as FreshUnfenced - reporting Fresh \
          claims an exclusivity that was demonstrably not held. Got {outcome:?}"
     );
 }
@@ -588,7 +588,7 @@ async fn a_lost_lease_does_not_cancel_the_body() {
     }
 }
 
-/// A backend error is not evidence somebody took the lock — it is evidence
+/// A backend error is not evidence somebody took the lock - it is evidence
 /// we could not ask. Giving up on the first blip guaranteed the lease would
 /// lapse even though the backend recovered milliseconds later.
 #[tokio::test]
@@ -612,7 +612,7 @@ async fn a_transient_refresh_error_does_not_abandon_the_lease() {
     );
     assert!(
         matches!(outcome, Idempotent::Fresh(13)),
-        "one transient error, then recovery, still holds the lease — this \
+        "one transient error, then recovery, still holds the lease - this \
          must not be downgraded to FreshUnfenced. Got {outcome:?}"
     );
 }

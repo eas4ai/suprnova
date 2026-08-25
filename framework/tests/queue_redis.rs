@@ -11,7 +11,7 @@ use suprnova::queue::{BackoffSchedule, CURRENT_SCHEMA_VERSION, Envelope};
 use uuid::Uuid;
 
 /// Where to reach Redis. Matches `cache_redis_integration`'s resolution so
-/// one env var points every Redis-backed suite at the same instance —
+/// one env var points every Redis-backed suite at the same instance -
 /// including a throwaway one, which is the only way to run these without
 /// writing into whatever Redis happens to be on the default port.
 fn redis_url() -> String {
@@ -150,7 +150,7 @@ async fn redis_driver_nack_with_delay_defers_redelivery() {
 
 /// Lights up the M40 fix. With no overrides, the trait defaults for
 /// `size`/`pending_size`/`reserved_size`/`delayed_size`/`clear` returned
-/// `Err("does not implement")` — admin dashboards inspecting a Redis
+/// `Err("does not implement")` - admin dashboards inspecting a Redis
 /// queue got no number back. The overrides round-trip:
 ///   - push 2 immediate + 1 delayed → size = 3, delayed = 1
 ///   - pop one → reserved = 1, pending shrinks accordingly
@@ -198,15 +198,15 @@ async fn redis_driver_size_introspection_round_trip() {
     // `reserved_size` is deliberately NOT pinned to an exact number here.
     // sea-streamer's consumer reads ahead in a background task, so entries
     // enter the group's PEL without a `pop` and re-enter it the moment one
-    // is acked. `reserved_size` counting them is correct — a prefetched
-    // entry really is reserved and invisible to other consumers — but it
+    // is acked. `reserved_size` counting them is correct - a prefetched
+    // entry really is reserved and invisible to other consumers - but it
     // makes any exact value a race with the prefetcher.
     //
     // The original assertions here demanded 0 before the first pop and 0
     // after the ack. Both passed only when the prefetch lost the race;
     // against a fresh Redis it wins reliably, which is how this surfaced.
     // What holds regardless is that the count never exceeds what was
-    // pushed, and that `clear` drives it to zero — asserted below.
+    // pushed, and that `clear` drives it to zero - asserted below.
     let r1 = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
     assert!(
         d.reserved_size().await.unwrap() <= 3,

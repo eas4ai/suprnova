@@ -1,6 +1,6 @@
 //! Path-confinement layer for local-filesystem disks.
 //!
-//! OpenDAL's `Operator` runs `normalize_path` before the accessor — it strips a
+//! OpenDAL's `Operator` runs `normalize_path` before the accessor - it strips a
 //! leading `/` and collapses `//`, but it does NOT resolve `..`. A `..`
 //! component therefore reaches the FS backend, which joins it onto the disk
 //! root, so `disk.write("../escaped.txt", ..)` escapes the configured root and
@@ -10,7 +10,7 @@
 //! The guard is applied only to local-filesystem disks (`register_fs` /
 //! `register_fs_with`). Object-store backends (S3, Azure Blob, GCS) and the
 //! in-memory backend confine to a bucket/prefix or have no filesystem at all,
-//! where `..` is just an ordinary key character — guarding them would wrongly
+//! where `..` is just an ordinary key character - guarding them would wrongly
 //! reject legitimate keys.
 //!
 //! # Symlink confinement
@@ -18,7 +18,7 @@
 //! The lexical check ([`validate_storage_path`]) is the first, cheap gate, but
 //! it only confines `..`/absolute path *components*. A symlink planted inside
 //! the root that points outside it survives the lexical check yet escapes the
-//! root once the kernel follows it — a real second-stage traversal vector (an
+//! root once the kernel follows it - a real second-stage traversal vector (an
 //! uploaded/extracted symlink, then a read/write through it). After the lexical
 //! gate, [`validate_resolved_path`] canonicalizes the on-disk target (resolving
 //! every symlink) and re-checks that the canonical path is still inside the
@@ -41,7 +41,7 @@ use std::sync::Arc;
 ///
 /// Rejects a path whose components include a parent-directory (`..`) hop or an
 /// absolute/root prefix. A `..` appearing only as a *substring* of a single
-/// path segment (e.g. `my..file.txt`) is allowed — the check is component-wise.
+/// path segment (e.g. `my..file.txt`) is allowed - the check is component-wise.
 /// The separator-agnostic split is belt-and-suspenders: `\` is an ordinary
 /// character on Unix (where [`Path::components`] would not split on it) but a
 /// separator on Windows, so splitting on both keeps the guard correct wherever
@@ -52,7 +52,7 @@ fn validate_storage_path(path: &str) -> Result<()> {
     // root-level list/stat. That is the disk root itself, not an escape, so it
     // is allowed. Every other path arrives with its leading `/` already
     // stripped (so a `RootDir` component below can only come from a caller that
-    // bypassed normalization — kept rejected as defense-in-depth).
+    // bypassed normalization - kept rejected as defense-in-depth).
     if path == "/" {
         return Ok(());
     }
@@ -108,7 +108,7 @@ fn symlink_escape_error(path: &str) -> Error {
 ///
 /// The full on-disk path is `root + path`. If it exists, it is canonicalized
 /// (which resolves every symlink component) and must lie under the canonical
-/// root. If it does not exist yet — the common case for a new write — we walk
+/// root. If it does not exist yet - the common case for a new write - we walk
 /// the target's ancestors up to the *nearest ancestor that actually exists* and
 /// canonicalize that one, so a symlinked ancestor directory is still rejected
 /// even before the leaf (and any intermediate dirs) are created. Components that
@@ -121,7 +121,7 @@ fn symlink_escape_error(path: &str) -> Error {
 async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     validate_storage_path(path)?;
 
-    // The post-normalize root indicator is the disk root itself — already inside.
+    // The post-normalize root indicator is the disk root itself - already inside.
     if path == "/" || path.is_empty() {
         return Ok(());
     }
@@ -143,14 +143,14 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     // canonicalize *that*. `target.ancestors()` yields the target first, then
     // each successive parent, so the first one that resolves is either the leaf
     // itself (existing target) or the deepest existing directory above it (new
-    // write). Confining only the *immediate* parent — as an earlier version did —
+    // write). Confining only the *immediate* parent - as an earlier version did -
     // let an intermediate symlink escape: if `root/evil -> /outside`, then
     // writing `evil/newdir/payload` has a missing leaf AND a missing immediate
     // parent (`evil/newdir`), so the old early-return treated it as safe while
     // the FS backend would follow `evil` and write to `/outside/newdir/payload`.
     // Resolving the nearest *existing* ancestor (`root/evil`, the symlink) and
     // requiring it to be within the root catches that escape. Components that
-    // exist nowhere on disk — `newdir`, `payload` — are the only ones genuinely
+    // exist nowhere on disk - `newdir`, `payload` - are the only ones genuinely
     // safe to create under the root, since the kernel can only follow links that
     // already exist.
     let mut resolved: Option<std::path::PathBuf> = None;
@@ -582,7 +582,7 @@ mod tests {
             "name..with..dots.txt",
             "",
             "dir/",
-            // The post-normalize root indicator (root list/stat) — allowed.
+            // The post-normalize root indicator (root list/stat) - allowed.
             "/",
         ] {
             assert!(
@@ -594,7 +594,7 @@ mod tests {
 
     // ------------------------------------------------------------------
     // Symlink confinement (`validate_resolved_path`). The lexical gate is
-    // clean for every path below — these escapes only manifest once the
+    // clean for every path below - these escapes only manifest once the
     // on-disk symlink is followed, which is exactly what the resolved check
     // catches.
     // ------------------------------------------------------------------
@@ -651,7 +651,7 @@ mod tests {
     #[tokio::test]
     async fn symlink_ancestor_escape_with_missing_immediate_parent_is_rejected() {
         // The escape the nearest-existing-ancestor walk closes: the symlinked
-        // ancestor is NOT the immediate parent of the write target — both the
+        // ancestor is NOT the immediate parent of the write target - both the
         // leaf and its immediate parent don't exist, so an
         // immediate-parent-only check would canonicalize NotFound and wave the
         // write through, letting the FS backend follow the symlink out of root.
@@ -693,7 +693,7 @@ mod tests {
         std::fs::create_dir_all(&real_dir).expect("create nested dir");
         std::fs::write(real_dir.join("data.txt"), b"inside").expect("write data");
         // A symlink inside the root that points at another location inside the
-        // root — legitimate, must be allowed.
+        // root - legitimate, must be allowed.
         std::os::unix::fs::symlink(&real_dir, root.join("link")).expect("create inside symlink");
 
         let root_str = canonical_root(&root);
@@ -722,7 +722,7 @@ mod tests {
                 .is_ok()
         );
         // New file under a NOT-yet-existing nested dir: parent missing, which
-        // the backend will create under the root — allowed.
+        // the backend will create under the root - allowed.
         assert!(validate_resolved_path(&root_str, "x/y/z.txt").await.is_ok());
         // The root indicator itself.
         assert!(validate_resolved_path(&root_str, "/").await.is_ok());

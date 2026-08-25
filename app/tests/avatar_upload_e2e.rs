@@ -54,7 +54,7 @@ use app::providers::DatabaseUserProvider;
 ///
 /// `tokio::sync::Mutex` (rather than `std::sync::Mutex`) so the guard
 /// is safe to hold across the many `.await` points in `setup_app` and
-/// the request lifecycle — clippy's `await_holding_lock` lint correctly
+/// the request lifecycle - clippy's `await_holding_lock` lint correctly
 /// flags `std::sync::Mutex` here, and tokio's mutex is designed for
 /// exactly this use case.
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -103,7 +103,7 @@ async fn setup_app() -> TestApp {
     let lock = TEST_LOCK.lock().await;
 
     // Install the process-wide encryption key once. `Crypt::init` uses
-    // `OnceLock` so this is idempotent across tests — the first test
+    // `OnceLock` so this is idempotent across tests - the first test
     // in this binary supplies a fresh key; later tests in this binary
     // share it. The `SessionMiddleware` requires `Crypt` to be
     // initialised (codex review finding #1 / fail-closed boot path);
@@ -131,13 +131,13 @@ async fn setup_app() -> TestApp {
         .expect("run migrations against sqlite::memory:");
     suprnova::App::singleton(suprnova::DbConnection::from_raw(conn));
 
-    // User provider — needed by `Auth::user()` → `Auth::user_as::<User>()`.
+    // User provider - needed by `Auth::user()` → `Auth::user_as::<User>()`.
     bind!(dyn UserProvider, DatabaseUserProvider);
 
     // SessionMiddleware with a custom store so we can both seed sessions
     // and let the middleware read them on the same connection. The
-    // `secure(false)` mirrors how local dev would set `SESSION_SECURE=false`
-    // — the hyper test client doesn't enforce the `Secure` attribute, so
+    // `secure(false)` mirrors how local dev would set `SESSION_SECURE=false` -
+    // the hyper test client doesn't enforce the `Secure` attribute, so
     // this is a parity choice rather than a functional requirement.
     let session_config = SessionConfig::default().secure(false);
     let session_store: Arc<DatabaseSessionDriver> =
@@ -330,7 +330,7 @@ async fn post_avatar(
     }
     let req = builder.body(Full::new(body)).unwrap();
 
-    // Send the request with a generous timeout — the test server runs
+    // Send the request with a generous timeout - the test server runs
     // on the same runtime, but a hang on a logic bug should surface as
     // a test failure rather than a CI watchdog kill.
     let resp = tokio::time::timeout(Duration::from_secs(10), sender.send_request(req))
@@ -395,7 +395,7 @@ async fn avatar_upload_rejects_non_image() {
 #[tokio::test]
 async fn avatar_upload_requires_authentication() {
     let app = setup_app().await;
-    // No session seeded — the request goes out without a cookie at all.
+    // No session seeded - the request goes out without a cookie at all.
 
     let png = tiny_png();
     let body = build_multipart_body("x", &[("avatar", Some("me.png"), &png)]);

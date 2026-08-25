@@ -1,10 +1,10 @@
-//! `Collection<T>` — the thin Eloquent-style wrapper around `Vec<T>`.
+//! `Collection<T>` - the thin Eloquent-style wrapper around `Vec<T>`.
 //!
 //! Phase 10A T7b ships only the constructor, `Deref` to `&[T]`, the
 //! `From<Vec<T>>` bridge, and the trait derives needed by serde and
 //! the `AsCollection` cast. Phase 10C fills in the full Laravel
 //! method surface (`map`, `filter`, `pluck`, `groupBy`, `sortBy`, the
-//! whole ~40-method chain — Laravel ships it at <https://laravel.com/docs/12.x/collections#available-methods>).
+//! whole ~40-method chain - Laravel ships it at <https://laravel.com/docs/12.x/collections#available-methods>).
 //!
 //! `Deref<Target = [T]>` is the key insight: it makes every `&[T]`
 //! method (`.len()`, `.iter()`, `.first()`, indexing, ...) work out of
@@ -14,7 +14,7 @@
 //! self-by-value semantics for chainability.
 //!
 //! Phase 10B T9 adds [`Collection<M>::load`] / [`Collection::load_missing`]
-//! on `Collection<M>` where `M` is a Suprnova model — these populate
+//! on `Collection<M>` where `M` is a Suprnova model - these populate
 //! the per-row `__eager` cache after the fact, mirroring Laravel's
 //! `$collection->load(...)`. The bound is feature-gated on `M`
 //! implementing `EagerLoadDispatch` (which `#[suprnova::model]` emits
@@ -63,7 +63,7 @@ impl<T> Collection<T> {
     //
     // ~25 methods that work for any `T`. Model-aware methods that need
     // string-keyed field access (`pluck("name")`, `sum("price")`, ...)
-    // ship in T5b on top of this surface — they require the
+    // ship in T5b on top of this surface - they require the
     // macro-emitted `Model::field_value` accessor.
 
     /// Construct from an owned `Vec<T>`. Equivalent to `Self::from(v)`
@@ -122,7 +122,7 @@ impl<T> Collection<T> {
     /// collection for chaining.
     ///
     /// Diverges from Laravel's PHP `each()` (which returns the
-    /// collection but doesn't enable chaining the same way) — in Rust
+    /// collection but doesn't enable chaining the same way) - in Rust
     /// we move `self` through, which lets `c.each(...).map(...)`
     /// stay fluent without an interim binding. The closure receives
     /// `&T`, so it does not consume the items.
@@ -162,7 +162,7 @@ impl<T> Collection<T> {
         Collection(self.0.into_iter().filter(pred).collect())
     }
 
-    /// Drop items for which `pred` is `true` — the inverse of
+    /// Drop items for which `pred` is `true` - the inverse of
     /// [`Self::filter`]. Laravel's `reject`.
     pub fn reject<F>(self, mut pred: F) -> Self
     where
@@ -251,7 +251,7 @@ impl<T> Collection<T> {
     }
 
     /// Drop duplicate items by closure-derived key. Only the key has
-    /// to be `Eq + Hash` — items themselves can be anything.
+    /// to be `Eq + Hash` - items themselves can be anything.
     pub fn unique_by<K, F>(self, mut key: F) -> Self
     where
         K: Eq + Hash,
@@ -301,7 +301,7 @@ impl<T> Collection<T> {
     }
 
     /// Slice out `len` items starting at `start`. Both bounds are
-    /// saturating — going past the end yields whatever's left.
+    /// saturating - going past the end yields whatever's left.
     pub fn slice(self, start: usize, len: usize) -> Self {
         Collection(self.0.into_iter().skip(start).take(len).collect())
     }
@@ -347,12 +347,12 @@ impl<T> Collection<T> {
         self
     }
 
-    /// Alias of [`Self::concat`] — Laravel ships both names.
+    /// Alias of [`Self::concat`] - Laravel ships both names.
     pub fn merge(self, other: Self) -> Self {
         self.concat(other)
     }
 
-    /// Keep items in self that are NOT in `other`. `O(n*m)` — pick a
+    /// Keep items in self that are NOT in `other`. `O(n*m)` - pick a
     /// hashed variant if performance matters.
     pub fn diff(self, other: Self) -> Self
     where
@@ -366,7 +366,7 @@ impl<T> Collection<T> {
         )
     }
 
-    /// Keep items in self that ARE also in `other`. `O(n*m)` — pick a
+    /// Keep items in self that ARE also in `other`. `O(n*m)` - pick a
     /// hashed variant if performance matters.
     pub fn intersect(self, other: Self) -> Self
     where
@@ -408,7 +408,7 @@ impl<T> Deref for Collection<T> {
 
 /// Mirrors `Vec<T>`'s `DerefMut<Target = [T]>` so call sites that
 /// previously held a `&mut Vec<M>` from `Model::query().get()` keep
-/// working unchanged after the T5b return-type sweep —
+/// working unchanged after the T5b return-type sweep -
 /// `.iter_mut()`, `.sort()`, slice-shape mutation all stay available.
 /// Adding owned mutation (`.push`, `.pop`) still requires unwrapping
 /// to `Vec` via [`Collection::into_vec`].
@@ -436,7 +436,7 @@ impl<'a, T> IntoIterator for &'a Collection<T> {
 
 /// Eager-loading methods for `Collection<M>` when `M` is a Suprnova
 /// model (`EagerLoadDispatch`). Loads relations on rows already in
-/// memory — mirrors Laravel's `$collection->load([...])`.
+/// memory - mirrors Laravel's `$collection->load([...])`.
 ///
 /// These methods are also useful on plain `Vec<M>` via a `Collection`
 /// wrap: `let mut c = Collection::from(rows); c.load(["posts"]).await?;`.
@@ -445,8 +445,8 @@ impl<'a, T> IntoIterator for &'a Collection<T> {
 /// `#[suprnova::model]` struct automatically (the macro emits both
 /// `EagerLoadDispatch` and `Model` for every annotated type). Real
 /// user code never picks up just `EagerLoadDispatch`. The bound is
-/// required so [`Self::load`] can consult `M::default_connection_name()`
-/// — eager loading must honour `#[model(connection = "...")]` routing
+/// required so [`Self::load`] can consult `M::default_connection_name()` -
+/// eager loading must honour `#[model(connection = "...")]` routing
 /// in the same way the parent `Builder::get` does.
 impl<M> Collection<M>
 where
@@ -465,8 +465,8 @@ where
     /// collection. Issues one query per top-level relation regardless
     /// of how many rows are loaded.
     ///
-    /// Dotted paths (`"posts.comments"`) drive nested-path resolution
-    /// — the same shape `Builder::with([...])` accepts.
+    /// Dotted paths (`"posts.comments"`) drive nested-path resolution -
+    /// the same shape `Builder::with([...])` accepts.
     ///
     /// ## Example
     ///
@@ -517,7 +517,7 @@ where
     ///   already have comments cached.
     ///
     /// The same per-row partition repeats at every segment of a
-    /// longer dotted path (`"posts.comments.author"` etc.) — at each
+    /// longer dotted path (`"posts.comments.author"` etc.) - at each
     /// step only the rows missing that segment get the bulk-load.
     pub async fn load_missing<I, S>(&mut self, relations: I) -> Result<(), FrameworkError>
     where
@@ -560,11 +560,11 @@ where
 //   `where_not_in("col", [v...])`
 // - Aggregate: `sum::<T>("col")`, `avg::<T>("col")`,
 //   `min::<T>("col")`, `max::<T>("col")`
-// - Serialise: `to_array()`, `to_json()` (T5b stubs — T6 extends with
+// - Serialise: `to_array()`, `to_json()` (T5b stubs - T6 extends with
 //   `hidden` / `visible` / `appends` filtering)
 //
 // Aggregates and `pluck` deserialise the JSON values via
-// `serde_json::from_value` — rows whose field is missing or whose JSON
+// `serde_json::from_value` - rows whose field is missing or whose JSON
 // doesn't round-trip into the target type are silently skipped. That
 // matches Laravel's `$collection->pluck('col')` semantics where
 // missing keys yield `null`s the caller is expected to handle.
@@ -573,7 +573,7 @@ where
 // bounds because Rust's trait elaboration doesn't transitively
 // propagate associated-type bounds from a supertrait's where clause
 // to a subtrait's method bodies. Same pattern as `impl<M: Model>
-// Builder<M>` in `builder.rs` and `FirstOrCreate` in `model.rs` — the
+// Builder<M>` in `builder.rs` and `FirstOrCreate` in `model.rs` - the
 // methods below only call `m.field_value(name)` (the new T5b trait
 // method) which by itself doesn't need every supertrait bound, but
 // `Model`'s where clause re-elaboration is what makes `M: Model`
@@ -622,7 +622,7 @@ where
     /// `Collection::modelKeys()`.
     ///
     /// Reads each row's already-hydrated key field, so it costs no
-    /// query — the counterpart to
+    /// query - the counterpart to
     /// [`Builder::model_keys`](crate::eloquent::Builder::model_keys),
     /// which projects keys without hydrating at all. Returns a `Vec`
     /// rather than a `Collection` because Laravel's `modelKeys()`
@@ -630,7 +630,7 @@ where
     /// both halves agree on the shape.
     ///
     /// A row whose key field cannot be read is skipped, matching
-    /// [`pluck`](Self::pluck)'s missing-key handling — a hand-built
+    /// [`pluck`](Self::pluck)'s missing-key handling - a hand-built
     /// model with a defaulted key is the only way to get there.
     pub fn model_keys(&self) -> Vec<<M as crate::eloquent::EloquentModel>::Key> {
         let pk = <M as crate::eloquent::EloquentModel>::PRIMARY_KEY;
@@ -712,12 +712,12 @@ where
     }
 
     /// Sort rows ascending by `field`. Ordering is best-effort across
-    /// JSON value shapes (see `compare_json`) — numeric, string,
+    /// JSON value shapes (see `compare_json`) - numeric, string,
     /// and boolean columns each sort cleanly within their own shape;
     /// heterogeneous mixes fall back to `Ordering::Equal`.
     ///
     /// Requires `M: Clone` because the implementation snapshots the
-    /// underlying `Vec<M>` before delegating to `slice::sort_by` —
+    /// underlying `Vec<M>` before delegating to `slice::sort_by` -
     /// the comparison closure borrows `&self.field_value(field)` via
     /// the contained `M`, while `sort_by` needs `&mut [M]`, so we
     /// can't sort in place against the original.
@@ -871,7 +871,7 @@ where
     }
 
     /// Serialise the whole collection to a `serde_json::Value`. Phase
-    /// 10C T6 — routes through each row's
+    /// 10C T6 - routes through each row's
     /// [`crate::eloquent::Model::to_array`] so the model's
     /// `hidden = [...]` / `visible = [...]` / `appends = [...]`
     /// filters propagate per-row when the collection serialises.
@@ -890,8 +890,8 @@ where
     ///
     /// `to_array` produces a `serde_json::Value::Array(...)` whose
     /// elements are pure JSON values, and `serde_json::to_string` only
-    /// fails on map keys that aren't strings — which `Value` cannot
-    /// represent — so the serialisation step is effectively
+    /// fails on map keys that aren't strings - which `Value` cannot
+    /// represent - so the serialisation step is effectively
     /// infallible. We still fall back to `"[]"` (the canonical
     /// empty-collection JSON) instead of `""` on any future surface
     /// change, so consumers always parse a syntactically valid array.

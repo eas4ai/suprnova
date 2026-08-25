@@ -23,7 +23,7 @@ const SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 /// Files at or below this size are read fully into memory and served as a
 /// buffered body whose `Content-Length` is the exact number of bytes read.
 /// This makes the declared length self-consistent with the body for the
-/// common case — there is no window in which the file can change between the
+/// common case - there is no window in which the file can change between the
 /// `stat` and the read. Larger files keep streaming so a multi-gigabyte
 /// download never has to be resident in memory.
 const BUFFERED_BODY_LIMIT: u64 = 1024 * 1024;
@@ -335,7 +335,7 @@ async fn sniff_prefix(path: &Path) -> Option<Vec<u8>> {
 /// The body declares a `Content-Length` equal to `remaining` at construction.
 /// The stream caps its output at that length and stops as soon as the
 /// underlying file returns end-of-file or an error. If that happens before
-/// `remaining` reaches zero — a truncated file or a mid-flight read failure —
+/// `remaining` reaches zero - a truncated file or a mid-flight read failure -
 /// the stream yields its terminal `None` with bytes still owed, leaving
 /// hyper's length-delimited encoder short of the promised body. hyper then
 /// fails the response with a body-write-aborted error and resets the

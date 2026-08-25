@@ -146,14 +146,14 @@ async fn always_reply_to_only_applies_when_message_has_no_reply_to() {
     let _ = Mail::always_reply_to(Address::new("support@example.com"));
     let fake = Mail::fake();
 
-    // No reply-to on message — default applies.
+    // No reply-to on message - default applies.
     Mail::to("alice@example.org")
         .send(WelcomeWithHints {
             name: "Alice".into(),
         })
         .await
         .unwrap();
-    // Explicit reply_to — default does NOT override.
+    // Explicit reply_to - default does NOT override.
     Mail::to("alice@example.org")
         .reply_to("custom@example.com")
         .send(WelcomeWithHints {
@@ -281,7 +281,7 @@ async fn fake_assert_queued_finds_mailables_pushed_through_builder_queue() {
         .await
         .unwrap();
 
-    // Nothing went through the sent transport — queued capture only.
+    // Nothing went through the sent transport - queued capture only.
     fake.assert_nothing_sent();
     fake.assert_queued("ParityWelcome");
     fake.assert_queued_count(2);
@@ -424,7 +424,7 @@ async fn fake_drop_clears_queued_capture_for_sibling_tests() {
             .await
             .unwrap();
         fake.assert_queued_count(1);
-    } // fake drops here — clears queue capture
+    } // fake drops here - clears queue capture
     let fake = Mail::fake();
     fake.assert_queued_count(0);
     let _ = Mail::forget_always();

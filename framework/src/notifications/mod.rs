@@ -1,7 +1,7 @@
 //! Notifications subsystem.
 //!
 //! A `Notification` declares which channels it should be sent to plus the
-//! data it carries. A `Notifiable` (the recipient — typically a user model)
+//! data it carries. A `Notifiable` (the recipient - typically a user model)
 //! exposes how to address that recipient on each channel (email address,
 //! database id, push subscription endpoint, etc.). A `Channel` knows how to
 //! deliver a notification to a routed address.
@@ -42,20 +42,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-/// A target of notifications — a `User`, an `Order`, etc.
+/// A target of notifications - a `User`, an `Order`, etc.
 ///
 /// Exposes per-channel addressing: `route_for("mail")` yields the email
 /// address, `route_for("database")` yields the entity id as a string,
 /// `route_for("webpush")` yields a serialized subscription endpoint, etc.
 /// Returning `None` for a channel causes the dispatcher to skip that
-/// channel for this recipient — useful for "email-only" or "push-only"
+/// channel for this recipient - useful for "email-only" or "push-only"
 /// users.
 pub trait Notifiable: Send + Sync {
     /// Return the addressable route for the named channel, if any.
     fn route_for(&self, channel: &str) -> Option<String>;
 }
 
-/// A notification — declares its channels and the serializable data it
+/// A notification - declares its channels and the serializable data it
 /// carries.
 ///
 /// `notification_name` is the stable identifier that channels (notably the
@@ -87,7 +87,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Post-send hook, invoked once per channel that completed successfully.
     /// Default: no-op. Mirrors Laravel's
-    /// `Notification::afterSending($notifiable, $channel, $response)` — minus
+    /// `Notification::afterSending($notifiable, $channel, $response)` - minus
     /// `$response` because Suprnova channels return `Result<(), …>` rather
     /// than a per-channel response object. Errors raised here propagate the
     /// same way as channel errors (short-circuits the remaining channels).
@@ -97,14 +97,14 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Queue this notification's `Notify::queue` dispatch resolves to.
     /// `None` (default) defers to any `Queue::route` registered for
-    /// [`SendNotificationJob`], then the driver default — the same
+    /// [`SendNotificationJob`], then the driver default - the same
     /// precedence [`Queue::push_with`](crate::queue::Queue::push_with)
     /// documents for every override field.
     ///
     /// `&self`, not a static fn like `Job::queue()`: `SendNotificationJob`
     /// is the single concrete `Job` impl every notification type shares,
     /// so its own `Job::queue()` cannot answer "which notification is
-    /// this?" — a per-notification queue can only ride the push as an
+    /// this?" - a per-notification queue can only ride the push as an
     /// [`EnvelopeOverrides`], read here
     /// from the notification instance `Notify::queue` still holds.
     /// Mirrors Laravel's `#[Queue(...)]` notification attribute.
@@ -113,7 +113,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Per-attempt timeout for this notification's queued jobs. `None`
-    /// (default) means no timeout — the same default
+    /// (default) means no timeout - the same default
     /// [`Job::timeout`](crate::queue::Job::timeout) declares. Mirrors
     /// Laravel's `#[Timeout(...)]` notification attribute.
     fn timeout(&self) -> Option<Duration> {
@@ -121,7 +121,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     /// If `true`, a timeout on this notification's queued jobs is a
-    /// permanent failure — the worker dead-letters on the first timeout
+    /// permanent failure - the worker dead-letters on the first timeout
     /// instead of retrying up to [`Notification::max_tries`]. Default
     /// `false`, the same default
     /// [`Job::fail_on_timeout`](crate::queue::Job::fail_on_timeout)
@@ -141,7 +141,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Backoff schedule for this notification's queued jobs. Default:
     /// the framework default (exponential, 2s base, 5min cap, ±25%
-    /// jitter) — the same default
+    /// jitter) - the same default
     /// [`Job::backoff`](crate::queue::Job::backoff) declares. Mirrors
     /// Laravel's `#[Backoff(...)]` notification attribute.
     fn backoff(&self) -> BackoffSchedule {
@@ -154,7 +154,7 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 /// Channels receive `&dyn DynNotification` so the dispatcher can fan a
 /// single notification out across multiple channels without cloning or
 /// re-serializing. The blanket impl below means every type that implements
-/// `Notification` is automatically a `DynNotification` — consumers do not
+/// `Notification` is automatically a `DynNotification` - consumers do not
 /// implement this trait directly.
 pub trait DynNotification: Send + Sync {
     /// The stable name of the underlying notification type.
@@ -185,7 +185,7 @@ impl<N: Notification> DynNotification for N {
     }
 }
 
-/// A channel — knows how to deliver a notification to a routed address.
+/// A channel - knows how to deliver a notification to a routed address.
 ///
 /// Implementors live in [`channels`]: `MailChannel` writes to the configured
 /// mail transport, `DatabaseChannel` inserts a row into the `notifications`
@@ -241,7 +241,7 @@ impl NotificationDispatcher {
     ///
     /// Returns on the first channel error; channels that already succeeded
     /// are not rolled back. For at-least-once semantics across multiple
-    /// channels, dispatch via [`Notify::queue`] — which pushes one job per
+    /// channels, dispatch via [`Notify::queue`] - which pushes one job per
     /// declared channel so a transient failure on channel B retries only
     /// channel B, never re-sending the channel-A side that already
     /// succeeded.
@@ -249,7 +249,7 @@ impl NotificationDispatcher {
     /// Lifecycle events:
     /// - [`events::NotificationSending`] fires immediately before each channel's
     ///   `deliver` runs. A listener that returns an error is treated as a
-    ///   per-channel veto — the channel is skipped, remaining channels
+    ///   per-channel veto - the channel is skipped, remaining channels
     ///   continue.
     /// - [`events::NotificationSent`] fires after a successful delivery.
     /// - [`events::NotificationFailed`] fires when delivery returned an error; the
@@ -305,7 +305,7 @@ impl NotificationDispatcher {
                 let channel_str = channel_name.to_string();
                 let route_owned = route.clone();
 
-                // Sending event — listener errors veto the channel.
+                // Sending event - listener errors veto the channel.
                 let sending = events::NotificationSending {
                     notification: payload_name.clone(),
                     channel: channel_str.clone(),
@@ -324,7 +324,7 @@ impl NotificationDispatcher {
 
                 match channel.deliver(&route, notification).await {
                     Ok(()) => {
-                        // Delivery succeeded — emit Sent before running the
+                        // Delivery succeeded - emit Sent before running the
                         // post-send hook, so a failing after_sending can't
                         // suppress the event for a notification that was in
                         // fact delivered.
@@ -400,7 +400,7 @@ static FACTORIES: RwLock<Option<HashMap<String, NotificationFactory>>> = RwLock:
 /// previously-bound dispatcher (last-write-wins).
 ///
 /// Returns [`FrameworkError::internal`] if the dispatcher registry lock is
-/// poisoned (a prior writer panicked) rather than panicking — the crate-wide
+/// poisoned (a prior writer panicked) rather than panicking - the crate-wide
 /// write-poison policy lives in `crate::lock`.
 pub fn set_dispatcher(d: Arc<NotificationDispatcher>) -> Result<(), FrameworkError> {
     *lock::write(&DISPATCHER, "notifications dispatcher")? = Some(d);
@@ -425,7 +425,7 @@ pub(crate) fn dispatcher_for_queue() -> Result<Arc<NotificationDispatcher>, Fram
 /// dead-letters per the envelope's backoff policy.
 ///
 /// Re-registering the same name silently replaces the existing factory
-/// (last-write-wins) — matches the mailable registry and the dispatcher's
+/// (last-write-wins) - matches the mailable registry and the dispatcher's
 /// channel registration.
 pub fn register_notification_factory<N: Notification>() -> Result<(), FrameworkError> {
     let factory: NotificationFactory = |payload| {
@@ -453,12 +453,12 @@ pub(crate) fn factory_for(name: &str) -> Result<NotificationFactory, FrameworkEr
         .ok_or_else(|| FrameworkError::internal(format!("unknown notification: {name}")))
 }
 
-/// Notification facade — mirrors the [`Mail`](crate::mail::Mail),
+/// Notification facade - mirrors the [`Mail`](crate::mail::Mail),
 /// [`Queue`](crate::queue::Queue), [`Bus`](crate::bus::Bus), and
 /// [`Cache`](crate::cache::Cache) patterns.
 ///
 /// `Notify::queue` builds a [`SendNotificationJob`] and pushes it onto the
-/// Phase 5A queue. `Notify::send` is the synchronous, in-process sibling —
+/// Phase 5A queue. `Notify::send` is the synchronous, in-process sibling -
 /// it delegates straight to the bound [`NotificationDispatcher`] with no
 /// queueing.
 pub struct Notify;
@@ -471,7 +471,7 @@ impl Notify {
     /// Pushes ONE [`SendNotificationJob`] per declared channel that
     /// resolves a route. This makes retries per-channel: if the mail
     /// channel fails after the database row was already inserted, only
-    /// the mail job re-runs — the recipient does not get the database row
+    /// the mail job re-runs - the recipient does not get the database row
     /// inserted twice. Channels with no matching route on `recipient` are
     /// skipped, mirroring the dispatcher's `route_for(channel).is_none()`
     /// behaviour.
@@ -485,7 +485,7 @@ impl Notify {
     ///
     /// Every push also carries [`Notification::queue`],
     /// [`Notification::timeout`], [`Notification::fail_on_timeout`],
-    /// [`Notification::max_tries`], and [`Notification::backoff`] —
+    /// [`Notification::max_tries`], and [`Notification::backoff`] -
     /// computed once from `notification` before the per-channel loop, as
     /// an [`EnvelopeOverrides`], then
     /// cloned onto each channel's
@@ -495,12 +495,12 @@ impl Notify {
     ///
     /// The push loop is non-atomic across channels: if the second of
     /// three pushes fails, the first channel is already queued and the
-    /// caller sees `Err`. The trade-off is intentional — it is strictly
+    /// caller sees `Err`. The trade-off is intentional - it is strictly
     /// better than the previous shape's worker-side double-send on
     /// partial failure.
     ///
     /// Under [`Notify::fake`] the notification is recorded for each
-    /// declared channel that resolves a route — no queue push, no channel
+    /// declared channel that resolves a route - no queue push, no channel
     /// execution, so none of the five queue-tuning methods are consulted.
     pub async fn queue<N, R>(recipient: &R, notification: N) -> Result<(), FrameworkError>
     where
@@ -532,7 +532,7 @@ impl Notify {
         // erases it into per-channel `SendNotificationJob`s.
         // `SendNotificationJob` is one concrete `Job` impl shared by
         // every notification type, so a per-notification value can only
-        // ride the push this way — see `Notification::queue`'s doc
+        // ride the push this way - see `Notification::queue`'s doc
         // comment for why it can't ride `Job::queue()` instead.
         let overrides = EnvelopeOverrides {
             queue: notification.queue().map(str::to_owned),
@@ -573,7 +573,7 @@ impl Notify {
 
     /// Send a notification synchronously (in-process, no queue) via the
     /// bound dispatcher. Returns on the first channel error per the
-    /// dispatcher contract — channels that already succeeded are not
+    /// dispatcher contract - channels that already succeeded are not
     /// rolled back.
     ///
     /// Under [`Notify::fake`] the notification is recorded per declared

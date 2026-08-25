@@ -1,9 +1,9 @@
-//! Enum cast — `AsEnum<E>` for any `E: FromStr + AsRef<str>`.
+//! Enum cast - `AsEnum<E>` for any `E: FromStr + AsRef<str>`.
 //!
 //! Stores the variant name (or the user-customised `strum::AsRefStr`
 //! string) as a `TEXT` column and parses back via `FromStr`. The two
 //! trait bounds together let the cast work cleanly with any enum the
-//! user marks with `#[derive(strum::EnumString, strum::AsRefStr)]` —
+//! user marks with `#[derive(strum::EnumString, strum::AsRefStr)]` -
 //! or any enum where the user wrote the impls manually. There is no
 //! framework lock-in on `strum`; it's just the most ergonomic way to
 //! get the bounds without hand-rolling them.
@@ -58,7 +58,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // Domain 7 audit D7-A - was `v.as_str().unwrap_or("")` which
         // silently coerced non-strings to the empty string and produced
         // a misleading "AsEnum: '' isn't a valid variant" error instead
         // of "AsEnum: expected JSON string, got <actual>".

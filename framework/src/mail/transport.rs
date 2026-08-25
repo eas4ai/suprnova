@@ -21,16 +21,16 @@ use tracing::Instrument;
 /// `X-Priority`/`Importance` headers, and HTTP providers that surface
 /// priority through their own field set it accordingly.
 pub const PRIORITY_HIGHEST: u8 = 1;
-/// `X-Priority: 2` — high priority.
+/// `X-Priority: 2` - high priority.
 pub const PRIORITY_HIGH: u8 = 2;
-/// `X-Priority: 3` — normal priority (most user mail).
+/// `X-Priority: 3` - normal priority (most user mail).
 pub const PRIORITY_NORMAL: u8 = 3;
-/// `X-Priority: 4` — low priority.
+/// `X-Priority: 4` - low priority.
 pub const PRIORITY_LOW: u8 = 4;
-/// `X-Priority: 5` — lowest priority.
+/// `X-Priority: 5` - lowest priority.
 pub const PRIORITY_LOWEST: u8 = 5;
 
-/// A fully-rendered outgoing message — what transports receive.
+/// A fully-rendered outgoing message - what transports receive.
 #[derive(Debug, Clone)]
 pub struct OutgoingMessage {
     /// Sender envelope-from address.
@@ -63,7 +63,7 @@ pub struct OutgoingMessage {
     /// Message priority. `1` = highest, `5` = lowest. None = unset.
     pub priority: Option<u8>,
     /// Custom MIME headers (key, value). Pass-through for transports
-    /// that support free-form headers — SMTP, SES (raw), most HTTP
+    /// that support free-form headers - SMTP, SES (raw), most HTTP
     /// providers via `Headers`.
     pub headers: Vec<(String, String)>,
     /// Return-Path / Bounce-To address. SMTP sets `Return-Path:` and the
@@ -95,7 +95,7 @@ impl OutgoingMessage {
     }
 
     /// True when the captured message lists `email` in its `to` block.
-    /// Mirrors Laravel's `Mailable::hasTo($address)` semantics — match
+    /// Mirrors Laravel's `Mailable::hasTo($address)` semantics - match
     /// on email, ignoring case.
     pub fn has_to(&self, email: &str) -> bool {
         has_email(&self.to, email)
@@ -178,8 +178,8 @@ pub trait MailTransport: Send + Sync {
 /// Telemetry-wrapped send. Opens a `mail.send` info span carrying the
 /// transport name and message shape (recipient counts, body kinds,
 /// attachment count, tag count, metadata count), then delegates to
-/// `transport.send`. On completion emits one event with `duration_ms`
-/// — `info` on success, `warn` on error — so an observability backend
+/// `transport.send`. On completion emits one event with `duration_ms` -
+/// `info` on success, `warn` on error - so an observability backend
 /// can plot mail latency without the transports themselves needing to
 /// know.
 ///

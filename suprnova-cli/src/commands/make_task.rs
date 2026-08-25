@@ -81,7 +81,7 @@ pub fn run(name: String) {
         }
     } else {
         ui::warning(
-            "src/lib.rs not found — declare `pub mod schedule;` and `pub mod tasks;` yourself",
+            "src/lib.rs not found - declare `pub mod schedule;` and `pub mod tasks;` yourself",
         );
     }
 

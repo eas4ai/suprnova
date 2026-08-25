@@ -1,11 +1,11 @@
-//! T15 — `suprnova serve`: crash respawn with backoff, `--no-restart`,
+//! T15 - `suprnova serve`: crash respawn with backoff, `--no-restart`,
 //! `--timestamps`, `--json` NDJSON events, and the `Suprnova.toml`
 //! extra-process registry.
 //!
 //! Hermetic: `--frontend-only` skips the `cargo-watch` bootstrap entirely
 //! (`ensure_cargo_watch` only runs without it), and a pre-created
 //! `frontend/node_modules` makes `ensure_npm_dependencies` skip the real
-//! `npm install`. `npm` itself is a PATH-shimmed shell script — the same
+//! `npm install`. `npm` itself is a PATH-shimmed shell script - the same
 //! pattern `migrate_fresh_gate.rs` uses for `cargo`: `serve.rs` spawns
 //! `Command::new("npm")` with no absolute path, so a shim earlier on
 //! `PATH` is picked up transparently. The original three tests redirect

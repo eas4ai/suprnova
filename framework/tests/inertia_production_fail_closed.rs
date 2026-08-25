@@ -8,7 +8,7 @@
 //! fail closed when production mode has no build manifest to back it.
 //!
 //! `Environment::detect()` reads the process-wide `APP_ENV` var. These
-//! tests mutate it, so — like `app_key_production_fail_closed.rs` —
+//! tests mutate it, so - like `app_key_production_fail_closed.rs` -
 //! they run in their own test binary and serialize on the same lock
 //! (`#[serial_test::serial]`) with each other so they don't race within
 //! this file; no other integration test file's tests can interleave with
@@ -95,7 +95,7 @@ async fn production_html_shell_never_references_a_localhost_dev_server() {
 
     // No manifest exists at the default path relative to this crate's
     // test working directory, so this exercises the "manifest absent"
-    // fallback inside `render_prod_head` — the important thing is that
+    // fallback inside `render_prod_head` - the important thing is that
     // it's a fallback path at all (production mode engaged), not
     // `render_dev_head`, which is what CFG-01 let slip through.
     let req = MockReq::new("/");
@@ -133,7 +133,7 @@ async fn production_html_shell_never_references_a_localhost_dev_server() {
 fn install_with_default_config_fails_closed_in_production_without_a_manifest() {
     let prior = set_app_env_production();
 
-    // No explicit `.production()` override — this is the environment-
+    // No explicit `.production()` override - this is the environment-
     // derived default an app gets by simply not thinking about it,
     // which is exactly the scenario CFG-01 left exposed.
     let cfg = InertiaConfig::default();

@@ -1,7 +1,7 @@
 use serde_json::json;
 use suprnova::payments::*;
 
-/// Trait-soundness proof — every adapter (Stripe, Paddle, future) MUST pass this flow:
+/// Trait-soundness proof - every adapter (Stripe, Paddle, future) MUST pass this flow:
 /// create customer -> start session -> subscribe -> simulated webhook -> get -> cancel (both modes)
 #[tokio::test]
 async fn discriminator_subscribe_webhook_mirror_read_cancel() {
@@ -21,7 +21,7 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
     assert_eq!(cus.email, "alice@example.com");
     // create_customer is the one path where the app's user_id flows
     // INTO the provider call, so the returned CustomerRef MUST echo
-    // it back. update/get below prove the inverse — providers don't
+    // it back. update/get below prove the inverse - providers don't
     // store the app identifier so they return None on the read paths.
     assert_eq!(cus.user_id.as_deref(), Some("user_42"));
 
@@ -81,7 +81,7 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
     assert_eq!(fetched.status, SubscriptionStatus::Active);
     assert!(!fetched.cancel_at_period_end);
 
-    // 6. Cancel at period end — status stays Active, flag is set
+    // 6. Cancel at period end - status stays Active, flag is set
     let canceled = provider
         .cancel(&sub.provider_subscription_id, true)
         .await
@@ -89,14 +89,14 @@ async fn discriminator_subscribe_webhook_mirror_read_cancel() {
     assert!(canceled.cancel_at_period_end);
     assert_eq!(canceled.status, SubscriptionStatus::Active);
 
-    // 7. Cancel immediately — status transitions to Canceled
+    // 7. Cancel immediately - status transitions to Canceled
     let canceled_now = provider
         .cancel(&sub.provider_subscription_id, false)
         .await
         .unwrap();
     assert_eq!(canceled_now.status, SubscriptionStatus::Canceled);
 
-    // 8. Verify as_payment() returns None — MockPaymentProvider deliberately omits Payment
+    // 8. Verify as_payment() returns None - MockPaymentProvider deliberately omits Payment
     let provider_ref: &dyn PaymentProvider = &provider;
     assert!(
         provider_ref.as_payment().is_none(),
@@ -142,7 +142,7 @@ async fn customer_store_user_id_contract() {
         .unwrap();
     // The mock retains user_id on the in-memory copy because it has
     // the full record locally. But for *real* providers the trait
-    // contract states user_id is None on update — adapters that don't
+    // contract states user_id is None on update - adapters that don't
     // know the app id MUST return None instead of fabricating an empty
     // string. The provider_customer_id is what survives across calls.
     assert_eq!(updated.provider_customer_id, provider_id);

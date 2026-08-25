@@ -2,8 +2,8 @@
 //!
 //! The middleware now reads the authenticated user's verification state
 //! through the application's configured
-//! [`UserProvider`](suprnova::UserProvider) — the same provider
-//! [`Auth::user`](suprnova::Auth::user) resolves against — rather than
+//! [`UserProvider`](suprnova::UserProvider) - the same provider
+//! [`Auth::user`](suprnova::Auth::user) resolves against - rather than
 //! reaching into a specific auth store. These tests drive that path with an
 //! [`EloquentUserProvider`]`<TestUser>` registered as the active "users"
 //! provider, mirroring `framework/tests/email_verify.rs`'s provider setup.
@@ -16,7 +16,7 @@
 //! `TestDatabase`/`TestContainer` install does NOT cross into the worker
 //! thread. So `active_user_provider()` (which resolves the `AuthManager`)
 //! and `DB::connection()` (which the Eloquent provider's query uses) must be
-//! bound **globally** for the worker thread to see them — the same reason
+//! bound **globally** for the worker thread to see them - the same reason
 //! the prior Magnetar-backed version relied on the global `init_magnetar`. This is
 //! the one place where global beats `TestContainer`; it is safe because this
 //! integration binary is its own process and the four tests address distinct
@@ -53,7 +53,7 @@ use suprnova::{
     MustVerifyEmail, Next, Request, Response, Router, handle_request, model,
 };
 
-/// One tokio runtime shared across every test — the in-memory SQLite pool is
+/// One tokio runtime shared across every test - the in-memory SQLite pool is
 /// bound to the runtime it was created on (the SQLx-bound-to-runtime reasoning
 /// from `framework/tests/email_verify.rs`).
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -156,12 +156,12 @@ static SETUP: Lazy<()> = Lazy::new(|| {
     });
 });
 
-/// Monotonic id seed so each test addresses a distinct user row — the rows
+/// Monotonic id seed so each test addresses a distinct user row - the rows
 /// share one global DB, and a per-test email avoids any cross-test coupling.
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
 /// Insert a fresh user row and return its (id, email). `verified` controls
-/// whether `email_verified_at` is stamped — the provider's
+/// whether `email_verified_at` is stamped - the provider's
 /// `is_email_verified(id)` reads exactly this column.
 async fn make_user(verified: bool) -> (i64, String) {
     use sea_orm::ConnectionTrait;
@@ -299,7 +299,7 @@ fn verified_user_reaches_handler() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // A user whose `email_verified_at` is stamped — the provider's
+        // A user whose `email_verified_at` is stamped - the provider's
         // `is_email_verified(id)` returns true, so the request passes through.
         let (id, _email) = make_user(true).await;
 
@@ -363,9 +363,9 @@ fn no_auth_user_falls_into_same_branch() {
     Lazy::force(&SETUP);
 
     RT.block_on(async {
-        // No LoginAs in the chain — `Auth::id()` returns None. The middleware
+        // No LoginAs in the chain - `Auth::id()` returns None. The middleware
         // mirrors Laravel's `! $request->user() || ! verified` by responding
-        // with the same 403 in this branch — and crucially does so WITHOUT
+        // with the same 403 in this branch - and crucially does so WITHOUT
         // consulting the provider (the id-None check comes first).
         let registry = MiddlewareRegistry::new().append(EnsureEmailVerifiedMiddleware::new());
         let addr = spawn(registry, 1).await;

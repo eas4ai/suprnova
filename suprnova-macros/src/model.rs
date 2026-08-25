@@ -5,12 +5,12 @@
 //! impl.
 //!
 //! Later tasks in Phase 10A extend the dispatcher:
-//! - Task 4 — Model trait CRUD methods (fills derive_eloquent.rs)
-//! - Task 6 — Fillable / Guarded
-//! - Task 7a-c — Casts (casts.rs slot wires from_storage / to_storage)
-//! - Task 8 — Accessors / mutators (function-level macros, separate file)
-//! - Task 9 — Timestamps
-//! - Task 10 — Soft deletes
+//! - Task 4 - Model trait CRUD methods (fills derive_eloquent.rs)
+//! - Task 6 - Fillable / Guarded
+//! - Task 7a-c - Casts (casts.rs slot wires from_storage / to_storage)
+//! - Task 8 - Accessors / mutators (function-level macros, separate file)
+//! - Task 9 - Timestamps
+//! - Task 10 - Soft deletes
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -50,7 +50,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     };
     input.item.attrs.push(injected);
 
-    // Phase 10B T1 — auto-inject `__eager: EagerLoadCache` and
+    // Phase 10B T1 - auto-inject `__eager: EagerLoadCache` and
     // `__pivot: Option<Arc<dyn Any + Send + Sync>>` on every model.
     //
     // These are runtime scratch state: the eager cache stores rows
@@ -80,14 +80,14 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let struct_def = input.struct_def();
     let struct_ident = &input.item.ident;
 
-    // Phase 10C T1 — per-model lifecycle events. The inner submodule
+    // Phase 10C T1 - per-model lifecycle events. The inner submodule
     // ships the 16 event structs (`Created`, `Saving`, ...); the
     // outer impl wires `Model::create` / `save` / `delete` / ... to
     // dispatch them through the global event dispatcher.
     let events_module = events::emit_events_module(struct_ident);
     let events_dispatch_impl = events::emit_event_dispatch_impl(struct_ident);
 
-    // Phase 10C T2c — `observers = [...]` compile-time validation +
+    // Phase 10C T2c - `observers = [...]` compile-time validation +
     // per-model `Self::observe()` runtime registration shim. The
     // validation block is empty for models that omit the attribute;
     // the shim emits unconditionally so every model has a manual
@@ -136,7 +136,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
 /// of JSON serialization, and they're filtered out of the inner
 /// SeaORM Model + the per-column macro code paths.
 ///
-/// Errors only if the input struct isn't `Fields::Named` — which
+/// Errors only if the input struct isn't `Fields::Named` - which
 /// `derive_seaorm` already rejects with a clear message earlier, so
 /// in practice this is unreachable on the happy path.
 fn inject_eager_pivot_fields(item: &mut syn::ItemStruct) -> Result<()> {
@@ -218,7 +218,7 @@ fn emit_registry(input: &ModelInput) -> TokenStream {
     }
 }
 
-/// Phase 10B T8 — emit one `inventory::submit!(MorphTypeEntry { ... })`
+/// Phase 10B T8 - emit one `inventory::submit!(MorphTypeEntry { ... })`
 /// per `#[suprnova::model(morph_type = "...")]` struct. Models without
 /// the attribute return an empty token stream and never enter the
 /// registry (pinned by the

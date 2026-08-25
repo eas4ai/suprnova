@@ -1,4 +1,4 @@
-//! `UserProps` — the canonical user DTO for the Suprnova example app.
+//! `UserProps` - the canonical user DTO for the Suprnova example app.
 //!
 //! Demonstrates the "one struct, both ends" pattern enabled by
 //! `#[derive(Data)]`:
@@ -13,8 +13,8 @@
 //!   impls are also emitted by `Data`.
 //!
 //! Validation rules:
-//! - `email`  — must be a well-formed e-mail address.
-//! - `name`   — must be at least one character long.
+//! - `email`  - must be a well-formed e-mail address.
+//! - `name`   - must be at least one character long.
 
 use suprnova::Data;
 use validator::Validate;

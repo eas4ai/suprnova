@@ -1,4 +1,4 @@
-//! `Router::inertia` — Laravel's `Route::inertia($uri, $component, $props)`.
+//! `Router::inertia` - Laravel's `Route::inertia($uri, $component, $props)`.
 //!
 //! Drives real requests through `handle_request` over an ephemeral hyper
 //! connection, because `hyper::body::Incoming` cannot be constructed
@@ -161,7 +161,7 @@ async fn inertia_route_accepts_null_props_as_no_props() {
 #[tokio::test]
 async fn try_inertia_rejects_props_that_are_not_an_object() {
     // Silently dropping them would register a route that renders no
-    // props and reports nothing — a bug you find in the browser.
+    // props and reports nothing - a bug you find in the browser.
     let err = Router::new()
         .try_inertia("/bad", "Bad", json!(["not", "an", "object"]))
         .err()

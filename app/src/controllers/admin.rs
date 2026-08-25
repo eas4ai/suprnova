@@ -2,14 +2,14 @@
 //!
 //! Three endpoints:
 //!
-//! * `GET /api/users/{id}` — JSON:API single-resource envelope via
+//! * `GET /api/users/{id}` - JSON:API single-resource envelope via
 //!   `Resource::single`. Supports `?fields[users]=...` sparse fieldsets
 //!   scoped by `IncludeMiddleware`.
 //!
-//! * `GET /api/v3/users` — JSON:API collection envelope via
+//! * `GET /api/v3/users` - JSON:API collection envelope via
 //!   `Resource::collection`.  Same sparse-fieldset support.
 //!
-//! * `DELETE /api/posts/{id}` — demonstrates `Gate::authorize` with the
+//! * `DELETE /api/posts/{id}` - demonstrates `Gate::authorize` with the
 //!   `PostPolicy`. The current user is loaded via `Auth::user_as::<User>()`,
 //!   which resolves the session's string `user_id` through the registered
 //!   `EloquentUserProvider<User>`.
@@ -72,7 +72,7 @@ pub async fn list_users(req: Request) -> Response {
 /// Clamped rather than validated-then-rejected: a too-large `limit` is a
 /// reasonable thing for a client to ask for and an unreasonable thing for
 /// a server to grant, so cap it instead of 400-ing the request. An
-/// unparseable value falls back to the default for the same reason —
+/// unparseable value falls back to the default for the same reason -
 /// `?limit=all` should serve a page, not an error.
 ///
 /// Extracted so the clamp is testable without a database; the endpoint
@@ -136,7 +136,7 @@ async fn delete_post_inner(req: Request) -> Result<HttpResponse, FrameworkError>
 
 #[cfg(test)]
 mod page_bounds_tests {
-    //! `list_users` used to call `User::find_all()` — every row into
+    //! `list_users` used to call `User::find_all()` - every row into
     //! memory, every row rendered. These pin the bound that replaced it.
 
     use super::{DEFAULT_PAGE, MAX_PAGE, page_bounds};

@@ -60,7 +60,7 @@ fn build_from(from_address: &str, from_name: Option<String>) -> Address {
 ///
 /// The `verification_link` is the fully-qualified URL the
 /// [`EmailVerification`](crate::auth_flows::EmailVerification) facade builds
-/// (base URL + the issued token as a query parameter) — the mailable does not
+/// (base URL + the issued token as a query parameter) - the mailable does not
 /// construct or sign the token itself.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmailVerificationMail {
@@ -91,7 +91,7 @@ impl Mailable for EmailVerificationMail {
     }
 
     fn html_template_source(&self) -> Option<String> {
-        // Autoescape is OFF — pipe user-controllable fields through `escape`
+        // Autoescape is OFF - pipe user-controllable fields through `escape`
         // explicitly. `app_name` and `verification_link` originate from
         // framework-controlled config, but we still escape them so a
         // future config typo (`<` in the brand string) can't break rendering.
@@ -137,7 +137,7 @@ impl Mailable for EmailVerificationMail {
 /// password-reset link from the forgot-password endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PasswordResetMail {
-    /// Recipient address — must be the user's on-file email.
+    /// Recipient address - must be the user's on-file email.
     pub to_address: String,
     /// Display name interpolated into the greeting; `None` falls back to the email local-part.
     pub user_name: Option<String>,
@@ -168,7 +168,7 @@ impl Mailable for PasswordResetMail {
     <p>We received a request to reset your {{ app_name | escape }} password. Click the link below to choose a new one:</p>
     <p><a href="{{ reset_link | escape }}" style="display: inline-block; padding: 10px 16px; background: #2563eb; color: #fff; text-decoration: none; border-radius: 6px;">Reset password</a></p>
     <p>Or copy this URL into your browser:<br><span style="word-break: break-all;">{{ reset_link | escape }}</span></p>
-    <p>This link expires in 15 minutes. If you didn't request a password reset, you can safely ignore this email — your password will stay the same.</p>
+    <p>This link expires in 15 minutes. If you didn't request a password reset, you can safely ignore this email - your password will stay the same.</p>
   </body>
 </html>"#
                 .to_string(),
@@ -185,7 +185,7 @@ impl Mailable for PasswordResetMail {
              {{ reset_link }}\n\
              \n\
              This link expires in 15 minutes. If you didn't request a password reset, \
-             you can safely ignore this email — your password will stay the same.\n"
+             you can safely ignore this email - your password will stay the same.\n"
                 .to_string(),
         )
     }
@@ -204,7 +204,7 @@ impl Mailable for PasswordResetMail {
 /// other lifecycle event that mutates the password hash).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PasswordChangedMail {
-    /// Recipient address — the user's on-file email.
+    /// Recipient address - the user's on-file email.
     pub to_address: String,
     /// Display name interpolated into the greeting; `None` falls back to the email local-part.
     pub user_name: Option<String>,

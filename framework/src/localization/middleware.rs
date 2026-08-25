@@ -1,4 +1,4 @@
-//! [`LocaleMiddleware`] — the per-request locale detection chain.
+//! [`LocaleMiddleware`] - the per-request locale detection chain.
 
 use super::config::{Detect, LocalizationConfig};
 use super::locale::{Locale, negotiate};
@@ -15,11 +15,11 @@ use async_trait::async_trait;
 /// the `__!` macro resolve against it anywhere downstream.
 ///
 /// Detection runs the configured [`LocalizationConfig::detection`]
-/// chain in order — `Session` then `Cookie` then `Header` by default —
+/// chain in order - `Session` then `Cookie` then `Header` by default -
 /// and returns the first candidate that both parses as a [`Locale`]
 /// *and* has a loaded catalog (per [`Translator::available_locales`]).
 /// A candidate that fails either check (a garbage cookie, a locale with
-/// no catalog) is skipped silently rather than erroring — a bad client
+/// no catalog) is skipped silently rather than erroring - a bad client
 /// value must never turn into a 500. When nothing in the chain hits,
 /// the request falls back to [`LocalizationConfig::default_locale`].
 ///
@@ -38,7 +38,7 @@ pub struct LocaleMiddleware {
 }
 
 impl LocaleMiddleware {
-    /// Build from an explicit config — the programmatic path for apps
+    /// Build from an explicit config - the programmatic path for apps
     /// that construct [`LocalizationConfig`] via its builder rather
     /// than environment variables.
     pub fn new(config: LocalizationConfig) -> Self {
@@ -47,7 +47,7 @@ impl LocaleMiddleware {
 
     /// Build from `APP_LOCALE` / `APP_FALLBACK_LOCALE` and the default
     /// detection chain, same as [`LocalizationConfig::from_env`]. Fails
-    /// loudly on a malformed env value rather than silently degrading —
+    /// loudly on a malformed env value rather than silently degrading -
     /// callers that want the silent-fallback behavior should use
     /// [`LocalizationConfig::from_env`]'s already-resolved config with
     /// [`LocaleMiddleware::new`] instead.
@@ -88,7 +88,7 @@ impl Middleware for LocaleMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
         if let Ok(translator) = App::resolve_make::<dyn Translator>() {
             // Dev-mode hot reload: pick up catalog edits without a
-            // restart. Best-effort — a reload failure (e.g. a
+            // restart. Best-effort - a reload failure (e.g. a
             // momentarily malformed `.ftl` mid-save) must never turn a
             // page request into a 500, so the error is dropped.
             if matches!(

@@ -30,7 +30,7 @@ impl Notifiable for User {
 }
 
 // ============================================================================
-// Test 1: happy path — registered renderer dispatches through transport
+// Test 1: happy path - registered renderer dispatches through transport
 // ============================================================================
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -198,7 +198,7 @@ impl NotificationMailable for RenderErr {
 #[tokio::test]
 #[serial]
 async fn mail_channel_renderer_error_propagates() {
-    // Same precaution as above — bind a transport so the test pins
+    // Same precaution as above - bind a transport so the test pins
     // renderer-error propagation rather than masking it with a
     // missing-transport error.
     let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
@@ -242,7 +242,7 @@ impl Notification for Unregistered {
         serde_json::to_value(self).expect("Unregistered serializes")
     }
 }
-// Note: NO NotificationMailable impl here — we never call to_mail on
+// Note: NO NotificationMailable impl here - we never call to_mail on
 // this type. The point is that nothing ever registers a renderer for
 // the `"Unregistered"` name, so the channel must produce a helpful
 // error when it tries to look one up.
@@ -290,7 +290,7 @@ async fn mail_channel_errors_on_unregistered_notification() {
 struct DecodeFail {
     // This field is required by serde, but the dispatched
     // `Notification::data()` impl deliberately returns a JSON object
-    // missing it — so the renderer's `from_value::<DecodeFail>(...)`
+    // missing it - so the renderer's `from_value::<DecodeFail>(...)`
     // call must fail.
     tracking: String,
 }
@@ -312,7 +312,7 @@ impl Notification for DecodeFail {
 
 impl NotificationMailable for DecodeFail {
     fn to_mail(&self) -> Result<MailRendering, FrameworkError> {
-        // Never reached — decode fails before `to_mail` runs.
+        // Never reached - decode fails before `to_mail` runs.
         Ok(MailRendering {
             subject: "unreachable".into(),
             text: Some("unreachable".into()),
@@ -336,7 +336,7 @@ async fn mail_channel_renderer_decode_failure_propagates() {
                 email: "eve@example.org".into(),
             },
             &DecodeFail {
-                tracking: "irrelevant — data() returns wrong shape".into(),
+                tracking: "irrelevant - data() returns wrong shape".into(),
             },
         )
         .await
@@ -360,7 +360,7 @@ async fn mail_channel_renderer_decode_failure_propagates() {
 // Two distinct concrete types share a single notification_name so the
 // renderer registry is keyed identically. We register A, then B, then
 // dispatch through the channel using A. Because the fn-pointer slot is
-// keyed by name, A's dispatch must run B's renderer — captured by
+// keyed by name, A's dispatch must run B's renderer - captured by
 // observing B's distinguishable subject.
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -424,7 +424,7 @@ async fn register_mail_renderer_is_last_write_wins() {
 
     let dispatcher = NotificationDispatcher::new().register_channel(Arc::new(MailChannel::new()));
 
-    // Dispatch via A — but B's renderer should run because B was the
+    // Dispatch via A - but B's renderer should run because B was the
     // last write under the same notification name.
     dispatcher
         .notify(

@@ -69,7 +69,7 @@ fn resolve_parses_typed_fields_from_string_envs() {
 #[test]
 #[serial]
 fn resolve_reports_missing_required_field() {
-    // MAIL_DRIVER is required (no serde default) — missing should error.
+    // MAIL_DRIVER is required (no serde default) - missing should error.
     clear_env(&["MAIL_DRIVER", "MAIL_HOST", "MAIL_PORT"]);
     // Leave MAIL_DRIVER unset; set the others.
     set_env("MAIL_HOST", "x");

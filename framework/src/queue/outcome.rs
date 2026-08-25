@@ -1,4 +1,4 @@
-//! Job outcomes — the worker's settlement decision for a single attempt.
+//! Job outcomes - the worker's settlement decision for a single attempt.
 //!
 //! Job handlers return `Result<(), FrameworkError>`; middleware speak the
 //! richer [`JobOutcome`] vocabulary. A middleware can release a job back to
@@ -23,7 +23,7 @@ pub enum JobOutcome {
 
     /// Re-enqueue the job after `delay` **without** counting this as a
     /// failed attempt. Used by `WithoutOverlapping` (couldn't get the
-    /// lock — try again later) and `RateLimited` (over budget — try
+    /// lock - try again later) and `RateLimited` (over budget - try
     /// again later). The worker emits a `JobReleasedAfterException`-free
     /// re-enqueue path; the envelope's `attempts` counter is held at its
     /// pre-dispatch value, not bumped.

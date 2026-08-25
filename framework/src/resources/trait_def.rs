@@ -21,13 +21,13 @@ pub trait IntoJsonResource: Send + Sync {
     /// regardless of how it's stored.
     fn resource_id(&self) -> String;
 
-    /// The `attributes` object — all non-relationship, non-id fields,
+    /// The `attributes` object - all non-relationship, non-id fields,
     /// filtered by the optional sparse-fieldset allowlist.
     fn resource_attributes(&self, fieldset: Option<&[&str]>) -> Value;
 
     /// The `relationships` object: maps relationship name → resource
     /// identifier or array of resource identifiers. Always emitted
-    /// regardless of `?include=` (spec §5.2.1 — relationship object
+    /// regardless of `?include=` (spec §5.2.1 - relationship object
     /// must be present with `data` linkage).
     fn resource_relationships(&self) -> Vec<(String, RelationshipValue)>;
 
@@ -86,7 +86,7 @@ pub enum RelationshipValue {
     Null,
 }
 
-/// JSON:API resource identifier — the (type, id) pair that appears
+/// JSON:API resource identifier - the (type, id) pair that appears
 /// inside `relationships.<name>.data`.
 #[derive(Debug, Clone)]
 pub struct ResourceIdentifier {

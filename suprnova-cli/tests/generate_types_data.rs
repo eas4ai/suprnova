@@ -1,6 +1,6 @@
 //! TS extraction across Data derives:
 //!   - Field<T>  → `field?: T | null`
-//!   - Prop<T>   → `field?: T`         (lazy/deferred — may be absent)
+//!   - Prop<T>   → `field?: T`         (lazy/deferred - may be absent)
 //!   - input_only → excluded from generated output type
 //!   - output_only → included in output type, excluded from input type
 //!   - allow_include → no TS effect (runtime-only)
@@ -44,7 +44,7 @@ fn extract_block(ts: &str, name: &str) -> String {
 fn user_dto_emits_output_and_input_types() {
     let ts = generate_types_string(ScanInput::Source(SRC));
 
-    // Output type — what the frontend RECEIVES
+    // Output type - what the frontend RECEIVES
     let output = extract_block(&ts, "UserDto");
     assert!(output.contains("id: number"));
     assert!(output.contains("name: string"));
@@ -55,7 +55,7 @@ fn user_dto_emits_output_and_input_types() {
     assert!(!output.contains("favorite_song?: string | null"));
     assert!(!output.contains("Prop<")); // never leak Rust-only types
 
-    // Input type — what the frontend SENDS
+    // Input type - what the frontend SENDS
     let input = extract_block(&ts, "UserDtoInput");
     assert!(input.contains("password: string")); // input_only included
     assert!(!input.contains("computed_handle")); // output_only excluded
@@ -87,7 +87,7 @@ fn generic_struct_emits_typescript_generic() {
 
 // A prop type that isn't an InertiaProps/Data struct but IS defined in the
 // project (here `UserInfo`, which only derives Serialize) resolves to its
-// real interface — the definition is right there in the source. Only types
+// real interface - the definition is right there in the source. Only types
 // the project doesn't define degrade to `unknown` (see
 // `external_and_tuple_types_still_degrade_to_unknown`).
 const UNRESOLVED_SRC: &str = r#"
@@ -144,7 +144,7 @@ fn resolved_nested_inertia_type_keeps_named_reference() {
 }
 
 // A self-referential InertiaProps struct (a comment thread node holding its own
-// children). The generator must still EMIT the interface — a self-edge is not a
+// children). The generator must still EMIT the interface - a self-edge is not a
 // real ordering dependency. Regression for the Kahn's-algorithm self-loop that
 // silently dropped self-referencing structs, leaving referencing structs with a
 // dangling type name.
@@ -201,7 +201,7 @@ fn multi_param_generic() {
 // ── Plain-struct resolution ──────────────────────────────────────────────
 // A prop field naming a struct that never derived InertiaProps/Data must
 // resolve to that struct's real interface (transitively), not degrade to
-// `unknown` — regression coverage for the v0.7.1 behavior that clobbered
+// `unknown` - regression coverage for the v0.7.1 behavior that clobbered
 // committed types files with weaker output.
 
 const NESTED_SRC: &str = r#"

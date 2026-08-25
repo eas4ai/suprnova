@@ -172,7 +172,7 @@ fn vapid_signer_emits_exact_rfc8292_claim_set() {
     // requires aud/sub/exp; we include iat for replay-window tracking.
     // We deliberately DROP `nbf` (jwt-simple defaults to it) because push
     // services with negative clock skew reject the request before nbf
-    // passes — observed against some non-FCM endpoints.
+    // passes - observed against some non-FCM endpoints.
     //
     // We also assert NO unexpected extras (e.g. jti, iss, nonce) so a
     // future signer refactor that re-introduces extras
@@ -192,13 +192,13 @@ fn vapid_signer_emits_exact_rfc8292_claim_set() {
         ["iat", "exp", "sub", "aud"].into_iter().collect();
     assert_eq!(
         keys, expected,
-        "claim set must be exactly {{iat, exp, sub, aud}} — extras risk clock-skew rejection on strict push services"
+        "claim set must be exactly {{iat, exp, sub, aud}} - extras risk clock-skew rejection on strict push services"
     );
 
-    // nbf rejection is the regression we're guarding — explicit absence.
+    // nbf rejection is the regression we're guarding - explicit absence.
     assert!(
         !claims.contains_key("nbf"),
-        "nbf must be absent — push services with negative clock skew reject otherwise"
+        "nbf must be absent - push services with negative clock skew reject otherwise"
     );
 }
 
@@ -224,7 +224,7 @@ fn base64_url_no_pad_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 }
 
 // ---------------------------------------------------------------------------
-// VAPID TTL bounds — RFC 8292 caps the JWT lifetime at 24 hours. Zero /
+// VAPID TTL bounds - RFC 8292 caps the JWT lifetime at 24 hours. Zero /
 // negative TTLs would produce already-expired tokens; the previous `as u64`
 // cast quietly wrapped negatives into multi-century lifetimes.
 // ---------------------------------------------------------------------------

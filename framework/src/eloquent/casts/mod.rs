@@ -6,7 +6,7 @@
 //! ## Explicit-only
 //!
 //! Per the spec's locked decisions there is no auto-detection from
-//! field types — a `Vec<String>` field does not implicitly become
+//! field types - a `Vec<String>` field does not implicitly become
 //! `AsArray<String>`. You must write
 //! `#[suprnova::model(casts = { tags = AsArray<String> })]` (T7b).
 //!
@@ -31,7 +31,7 @@ use crate::error::FrameworkError;
 /// SQLite `INTEGER` boolean column, `String` for a `TEXT` date).
 ///
 /// Both directions are fallible because temporal / decimal parsing
-/// can fail — the macro propagates the `Result` through the model
+/// can fail - the macro propagates the `Result` through the model
 /// trait's `apply_attrs_to_active_model` and `From<inner::Model>`
 /// emissions.
 pub trait Cast: Send + Sync {

@@ -18,7 +18,7 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 /// short-circuiting. Visits every entry, comparing it to `code` with
 /// [`subtle::ConstantTimeEq`] and folding the result. Run-time depends
 /// on `codes.len()` only, not on whether or where a match exists, so a
-/// timing observer cannot learn which slot — or whether any slot —
+/// timing observer cannot learn which slot - or whether any slot -
 /// matched. Equal-length entries fall through to `ct_eq`; entries of a
 /// different length are skipped (recovery codes are a fixed 13-byte
 /// shape, so a length mismatch is a structural reject, not a timing
@@ -34,7 +34,7 @@ fn find_constant_time(codes: &[String], code: &str) -> Option<usize> {
         } else {
             Choice::from(0u8)
         };
-        // Adopt this index only on the FIRST match — `take` is set only
+        // Adopt this index only on the FIRST match - `take` is set only
         // when `eq` is true and no earlier match has been recorded.
         // `conditional_select` keeps the assignment branch-free.
         let take = eq & !found;
@@ -51,7 +51,7 @@ fn find_constant_time(codes: &[String], code: &str) -> Option<usize> {
 
 /// Generate `count` fresh recovery codes in `NNNNNN-NNNNNN` shape
 /// (12 decimal digits with a hyphen separator, ~40 bits of entropy
-/// each — matching Laravel's `Fortify::recoveryCodes()` format).
+/// each - matching Laravel's `Fortify::recoveryCodes()` format).
 pub fn generate(count: usize) -> Vec<String> {
     let mut rng = rand::rng();
     (0..count)
@@ -77,7 +77,7 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
     // the *original* ciphertext. If another consume() raced ahead and
     // already rewrote `recovery_codes`, rows_affected == 0 and we
     // retry against the fresh blob. The retry cap defends against
-    // pathological contention without hanging — in practice two
+    // pathological contention without hanging - in practice two
     // concurrent consume() calls for the same user_id are vanishingly
     // rare (a user logging in twice within the same TOTP window with
     // two recovery codes), so the bound is tight by design.
@@ -133,7 +133,7 @@ pub async fn consume(user_id: &str, code: &str) -> Result<bool, FrameworkError> 
             return Ok(true);
         }
 
-        // 0 rows affected means the ciphertext changed under us —
+        // 0 rows affected means the ciphertext changed under us -
         // a concurrent consume() got there first. Retry the read.
         attempt += 1;
         if attempt >= MAX_RETRIES {
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn ct_find_returns_none_for_length_mismatch() {
         let codes: Vec<String> = vec!["111111-111111".into()];
-        // Same prefix but truncated — must NOT match.
+        // Same prefix but truncated - must NOT match.
         assert_eq!(find_constant_time(&codes, "111111-11111"), None);
         // Longer than any stored code.
         assert_eq!(find_constant_time(&codes, "111111-1111111"), None);

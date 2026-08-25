@@ -2,7 +2,7 @@
 //!
 //! Composes the real SeaORM stores over in-memory SQLite, the real opaque
 //! session provider and factor gate, recording mail/limiter fakes, and the
-//! three password-domain plugins — the same shape the example host uses.
+//! three password-domain plugins - the same shape the example host uses.
 
 #![allow(dead_code)]
 

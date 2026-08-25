@@ -2,8 +2,8 @@
 //! wall clock.
 //!
 //! Every authentication attempt must perform exactly one bcrypt-format and
-//! one Argon2-format verification through the installed driver — unknown
-//! email, passwordless account, wrong password, and success included — and
+//! one Argon2-format verification through the installed driver - unknown
+//! email, passwordless account, wrong password, and success included - and
 //! each dummy call must carry the same parameter profile as the deployed
 //! format it stands in for. The assertions pin provenance and profile
 //! equality, never durations, so they cannot flake on a loaded CI box.

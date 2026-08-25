@@ -6,11 +6,11 @@
 //! flushed. Mirrors Laravel 13's `Illuminate\Queue\Failed\*`.
 //!
 //! Three backends ship:
-//! - [`MemoryFailedJobStore`] — in-process Vec, lost on restart. Default
+//! - [`MemoryFailedJobStore`] - in-process Vec, lost on restart. Default
 //!   wired by `bootstrap_default`.
-//! - [`DatabaseFailedJobStore`] — persists to a `failed_jobs` table via
+//! - [`DatabaseFailedJobStore`] - persists to a `failed_jobs` table via
 //!   SeaORM. Production default for the database driver.
-//! - [`NullFailedJobStore`] — discards every record. Mirrors Laravel's
+//! - [`NullFailedJobStore`] - discards every record. Mirrors Laravel's
 //!   `NullFailedJobProvider`.
 //!
 //! Configure via [`Queue::set_failed_store`](crate::queue::Queue::set_failed_store)
@@ -188,7 +188,7 @@ impl FailedJobStore for MemoryFailedJobStore {
 // ---------------------------------------------------------------------------
 
 /// [`FailedJobStore`] that discards every record. Mirrors Laravel's
-/// `NullFailedJobProvider` — use it to disable failed-job retention
+/// `NullFailedJobProvider` - use it to disable failed-job retention
 /// without removing the worker's logging path.
 #[derive(Default)]
 pub struct NullFailedJobStore;
@@ -259,7 +259,7 @@ pub struct DatabaseFailedJobStore {
 
 impl DatabaseFailedJobStore {
     /// Open a database-backed store against `table`. The table name is
-    /// validated as a SQL identifier — invalid input returns
+    /// validated as a SQL identifier - invalid input returns
     /// [`FrameworkError`] rather than reaching the database.
     pub fn new(db: DatabaseConnection, table: String) -> Result<Self, FrameworkError> {
         validate_identifier(&table)?;
@@ -452,7 +452,7 @@ fn decode_row(row: &sea_orm::QueryResult) -> Result<FailedJob, FrameworkError> {
 /// Read an epoch-seconds column that may be either 32- or 64-bit wide.
 ///
 /// `manual/queues.md` documents `failed_at INTEGER`, which SQLite treats as a
-/// 64-bit dynamic type but Postgres pins to `int4` — and sqlx refuses to
+/// 64-bit dynamic type but Postgres pins to `int4` - and sqlx refuses to
 /// decode an `int4` column into `i64`, so a store that had just written the
 /// row could not read it back. Widening on read (rather than demanding
 /// `BIGINT`) keeps every already-deployed `failed_jobs` table working.

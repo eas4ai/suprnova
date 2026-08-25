@@ -2,23 +2,23 @@
 //! `_previous.url`.
 //!
 //! `_previous.url` backs `Redirect::back`, `Redirect::refresh`, and
-//! `url::previous` — none of those readers sanitize what they read back,
+//! `url::previous` - none of those readers sanitize what they read back,
 //! they trust the session verbatim. `current_url` (the value considered
 //! for the write) is built straight from `request.path()` + query, and
 //! an origin-form HTTP request-target is syntactically free to start
-//! with `//` (httparse's `URI_MAP` permits it — this isn't rejected at
+//! with `//` (httparse's `URI_MAP` permits it - this isn't rejected at
 //! the HTTP-parse layer). A `fallback!` route that answers any unmatched
-//! path with `200` — the standard Inertia/SPA app-shell pattern — would,
+//! path with `200` - the standard Inertia/SPA app-shell pattern - would,
 //! without a write-time guard, let `GET //evil.test/anything` persist
 //! `//evil.test/anything` as the previous URL, and every later
 //! `Redirect::back()` would hand the browser that off-origin `Location`.
 //!
 //! `SessionMiddleware::handle` now guards the write with
-//! `routing::url::root_relative_or_none` — the same sanitizer
+//! `routing::url::root_relative_or_none` - the same sanitizer
 //! `InertiaValidationRedirectMiddleware` uses for its own `Referer`
 //! guard (see `framework/src/inertia/validation_redirect_middleware.rs`).
 //! These tests drive `SessionMiddleware::handle` directly with a real
-//! `Request` (parsed from raw HTTP bytes over an in-memory duplex pipe —
+//! `Request` (parsed from raw HTTP bytes over an in-memory duplex pipe -
 //! the same technique `session_persistence_fail_closed.rs` uses), since
 //! that's the one place in the framework this can be enforced.
 
@@ -38,7 +38,7 @@ fn ensure_crypt() {
 }
 
 /// A store that remembers whatever `SessionData` it was last asked to
-/// persist, and hands that back on the next `read` — a minimal
+/// persist, and hands that back on the next `read` - a minimal
 /// in-memory session store, just enough to let two successive
 /// `SessionMiddleware::handle` calls share state the way two requests
 /// in the same browser session would.
@@ -77,7 +77,7 @@ fn test_config() -> SessionConfig {
 
 /// Percent-encode the handful of bytes that would otherwise break a raw
 /// `Cookie:` request header. Copied from
-/// `session_persistence_fail_closed.rs::post_request_with_cookie` — kept
+/// `session_persistence_fail_closed.rs::post_request_with_cookie` - kept
 /// duplicated rather than shared, since these are two independent test
 /// binaries and helpers here are module-private.
 fn encode_cookie_value(value: &str) -> String {
@@ -100,7 +100,7 @@ fn encode_cookie_value(value: &str) -> String {
 /// bytes through a hyper service over an in-memory duplex pipe.
 /// `Request::new` only accepts a `hyper::Request<Incoming>`, and
 /// `Incoming` bodies can't be synthesized directly, so we let hyper
-/// parse a real request and hand it back over a oneshot — the request
+/// parse a real request and hand it back over a oneshot - the request
 /// line is built by hand so `raw_target` can carry a `//`-leading path
 /// a higher-level request builder might normalize away before we ever
 /// get to exercise the guard.
@@ -171,7 +171,7 @@ async fn a_protocol_relative_current_url_never_reaches_previous_url() {
 
     // The handler makes an unrelated mutation so the session is
     // guaranteed dirty (and therefore persisted) regardless of whether
-    // the `_previous.url` write itself happens — isolating this test
+    // the `_previous.url` write itself happens - isolating this test
     // from the separate "does an unmodified session get written at all"
     // question `session_persistence_fail_closed.rs` already covers.
     let next: Next = Arc::new(|_req| {
@@ -202,7 +202,7 @@ async fn a_protocol_relative_current_url_never_reaches_previous_url() {
         session.previous_url(),
         None,
         "declining the write leaves no previous URL recorded, rather than \
-         inventing one — see the write-site comment in session/middleware.rs \
+         inventing one - see the write-site comment in session/middleware.rs \
          for why 'store nothing' was chosen over 'store /'"
     );
 }

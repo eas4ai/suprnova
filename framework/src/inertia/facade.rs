@@ -1,4 +1,4 @@
-//! `Inertia` static facade — Laravel-style entrypoint for the most
+//! `Inertia` static facade - Laravel-style entrypoint for the most
 //! common Inertia helpers.
 
 use crate::FrameworkError;
@@ -19,9 +19,9 @@ impl Inertia {
     /// Build an Inertia response with a single scroll-prop wired from
     /// a paginator.
     ///
-    /// - `component` — the Inertia page component name (e.g. `"Users/Index"`).
+    /// - `component` - the Inertia page component name (e.g. `"Users/Index"`).
     ///   This is what the frontend resolves to a real component.
-    /// - `key` — the prop name under which the paginated rows land
+    /// - `key` - the prop name under which the paginated rows land
     ///   (e.g. `"users"`). Scroll metadata is attached to the same key.
     ///
     /// The metadata page-name comes from the paginator itself:
@@ -43,7 +43,7 @@ impl Inertia {
     ///
     /// Lazy fields registered via `#[data(lazy)]` / `#[data(auto_lazy)]`
     /// resolve against the request's `?include=` set; the per-DTO allowlist
-    /// enforces default-deny — disallowed includes return 400.
+    /// enforces default-deny - disallowed includes return 400.
     pub fn data<T>(component: &'static str, dto: T) -> InertiaResponse
     where
         T: IntoInertiaData,
@@ -55,7 +55,7 @@ impl Inertia {
     /// `Err(FrameworkError)` (naming the offending field) if a DTO field's
     /// `Serialize` impl fails, instead of panicking.
     ///
-    /// On the HTTP request path the panicking [`data`](Self::data) is fine —
+    /// On the HTTP request path the panicking [`data`](Self::data) is fine -
     /// the panic-recovery middleware converts it to a 500. Prefer `try_data`
     /// when building an Inertia response off that path (queue workers,
     /// scheduled tasks, CLI) where no panic net applies, or whenever you
@@ -73,21 +73,21 @@ impl Inertia {
     /// Install the standard Inertia protocol middleware globally.
     ///
     /// Registers four global middlewares in order:
-    /// 1. [`InertiaHeadersMiddleware`] — sets `Vary: X-Inertia` on every
+    /// 1. [`InertiaHeadersMiddleware`] - sets `Vary: X-Inertia` on every
     ///    response and turns an empty `200` on an Inertia visit into a
     ///    `303` back. Registered first, so it wraps everything, including
     ///    the `409` the version middleware returns below.
-    /// 2. [`InertiaVersionMiddleware`] — emits `409 Conflict` +
+    /// 2. [`InertiaVersionMiddleware`] - emits `409 Conflict` +
     ///    `X-Inertia-Location` when the client's `X-Inertia-Version`
     ///    header doesn't match the server's configured version.
     ///    Without it, asset-version mismatches are silent and stale
     ///    clients keep hitting the new server with the old bundle.
-    /// 3. [`Inertia303Middleware`] — converts `302` redirects on
+    /// 3. [`Inertia303Middleware`] - converts `302` redirects on
     ///    non-GET Inertia visits to `303`, so the client's follow-up
     ///    request is explicitly a GET. Without it, browsers may
     ///    re-submit the original PUT/PATCH/DELETE to the redirect
-    ///    target — silently breaking form-create-then-redirect flows.
-    /// 4. [`InertiaValidationRedirectMiddleware`] — turns a validation
+    ///    target - silently breaking form-create-then-redirect flows.
+    /// 4. [`InertiaValidationRedirectMiddleware`] - turns a validation
     ///    `422` on an Inertia visit into a `303` back with the errors
     ///    flashed. Innermost, so it sees the handler's raw `422`; the
     ///    `303` it emits passes untouched through the `302 → 303`
@@ -96,7 +96,7 @@ impl Inertia {
     ///    error modal instead of populating `form.errors`.
     ///
     /// One call wires all four, so an app cannot end up carrying two of
-    /// them and silently missing the third — each closes a failure mode
+    /// them and silently missing the third - each closes a failure mode
     /// that surfaces only in production: cache poisoning across the two
     /// representations of a URL, a stale bundle after a deploy, a
     /// method-preserving redirect, and a form that reports its own
@@ -115,8 +115,8 @@ impl Inertia {
     ///
     /// Per-response [`InertiaResponse::with_config`] still wins. The
     /// argument stays a `&` reference so callers keep ownership, and
-    /// calling `install` again replaces the retained config — last write
-    /// wins. The middleware registrations are appended, not replaced —
+    /// calling `install` again replaces the retained config - last write
+    /// wins. The middleware registrations are appended, not replaced -
     /// call `install` exactly once per process.
     ///
     /// The config is retained on the *active* container's Inertia
@@ -128,7 +128,7 @@ impl Inertia {
     /// # Errors
     ///
     /// Returns [`FrameworkError`] when `config` is in production mode
-    /// (`development == false` — the default whenever `APP_ENV=production`,
+    /// (`development == false` - the default whenever `APP_ENV=production`,
     /// see `InertiaConfig::default`) but no Vite manifest can be loaded
     /// from `config.manifest_path`. This is CFG-01's fail-closed guard:
     /// without it, a production boot with a missing/unbuilt frontend
@@ -137,7 +137,7 @@ impl Inertia {
     /// missing `APP_KEY` fails closed in [`crate::Server::from_config`]
     /// rather than booting with a broken encryption key. Neither the
     /// middleware registration nor the config retention happens when this
-    /// returns `Err` — nothing is half-installed, and responses keep
+    /// returns `Err` - nothing is half-installed, and responses keep
     /// rendering from `InertiaConfig::default()`.
     ///
     /// # Example
@@ -182,7 +182,7 @@ impl Inertia {
 
         // Registration order is execution order, and the first registered
         // is the outermost (`middleware/chain.rs:94`). The headers
-        // middleware goes first so it wraps everything — including the
+        // middleware goes first so it wraps everything - including the
         // `409` the version middleware returns without ever calling the
         // handler, which is precisely a response a shared cache would
         // otherwise store with no `Vary`.
@@ -207,8 +207,8 @@ mod tests {
         // `install` also retains the config on the active container's
         // Inertia registry. Without this guard that write lands on the
         // global registry, and `response.rs`'s
-        // `build_page_object_eager_only` — same binary, running in
-        // parallel — would see `version = "test-version"` where it
+        // `build_page_object_eager_only` - same binary, running in
+        // parallel - would see `version = "test-version"` where it
         // asserts `"1.0"`. The guard gives this test its own registry,
         // cleared when it drops.
         let _guard = crate::testing::TestContainer::fake();
@@ -235,8 +235,8 @@ mod tests {
         );
         // This asserts the count, not the registration ORDER (headers
         // outermost). `get_global_middleware()` returns
-        // `Vec<Arc<dyn Fn(Request, Next) -> MiddlewareFuture + Send + Sync>>`
-        // — fully type-erased, no `TypeId` or type name survives past
+        // `Vec<Arc<dyn Fn(Request, Next) -> MiddlewareFuture + Send + Sync>>` -
+        // fully type-erased, no `TypeId` or type name survives past
         // `into_boxed`, so there is nothing in that `Vec` to assert order
         // against without adding new runtime introspection. The order
         // guarantee is instead carried end-to-end by
@@ -248,12 +248,12 @@ mod tests {
     }
 
     /// CFG-01 fail-closed guard. Deliberately uses `.production()` +
-    /// `.manifest_path(...)` instead of mutating `APP_ENV` — this crate's
+    /// `.manifest_path(...)` instead of mutating `APP_ENV` - this crate's
     /// unit tests all share one process/binary, so an env-var-free test
     /// avoids racing every other test that reads the environment
     /// concurrently. The `APP_ENV`-driven default itself (dev vs.
     /// production) is covered separately in its own isolated test
-    /// binary — see `framework/tests/inertia_production_fail_closed.rs`.
+    /// binary - see `framework/tests/inertia_production_fail_closed.rs`.
     #[test]
     fn install_fails_closed_in_production_without_a_manifest() {
         // No before/after `get_global_middleware().len()` delta check
@@ -274,7 +274,7 @@ mod tests {
             .expect_err("production install without a manifest must fail closed");
         assert!(
             crate::App::inertia_registry().installed_config().is_none(),
-            "a failed install must retain no config either — a response \
+            "a failed install must retain no config either - a response \
              must not render from settings the operator was just told are \
              unusable"
         );

@@ -1,8 +1,8 @@
-//! Mail boot wiring — reads `MAIL_DRIVER` env and binds the matching
+//! Mail boot wiring - reads `MAIL_DRIVER` env and binds the matching
 //! transport via [`Mail::set_transport`]. Outside production, defaults to
 //! the `log` driver when `MAIL_DRIVER` is unset or names an unknown driver;
 //! in production those defaults are a hard boot failure unless the operator
-//! opts in (SEC-03 — see `select_driver` in this module).
+//! opts in (SEC-03 - see `select_driver` in this module).
 
 use crate::error::FrameworkError;
 use crate::lock;
@@ -20,7 +20,7 @@ use std::sync::{Arc, RwLock};
 
 // `RwLock<Option<...>>` (not `OnceLock`) so successive bootstrap calls can
 // install a fresh capture handle when the driver is toggled back to memory.
-// `OnceLock::set` only succeeds once per process — that would silently leak
+// `OnceLock::set` only succeeds once per process - that would silently leak
 // the stale Arc from the FIRST memory bootstrap into every subsequent one,
 // confusing tests that switch drivers between cases.
 static MEMORY_CAPTURE: RwLock<Option<Arc<InMemoryMailTransport>>> = RwLock::new(None);
@@ -31,7 +31,7 @@ static MEMORY_CAPTURE: RwLock<Option<Arc<InMemoryMailTransport>>> = RwLock::new(
 /// any non-memory driver.
 pub fn captured_in_memory() -> Option<Arc<InMemoryMailTransport>> {
     // Read accessor: degrade to `None` on a poisoned lock rather than
-    // panicking (crate-wide read-poison policy — see `crate::lock`).
+    // panicking (crate-wide read-poison policy - see `crate::lock`).
     lock::read(&MEMORY_CAPTURE, "mail memory capture")
         .ok()
         .and_then(|g| g.clone())
@@ -49,15 +49,15 @@ fn clear_memory_capture() -> Result<(), FrameworkError> {
 
 /// Operator opt-in that lets a production deployment boot on a mail driver
 /// which renders messages and discards them. Set it to a truthy value
-/// (`1` / `true` / `yes` / `on`) to acknowledge that outgoing mail —
-/// including password resets and email verifications — will not be
+/// (`1` / `true` / `yes` / `on`) to acknowledge that outgoing mail -
+/// including password resets and email verifications - will not be
 /// delivered. Anything else, including leaving it unset, keeps the
 /// fail-closed behaviour.
 const ALLOW_NON_DELIVERING_ENV: &str = "MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION";
 
 /// Operator opt-in that lets a production deployment boot on an
 /// unencrypted SMTP connection. Same shape and same truthiness rules as
-/// [`ALLOW_NON_DELIVERING_ENV`] — deliberately, so operators learn one
+/// [`ALLOW_NON_DELIVERING_ENV`] - deliberately, so operators learn one
 /// pattern rather than two.
 ///
 /// The legitimate use is a relay reachable only over a private network
@@ -83,8 +83,8 @@ enum SmtpEncryption {
     /// `unencrypted`, so an operator whose relay requires 465 had no
     /// combination of environment variables that worked.
     Tls,
-    /// No encryption at all. For local mail catchers — Mailpit, MailHog,
-    /// maildev — which listen unauthenticated on 1025.
+    /// No encryption at all. For local mail catchers - Mailpit, MailHog,
+    /// maildev - which listen unauthenticated on 1025.
     Plaintext,
 }
 
@@ -126,8 +126,8 @@ impl SmtpEncryption {
 /// write races every other test in flight.
 ///
 /// Three of the four `(user, pass)` arms used to land on
-/// [`SmtpMailTransport::unencrypted`] — `builder_dangerous`, no TLS and no
-/// certificate check — and the both-unset arm merely logged a `warn!` in
+/// [`SmtpMailTransport::unencrypted`] - `builder_dangerous`, no TLS and no
+/// certificate check - and the both-unset arm merely logged a `warn!` in
 /// production before booting plaintext anyway. A warning is the wrong
 /// instrument here: it appears once at boot, in a log nobody reads on a
 /// green deploy, while every password-reset link the application ever
@@ -138,7 +138,7 @@ impl SmtpEncryption {
 /// credentials means the local-catcher path (Mailpit on 1025 speaks no
 /// TLS, so defaulting to `starttls` would break `suprnova new` out of the
 /// box), and credentials mean STARTTLS. So this knob changes nothing for
-/// anyone who does not set it — except in production, where the plaintext
+/// anyone who does not set it - except in production, where the plaintext
 /// branch now fails closed.
 ///
 /// An unrecognised value is an error in *every* environment, not just
@@ -157,7 +157,7 @@ fn resolve_smtp_encryption(
                 "MAIL_SMTP_ENCRYPTION=`{value}` is not a value this build \
                  recognises. Use `starttls` (STARTTLS on the submission port, \
                  usually 587), `tls` (implicit TLS, usually 465), or `none` \
-                 (no encryption — local mail catchers only)."
+                 (no encryption - local mail catchers only)."
             ))
         })?,
         None if has_credentials => SmtpEncryption::StartTls,
@@ -168,12 +168,12 @@ fn resolve_smtp_encryption(
         return Err(FrameworkError::internal(format!(
             "refusing to boot in production: MAIL_DRIVER=smtp resolved to an \
              unencrypted connection, so the SMTP credentials and every message \
-             body — including password-reset and email-verification links — \
+             body - including password-reset and email-verification links - \
              would cross the network in cleartext. Set MAIL_SMTP_USER and \
              MAIL_SMTP_PASS (STARTTLS is then the default), or set \
              MAIL_SMTP_ENCRYPTION=tls for a relay that expects implicit TLS on \
              465, or set {ALLOW_INSECURE_SMTP_ENV}=true to acknowledge \
-             cleartext SMTP — which is only defensible when the relay is \
+             cleartext SMTP - which is only defensible when the relay is \
              reachable solely over a private network."
         )));
     }
@@ -222,7 +222,7 @@ impl MailDriver {
     }
 
     /// Whether this driver hands the rendered message to something that can
-    /// actually deliver it. `log`, `memory`, and `file` render and drop —
+    /// actually deliver it. `log`, `memory`, and `file` render and drop -
     /// which is the entire point in development and a silent outage in
     /// production.
     fn delivers(self) -> bool {
@@ -253,7 +253,7 @@ struct DriverSelection {
     /// `Some(raw)` when `MAIL_DRIVER` named a driver this build does not
     /// know and selection fell back to `log`. Carried out to the caller so
     /// the warn can quote the operator's literal value instead of a
-    /// sanitised one — that string is usually the typo itself.
+    /// sanitised one - that string is usually the typo itself.
     unknown_value: Option<String>,
 }
 
@@ -262,22 +262,22 @@ struct DriverSelection {
 ///
 /// Takes its inputs explicitly rather than reading `MAIL_DRIVER` / `APP_ENV`
 /// itself so the whole decision matrix is unit-testable without mutating
-/// process-global env — this crate's tests run massively parallel inside one
+/// process-global env - this crate's tests run massively parallel inside one
 /// binary, where an env write races every other test in flight.
 ///
 /// SEC-03: `log`, `memory`, and `file` render a message and drop it on the
 /// floor. An unset `MAIL_DRIVER`, and any value this build does not
 /// recognise, both land on that same `log` transport, so all five cases
-/// have to fail closed together — otherwise a production deploy that forgot
+/// have to fail closed together - otherwise a production deploy that forgot
 /// the variable (or typo'd `MAIL_DRIVER=SMTP`) reports every password reset
 /// and email verification as sent while nothing leaves the process, and the
 /// failure only surfaces when a locked-out user complains.
-/// `allow_non_delivering` is the operator's explicit acknowledgement — see
+/// `allow_non_delivering` is the operator's explicit acknowledgement - see
 /// [`ALLOW_NON_DELIVERING_ENV`].
 ///
 /// Only `is_production()` gates this, not staging: a staging environment
 /// pointed at the `log` driver is a normal, deliberate configuration, and
-/// hard-failing it would push teams towards setting the override globally —
+/// hard-failing it would push teams towards setting the override globally -
 /// which would disarm the check where it actually matters.
 fn select_driver(
     raw: Option<&str>,
@@ -343,7 +343,7 @@ use crate::config::env::env_flag_enabled;
 ///
 /// When `APP_ENV` resolves to production, an unset, unknown, `log`,
 /// `memory`, or `file` driver returns `Err` instead of binding a transport
-/// that discards mail — see `select_driver` for why all five cases
+/// that discards mail - see `select_driver` for why all five cases
 /// collapse into one. Set `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` to
 /// boot anyway; the boot then warns loudly on every startup. Outside
 /// production nothing changes.
@@ -354,7 +354,7 @@ use crate::config::env::env_flag_enabled;
 ///
 /// Synchronous: every supported transport's constructor is sync today.
 /// If a future transport adds async initialization (e.g. a connection
-/// pre-warm), flip this back to `async` and update the call sites — only
+/// pre-warm), flip this back to `async` and update the call sites - only
 /// `Server::serve` and the boot tests need to add `.await`.
 pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
     // Release any previous in-memory capture handle BEFORE matching, so
@@ -374,14 +374,14 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         tracing::warn!(driver = %bad, "unknown MAIL_DRIVER, falling back to log");
     }
     if is_production && !selection.driver.delivers() {
-        // Reachable only via the explicit override — `select_driver` has
+        // Reachable only via the explicit override - `select_driver` has
         // already returned `Err` otherwise. Restate it every boot so the
         // acknowledgement stays visible in the logs of the deployment it
         // was set on, rather than being a one-time decision nobody recalls.
         tracing::warn!(
             driver = selection.driver.as_str(),
             override_env = ALLOW_NON_DELIVERING_ENV,
-            "booting production with a mail driver that discards messages — \
+            "booting production with a mail driver that discards messages - \
              outgoing mail, including password resets, will NOT be delivered"
         );
     }
@@ -397,7 +397,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
         }
         MailDriver::File => {
             // Resolve through the app's path family rather than the process
-            // CWD — every other `storage/` consumer goes through
+            // CWD - every other `storage/` consumer goes through
             // `storage_path()`, and a service manager that doesn't set a
             // working directory would otherwise scatter `.eml` files
             // wherever the process happened to start. An absolute
@@ -421,20 +421,20 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
             // Exactly one of the pair set is almost always a
             // misconfiguration (env file copied without its partner,
             // secret-manager rotation half-applied). Say so before
-            // resolving, because what it resolves *to* — no credentials,
-            // therefore the local-catcher default — is not what the
+            // resolving, because what it resolves *to* - no credentials,
+            // therefore the local-catcher default - is not what the
             // operator was reaching for.
             match (&user, &pass) {
                 (Some(_), None) => tracing::warn!(
                     host = %host,
                     port = port,
-                    "MAIL_SMTP_USER is set but MAIL_SMTP_PASS is not — SMTP auth \
+                    "MAIL_SMTP_USER is set but MAIL_SMTP_PASS is not - SMTP auth \
                      is DISABLED; set BOTH variables to authenticate"
                 ),
                 (None, Some(_)) => tracing::warn!(
                     host = %host,
                     port = port,
-                    "MAIL_SMTP_PASS is set but MAIL_SMTP_USER is not — SMTP auth \
+                    "MAIL_SMTP_PASS is set but MAIL_SMTP_USER is not - SMTP auth \
                      is DISABLED; set BOTH variables to authenticate"
                 ),
                 _ => {}
@@ -470,8 +470,8 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
                 }
                 SmtpEncryption::Plaintext => {
                     // Reaching here in production means the operator set
-                    // the override — `resolve_smtp_encryption` refuses
-                    // otherwise — so this is an acknowledged risk, not a
+                    // the override - `resolve_smtp_encryption` refuses
+                    // otherwise - so this is an acknowledged risk, not a
                     // discovery. Still worth one line per boot: the
                     // override tends to outlive the sidecar that justified
                     // it.
@@ -555,7 +555,7 @@ pub fn bootstrap_from_env() -> Result<(), FrameworkError> {
 #[cfg(test)]
 mod tests {
     //! SEC-03 decision matrix. Every test here drives [`select_driver`]
-    //! with explicit arguments — no `MAIL_DRIVER` / `APP_ENV` mutation, so
+    //! with explicit arguments - no `MAIL_DRIVER` / `APP_ENV` mutation, so
     //! these are safe in the massively-parallel lib test binary. The
     //! env-reading path is covered end-to-end by the dedicated
     //! `framework/tests/mail_production_fail_closed.rs` binary.
@@ -572,7 +572,7 @@ mod tests {
         format!("{err}")
     }
 
-    // P2-03 — SMTP encryption decision matrix. Same discipline as the
+    // P2-03 - SMTP encryption decision matrix. Same discipline as the
     // SEC-03 tests above: explicit arguments, no env mutation.
 
     fn encryption(raw: Option<&str>, has_credentials: bool, is_production: bool) -> SmtpEncryption {
@@ -603,7 +603,7 @@ mod tests {
     fn production_refuses_to_boot_on_an_unencrypted_smtp_connection() {
         // Explicitly asking for plaintext is refused whether or not
         // credentials exist. Credentials do not make a cleartext
-        // connection safe — they are among the things being sent in it.
+        // connection safe - they are among the things being sent in it.
         for has_credentials in [false, true] {
             for raw in ["none", "null", "plaintext", "insecure"] {
                 let resolved = resolve_smtp_encryption(Some(raw), has_credentials, true, false);
@@ -627,7 +627,7 @@ mod tests {
         );
     }
 
-    /// Split out so the message itself is asserted — an operator who hits
+    /// Split out so the message itself is asserted - an operator who hits
     /// this needs to be told which variable unblocks them.
     #[test]
     fn the_production_refusal_names_the_override_and_the_alternatives() {
@@ -657,7 +657,7 @@ mod tests {
     }
 
     /// Implicit TLS was written and tested but unreachable from
-    /// configuration — `bootstrap_from_env` only ever built `starttls` or
+    /// configuration - `bootstrap_from_env` only ever built `starttls` or
     /// `unencrypted`. An operator on a 465-only relay had no working
     /// combination of environment variables.
     #[test]
@@ -679,7 +679,7 @@ mod tests {
     }
 
     /// An encrypted mode is never blocked by the production guard, even
-    /// with no credentials — the missing-credentials refusal is a
+    /// with no credentials - the missing-credentials refusal is a
     /// different error raised by the caller, with a different message.
     #[test]
     fn an_encrypted_mode_passes_the_production_guard_without_credentials() {
@@ -691,7 +691,7 @@ mod tests {
     }
 
     /// A typo must not silently become plaintext, and must not wait for a
-    /// production deploy to say so. `tsl` is the one that matters — it is
+    /// production deploy to say so. `tsl` is the one that matters - it is
     /// a transposition of an encrypted mode, so the operator believes
     /// they asked for TLS.
     #[test]
@@ -706,7 +706,7 @@ mod tests {
                 let msg = format!("{err}");
                 assert!(
                     msg.contains(raw),
-                    "the error must quote the offending value — it is usually \
+                    "the error must quote the offending value - it is usually \
                      the typo itself: {msg}"
                 );
                 assert!(
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn production_refuses_an_unknown_driver_instead_of_falling_back_to_log() {
-        // The pre-SEC-03 behaviour — warn, then bind `log` — is exactly the
+        // The pre-SEC-03 behaviour - warn, then bind `log` - is exactly the
         // fail-open path. A typo'd `MAIL_DRIVER=SMTP` must not deploy.
         let msg = err_message(Some("SMTP"));
         assert!(
@@ -851,7 +851,7 @@ mod tests {
             assert!(flag_is_truthy(Some(yes)), "{yes:?} must count as opt-in");
         }
         // Failure mode: a present-but-negative or garbled value must NOT be
-        // read as consent — "the variable exists" is not an acknowledgement.
+        // read as consent - "the variable exists" is not an acknowledgement.
         for no in ["0", "false", "no", "off", "maybe", "", "  "] {
             assert!(!flag_is_truthy(Some(no)), "{no:?} must not opt in");
         }

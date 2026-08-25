@@ -1,9 +1,9 @@
-//! Tag — Phase 10B T10 dogfood for `MorphedByMany`.
+//! Tag - Phase 10B T10 dogfood for `MorphedByMany`.
 //!
 //! Sits on the "many side that points back to many families" of a
 //! polymorphic many-to-many. The shared `taggables` pivot table
 //! carries `(tag_id, taggable_id, taggable_type)`; Tag declares two
-//! `MorphedByMany` relations — one each for Posts and Videos — and
+//! `MorphedByMany` relations - one each for Posts and Videos - and
 //! the loader filters by `taggable_type` to keep the two families
 //! separate.
 //!

@@ -61,7 +61,7 @@ impl DbConnection {
             if path != ":memory:" && !path.starts_with(":memory:") {
                 // Create parent directories if needed. `?mode=rwc` makes
                 // SQLite create the database FILE, but it will not make
-                // PARENT DIRECTORIES — propagate any failure here with
+                // PARENT DIRECTORIES - propagate any failure here with
                 // path context so misconfigured paths and permission
                 // problems surface as a clear filesystem diagnostic
                 // instead of a downstream "unable to open database file."
@@ -99,7 +99,7 @@ impl DbConnection {
         // path with __primary__ semantics; named pools flow through
         // here from ConnectionRegistry::register with their registered
         // name. Listeners observe the connection name; failures are
-        // logged-only — a listener bug must not block the pool from
+        // logged-only - a listener bug must not block the pool from
         // coming up.
         let event = crate::database::events::ConnectionEstablished {
             connection_name: connection_name.to_string(),
@@ -169,7 +169,7 @@ impl DbConnection {
 /// keeps that query intact instead of being double-suffixed.
 ///
 /// In-memory targets (`:memory:`) are returned with their query
-/// preserved verbatim — `mode=rwc` is meaningless there and SQLite
+/// preserved verbatim - `mode=rwc` is meaningless there and SQLite
 /// rejects an unexpected `?mode=rwc` on `:memory:`.
 pub(crate) fn normalize_sqlite_url(url: &str) -> (String, String) {
     let without_scheme = url.trim_start_matches("sqlite://");
@@ -205,7 +205,7 @@ fn merge_rwc_query(query: Option<&str>) -> String {
     if existing.is_empty() {
         return "mode=rwc".to_string();
     }
-    // If a `mode=` param is already present, the caller's choice wins —
+    // If a `mode=` param is already present, the caller's choice wins -
     // appending a second `mode=` would be ambiguous to SQLite.
     let has_mode = existing
         .split('&')
@@ -217,15 +217,15 @@ fn merge_rwc_query(query: Option<&str>) -> String {
     }
 }
 
-// Domain 6 audit D6-3 — `pub fn is_closed(&self) -> bool` was removed.
+// Domain 6 audit D6-3 - `pub fn is_closed(&self) -> bool` was removed.
 // The previous implementation hardcoded `false` with a comment saying
 // "SeaORM doesn't expose this directly, but we can check via ping"; in
 // practice it lied about every connection's state. `ping().is_err()`
 // would also conflate transient network blips with closed-state and
 // would still leave the public name `is_closed` semantically wrong (a
-// failed ping is "unhealthy", not "closed"). With one caller — a
+// failed ping is "unhealthy", not "closed"). With one caller - a
 // tautological `assert!(!conn.is_closed())` in the registry round-trip
-// test — removing the method is cleaner than papering over it.
+// test - removing the method is cleaner than papering over it.
 
 impl AsRef<DatabaseConnection> for DbConnection {
     fn as_ref(&self) -> &DatabaseConnection {
@@ -282,7 +282,7 @@ mod sqlite_url_tests {
 
     #[test]
     fn caller_mode_choice_is_not_clobbered() {
-        // A deliberate `mode=ro` must win — we don't append a conflicting
+        // A deliberate `mode=ro` must win - we don't append a conflicting
         // second `mode=`.
         let (path, url) = normalize_sqlite_url("sqlite://file.db?mode=ro");
         assert_eq!(path, "file.db");

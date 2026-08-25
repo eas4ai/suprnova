@@ -39,7 +39,7 @@ pub enum ClientFrame {
         /// Channel name to unsubscribe from.
         channel: String,
     },
-    /// Client-published event. Rare in practice — most events
+    /// Client-published event. Rare in practice - most events
     /// come from server-side dispatch via `Broadcastable`. Allowed
     /// for symmetric apps; the channel's authorize gate still
     /// applies.
@@ -97,7 +97,7 @@ pub enum ServerFrame {
         /// Number of envelopes dropped on this connection before the lag was reported.
         skipped: u64,
     },
-    /// Error response — surfaces parse failures, auth rejections,
+    /// Error response - surfaces parse failures, auth rejections,
     /// channel-not-found, etc. `channel` is `None` for envelope-level
     /// errors that aren't tied to a specific channel.
     Error {

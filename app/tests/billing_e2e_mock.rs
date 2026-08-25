@@ -11,7 +11,7 @@ async fn billing_e2e_mock_discriminator() {
         email: "alice@example.com".into(),
     };
 
-    // 1. BillableUser ergonomic — creates customer + session in one call
+    // 1. BillableUser ergonomic - creates customer + session in one call
     let session = user
         .start_subscription(
             mock.clone(),
@@ -25,7 +25,7 @@ async fn billing_e2e_mock_discriminator() {
 
     // 2. Domain-side: create a separate customer for the subscription leg of
     //    the test (the BillableUser-created one is now in the mock but we
-    //    don't need to thread its id through — the test demonstrates the
+    //    don't need to thread its id through - the test demonstrates the
     //    ergonomic, then exercises the subscription lifecycle independently).
     let domain_cus = mock
         .create_customer(CreateCustomerRequest {

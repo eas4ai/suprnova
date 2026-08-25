@@ -6,7 +6,7 @@
 //! receive `{ head: string[], body: string }` back.
 //!
 //! Suprnova talks to that worker over loopback HTTP. We don't manage
-//! the worker process from the framework — `suprnova-cli` ships
+//! the worker process from the framework - `suprnova-cli` ships
 //! `ssr:start` for that, and operators are free to use their own
 //! supervisor.
 
@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::error::FrameworkError;
 use crate::inertia::config::SsrConfig;
 
-// Note: we don't define a typed request struct — the `@inertiajs/*/server`
+// Note: we don't define a typed request struct - the `@inertiajs/*/server`
 // `createServer()` workers accept the raw page object JSON envelope.
 // We send `serde_json::Value` directly to avoid an extra serialize step.
 
@@ -52,7 +52,7 @@ pub fn disable_ssr_for_request() {
 }
 
 /// Check whether SSR has been disabled for the current task. Returns
-/// `false` outside any scope (the default — caller's config wins).
+/// `false` outside any scope (the default - caller's config wins).
 pub fn is_disabled_for_request() -> bool {
     DISABLE_SSR
         .try_with(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
@@ -69,15 +69,15 @@ pub fn new_disable_ssr_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
 /// Laravel's `HttpGateway::shouldDispatch()`: when
 /// [`SsrConfig::ensure_bundle_exists`] is on and a
 /// [`SsrConfig::bundle_path`] is configured, dispatch is gated on the
-/// built bundle actually being on disk — so a worker that was never
+/// built bundle actually being on disk - so a worker that was never
 /// started, or a bundle that was never built, fails fast, before paying
 /// `config.timeout` on a connection that was never going to succeed.
 ///
 /// Returns `Some(reason)` when dispatch should be skipped, `None` when
-/// it's fine to proceed — bundle exists, the check is off, or (the
+/// it's fine to proceed - bundle exists, the check is off, or (the
 /// common case for every test in this codebase) no path is configured
 /// at all, which is treated the same as "off": there's nothing to
-/// check. This check runs unconditionally of `throw_on_error` — a
+/// check. This check runs unconditionally of `throw_on_error` - a
 /// missing bundle is a deployment/build problem the caller should see
 /// in logs, not a request-time failure mode to escalate to a 500, and
 /// that matches `HttpGateway::shouldDispatch()`, which sits entirely
@@ -154,7 +154,7 @@ pub(crate) async fn render(
 
 /// Process-global hyper client shared across all SSR calls.
 ///
-/// Constructing a `Client` is expensive — it sets up a connection pool
+/// Constructing a `Client` is expensive - it sets up a connection pool
 /// and an HTTP/1.1 handshake state. A per-request `Client` resets the
 /// pool every time, so we keep one for the lifetime of the process.
 /// `hyper_util::client::legacy::Client` is `Clone`-cheap (`Arc` inside)
@@ -177,7 +177,7 @@ fn shared_client() -> &'static hyper_util::client::legacy::Client<
 }
 
 /// POST JSON to the SSR worker and deserialize the response. Uses
-/// `hyper` directly — we already depend on it, so no extra crate.
+/// `hyper` directly - we already depend on it, so no extra crate.
 ///
 /// Domain 20 audit D20-D: response body is read through
 /// [`http_body_util::Limited`] so a misconfigured or compromised
@@ -193,17 +193,17 @@ fn shared_client() -> &'static hyper_util::client::legacy::Client<
 /// rejected before any body bytes are read.
 ///
 /// T31 fix round 1: one `deadline`, computed once, bounds the *whole*
-/// call — awaiting the response headers and reading the response body
+/// call - awaiting the response headers and reading the response body
 /// both draw down the same shared deadline, rather than each getting a
 /// fresh copy of `timeout`. Before this fix, only the headers phase was
 /// bounded (`tokio::time::timeout` wrapped `client.request(req)` alone);
 /// a worker that accepted the connection, sent headers, then stalled
 /// mid-body could hang `render()` forever, since `Limited::collect()`
-/// has no timeout of its own — `Limited` only bounds body *size*, not
+/// has no timeout of its own - `Limited` only bounds body *size*, not
 /// time. `SsrConfig::timeout`'s own doc calls this "the SSR call"'s
 /// timeout, singular, and a per-phase reset would let a pathological
 /// worker (slow headers, then a slow-trickling body) consume up to `2 ×
-/// timeout` in the worst case — exactly the "a hung worker shouldn't
+/// timeout` in the worst case - exactly the "a hung worker shouldn't
 /// block real users" guarantee that doc promises.
 async fn post_json(
     url: &str,
@@ -215,13 +215,13 @@ async fn post_json(
     use hyper::Request;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 
-    // One deadline for the whole call, shared by both phases below —
+    // One deadline for the whole call, shared by both phases below -
     // see the T31 fix-round-1 note on this function's doc comment.
     let deadline = tokio::time::Instant::now() + timeout;
 
     let parsed = hyper::Uri::try_from(url).map_err(|e| format!("invalid url: {e}"))?;
 
-    // Pick the default port from the URI scheme — defaulting to 80
+    // Pick the default port from the URI scheme - defaulting to 80
     // on every URL (including `https://...`) sent the wrong Host
     // header for TLS-backed SSR endpoints, which some reverse
     // proxies reject. When the URI carries an explicit port, use it;
@@ -322,7 +322,7 @@ mod tests {
         };
         let page = serde_json::json!({"component": "Home"});
         // No SSR worker is listening either, but the bundle check must
-        // short-circuit before any connection attempt — proven by this
+        // short-circuit before any connection attempt - proven by this
         // resolving immediately rather than waiting out `config.timeout`.
         let started = std::time::Instant::now();
         let result = render(&cfg, "/", &page).await.unwrap();
@@ -340,7 +340,7 @@ mod tests {
         // actually attempted (vs. short-circuited by the bundle check).
         // On Linux, connecting to an unbound loopback port returns
         // ECONNREFUSED via an immediate RST rather than waiting out the
-        // timeout, so that assertion fails deterministically here — it's
+        // timeout, so that assertion fails deterministically here - it's
         // not a flake, the premise (a refused local connection is slow)
         // doesn't hold. Asserting on the distinguishing on_error message
         // instead proves the same thing without depending on timing:
@@ -366,7 +366,7 @@ mod tests {
             .lock()
             .expect("lock captured message")
             .clone()
-            .expect("on_error must fire — the check is off, so render must actually dispatch");
+            .expect("on_error must fire - the check is off, so render must actually dispatch");
         assert!(
             msg.contains("unreachable"),
             "with the check off, render must attempt (and fail) the connection, not \
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn missing_bundle_reason_is_none_when_no_path_is_configured() {
         // The safe default: `.ssr(url)` alone (no `.ssr_bundle_path`)
-        // must never gate dispatch — this is what keeps every SSR test
+        // must never gate dispatch - this is what keeps every SSR test
         // in `framework/tests/inertia.rs` behaving exactly as before.
         let cfg = SsrConfig {
             enabled: true,
@@ -433,7 +433,7 @@ mod tests {
     /// finished fast regardless of the missing timeout.
     ///
     /// The outer `tokio::time::timeout` here is a test-level safety net
-    /// in case of a regression, not the behaviour under test — every
+    /// in case of a regression, not the behaviour under test - every
     /// `.await` in this suite needs a bound, and without it a
     /// regression here would hang the whole test binary rather than
     /// fail this one test.
@@ -452,7 +452,7 @@ mod tests {
                 // Headers promise a body that never fully arrives:
                 // send the status line + a Content-Length, a few body
                 // bytes, then hold the connection open without sending
-                // the rest or closing it — well past both `cfg.timeout`
+                // the rest or closing it - well past both `cfg.timeout`
                 // below and this test's own outer timeout.
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                                Content-Length: 1000000\r\n\r\n";

@@ -1,4 +1,4 @@
-//! Phase 10C T12 — Multi-Connection + Read-Write Split integration tests.
+//! Phase 10C T12 - Multi-Connection + Read-Write Split integration tests.
 //!
 //! Exercises:
 //!
@@ -20,7 +20,7 @@
 //! `__read_replica__` / `warehouse` names. The
 //! [`TestDatabase`](suprnova::testing::TestDatabase) teardown calls
 //! [`ConnectionRegistry::clear`] via the `TestContainerGuard::drop`
-//! hook, so the next test starts with an empty registry — but
+//! hook, so the next test starts with an empty registry - but
 //! `#[serial]` is still required to prevent two tests racing to
 //! register under the same name within the SAME process slot.
 
@@ -66,7 +66,7 @@ async fn fresh_users_table(db: &TestDatabase) {
     .unwrap();
 }
 
-/// Step 1 of the plan — `DB::register_named` adds a named connection,
+/// Step 1 of the plan - `DB::register_named` adds a named connection,
 /// `Model::on(name)` runs a query against it.
 #[tokio::test]
 #[serial]
@@ -83,7 +83,7 @@ async fn register_named_connection_and_query_against_it() {
 
     // The "named" connection points at the same in-memory DB for the
     // round-trip assertion. (SQLite in-memory connections are
-    // process-private — connecting twice would yield two empty
+    // process-private - connecting twice would yield two empty
     // databases. Sharing one connection across the registry slot is
     // the right shape for routing-correctness tests.)
     ConnectionRegistry::register_existing("analytics_read", primary.db().clone())
@@ -95,7 +95,7 @@ async fn register_named_connection_and_query_against_it() {
     assert_eq!(users[0].email, "alice@x.com");
 }
 
-/// Step 2 — read-write split routing pin. When `__read_replica__` is
+/// Step 2 - read-write split routing pin. When `__read_replica__` is
 /// registered, default reads land on it; `on_write_connection` opts
 /// back to the primary; writes never touch the replica.
 #[tokio::test]
@@ -145,7 +145,7 @@ async fn read_replica_routes_read_queries() {
         .await
         .unwrap();
 
-    // Default read — routes to replica via auto-routing step 5.
+    // Default read - routes to replica via auto-routing step 5.
     let users = T12User::query().get().await.unwrap();
     assert_eq!(users.len(), 1, "default reads route to replica");
     assert_eq!(users[0].email, "replica@x.com");
@@ -157,7 +157,7 @@ async fn read_replica_routes_read_queries() {
     assert_eq!(users[0].email, "primary@x.com");
 }
 
-/// Step 3 — writes always go to primary. Even with the replica
+/// Step 3 - writes always go to primary. Even with the replica
 /// registered, `Model::create` lands on the default pool; the replica
 /// stays untouched.
 #[tokio::test]
@@ -188,7 +188,7 @@ async fn writes_always_go_to_primary() {
         .await
         .unwrap();
 
-    // Create — write goes to primary because resolve_write skips the
+    // Create - write goes to primary because resolve_write skips the
     // replica auto-routing step.
     let _ = T12User::create(attrs! { email: "fresh@x.com" })
         .await
@@ -213,7 +213,7 @@ async fn writes_always_go_to_primary() {
 }
 
 /// Locked SELECTs (`FOR UPDATE` / `FOR SHARE`) must skip the
-/// `__read_replica__` step even outside a transaction — Postgres
+/// `__read_replica__` step even outside a transaction - Postgres
 /// hot-standbys reject locked reads outright, and MySQL replicas
 /// accept them but the lock is local to the replica and useless.
 /// Pre-A2-M-001 the lock setter only flipped `Builder::lock_mode`;
@@ -265,7 +265,7 @@ async fn locked_read_outside_tx_avoids_read_replica() {
 
     // Without a lock, the default-policy read lands on the replica
     // and sees `replica@x.com`. SQLite ignores the FOR UPDATE clause
-    // semantically, but the executor-routing layer still applies —
+    // semantically, but the executor-routing layer still applies -
     // and that's the layer this test pins.
     let plain_read = T12User::query().first().await.unwrap().unwrap();
     assert_eq!(
@@ -296,7 +296,7 @@ async fn locked_read_outside_tx_avoids_read_replica() {
     );
 }
 
-/// Step 4 — `#[model(connection = "warehouse")]` routes the model's
+/// Step 4 - `#[model(connection = "warehouse")]` routes the model's
 /// default reads + writes through the named connection without any
 /// per-query `on(...)`.
 #[tokio::test]
@@ -337,13 +337,13 @@ async fn per_model_connection_attribute_routes_default() {
         .await
         .unwrap();
 
-    // Default read — routes to warehouse via the per-model attribute
+    // Default read - routes to warehouse via the per-model attribute
     // (step 4 of the precedence chain).
     let events = AnalyticsEvent::query().get().await.unwrap();
     assert_eq!(events.len(), 1, "per-model connection routes default read");
     assert_eq!(events[0].event_name, "click");
 
-    // Default write — also lands on warehouse (no replica-skip
+    // Default write - also lands on warehouse (no replica-skip
     // applies, the per-model default takes precedence over the empty
     // primary).
     AnalyticsEvent::create(attrs! { event_name: "pageview" })
@@ -358,7 +358,7 @@ async fn per_model_connection_attribute_routes_default() {
         .unwrap();
     assert_eq!(on_warehouse.len(), 1, "write landed on warehouse");
 
-    // Primary doesn't even have the t12_events table — opting to
+    // Primary doesn't even have the t12_events table - opting to
     // primary should fail because no such table exists there.
     let primary_attempt = AnalyticsEvent::on_write_connection()
         .filter("event_name", "pageview")
@@ -370,7 +370,7 @@ async fn per_model_connection_attribute_routes_default() {
     );
 }
 
-/// Step 5 — inside a transaction, `on(name)` is silently ignored.
+/// Step 5 - inside a transaction, `on(name)` is silently ignored.
 /// Every operation runs through the tx's connection because
 /// atomicity must not split across connections.
 #[tokio::test]
@@ -412,7 +412,7 @@ async fn transaction_ignores_on_name_routing() {
         .unwrap();
 
     // Inside DB::transaction, `on("isolated_alt")` is silently
-    // ignored — the read runs through the transaction's connection
+    // ignored - the read runs through the transaction's connection
     // (which is on the primary), so it sees an empty table.
     let result = DB::transaction(|_tx| {
         Box::pin(async move {
@@ -433,7 +433,7 @@ async fn transaction_ignores_on_name_routing() {
     assert_eq!(users[0].email, "replica@x.com");
 }
 
-/// Registering under `__primary__` is rejected — that name is
+/// Registering under `__primary__` is rejected - that name is
 /// reserved for the default pool.
 #[tokio::test]
 #[serial]
@@ -471,7 +471,7 @@ async fn db_facade_named_connection_escapes() {
         .await
         .unwrap();
 
-    // statement_on — DDL against the warehouse.
+    // statement_on - DDL against the warehouse.
     DB::statement_on(
         "aux_warehouse",
         "CREATE TABLE t12_aux (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
@@ -480,14 +480,14 @@ async fn db_facade_named_connection_escapes() {
     .await
     .unwrap();
 
-    // table_on — chainable builder pinned to the warehouse.
+    // table_on - chainable builder pinned to the warehouse.
     let id = DB::table_on("aux_warehouse", "t12_aux")
         .insert(attrs! { label: "hello" })
         .await
         .unwrap();
     assert!(id > 0, "insert returned a positive id");
 
-    // select_on — raw select against the warehouse.
+    // select_on - raw select against the warehouse.
     let rows = DB::select_on(
         "aux_warehouse",
         "SELECT id, label FROM t12_aux WHERE label = ?",

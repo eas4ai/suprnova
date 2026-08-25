@@ -1,4 +1,4 @@
-//! Upload validators. Composable via tuple impls — `(ImageFile, MaxSize<N>)`
+//! Upload validators. Composable via tuple impls - `(ImageFile, MaxSize<N>)`
 //! runs both. Implementations are `Default`-constructed inside the
 //! derive macro; unit structs auto-impl `Default`, parameterized
 //! built-ins use phantom types so a `Default` ctor is meaningful.
@@ -63,7 +63,7 @@ pub trait UploadValidator: Send + Sync + Default {
     ///   (same buffer threaded through `validate_chunk`).
     /// - `size` is the final byte count.
     /// - `content_type` is the client-declared `Content-Type` header.
-    ///   Untrusted — content sniffers should rely on `sniff`.
+    ///   Untrusted - content sniffers should rely on `sniff`.
     fn validate_final(
         &self,
         sniff: &[u8],
@@ -75,10 +75,10 @@ pub trait UploadValidator: Send + Sync + Default {
     }
 }
 
-/// No-op validator — `UploadedFile<()>` accepts any bytes.
+/// No-op validator - `UploadedFile<()>` accepts any bytes.
 impl UploadValidator for () {}
 
-/// `MaxSize<N>` — short-circuits at byte boundary when accumulated > N.
+/// `MaxSize<N>` - short-circuits at byte boundary when accumulated > N.
 #[derive(Default)]
 pub struct MaxSize<const N: usize>;
 
@@ -102,7 +102,7 @@ impl<const N: usize> UploadValidator for MaxSize<N> {
     }
 }
 
-/// `ImageFile` — rejects anything whose magic bytes don't claim image/*.
+/// `ImageFile` - rejects anything whose magic bytes don't claim image/*.
 ///
 /// Named after Laravel's own `Illuminate\Validation\Rules\ImageFile`, which
 /// is exactly this rule class. The bare `Image` name belongs to the
@@ -137,7 +137,7 @@ impl UploadValidator for ImageFile {
     }
 }
 
-/// `MimeType<L>` — accepts a fixed list provided by an allowlist type.
+/// `MimeType<L>` - accepts a fixed list provided by an allowlist type.
 pub trait MimeAllowlist: Send + Sync + Default {
     /// The set of allowed MIME types.
     fn allowed() -> &'static [&'static str];
@@ -157,7 +157,7 @@ fn validate_against_allowlist(
     allowed: &[&str],
 ) -> Result<(), FrameworkError> {
     if let Some(kind) = infer::get(sniff) {
-        // Detected via magic bytes — the content itself, not the header.
+        // Detected via magic bytes - the content itself, not the header.
         if allowed.iter().any(|m| *m == kind.mime_type()) {
             return Ok(());
         }

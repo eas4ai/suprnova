@@ -19,9 +19,9 @@ pub struct Stats {
 
 /// The props `Home.svelte` destructures.
 ///
-/// The handler layers a good deal more onto the response below — a
+/// The handler layers a good deal more onto the response below - a
 /// feature-flagged banner, `user`, `stats`, and one prop of every
-/// Lazy / Defer / Merge / Once variant — because this route doubles as
+/// Lazy / Defer / Merge / Once variant - because this route doubles as
 /// the builder-API dogfood. Those are demonstrations. These two are the
 /// contract the page actually depends on, so these two are what
 /// `suprnova generate-types` needs to emit for the component to typecheck.
@@ -35,7 +35,7 @@ pub async fn index(req: Request) -> Response {
     let action = App::resolve::<ExampleAction>()?;
     let message = action.execute();
 
-    // Phase 13 — feature-flag gated prop. `Feature::is_enabled()`
+    // Phase 13 - feature-flag gated prop. `Feature::is_enabled()`
     // resolves NEW_CHECKOUT_FLOW against the active featureflag
     // context (populated by `FeatureMiddleware` at the request edge):
     // user-scoped flag rows beat the global, which beats the
@@ -48,7 +48,7 @@ pub async fn index(req: Request) -> Response {
     // the change is visible to .is_enabled() here before that call
     // returns.
     let banner = if NEW_CHECKOUT_FLOW.is_enabled() {
-        Some("Try the new checkout — faster, fewer steps.")
+        Some("Try the new checkout - faster, fewer steps.")
     } else {
         None
     };
@@ -56,7 +56,7 @@ pub async fn index(req: Request) -> Response {
     // Dogfood the full Tier 0–2 builder API. Mixes eager props with
     // Lazy / Defer / Merge / Once / Flash so every variant runs against
     // a real handler. The macro (`inertia_response!`) only handles the
-    // typed-eager case — anything more interesting uses the builder.
+    // typed-eager case - anything more interesting uses the builder.
     let page = HomeProps {
         title: "Welcome to Suprnova!".to_string(),
         message,

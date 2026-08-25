@@ -1,8 +1,8 @@
-//! Temporal casts — dates, datetimes, immutable variants, and
+//! Temporal casts - dates, datetimes, immutable variants, and
 //! Unix-epoch timestamps.
 //!
 //! All non-timestamp temporals store as `TEXT` so the round-trip is
-//! backend-agnostic — SQLite stores datetimes as strings natively
+//! backend-agnostic - SQLite stores datetimes as strings natively
 //! and Postgres / MySQL accept ISO-8601 / RFC-3339 strings transparently
 //! through SeaORM's `Value::String` boundary.
 //!
@@ -13,13 +13,13 @@
 //! with Laravel's `immutable_date` / `immutable_datetime` casts where
 //! the runtime side returns a non-mutating wrapper. Rust's
 //! borrow-checker already enforces immutability through `&` references,
-//! so the two variants share underlying `chrono` types — the cast
+//! so the two variants share underlying `chrono` types - the cast
 //! names are documentation about user intent.
 //!
 //! ## AsTimestamp
 //!
 //! Stores as `INTEGER` (Unix epoch seconds). Distinct from
-//! `AsDateTime` (TEXT, RFC-3339) — pick `AsTimestamp` when the column
+//! `AsDateTime` (TEXT, RFC-3339) - pick `AsTimestamp` when the column
 //! is queried as a numeric range or used in arithmetic.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
@@ -53,7 +53,7 @@ impl DynCast for AsDateDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // Domain 7 audit D7-A - was `v.as_str().unwrap_or("")` which
         // silently coerced non-strings to "" and produced a cryptic
         // chrono parse-error instead of an explicit "expected JSON
         // string, got <actual>" diagnostic.
@@ -119,7 +119,7 @@ impl DynCast for AsDateTimeDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate the input shape.
+        // Domain 7 audit D7-A - strict-validate the input shape.
         let s = v
             .as_str()
             .ok_or_else(|| {
@@ -168,7 +168,7 @@ impl Cast for AsImmutableDate {
 
 impl IntoDynCast for AsImmutableDate {
     fn into_dyn() -> Box<dyn DynCast> {
-        // Re-uses `AsDateDyn` rather than spinning a new unit type — the
+        // Re-uses `AsDateDyn` rather than spinning a new unit type - the
         // erased shape is identical.
         AsDate::into_dyn()
     }
@@ -205,7 +205,7 @@ impl IntoDynCast for AsImmutableDateTime {
 ///
 /// Auto-injected by the `#[suprnova::model(soft_deletes)]` flag for the
 /// nullable tombstone column (`deleted_at` by default). The wrapped
-/// option keeps the storage column nullable — soft-deleted vs alive
+/// option keeps the storage column nullable - soft-deleted vs alive
 /// rows discriminate on `IS NULL` / `IS NOT NULL` without forcing a
 /// sentinel value.
 ///

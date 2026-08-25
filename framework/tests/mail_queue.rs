@@ -122,7 +122,7 @@ async fn mail_queue_rejects_mailable_without_any_body_at_push_time() {
         "error suggests which methods to implement: {msg}"
     );
 
-    // The queue stays empty — no envelope was committed.
+    // The queue stays empty - no envelope was committed.
     let popped = driver.pop(Duration::from_secs(60)).await.unwrap();
     assert!(popped.is_none(), "no envelope should have been pushed");
 }
@@ -138,7 +138,7 @@ async fn mail_queue_unregistered_mailable_surfaces_unknown_error_from_job() {
     // silent retry loops on a typo'd mailable_name.
     use suprnova::queue::Job;
 
-    // A transport must be bound — handle resolves the transport AFTER
+    // A transport must be bound - handle resolves the transport AFTER
     // the registry lookup, but we still set one to keep failure modes
     // unambiguous.
     let _ = Mail::set_transport(Arc::new(InMemoryMailTransport::new()));
@@ -185,7 +185,7 @@ impl Mailable for OverriddenRenderMail {
     fn subject(&self) -> String {
         "rendered".into()
     }
-    // No template_source — relies entirely on the render override below.
+    // No template_source - relies entirely on the render override below.
     fn render_html(&self) -> Result<Option<String>, FrameworkError> {
         Ok(Some("<p>pre-rendered html, no template source</p>".into()))
     }
@@ -206,7 +206,7 @@ async fn mail_queue_accepts_mailable_that_overrides_render_without_template_sour
     let driver: Arc<dyn QueueDriver> = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
 
-    // Must succeed — the override produces a body even though
+    // Must succeed - the override produces a body even though
     // html_template_source returns None.
     Mail::to("alice@example.org")
         .queue(OverriddenRenderMail)
@@ -241,7 +241,7 @@ async fn mail_queue_accepts_mailable_that_overrides_render_without_template_sour
     );
     assert!(
         msgs[0].text.is_none(),
-        "no text body — only the html override produced output"
+        "no text body - only the html override produced output"
     );
 }
 
@@ -369,7 +369,7 @@ async fn mail_on_queue_outranks_a_queue_route_and_the_mailables_own_hook() {
     Queue::set_driver(driver.clone());
     Queue::route::<SendMailJob>(None, Some("routed-mail")); // operator route
 
-    // No `.on_queue(...)` — `BulkMail::queue()` applies and outranks the route.
+    // No `.on_queue(...)` - `BulkMail::queue()` applies and outranks the route.
     Mail::to("a@example.org").queue(BulkMail {}).await.unwrap();
     let via_hook = driver
         .pop_from(Duration::from_secs(60), &["bulk".to_string()])

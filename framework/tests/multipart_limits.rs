@@ -31,7 +31,7 @@ async fn part_count_ceiling_bails_out_before_reading_every_part() {
     // 12 tiny parts, ceiling of 5. A fix that only checks the count after
     // parsing would read all 12; the streaming guard rejects the 6th part
     // before it is read. The validator fires once per chunk inside
-    // `collect_part`, which only runs for accepted parts — so it must
+    // `collect_part`, which only runs for accepted parts - so it must
     // observe at most `max_parts` parts.
     let parts: Vec<(&str, Option<&str>, &[u8])> =
         (0..12).map(|_| ("p", None, b"x" as &[u8])).collect();
@@ -72,7 +72,7 @@ async fn part_count_ceiling_bails_out_before_reading_every_part() {
 
 #[tokio::test]
 async fn declared_oversized_content_length_is_pre_rejected() {
-    // The body is a few bytes — well under the 1 MiB cap — but the request
+    // The body is a few bytes - well under the 1 MiB cap - but the request
     // DECLARES a 50 MiB Content-Length. Because the actual body is under
     // the cap, the progressive per-chunk cap could never fire on it, so a
     // 413 here proves the header pre-check rejected the request before the
@@ -111,7 +111,7 @@ async fn per_field_max_count_rejects_before_reading_the_extra_part() {
         &[
             ("files", Some("1.bin"), b"a"),
             ("files", Some("2.bin"), b"b"),
-            ("files", Some("3.bin"), b"c"), // the (cap+1)-th — must be rejected unread
+            ("files", Some("3.bin"), b"c"), // the (cap+1)-th - must be rejected unread
         ],
     );
     let req = request_from_multipart("test", body).await;
@@ -176,7 +176,7 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
     );
 
     // Positive control: a file part of the SAME size spills to disk and is
-    // accepted, and the global spill counter advances — confirming the
+    // accepted, and the global spill counter advances - confirming the
     // disk path that the text field deliberately avoids. `>= before + 1`
     // is robust to other upload tests spilling concurrently.
     let before = upload_tempfiles_spilled_total();
@@ -203,7 +203,7 @@ async fn oversized_text_field_rejected_at_threshold_without_spilling() {
 
 // ── SEC-05: the raw stream is capped, not just the bytes reaching a part ──
 
-/// A body made entirely of preamble — bytes before the first boundary —
+/// A body made entirely of preamble - bytes before the first boundary -
 /// never reaches `collect_part`, so `total_bytes` stays at zero and the
 /// part-count ceiling never fires either. Sent chunked, so there is no
 /// `Content-Length` for the header pre-check to reject. Before the raw
@@ -241,7 +241,7 @@ async fn oversized_preamble_is_rejected_without_a_content_length() {
     assert_eq!(
         seen.load(Ordering::SeqCst),
         0,
-        "no part was ever parsed — this body is pure framing, which is \
+        "no part was ever parsed - this body is pure framing, which is \
          exactly why the payload-byte counter could not see it"
     );
 }
@@ -280,7 +280,7 @@ async fn unterminated_part_header_is_rejected() {
     );
 }
 
-/// A well-formed body under the cap still parses — the raw counter must
+/// A well-formed body under the cap still parses - the raw counter must
 /// bound abuse without rejecting legitimate uploads whose framing pushes
 /// them slightly above the sum of their payload bytes.
 #[tokio::test]

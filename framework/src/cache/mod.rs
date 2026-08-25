@@ -2,7 +2,7 @@
 //!
 //! Provides a unified facade over an in-memory store and a Redis store.
 //! The backend is selected explicitly via the `CACHE_DRIVER` env var
-//! (`memory` — default — or `redis`); a misconfigured or unreachable
+//! (`memory` - default - or `redis`); a misconfigured or unreachable
 //! Redis fails boot rather than silently downgrading to a per-process
 //! in-memory cache.
 //!
@@ -90,9 +90,9 @@ impl Cache {
     /// Reads `CacheConfig` from the configured `Config` (or constructs
     /// it from env). The bootstrap dispatches on `CacheConfig::driver`:
     ///
-    /// - [`CacheDriver::Memory`] — bind an `InMemoryCache` derived from
+    /// - [`CacheDriver::Memory`] - bind an `InMemoryCache` derived from
     ///   the prefix and default TTL. Always succeeds.
-    /// - [`CacheDriver::Redis`] — connect to `REDIS_URL` and bind the
+    /// - [`CacheDriver::Redis`] - connect to `REDIS_URL` and bind the
     ///   resulting `RedisCache`. **Fails closed** if the URL is
     ///   unreachable so a misconfigured production deployment never
     ///   silently downgrades to a per-process cache.
@@ -110,7 +110,7 @@ impl Cache {
                 App::bind::<dyn CacheStore>(Arc::new(memory_cache));
             }
             CacheDriver::Redis => {
-                // No silent downgrade — surface the connection failure
+                // No silent downgrade - surface the connection failure
                 // so operators notice misconfiguration at boot.
                 let redis_cache = RedisCache::connect(&config).await.map_err(|e| {
                     FrameworkError::internal(format!(
@@ -169,7 +169,7 @@ impl Cache {
     ///
     /// If `ttl` is `None`, uses the default TTL from config (or no
     /// expiration if the default is 0). The default-TTL resolution
-    /// happens at the facade layer — both in-memory and Redis backends
+    /// happens at the facade layer - both in-memory and Redis backends
     /// honour `None` literally at the store level.
     ///
     /// # Example
@@ -196,7 +196,7 @@ impl Cache {
 
     /// Store an item forever (no expiration).
     ///
-    /// Bypasses the configured default TTL entirely — even if
+    /// Bypasses the configured default TTL entirely - even if
     /// `CACHE_DEFAULT_TTL` is set, the value will never expire. This
     /// path is symmetric across in-memory and Redis backends.
     ///
@@ -214,7 +214,7 @@ impl Cache {
         let json = serde_json::to_string(value)
             .map_err(|e| FrameworkError::internal(format!("Cache serialize error: {}", e)))?;
         // Pass `None` literally so the store writes without any TTL.
-        // Do NOT delegate to `Cache::put` — that would resolve the
+        // Do NOT delegate to `Cache::put` - that would resolve the
         // facade default and make forever non-forever.
         store.put_raw(key, &json, None).await
     }
@@ -257,7 +257,7 @@ impl Cache {
     /// Retrieve an item from the cache AND delete it in one call. Mirrors
     /// Laravel's `Cache::pull($key)`. Returns `None` if the key was absent.
     ///
-    /// **Not atomic** across the get and forget — same shape as Laravel's
+    /// **Not atomic** across the get and forget - same shape as Laravel's
     /// `Repository::pull` (PHP-side it's also a non-atomic
     /// `get`-then-`forget` pair). For an atomic dequeue, wrap the call in
     /// a `Cache::lock` around the read.
@@ -285,7 +285,7 @@ impl Cache {
     /// value was written, `false` if the key already existed (or had not
     /// yet expired).
     ///
-    /// **Atomic** on the built-in backends — `InMemoryCache` holds a
+    /// **Atomic** on the built-in backends - `InMemoryCache` holds a
     /// write-lock across the existence check + insert, `RedisCache` uses
     /// `SET NX [EX ttl]`. Custom `CacheStore` implementations that do not
     /// override `CacheStore::add_raw` fall back to a non-atomic
@@ -293,7 +293,7 @@ impl Cache {
     /// `Cache/Repository.php:476-490` for PHP stores without a native
     /// `add`).
     ///
-    /// `None` ttl resolves to the configured store default — same shape
+    /// `None` ttl resolves to the configured store default - same shape
     /// as `Cache::put`. Pass an explicit `Duration` to bypass the
     /// default, or use `Cache::add(key, &value, None)` with no
     /// `CACHE_DEFAULT_TTL` for "forever-unless-overwritten".
@@ -327,7 +327,7 @@ impl Cache {
     /// `Cache::sear($key, $callback)`. Ships under the Laravel-side name
     /// for migration ergonomics; `remember_forever` is the Rust-side name
     /// and is the more discoverable spelling. Inherits the non-atomic /
-    /// stampede-prone semantics — see [`Cache::remember`].
+    /// stampede-prone semantics - see [`Cache::remember`].
     ///
     /// # Example
     ///
@@ -422,14 +422,14 @@ impl Cache {
     /// If the key exists, returns the cached value.
     /// If not, calls the closure to compute the value, stores it, and returns it.
     ///
-    /// # Concurrency — not stampede-safe
+    /// # Concurrency - not stampede-safe
     ///
     /// `remember` is the get-or-compute composition Laravel ships and is
     /// **non-atomic**: N concurrent misses for the same key will each run
     /// `default()` and each write the result. That matches Laravel's
     /// `Repository::remember` semantics (the upstream version is also a
     /// non-atomic `get`-then-`put` pair) but it does not protect against
-    /// cache stampedes — a popular cold key under heavy load will hit
+    /// cache stampedes - a popular cold key under heavy load will hit
     /// the backing store once per concurrent caller.
     ///
     /// For stampede-safe rebuilds wrap the call in [`Cache::lock`]:
@@ -447,7 +447,7 @@ impl Cache {
     ///     guard.release().await?;
     ///     return Ok(user);
     /// }
-    /// // Lost the race — read whatever the winner wrote (or fall back).
+    /// // Lost the race - read whatever the winner wrote (or fall back).
     /// # Ok(String::new()) }
     /// ```
     ///
@@ -493,7 +493,7 @@ impl Cache {
     /// Get an item or store a default value forever
     ///
     /// Same as `remember` but with no expiration. Inherits `remember`'s
-    /// non-atomic / stampede-prone semantics — see [`Cache::remember`]
+    /// non-atomic / stampede-prone semantics - see [`Cache::remember`]
     /// for the lock-based mitigation.
     pub async fn remember_forever<T, F, Fut>(key: &str, default: F) -> Result<T, FrameworkError>
     where
@@ -551,7 +551,7 @@ impl Cache {
     ///
     /// On success returns `Ok(Some(guard))`. The guard holds the ownership
     /// token and exposes `.release()` and `.refresh()`. Call `.release()`
-    /// explicitly — there is intentionally no `Drop` auto-release because
+    /// explicitly - there is intentionally no `Drop` auto-release because
     /// a Redis lock must be acknowledged across process boundaries.
     ///
     /// On contention returns `Ok(None)`.
@@ -603,7 +603,7 @@ impl Cache {
 /// Guard returned by [`Cache::lock`].
 ///
 /// Holds the ownership token for the acquired lock. Release explicitly via
-/// `.release()`. No `Drop` auto-release — cross-process Redis semantics
+/// `.release()`. No `Drop` auto-release - cross-process Redis semantics
 /// require an explicit acknowledgement.
 pub struct LockGuard {
     key: String,

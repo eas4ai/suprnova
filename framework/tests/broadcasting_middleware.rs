@@ -1,4 +1,4 @@
-//! Per-route WS middleware tests — registration shape, middleware
+//! Per-route WS middleware tests - registration shape, middleware
 //! invocation on upgrade, short-circuit on non-2xx response.
 
 use async_trait::async_trait;

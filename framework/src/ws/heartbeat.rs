@@ -5,7 +5,7 @@
 //! counter is incremented. When the peer responds with a Pong,
 //! `WsSocket`'s recv path resets the counter to 0. If the counter
 //! reaches `max_missed`, the heartbeat sends a Close(1011) frame and
-//! returns — the connection is considered dead.
+//! returns - the connection is considered dead.
 //!
 //! The caller is responsible for aborting this task (`spawn(run(...))
 //! .abort_handle()`) when the handler future resolves. See the
@@ -53,12 +53,12 @@ pub async fn run(
             .await
             .is_err()
         {
-            // Forwarder dropped — connection over (or caller aborted).
+            // Forwarder dropped - connection over (or caller aborted).
             return;
         }
 
         // Increment the missed-ping counter. If the new value meets or
-        // exceeds the threshold, close with 1011 ("internal error" —
+        // exceeds the threshold, close with 1011 ("internal error" -
         // RFC 6455 §7.4 uses this for unexpected server-side conditions,
         // which includes a peer that stopped responding to pings).
         let prev = missed_pings.fetch_add(1, Ordering::AcqRel);

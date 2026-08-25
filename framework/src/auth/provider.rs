@@ -12,7 +12,7 @@ use crate::error::FrameworkError;
 
 /// Precomputed bcrypt hash of an arbitrary string at the framework's
 /// OWASP-floor cost (12). Used as the fallback dummy hash when the
-/// configured driver can't be resolved or fails to mint one — so
+/// configured driver can't be resolved or fails to mint one - so
 /// [`UserProvider::dummy_verify`] always does *some* representative work
 /// and never errors out the auth flow.
 const FALLBACK_DUMMY_HASH: &str = "$2b$12$WzkqK0YIMJW8a4hkOEX/cuFNNDU.lI5jvyiQekkLwnAi8sFxlnEv6";
@@ -28,7 +28,7 @@ static DUMMY_HASH: OnceLock<String> = OnceLock::new();
 /// stored-password verify under any `HASH_DRIVER`. Minted once and cached.
 ///
 /// Falls back to [`FALLBACK_DUMMY_HASH`] (bcrypt cost 12) if the configured
-/// driver can't be resolved or hashing fails — equalisation degrades to the
+/// driver can't be resolved or hashing fails - equalisation degrades to the
 /// previous fixed-cost behaviour rather than erroring.
 fn dummy_hash() -> String {
     DUMMY_HASH
@@ -107,7 +107,7 @@ pub trait UserProvider: Send + Sync + 'static {
     /// [`StatefulGuard`](super::StatefulGuard) calls this on the
     /// `retrieve_by_credentials` MISS branch so the wall-clock of
     /// `attempt(...)` for an unknown identifier matches the wall-clock
-    /// for a known identifier with the wrong password — closing the
+    /// for a known identifier with the wrong password - closing the
     /// account-enumeration timing oracle that the natural
     /// short-circuit-on-miss flow would otherwise create.
     ///
@@ -115,7 +115,7 @@ pub trait UserProvider: Send + Sync + 'static {
     /// result is discarded by the caller. The default implementation
     /// drives [`crate::hashing::verify_async`] against a throwaway
     /// hash minted by the *configured* driver so providers using the
-    /// framework's hashing surface get equalisation for free — and so
+    /// framework's hashing surface get equalisation for free - and so
     /// the dummy cost tracks the real verify cost regardless of
     /// `HASH_DRIVER` (a bcrypt-cost-12 dummy under `HASH_DRIVER=argon2id`
     /// would re-open the enumeration oracle through the timing gap).

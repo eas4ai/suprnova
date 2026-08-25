@@ -1,7 +1,7 @@
 //! Trusted-proxy gating for header-derived request accessors.
 //!
-//! Several `Request` accessors — `ip()`, `ips()`, `secure()`, `host()`,
-//! `http_host()`, `port()` — historically honoured `X-Forwarded-*` and
+//! Several `Request` accessors - `ip()`, `ips()`, `secure()`, `host()`,
+//! `http_host()`, `port()` - historically honoured `X-Forwarded-*` and
 //! `X-Real-IP` headers ahead of the actual TCP peer. That trust is
 //! correct behind a real terminating proxy (nginx, ALB, Cloudflare)
 //! that scrubs these headers from client requests and re-stamps them
@@ -10,7 +10,7 @@
 //! will believe it.
 //!
 //! [`TrustedProxiesConfig`] is the explicit allowlist that gates this
-//! trust. The default — empty allowlist — means proxy headers are
+//! trust. The default - empty allowlist - means proxy headers are
 //! **ignored**: `Request::ip()` falls back to the TCP peer, `secure()`
 //! to the URI scheme, `host()` to the `Host` header, and so on. The
 //! operator opts in by listing proxy IPs (the addresses of the
@@ -24,7 +24,7 @@
 //! configured allowlist once per request (via `Config::get`) and
 //! threads it into the [`Request`](crate::Request) builder. This
 //! keeps the accessor methods pure `&self` (no global lookups) and
-//! makes parallel tests trivial — bind a `TrustedProxiesConfig`
+//! makes parallel tests trivial - bind a `TrustedProxiesConfig`
 //! directly into the test's `Request` via
 //! [`Request::with_trusted_proxies`](crate::Request::with_trusted_proxies)
 //! without touching the global container.
@@ -46,7 +46,7 @@
 //! ## Deployment guidance
 //!
 //! Deployments *not* behind a terminating proxy must leave the
-//! allowlist empty — any inbound `X-Forwarded-*` from a direct client
+//! allowlist empty - any inbound `X-Forwarded-*` from a direct client
 //! is hostile. Deployments behind a real proxy must list every
 //! address from which the proxy hops can reach the framework, NOT
 //! every client IP; the proxy itself terminates the TCP connection.
@@ -57,7 +57,7 @@ use std::sync::Arc;
 /// Allowlist of TCP peer addresses whose `X-Forwarded-*` / `X-Real-IP`
 /// headers may be trusted.
 ///
-/// The default constructor returns an **empty** allowlist — proxy
+/// The default constructor returns an **empty** allowlist - proxy
 /// headers are ignored on every request. This is fail-safe: a
 /// deployment that forgets to configure trusted proxies cannot have
 /// its `Request::ip()` spoofed.
@@ -71,7 +71,7 @@ pub struct TrustedProxiesConfig {
 }
 
 impl TrustedProxiesConfig {
-    /// Construct an empty allowlist — proxy headers ignored on every
+    /// Construct an empty allowlist - proxy headers ignored on every
     /// request. Equivalent to [`TrustedProxiesConfig::default()`].
     pub fn empty() -> Self {
         Self::default()

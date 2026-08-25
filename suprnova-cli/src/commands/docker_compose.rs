@@ -139,7 +139,7 @@ fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool
     }
     ui::br();
     ui::hint("Services are published on 127.0.0.1 only. To reach them from");
-    ui::hint("another host, set DB_HOST_BIND / REDIS_HOST_BIND — and put");
+    ui::hint("another host, set DB_HOST_BIND / REDIS_HOST_BIND - and put");
     ui::hint("them behind something that authenticates first.");
     ui::br();
 }

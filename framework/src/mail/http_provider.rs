@@ -2,7 +2,7 @@
 //!
 //! The timeout envelope and the capped error-body reader live in
 //! [`crate::http_client::vendor`], because the Pinecone vector driver needs
-//! exactly the same safety properties against exactly the same threat — an
+//! exactly the same safety properties against exactly the same threat - an
 //! operator-overridable endpoint that may be slow, hostile, or wrong. This
 //! module keeps the mail-specific parts: the pooled client tagged with the
 //! mail user agent, and the provider error formatter.

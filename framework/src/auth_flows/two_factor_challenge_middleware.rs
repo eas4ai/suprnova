@@ -1,4 +1,4 @@
-//! [`TwoFactorChallengeMiddleware`] — gate routes when the session
+//! [`TwoFactorChallengeMiddleware`] - gate routes when the session
 //! has a 2FA challenge pending.
 //!
 //! Composes in front of [`crate::AuthMiddleware`]: this middleware
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! Routes that ARE the challenge page itself (GET / POST the form)
-//! must NOT install this middleware — they are the destination. They
+//! must NOT install this middleware - they are the destination. They
 //! typically install no middleware at all and let the handler check
 //! [`crate::auth_flows::TwoFactor::pending_user_id`] up front.
 
@@ -28,7 +28,7 @@ use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{Middleware, Next};
 
 /// Middleware that 302s (or 403s) any request whose session has a
-/// 2FA challenge pending — the user authenticated their password but
+/// 2FA challenge pending - the user authenticated their password but
 /// has not yet completed the TOTP challenge.
 ///
 /// The choice between **403 JSON** and **302 HTML redirect** is made
@@ -42,7 +42,7 @@ use crate::middleware::{Middleware, Next};
 /// ```rust,ignore
 /// use suprnova::{AuthMiddleware, TwoFactorChallengeMiddleware, group, get};
 ///
-/// // API surface — 403 JSON until the challenge completes
+/// // API surface - 403 JSON until the challenge completes
 /// group!("/api")
 ///     .middleware(TwoFactorChallengeMiddleware::new())
 ///     .middleware(AuthMiddleware::new())
@@ -50,7 +50,7 @@ use crate::middleware::{Middleware, Next};
 ///         get!("/me", profile::show),
 ///     ]);
 ///
-/// // Web surface — 302 to the challenge form
+/// // Web surface - 302 to the challenge form
 /// group!("/dashboard")
 ///     .middleware(TwoFactorChallengeMiddleware::redirect_to("/two-factor-challenge"))
 ///     .middleware(AuthMiddleware::redirect_to("/login"))
@@ -69,7 +69,7 @@ use crate::middleware::{Middleware, Next};
 ///
 /// When the `redirect_to` form is used and the request is detected
 /// as an Inertia visit, the response is `409 Conflict` with an
-/// `X-Inertia-Location` header — Inertia performs a full-page visit
+/// `X-Inertia-Location` header - Inertia performs a full-page visit
 /// to the target. Plain HTML redirects use `302 Found` with a
 /// `Location` header.
 pub struct TwoFactorChallengeMiddleware {
@@ -89,7 +89,7 @@ impl TwoFactorChallengeMiddleware {
     }
 
     /// Create middleware that redirects pending users to `path`.
-    /// Best for web routes — pair with
+    /// Best for web routes - pair with
     /// [`crate::AuthMiddleware::redirect_to`]. Inertia requests
     /// receive `409 Conflict` + `X-Inertia-Location` instead of
     /// `302`.
@@ -99,7 +99,7 @@ impl TwoFactorChallengeMiddleware {
         }
     }
 
-    /// Build the "challenge pending" response — either a redirect or
+    /// Build the "challenge pending" response - either a redirect or
     /// a `403` JSON, depending on how the middleware was constructed.
     fn challenge_response(&self, request: &Request) -> HttpResponse {
         match &self.redirect_to {
@@ -136,7 +136,7 @@ impl Middleware for TwoFactorChallengeMiddleware {
             // protected handler.
             Err(self.challenge_response(&request))
         } else {
-            // Not pending — could be fully authed, could be a guest.
+            // Not pending - could be fully authed, could be a guest.
             // Pass through; downstream `AuthMiddleware` handles the
             // guest case.
             next(request).await

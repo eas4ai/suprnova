@@ -1,4 +1,4 @@
-//! Which process am I — the one thing a benchmark replica must know.
+//! Which process am I - the one thing a benchmark replica must know.
 //!
 //! Phase 1.2 and 1.5 both ask a question of the form "did N processes each
 //! decide this work was theirs?". Answering it needs every replica to write
@@ -8,7 +8,7 @@
 //! Compose scales a service by cloning it, environment block included, so
 //! there is no per-replica variable to set. The container hostname is the
 //! identity Docker already assigns, and it is stable for the life of the
-//! container — which is exactly the lifetime being measured.
+//! container - which is exactly the lifetime being measured.
 
 /// A stable, per-process identity for benchmark rows.
 ///

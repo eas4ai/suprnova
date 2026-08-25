@@ -1,4 +1,4 @@
-//! `Broadcastable: Event + Serialize` — events that get pushed to
+//! `Broadcastable: Event + Serialize` - events that get pushed to
 //! WebSocket subscribers in addition to running in-process Listeners.
 //!
 //! User code opts in by:
@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// # Multi-channel publish semantics
 ///
 /// When `broadcast_on` returns multiple channels, [`BroadcastListener`]
-/// publishes to **every** channel even if one fails — a single broker hiccup
+/// publishes to **every** channel even if one fails - a single broker hiccup
 /// on channel N does not skip delivery to channels N+1..K. The first failure
 /// is remembered and returned at the end; subsequent failures are logged at
 /// `warn`. Local in-process subscribers on channels that did succeed keep
@@ -58,7 +58,7 @@ pub trait Broadcastable: Event + Serialize {
 
     /// The payload pushed to subscribers. `None` (the default) serializes the
     /// whole event via [`Serialize`]; return `Some(value)` to broadcast a
-    /// curated shape instead — Laravel's `broadcastWith()`. The broadcast
+    /// curated shape instead - Laravel's `broadcastWith()`. The broadcast
     /// payload is independent of the event's own fields, so you can omit
     /// secrets or reshape for the client without changing the event type.
     fn broadcast_with(&self) -> Option<Value> {
@@ -67,13 +67,13 @@ pub trait Broadcastable: Event + Serialize {
 
     /// Whether to broadcast *this* instance. `true` by default. Returning
     /// `false` dispatches the event to in-process [`Listener`]s as usual but
-    /// suppresses the WebSocket push — Laravel's `broadcastWhen()`. Only the
+    /// suppresses the WebSocket push - Laravel's `broadcastWhen()`. Only the
     /// broadcast is skipped; the rest of the event pipeline is unaffected.
     fn broadcast_when(&self) -> bool {
         true
     }
 
-    /// Whether to exclude the connection that triggered this broadcast —
+    /// Whether to exclude the connection that triggered this broadcast -
     /// the originating WebSocket `socket_id`, taken from the current request's
     /// `X-Socket-ID` header (Laravel's `toOthers()`). `false` by default (every
     /// subscriber receives it). When `true`, the originating connection is
@@ -108,7 +108,7 @@ impl<E: Broadcastable> BroadcastListener<E> {
 #[async_trait]
 impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
     async fn handle(&self, event: &E) -> Result<(), FrameworkError> {
-        // `broadcast_when() == false` suppresses only the WS push — by the time
+        // `broadcast_when() == false` suppresses only the WS push - by the time
         // this listener runs, the event has already reached its in-process
         // listeners; we just skip publishing to the hub.
         if !event.broadcast_when() {
@@ -136,7 +136,7 @@ impl<E: Broadcastable> Listener<E> for BroadcastListener<E> {
         };
         // Attempt every channel even if one fails. A `?` short-circuit here
         // would mean a broker error on channel N silently skips local AND
-        // remote delivery to channels N+1..K — those subscribers would never
+        // remote delivery to channels N+1..K - those subscribers would never
         // observe an event the application believed was dispatched. Instead
         // we publish through the full list, remember the first error, and
         // log any subsequent ones at warn. The first error is then returned
@@ -303,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_channel_failure_still_surfaces_as_err() {
-        // Regression guard for the easy case — a single channel that fails
+        // Regression guard for the easy case - a single channel that fails
         // must still return Err so the existing semantic for one-channel
         // dispatches doesn't drift.
         let hub = Arc::new(PartialFailureHub::new(["only"]));
@@ -337,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_when_false_skips_publish_entirely() {
-        // The `broadcast_when() == false` early return predates this fix —
+        // The `broadcast_when() == false` early return predates this fix -
         // assert it still wins so we don't burn cycles building envelopes
         // for events that are explicitly not going on the wire.
         let hub = Arc::new(PartialFailureHub::new(["any"]));

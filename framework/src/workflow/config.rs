@@ -48,7 +48,7 @@ impl WorkflowConfig {
     ///
     /// Out-of-range values are clamped to safe minimums rather than honoured
     /// blindly. Returning a "load-but-useless" config (e.g. concurrency=0)
-    /// would deadlock the worker the first time it ran — clamping plus a
+    /// would deadlock the worker the first time it ran - clamping plus a
     /// structured warning makes the misconfiguration visible while keeping
     /// the worker functional.
     pub fn from_env() -> Self {
@@ -176,7 +176,7 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             for (k, v) in &self.keys {
-                // SAFETY: same as above — serial test, single-threaded env mutation.
+                // SAFETY: same as above - serial test, single-threaded env mutation.
                 unsafe {
                     match v {
                         Some(value) => std::env::set_var(k, value),

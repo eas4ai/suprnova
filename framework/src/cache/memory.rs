@@ -17,7 +17,7 @@ use crate::error::FrameworkError;
 /// `tags` is the per-entry source of truth: a tagged write records the
 /// new tag set on the entry, and `flush_tags` consults it before
 /// deleting. That makes overwriting a tagged key with an untagged
-/// `put_raw` safe — the entry's tag set is cleared and a later
+/// `put_raw` safe - the entry's tag set is cleared and a later
 /// `flush_tags(t)` will not touch the live untagged value.
 #[derive(Clone)]
 struct CacheEntry {
@@ -44,7 +44,7 @@ impl CacheEntry {
 /// removes it from the store as part of that call, so re-accessed keys
 /// do not accumulate. Keys that expire and are never touched again
 /// stay in the map until the entire cache is flushed or until a tagged
-/// flush walks them — call [`InMemoryCache::purge_expired`] from a
+/// flush walks them - call [`InMemoryCache::purge_expired`] from a
 /// periodic task if a workload writes many short-lived keys that are
 /// never re-read.
 ///
@@ -90,7 +90,7 @@ impl InMemoryCache {
         }
     }
 
-    /// Create from a `CacheConfig` — picks up both the prefix and the
+    /// Create from a `CacheConfig` - picks up both the prefix and the
     /// configured `default_ttl` so that the facade-level default TTL
     /// applies uniformly across in-memory and Redis backends.
     pub fn with_config(config: &CacheConfig) -> Self {
@@ -117,7 +117,7 @@ impl InMemoryCache {
     /// so they cannot collide with any user-supplied cache key. User
     /// keys are always passed through `prefixed_key(...)` which does not
     /// inject the sentinel, so a caller doing `Cache::forget("lock:foo")`
-    /// targets `<prefix>lock:foo` — distinct from the lock's
+    /// targets `<prefix>lock:foo` - distinct from the lock's
     /// `<prefix>\0lock:foo` slot. This prevents a regular `forget` /
     /// `put` from releasing or overwriting a held distributed lock.
     fn locked_key(&self, key: &str) -> String {
@@ -130,7 +130,7 @@ impl InMemoryCache {
     /// expired entry the first time they observe it, so the typical
     /// hot-key workload does not accumulate corpses. Workloads that
     /// write many short-lived keys and never read them back have no
-    /// such trigger — wire `purge_expired` into a periodic task in
+    /// such trigger - wire `purge_expired` into a periodic task in
     /// that case. Returns the number of entries removed.
     pub fn purge_expired(&self) -> Result<usize, FrameworkError> {
         let mut store = self
@@ -165,7 +165,7 @@ impl InMemoryCache {
     /// Drop `key` from the store if (and only if) the entry is still
     /// the same expired one observed under the read lock. A concurrent
     /// writer may have replaced the entry between the read-lock drop
-    /// and the write-lock acquire — in that case we leave the new
+    /// and the write-lock acquire - in that case we leave the new
     /// value alone.
     fn evict_if_still_expired(&self, key: &str) {
         let mut store = match self.store.write() {
@@ -216,7 +216,7 @@ impl CacheStore for InMemoryCache {
 
         // Hold the read lock for the common (hit / clean miss) path. If
         // an expired entry is observed we drop the read lock, take a
-        // write lock, and evict — see `evict_if_still_expired` for the
+        // write lock, and evict - see `evict_if_still_expired` for the
         // racey-concurrent-writer caveat.
         let observed_expired = {
             let store = self
@@ -397,7 +397,7 @@ impl CacheStore for InMemoryCache {
             .write()
             .map_err(|_| FrameworkError::internal("Tag index poisoned"))?;
 
-        // Clear both the value store and the tag index — leaving stale
+        // Clear both the value store and the tag index - leaving stale
         // tag candidates pointing at deleted keys would let a later
         // `flush_tags` walk a long-dead forward index.
         store.clear();
@@ -413,7 +413,7 @@ impl CacheStore for InMemoryCache {
             .write()
             .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
 
-        // Preserve the existing entry's TTL on increment — matches Redis
+        // Preserve the existing entry's TTL on increment - matches Redis
         // `INCR` semantics, which never resets the key's expiration. The
         // rate-limit fixed-window counter relies on this: the counter
         // shares its TTL with the `:timer` deadline so both ages out
@@ -478,7 +478,7 @@ impl CacheStore for InMemoryCache {
             }
         }
 
-        // Overwrite installs the new tag set on the entry — replaces
+        // Overwrite installs the new tag set on the entry - replaces
         // (not unions with) any prior tags. This is what makes a
         // tagged overwrite drop old tag memberships from the source
         // of truth.
@@ -525,7 +525,7 @@ impl CacheStore for InMemoryCache {
                 // Validate against the entry's own tag set before
                 // deleting. If the entry was overwritten untagged
                 // (tags.is_empty()) or never had this tag (re-tagged to
-                // something else), leave it alone — only the now-stale
+                // something else), leave it alone - only the now-stale
                 // forward index entry pointed here.
                 let should_delete = match s.get(&k) {
                     Some(e) if !e.is_expired() => e.tags.contains(&tag),
@@ -679,7 +679,7 @@ mod tests {
             .put_raw("b", "2", Some(Duration::from_millis(5)))
             .await
             .unwrap();
-        // No TTL — must survive the purge.
+        // No TTL - must survive the purge.
         cache.put_raw("c", "3", None).await.unwrap();
         assert_eq!(cache.raw_len(), 3);
 
@@ -701,7 +701,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(15)).await;
         assert!(cache.get_raw("u:1").await.unwrap().is_none());
 
-        // Re-tag a new key under the same tag, then flush — if the stale
+        // Re-tag a new key under the same tag, then flush - if the stale
         // `u:1` pointer survived, flush_tags would do nothing harmful (the
         // entry is already gone), but the tag map would never shrink.
         let idx_size = cache.tag_index.read().unwrap().len();
@@ -722,12 +722,12 @@ mod tests {
             .expect("lock should be acquired");
 
         // A caller using a regular cache key with the "lock:" prefix
-        // must NOT be able to release the held lock — even though
+        // must NOT be able to release the held lock - even though
         // before the keyspace isolation fix this was effectively a
         // user-reachable DEL of the lock's storage slot.
         let _ = cache.forget("lock:printer").await.unwrap();
 
-        // The lock must remain held — a fresh attempt should still
+        // The lock must remain held - a fresh attempt should still
         // contend, and the original token must still release.
         assert!(
             cache

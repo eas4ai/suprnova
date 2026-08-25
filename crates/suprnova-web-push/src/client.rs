@@ -24,7 +24,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// messages (`"too many requests"`, `"invalid registration token"`); a
 /// hostile or buggy endpoint streaming gigabytes of body must not be able
 /// to drive the sender's memory growth. Bodies are streamed and read
-/// stops once the cap is reached — the underlying connection is dropped
+/// stops once the cap is reached - the underlying connection is dropped
 /// without consuming the remainder.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
@@ -48,7 +48,7 @@ pub struct PushResponse {
 /// Validation policy applied to a subscription endpoint before the client
 /// POSTs to it.
 ///
-/// Subscription endpoints are user-derived data — the browser receives the URL
+/// Subscription endpoints are user-derived data - the browser receives the URL
 /// from a remote push service when a user subscribes, and the application
 /// stores it. A maliciously stored subscription can point the push HTTP POST
 /// anywhere reachable, turning the push sender into an SSRF gadget.
@@ -66,7 +66,7 @@ pub enum EndpointPolicy {
     #[default]
     Strict,
     /// Accept any URL the underlying [`Client`] accepts. Intended for tests
-    /// against controlled mock servers — DO NOT use in production.
+    /// against controlled mock servers - DO NOT use in production.
     AllowAny,
 }
 
@@ -89,7 +89,7 @@ impl WebPushClient {
     /// [`Client`] and use [`Self::with_client`] instead.
     ///
     /// Returns an error if `subject` is not a VAPID-conformant contact
-    /// URI — see [`Self::with_client`] for the validation rules.
+    /// URI - see [`Self::with_client`] for the validation rules.
     pub fn new(signer: VapidSigner, subject: impl Into<String>) -> Result<Self, WebPushError> {
         let http = Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
@@ -107,7 +107,7 @@ impl WebPushClient {
     /// Build a client wrapping a caller-supplied [`Client`].
     ///
     /// Use this when the default transport (a 30 s timeout) is the wrong
-    /// policy — for example, when wiring through a corporate proxy, pinning
+    /// policy - for example, when wiring through a corporate proxy, pinning
     /// TLS, or applying a different timeout.
     ///
     /// `subject` must be a VAPID contact URI per RFC 8292 §2.1: either a
@@ -115,7 +115,7 @@ impl WebPushClient {
     /// Any other value is rejected at construction so a misconfigured
     /// signer fails fast at startup rather than producing a JWT every push
     /// service silently refuses. Validation is intentionally scheme-shape
-    /// only — full RFC 5322 email parsing is out of scope and not what
+    /// only - full RFC 5322 email parsing is out of scope and not what
     /// RFC 8292 requires.
     pub fn with_client(
         http: Client,
@@ -217,7 +217,7 @@ impl WebPushClient {
 
 /// Stream and accumulate up to `cap` bytes of an HTTP response body, then
 /// drop the response so the remainder of the body is not buffered. The
-/// returned string is UTF-8-lossy — push services may include arbitrary
+/// returned string is UTF-8-lossy - push services may include arbitrary
 /// bytes, but the snippet is intended for diagnostic surfacing only.
 async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> String {
     let mut buf: Vec<u8> = Vec::new();
@@ -235,7 +235,7 @@ async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> String {
             Err(_) => break,
         }
     }
-    // Drop resp explicitly — closing the connection (or returning it to
+    // Drop resp explicitly - closing the connection (or returning it to
     // the pool) prevents the hostile peer from holding the socket open by
     // dribbling more bytes once we've stopped reading.
     drop(resp);
@@ -262,15 +262,15 @@ fn parse_retry_after_secs(header: Option<&reqwest::header::HeaderValue>) -> Opti
 
 /// Validate a VAPID subject claim per RFC 8292 §2.1.
 ///
-/// The subject MUST be a contact URI — either a `mailto:` URI with a
+/// The subject MUST be a contact URI - either a `mailto:` URI with a
 /// non-empty addressee, or an `https://` URL. Anything else is rejected
 /// at client construction so a misconfigured signer cannot ship invalid
 /// JWTs that push services silently refuse.
 ///
 /// Validation is intentionally shallow:
-/// - `mailto:` — accept any non-empty addressee (no RFC 5322 parse;
+/// - `mailto:` - accept any non-empty addressee (no RFC 5322 parse;
 ///   push services accept the same form browsers do).
-/// - `https://` — require [`Url::parse`] to succeed and the result to
+/// - `https://` - require [`Url::parse`] to succeed and the result to
 ///   have a host.
 fn validate_vapid_subject(subject: &str) -> Result<(), WebPushError> {
     let trimmed = subject.trim();
@@ -323,7 +323,7 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, WebPushError> {
 /// Enforced rules:
 /// - scheme must be `https` (RFC 8030 requires it; HTTP would also bypass TLS)
 /// - URL must have a host component
-/// - host must NOT be an IP literal — real push services use named hosts; an
+/// - host must NOT be an IP literal - real push services use named hosts; an
 ///   IP literal in a subscription almost always indicates an SSRF probe or a
 ///   tampered store
 /// - host must NOT be one of the common SSRF targets (cloud metadata services,
@@ -346,7 +346,7 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
 
     // Use the typed `url::Host` so IPv4 / IPv6 are detected regardless of
     // URL syntax. `host_str` for IPv6 returns the bracketed form (e.g.
-    // `"[::1]"`), which does NOT parse as `std::net::IpAddr` — relying on
+    // `"[::1]"`), which does NOT parse as `std::net::IpAddr` - relying on
     // that parse alone leaks IPv6-literal hosts past the guard.
     let domain = match url.host() {
         None => {
@@ -369,7 +369,7 @@ fn validate_strict_endpoint(url: &Url) -> Result<(), WebPushError> {
 
     let host_normalized = domain.to_ascii_lowercase();
     let host_trimmed = host_normalized.trim_end_matches('.');
-    // Exact-match blocklist — cloud metadata host names that resolve to
+    // Exact-match blocklist - cloud metadata host names that resolve to
     // link-local addresses (169.254.169.254 etc.) on the host network.
     const BLOCKED_EXACT: &[&str] = &[
         "localhost",
@@ -494,7 +494,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // VAPID subject validation — RFC 8292 §2.1 requires `mailto:` or
+    // VAPID subject validation - RFC 8292 §2.1 requires `mailto:` or
     // `https:` URI for the `sub` claim. Misconfigured subjects fail at
     // client construction so a startup misconfig blows up early instead of
     // producing JWTs every push service silently refuses.
@@ -553,7 +553,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Retry-After parsing — only delta-seconds. HTTP-date form is
+    // Retry-After parsing - only delta-seconds. HTTP-date form is
     // intentionally returned as None (documented behaviour).
     // ---------------------------------------------------------------------
 
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn retry_after_caps_at_24h() {
-        // 30 days in seconds — must be clamped to 24h.
+        // 30 days in seconds - must be clamped to 24h.
         let h = reqwest::header::HeaderValue::from_static("2592000");
         assert_eq!(
             parse_retry_after_secs(Some(&h)),

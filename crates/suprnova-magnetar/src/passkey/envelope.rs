@@ -1,8 +1,8 @@
 //! The deployed passkey storage envelope, byte-compatible with the fork.
 //!
-//! `data_json` is an outer JSON object — `credential_id` (base64-standard),
+//! `data_json` is an outer JSON object - `credential_id` (base64-standard),
 //! `public_key` (base64-standard over the serialized `webauthn_rs::Passkey`),
-//! `name`, `created_at`, `last_used_at` — serialized with serde_json's
+//! `name`, `created_at`, `last_used_at` - serialized with serde_json's
 //! default alphabetical key order, exactly as torii's repository writes it.
 //! Updates edit fields inside the parsed object rather than reserializing a
 //! typed struct, so untouched fields round-trip byte-for-byte and the

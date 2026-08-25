@@ -1,4 +1,4 @@
-//! [`PhoneNumber`] — E.164-style phone number, validated on construction.
+//! [`PhoneNumber`] - E.164-style phone number, validated on construction.
 //!
 //! Used by Mobile Money flows that identify the payer by phone rather
 //! than email.
@@ -6,17 +6,17 @@
 use crate::payments::PaymentError;
 use serde::{Deserialize, Serialize};
 
-/// E.164-style phone number — `+` prefix followed by 8 to 15 ASCII digits.
+/// E.164-style phone number - `+` prefix followed by 8 to 15 ASCII digits.
 ///
 /// Required for Mobile Money checkout flows (MTN MoMo, M-Pesa, Airtel Money,
 /// Orange Money, Lipila) where the user is identified by phone, not email.
 ///
 /// Constructed via `PhoneNumber::new("+260971234567")` or
-/// `PhoneNumber::new("260971234567")` — leading `+` is added if absent.
+/// `PhoneNumber::new("260971234567")` - leading `+` is added if absent.
 ///
 /// # Wire format
 ///
-/// Serializes as a single string ("+countrycode...digits") — frontend SDKs and
+/// Serializes as a single string ("+countrycode...digits") - frontend SDKs and
 /// provider APIs both consume this shape directly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

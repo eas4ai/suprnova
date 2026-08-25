@@ -1,10 +1,10 @@
-//! `#[suprnova::main]` — the application entry point.
+//! `#[suprnova::main]` - the application entry point.
 //!
 //! Why this exists rather than `#[tokio::main]`: loading `.env` mutates
 //! the process environment, and `std::env::set_var` is only sound while
 //! the process is single-threaded. `#[tokio::main]` builds the runtime
 //! *around* the whole body, so every worker thread already exists by the
-//! time the first line of `main` runs — and any of them may call `getenv`
+//! time the first line of `main` runs - and any of them may call `getenv`
 //! through DNS resolution, time formatting, or a C dependency. This macro
 //! keeps the same `async fn main` ergonomics while moving the env load
 //! ahead of the runtime, where the mutation is actually sound.
@@ -45,7 +45,7 @@ impl syn::parse::Parse for MainArgs {
                         return Err(syn::Error::new(
                             lit.span(),
                             format!(
-                                "unknown runtime flavor `{other}` — supported: \
+                                "unknown runtime flavor `{other}` - supported: \
                                  \"multi_thread\", \"current_thread\""
                             ),
                         ));
@@ -59,7 +59,7 @@ impl syn::parse::Parse for MainArgs {
                 return Err(syn::Error::new(
                     ident.span(),
                     format!(
-                        "unknown #[suprnova::main(...)] key `{ident}` — supported keys: \
+                        "unknown #[suprnova::main(...)] key `{ident}` - supported keys: \
                          flavor, worker_threads"
                     ),
                 ));
@@ -79,7 +79,7 @@ impl syn::parse::Parse for MainArgs {
             let span = flavor_span.unwrap_or_else(|| threads.span());
             return Err(syn::Error::new(
                 span,
-                "`worker_threads` has no meaning with `flavor = \"current_thread\"` — \
+                "`worker_threads` has no meaning with `flavor = \"current_thread\"` - \
                  a current-thread runtime has no worker pool",
             ));
         }
@@ -102,7 +102,7 @@ pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     if input_fn.sig.asyncness.is_none() {
         return syn::Error::new_spanned(
             input_fn.sig.fn_token,
-            "#[suprnova::main] expects an `async fn` — it builds the Tokio runtime for you",
+            "#[suprnova::main] expects an `async fn` - it builds the Tokio runtime for you",
         )
         .to_compile_error()
         .into();
@@ -129,7 +129,7 @@ pub fn main_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     // `load_env` runs before the builder line on purpose, and the
-    // ordering is the entire point of this macro — see the module doc.
+    // ordering is the entire point of this macro - see the module doc.
     let expanded = quote! {
         #(#attrs)*
         #vis fn #name() #output {
@@ -189,7 +189,7 @@ mod tests {
     }
 
     /// A typo in the flavor string must not silently downgrade the
-    /// runtime — `flavor = "current-thread"` (hyphen) would otherwise
+    /// runtime - `flavor = "current-thread"` (hyphen) would otherwise
     /// be indistinguishable from the default at runtime.
     #[test]
     fn an_unknown_flavor_is_rejected() {

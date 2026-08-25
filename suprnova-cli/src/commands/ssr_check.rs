@@ -1,9 +1,9 @@
-//! `suprnova ssr:check` — verify the Inertia SSR worker is healthy.
+//! `suprnova ssr:check` - verify the Inertia SSR worker is healthy.
 //!
 //! HTTP check against the worker's own `/health` route. Every
 //! `@inertiajs/{vue3,react,svelte}/server` `createServer()` bundle
 //! answers `GET /health` with `{ status: 'OK', timestamp }` / 200 out of
-//! the box (`@inertiajs/core/src/server.ts`) — no extra code needed in
+//! the box (`@inertiajs/core/src/server.ts`) - no extra code needed in
 //! the SSR entry. Verifying the *application* answered, not just that
 //! some listener accepted a TCP handshake, is what Laravel's
 //! `Inertia\Ssr\HttpGateway::isHealthy()` does too
@@ -72,7 +72,7 @@ pub(crate) fn parse_host_port(url: &str) -> Result<(String, u16), String> {
 ///
 /// There is no timeout-capable resolver in `std`, so the lookup runs on a
 /// worker thread and we wait on a channel. If it blows the deadline the
-/// thread is left to finish and be reaped at exit — leaking a thread is
+/// thread is left to finish and be reaped at exit - leaking a thread is
 /// acceptable for a short-lived CLI, and unavoidable without pulling in an
 /// async resolver for one probe.
 fn resolve_within(addr: &str, budget: Duration) -> Result<Vec<std::net::SocketAddr>, String> {
@@ -101,7 +101,7 @@ fn resolve_within(addr: &str, budget: Duration) -> Result<Vec<std::net::SocketAd
 
 /// Try every resolved address until one connects or the deadline passes.
 ///
-/// The old code took `socket_addrs.next()` — the *first* address — and
+/// The old code took `socket_addrs.next()` - the *first* address - and
 /// reported the host unreachable if it failed. That is wrong for the most
 /// ordinary dual-stack setup there is: a host with an AAAA record on a
 /// machine with no IPv6 route resolves to the v6 address first, fails, and
@@ -142,7 +142,7 @@ pub(crate) fn probe(
     port: u16,
     timeout: Duration,
 ) -> Result<std::net::SocketAddr, String> {
-    // One deadline for the whole operation — DNS and every connection
+    // One deadline for the whole operation - DNS and every connection
     // attempt inside it. Previously DNS was unbounded and each attempt got
     // a fresh full timeout.
     let deadline = std::time::Instant::now() + timeout;
@@ -155,8 +155,8 @@ pub(crate) fn probe(
 /// Time left until `deadline`, clamped to zero rather than going
 /// negative.
 ///
-/// Every phase of `run`'s check — `probe`'s connect budget, then
-/// `get_health`'s connect/read/write timeouts — draws down this same
+/// Every phase of `run`'s check - `probe`'s connect budget, then
+/// `get_health`'s connect/read/write timeouts - draws down this same
 /// shared deadline instead of starting from a fresh copy of the
 /// original `--timeout-ms`. T31 fix round 1 changed `probe`'s call site
 /// from `Duration::from_millis(timeout_ms)` to `time_left(deadline)`;
@@ -167,14 +167,14 @@ pub(crate) fn probe(
 /// any reproducible scenario). What it buys instead is structural: one
 /// named expression, used everywhere a remaining budget is needed,
 /// means there's no separate `timeout_ms` left lying around for a
-/// future edit to reach for by mistake — the kind of accidental
+/// future edit to reach for by mistake - the kind of accidental
 /// divergence that, in a differently-shaped future change, could
 /// produce the misreport this one didn't.
 fn time_left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
-/// Why [`check`] failed, tagged by phase — `run` turns each variant
+/// Why [`check`] failed, tagged by phase - `run` turns each variant
 /// into its own message and both exit with status 1, but they mean
 /// different things to an operator (nothing answered at all, vs.
 /// something answered but isn't healthy).
@@ -186,7 +186,7 @@ enum CheckFailure {
 
 /// `probe` then `get_health`, sharing one `deadline` end to end.
 ///
-/// Split out of [`run`] so the check itself is testable — `run` only
+/// Split out of [`run`] so the check itself is testable - `run` only
 /// adds the process-exit codes and the human-readable messages.
 /// `check` takes a `deadline`, never a separate `timeout`, which is
 /// deliberate: it's a structural guard, not the fix for an observed
@@ -229,12 +229,12 @@ pub fn run(url: Option<String>, timeout_ms: u64) {
 }
 
 /// Send `GET /health HTTP/1.1` to `addr` and report whether the
-/// response status line is 2xx. Blocking, minimal HTTP/1.1 client —
+/// response status line is 2xx. Blocking, minimal HTTP/1.1 client -
 /// `ssr:check` is a short-lived CLI invocation, and pulling in a full
 /// HTTP client for one GET would be a heavier dependency than the check
 /// warrants.
 ///
-/// `addr` must already be known reachable (from [`probe`]) — this opens
+/// `addr` must already be known reachable (from [`probe`]) - this opens
 /// a fresh connection to it rather than reusing the one `probe` made,
 /// which costs one extra round trip but keeps `probe`'s address-
 /// iteration logic untouched and independently testable.
@@ -330,7 +330,7 @@ mod tests {
     fn time_left_shrinks_as_time_elapses_rather_than_resetting() {
         // T31 fix round 1: `probe` used to be handed a *fresh*
         // `Duration::from_millis(timeout_ms)` instead of what was left
-        // of the shared deadline — so if `probe` ran late (a slow DNS
+        // of the shared deadline - so if `probe` ran late (a slow DNS
         // lookup, a healthy-but-slow-to-accept worker), `get_health`
         // still started as if no time had passed at all. Pin the fix:
         // the budget for a later phase must reflect real elapsed time,
@@ -367,7 +367,7 @@ mod probe_tests {
     //! Addresses here come from RFC 5737 TEST-NET-1 (`192.0.2.0/24`),
     //! which is reserved for documentation and guaranteed not to be
     //! routed. Connecting to one either fails immediately (no route) or
-    //! times out — never succeeds — so these tests exercise the failure
+    //! times out - never succeeds - so these tests exercise the failure
     //! paths without depending on the network or on any host being down.
 
     use super::{connect_within, probe, resolve_within};
@@ -386,7 +386,7 @@ mod probe_tests {
     /// *refused immediately* rather than timing out.
     ///
     /// That distinction matters. TEST-NET-1 addresses are unroutable, so a
-    /// connection to one hangs until the deadline — which is what the
+    /// connection to one hangs until the deadline - which is what the
     /// deadline test below wants, and exactly what the iteration test does
     /// not: a first address that eats the entire budget proves nothing
     /// about whether a second would have been tried.
@@ -394,7 +394,7 @@ mod probe_tests {
     /// Binding an ephemeral port and dropping it is the obvious way to get
     /// a dead address, and it is the bug this replaces: `drop` hands the
     /// port straight back to the ephemeral pool, a `listening()` in another
-    /// test — these run in parallel — is handed the same number, and the
+    /// test - these run in parallel - is handed the same number, and the
     /// supposedly unreachable address is live. That is how
     /// `a_reachable_address_after_an_unreachable_one_is_still_found` failed
     /// a release gate, reporting the dead address as the one that accepted,
@@ -402,7 +402,7 @@ mod probe_tests {
     ///
     /// Privileged ports sit outside the ephemeral range and need root to
     /// bind, so no test in this run can claim one. The probe steps over any
-    /// a system daemon already holds — sshd on 22 being the obvious one —
+    /// a system daemon already holds - sshd on 22 being the obvious one -
     /// and the counter keeps two calls distinct, which
     /// `all_addresses_failing_reports_the_last_error` depends on.
     pub(super) fn refusing() -> SocketAddr {
@@ -418,8 +418,8 @@ mod probe_tests {
     }
 
     /// The headline regression: a working address after a dead one must
-    /// still be found. This is the dual-stack case — an AAAA record on a
-    /// host with no IPv6 route — where the probe used to report the
+    /// still be found. This is the dual-stack case - an AAAA record on a
+    /// host with no IPv6 route - where the probe used to report the
     /// worker down while it was listening perfectly well.
     #[test]
     fn a_reachable_address_after_an_unreachable_one_is_still_found() {
@@ -449,7 +449,7 @@ mod probe_tests {
         assert_eq!(connect_within(&[good], deadline).expect("listening"), good);
     }
 
-    /// Every address failing is an error, not a hang — and the message
+    /// Every address failing is an error, not a hang - and the message
     /// carries the last failure so an operator can see why.
     #[test]
     fn all_addresses_failing_reports_the_last_error() {
@@ -533,8 +533,8 @@ mod probe_tests {
     fn probe_fails_on_a_closed_port_within_the_budget() {
         // `refusing()`, not bind-then-drop. This test used the latter and
         // flaked roughly once in sixty runs of the suite: `drop` returns the
-        // port to the ephemeral pool, a `listening()` in a sibling test —
-        // these run in parallel — is handed the same number, and the probe
+        // port to the ephemeral pool, a `listening()` in a sibling test -
+        // these run in parallel - is handed the same number, and the probe
         // connects to a port this test believes it closed. `is_err` then
         // fails, which is the correct answer to the question the test
         // accidentally asked. See `refusing()` above, which exists because
@@ -555,7 +555,7 @@ mod probe_tests {
 #[cfg(test)]
 mod health_tests {
     //! T31. `ssr:check` upgrades from "something answered on the port"
-    //! to "the SSR worker's own `/health` route said OK" — mirroring
+    //! to "the SSR worker's own `/health` route said OK" - mirroring
     //! Laravel's `HttpGateway::isHealthy()`.
 
     use super::get_health;
@@ -564,7 +564,7 @@ mod health_tests {
     use std::time::{Duration, Instant};
 
     /// Spawn a fake HTTP server that answers every connection it
-    /// accepts — not just the first — with `response` verbatim after
+    /// accepts - not just the first - with `response` verbatim after
     /// draining whatever the client sent. Returns its address.
     ///
     /// Multi-shot rather than one-shot: `check`'s `probe` phase opens
@@ -573,7 +573,7 @@ mod health_tests {
     /// connection to actually speak HTTP. A one-shot server (accept
     /// once, then let the listener drop) serves `probe`'s throwaway
     /// connection and is gone by the time `get_health` tries to
-    /// connect, which looks like — but is not — an unhealthy worker.
+    /// connect, which looks like - but is not - an unhealthy worker.
     fn fake_http_server(response: &'static str) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
@@ -617,7 +617,7 @@ mod health_tests {
     fn nothing_listening_is_a_connect_error() {
         // Reuses `probe_tests::refusing()` rather than bind-then-drop:
         // an ephemeral port freed by `drop` can be handed straight back
-        // out to a `listening()` in a sibling test running in parallel —
+        // out to a `listening()` in a sibling test running in parallel -
         // the exact race `refusing()` exists to avoid (see its doc
         // comment in `probe_tests`).
         let addr = super::probe_tests::refusing();
@@ -629,7 +629,7 @@ mod health_tests {
     /// `probe` is pointed at an address that can never answer, stays
     /// close to the shared `deadline` rather than running away to some
     /// much larger value. It does **not** prove that a specific
-    /// historical bug can't return — a future change that gave `probe`
+    /// historical bug can't return - a future change that gave `probe`
     /// its own multi-second timeout unrelated to `deadline` would still
     /// pass this test as written, since 450ms is a generous margin, not
     /// a tight one. Read it as "the check respects its budget," not as
@@ -637,13 +637,13 @@ mod health_tests {
     ///
     /// (`time_left`'s doc comment has the history: the change that
     /// introduced `check`'s current shape was a structural cleanup, not
-    /// a fix for a misreport this test — or anything else — ever
+    /// a fix for a misreport this test - or anything else - ever
     /// observed in the code that actually shipped.)
     ///
     /// A loopback connect succeeds or fails in microseconds regardless
     /// of the budget it's handed, so there's no way to observe *how
     /// big* a budget `probe` received through a real local connection's
-    /// timing — an earlier version of this test used one and passed
+    /// timing - an earlier version of this test used one and passed
     /// identically no matter what budget `check` computed, which is
     /// worse than no test at all. An unroutable RFC 5737 TEST-NET-1
     /// address doesn't have that problem: a connect attempt to one

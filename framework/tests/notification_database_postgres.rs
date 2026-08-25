@@ -2,8 +2,8 @@
 //! notification read model (DATA-01).
 //!
 //! Every statement in the write channel and the read helpers was
-//! hand-written with `?` positional placeholders — SQLite/MySQL syntax that
-//! Postgres rejects — so persisting or reading a notification failed
+//! hand-written with `?` positional placeholders - SQLite/MySQL syntax that
+//! Postgres rejects - so persisting or reading a notification failed
 //! outright on Postgres. The rest of the notification suite runs on
 //! in-memory SQLite, which is why the breakage was invisible.
 //!
@@ -27,7 +27,7 @@ use suprnova::notifications::{
     mark_all_as_read, mark_as_read, mark_as_unread, read_for, unread_for,
 };
 
-/// The shipped migration, applied verbatim — the point of the exercise is
+/// The shipped migration, applied verbatim - the point of the exercise is
 /// that the framework's own SQL works against the schema it ships.
 const NOTIFICATIONS_MIGRATION: &str =
     include_str!("../migrations/20260516_create_notifications_table.sql");
@@ -56,7 +56,7 @@ async fn connect_postgres() -> DatabaseConnection {
 }
 
 /// The table name is fixed by the migration, so every test in this binary
-/// shares it — hence `#[serial]` plus a drop-and-recreate per test.
+/// shares it - hence `#[serial]` plus a drop-and-recreate per test.
 async fn fresh_db() -> DatabaseConnection {
     let db = connect_postgres().await;
     db.execute_unprepared("DROP TABLE IF EXISTS notifications")

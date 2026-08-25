@@ -25,7 +25,7 @@ struct PanickingMiddleware;
 #[async_trait]
 impl Middleware for PanickingMiddleware {
     async fn handle(&self, _request: Request, _next: Next) -> Response {
-        panic!("intentional test panic — string literal payload");
+        panic!("intentional test panic - string literal payload");
     }
 }
 
@@ -37,7 +37,7 @@ impl Middleware for PanickingMiddlewareString {
     async fn handle(&self, _request: Request, _next: Next) -> Response {
         panic!(
             "{}",
-            String::from("intentional test panic — String payload")
+            String::from("intentional test panic - String payload")
         );
     }
 }
@@ -109,7 +109,7 @@ async fn send_get(addr: SocketAddr, path: &str) -> (hyper::http::StatusCode, Byt
 /// A panicking middleware must translate to a 500 response, not a
 /// dropped connection. After audit HIGH `error` #1 the body uses the
 /// same standardised JSON shape the `FrameworkError -> HttpResponse`
-/// path emits — generic 5xx-sanitised `message`, optional
+/// path emits - generic 5xx-sanitised `message`, optional
 /// `request_id`, optional `debug_message` when `APP_DEBUG=true`.
 /// The panic payload still appears in the structured tracing log,
 /// just not in the wire response.
@@ -164,7 +164,7 @@ async fn panicking_middleware_string_payload_translates_to_500() {
 #[tokio::test]
 async fn panicking_handler_translates_to_500() {
     let router = Router::new().get("/panic-handler", |_req: Request| async {
-        panic!("intentional test panic — handler");
+        panic!("intentional test panic - handler");
         #[allow(unreachable_code)]
         text("unreachable")
     });
@@ -194,7 +194,7 @@ async fn server_survives_panic_and_serves_next_request() {
 
     let addr = spawn_server(router, 4).await;
 
-    // First request panics — gets 500.
+    // First request panics - gets 500.
     let (s1, _) = send_get(addr, "/panic").await;
     assert_eq!(s1.as_u16(), 500);
 

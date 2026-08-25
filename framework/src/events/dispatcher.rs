@@ -72,7 +72,7 @@ const DEFAULT_QUEUED_CONCURRENCY: usize = 256;
 /// How many times a queued listener is attempted before the failure is logged
 /// and the task gives up. 1 original try + retries. In-process retries are for
 /// transient faults (a brief network blip); work that must survive a crash
-/// belongs on the durable queue — see [`crate::events`] module docs.
+/// belongs on the durable queue - see [`crate::events`] module docs.
 const MAX_QUEUED_ATTEMPTS: u32 = 3;
 
 /// In-process event dispatcher. Held as a process-global via
@@ -81,8 +81,8 @@ const MAX_QUEUED_ATTEMPTS: u32 = 3;
 ///
 /// The listener-table [`RwLock`] is the std synchronous form (not
 /// [`tokio::sync::RwLock`]). Holding the lock across an `.await` is
-/// already impossible in the current API — every callsite reads or
-/// writes, drops the guard, then awaits separately — so the cheaper
+/// already impossible in the current API - every callsite reads or
+/// writes, drops the guard, then awaits separately - so the cheaper
 /// std lock buys us a synchronous [`Self::clear`] that can run from
 /// `TestContainerGuard`'s `Drop` for test isolation parity with
 /// [`crate::database::ConnectionRegistry::clear`].
@@ -130,7 +130,7 @@ impl EventDispatcher {
 
     /// Register a listener for events of type `E`.
     ///
-    /// **Append-only contract:** every call pushes another listener — there is
+    /// **Append-only contract:** every call pushes another listener - there is
     /// deliberately no dedup, so a caller can register two instances of the
     /// same listener type with different state. The flip side is that calling
     /// `listen` (or [`Event::broadcast`]) twice for the same listener delivers
@@ -166,7 +166,7 @@ impl EventDispatcher {
         super::testing::record_listener::<E, L>();
     }
 
-    /// Phase 10C audit-fix AF4 — drop every registered listener.
+    /// Phase 10C audit-fix AF4 - drop every registered listener.
     /// `#[doc(hidden)]` because it's a test-only escape hatch; called
     /// from [`crate::testing::TestContainerGuard::drop`] so the next
     /// test in the same process starts with an empty listener table.
@@ -190,14 +190,14 @@ impl EventDispatcher {
     /// Dispatch an event. Synchronous events run inline (sequentially,
     /// in registration order, fail-fast on the first listener error).
     /// Queued events spawn a bounded, retrying task per listener; this
-    /// call returns after spawning, not after they complete — but it
+    /// call returns after spawning, not after they complete - but it
     /// will await a backpressure permit first, so under a flood of
     /// queued events `dispatch` slows rather than spawning unbounded
     /// tasks.
     ///
     /// **Poison policy** (Domain 11 audit D11-A): if the listener
     /// registry lock is poisoned, dispatch returns `Ok(())` after
-    /// logging an error — equivalent to "no listeners registered for
+    /// logging an error - equivalent to "no listeners registered for
     /// this event type", which is the documented safe-fallback
     /// semantic (events are not guaranteed to have subscribers).
     pub async fn dispatch<E: super::Event>(&self, event: E) -> Result<(), FrameworkError> {
@@ -283,7 +283,7 @@ impl EventDispatcher {
     /// If a deferral scope is active in this task and the event is eligible,
     /// clone the event into the buffer and return `true` (caller short-circuits
     /// with `Ok(())`). Returns `false` when no deferral is active or the event
-    /// is filtered out — caller proceeds with normal dispatch.
+    /// is filtered out - caller proceeds with normal dispatch.
     ///
     /// `build_call` is invoked only when we are deferring; it builds the
     /// re-dispatch closure that the buffer will flush. Keeping the closure
@@ -309,7 +309,7 @@ impl EventDispatcher {
     /// Dispatch an event to every listener **best-effort**: run all of them
     /// even if some return `Err`, collecting the first error to return after
     /// the rest have run. Contrast [`dispatch`](Self::dispatch), which is
-    /// fail-fast for synchronous events (stops at the first error — the
+    /// fail-fast for synchronous events (stops at the first error - the
     /// semantic cancellable model events depend on).
     ///
     /// Queued events behave identically under both methods (each listener is
@@ -427,7 +427,7 @@ impl EventDispatcher {
                 // Wrap each attempt in a panic boundary so a panicking
                 // listener feeds the existing retry-on-Err branch (bounded by
                 // MAX_QUEUED_ATTEMPTS) instead of aborting the spawned task
-                // and silently disappearing — see drain_queued's is_panic
+                // and silently disappearing - see drain_queued's is_panic
                 // log for the defense-in-depth case where a panic somehow
                 // escapes this boundary.
                 let attempt_result = match AssertUnwindSafe(listener.dispatch(&event))
@@ -482,7 +482,7 @@ impl EventDispatcher {
         tokio::pin!(deadline);
         // Outer loop re-swaps the task set after each batch drains. A
         // `spawn_queued_listener` parked at `acquire_owned().await` can resume
-        // *after* the swap below and `spawn` into the fresh JoinSet — past the
+        // *after* the swap below and `spawn` into the fresh JoinSet - past the
         // point a single-shot drain would observe. Re-swapping until a lock
         // acquisition finds an empty set closes that shutdown race without
         // closing the permit semaphore (which would leave the dispatcher
@@ -532,7 +532,7 @@ impl EventDispatcher {
 
     /// True when at least one listener is registered for event type `E`.
     /// Mirrors Laravel's `Dispatcher::hasListeners($eventName)`. A poisoned
-    /// registry lock is treated as "no listeners" — same fail-safe stance as
+    /// registry lock is treated as "no listeners" - same fail-safe stance as
     /// [`dispatch`](Self::dispatch).
     pub fn has_listeners<E: super::Event>(&self) -> bool {
         match self.listeners.read() {
@@ -554,7 +554,7 @@ impl EventDispatcher {
     /// Remove every listener registered for event type `E`. Mirrors Laravel's
     /// `Dispatcher::forget($event)`. Returns the number of listeners removed.
     ///
-    /// In production code this is rarely the right tool — listener registration
+    /// In production code this is rarely the right tool - listener registration
     /// is normally bootstrap-once. It exists for test isolation (alongside the
     /// process-wide [`clear`](Self::clear)) and for code that hot-swaps a
     /// listener at runtime (e.g. switching a notifier mid-process).
@@ -579,7 +579,7 @@ impl EventDispatcher {
     ///
     /// Each call appends to the per-event bucket; [`flush`](Self::flush) drains
     /// that bucket and dispatches the events in the order they were pushed.
-    /// Pushed events do NOT participate in the [`defer`](Self::defer) scope —
+    /// Pushed events do NOT participate in the [`defer`](Self::defer) scope -
     /// they are already explicitly deferred.
     pub async fn push<E: super::Event>(&self, event: E) {
         let mut guard = self.pushed.lock().await;
@@ -596,7 +596,7 @@ impl EventDispatcher {
 
     /// Drain and dispatch every event previously [`push`](Self::push)ed under
     /// the name `E::event_name()`. Returns the first dispatch error if any of
-    /// the pushed events fail; the rest still run (drain semantics — not
+    /// the pushed events fail; the rest still run (drain semantics - not
     /// fail-fast).
     ///
     /// Calling `flush` for an event name with no pushed entries is a no-op.
@@ -670,7 +670,7 @@ impl EventDispatcher {
         Ok((value, first_err))
     }
 
-    /// Register a [`Subscriber`](super::Subscriber) — a single struct that bundles a related set
+    /// Register a [`Subscriber`](super::Subscriber) - a single struct that bundles a related set
     /// of listener registrations behind one bootstrap call. Mirrors Laravel's
     /// `Dispatcher::subscribe($subscriber)`.
     ///
@@ -685,7 +685,7 @@ impl EventDispatcher {
 
 /// In-process exponential backoff for queued-listener retries: base 100ms,
 /// doubling, capped at 2s, with full jitter (uniform in `[0, capped]`). Short
-/// by design — these are in-memory transient-fault retries, not the durable
+/// by design - these are in-memory transient-fault retries, not the durable
 /// queue's minutes-long schedule.
 fn retry_backoff(attempt: u32) -> Duration {
     let base_ms: u64 = 100;
@@ -780,7 +780,7 @@ impl Event {
     /// Mirrors Laravel's `Event::push($event, $payload)`. Pair with
     /// [`flush`](Self::flush) to drain.
     ///
-    /// When a fake is active, `push` is a no-op — Laravel's `EventFake::push`
+    /// When a fake is active, `push` is a no-op - Laravel's `EventFake::push`
     /// is also a deliberate no-op.
     pub async fn push<E: super::Event>(event: E) {
         if super::testing::fake_installed() {
@@ -842,7 +842,7 @@ impl Event {
 
     /// Replace the global dispatcher with a fake. Returns a guard
     /// that restores listener invocation on drop. Available to
-    /// consumer-crate tests by default — no feature gate.
+    /// consumer-crate tests by default - no feature gate.
     pub fn fake() -> super::testing::EventFakeGuard {
         super::testing::install_fake()
     }
@@ -1099,7 +1099,7 @@ mod tests {
     /// A panicking synchronous listener must be caught and converted to
     /// `FrameworkError::internal("listener for <name> panicked")` rather
     /// than unwinding past the dispatcher. Without the boundary the panic
-    /// tears down the dispatching task — fine on the HTTP request path
+    /// tears down the dispatching task - fine on the HTTP request path
     /// (caught by `execute_chain_safely`) but fatal for queue workers,
     /// scheduled tasks, model lifecycle hooks, and broadcasting bridges.
     #[tokio::test]
@@ -1167,7 +1167,7 @@ mod tests {
     /// "failed after retries; giving up" error trace with the event name.
     /// Before the panic boundary, a panic in `listener.dispatch(...)` would
     /// unwind the spawned task to a JoinError and `drain_queued` would
-    /// previously drop that on the floor — no retry, no log.
+    /// previously drop that on the floor - no retry, no log.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn queued_listener_panic_is_caught_retried_and_logged() {
@@ -1377,7 +1377,7 @@ mod tests {
         let mid_w = mid.clone();
         let d_ref = &d;
         let count_clone = count.clone();
-        // Defer only "OtherEvent" — our Pinged event passes through immediately.
+        // Defer only "OtherEvent" - our Pinged event passes through immediately.
         let ((), flush_err) = d
             .defer::<_, ()>(Some(&["OtherEvent"]), async move {
                 d_ref.dispatch(Pinged { n: 5 }).await?;

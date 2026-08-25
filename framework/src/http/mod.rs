@@ -74,7 +74,7 @@ mod tests {
 
     /// The legacy `From<ParamError> for HttpResponse` must emit the same
     /// canonical `{ "message": ... }` body and 400 status as every other
-    /// error path — not the old divergent `{ "error": ... }` shape.
+    /// error path - not the old divergent `{ "error": ... }` shape.
     #[test]
     fn param_error_renders_canonical_message_shape() {
         let resp = HttpResponse::from(ParamError {

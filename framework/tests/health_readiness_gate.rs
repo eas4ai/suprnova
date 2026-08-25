@@ -1,9 +1,9 @@
-//! P2-01 — the split between liveness and readiness, and the optional
+//! P2-01 - the split between liveness and readiness, and the optional
 //! secret that closes readiness off.
 //!
 //! Two separate problems shared one endpoint. `/_suprnova/health?db=true`
 //! ran a database round trip for any anonymous caller, and it decided to
-//! do so by testing `query.contains("db=true")` — a substring match over
+//! do so by testing `query.contains("db=true")` - a substring match over
 //! the whole query string, so `?nodb=true` ran the probe too. (The parsing
 //! half is pinned by unit tests in `server.rs`; this file covers the
 //! behaviour end to end, through a real socket.)
@@ -16,7 +16,7 @@
 //! answering exactly as documented; operators who want readiness closed
 //! set `SERVER_HEALTH_READINESS_TOKEN` and get a 404 for everyone else.
 //!
-//! 404 rather than 401 is the point of the exercise — a 401 advertises
+//! 404 rather than 401 is the point of the exercise - a 401 advertises
 //! that something is there. And the 404 is not hand-built: a rejected
 //! readiness probe falls through to normal routing and gets the router's
 //! own not-found response, so it cannot drift into being distinguishable.
@@ -41,8 +41,8 @@ const TOKEN_HEADER: &str = "X-Suprnova-Health-Token";
 const TOKEN: &str = "correct-horse-battery-staple";
 
 /// Route through the real `handle_request` so these exercise the actual
-/// short-circuit branch — and, for the gated cases, the actual fall-through
-/// into routing — rather than a re-implementation of either.
+/// short-circuit branch - and, for the gated cases, the actual fall-through
+/// into routing - rather than a re-implementation of either.
 async fn spawn_server() -> SocketAddr {
     let router = Arc::new(Router::new());
     let middleware = Arc::new(MiddlewareRegistry::new());
@@ -174,7 +174,7 @@ async fn the_documented_endpoint_keeps_answering_exactly_as_documented() {
     let probed = get(addr, "/_suprnova/health?db=true", &[]).await;
     assert_eq!(
         probed.status, 503,
-        "`?db=true` must still run the probe with no token configured — \
+        "`?db=true` must still run the probe with no token configured - \
          the Docker HEALTHCHECK, the Railway healthcheckPath and the \
          DigitalOcean app spec all depend on it"
     );
@@ -212,7 +212,7 @@ async fn a_query_key_merely_ending_in_db_does_not_trigger_the_probe() {
 /// Liveness answers while the database is down. This is the whole reason
 /// the split exists: a liveness failure restarts the pod, so wiring a
 /// database probe into it turns a database blip into a rolling restart of
-/// every replica — at the worst possible moment.
+/// every replica - at the worst possible moment.
 #[tokio::test]
 #[serial]
 async fn liveness_answers_200_while_the_database_is_unreachable() {
@@ -242,7 +242,7 @@ async fn liveness_ignores_a_db_query_parameter() {
     assert_eq!(
         reply.status, 200,
         "`/live` must not be talked into a dependency probe by a query \
-         parameter — its contract is that it touches nothing"
+         parameter - its contract is that it touches nothing"
     );
     assert!(reply.json().get("database").is_none());
 }
@@ -275,7 +275,7 @@ async fn readiness_probes_the_database_without_being_asked_to() {
 // ---------------------------------------------------------------------
 
 /// The core assertion of the gate: not merely "closed" but *invisible*,
-/// and provably so — compared byte for byte against a path that genuinely
+/// and provably so - compared byte for byte against a path that genuinely
 /// does not exist. A hand-built 404 would pass a status check and still
 /// leak through a different body or content type.
 #[tokio::test]

@@ -56,7 +56,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // verify_and_rotate looks up by selector — UNIQUE + indexed
+        // verify_and_rotate looks up by selector - UNIQUE + indexed
         // gives O(1) lookup and enforces selector collision impossibility
         // at the DB level.
         manager

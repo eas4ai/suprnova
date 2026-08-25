@@ -276,7 +276,7 @@ struct ChecksumForm {
 
 impl MultipartRequestHooks for ChecksumForm {
     fn after_validation(&self) -> Result<(), ValidationErrors> {
-        // `after_validation` is sync — no `.await`. Use the pre-computed
+        // `after_validation` is sync - no `.await`. Use the pre-computed
         // `size` field, which works for both memory- and disk-backed
         // uploads without re-reading bytes.
         if self.file.size as usize != self.expected_size {
@@ -313,7 +313,7 @@ async fn extension_from_magic_returns_canonical_for_png() {
     let body = build_multipart_body("test", &[("avatar", Some("evil.exe"), &png)]);
     let req = request_from_multipart("test", body).await;
     let form = AvatarUpload::from_request(req).await.unwrap();
-    // Filename says ".exe", magic bytes say PNG — magic wins.
+    // Filename says ".exe", magic bytes say PNG - magic wins.
     assert_eq!(form.avatar.extension_from_magic(), "png");
 }
 
@@ -366,7 +366,7 @@ impl suprnova::http::upload::validators::UploadValidator for ChunkCounter {
         let chunks = self.count.load(Ordering::SeqCst);
         if chunks == 0 {
             return Err(suprnova::FrameworkError::Domain {
-                message: "validate_final saw zero chunks — instances not threaded".into(),
+                message: "validate_final saw zero chunks - instances not threaded".into(),
                 status_code: 500,
             });
         }
@@ -407,7 +407,7 @@ async fn validator_instance_is_threaded_across_chunk_and_final() {
 // The `UploadGlobalsGuard` below combines a poison-tolerant Mutex with
 // RAII reset-to-default-on-drop covering BOTH atomics so even if a test
 // panics mid-assertion the next one starts clean. We share one mutex
-// across body-cap and spill-threshold tests — both atomics are global,
+// across body-cap and spill-threshold tests - both atomics are global,
 // so simultaneous mutation from sibling tests would still race even if
 // each used a separate lock.
 
@@ -453,7 +453,7 @@ struct UncappedBlob {
 async fn body_cap_uses_default_when_no_override() {
     let _g = UploadGlobalsGuard::acquire();
 
-    // 26 MiB body — exceeds the 25 MiB compile-time default.
+    // 26 MiB body - exceeds the 25 MiB compile-time default.
     let big = vec![0u8; 26 * 1024 * 1024];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &big)]);
     let req = request_from_multipart("test", body).await;
@@ -492,10 +492,10 @@ struct TinyBlob {
 async fn body_cap_per_struct_override_wins() {
     let _g = UploadGlobalsGuard::acquire();
 
-    // Bump the global way up — per-struct should still apply.
+    // Bump the global way up - per-struct should still apply.
     suprnova::http::upload::set_global_max_multipart_body_bytes(100 * 1024 * 1024);
 
-    // 1 KiB body — under global, over the per-struct 512-byte cap.
+    // 1 KiB body - under global, over the per-struct 512-byte cap.
     let kb = vec![0u8; 1024];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &kb)]);
     let req = request_from_multipart("test", body).await;
@@ -510,7 +510,7 @@ async fn body_cap_per_struct_override_wins() {
 async fn body_cap_per_struct_under_cap_succeeds() {
     let _g = UploadGlobalsGuard::acquire();
 
-    // 256-byte body, under the per-struct 512-byte cap — should succeed.
+    // 256-byte body, under the per-struct 512-byte cap - should succeed.
     let small = vec![0u8; 256];
     let body = build_multipart_body("test", &[("file", Some("a.bin"), &small)]);
     let req = request_from_multipart("test", body).await;
@@ -535,7 +535,7 @@ async fn upload_spills_to_disk_above_threshold() {
     suprnova::http::upload::set_global_upload_spill_threshold(1024); // 1 KiB
     suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
 
-    let big = vec![7u8; 4 * 1024]; // 4 KiB — comfortably above the 1 KiB threshold
+    let big = vec![7u8; 4 * 1024]; // 4 KiB - comfortably above the 1 KiB threshold
     let body = build_multipart_body("test", &[("file", Some("big.bin"), &big)]);
     let req = request_from_multipart("test", body).await;
 
@@ -553,7 +553,7 @@ async fn upload_stays_in_memory_below_threshold() {
     let _g = UploadGlobalsGuard::acquire();
 
     // Default 2 MiB spill threshold (set via `0` sentinel above). A 1 KiB
-    // body must NOT trigger the disk path — assertion is content-equality
+    // body must NOT trigger the disk path - assertion is content-equality
     // round-tripped through the in-memory accessor.
     let small = vec![3u8; 1024];
     let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
@@ -573,7 +573,7 @@ async fn store_as_streams_disk_backed_part_to_storage() {
     let _g = UploadGlobalsGuard::acquire();
     // `Storage::fake()` serialises against other Storage tests via its
     // own internal mutex; our `UploadGlobalsGuard` mutex is independent
-    // (covers the spill/cap atomics). Acquiring both is fine — they
+    // (covers the spill/cap atomics). Acquiring both is fine - they
     // don't share any state.
     let _storage_guard = Storage::fake();
     Storage::register_memory("spill_dest");
@@ -582,7 +582,7 @@ async fn store_as_streams_disk_backed_part_to_storage() {
     suprnova::http::upload::set_global_upload_spill_threshold(1024);
     suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
 
-    // 4 KiB body — must spill. Non-uniform content so we can detect
+    // 4 KiB body - must spill. Non-uniform content so we can detect
     // truncation or corruption in the round-trip assertion.
     let mut big = Vec::with_capacity(4 * 1024);
     for i in 0..(4 * 1024) {
@@ -599,7 +599,7 @@ async fn store_as_streams_disk_backed_part_to_storage() {
         .expect("store_as must stream disk-backed parts");
 
     // Read the stored object back and assert byte-for-byte equality with
-    // the original upload — this proves the streaming copy preserved
+    // the original upload - this proves the streaming copy preserved
     // every byte (no early termination, no truncation, no double-write).
     let stored = disk.read("stored/big.bin").await.unwrap();
     assert_eq!(stored.to_vec(), big);

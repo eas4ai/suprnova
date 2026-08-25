@@ -1,23 +1,23 @@
-//! # Suprnova — a Laravel-inspired web framework for Rust
+//! # Suprnova - a Laravel-inspired web framework for Rust
 //!
 //! Suprnova brings the productivity of Laravel to async Rust. It pairs a
-//! batteries-included stack — routing, middleware, sessions, Eloquent-style
-//! ORM, queues, broadcasting, mail, payments, scheduling — with the
+//! batteries-included stack - routing, middleware, sessions, Eloquent-style
+//! ORM, queues, broadcasting, mail, payments, scheduling - with the
 //! concurrency model Tokio gives you for free, so long-lived connections,
 //! background workers, and parallel IO are first-class rather than bolted on.
 //!
 //! ## Where to start
 //!
-//! * [`server`] — boot the HTTP server, wire global middleware, register routes.
-//! * [`routing`] — define typed routes, route groups, signed URLs, resource controllers.
-//! * [`http`] — request/response types, extractors, form validation, file uploads.
-//! * [`eloquent`] — Active-Record style models on top of SeaORM.
-//! * [`database`] — connection pools for SQLite, MySQL, and Postgres.
-//! * [`auth`] / [`auth_flows`] — authentication guards, password reset, 2FA, email verification.
-//! * [`queue`] / [`schedule`] — background jobs and cron-style scheduling.
-//! * [`broadcasting`] — WebSocket channels with presence and authorization.
-//! * [`payments`] — provider-neutral checkout, subscriptions, and webhooks.
-//! * [`testing`] — first-class harness for HTTP, database, and queue tests.
+//! * [`server`] - boot the HTTP server, wire global middleware, register routes.
+//! * [`routing`] - define typed routes, route groups, signed URLs, resource controllers.
+//! * [`http`] - request/response types, extractors, form validation, file uploads.
+//! * [`eloquent`] - Active-Record style models on top of SeaORM.
+//! * [`database`] - connection pools for SQLite, MySQL, and Postgres.
+//! * [`auth`] / [`auth_flows`] - authentication guards, password reset, 2FA, email verification.
+//! * [`queue`] / [`schedule`] - background jobs and cron-style scheduling.
+//! * [`broadcasting`] - WebSocket channels with presence and authorization.
+//! * [`payments`] - provider-neutral checkout, subscriptions, and webhooks.
+//! * [`testing`] - first-class harness for HTTP, database, and queue tests.
 //!
 //! ## Conventions
 //!
@@ -28,14 +28,14 @@
 //!
 //! For task-driven docs, see the user manual in `docs/manual/`.
 
-// Rustdoc link hygiene — deny-level: every intra-doc link that
+// Rustdoc link hygiene - deny-level: every intra-doc link that
 // rustdoc can't resolve fails the build, and any pub item linking
 // to a private one is rejected at the same gate. The sweep that
 // brought the count to zero ran in release-prep §3.3; the CI
 // ratchet that tracked it is gone, replaced by these two attrs.
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(rustdoc::private_intra_doc_links)]
-// Missing-doc surface — deny-level: every undocumented public item
+// Missing-doc surface - deny-level: every undocumented public item
 // fails the build. The §3.4 sweep brought the count to zero; the
 // deny attr keeps it there.
 #![deny(missing_docs)]
@@ -92,7 +92,7 @@ pub mod schedule;
 pub mod seed;
 pub mod server;
 pub mod session;
-/// Process shutdown signals — SIGINT and SIGTERM — observed once and
+/// Process shutdown signals - SIGINT and SIGTERM - observed once and
 /// shared. Internal: the shape callers see is `Server::run` and the
 /// daemons already draining correctly.
 pub(crate) mod signals;
@@ -196,7 +196,7 @@ pub use magnetar_integration::{
 #[cfg(feature = "magnetar-oauth")]
 pub use secrecy::SecretString;
 
-// SeaORM type aliasing — Suprnova design principle #4: SeaORM is an
+// SeaORM type aliasing - Suprnova design principle #4: SeaORM is an
 // implementation detail; consumers reach for `suprnova::*` and never
 // `use sea_orm::*`. Every type a user would name in handler / model /
 // migration code is re-exported here.
@@ -217,7 +217,7 @@ pub use sea_orm::{
 // documented surface; this is the "I know what I'm doing" path.
 pub use ::sea_orm;
 
-// hyper type aliasing — same principle as the SeaORM block above:
+// hyper type aliasing - same principle as the SeaORM block above:
 // `Request::method() -> &Method`, `Request::uri() -> &Uri`,
 // `Request::headers() -> &HeaderMap`, and the streaming body type all
 // surface hyper-owned types. Re-exporting them at the crate root lets
@@ -227,7 +227,7 @@ pub use ::sea_orm;
 pub use ::hyper;
 pub use ::hyper::{HeaderMap, Method, StatusCode, Uri, body::Incoming as RequestBodyStream};
 
-// opendal escape hatch — `Storage::disk(name)` returns `opendal::Operator`
+// opendal escape hatch - `Storage::disk(name)` returns `opendal::Operator`
 // and the `DiskExt` extension trait is implemented on `opendal::Operator`,
 // so consumers need to name `Operator` (and reach for layer types like
 // `RetryLayer`, `TimeoutLayer`, `LoggingLayer`) directly. Re-exporting the
@@ -446,7 +446,7 @@ pub use workflow::{
     StepStatus, WorkflowConfig, WorkflowContext, WorkflowHandle, WorkflowStatus, WorkflowWorker,
     start_named,
 };
-// Phase 12 — payments. Money + Currency are the foundational primitives;
+// Phase 12 - payments. Money + Currency are the foundational primitives;
 // every payment DTO builds on them. Re-exported at the crate root so
 // consumers write `suprnova::Money` / `suprnova::Currency`.
 pub use payments::{
@@ -470,10 +470,10 @@ pub use mail::{
     Address, Attachment, Mail, MailBuilder, MailFake, Mailable, MessageSending, MessageSent,
     OutgoingMessage, QueuedSnapshot, SendMailJob,
 };
-// Phase 13 — feature flags.
+// Phase 13 - feature flags.
 //
 // `Feature`, `Evaluator`, and `EvaluatorRef` re-export cleanly at the
-// crate root. `Context` and the `context!` macro cannot — both names
+// crate root. `Context` and the `context!` macro cannot - both names
 // collide with the framework's own per-request context module
 // (`crate::context`). Consumers reach for the featureflag context as
 // `suprnova::features::Context` and the macro as
@@ -481,7 +481,7 @@ pub use mail::{
 // expose the rest of the primitives + the non-colliding macros here.
 pub use featureflag::{feature, is_enabled};
 pub use features::{Evaluator, EvaluatorRef, Feature};
-// Phase 10 — Eloquent. Foundation primitives land in 10A; relationships
+// Phase 10 - Eloquent. Foundation primitives land in 10A; relationships
 // (10B) and collections/pagination/observers (10C) extend the same
 // `eloquent` module. The `ModelEntry` registry is populated at compile
 // time by `#[suprnova::model]` (Task 3) and walked at boot by Phase 8
@@ -500,7 +500,7 @@ pub use eloquent::{
     prevent_silently_discarding_attributes, preventing_silently_discarding_attributes, prune_all,
     prune_all_dry, prune_one, relations, relations_of, unguarded,
 };
-// Phase 10C T1 — model lifecycle events. The 16 per-type event
+// Phase 10C T1 - model lifecycle events. The 16 per-type event
 // structs (`Created`, `Saving`, ...) are macro-emitted into each
 // model's `events::` submodule; the cross-model shared types
 // (`EventResult`, listener traits, dispatch helpers) re-export here
@@ -510,7 +510,7 @@ pub use eloquent::events::{
     CancellableListener, EventResult, ModelEventHooks, dispatch_after, dispatch_cancellable,
     listen_cancellable,
 };
-// Phase 10C T2a — lifecycle observers. Users implement `Observer<M>`
+// Phase 10C T2a - lifecycle observers. Users implement `Observer<M>`
 // on their observer struct (zero-sized or `Arc`-clonable); the
 // `#[suprnova::observer(M)]` macro (T2b) walks the impl block and
 // registers per-method listeners through the `ObserverEntry` inventory.
@@ -518,7 +518,7 @@ pub use eloquent::events::{
 pub use eloquent::observers::{
     Observer, ObserverEntry, ObserverInstallFuture, bootstrap_observers,
 };
-// `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs — re-exported
+// `casts!` macro is `#[macro_export]` in eloquent/casts/mod.rs - re-exported
 // at the crate root automatically. No `pub use` needed here.
 pub use notifications::channels::broadcast::BroadcastChannel;
 pub use notifications::channels::database::DatabaseChannel;
@@ -576,7 +576,7 @@ pub use serde;
 // is a Laravel-shape column type users name in their own structs.
 pub use chrono;
 
-// Re-export Tera for the `#[derive(NotificationMailable)]` macro — the
+// Re-export Tera for the `#[derive(NotificationMailable)]` macro - the
 // generated `to_mail` references `::suprnova::__tera::{Context, Tera}`
 // so consumers don't need to add `tera` to their `[dependencies]`.
 #[doc(hidden)]
@@ -666,8 +666,8 @@ macro_rules! text_response {
 /// Global middleware is registered in `bootstrap.rs` and runs in registration order,
 /// before any route-specific middleware.
 ///
-/// Registration is idempotent per middleware type — registering the same
-/// type twice keeps the first registration — so re-running bootstrap won't
+/// Registration is idempotent per middleware type - registering the same
+/// type twice keeps the first registration - so re-running bootstrap won't
 /// double-run a global middleware. Register every global BEFORE the server
 /// is constructed: the server snapshots the registry at build time, so a
 /// `global_middleware!` call made after `Server::from_config` / `Server::new`

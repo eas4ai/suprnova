@@ -20,8 +20,8 @@ impl syn::parse::Parse for SuprnovaTestArgs {
             let ident: syn::Ident = input.parse()?;
             // Domain 5 audit M-D5-5: unknown keys (e.g. typo
             // `migrtor = MyMigrator`) used to be silently ignored
-            // because the `if ident == "migrator"` branch had no else
-            // — the next iteration just parsed the next ident as if
+            // because the `if ident == "migrator"` branch had no else -
+            // the next iteration just parsed the next ident as if
             // nothing was wrong. Reject unknown keys with a span-
             // pointed compile error so typos surface immediately.
             if ident == "migrator" {
@@ -31,7 +31,7 @@ impl syn::parse::Parse for SuprnovaTestArgs {
                 return Err(syn::Error::new(
                     ident.span(),
                     format!(
-                        "unknown #[suprnova_test(...)] key `{ident}` — supported keys: migrator"
+                        "unknown #[suprnova_test(...)] key `{ident}` - supported keys: migrator"
                     ),
                 ));
             }
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn empty_attribute_parses_cleanly() {
-        // `#[suprnova_test]` with no args is the common case — must
+        // `#[suprnova_test]` with no args is the common case - must
         // remain valid.
         let tokens: proc_macro2::TokenStream = "".parse().unwrap();
         let parsed: SuprnovaTestArgs = parse2(tokens).expect("empty attribute must parse");

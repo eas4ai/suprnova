@@ -9,7 +9,7 @@
 //! work (Phase 8) can layer richer attributes without losing the
 //! baseline schema.
 //!
-//! All tests are `#[serial]` — the `Mail::TRANSPORT` global is shared.
+//! All tests are `#[serial]` - the `Mail::TRANSPORT` global is shared.
 
 use serde::{Deserialize, Serialize};
 use serial_test::serial;
@@ -63,7 +63,7 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
         "span name `mail.send` must appear in captured trace output"
     );
 
-    // Transport identity — the in-memory transport reports `"in-memory"`.
+    // Transport identity - the in-memory transport reports `"in-memory"`.
     assert!(
         logs_contain("transport=\"in-memory\""),
         "transport name must be on the span fields"
@@ -79,7 +79,7 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
         "attachment_count must be captured"
     );
 
-    // Completion event — success path.
+    // Completion event - success path.
     assert!(
         logs_contain("mail sent"),
         "completion event message must be present"
@@ -95,7 +95,7 @@ async fn successful_send_emits_mail_send_span_with_shape_fields() {
 #[serial]
 async fn failed_send_emits_warn_event_with_error_field() {
     // Bind a transport that always fails so dispatch_with_telemetry's
-    // warn arm runs — the upstream "no transport" and "empty body"
+    // warn arm runs - the upstream "no transport" and "empty body"
     // guards short-circuit before the helper, so a failing transport
     // is the only way to exercise the warn path.
 

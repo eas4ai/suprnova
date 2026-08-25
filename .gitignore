@@ -24,7 +24,7 @@ docs/
 .codex
 .gitnexus
 
-# Local-only AI review notes (Grok, Opus, etc.) — working artifacts, not source
+# Local-only AI review notes (Grok, Opus, etc.) - working artifacts, not source
 /GROK-*.md
 /grok-*.md
 /opus*.md
@@ -33,14 +33,14 @@ docs/
 /*-REVIEW.md
 /remediate-*.md
 
-# Planning + audit artifacts — local working notes, not source
+# Planning + audit artifacts - local working notes, not source
 /.planning/
 /release-prep.md
 **/MODULE_REVIEW_NOTES.md
 **/REVIEW_DEEP_DIVE_*.md
 /FRAMEWORK-1.0-AUDIT.md
 # Remediation working docs. These enumerate findings that are still open,
-# so they stay local until the fixes ship — and they leave the tree dirty,
+# so they stay local until the fixes ship - and they leave the tree dirty,
 # which suppresses the gate stamp and makes every push re-run the suite.
 /REMEDIATION-PLAN.md
 /REMAINING-WORK.md
@@ -49,18 +49,18 @@ docs/
 /PHASE1-FIXES-PLAN.md
 /BENCHMARK-SPEC.md
 
-# Per-directory CLAUDE/AGENTS guidance — AI assistant scope notes,
+# Per-directory CLAUDE/AGENTS guidance - AI assistant scope notes,
 # not part of the published framework surface
 CLAUDE.md
 AGENTS.md
 assets/
 
-# Local dev tooling + stray artifacts — kept locally, not published
+# Local dev tooling + stray artifacts - kept locally, not published
 /database.db
 /bacon.toml
 /dev.sh
 
-# Local tooling — the gate, release scripts, git hooks, and the
+# Local tooling - the gate, release scripts, git hooks, and the
 # cargo-audit policy. Not published.
 /scripts/
 /.cargo/

@@ -1,14 +1,14 @@
 //! `AssertableInertia` unit tests. Everything here builds an
 //! `HttpResponse` (or a `TestResponse`) by hand rather than driving a
-//! real request — the type under test is a pure JSON-object parser
+//! real request - the type under test is a pure JSON-object parser
 //! plus a set of dot-path assertions, so there's nothing a socket would
 //! add. `framework/tests/inertia.rs` is the proof-of-use site: three of
 //! its existing tests are rewritten against this type as part of the
 //! same task.
 //!
-//! The `reload_*` tests fake a "server" inline — a closure that
+//! The `reload_*` tests fake a "server" inline - a closure that
 //! filters a canned page object's `props` by the `ReloadRequest`'s
-//! `only`/`except` lists — so they prove the replay plumbing (request
+//! `only`/`except` lists - so they prove the replay plumbing (request
 //! shape in, chained `AssertableInertia` out, reloader propagation)
 //! without needing `PartialFilter`/`InertiaResponse` at all; those are
 //! already covered end-to-end by `framework/tests/inertia.rs`.
@@ -43,7 +43,7 @@ fn html_shell_response(page: &serde_json::Value) -> HttpResponse {
     HttpResponse::html(html)
 }
 
-// ── `from_response` — both shapes ────────────────────────────────────
+// ── `from_response` - both shapes ────────────────────────────────────
 
 #[test]
 fn from_response_parses_json_page_object_and_chains_every_assertion() {
@@ -92,7 +92,7 @@ fn prop_returns_the_value_at_a_dot_path_or_null_when_absent() {
 #[test]
 fn where_reads_the_collapsed_first_message_errors_shape_from_task_23() {
     // `errors.<field>` is a plain string by default since T23, not an
-    // array — the shape a validation-redirect page actually renders.
+    // array - the shape a validation-redirect page actually renders.
     let page = json!({
         "component": "Register",
         "props": {"errors": {"email": "The email field is required."}},
@@ -142,7 +142,7 @@ fn from_response_reports_the_real_parse_error_when_the_html_shells_script_is_mal
     AssertableInertia::from_response(&response);
 }
 
-// ── page-level assertions — failure modes ────────────────────────────
+// ── page-level assertions - failure modes ────────────────────────────
 
 #[test]
 #[should_panic(expected = "AssertableInertia::component")]
@@ -253,7 +253,7 @@ fn test_response_assert_inertia_panics_without_the_x_inertia_header() {
 
 #[test]
 // Distinct from the header-absent case above: here the header IS
-// present, just not "true" — a client that sent `X-Inertia: false` (or
+// present, just not "true" - a client that sent `X-Inertia: false` (or
 // any other stray value) must be rejected the same way as one that
 // sent no header at all, and the message should echo the value it saw.
 #[should_panic(expected = "got X-Inertia = Some(\"false\")")]
@@ -283,7 +283,7 @@ fn full_users_page() -> serde_json::Value {
 
 /// Fakes the server side of a partial reload: filters the canned page's
 /// `props` by the `ReloadRequest`'s `only`/`except` lists. Proves the
-/// replay plumbing works without pulling in `PartialFilter` — the real
+/// replay plumbing works without pulling in `PartialFilter` - the real
 /// filtering semantics are `framework/src/inertia/prop.rs`'s job and
 /// are already covered by `framework/tests/inertia.rs`.
 fn filtered_response(reload: &ReloadRequest) -> HttpResponse {
@@ -381,7 +381,7 @@ async fn a_reloaded_assertable_carries_the_same_reloader_forward() {
     });
 
     let first = assertable.reload_only(["users"]).await;
-    // `first` never had `.with_reload(...)` called on it directly — this
+    // `first` never had `.with_reload(...)` called on it directly - this
     // only works if the reloader was carried forward from `assertable`.
     let second = first.reload_only(["users"]).await;
     second.has("users");
@@ -400,13 +400,13 @@ async fn reload_only_panics_without_a_reloader_attached() {
 // the replayed result actually fires, not just documents intent ──────
 //
 // Each fake reloader below deliberately misbehaves (the way a buggy
-// `with_reload` harness — or a server bug the harness faithfully
-// reports — would): it returns a page that doesn't match what a
+// `with_reload` harness - or a server bug the harness faithfully
+// reports - would): it returns a page that doesn't match what a
 // correct replay of the same request would produce. If the
 // `reloaded.component(...)`/`.url(...)`/`.version(...)`/`.has(...)`/
 // `.missing(...)` re-assertions inside `reload_only`/`reload_except`
 // were ever deleted, every one of these tests would stop panicking and
-// fail — that's what makes them prove the guard is load-bearing rather
+// fail - that's what makes them prove the guard is load-bearing rather
 // than merely present.
 
 #[tokio::test]
@@ -481,7 +481,7 @@ async fn reload_except_panics_when_the_replayed_response_still_contains_an_exclu
     let assertable =
         AssertableInertia::from_response(&response).with_reload(|_reload| async move {
             // Misbehaving reloader: ignores the exclusion and echoes the
-            // full, unfiltered page back — "stats" is still there despite
+            // full, unfiltered page back - "stats" is still there despite
             // being named in `except`.
             AssertableInertia::from_response(
                 &HttpResponse::json(full_users_page()).header("X-Inertia", "true"),

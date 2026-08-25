@@ -69,7 +69,7 @@ pub fn redirect() -> crate::http::Redirect {
     crate::http::Redirect::to("/")
 }
 
-/// `redirect_to(path)` — Rust-side shorthand for
+/// `redirect_to(path)` - Rust-side shorthand for
 /// [`crate::http::Redirect::to`]. Identical behaviour; provided so call
 /// sites can write `redirect_to("/dashboard")` instead of the longer
 /// `Redirect::to("/dashboard")`.

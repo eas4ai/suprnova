@@ -11,7 +11,7 @@
 //! actual `OutgoingMessage` to prove the wiring is correct, not just
 //! that `to_mail` builds a struct.
 //!
-//! All tests are `#[serial]` — they touch the renderer registry, the
+//! All tests are `#[serial]` - they touch the renderer registry, the
 //! dispatcher, and the mail transport, all of which are process-global.
 
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ fn channels_mail() -> Vec<&'static str> {
 }
 
 // ============================================================================
-// Variant 1 — inline html + text, no sender override
+// Variant 1 - inline html + text, no sender override
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
@@ -102,7 +102,7 @@ async fn derive_inline_html_and_text() {
 }
 
 // ============================================================================
-// Variant 2 — text only (no html); from + from_name override
+// Variant 2 - text only (no html); from + from_name override
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
@@ -156,7 +156,7 @@ async fn derive_text_only_with_from_and_from_name() {
 }
 
 // ============================================================================
-// Variant 3 — cc / bcc / reply_to comma-separated lists
+// Variant 3 - cc / bcc / reply_to comma-separated lists
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
@@ -217,7 +217,7 @@ async fn derive_cc_bcc_reply_to_lists_thread_through() {
 }
 
 // ============================================================================
-// Variant 4 — file templates via `include_str!`
+// Variant 4 - file templates via `include_str!`
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
@@ -280,7 +280,7 @@ async fn derive_html_and_text_templates_via_include_str() {
 }
 
 // ============================================================================
-// Variant 5 — html only (no text)
+// Variant 5 - html only (no text)
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]
@@ -328,7 +328,7 @@ async fn derive_html_only_leaves_text_none() {
 }
 
 // ============================================================================
-// Variant 6 — trailing comma / extra whitespace in address lists
+// Variant 6 - trailing comma / extra whitespace in address lists
 // ============================================================================
 
 #[derive(Serialize, Deserialize, NotificationMailable)]

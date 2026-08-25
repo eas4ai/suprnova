@@ -1,4 +1,4 @@
-//! `suprnova dev:tls` — register a portless HTTPS dev URL and trust
+//! `suprnova dev:tls` - register a portless HTTPS dev URL and trust
 //! portless's local CA in every browser certificate store on the machine.
 //!
 //! On Linux, browsers read NSS databases (`~/.pki/nssdb`, Flatpak
@@ -18,7 +18,7 @@
 //! That mattered because `run` loads the project's `.env` (for `SERVER_PORT`)
 //! before resolving the CA, and `dotenvy` fills in variables the real
 //! environment does not define. A checked-in `.env` containing
-//! `PORTLESS_STATE_DIR=/tmp/attacker` — or `HOME=/tmp/attacker` — therefore
+//! `PORTLESS_STATE_DIR=/tmp/attacker` - or `HOME=/tmp/attacker` - therefore
 //! chose the CA, and `git clone && suprnova dev:tls` installed it. The
 //! trust-relevant environment is now snapshotted by [`TrustEnv::capture`]
 //! *before* `.env` is loaded, the certificate is checked for ownership,
@@ -67,7 +67,7 @@ pub fn resolve_name(cli: Option<String>, cargo_name: Option<String>) -> Result<S
 }
 
 /// Resolve the backend port. `--port` wins; else `SERVER_PORT` (passed in
-/// as `env_server_port`); else the 8765 default. No free-port scan —
+/// as `env_server_port`); else the 8765 default. No free-port scan -
 /// `dev:tls` registers a route, it doesn't bind.
 pub fn resolve_port(cli: Option<u16>, env_server_port: Option<u16>) -> u16 {
     cli.or(env_server_port).unwrap_or(DEFAULT_BACKEND_PORT)
@@ -84,12 +84,12 @@ pub fn ca_path_for(state_dir: Option<&Path>, home: &Path) -> PathBuf {
 
 /// Discover candidate browser NSS databases under `home`.
 ///
-/// Pure: computes paths and flags only — it creates nothing, so it stays
+/// Pure: computes paths and flags only - it creates nothing, so it stays
 /// unit-testable against a temporary `$HOME`. The caller performs any
 /// `mkdir -p` (guided by `create_if_missing`).
 ///
 /// - `~/.pki/nssdb` (Chrome/Chromium deb/rpm) is **always** included with
-///   `create_if_missing = true`, even when absent — a fresh Chrome may not
+///   `create_if_missing = true`, even when absent - a fresh Chrome may not
 ///   have created it yet, and trusting there pre-creation works.
 /// - `~/.var/app/<id>/.pki/nssdb` (Flatpak Chromium-family) is included
 ///   only when that nssdb directory already exists (we don't fabricate NSS
@@ -100,7 +100,7 @@ pub fn ca_path_for(state_dir: Option<&Path>, home: &Path) -> PathBuf {
 pub fn nss_databases(home: &Path) -> Vec<NssDb> {
     let mut dbs = Vec::new();
 
-    // Chrome / Chromium (deb/rpm) — always, create if needed.
+    // Chrome / Chromium (deb/rpm) - always, create if needed.
     dbs.push(NssDb {
         path: home.join(".pki").join("nssdb"),
         create_if_missing: true,
@@ -194,7 +194,7 @@ const MAX_CA_BYTES: u64 = 64 * 1024;
 
 /// Where the CLI records the fingerprint of the CA it last installed.
 ///
-/// Under the user's home, in the tool's own directory — not next to the CA,
+/// Under the user's home, in the tool's own directory - not next to the CA,
 /// and nowhere a project can reach. A pin the same actor could rewrite would
 /// detect nothing.
 fn pin_path(home: &Path) -> PathBuf {
@@ -219,7 +219,7 @@ pub struct CaCertificate {
 ///
 /// This deliberately does not parse X.509. A full parse would need another
 /// dependency and still could not distinguish a legitimate portless CA from
-/// a hostile one — that judgement belongs to the human at the prompt, and
+/// a hostile one - that judgement belongs to the human at the prompt, and
 /// what they need for it is a stable fingerprint. The structural checks here
 /// only ensure we are fingerprinting a certificate rather than a text file.
 pub fn parse_single_certificate(pem: &str) -> Result<Vec<u8>, String> {
@@ -276,7 +276,7 @@ pub fn fingerprint_of(der: &[u8]) -> String {
 /// Read and inspect the CA at `path`.
 ///
 /// The file must be a regular file (not a symlink), owned by the same user
-/// as `home`, and not writable by anyone else — a CA that another account
+/// as `home`, and not writable by anyone else - a CA that another account
 /// can rewrite offers no security once trusted, and following a symlink
 /// would let the pinned fingerprint describe a file other than the one
 /// `certutil` later reads.
@@ -366,7 +366,7 @@ pub fn load_ca(path: &Path, home: &Path) -> Result<CaCertificate, String> {
 /// What to do before mutating a trust store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustDecision {
-    /// Install without asking — the user already said so on the command line.
+    /// Install without asking - the user already said so on the command line.
     Proceed,
     /// Ask the human first. `changed` marks the case where a *different* CA
     /// now sits where a previously-approved one did.
@@ -397,7 +397,7 @@ pub fn decide_trust(
             return TrustDecision::Refuse(
                 "The portless CA has changed since you last trusted it. That is either \
                  a CA rotation or someone substituting a certificate, and telling them \
-                 apart needs a human — re-run `suprnova dev:tls` from an interactive \
+                 apart needs a human - re-run `suprnova dev:tls` from an interactive \
                  terminal. --yes does not cover this case."
                     .to_string(),
             );
@@ -423,7 +423,7 @@ pub fn decide_trust(
 
 /// Is `bin` on PATH? Probe by spawning it with a harmless arg; only a
 /// `NotFound` spawn error counts as "absent" (a non-zero exit still means
-/// the binary exists — e.g. `certutil -H` prints help and exits non-zero).
+/// the binary exists - e.g. `certutil -H` prints help and exits non-zero).
 fn on_path(bin: &str, probe_arg: &str) -> bool {
     match Command::new(bin)
         .arg(probe_arg)
@@ -500,7 +500,7 @@ fn confirm_trust(ca: &CaCertificate, changed: bool) -> Result<(), String> {
     if line.trim().eq_ignore_ascii_case("yes") {
         Ok(())
     } else {
-        Err("Aborted — no certificate store was modified.".to_string())
+        Err("Aborted - no certificate store was modified.".to_string())
     }
 }
 
@@ -645,7 +645,7 @@ pub fn run(name: Option<String>, port: Option<u16>, no_alias: bool, assume_yes: 
     let _ = dotenvy::dotenv();
 
     ui::banner();
-    ui::header("dev:tls — named HTTPS dev URL via portless");
+    ui::header("dev:tls - named HTTPS dev URL via portless");
 
     // 1. Locate portless.
     if !on_path("portless", "--version") {
@@ -690,10 +690,10 @@ pub fn run(name: Option<String>, port: Option<u16>, no_alias: bool, assume_yes: 
         std::process::exit(1);
     }
 
-    // 5. Next steps — always, in order.
+    // 5. Next steps - always, in order.
     ui::br();
     ui::info("Next:");
-    ui::hint("  1. Fully restart your browser — type chrome://restart (a tab");
+    ui::hint("  1. Fully restart your browser - type chrome://restart (a tab");
     ui::hint("     reload is not enough; the cert store is read once at launch)");
     ui::hint("  2. suprnova serve");
     ui::hint(&format!("  3. open {url}"));
@@ -806,7 +806,7 @@ mod tests {
     }
 
     /// A syntactically valid single-certificate PEM. The body is not a real
-    /// X.509 certificate — `load_ca` only checks structure and fingerprints
+    /// X.509 certificate - `load_ca` only checks structure and fingerprints
     /// the DER, which is all the trust decision needs.
     fn sample_pem(seed: u8) -> String {
         let mut der = vec![0x30u8];

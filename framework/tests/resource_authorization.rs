@@ -1,4 +1,4 @@
-//! Integration test for `ResourceRoutes::authorize_resource` — Laravel's
+//! Integration test for `ResourceRoutes::authorize_resource` - Laravel's
 //! `authorizeResource` parity.
 //!
 //! Resource routes are ungated unless every controller body remembers to call
@@ -6,7 +6,7 @@
 //! `authorize_resource::<User, Resource>()` closes that gap by attaching the
 //! conventional ability check to every generated route as per-route
 //! middleware. This drives the wiring end-to-end through `handle_request` over
-//! a loopback socket (the established middleware test pattern — a synthetic
+//! a loopback socket (the established middleware test pattern - a synthetic
 //! `hyper::body::Incoming` can't be built directly), proving that:
 //!
 //! - a denied ability short-circuits with `403` before the handler runs,
@@ -58,7 +58,7 @@ impl Authenticatable for TestUser {
     }
 }
 
-/// Resource marker type — the Gate discriminates on this type, the way
+/// Resource marker type - the Gate discriminates on this type, the way
 /// Laravel discriminates on the model class.
 #[derive(Default)]
 struct Post;
@@ -212,7 +212,7 @@ async fn authorize_resource_denies_destroy_without_grant() {
     assert_eq!(status, 200, "viewer may show");
 
     // The headline case: a forgotten controller-side check would let this
-    // through. authorize_resource gates it — DELETE must be 403 for a viewer.
+    // through. authorize_resource gates it - DELETE must be 403 for a viewer.
     let (status, body) = request(addr, "DELETE", "/posts/42", &[("X-Test-User", "viewer")]).await;
     assert_eq!(
         status, 403,
@@ -227,7 +227,7 @@ async fn authorize_resource_denies_destroy_without_grant() {
     let (status, _) = request(addr, "PUT", "/posts/42", &[("X-Test-User", "viewer")]).await;
     assert_eq!(status, 403, "viewer must NOT be able to update via PUT");
 
-    // PATCH shares the update action and must be gated the same as PUT —
+    // PATCH shares the update action and must be gated the same as PUT -
     // never an ungated bypass.
     let (status, _) = request(addr, "PATCH", "/posts/42", &[("X-Test-User", "viewer")]).await;
     assert_eq!(status, 403, "viewer must NOT be able to update via PATCH");

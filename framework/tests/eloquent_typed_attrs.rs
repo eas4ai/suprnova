@@ -1,4 +1,4 @@
-//! P2-10 — a malformed attribute value must name its field, not become
+//! P2-10 - a malformed attribute value must name its field, not become
 //! that field's `Default`.
 //!
 //! `#[model]` generated both `fill` and `from_attrs_unsaved` (the engine
@@ -9,7 +9,7 @@
 //!
 //! `user.fill(attrs! { age: "not a number" })` set `age = 0` and reported
 //! success. That is the same failure class as P2-09(a)'s silently dropped
-//! eager loads — wrong data, no error, no way to notice — and it is
+//! eager loads - wrong data, no error, no way to notice - and it is
 //! reachable anywhere attrs are built from request input, which is the
 //! ordinary case for `fill`.
 //!
@@ -22,7 +22,7 @@
 //! a *known* column carrying an undecodable value is now an error. Those
 //! are different questions and they get different answers.
 //!
-//! Models are declared at module scope — `#[suprnova::model]` emits an
+//! Models are declared at module scope - `#[suprnova::model]` emits an
 //! inner module whose `use super::*` only sees this file's top-level
 //! imports, so a model inside a test fn breaks SeaORM type resolution.
 
@@ -87,7 +87,7 @@ async fn fill_rejects_a_value_of_the_wrong_type_instead_of_defaulting_it() {
     let msg = format!("{err}");
     assert!(
         msg.contains("age"),
-        "the error must name the offending field — that is the whole \
+        "the error must name the offending field - that is the whole \
          point of a typed field error: {msg}"
     );
     assert_eq!(
@@ -98,7 +98,7 @@ async fn fill_rejects_a_value_of_the_wrong_type_instead_of_defaulting_it() {
     );
 }
 
-/// Not just integers — the same hole existed for every non-mutator field
+/// Not just integers - the same hole existed for every non-mutator field
 /// of every type.
 #[tokio::test]
 async fn fill_rejects_wrong_types_across_field_kinds() {
@@ -137,7 +137,7 @@ async fn fill_still_applies_well_formed_values() {
     assert!(!p.active);
 }
 
-/// serde's numeric flexibility is not "wrong type" — an integer JSON
+/// serde's numeric flexibility is not "wrong type" - an integer JSON
 /// value decoding into an `f64` field is a legitimate coercion and must
 /// keep working. Erring here would make the fix a regression.
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn fill_still_skips_unknown_columns_silently() {
 
 /// A guarded field is dropped by the mass-assignment filter before any
 /// decoding happens, so a malformed value for a field the caller may not
-/// set must not turn into an error either — that would leak which fields
+/// set must not turn into an error either - that would leak which fields
 /// exist to a caller who is not allowed to touch them.
 #[tokio::test]
 async fn fill_ignores_malformed_values_for_non_fillable_fields() {

@@ -54,7 +54,7 @@
 //! singleton entries in a fixed-point loop: every iteration tries every
 //! still-pending entry once, removes the ones that succeeded, and stops when
 //! either the pending set is empty (success) or a full pass made zero progress
-//! (genuine missing or cyclic dependency — returned as a structured error
+//! (genuine missing or cyclic dependency - returned as a structured error
 //! naming the failing entry).
 
 use crate::error::FrameworkError;
@@ -84,7 +84,7 @@ pub struct ServiceBindingEntry {
 /// failed entries until they all succeed or progress stalls.
 pub struct SingletonEntry {
     /// Function to register the singleton. Returns `Ok(())` on success or
-    /// `Err(reason)` if a dependency wasn't registered yet — the bootstrap
+    /// `Err(reason)` if a dependency wasn't registered yet - the bootstrap
     /// loop will retry on later iterations.
     pub register: fn() -> Result<(), String>,
     /// Type name for debugging/logging
@@ -122,7 +122,7 @@ pub fn register_service_bindings() -> Result<(), FrameworkError> {
 /// each iteration tries every pending entry; entries that succeed drop out
 /// of the pending set; the loop stops when either the set empties (success)
 /// or a full pass makes no progress (return Err naming the most recently
-/// failing entry — its `reason` typically already says which transitive
+/// failing entry - its `reason` typically already says which transitive
 /// dependency couldn't be resolved).
 pub fn register_singletons() -> Result<(), FrameworkError> {
     // Snapshot inventory into an owned vec so we can drain it across
@@ -142,7 +142,7 @@ pub fn register_singletons() -> Result<(), FrameworkError> {
         for entry in pending.drain(..) {
             match (entry.register)() {
                 Ok(()) => {
-                    // Registered (or already present via if_absent) — done.
+                    // Registered (or already present via if_absent) - done.
                 }
                 Err(reason) => {
                     iteration_failures.push((entry.name, reason));
@@ -152,7 +152,7 @@ pub fn register_singletons() -> Result<(), FrameworkError> {
         }
 
         if next_pending.is_empty() {
-            // All entries succeeded this iteration — done.
+            // All entries succeeded this iteration - done.
             return Ok(());
         }
 
@@ -167,7 +167,7 @@ pub fn register_singletons() -> Result<(), FrameworkError> {
                 .unwrap_or_else(|| ("<unknown>", "no progress in singleton boot loop".into()));
             return Err(FrameworkError::internal(format!(
                 "singleton `{name}` could not be booted: {reason} \
-                 (no progress across the remaining {} entries — check for \
+                 (no progress across the remaining {} entries - check for \
                  a missing #[injectable] type or a cyclic dependency)",
                 next_pending.len()
             )));
@@ -185,7 +185,7 @@ pub fn register_singletons() -> Result<(), FrameworkError> {
 ///
 /// Called automatically by `Server::from_config()`. Services first, then the
 /// fixed-point loop for singletons. Any failure is returned as a structured
-/// `FrameworkError::internal` naming the failing entry — `Server::from_config`
+/// `FrameworkError::internal` naming the failing entry - `Server::from_config`
 /// propagates it as the boot error.
 pub fn bootstrap() -> Result<(), FrameworkError> {
     register_service_bindings()?;

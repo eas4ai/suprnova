@@ -5,14 +5,14 @@ use crate::config::{DatabaseConfig, MailConfig};
 /// Example endpoint demonstrating how to read application config from a
 /// route handler.
 ///
-/// **Principle: expose non-secret metadata only — never connection
+/// **Principle: expose non-secret metadata only - never connection
 /// strings or credentials.** The handler reads the same
 /// `DatabaseConfig` and `MailConfig` registrations the rest of the app
 /// uses, but only returns operational metadata that is safe to surface
 /// in a JSON response: the database *type* (driver family), pool
 /// numbers, and the mail *driver name*. The database URL, mail host,
 /// port, username, password, and from-address are deliberately
-/// withheld — they may contain credentials, internal hostnames, or
+/// withheld - they may contain credentials, internal hostnames, or
 /// other secrets that don't belong in a public response.
 ///
 /// Copy-pasting this pattern into a real app? Keep the rule: surface

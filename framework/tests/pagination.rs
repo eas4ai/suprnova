@@ -2,8 +2,8 @@
 //! `Pagination::length_aware`/`cursor`, and the Inertia bridge.
 //!
 //! The cursor tests stand up a real in-memory SQLite database via the
-//! `TestContainer` thread-local override so `Pagination::cursor` —
-//! which uses `DB::connection()` internally — sees a connection.
+//! `TestContainer` thread-local override so `Pagination::cursor` -
+//! which uses `DB::connection()` internally - sees a connection.
 
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, Database, DbBackend, EntityTrait, Schema, Set, Statement,
@@ -17,7 +17,7 @@ use suprnova::{
 };
 
 /// Cursor pagination encrypts every emitted payload via the framework's
-/// `Crypt` facade (codex review finding #1 — no plaintext base64
+/// `Crypt` facade (codex review finding #1 - no plaintext base64
 /// fallback). Tests that exercise `Pagination::cursor` need a key
 /// installed, but `Crypt` is a process-global `OnceLock`, so we install
 /// it exactly once for the binary.
@@ -121,7 +121,7 @@ async fn seaorm_length_aware_page_2_returns_10_rows() {
 #[tokio::test]
 async fn facade_length_aware_rejects_zero_per_page() {
     // A live DB is installed so that, were the guard removed, the call
-    // would succeed (LIMIT 0 → empty page) and `expect_err` would panic —
+    // would succeed (LIMIT 0 → empty page) and `expect_err` would panic -
     // this is a real regression signal, not a no-DB false pass. The 400
     // assertion distinguishes the param guard from a 500 DB error.
     let _guard = TestContainer::fake();
@@ -202,7 +202,7 @@ async fn pagination_cursor_emits_prev_cursor_on_page_2() {
     let conn = make_db_with_n_rows(25).await;
     install_db(conn);
 
-    // Page 1 — first page, prev_cursor must be None.
+    // Page 1 - first page, prev_cursor must be None.
     let page1 = Pagination::cursor::<toy::Entity, toy::Column>(
         toy::Entity::find(),
         None,
@@ -222,7 +222,7 @@ async fn pagination_cursor_emits_prev_cursor_on_page_2() {
     let page1_ids: Vec<i32> = page1.data.iter().map(|r| r.id).collect();
     assert_eq!(page1_ids, (1..=10).collect::<Vec<i32>>());
 
-    // Page 2 — using page 1's next_cursor.
+    // Page 2 - using page 1's next_cursor.
     let page2 = Pagination::cursor::<toy::Entity, toy::Column>(
         toy::Entity::find(),
         Some(&next1),
@@ -298,7 +298,7 @@ async fn pagination_cursor_last_page_no_next() {
 // for native int4 / bigint / uuid columns on each dialect.
 //
 // They're skipped by default. To run them, point the URL env var at a
-// DISPOSABLE database and pass `--ignored`. The variable is required —
+// DISPOSABLE database and pass `--ignored`. The variable is required -
 // `populate_n` drops and recreates its table, so there is deliberately no
 // localhost default to fall back onto.
 //
@@ -308,7 +308,7 @@ async fn pagination_cursor_last_page_no_next() {
 //   MYSQL_TEST_URL=mysql://root:pw@127.0.0.1:55997/suprnova_test \
 //     cargo test -p suprnova --test pagination -- --ignored mysql
 //
-// The toy entity's `id` is `i32` (Int) on every dialect — so the
+// The toy entity's `id` is `i32` (Int) on every dialect - so the
 // cursor wire format roundtrips `Value::Int(Some(42))` through
 // Postgres `int4`, MySQL `INT`, etc. without dialect-specific casts.
 
@@ -350,13 +350,13 @@ async fn live_postgres_cursor_walks_with_typed_int_boundary() {
     // No default. `populate_n` below issues `DROP TABLE IF EXISTS items`
     // and recreates it, so a default of `localhost:5432` would silently
     // point a destructive test at whatever Postgres the developer happens
-    // to be running — which is, on most machines, a real one. Requiring
+    // to be running - which is, on most machines, a real one. Requiring
     // the variable makes the target an explicit choice.
     let url = std::env::var("PG_TEST_URL")
-        .expect("set PG_TEST_URL to a disposable Postgres — this test DROPs and recreates tables");
+        .expect("set PG_TEST_URL to a disposable Postgres - this test DROPs and recreates tables");
     let conn = try_connect_live(&url)
         .await
-        .expect("Postgres test DB not reachable — check PG_TEST_URL");
+        .expect("Postgres test DB not reachable - check PG_TEST_URL");
     populate_n(&conn, 25).await;
 
     // `Pagination::cursor` encrypts its cursor, so a key must exist. The
@@ -398,10 +398,10 @@ async fn live_mysql_cursor_walks_with_typed_int_boundary() {
     // Required, not defaulted, for the same reason as the Postgres case
     // above: `populate_n` is destructive.
     let url = std::env::var("MYSQL_TEST_URL")
-        .expect("set MYSQL_TEST_URL to a disposable MySQL — this test DROPs and recreates tables");
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test DROPs and recreates tables");
     let conn = try_connect_live(&url)
         .await
-        .expect("MySQL test DB not reachable — check MYSQL_TEST_URL");
+        .expect("MySQL test DB not reachable - check MYSQL_TEST_URL");
     populate_n(&conn, 25).await;
 
     // `Pagination::cursor` encrypts its cursor, so a key must exist. The
@@ -472,7 +472,7 @@ fn inertia_paginate_facade_produces_inertia_response() {
         id: i32,
     }
     let p = LengthAwarePaginator::new(vec![Row { id: 1 }, Row { id: 2 }], 2, 10, 1);
-    // Just exercise the facade — we don't try to serialize the full
+    // Just exercise the facade - we don't try to serialize the full
     // Inertia response here (that path runs through a scroll-flagged
     // `Prop` which needs an InertiaContext / request).
     let _resp = suprnova::Inertia::paginate("Users/Index", "users", p);

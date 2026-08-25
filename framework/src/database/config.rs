@@ -6,11 +6,11 @@ use crate::config::{Environment, env, env_optional};
 /// Database type enumeration
 #[derive(Debug, Clone, PartialEq)]
 pub enum DatabaseType {
-    /// PostgreSQL — `postgres://` or `postgresql://` URL.
+    /// PostgreSQL - `postgres://` or `postgresql://` URL.
     Postgres,
-    /// MySQL or MariaDB — `mysql://` URL.
+    /// MySQL or MariaDB - `mysql://` URL.
     Mysql,
-    /// SQLite — `sqlite://` URL, or an absolute file path.
+    /// SQLite - `sqlite://` URL, or an absolute file path.
     Sqlite,
     /// Unrecognized scheme; the database layer will refuse to connect.
     Unknown,
@@ -22,7 +22,7 @@ pub enum DatabaseType {
 /// (`Env`), was filled in by the silent SQLite fallback (`Default`),
 /// or was supplied explicitly via [`DatabaseConfigBuilder::url`]
 /// (`Explicit`). Audit HIGH `database` #1: production boots must
-/// refuse the silent fallback — see
+/// refuse the silent fallback - see
 /// [`DatabaseConfig::validate_for_environment`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlSource {
@@ -73,7 +73,7 @@ pub struct DatabaseConfig {
     pub connect_timeout: u64,
     /// Enable SQL query logging
     pub logging: bool,
-    /// Where [`Self::url`] came from — env var, dev-fallback default,
+    /// Where [`Self::url`] came from - env var, dev-fallback default,
     /// or an explicit programmatic value. Used by
     /// [`Self::validate_for_environment`] to refuse the silent
     /// SQLite fallback in production.
@@ -91,7 +91,7 @@ impl DatabaseConfig {
     ///
     /// When `DATABASE_URL` is unset, falls back to
     /// [`Self::DEFAULT_SQLITE_URL`] and records the source as
-    /// [`UrlSource::Default`] — that flag is what
+    /// [`UrlSource::Default`] - that flag is what
     /// [`Self::validate_for_environment`] uses to refuse the silent
     /// fallback in production.
     pub fn from_env() -> Self {
@@ -130,7 +130,7 @@ impl DatabaseConfig {
     /// Returns whether the database URL was explicitly configured
     /// rather than falling through to the dev SQLite default.
     ///
-    /// Use this as a precondition signal — production boots that
+    /// Use this as a precondition signal - production boots that
     /// observe `false` here must refuse to continue. The lower-level
     /// helper that gates `DB::init` on this is
     /// [`Self::validate_for_environment`].
@@ -156,7 +156,7 @@ impl DatabaseConfig {
         let prod_like = env.is_production() || matches!(env, Environment::Staging);
         if prod_like && self.url_source == UrlSource::Default {
             return Err(FrameworkError::param(format!(
-                "DATABASE_URL is required in `{env}` but was unset — refusing to boot \
+                "DATABASE_URL is required in `{env}` but was unset - refusing to boot \
                  against the dev SQLite fallback `{}`. Set DATABASE_URL to the \
                  production database URL, or construct an explicit config via \
                  `DatabaseConfig::builder().url(...)` when a SQLite file really is \
@@ -169,18 +169,18 @@ impl DatabaseConfig {
 
     /// Refuse pool settings that would silently misbehave at runtime:
     ///
-    /// - `max_connections == 0` — the pool will never hand out a
+    /// - `max_connections == 0` - the pool will never hand out a
     ///   connection; every query times out.
-    /// - `min_connections > max_connections` — sqlx accepts this but it
+    /// - `min_connections > max_connections` - sqlx accepts this but it
     ///   means the pool can never warm itself up.
-    /// - `connect_timeout == 0` — the first call would error
+    /// - `connect_timeout == 0` - the first call would error
     ///   immediately on any latency.
     ///
     /// Called from [`DbConnection::connect`](crate::database::DbConnection)
     /// so both [`DB::init`](crate::DB::init) and
     /// [`DB::init_with`](crate::DB::init_with) fail-fast on a bad config
     /// instead of producing a sick pool. `min_connections == 0` is left
-    /// alone — that's a legitimate "lazy / idle-empty pool" mode.
+    /// alone - that's a legitimate "lazy / idle-empty pool" mode.
     pub fn validate_pool(&self) -> Result<(), FrameworkError> {
         if self.max_connections == 0 {
             return Err(FrameworkError::param(
@@ -252,10 +252,10 @@ impl DatabaseConfigBuilder {
     /// Build the configuration.
     ///
     /// `url`: if [`Self::url`] was called the resulting config
-    /// carries [`UrlSource::Explicit`] (production-safe — the
+    /// carries [`UrlSource::Explicit`] (production-safe - the
     /// operator chose this URL deliberately). Otherwise the URL +
     /// source are inherited from
-    /// [`DatabaseConfig::from_env`] — `Env` when `DATABASE_URL` is
+    /// [`DatabaseConfig::from_env`] - `Env` when `DATABASE_URL` is
     /// set, `Default` when it falls through to the SQLite
     /// convenience URL.
     pub fn build(self) -> DatabaseConfig {

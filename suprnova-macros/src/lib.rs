@@ -36,7 +36,7 @@ mod utils;
 mod workflow;
 mod workflow_step;
 
-/// Derive macro for `Data` — composite derive that produces `Serialize`
+/// Derive macro for `Data` - composite derive that produces `Serialize`
 /// (skipping `#[data(input_only)]` fields) and `Deserialize` (rejecting
 /// payloads that set `#[data(output_only)]` fields). Also registers
 /// `#[data(allow_include)]` fields into the runtime include allowlist
@@ -152,7 +152,7 @@ pub fn inertia_response(input: TokenStream) -> TokenStream {
 ///
 /// The named-route form validates that the route name exists at compile
 /// time. If the route doesn't exist, you'll get a compile error with
-/// suggestions. Literal paths skip that validation — they may point at
+/// suggestions. Literal paths skip that validation - they may point at
 /// routes another service owns.
 #[proc_macro]
 pub fn redirect(input: TokenStream) -> TokenStream {
@@ -195,7 +195,7 @@ pub fn service(attr: TokenStream, input: TokenStream) -> TokenStream {
     service::service_impl(attr, input)
 }
 
-/// The application entry point — use instead of `#[tokio::main]`.
+/// The application entry point - use instead of `#[tokio::main]`.
 ///
 /// Loads `.env` while the process is still single-threaded, then builds
 /// the Tokio runtime and runs the body on it. `#[tokio::main]` cannot do
@@ -494,8 +494,8 @@ pub fn derive_command(input: TokenStream) -> TokenStream {
 ///
 /// # Attributes
 ///
-/// - `name = "db:seed"` (required) — invocation name on the CLI
-/// - `description = "..."` (optional) — help-line text
+/// - `name = "db:seed"` (required) - invocation name on the CLI
+/// - `description = "..."` (optional) - help-line text
 ///
 /// # Example
 ///
@@ -631,17 +631,17 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
     policy::policy(attr, item)
 }
 
-/// Derive macro for `MultipartRequest` — strongly-typed multipart extractor.
+/// Derive macro for `MultipartRequest` - strongly-typed multipart extractor.
 ///
 /// Annotate each field with `#[field("form_name")]` to bind it to the
 /// matching multipart part. Supported field shapes:
 ///
-/// - `UploadedFile<V>` — required file; 422 if absent
-/// - `Option<UploadedFile<V>>` — optional file
-/// - `Vec<UploadedFile<V>>` — collect every matching file part
-/// - `T: FromStr` (e.g. `String`, `u32`) — required text field
-/// - `Option<T>` — optional text field
-/// - `Vec<T>` — collect every matching text part
+/// - `UploadedFile<V>` - required file; 422 if absent
+/// - `Option<UploadedFile<V>>` - optional file
+/// - `Vec<UploadedFile<V>>` - collect every matching file part
+/// - `T: FromStr` (e.g. `String`, `u32`) - required text field
+/// - `Option<T>` - optional text field
+/// - `Vec<T>` - collect every matching text part
 ///
 /// The validator `V` defaults to `()` (accept anything). Built-in
 /// validators live in `suprnova::http::upload::validators` and can be
@@ -671,7 +671,7 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
     multipart::expand(input)
 }
 
-/// Derive macro for `NotificationMailable` — auto-generates `to_mail`
+/// Derive macro for `NotificationMailable` - auto-generates `to_mail`
 /// from a `#[mail(...)]` attribute.
 ///
 /// The struct must also derive `Serialize` (used as the Tera template
@@ -685,12 +685,12 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
 ///
 /// | Key             | Required? | Purpose                                                                    |
 /// |-----------------|-----------|----------------------------------------------------------------------------|
-/// | `subject`       | yes       | Subject Tera template — rendered with `self` as the JSON context.          |
+/// | `subject`       | yes       | Subject Tera template - rendered with `self` as the JSON context.          |
 /// | `html`          | ‡         | Inline HTML body Tera template.                                            |
 /// | `html_template` | ‡         | Path to an HTML body Tera template, embedded via `include_str!`.           |
 /// | `text`          | ‡         | Inline plain-text body Tera template.                                      |
 /// | `text_template` | ‡         | Path to a plain-text body Tera template, embedded via `include_str!`.      |
-/// | `from`          | no        | Sender email address — overrides the framework default `noreply@localhost`. |
+/// | `from`          | no        | Sender email address - overrides the framework default `noreply@localhost`. |
 /// | `from_name`     | no        | Display name for the sender. Requires `from`.                              |
 /// | `cc`            | no        | Comma-separated CC list (e.g. `"a@x.com, b@y.com"`). Whitespace is ignored. |
 /// | `bcc`           | no        | Comma-separated BCC list.                                                  |
@@ -723,7 +723,7 @@ pub fn multipart_request(input: TokenStream) -> TokenStream {
 ///
 /// #[derive(Serialize, Deserialize, NotificationMailable)]
 /// #[mail(
-///     subject = "Your order shipped — tracking {{ tracking }}",
+///     subject = "Your order shipped - tracking {{ tracking }}",
 ///     html    = "<p>Tracking: <code>{{ tracking }}</code></p>",
 ///     text    = "Tracking: {{ tracking }}",
 ///     from    = "orders@suprnova.dev",
@@ -754,7 +754,7 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
     notification_mail::derive_notification_mailable_impl(input)
 }
 
-/// `#[suprnova::model]` — declare a Suprnova/Eloquent model.
+/// `#[suprnova::model]` - declare a Suprnova/Eloquent model.
 ///
 /// Generates SeaORM Entity, Model, ActiveModel, Column enum, Relation
 /// stub, and Eloquent trait impls. Registers the model via
@@ -763,13 +763,13 @@ pub fn derive_notification_mailable(input: TokenStream) -> TokenStream {
 ///
 /// # Attribute keys (Phase 10A T3)
 ///
-/// - `table = "..."` — SQL table name. Defaults to the naive plural of
+/// - `table = "..."` - SQL table name. Defaults to the naive plural of
 ///   the struct's snake-case name (`User` → `users`).
-/// - `primary_key = "..."` — primary-key column name. Defaults to `"id"`.
-/// - `key_type = "..."` — primary-key Rust type (parsed as a `Type`).
+/// - `primary_key = "..."` - primary-key column name. Defaults to `"id"`.
+/// - `key_type = "..."` - primary-key Rust type (parsed as a `Type`).
 ///   Defaults to `"i64"`.
-/// - `auto_increment = true|false` — defaults to `true`.
-/// - `connection = "..."` — multi-connection routing identifier.
+/// - `auto_increment = true|false` - defaults to `true`.
+/// - `connection = "..."` - multi-connection routing identifier.
 ///   Defaults to `"default"`.
 ///
 /// Additional keys (`fillable`, `guarded`, `casts`, `timestamps`,
@@ -798,7 +798,7 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[accessor]` — function-level attribute that marks an
+/// `#[accessor]` - function-level attribute that marks an
 /// `impl Model { ... }` method as an Eloquent attribute reader.
 ///
 /// Applied to `fn name(&self) -> T`. When the field name appears in
@@ -834,7 +834,7 @@ pub fn accessor(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[mutator]` — function-level attribute that marks an
+/// `#[mutator]` - function-level attribute that marks an
 /// `impl Model { ... }` method as the routed write-path for a column.
 ///
 /// Applied to
@@ -845,7 +845,7 @@ pub fn accessor(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// body owns the deserialise + transform.
 ///
 /// Direct field assignment (`user.password = "raw"`) bypasses the
-/// mutator — same as Laravel's `$user->password = ...` vs
+/// mutator - same as Laravel's `$user->password = ...` vs
 /// `$user->fill(...)`.
 ///
 /// # Example
@@ -878,7 +878,7 @@ pub fn mutator(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[suprnova::prunable]` — register a `Prunable` / `MassPrunable`
+/// `#[suprnova::prunable]` - register a `Prunable` / `MassPrunable`
 /// impl with the `model:prune` runtime.
 ///
 /// Wraps the user's `impl Prunable for T` (or `impl MassPrunable for T`)
@@ -888,7 +888,7 @@ pub fn mutator(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// console command exposes the same surface on the CLI.
 ///
 /// The macro detects which trait is being implemented via the trait
-/// path's last segment — accepts both `Prunable` / `MassPrunable` and
+/// path's last segment - accepts both `Prunable` / `MassPrunable` and
 /// fully qualified `suprnova::eloquent::Prunable` /
 /// `suprnova::eloquent::MassPrunable`.
 ///
@@ -918,7 +918,7 @@ pub fn prunable(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `#[suprnova::observer(M)]` — attribute macro that turns an
+/// `#[suprnova::observer(M)]` - attribute macro that turns an
 /// `impl Observer<M> for SomeObserver { ... }` block into a set of
 /// registered listeners.
 ///
@@ -999,7 +999,7 @@ pub fn observer(attr: TokenStream, item: TokenStream) -> TokenStream {
     observer::expand(attr, item)
 }
 
-/// `#[suprnova::scopes(Model)]` — attribute macro that turns an
+/// `#[suprnova::scopes(Model)]` - attribute macro that turns an
 /// `impl Model { ... }` block into a scope-aware impl.
 ///
 /// Walks the impl block and, for every method whose signature matches
@@ -1008,7 +1008,7 @@ pub fn observer(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 1. **Static helper** on the model: `Model::active(args...)`.
 ///    Starts from `Self::query()` and applies the scope.
 /// 2. **Builder extension** via a per-(scope, model) trait
-///    `HasScope_<scope>_<Model>`: `Builder<Model>::active(args...)` —
+///    `HasScope_<scope>_<Model>`: `Builder<Model>::active(args...)` -
 ///    chainable from any existing builder.
 ///
 /// The original body is preserved as a renamed `__scope_<name>`
@@ -1024,7 +1024,7 @@ pub fn observer(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The emitted `HasScope_<scope>_<Model>` trait is `pub` and lives at
 /// module scope alongside the impl block. Inside the same module the
 /// `.<scope>()` call resolves automatically. From a different module
-/// the consumer must `use` the trait — the static helper does NOT
+/// the consumer must `use` the trait - the static helper does NOT
 /// require an extra `use`.
 ///
 /// # Example
@@ -1052,7 +1052,7 @@ pub fn observer(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///         query.filter_op("followers_count", ">", threshold)
 ///     }
 ///
-///     // Not a scope — pass-through.
+///     // Not a scope - pass-through.
 ///     pub fn display_name(&self) -> String {
 ///         self.name.clone()
 ///     }
@@ -1067,7 +1067,7 @@ pub fn scopes(attr: TokenStream, item: TokenStream) -> TokenStream {
     scopes::expand(attr, item)
 }
 
-/// Derive macro for `Factory` — generates a sibling marker struct plus
+/// Derive macro for `Factory` - generates a sibling marker struct plus
 /// the `Factory` impl from a struct that implements `fake::Dummy`.
 ///
 /// Applied to a model `User`, the derive emits:
@@ -1084,7 +1084,7 @@ pub fn scopes(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The marker's visibility matches the model's. The generated name
 /// defaults to `<ModelName>Factory`; override via `#[factory(name = "...")]`.
 ///
-/// The model must implement `fake::Dummy<fake::Faker>` — typically via
+/// The model must implement `fake::Dummy<fake::Faker>` - typically via
 /// `#[derive(suprnova::Dummy)]`. `Dummy` is re-exported from suprnova so
 /// consumers don't need a direct `fake` dependency.
 ///

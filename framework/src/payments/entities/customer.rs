@@ -6,7 +6,7 @@
 //!
 //! The `provider_metadata` JSON binary column preserves the full
 //! provider response (e.g. Stripe's `Customer` object) without schema
-//! coupling — providers add fields without requiring a migration.
+//! coupling - providers add fields without requiring a migration.
 
 use chrono::{DateTime, Utc};
 
@@ -15,17 +15,17 @@ use chrono::{DateTime, Utc};
 pub struct Customer {
     /// Surrogate primary key.
     pub id: i64,
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.) matching
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.) matching
     /// the value [`super::super::traits::PaymentProvider::name`] returns.
     pub provider: String,
     /// Provider-issued customer identifier (e.g. Stripe's `cus_…`).
     pub provider_customer_id: String,
-    /// App-side user identifier — kept opaque (`String`) so any format
+    /// App-side user identifier - kept opaque (`String`) so any format
     /// (UUID, ULID, numeric) round-trips unchanged.
     pub user_id: String,
     /// Customer's billing email.
     pub email: String,
-    /// JSON snapshot of the provider's customer object — preserved
+    /// JSON snapshot of the provider's customer object - preserved
     /// verbatim so app code can read fields the mirror schema doesn't
     /// flatten.
     pub provider_metadata: serde_json::Value,

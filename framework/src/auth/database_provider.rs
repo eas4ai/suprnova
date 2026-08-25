@@ -1,8 +1,8 @@
-//! Table-backed user provider — Laravel's `DatabaseUserProvider`.
+//! Table-backed user provider - Laravel's `DatabaseUserProvider`.
 //!
 //! Authenticates against a raw table via [`crate::DB::table`], returning
 //! a [`GenericUser`]. The fully-generic provider: no model type, no
-//! macro — point it at a table and it works, so the common case needs no
+//! macro - point it at a table and it works, so the common case needs no
 //! hand-written [`UserProvider`].
 //!
 //! ```rust,no_run
@@ -110,7 +110,7 @@ impl DatabaseUserProvider {
     /// Set the credential-lookup allowlist (default `["email"]`).
     ///
     /// `retrieve_by_credentials` filters on the intersection of these
-    /// columns and the supplied credential keys — and nothing else. To
+    /// columns and the supplied credential keys - and nothing else. To
     /// allow login by email *or* username, pass `["email", "username"]`.
     pub fn credential_columns<I, S>(mut self, columns: I) -> Self
     where
@@ -123,7 +123,7 @@ impl DatabaseUserProvider {
 
     /// Override how a string id is bound into the SQL lookup. The
     /// default parses numeric ids as integers and treats anything else
-    /// (UUIDs, ULIDs, zero-padded codes) as a string — pass a custom
+    /// (UUIDs, ULIDs, zero-padded codes) as a string - pass a custom
     /// parser when a string PK happens to look numeric (e.g. zero-padded
     /// `"007"`) so it doesn't bind as `7`.
     pub fn with_id_parser(mut self, parser: fn(&str) -> SeaValue) -> Self {
@@ -262,7 +262,7 @@ mod tests {
         let wrong_pw = t0.elapsed();
 
         // Passwordless (OAuth-only) user: must ALSO run a dummy KDF, not return
-        // instantly — otherwise its wall-clock reveals the account is passwordless.
+        // instantly - otherwise its wall-clock reveals the account is passwordless.
         let passwordless = TestUser { password: None };
         let t1 = Instant::now();
         assert!(

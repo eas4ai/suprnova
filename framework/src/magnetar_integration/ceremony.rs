@@ -26,7 +26,7 @@ use crate::error::FrameworkError;
 
 /// Issue a ceremony token. `selector` MUST be globally unique
 /// (UUID v4 is the canonical choice). `payload` is serialised to
-/// JSON and stored as text — opaque to this table.
+/// JSON and stored as text - opaque to this table.
 ///
 /// `kind` is a free-form discriminator used by [`consume`] to ensure
 /// a passkey-registration selector can't be replayed against an OAuth
@@ -66,7 +66,7 @@ pub async fn issue<P: Serialize>(
 /// - the conditional DELETE affected exactly 1 row.
 ///
 /// Returns `None` for any miss (no row, wrong kind, expired, or lost
-/// a concurrency race). Callers MUST NOT retry on `None` — it
+/// a concurrency race). Callers MUST NOT retry on `None` - it
 /// indicates "ceremony already consumed or invalid", not a transient
 /// failure.
 pub async fn consume<P: DeserializeOwned>(
@@ -163,7 +163,7 @@ pub mod entity {
         pub created_at: chrono::NaiveDateTime,
     }
 
-    /// SeaORM relation enum — `auth_ceremony_tokens` is a leaf table with no
+    /// SeaORM relation enum - `auth_ceremony_tokens` is a leaf table with no
     /// declared foreign-key relations.
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}

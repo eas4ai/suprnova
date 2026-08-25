@@ -1,4 +1,4 @@
-//! Phase 10C T1 — emit per-model `events::` submodule + macro-driven
+//! Phase 10C T1 - emit per-model `events::` submodule + macro-driven
 //! [`ModelEventHooks`] impl.
 //!
 //! Two emission helpers:
@@ -54,7 +54,7 @@ pub fn emit_events_module(struct_ident: &Ident) -> TokenStream {
     let force_deleted_name = qualify("ForceDeleted");
 
     quote! {
-        /// Phase 10C T1 — lifecycle event structs. Listeners attach
+        /// Phase 10C T1 - lifecycle event structs. Listeners attach
         /// via [`suprnova::EventFacade::listen`] (non-cancellable) or
         /// [`suprnova::listen_cancellable`] (cancellable). See
         /// `docs/core/eloquent.md` "Lifecycle events" for the matrix.
@@ -144,7 +144,7 @@ pub fn emit_events_module(struct_ident: &Ident) -> TokenStream {
 
             /// Fired before `delete` (soft or hard). Cancellable.
             /// `is_force` is `true` when invoked via `force_delete`
-            /// on a soft-delete model — listeners that care about
+            /// on a soft-delete model - listeners that care about
             /// soft-delete-only behaviour branch on this flag.
             #[derive(Debug, Clone)]
             pub struct Deleting {
@@ -176,7 +176,7 @@ pub fn emit_events_module(struct_ident: &Ident) -> TokenStream {
             }
 
             /// Fired before `restore` on a soft-delete model.
-            /// Cancellable — a listener can refuse the un-tombstone
+            /// Cancellable - a listener can refuse the un-tombstone
             /// operation.
             #[derive(Debug, Clone)]
             pub struct Restoring { pub model: #struct_ident }

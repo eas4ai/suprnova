@@ -5,8 +5,8 @@
 //!
 //! | Handler param shape          | Scope policy                            |
 //! |------------------------------|-----------------------------------------|
-//! | `RouteParam<User>`           | Routes through `User::find(id)` — applies global scopes + soft-delete filter |
-//! | bare `<inner>::Model`        | Bypasses the Eloquent scope — exposes trashed rows |
+//! | `RouteParam<User>`           | Routes through `User::find(id)` - applies global scopes + soft-delete filter |
+//! | bare `<inner>::Model`        | Bypasses the Eloquent scope - exposes trashed rows |
 //!
 //! The wrapped path is the safe default (Laravel-equivalent
 //! `Route::model(...)`). The raw `Model` path remains the escape hatch
@@ -69,7 +69,7 @@ async fn route_param_filters_trashed_rows() {
     // Soft-delete the row.
     user.delete().await.unwrap();
 
-    // Wrapped path now refuses to bind — soft-delete scope applies.
+    // Wrapped path now refuses to bind - soft-delete scope applies.
     let err = <RouteParam<RbSdUser> as AutoRouteBinding>::from_route_param(&user_id.to_string())
         .await
         .expect_err("scoped binding hides trashed row");
@@ -84,7 +84,7 @@ async fn route_param_filters_trashed_rows() {
 #[tokio::test]
 async fn raw_model_binding_exposes_trashed_rows() {
     // The bare SeaORM `Model` path goes through `EntityExt::find_by_pk`,
-    // which is intentionally unscoped — it's the escape hatch for admin
+    // which is intentionally unscoped - it's the escape hatch for admin
     // surfaces that must reach trashed rows by id. This test pins the
     // contract so we notice if a future change accidentally routes the
     // raw path through the scoped finder.
@@ -97,7 +97,7 @@ async fn raw_model_binding_exposes_trashed_rows() {
     let user_id = user.id;
     user.delete().await.unwrap();
 
-    // Raw Model path — no scope filter, trashed row returned.
+    // Raw Model path - no scope filter, trashed row returned.
     let row: rb_sd_user::Model =
         <rb_sd_user::Model as AutoRouteBinding>::from_route_param(&user_id.to_string())
             .await
@@ -126,7 +126,7 @@ async fn route_param_404_for_missing_id() {
 #[tokio::test]
 async fn route_param_param_parse_error_for_non_integer() {
     // Wrapped path surfaces ParamParse (400) when the captured string
-    // can't parse into the model's PK type — same error shape as the
+    // can't parse into the model's PK type - same error shape as the
     // raw path.
     let db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&db).await;

@@ -4,7 +4,7 @@
 
   // `GET /users` serves this component via `Inertia::paginate`, so the
   // rows arrive under `users` and the page cursor under `scrollProps`.
-  // The Rust side projects to id + name deliberately — the route is
+  // The Rust side projects to id + name deliberately - the route is
   // unauthenticated and the full user DTO carries an email address.
   let { users }: { users: PublicUserProps[] } = $props()
 </script>

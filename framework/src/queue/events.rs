@@ -11,7 +11,7 @@
 //! and listener-side classification (string prefix / contains checks)
 //! without forcing every listener to hold the full error chain.
 //!
-//! These events are best-effort — `Event::dispatch` with no listeners
+//! These events are best-effort - `Event::dispatch` with no listeners
 //! registered is a no-op `Ok(())`, so workers that emit them in
 //! deployments without `Event::init()` pay nothing.
 
@@ -110,7 +110,7 @@ impl Event for JobProcessed {
 }
 
 /// Fired immediately after a job attempt resolves to a terminal outcome
-/// (success / fail / timeout — not retry). Mirrors
+/// (success / fail / timeout - not retry). Mirrors
 /// `Illuminate\Queue\Events\JobAttempted`. Distinct from [`JobProcessed`]:
 /// `JobAttempted` fires for every terminal settlement, while
 /// `JobProcessed` only fires on a clean success.
@@ -179,7 +179,7 @@ impl Event for JobReleasedAfterException {
 
 /// Fired when middleware (or manual `release(delay)`) re-enqueues a job
 /// **without** counting it as a failed attempt. Distinct from
-/// [`JobReleasedAfterException`] — the original Laravel split, kept here
+/// [`JobReleasedAfterException`] - the original Laravel split, kept here
 /// so listeners can distinguish "back-off after error" from "retry later
 /// because lock/throttle was busy".
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,7 +278,7 @@ impl Event for WorkerInterrupted {
 /// within the job's [`Job::unique_for`](crate::queue::Job::unique_for)
 /// window. Mirrors `Illuminate\Queue\Events\UniqueJobSkipped`.
 ///
-/// The suppression is the feature working, not a failure — the return
+/// The suppression is the feature working, not a failure - the return
 /// value stays `Ok(false)`. The event exists because a silent suppression
 /// is invisible: without it, "the job never ran" and "the job was
 /// deduped" look identical from outside the process.
@@ -328,7 +328,7 @@ impl Event for QueuesResumed {
 
 /// Fired by [`Queue::pause`](crate::queue::Queue::pause). Mirrors
 /// Laravel's `Illuminate\Queue\Events\QueuePaused` (minus its optional
-/// `$ttl` — Suprnova has no `pauseFor` equivalent).
+/// `$ttl` - Suprnova has no `pauseFor` equivalent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuePaused {
     /// Connection name the pause applies to.

@@ -1,4 +1,4 @@
-//! Application path helpers — Suprnova's analogue of Laravel's
+//! Application path helpers - Suprnova's analogue of Laravel's
 //! `base_path()` / `storage_path()` / `config_path()` family.
 //!
 //! Every path derives from a single base directory. The base defaults to the

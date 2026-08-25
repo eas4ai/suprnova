@@ -1,7 +1,7 @@
-//! Phase 10B T7 — `MorphToMany<L, R, P>` + `MorphedByMany<L, R, P>` +
+//! Phase 10B T7 - `MorphToMany<L, R, P>` + `MorphedByMany<L, R, P>` +
 //! polymorphic m2m.
 //!
-//! Exercises the full polymorphic m2m surface — the same shape as
+//! Exercises the full polymorphic m2m surface - the same shape as
 //! `BelongsToMany` (T4) but with a `*_type` discriminator on every
 //! pivot SQL statement so multiple parent morph families can share a
 //! single pivot table:
@@ -13,7 +13,7 @@
 //!   `.first()`, `.count()`.
 //! - `MorphedByMany` (m2m partner → one specific morph target family):
 //!   `Tag.posts()` returns only Post-typed taggables, `Tag.videos()`
-//!   returns only Video-typed taggables. Readers only — pivot writes
+//!   returns only Video-typed taggables. Readers only - pivot writes
 //!   go through the parent-side `MorphToMany`.
 //!
 //! Eager loading runs through the parent model's `__eager_load`
@@ -128,7 +128,7 @@ async fn morph_to_many_attaches_to_video_independently() {
     let v_tags = v.tags().get().await.unwrap();
     assert_eq!(p_tags.len(), 1);
     assert_eq!(v_tags.len(), 1);
-    // Same tag row, two morph attachments — proves the pivot's
+    // Same tag row, two morph attachments - proves the pivot's
     // `taggable_type` discriminator separates the two families.
     assert_eq!(p_tags[0].id, v_tags[0].id);
 }
@@ -160,7 +160,7 @@ async fn morph_to_many_detach_does_not_touch_other_family() {
     v.tags().attach(t.id).await.unwrap();
 
     // Same primary-key value across two morph families is the worst
-    // case — assert the detach only removed the matching type.
+    // case - assert the detach only removed the matching type.
     assert_eq!(
         p.id, v.id,
         "test relies on Post.id == Video.id sharing values"
@@ -174,7 +174,7 @@ async fn morph_to_many_detach_does_not_touch_other_family() {
 #[tokio::test]
 async fn morph_to_many_sync_transactional() {
     // `sync` is the diff-and-apply path: attach what's new, detach
-    // what's gone. Mirrors BelongsToMany::sync — wraps in a single
+    // what's gone. Mirrors BelongsToMany::sync - wraps in a single
     // transaction so partial failures roll back.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -326,7 +326,7 @@ async fn morph_to_many_eager_load() {
     }
 }
 
-/// Helper — invoke `__count_relation` directly. T9's user-facing
+/// Helper - invoke `__count_relation` directly. T9's user-facing
 /// `with_count(["..."])` builder method lives on top of this hook;
 /// driving the hook lets us pin the count contract before T9 lands the
 /// surface sugar.
@@ -340,7 +340,7 @@ where
         .unwrap();
 }
 
-/// Helper — invoke `__aggregate_relation` directly. Same rationale as
+/// Helper - invoke `__aggregate_relation` directly. Same rationale as
 /// `dispatch_count`.
 async fn dispatch_aggregate<M>(
     rows: &mut [M],
@@ -360,7 +360,7 @@ async fn dispatch_aggregate<M>(
 #[tokio::test]
 async fn morph_to_many_eager_load_excludes_other_family() {
     // The eager arm MUST apply the `<name>_type = '<self_morph_type>'`
-    // filter — otherwise Post.tags eager-load would surface
+    // filter - otherwise Post.tags eager-load would surface
     // video-side attachments shared on the same pivot.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
@@ -478,7 +478,7 @@ async fn morph_to_many_pivot_accessor_after_eager_load() {
 
 #[tokio::test]
 async fn morphed_by_many_pivot_accessor() {
-    // Inverse-direction pivot accessor — `tag.posts().get()` should
+    // Inverse-direction pivot accessor - `tag.posts().get()` should
     // stamp `__pivot` on each Post just like the parent direction.
     // Mirrors `MorphToMany`'s pivot contract for API symmetry.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -541,7 +541,7 @@ async fn morph_to_many_count_via_server_side_group_by() {
 
 #[tokio::test]
 async fn morph_to_many_aggregate_via_server_side_group_by() {
-    // Aggregate over the related table's column (Laravel parity —
+    // Aggregate over the related table's column (Laravel parity -
     // users typically aggregate over tag.id-related metrics, not the
     // pivot's own columns).
     let _db = TestDatabase::sqlite_memory().await.unwrap();
@@ -582,7 +582,7 @@ async fn morph_to_many_aggregate_min_max_returns_option() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
     let p = MmPost::create(attrs! { title: "p" }).await.unwrap();
-    // Empty-set Post — no attachments. Min/Max → None.
+    // Empty-set Post - no attachments. Min/Max → None.
     let mut posts_no_tags = MmPost::query().get().await.unwrap();
     dispatch_aggregate(
         &mut posts_no_tags,

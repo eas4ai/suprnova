@@ -1,11 +1,11 @@
-//! Profile model — Phase 10B P5 dogfood for `HasOne`.
+//! Profile model - Phase 10B P5 dogfood for `HasOne`.
 //!
 //! Sits on the "child" side of a one-to-one relation with `User`:
 //! each Profile row carries a `user_id` FK back to its owning User,
 //! and the `user_id` column is UNIQUE in the schema so a User has
 //! at most one Profile (by definition of HasOne).
 //!
-//! Paired with `User.profile: HasOne<Profile>` on the parent side —
+//! Paired with `User.profile: HasOne<Profile>` on the parent side -
 //! see `crate::models::users`. The default FK convention
 //! (`default_has_fk("User") == "user_id"`) matches this schema, so
 //! the parent's relation declaration carries no `fk = "..."` override.

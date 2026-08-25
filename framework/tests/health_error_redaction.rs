@@ -1,4 +1,4 @@
-//! CI-05 — `/_suprnova/health?db=true` must not hand a raw driver error
+//! CI-05 - `/_suprnova/health?db=true` must not hand a raw driver error
 //! to an unauthenticated caller.
 //!
 //! The health endpoint is unauthenticated by design: it exists for
@@ -12,7 +12,7 @@
 //! and schema names, and server versions; sqlx's configuration errors can
 //! carry the connection URL. Handing those to whoever asks, precisely when
 //! the system is already degraded, is the definition of an information
-//! leak — and the endpoint's 503 is exactly the moment an attacker is most
+//! leak - and the endpoint's 503 is exactly the moment an attacker is most
 //! interested.
 //!
 //! `http/response.rs` and `resources/errors.rs` already gate their 5xx
@@ -108,7 +108,7 @@ fn install_app_config(env: Environment, debug: bool) {
 }
 
 /// The headline case. Production-shaped config, database not initialized,
-/// so the probe fails — and the caller learns only that it failed.
+/// so the probe fails - and the caller learns only that it failed.
 #[tokio::test]
 #[serial]
 async fn a_degraded_health_probe_hides_the_driver_error_outside_debug() {
@@ -123,7 +123,7 @@ async fn a_degraded_health_probe_hides_the_driver_error_outside_debug() {
     );
     assert_eq!(
         body["status"], "degraded",
-        "the machine-readable status must be unchanged by redaction — \
+        "the machine-readable status must be unchanged by redaction - \
          dashboards parse this field"
     );
     assert_eq!(
@@ -152,7 +152,7 @@ async fn a_degraded_health_probe_keeps_the_driver_error_in_debug() {
     assert_eq!(body["status"], "degraded");
     assert!(
         body.get("database_error").is_some(),
-        "debug builds must keep the detail — redacting it everywhere would \
+        "debug builds must keep the detail - redacting it everywhere would \
          trade a leak for an undiagnosable outage. Got: {body}"
     );
 }

@@ -4,7 +4,7 @@
 //! the browser opens `EventSource(url)`, the server keeps a
 //! `text/event-stream` response open, and pushes framed events as
 //! they happen. No WebSocket handshake, no permessage-deflate, no
-//! framing libs — just `data:`, `event:`, `id:` lines terminated
+//! framing libs - just `data:`, `event:`, `id:` lines terminated
 //! by a blank line, per the W3C [HTML Living Standard][whatwg] /
 //! [WHATWG `EventSource`][es-spec].
 //!
@@ -51,7 +51,7 @@ use std::time::Duration;
 ///
 /// The SSE wire grammar uses CR/LF as field terminators with no escape
 /// mechanism. A producer that lets `event` or `id` carry a CR or LF would
-/// let a hostile input inject additional SSE fields — or a whole new event —
+/// let a hostile input inject additional SSE fields - or a whole new event -
 /// after a legitimate one. NUL is rejected for the same reason the WHATWG
 /// parser drops it from `id` ("Last-Event-ID containing NULL is ignored"):
 /// pre-stripping keeps producer and consumer in agreement.
@@ -98,7 +98,7 @@ fn write_field(out: &mut String, name: &str, value: &str) {
 /// treats `\r\n`, `\r`, and `\n` all as field terminators. If the producer
 /// embeds a bare `\r` in `data` and we split only on `\n`, the receiver's
 /// parser will still treat the `\r` as a terminator and synthesise a new
-/// `data:` field at parse time — the same injection shape as `\n` in
+/// `data:` field at parse time - the same injection shape as `\n` in
 /// `event`, just one layer down. Normalizing here keeps producer intent
 /// and receiver behaviour aligned regardless of which terminator was used.
 ///
@@ -115,16 +115,16 @@ fn normalize_data_line_endings(data: &str) -> Cow<'_, str> {
 ///
 /// Two kinds of value share this type:
 ///
-/// 1. **Frame** — a normal event with optional `event`, `id`, `retry` and
+/// 1. **Frame** - a normal event with optional `event`, `id`, `retry` and
 ///    a multi-line `data` payload. Constructed via [`SseEvent::data`] /
 ///    [`SseEvent::json`] / [`SseEvent::error`] and decorated with
 ///    `with_event` / `with_id` / `with_retry`.
-/// 2. **Comment** — a wire-only keep-alive (`: <text>\n\n`). The browser
+/// 2. **Comment** - a wire-only keep-alive (`: <text>\n\n`). The browser
 ///    ignores comments, but the bytes traverse intermediaries which is
 ///    what keeps idle connections from being closed by a proxy timeout.
 ///    Constructed via [`SseEvent::comment`] / [`SseEvent::keep_alive`].
 ///
-/// The kind discriminator is internal — [`Self::is_comment`] / accessor
+/// The kind discriminator is internal - [`Self::is_comment`] / accessor
 /// methods give safe read access without locking us into the current
 /// representation. Once you've built an `SseEvent`, mutators
 /// (`with_event` / `with_id` / `with_retry`) only apply to the `Frame`
@@ -136,7 +136,7 @@ pub struct SseEvent {
 }
 
 /// Internal kind discriminator. Kept `pub(crate)` so external code can't
-/// accidentally depend on the representation — accessor methods on
+/// accidentally depend on the representation - accessor methods on
 /// [`SseEvent`] expose only what's safe to commit to.
 #[derive(Debug, Clone)]
 pub(crate) enum SseEventKind {
@@ -187,7 +187,7 @@ impl SseEvent {
     ///
     /// Comments are ignored by the WHATWG `EventSource` parser, so the
     /// browser does NOT dispatch a `message` event for them. Use them as
-    /// keep-alive heartbeats on idle streams — the bytes traverse proxies
+    /// keep-alive heartbeats on idle streams - the bytes traverse proxies
     /// and load balancers that would otherwise drop a silent connection.
     ///
     /// Multi-line comment text is split on the same `\r\n` / `\r` / `\n`
@@ -221,7 +221,7 @@ impl SseEvent {
     /// es.addEventListener("error", (evt) => console.error(evt.data));
     /// ```
     ///
-    /// Note that this is a domain-level error event — distinct from the
+    /// Note that this is a domain-level error event - distinct from the
     /// connection-level `error` the browser fires on EventSource transport
     /// failures (those have no `data`).
     pub fn error(message: impl Into<String>) -> Self {
@@ -240,7 +240,7 @@ impl SseEvent {
     /// Tag a `Frame` event with a name. Subscribers in the browser pick
     /// it up via `EventSource.addEventListener("<name>", ...)`.
     ///
-    /// On a `Comment` event this is a silent no-op — comments do not
+    /// On a `Comment` event this is a silent no-op - comments do not
     /// carry an event name and the wire format has no way to express one.
     /// Producers that want to fail-fast on bad input (CR / LF / NUL)
     /// should use [`Self::try_with_event`] instead.
@@ -265,7 +265,7 @@ impl SseEvent {
         self
     }
 
-    /// Tag a `Frame` event with a `retry:` value — the browser's
+    /// Tag a `Frame` event with a `retry:` value - the browser's
     /// reconnect delay after a transport drop. Spec-defined as
     /// non-negative integer milliseconds.
     ///
@@ -341,7 +341,7 @@ impl SseEvent {
 
     /// The frame's payload. Returns `""` for `Comment` (comments have no
     /// `data:` field). For frames, returns the raw producer-supplied
-    /// string — line-ending normalization happens at [`Self::to_wire`]
+    /// string - line-ending normalization happens at [`Self::to_wire`]
     /// time, not here.
     ///
     /// Named `payload` instead of `data` so the accessor doesn't collide
@@ -380,7 +380,7 @@ impl SseEvent {
     /// retry: <ms>\n      (only if Some)
     /// data: <line>\n     (one per line in self.data, after \r/\r\n
     ///                     line-ending normalization)
-    /// \n                 (terminator — required by the spec)
+    /// \n                 (terminator - required by the spec)
     /// ```
     ///
     /// For a `Comment`:
@@ -388,7 +388,7 @@ impl SseEvent {
     /// : <line>\n         (one per line in the comment text, after
     ///                     \r/\r\n normalization; empty line if the
     ///                     comment text itself is empty)
-    /// \n                 (flush boundary — without it some proxies
+    /// \n                 (flush boundary - without it some proxies
     ///                     buffer the comment forever)
     /// ```
     ///
@@ -397,7 +397,7 @@ impl SseEvent {
     /// serialize time and a structured `WARN`
     /// (`target: "suprnova::sse", field = "event"|"id"`) is emitted so the
     /// producer-side bug can be tracked down. The warn never logs the
-    /// stripped value — it is attacker-controlled by construction.
+    /// stripped value - it is attacker-controlled by construction.
     /// Producers that want to fail-fast instead of silently strip should
     /// use the `try_with_*` siblings (see [`Self::try_with_event`] /
     /// [`Self::try_with_id`]).
@@ -405,7 +405,7 @@ impl SseEvent {
     /// `data` and comment text are allowed to be multi-line. Embedded
     /// `\r\n` and bare `\r` are normalized to `\n` before splitting so
     /// the wire reflects exactly the lines the producer's string spelled
-    /// out, regardless of which terminator the producer used — see
+    /// out, regardless of which terminator the producer used - see
     /// `normalize_data_line_endings` for the why. NUL bytes in comment
     /// text are stripped on the same grounds as `event` / `id`.
     pub fn to_wire(&self) -> Bytes {
@@ -486,7 +486,7 @@ impl SseEvent {
     }
 }
 
-/// One item pushed onto an `event_stream` — Laravel's `StreamedEvent`.
+/// One item pushed onto an `event_stream` - Laravel's `StreamedEvent`.
 /// `message` defaults the event name to `"update"`, what `useEventStream`
 /// listens for out of the box; `named` overrides it for a producer
 /// fanning out more than one logical channel over one connection.
@@ -494,7 +494,7 @@ impl SseEvent {
 pub struct StreamedEvent {
     /// The SSE `event:` name this item is framed under.
     pub event: String,
-    /// The payload — unquoted on the wire for a bare string, JSON-encoded
+    /// The payload - unquoted on the wire for a bare string, JSON-encoded
     /// otherwise (Laravel's `is_string() || is_numeric()` split; a
     /// JSON-encoded number renders identically to a bare one).
     pub data: serde_json::Value,
@@ -532,12 +532,12 @@ impl StreamedEvent {
 }
 
 /// The terminal frame `event_stream` sends after the producer stream
-/// ends — Laravel's `$endStreamWith` (default `'</stream>'`, `null` to
+/// ends - Laravel's `$endStreamWith` (default `'</stream>'`, `null` to
 /// omit; `EndSignal::default()` and `EndSignal::None` are those two
 /// cases here).
 #[derive(Debug, Clone)]
 pub enum EndSignal {
-    /// No terminal frame — the stream just ends.
+    /// No terminal frame - the stream just ends.
     None,
     /// `StreamedEvent { event: "update", .. }` carrying this text.
     Message(String),
@@ -553,7 +553,7 @@ impl EndSignal {
 }
 
 impl Default for EndSignal {
-    /// `</stream>` under `"update"` — `useEventStream`'s default and
+    /// `</stream>` under `"update"` - `useEventStream`'s default and
     /// `ResponseFactory::eventStream`'s default.
     fn default() -> Self {
         Self::text("</stream>")
@@ -569,7 +569,7 @@ fn validate_no_control_chars(field: &str, value: &str) -> Result<(), FrameworkEr
         Err(FrameworkError::validation(
             field.to_string(),
             format!(
-                "SSE `{field}` MUST NOT contain CR / LF / NUL — \
+                "SSE `{field}` MUST NOT contain CR / LF / NUL - \
                  line terminators have no escape in the wire format"
             ),
         ))
@@ -596,7 +596,7 @@ fn strip_nul(value: &str) -> (Cow<'_, str>, bool) {
 /// unit-testable without building a full `Request` (which requires a
 /// live `hyper::body::Incoming` body in the current API).
 ///
-/// Returns `None` when the value is absent OR contains a NUL byte —
+/// Returns `None` when the value is absent OR contains a NUL byte -
 /// per the spec a NUL invalidates the id, and pre-filtering keeps
 /// producer code from having to defend against it on every read.
 pub fn last_event_id_from_value(value: Option<&str>) -> Option<String> {
@@ -607,13 +607,13 @@ pub fn last_event_id_from_value(value: Option<&str>) -> Option<String> {
 /// per the WHATWG `EventSource` contract.
 ///
 /// The browser sends this header when reconnecting after an
-/// `EventSource` drop — its value is the most recent `id:` field the
+/// `EventSource` drop - its value is the most recent `id:` field the
 /// browser saw on the previous connection. Producers map it back to
 /// stream state (cursor / sequence number / offset) so the receiver
 /// resumes from where it dropped instead of re-receiving the entire
 /// history.
 ///
-/// Returns `None` when the header is absent OR contains a NUL byte —
+/// Returns `None` when the header is absent OR contains a NUL byte -
 /// per the spec a NUL invalidates the id, and pre-filtering keeps
 /// producer code from having to defend against it on every read.
 ///
@@ -621,7 +621,7 @@ pub fn last_event_id_from_value(value: Option<&str>) -> Option<String> {
 /// for SQL fragments, file paths, or anything else. Validate the shape
 /// (e.g. parse as a `u64` cursor) at the point of use.
 ///
-/// Internally delegates to [`last_event_id_from_value`] — that function
+/// Internally delegates to [`last_event_id_from_value`] - that function
 /// is the one targeted by unit tests since constructing a `Request` in
 /// isolation requires a live `hyper::body::Incoming` body.
 pub fn last_event_id(req: &crate::Request) -> Option<String> {
@@ -666,7 +666,7 @@ mod tests {
 
     // ---- sanitization regression tests --------------------------------
 
-    /// LF in `event:` is the canonical injection vector — without
+    /// LF in `event:` is the canonical injection vector - without
     /// sanitization the receiver would parse the `data:` field after the
     /// LF as part of THIS event's frame and the rest as a follow-up.
     #[test]
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(s, "event: legitdata: injected\ndata: payload\n\n");
         assert!(
             !s.starts_with("event: legit\n"),
-            "an LF in event MUST NOT terminate the field early — got: {s:?}",
+            "an LF in event MUST NOT terminate the field early - got: {s:?}",
         );
     }
 
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(s, "event: legitspoofed\ndata: payload\n\n");
     }
 
-    /// `id:` is sanitized on the same contract — a CR/LF there would let
+    /// `id:` is sanitized on the same contract - a CR/LF there would let
     /// a producer claim two different `Last-Event-ID` values for a single
     /// frame.
     #[test]
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(s, "event: legitpoison\ndata: payload\n\n");
     }
 
-    /// Legitimate values pass through unchanged — sanity check that the
+    /// Legitimate values pass through unchanged - sanity check that the
     /// strip path is gated on the actual presence of bad bytes.
     #[test]
     fn event_and_id_without_terminators_pass_through() {
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(s, "event: user.registered\nid: user-42\ndata: payload\n\n",);
     }
 
-    /// `\r\n` in data must collapse to one line — without normalization a
+    /// `\r\n` in data must collapse to one line - without normalization a
     /// receiver would parse the CR as a terminator AND the LF as a
     /// terminator, producing a synthetic empty data line.
     #[test]
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(s, "data: line1\ndata: line2\n\n");
     }
 
-    /// Bare CR in data must split as if it were `\n` — otherwise a producer
+    /// Bare CR in data must split as if it were `\n` - otherwise a producer
     /// embedding `\r` in `data` could inject `data:`/`event:`/`id:` fields
     /// at the WHATWG parser layer.
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(s, "data: line1\ndata: line2\ndata: line3\n\n");
     }
 
-    /// Mixed `\r\n`, `\r`, and `\n` collapse to the same shape — exercises
+    /// Mixed `\r\n`, `\r`, and `\n` collapse to the same shape - exercises
     /// the full WHATWG line-terminator normalization contract.
     #[test]
     fn data_with_mixed_line_endings_collapses_uniformly() {
@@ -759,7 +759,7 @@ mod tests {
         assert_eq!(s, "data: a\ndata: b\ndata: c\ndata: d\n\n");
     }
 
-    /// `sanitize_field` returns Borrowed for the common-case clean input —
+    /// `sanitize_field` returns Borrowed for the common-case clean input -
     /// pins the no-allocation fast path so future refactors can't quietly
     /// regress it.
     #[test]
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(evt.retry(), Some(Duration::from_millis(2500)));
     }
 
-    /// Zero retry is valid per the spec — "reconnect immediately" —
+    /// Zero retry is valid per the spec - "reconnect immediately" -
     /// and must NOT be coerced to anything else.
     #[test]
     fn with_retry_zero_is_valid_and_emitted_verbatim() {
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(s, "retry: 0\ndata: payload\n\n");
     }
 
-    /// `retry` comes after `event`/`id` and before `data` — pinned because
+    /// `retry` comes after `event`/`id` and before `data` - pinned because
     /// the WHATWG parsing algorithm reads fields in order and producers
     /// often eyeball the wire for debugging.
     #[test]
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(s, "event: tick\nid: 42\nretry: 5000\ndata: payload\n\n");
     }
 
-    /// `keep_alive()` produces a minimal comment frame — `:\n\n` —
+    /// `keep_alive()` produces a minimal comment frame - `:\n\n` -
     /// without emitting any `data:` line. Empty `data:` would dispatch a
     /// spurious empty `message` event to the client every heartbeat, so
     /// the comment kind must NOT share the empty-data fallthrough that
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(evt.payload(), "");
         assert!(
             !s.contains("data:"),
-            "a keep-alive MUST NOT emit a data: line — it would dispatch \
+            "a keep-alive MUST NOT emit a data: line - it would dispatch \
              an empty message event to every subscriber",
         );
     }
@@ -881,8 +881,8 @@ mod tests {
         assert_eq!(s, ": pingpoison\n\n");
     }
 
-    /// `error("msg")` is the conventional `event: error` + payload shape
-    /// — subscribers can `addEventListener("error", ...)` without colliding
+    /// `error("msg")` is the conventional `event: error` + payload shape -
+    /// subscribers can `addEventListener("error", ...)` without colliding
     /// with the connection-level `error` the browser fires on transport
     /// failure (those carry no `data`).
     #[test]
@@ -928,7 +928,7 @@ mod tests {
         assert!(format!("{err}").contains("id"));
     }
 
-    /// Builders on a `Comment` event are silent no-ops — `with_event` on
+    /// Builders on a `Comment` event are silent no-ops - `with_event` on
     /// a comment does NOT convert it to a frame, and the wire stays
     /// comment-shaped.
     #[test]
@@ -941,7 +941,7 @@ mod tests {
     }
 
     /// `try_with_event` on a `Comment` returns `Ok(self)` unchanged for
-    /// the same reason — it's a no-op, so by definition it cannot fail.
+    /// the same reason - it's a no-op, so by definition it cannot fail.
     #[test]
     fn try_with_event_on_comment_returns_ok_unchanged() {
         let evt = SseEvent::keep_alive()
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(evt.event(), None);
     }
 
-    /// `with_retry` on a `Comment` is also a no-op — `retry:` is only
+    /// `with_retry` on a `Comment` is also a no-op - `retry:` is only
     /// meaningful on a `Frame`.
     #[test]
     fn with_retry_on_comment_is_silent_noop() {
@@ -963,7 +963,7 @@ mod tests {
     /// Clean header value passes through to `Some(<owned String>)`. We
     /// target the pure `last_event_id_from_value` helper since
     /// constructing a `Request` in isolation requires a live
-    /// `hyper::body::Incoming` — the Request-bound `last_event_id` is a
+    /// `hyper::body::Incoming` - the Request-bound `last_event_id` is a
     /// one-line wrapper over this helper, so this exercises the entire
     /// validation contract.
     #[test]
@@ -989,7 +989,7 @@ mod tests {
     }
 
     /// Empty header value is permitted by RFC 9110 but undefined as a
-    /// last-event-id. We pass it through verbatim — producer code is
+    /// last-event-id. We pass it through verbatim - producer code is
     /// expected to validate the shape (e.g. parse as cursor). The
     /// last-event-id contract is "what was the last id you saw"; an
     /// empty value means "I saw no id yet", which is semantically

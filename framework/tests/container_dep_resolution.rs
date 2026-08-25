@@ -1,11 +1,11 @@
-//! Regression: HIGH audit finding `container` #290 — `#[injectable]`
+//! Regression: HIGH audit finding `container` #290 - `#[injectable]`
 //! dependency resolution depends on inventory iteration order and
 //! panics on missing dependencies.
 //!
 //! Before the fix, `provider::bootstrap` registered all
 //! `SingletonEntry` values in the order yielded by `inventory::iter`,
 //! and the macro-generated registration closure called
-//! `App::resolve::<DepType>().expect(...)` — so if inventory yielded a
+//! `App::resolve::<DepType>().expect(...)` - so if inventory yielded a
 //! consumer before its producer, the boot would panic. Inventory order
 //! is implementation-defined, so the problem was order-dependent
 //! flakiness.
@@ -21,14 +21,14 @@
 //!    boot-time failures propagate cleanly to `Server::from_config`.
 //!
 //! Test strategy: declare two `#[injectable]` types where Consumer has
-//! an `#[inject]` field of type Producer. Boot must resolve both —
+//! an `#[inject]` field of type Producer. Boot must resolve both -
 //! regardless of which one inventory yields first. We assert both
 //! resolve cleanly and the dependency was wired through.
 
 use suprnova::App;
 use suprnova_macros::injectable;
 
-/// Producer — no dependencies, just a simple unit struct.
+/// Producer - no dependencies, just a simple unit struct.
 #[injectable]
 pub struct DepResolutionProducer;
 
@@ -38,7 +38,7 @@ impl DepResolutionProducer {
     }
 }
 
-/// Consumer — has an `#[inject]` field referring to Producer. The macro
+/// Consumer - has an `#[inject]` field referring to Producer. The macro
 /// generates a registration closure that calls
 /// `App::resolve::<DepResolutionProducer>()`. If inventory yields
 /// Consumer before Producer, the first pass of the boot loop will Err;
@@ -81,7 +81,7 @@ fn boot_resolves_injectable_dependencies_regardless_of_inventory_order() {
 
 #[test]
 fn second_boot_is_idempotent_for_dep_graph() {
-    // Boot a second time after the first test — should be a no-op for
+    // Boot a second time after the first test - should be a no-op for
     // already-registered singletons (verifies #289's idempotency
     // interlocks with #290's loop: the second pass's `singleton_if_absent`
     // is a no-op, the closure returns Ok, the loop terminates).

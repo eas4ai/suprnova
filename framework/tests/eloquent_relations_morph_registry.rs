@@ -1,11 +1,11 @@
-//! Phase 10B T8 — `MorphTypeEntry` inventory + lookups.
+//! Phase 10B T8 - `MorphTypeEntry` inventory + lookups.
 //!
 //! Pins:
 //! - Every `#[suprnova::model(morph_type = "...")]` struct registers a
 //!   `MorphTypeEntry` accessible via `find_morph_type` /
 //!   `find_morph_type_by_id` / `morph_types()`.
 //! - Plain `#[suprnova::model]` structs without the attribute stay out
-//!   of the registry — the test isolating this is the discriminator
+//!   of the registry - the test isolating this is the discriminator
 //!   that confirms the macro's `morph_type.is_none()` early-return is
 //!   correct.
 //! - The `fn() -> TypeId` thunk threads through `inventory::submit!`'s
@@ -50,7 +50,7 @@ fn morph_type_registered_for_video() {
 
 #[test]
 fn morph_type_not_registered_for_non_morph_models() {
-    // MrNoMorph has no `morph_type` attribute — must not appear in the
+    // MrNoMorph has no `morph_type` attribute - must not appear in the
     // registry. This is the discriminator that confirms the macro's
     // `morph_type.is_none()` early-return is wired correctly.
     assert!(morph_types().all(|e| e.type_name != "MrNoMorph"));

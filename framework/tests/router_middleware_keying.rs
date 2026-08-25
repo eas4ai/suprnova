@@ -36,7 +36,7 @@ use suprnova::{MiddlewareRegistry, Request, Response, Router, handle_request};
 
 /// Test middleware that records every request that passes through
 /// it under a stable tag. The handlers in these tests do NOT push to
-/// the tracker — only this middleware does. That keeps the assertion
+/// the tracker - only this middleware does. That keeps the assertion
 /// crisp: "did the middleware run" is exactly "did the tag land in
 /// the tracker".
 #[derive(Clone)]
@@ -91,7 +91,7 @@ async fn spawn_server(router: impl Into<Router>, accepts: usize) -> SocketAddr {
 }
 
 /// Issue a single HTTP/1.1 request against the test server and return
-/// the status + body bytes. Empty body, no cookies — these are
+/// the status + body bytes. Empty body, no cookies - these are
 /// routing-layer assertions, not auth assertions.
 async fn send_request(
     addr: SocketAddr,
@@ -126,7 +126,7 @@ async fn send_request(
 
 /// 1. Middleware on `POST /x` MUST NOT run for `GET /x`, and vice
 ///    versa. This is the canonical leak: register one method with
-///    middleware, register the other without — the second must stay
+///    middleware, register the other without - the second must stay
 ///    clean.
 #[tokio::test]
 async fn middleware_does_not_leak_across_methods_same_path() {
@@ -144,7 +144,7 @@ async fn middleware_does_not_leak_across_methods_same_path() {
 
     let addr = spawn_server(router, 4).await;
 
-    // Drive a GET — auth middleware must not run, response is 200.
+    // Drive a GET - auth middleware must not run, response is 200.
     let (get_status, _) = send_request(addr, "GET", "/api/posts").await;
     assert_eq!(get_status.as_u16(), 200);
     assert!(
@@ -153,7 +153,7 @@ async fn middleware_does_not_leak_across_methods_same_path() {
         auth_calls.lock().unwrap()
     );
 
-    // Drive a POST — auth middleware MUST run exactly once.
+    // Drive a POST - auth middleware MUST run exactly once.
     let (post_status, _) = send_request(addr, "POST", "/api/posts").await;
     assert_eq!(post_status.as_u16(), 200);
     assert_eq!(
@@ -244,7 +244,7 @@ async fn group_middleware_does_not_leak_to_sibling_routes_outside_group() {
 }
 
 /// 4. Middleware on one path MUST NOT apply to a different path.
-///    Sanity check that path-component of the key still works — a
+///    Sanity check that path-component of the key still works - a
 ///    naive fix that drops the path entirely would pass tests 1-3
 ///    but fail this one.
 #[tokio::test]
@@ -281,7 +281,7 @@ async fn middleware_on_one_path_does_not_apply_to_another_path() {
 ///    resolved path matches the pattern. Earlier, middleware was keyed
 ///    by the matched pattern but the dispatcher looked it up by the
 ///    raw request path, so `DELETE /api/posts/42` would silently miss
-///    the registered key `/api/posts/{id}` — and the route's group
+///    the registered key `/api/posts/{id}` - and the route's group
 ///    middleware (e.g. an auth gate) never ran.
 #[tokio::test]
 async fn group_middleware_applies_to_parameterised_routes() {
@@ -306,6 +306,6 @@ async fn group_middleware_applies_to_parameterised_routes() {
     assert_eq!(
         *calls.lock().unwrap(),
         vec!["auth"],
-        "group middleware must run for parameterised routes — lookup by matched pattern, not raw path"
+        "group middleware must run for parameterised routes - lookup by matched pattern, not raw path"
     );
 }

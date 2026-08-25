@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::authenticatable::Authenticatable;
 use crate::error::FrameworkError;
 
-/// Authentication credentials — a JSON object, typically
+/// Authentication credentials - a JSON object, typically
 /// `{"email": …, "password": …}` (Laravel's `array $credentials`).
 ///
 /// ```rust,no_run
@@ -75,7 +75,7 @@ pub trait Guard: Send + Sync {
     async fn validate(&self, credentials: &Credentials) -> Result<bool, FrameworkError>;
 
     /// Set the current user for this request **without** persisting to the
-    /// session — the in-memory equivalent of `once_using_id`. Mirrors
+    /// session - the in-memory equivalent of `once_using_id`. Mirrors
     /// Laravel's `setUser($user)` (a `GuardHelpers` method surfaced on the
     /// base contract). After this call, `user()`/`id()`/`has_user()` reflect
     /// `user` for the remainder of the request.
@@ -107,7 +107,7 @@ pub trait Guard: Send + Sync {
 /// `Result<Option<Arc<dyn Authenticatable>>, _>`: `Ok(Some(user))` on success,
 /// `Ok(None)` when no user matched (bad credentials or unknown id), and `Err`
 /// only for an underlying failure (database, hashing). This is the Rust-native
-/// shape of Laravel's `Authenticatable|false` return — the caller gets the
+/// shape of Laravel's `Authenticatable|false` return - the caller gets the
 /// resolved user, and the id is one field away via
 /// [`Authenticatable::get_auth_identifier`].
 #[async_trait]

@@ -2,11 +2,11 @@
 //! lock across construction.
 //!
 //! The natural way to write get-or-build is to take the write lock, check
-//! for a miss, build, and insert — all under the one guard. It reads as
+//! for a miss, build, and insert - all under the one guard. It reads as
 //! correct and it is, for a synchronous build. The moment construction
 //! becomes `.await`, the same shape means the write lock is held across a
-//! network round trip, and every other caller — including one that would
-//! have *hit* the cache for a completely unrelated key — waits behind it.
+//! network round trip, and every other caller - including one that would
+//! have *hit* the cache for a completely unrelated key - waits behind it.
 //! `tokio::sync::RwLock` is fair, so a queued writer blocks subsequent
 //! readers too: one cold index stalls every warm one.
 //!
@@ -98,7 +98,7 @@ mod tests {
     /// Driven by a barrier rather than a sleep, so it is deterministic:
     /// each build parks until *both* have started. If construction ran
     /// under a shared write lock the second could never start, the barrier
-    /// would never open, and both would park forever — which is why the
+    /// would never open, and both would park forever - which is why the
     /// whole thing is wrapped in a timeout. Without it this test would
     /// hang instead of failing, and a hang in CI reads as an infrastructure
     /// problem rather than a regression.
@@ -126,7 +126,7 @@ mod tests {
             .await
             .expect(
                 "two cold keys must build concurrently; this timed out, which \
-             means construction is serialised behind a shared lock — the \
+             means construction is serialised behind a shared lock - the \
              exact defect this module was extracted to prevent",
             );
 
@@ -184,7 +184,7 @@ mod tests {
 
     /// Racing builders of the *same* key must converge on one handle. The
     /// loser's freshly-built value is dropped, so callers can rely on the
-    /// cached `Arc` being the only one in circulation — which is what makes
+    /// cached `Arc` being the only one in circulation - which is what makes
     /// it safe to wrap a `Mutex` around a resource that must be serialised.
     #[tokio::test]
     async fn racing_builders_of_one_key_converge_on_a_single_handle() {

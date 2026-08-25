@@ -8,7 +8,7 @@
 //!
 //! Differences from Laravel:
 //! - `then`/`catch`/`finally` are `Arc<dyn BatchCallback>` trait objects
-//!   instead of Closure serialization — Rust closures don't serialize, so
+//!   instead of Closure serialization - Rust closures don't serialize, so
 //!   callback registration is per-process. Process restarts lose the
 //!   in-flight callbacks; for cross-restart guarantees, define a
 //!   `BatchCallback` impl and register it at boot (the registry is
@@ -114,7 +114,7 @@ pub trait BatchRepository: Send + Sync {
     ///
     /// Ids arrive from [`PendingBatch::dispatch`] as fresh UUIDs, so a
     /// repository MAY reject an id it already holds rather than overwrite a
-    /// batch that could already have settlements recorded against it —
+    /// batch that could already have settlements recorded against it -
     /// [`DatabaseBatchRepository`] does.
     async fn store(&self, batch: Batch) -> Result<(), FrameworkError>;
     /// Look up a batch by id; returns `Ok(None)` if no such batch exists.
@@ -130,7 +130,7 @@ pub trait BatchRepository: Send + Sync {
     /// returning the post-update counts the worker uses for callback gating.
     ///
     /// **Must be idempotent per `job_id`.** Queues are at-least-once, so the
-    /// same job can be settled more than once — a redelivery, a duplicated
+    /// same job can be settled more than once - a redelivery, a duplicated
     /// ack, a worker that died between doing the work and recording it. An
     /// implementation that decrements on every call drives `pending_jobs` to
     /// zero early and fires `then`/`finally` callbacks while jobs are still
@@ -146,7 +146,7 @@ pub trait BatchRepository: Send + Sync {
     /// counts.
     ///
     /// **Must be idempotent per `job_id`**, on the same terms as
-    /// [`record_successful_job`](Self::record_successful_job) — and note that
+    /// [`record_successful_job`](Self::record_successful_job) - and note that
     /// deduplicating `failed_job_ids` alone is not enough, because the
     /// counters are what gate the callbacks.
     async fn record_failed_job(
@@ -178,8 +178,8 @@ struct BatchEntry {
     batch: Batch,
     /// Job ids whose settlement has already moved the counters.
     ///
-    /// Queues are at-least-once, so the same job can be delivered — and
-    /// settled — more than once. Without this, each redelivery decremented
+    /// Queues are at-least-once, so the same job can be delivered - and
+    /// settled - more than once. Without this, each redelivery decremented
     /// `pending_jobs` again, driving the batch to "finished" while jobs were
     /// still running and firing `then`/`finally` callbacks early.
     settled: HashSet<Uuid>,
@@ -253,7 +253,7 @@ impl BatchRepository for MemoryBatchRepository {
         let entry = g
             .get_mut(id)
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
-        // `job_id` used to be `_job_id` — ignored entirely — so a redelivered
+        // `job_id` used to be `_job_id` - ignored entirely - so a redelivered
         // settlement decremented `pending_jobs` a second time.
         if entry.settled.insert(job_id) && entry.batch.pending_jobs > 0 {
             entry.batch.pending_jobs -= 1;
@@ -277,7 +277,7 @@ impl BatchRepository for MemoryBatchRepository {
             .ok_or_else(|| FrameworkError::internal(format!("batch not found: {id}")))?;
         // The `failed_job_ids` dedupe below predates this guard, which made
         // the method look idempotent while both counters still moved on
-        // every redelivery — the more misleading of the two states to be in.
+        // every redelivery - the more misleading of the two states to be in.
         if entry.settled.insert(job_id) {
             if entry.batch.pending_jobs > 0 {
                 entry.batch.pending_jobs -= 1;
@@ -414,7 +414,7 @@ impl DatabaseBatchRepository {
     /// Open a repository against explicitly-named tables.
     ///
     /// Both names are interpolated into every statement, so both are validated
-    /// as SQL identifiers once, here — the same treatment
+    /// as SQL identifiers once, here - the same treatment
     /// [`DatabaseQueueDriver::new`](crate::queue::DatabaseQueueDriver::new)
     /// gives its table.
     ///
@@ -554,7 +554,7 @@ impl DatabaseBatchRepository {
         }
 
         // Read the derived counts inside the same transaction, so the snapshot
-        // the worker gates callbacks on is the one this settlement produced —
+        // the worker gates callbacks on is the one this settlement produced -
         // not one a concurrent settlement moved underneath it.
         let counts = self.counts(&txn, id).await?;
 
@@ -876,7 +876,7 @@ fn timestamp(secs: i64, what: &'static str) -> Result<DateTime<Utc>, FrameworkEr
 /// hold the names of impls to invoke.
 #[async_trait]
 pub trait BatchCallback: Send + Sync + 'static {
-    /// Callback name — matches the entry in `BatchOptions.then/catch/finally`.
+    /// Callback name - matches the entry in `BatchOptions.then/catch/finally`.
     fn name(&self) -> &'static str;
 
     /// Run the callback for `batch`. `error` is `Some` for `catch`/`finally`
@@ -933,7 +933,7 @@ pub(crate) fn ensure_default_repository() {
 }
 
 // ---------------------------------------------------------------------------
-// PendingBatch — builder used by `Bus::batch_queue(...)`
+// PendingBatch - builder used by `Bus::batch_queue(...)`
 // ---------------------------------------------------------------------------
 
 /// Builder for a queued batch. Mirrors Laravel's `PendingBatch`.
@@ -1053,7 +1053,7 @@ impl PendingBatch {
     /// This used to be handled by deleting the batch row, which traded that
     /// for something worse. The envelopes that *had* landed were still in the
     /// queue and still stamped with the batch id, so every one of them settled
-    /// against a batch that no longer existed — `Err(batch not found)`, on
+    /// against a batch that no longer existed - `Err(batch not found)`, on
     /// every delivery, forever, with no operator action that reconciles it.
     /// The worker even had to be written not to let that error hold the
     /// reservation, or the orphans would have spun on visibility expiry with
@@ -1061,8 +1061,8 @@ impl PendingBatch {
     ///
     /// Instead the batch is *settled*: every envelope that was not pushed is
     /// recorded as a failed job, and the batch is cancelled. That keeps the
-    /// accounting true — `total_jobs` still counts what was asked for,
-    /// `failed_job_ids` names exactly the jobs that never made it — and lets
+    /// accounting true - `total_jobs` still counts what was asked for,
+    /// `failed_job_ids` names exactly the jobs that never made it - and lets
     /// the ones already queued settle normally against a batch that is still
     /// there. Cancellation makes [`SkipIfBatchCancelled`] drop the rest, so
     /// pending still reaches zero and the terminal callbacks still fire.
@@ -1271,7 +1271,7 @@ mod tests {
         assert_eq!(first.pending_jobs, 2, "the first settlement counts");
         assert_eq!(
             second.pending_jobs, 2,
-            "the same job settled twice must not decrement twice — two more \
+            "the same job settled twice must not decrement twice - two more \
              jobs are still pending and the batch is not finished"
         );
     }
@@ -1308,7 +1308,7 @@ mod tests {
     }
 
     /// A job that succeeds and is then redelivered and *fails* must not be
-    /// counted twice either — the batch already consumed its pending slot.
+    /// counted twice either - the batch already consumed its pending slot.
     #[tokio::test]
     async fn a_job_that_settles_both_ways_consumes_one_slot() {
         let repo = MemoryBatchRepository::new();
@@ -1353,7 +1353,7 @@ mod tests {
 
         assert_eq!(
             third.pending_jobs, 0,
-            "three distinct jobs settle the batch — the idempotency guard \
+            "three distinct jobs settle the batch - the idempotency guard \
              must key on the job id, not suppress every repeat call"
         );
     }

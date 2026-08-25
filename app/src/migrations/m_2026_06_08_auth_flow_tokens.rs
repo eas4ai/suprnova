@@ -1,4 +1,4 @@
-//! Auth-flows dogfood — `auth_flow_tokens` single-use token table.
+//! Auth-flows dogfood - `auth_flow_tokens` single-use token table.
 //!
 //! Backs the email-verification and password-reset links. The framework owns
 //! the schema and exposes a ready-to-apply `TableCreateStatement` via

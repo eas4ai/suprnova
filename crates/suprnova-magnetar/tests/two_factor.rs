@@ -464,11 +464,11 @@ async fn matched_step_claims_close_every_replay_edge() {
     let now = Utc::now().timestamp();
 
     // A forward-edge code (the next timestep) is inside the skew window
-    // and verifies once, claiming its matched step — NOT server time.
+    // and verifies once, claiming its matched step - NOT server time.
     let forward = totp_code_at(&enrollment.otpauth_url, now + STEP_SECONDS);
     assert!(world.two_factor.verify(&user_id, &forward).await.unwrap());
 
-    // The same forward code can never be accepted again — including when
+    // The same forward code can never be accepted again - including when
     // the server actually reaches that timestep (the deployed forward-edge
     // stamp left this replayable; the matched-step contract does not).
     assert!(!world.two_factor.verify(&user_id, &forward).await.unwrap());
@@ -680,7 +680,7 @@ async fn every_primary_provider_promotes_through_one_gate() {
         .unwrap()
         .to_owned();
     // The password challenge just claimed the forward edge, so no TOTP
-    // code can verify again inside this timestep — exactly the hardened
+    // code can verify again inside this timestep - exactly the hardened
     // contract. A recovery code completes the challenge instead, proving
     // the second proof path through the same gate.
     let completed = send(

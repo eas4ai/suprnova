@@ -76,7 +76,7 @@ async fn redis_lock_subsecond_ttl_expires_and_releases() {
         .unwrap();
     assert!(
         carol.is_some(),
-        "sub-second lock TTL must expire — EX-as-secs would have errored or rounded to 0"
+        "sub-second lock TTL must expire - EX-as-secs would have errored or rounded to 0"
     );
 }
 
@@ -106,7 +106,7 @@ async fn redis_lock_refresh_subsecond_ttl_extends() {
         .unwrap();
     assert!(
         bob.is_none(),
-        "PEXPIRE extended the lock — EXPIRE with sub-second TTL would have deleted the key"
+        "PEXPIRE extended the lock - EXPIRE with sub-second TTL would have deleted the key"
     );
 
     s.release_lock("k", &alice).await.unwrap();
@@ -186,7 +186,7 @@ async fn redis_untagged_overwrite_after_tagged_survives_flush() {
 
     assert!(
         s.has("u:1").await.unwrap(),
-        "untagged overwrite cleared the tag aux set — flush_tags must skip it"
+        "untagged overwrite cleared the tag aux set - flush_tags must skip it"
     );
     let got: Option<String> = s.get_raw("u:1").await.unwrap();
     assert_eq!(got.as_deref(), Some("v2"));
@@ -202,7 +202,7 @@ async fn redis_retagging_drops_old_membership() {
     s.flush_tags(&["a"]).await.unwrap();
     assert!(
         s.has("k").await.unwrap(),
-        "k re-tagged to b — flushing a must not delete it"
+        "k re-tagged to b - flushing a must not delete it"
     );
 
     s.flush_tags(&["b"]).await.unwrap();
@@ -234,7 +234,7 @@ async fn redis_add_with_subsecond_ttl_expires() {
         .unwrap();
     assert!(ok);
 
-    // Contention with another add — must fail until the TTL expires.
+    // Contention with another add - must fail until the TTL expires.
     let busy = s
         .add_raw("k", "v2", Some(Duration::from_secs(5)))
         .await
@@ -319,7 +319,7 @@ async fn redis_forget_with_tag_prefixed_key_does_not_clobber_tag_index() {
         .unwrap();
 
     // User-side forget against the same prefix we used to store the
-    // forward index — must miss because the internal index lives in
+    // forward index - must miss because the internal index lives in
     // a NUL-byte-prefixed slot the user cannot reach.
     let _ = s.forget("tag:users").await.unwrap();
 
@@ -334,7 +334,7 @@ async fn redis_forget_with_tag_prefixed_key_does_not_clobber_tag_index() {
 /// flush completely.
 ///
 /// `flush_tags` used to call `SMEMBERS`, which materialises the whole
-/// forward index at once — unbounded in Redis and again in this process.
+/// forward index at once - unbounded in Redis and again in this process.
 /// It now scans in batches, and a batching bug is invisible on the small
 /// tags every other test here uses: the first round would flush and the
 /// loop would stop, leaving the rest cached forever. 600 keys against a

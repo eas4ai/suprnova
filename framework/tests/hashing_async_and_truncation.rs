@@ -1,4 +1,4 @@
-//! Regression: HIGH audit findings `hashing` #1 + #2 — bcrypt's `hash`
+//! Regression: HIGH audit findings `hashing` #1 + #2 - bcrypt's `hash`
 //! / `verify` are synchronous CPU-bound (blocks the Tokio worker
 //! thread at cost 12) AND silently truncate passwords > 72 bytes (two
 //! distinct passphrases with the same first 72 bytes hash equal).
@@ -41,7 +41,7 @@ fn hash_rejects_passwords_over_72_bytes() {
 
 #[test]
 fn hash_accepts_exactly_max_bytes() {
-    // Boundary test — MAX_PASSWORD_BYTES (71) is the legal max.
+    // Boundary test - MAX_PASSWORD_BYTES (71) is the legal max.
     let exactly = "y".repeat(MAX_PASSWORD_BYTES);
     let h = hashing::hash(&exactly).expect("exactly max bytes must hash");
     assert!(hashing::verify(&exactly, &h).expect("verify"));
@@ -69,7 +69,7 @@ fn truncation_collision_no_longer_possible() {
     let common = "a".repeat(MAX_PASSWORD_BYTES);
     let a = format!("{common}_suffix_A");
     let b = format!("{common}_suffix_B");
-    // Both rejected at hash, so neither has a hash to verify against —
+    // Both rejected at hash, so neither has a hash to verify against -
     // which is the right semantic: the framework refuses to mint
     // collidable hashes.
     assert!(hashing::hash(&a).is_err());

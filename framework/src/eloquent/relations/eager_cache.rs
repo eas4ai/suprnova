@@ -4,7 +4,7 @@
 //! `#[suprnova::model]` struct by the macro. Stores eager-loaded
 //! relation rows and aggregate values keyed by relation name; the
 //! generated `<rel>_loaded()` / `<rel>_count()` accessors read from
-//! it. Empty by default — populated by
+//! it. Empty by default - populated by
 //! [`Builder::with`][crate::eloquent::Builder::with] and related
 //! eager-loading methods (T9).
 //!
@@ -15,7 +15,7 @@
 //!
 //! ## Clone semantics
 //!
-//! `EagerLoadCache` deep-clones — every cell carries a clone trampoline
+//! `EagerLoadCache` deep-clones - every cell carries a clone trampoline
 //! (the `ClonedBox` struct) so cloning a model also clones any rows
 //! the eager loader had attached. This matches Laravel's behaviour:
 //! `clone $user` preserves `$user->posts`.
@@ -39,15 +39,15 @@ pub struct EagerLoadCache {
 /// Internal storage variant. One per relation kind plus a generic
 /// aggregate slot.
 enum RelationCell {
-    /// `Vec<T>` rows — populated by HasMany / BelongsToMany / Through /
+    /// `Vec<T>` rows - populated by HasMany / BelongsToMany / Through /
     /// MorphMany / MorphToMany / MorphedByMany eager loaders.
     Many(ClonedBox),
-    /// `Option<T>` row — populated by HasOne / BelongsTo / MorphTo /
+    /// `Option<T>` row - populated by HasOne / BelongsTo / MorphTo /
     /// MorphOne / HasOneThrough eager loaders.
     One(ClonedBox),
-    /// Plain count — populated by `with_count`.
+    /// Plain count - populated by `with_count`.
     Count(u64),
-    /// Aggregate value — populated by `with_sum` / `with_avg` /
+    /// Aggregate value - populated by `with_sum` / `with_avg` /
     /// `with_min` / `with_max`. Stored type-erased so the same cell
     /// covers `f64` SUM/AVG and `i64` MIN/MAX without per-variant
     /// branching at the storage layer.
@@ -75,12 +75,12 @@ impl EagerLoadCache {
 
     /// Read an eager-loaded HasMany / BelongsToMany row vector.
     ///
-    /// Panics with a clear message if the relation was not loaded —
+    /// Panics with a clear message if the relation was not loaded -
     /// spec is explicit: silently returning `&[]` would hide bugs in
     /// user code that forgot `with([...])` and expected eager rows.
     ///
     /// Also panics if the cell exists but stores a different kind
-    /// (HasOne / count / aggregate) — that combination indicates a
+    /// (HasOne / count / aggregate) - that combination indicates a
     /// framework bug rather than a user mistake.
     pub fn get_many<T: Any + Send + Sync>(&self, name: &str) -> &[T] {
         match self.rows.get(name) {
@@ -148,9 +148,9 @@ impl EagerLoadCache {
     /// Take the eager-loaded HasMany / BelongsToMany row vector out by
     /// value, leaving an empty vector in its place (so the cell still
     /// reports as loaded). Used by the batched nested-recursion arm,
-    /// which gathers every parent's children into one owned slice — owning
+    /// which gathers every parent's children into one owned slice - owning
     /// them sidesteps the lifetimes of holding `&mut` through a slice of
-    /// `&mut Self` — then puts them back via [`set_many`](Self::set_many).
+    /// `&mut Self` - then puts them back via [`set_many`](Self::set_many).
     /// Returns `None` if the cell isn't a populated `Many`.
     pub fn take_many<T: Any + Send + Sync>(&mut self, name: &str) -> Option<Vec<T>> {
         match self.rows.get_mut(name) {
@@ -177,7 +177,7 @@ impl EagerLoadCache {
     /// Returns `None` if the relation was not loaded OR if the FK was
     /// null. Unlike `get_many`, this returns `None` instead of panicking
     /// for missing relations because callers like `<rel>_loaded()` on
-    /// HasOne return `Option<&T>` — distinguishing "not loaded" from
+    /// HasOne return `Option<&T>` - distinguishing "not loaded" from
     /// "loaded as None" would require a different accessor on the model.
     pub fn get_one<T: Any + Send + Sync>(&self, name: &str) -> Option<&T> {
         match self.rows.get(name) {
@@ -199,7 +199,7 @@ impl EagerLoadCache {
     }
 
     /// Read a `with_count` aggregate. Returns `None` if `with_count`
-    /// wasn't called for this relation — callers like `<rel>_count()`
+    /// wasn't called for this relation - callers like `<rel>_count()`
     /// turn that into a panic with a clear message.
     pub fn get_count(&self, name: &str) -> Option<u64> {
         match self.rows.get(name) {
@@ -211,8 +211,8 @@ impl EagerLoadCache {
     /// Store a `with_sum` / `with_avg` / `with_min` / `with_max` value.
     ///
     /// The cache key is the wide `<rel>_<kind>_<col>` form built by
-    /// [`aggregate_cache_key`][crate::eloquent::relations::aggregate_cache_key]
-    /// — runtime-formatted, hence the `&str` (not `&'static str`)
+    /// [`aggregate_cache_key`][crate::eloquent::relations::aggregate_cache_key] -
+    /// runtime-formatted, hence the `&str` (not `&'static str`)
     /// parameter. Multiple aggregates on the same relation (e.g.
     /// `with_sum(("posts","id"))` then `with_avg(("posts","id"))`)
     /// coexist without collision because the key encodes both the

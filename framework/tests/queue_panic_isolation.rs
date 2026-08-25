@@ -53,7 +53,7 @@ impl Job for PanicThenSucceedJob {
 /// The headline contract for H1: a single panicking attempt must NOT kill the
 /// worker. The worker must convert the panic into a typed failure, retry per
 /// the job's `BackoffSchedule`/`max_tries` policy, and ultimately settle the
-/// second attempt as a success — proving (a) the worker survived, (b) the
+/// second attempt as a success - proving (a) the worker survived, (b) the
 /// reservation was nack'd not stranded, and (c) the panic was routed through
 /// the existing failure accounting.
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn worker_survives_handler_panic_and_retries_to_success() {
 
     // Wait for the second attempt to settle as success. Without the panic
     // boundary the worker task would have aborted on attempt #1 and SUCCESSES
-    // would stay at 0 — the timeout below would fail the assertion.
+    // would stay at 0 - the timeout below would fail the assertion.
     for _ in 0..400 {
         if SUCCESSES.load(Ordering::SeqCst) > 0 {
             break;
@@ -88,7 +88,7 @@ async fn worker_survives_handler_panic_and_retries_to_success() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
-    // Worker must still be alive — cancel cleanly, not abort.
+    // Worker must still be alive - cancel cleanly, not abort.
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 
@@ -100,7 +100,7 @@ async fn worker_survives_handler_panic_and_retries_to_success() {
     assert_eq!(
         SUCCESSES.load(Ordering::SeqCst),
         1,
-        "second attempt must settle as success — proves the panic was retried, \
+        "second attempt must settle as success - proves the panic was retried, \
          not left stuck on a non-acked reservation"
     );
 }

@@ -223,7 +223,7 @@ fn append_plain_text(out: &mut String, text: &str) {
 
     // A SoftBreak/LineBreak before a node whose text opens with closing
     // punctuation (`.`, `,`, etc.) leaves a single break-introduced space
-    // sitting in front of that punctuation — e.g. `Hello\n. World` walks to
+    // sitting in front of that punctuation - e.g. `Hello\n. World` walks to
     // `"Hello . World"`. Drop only that spurious break space; intentional
     // spaced punctuation inside a single Text run (French `Bonjour : ...`)
     // is left untouched because it never crosses a break boundary.
@@ -344,7 +344,7 @@ mod tests {
     fn intentional_spaced_punctuation_in_a_single_run_is_preserved() {
         // French typography keeps a space before `:` and `?`. When the text
         // arrives as a single run (no break boundary), the spacing must
-        // survive — the old global ` :` -> `:` replace corrupted it.
+        // survive - the old global ` :` -> `:` replace corrupted it.
         let mut out = String::new();
         append_plain_text(&mut out, "Bonjour : comment ça va ?");
         assert_eq!(out, "Bonjour : comment ça va ?");

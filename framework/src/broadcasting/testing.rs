@@ -1,4 +1,4 @@
-//! Test doubles for broadcasting — the Suprnova analogue of Laravel's
+//! Test doubles for broadcasting - the Suprnova analogue of Laravel's
 //! `Broadcast::fake()` + `assertBroadcasted`.
 //!
 //! [`RecordingBroadcastHub`] is a [`BroadcastHub`] that records every published

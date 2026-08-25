@@ -5,7 +5,7 @@
 //! Loading `.env` writes to the process environment, and `set_var` is
 //! sound only when no other thread can be reading it. `#[tokio::main]`
 //! constructs the runtime around the whole of `main`, so its worker
-//! threads already exist before the first statement executes — and any
+//! threads already exist before the first statement executes - and any
 //! of them may call `getenv` indirectly through DNS resolution, time
 //! formatting, or a C dependency. The window is small and the corruption
 //! is silent, which is the worst combination to debug.
@@ -110,7 +110,7 @@ mod tests {
         assert!(boot_precondition(true).is_ok());
     }
 
-    /// The message is the entire value of this guard — someone hits it
+    /// The message is the entire value of this guard - someone hits it
     /// exactly once, while confused, and needs the fix in front of them.
     #[test]
     fn an_unloaded_environment_is_refused_with_the_fix_in_the_message() {
@@ -130,7 +130,7 @@ mod tests {
     }
 
     /// `load_env` mutates a global, so this asserts the refusal path
-    /// only — the one that must never set the flag.
+    /// only - the one that must never set the flag.
     #[tokio::test]
     async fn load_env_refuses_inside_a_runtime() {
         let err = load_env().expect_err("must refuse inside a runtime");

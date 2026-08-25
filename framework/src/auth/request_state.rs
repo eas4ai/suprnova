@@ -15,20 +15,20 @@
 //!
 //! It serves three jobs:
 //!
-//! 1. **Current user** — the [`Authenticatable`] resolved for this
+//! 1. **Current user** - the [`Authenticatable`] resolved for this
 //!    request. Set by `once`/`once_using_id`/`set_user`, and by a guard's
 //!    first `user()` resolution (a per-request cache so repeated lookups
-//!    don't re-query the provider — closing a divergence where the old
+//!    don't re-query the provider - closing a divergence where the old
 //!    `Auth::user()` re-queried on every call). `current_user_id` feeds
 //!    `Auth::id()` so the static facade sees `once`/`set_user`.
-//! 2. **Id-only slot** — the authenticated identifier when only the id is
+//! 2. **Id-only slot** - the authenticated identifier when only the id is
 //!    known, not a resolved [`Authenticatable`]. Set by
 //!    `BearerTokenMiddleware` after it validates a token, so
 //!    `Auth::check()`/`Auth::id()` work for token-only requests that never
-//!    install `SessionMiddleware` — without forcing a provider lookup on
+//!    install `SessionMiddleware` - without forcing a provider lookup on
 //!    every request. A later fully-resolved current user still wins; see
 //!    `current_user_id`.
-//! 3. **Via-remember flag** — whether the current user was
+//! 3. **Via-remember flag** - whether the current user was
 //!    re-authenticated from a remember-me cookie *this request* (set by
 //!    `SessionMiddleware`'s hydration path) rather than from an active
 //!    session, surfaced through `StatefulGuard::via_remember`.
@@ -55,7 +55,7 @@ struct AuthRequestState {
     ///
     /// A bearer-token request learns its user id from the token store
     /// before any provider lookup happens, and forcing a lookup there
-    /// would put a database round-trip on every request — including
+    /// would put a database round-trip on every request - including
     /// requests that never consult `Auth`. `TokenGuard::user()` already
     /// resolves and caches the full user lazily, so this slot exists to
     /// carry the id until something actually needs the user.
@@ -70,7 +70,7 @@ tokio::task_local! {
     // `scope` may move across worker threads at `.await` points (so the
     // value must be `Send + Sync`), and setters mutate it after the
     // scope is installed. The guard is only ever held across synchronous
-    // closures — never across an `.await` — so the std mutex is sound.
+    // closures - never across an `.await` - so the std mutex is sound.
     static AUTH_STATE: Arc<Mutex<AuthRequestState>>;
 }
 
@@ -88,7 +88,7 @@ pub(crate) async fn scope<F: std::future::Future>(fut: F) -> F::Output {
 /// Set the user resolved for this request.
 ///
 /// No-op when called outside a request scope (e.g. a unit test that did
-/// not install one) — the same fail-quiet posture as the session
+/// not install one) - the same fail-quiet posture as the session
 /// helpers.
 pub(crate) fn set_current_user(user: Arc<dyn Authenticatable>) {
     let _ = AUTH_STATE.try_with(|state| {
@@ -114,7 +114,7 @@ pub(crate) fn current_user() -> Option<Arc<dyn Authenticatable>> {
 /// resolved yet.
 ///
 /// Set by `BearerTokenMiddleware` after it validates the token. A later
-/// `set_current_user` takes precedence — see `current_user_id`.
+/// `set_current_user` takes precedence - see `current_user_id`.
 ///
 /// No-op outside a request scope, matching `set_current_user`.
 ///
@@ -166,7 +166,7 @@ pub(crate) fn clear_current_user() {
     });
 }
 
-/// Whether a user instance has been resolved for this request — without
+/// Whether a user instance has been resolved for this request - without
 /// triggering provider resolution. Backs [`Guard::has_user`](super::Guard::has_user).
 pub(crate) fn has_current_user() -> bool {
     AUTH_STATE
@@ -265,8 +265,8 @@ mod tests {
             set_current_user_id("id-only-99");
             assert_eq!(current_user_id(), Some("id-only-99".to_string()));
 
-            // A later `set_current_user` — e.g. `TokenGuard::user()` resolving
-            // and caching the full user — must win, per `current_user_id`'s
+            // A later `set_current_user` - e.g. `TokenGuard::user()` resolving
+            // and caching the full user - must win, per `current_user_id`'s
             // documented precedence.
             set_current_user(Arc::new(TestUser {
                 id: "resolved-7".into(),

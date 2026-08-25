@@ -3,14 +3,14 @@
 //! Five casts that mediate cryptographic transforms on the storage ↔
 //! runtime boundary:
 //!
-//! - [`AsEncrypted`] — `String` ↔ AES-256-GCM ciphertext, both at rest
+//! - [`AsEncrypted`] - `String` ↔ AES-256-GCM ciphertext, both at rest
 //!   and on the wire to/from the column.
-//! - [`AsEncryptedArray<T>`] — `Vec<T>` via JSON-then-encrypt.
-//! - [`AsEncryptedObject<T>`] — any `Serialize + DeserializeOwned` type
+//! - [`AsEncryptedArray<T>`] - `Vec<T>` via JSON-then-encrypt.
+//! - [`AsEncryptedObject<T>`] - any `Serialize + DeserializeOwned` type
 //!   via JSON-then-encrypt. Use when the runtime shape is a fixed
 //!   struct.
-//! - [`AsEncryptedCollection<T>`] — `Collection<T>` via JSON-then-encrypt.
-//! - [`AsHashed`] — one-way bcrypt hash on write; the stored value
+//! - [`AsEncryptedCollection<T>`] - `Collection<T>` via JSON-then-encrypt.
+//! - [`AsHashed`] - one-way bcrypt hash on write; the stored value
 //!   matches what `from_storage` returns (matches Laravel's `hashed`
 //!   cast). Idempotent across re-saves: an already-hashed value passes
 //!   through unchanged, so `User::find().save()` does not re-bcrypt
@@ -62,7 +62,7 @@ impl DynCast for AsEncryptedDyn {
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape; was silently
+        // Domain 7 audit D7-A - strict-validate input shape; was silently
         // coercing non-strings to "" and attempting to decrypt that.
         let wire = v
             .as_str()
@@ -77,7 +77,7 @@ impl DynCast for AsEncryptedDyn {
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate. Critical for the
+        // Domain 7 audit D7-A - strict-validate. Critical for the
         // write path because a non-string input here used to be
         // silently encrypted as the empty string.
         let s = v
@@ -140,7 +140,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let wire = v
             .as_str()
             .ok_or_else(|| {
@@ -216,7 +216,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let wire = v
             .as_str()
             .ok_or_else(|| {
@@ -268,7 +268,7 @@ where
     type Storage = String;
 
     fn to_storage(v: &crate::eloquent::Collection<T>) -> Result<String, FrameworkError> {
-        // Borrow the inner slice and clone into a Vec — the slice itself
+        // Borrow the inner slice and clone into a Vec - the slice itself
         // serialises with the same shape as Vec<T> (a JSON array), but
         // taking a Vec keeps the `to_storage` signature on
         // AsEncryptedArray<T> uniform with the rest of the cast surface.
@@ -290,7 +290,7 @@ where
         &self,
         v: &serde_json::Value,
     ) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — strict-validate input shape.
+        // Domain 7 audit D7-A - strict-validate input shape.
         let wire = v
             .as_str()
             .ok_or_else(|| {
@@ -329,8 +329,8 @@ where
 // ---- AsHashed ------------------------------------------------------------
 
 /// Cast a plaintext `String` to a hashed string on write using the
-/// active driver (`HASH_DRIVER` — bcrypt by default; argon2i / argon2id
-/// also supported). The runtime value is the hashed string — there is no
+/// active driver (`HASH_DRIVER` - bcrypt by default; argon2i / argon2id
+/// also supported). The runtime value is the hashed string - there is no
 /// reverse direction.
 ///
 /// ## Idempotence
@@ -357,13 +357,13 @@ impl Cast for AsHashed {
         if crate::hashing::is_hashed(v) {
             return Ok(v.clone());
         }
-        // `hashing::hash` already returns Result<String, FrameworkError> —
+        // `hashing::hash` already returns Result<String, FrameworkError> -
         // propagate directly, don't double-wrap.
         crate::hashing::hash(v)
     }
 
     fn from_storage(s: &String) -> Result<String, FrameworkError> {
-        // Hashes don't reverse — Laravel's `hashed` cast does the same.
+        // Hashes don't reverse - Laravel's `hashed` cast does the same.
         Ok(s.clone())
     }
 }
@@ -380,7 +380,7 @@ impl DynCast for AsHashedDyn {
     }
 
     fn to_storage_json(&self, v: &serde_json::Value) -> Result<serde_json::Value, FrameworkError> {
-        // Domain 7 audit D7-A — was `v.as_str().unwrap_or("")` which
+        // Domain 7 audit D7-A - was `v.as_str().unwrap_or("")` which
         // would silently bcrypt the empty string if user code routed a
         // non-string value through here (e.g. via a future `with_casts`
         // write-path wiring). The damage shape: every row's password
@@ -425,14 +425,14 @@ mod tests {
     #[test]
     fn as_hashed_rejects_plaintext_that_only_starts_with_dollar_2b() {
         // Plaintext prefix that looks bcrypt-y but isn't the right
-        // length — must NOT be treated as already-hashed.
+        // length - must NOT be treated as already-hashed.
         let fake = "$2b$short-not-a-real-hash".to_string();
         assert!(!crate::hashing::is_hashed(&fake));
     }
 
     #[test]
     fn as_hashed_rejects_wrong_prefix_even_at_60_chars() {
-        // 60 chars but wrong prefix — not a recognised hash, must rehash.
+        // 60 chars but wrong prefix - not a recognised hash, must rehash.
         let mut s = "$2c$".to_string();
         s.push_str(&"x".repeat(56));
         assert_eq!(s.len(), 60);
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn as_hashed_accepts_2a_and_2y_variants() {
-        // Older bcrypt variants — must also pass through unchanged.
+        // Older bcrypt variants - must also pass through unchanged.
         let a = format!("$2a$12${}", "x".repeat(53));
         let y = format!("$2y$12${}", "x".repeat(53));
         assert_eq!(a.len(), 60);
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn as_hashed_treats_argon_hash_as_already_hashed() {
-        // Algorithm-agnostic — once we support argon2id via HASH_DRIVER,
+        // Algorithm-agnostic - once we support argon2id via HASH_DRIVER,
         // the cast must not re-hash a stored argon2id digest into a
         // bcrypt-of-argon-of-argon-of-… chain on every save.
         use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};

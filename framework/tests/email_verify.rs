@@ -1,4 +1,4 @@
-//! `EmailVerification` facade integration tests — provider-backed.
+//! `EmailVerification` facade integration tests - provider-backed.
 //!
 //! Exercises the facade end-to-end against a real `#[suprnova::model]` user in
 //! in-memory SQLite + the framework's own `auth_flow_tokens` table, with the
@@ -11,7 +11,7 @@
 //! `Mail::fake()` swaps the process-global mail transport, so two parallel
 //! tests installing fakes would cross-capture each other's messages. The DB is
 //! thread-local (per `TestDatabase`), so the mail fake is the only remaining
-//! global — `#[serial]` serializes against it.
+//! global - `#[serial]` serializes against it.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -82,7 +82,7 @@ impl CanResetPassword for TestUser {
 /// Held-for-the-test guard: the `TestDatabase` carries the thread-local
 /// container scope (it installs one via `TestContainer::fake` internally and
 /// registers the `DbConnection` in it). We register the `AuthManager` +
-/// provider into that SAME container — without replacing it — so the facade's
+/// provider into that SAME container - without replacing it - so the facade's
 /// `active_user_provider()` and `DB::connection()` both resolve.
 struct Harness {
     _db: TestDatabase,
@@ -127,7 +127,7 @@ async fn setup() -> Harness {
 
     // Register the Eloquent provider as the active "users" provider into the
     // SAME thread-local container `TestDatabase` already installed (do NOT call
-    // `TestContainer::fake()` again — that would replace the container and drop
+    // `TestContainer::fake()` again - that would replace the container and drop
     // the DB binding). `TestContainer::singleton` writes into the active scope.
     // `AuthConfig::default()`'s "web" guard points at the "users" provider.
     TestContainer::singleton(AuthManager::new(AuthConfig::default()));
@@ -138,7 +138,7 @@ async fn setup() -> Harness {
     Harness { _db: db }
 }
 
-/// Reload the seeded user from the DB by email — to assert the verification
+/// Reload the seeded user from the DB by email - to assert the verification
 /// stamp persisted through the provider.
 async fn reload_ada() -> TestUser {
     let p = EloquentUserProvider::<TestUser>::new();

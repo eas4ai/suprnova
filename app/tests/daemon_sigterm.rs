@@ -8,7 +8,7 @@
 //!
 //! `schedule:work`, `queue:work` and `workflow:work` each selected on
 //! `tokio::signal::ctrl_c()` alone. `ctrl_c` installs a SIGINT handler, so
-//! SIGTERM had no handler anywhere in the process — and SIGTERM is what
+//! SIGTERM had no handler anywhere in the process - and SIGTERM is what
 //! `docker stop`, Coolify, systemd and Kubernetes send. Every one of the
 //! three had a careful bounded drain sitting behind that `select!` which
 //! had never run under any supervisor.
@@ -16,7 +16,7 @@
 //! Measured on the benchmark host before the fix: `docker stop` on a
 //! `queue:work` container burned its entire 40s grace window and exited
 //! 137 (SIGKILL) with the in-flight job destroyed. The same worker at a
-//! normal pid exited 143 in 0.1s — the default disposition, which is what
+//! normal pid exited 143 in 0.1s - the default disposition, which is what
 //! proves no handler existed. As PID 1, which is what a container runs,
 //! the kernel discards an unhandled SIGTERM outright.
 //!
@@ -25,7 +25,7 @@
 //! The PID-1 half. A test process is never PID 1, so the "signal is
 //! discarded entirely" behaviour needs a container to observe and cannot
 //! be reached from here. What this file asserts is the thing that
-//! *causes* it — whether a handler exists at all — which is also the
+//! *causes* it - whether a handler exists at all - which is also the
 //! thing a future refactor could silently drop.
 
 #![cfg(unix)]
@@ -77,7 +77,7 @@ fn daemon_command(subcommand: &str, db_path: &Path) -> Command {
 ///
 /// `bootstrap::register` wires the feature-flag chain against the
 /// `features` table and panics if it is missing, so an unmigrated database
-/// takes the daemon down during boot — which would look exactly like a
+/// takes the daemon down during boot - which would look exactly like a
 /// signal-handling failure from the outside.
 fn migrate(db_path: &Path) {
     let output = daemon_command("migrate", db_path)
@@ -174,7 +174,7 @@ fn wait_for_exit(child: &mut Child) -> Option<(std::process::ExitStatus, Duratio
 ///
 /// The assertion is on a *clean* exit, not merely a prompt one. Exit 143
 /// is 128+15: the process died on SIGTERM's default disposition, which
-/// means no handler ran and therefore no drain ran either — prompt, and
+/// means no handler ran and therefore no drain ran either - prompt, and
 /// exactly the bug.
 fn assert_daemon_drains(subcommand: &str, banner: &str, sig: &str) {
     let tmp = tempfile::TempDir::new().expect("tmpdir");
@@ -237,7 +237,7 @@ fn scheduler_drains_on_sigterm() {
 ///
 /// What is still worth asserting is the regression this file exists for:
 /// that a handler *exists*. A process killed by a signal reports no exit
-/// code at all — `status.code()` is `None` — so a `Some(_)` is proof the
+/// code at all - `status.code()` is `None` - so a `Some(_)` is proof the
 /// process chose its own exit rather than being terminated by the
 /// disposition. Demanding exit 0 here would only be testing that Postgres
 /// is absent.

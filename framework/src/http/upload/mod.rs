@@ -1,24 +1,24 @@
 //! Streaming multipart upload support.
 //!
 //! Public API:
-//! - `#[derive(MultipartRequest)]` — strongly-typed extractor for handlers
-//! - `UploadedFile<V>` — single uploaded file with validator `V`
-//! - `parse_multipart_streaming` — low-level helper for advanced parsers
-//! - `MultipartRequestHooks` — `authorize` / `after_validation` lifecycle hooks
+//! - `#[derive(MultipartRequest)]` - strongly-typed extractor for handlers
+//! - `UploadedFile<V>` - single uploaded file with validator `V`
+//! - `parse_multipart_streaming` - low-level helper for advanced parsers
+//! - `MultipartRequestHooks` - `authorize` / `after_validation` lifecycle hooks
 //!
 //! # Streaming model
 //!
 //! Each multipart part is collected into one of two backings:
 //!
-//! - **Memory** (`Bytes`) — fast path for small parts. Default cap is
+//! - **Memory** (`Bytes`) - fast path for small parts. Default cap is
 //!   2 MiB, configurable via [`set_global_upload_spill_threshold`].
-//! - **Disk** (`tempfile::NamedTempFile`) — spill path for large parts.
+//! - **Disk** (`tempfile::NamedTempFile`) - spill path for large parts.
 //!   Chunks are streamed into a temp file as they arrive from the
 //!   transport, so a 200 MiB video upload never resides fully in RAM.
 //!
 //! `UploadedFile::store_as` streams from disk-backed parts directly to
-//! the destination storage in 64 KiB chunks via `opendal::Operator::writer`
-//! — true streaming, not a final-write of a buffered blob.
+//! the destination storage in 64 KiB chunks via `opendal::Operator::writer` -
+//! true streaming, not a final-write of a buffered blob.
 //!
 //! Body is consumed exactly once per request. The derive macro
 //! dispatches by `#[field("name")]` so multiple files + text fields
@@ -41,12 +41,12 @@ use validators::UploadValidator;
 
 /// Default per-request multipart body cap when none is configured.
 /// 25 MiB matches what most production apps want as their default
-/// upper bound — large enough for typical document/image uploads,
+/// upper bound - large enough for typical document/image uploads,
 /// small enough that an unauthenticated client can't trivially DoS.
 pub const DEFAULT_MAX_MULTIPART_BODY_BYTES: usize = 25 * 1024 * 1024;
 
 /// Default in-memory buffer size before a single part spills to a
-/// temp file. 2 MiB — small enough that typical avatar/image uploads
+/// temp file. 2 MiB - small enough that typical avatar/image uploads
 /// stay in memory (fast path), large enough that buffer thrashing is
 /// rare for legitimate uploads.
 pub const DEFAULT_UPLOAD_SPILL_THRESHOLD: usize = 2 * 1024 * 1024;
@@ -69,7 +69,7 @@ static GLOBAL_SPILL_THRESHOLD: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the process-global cap on multipart request body size, in bytes.
 ///
-/// Called at boot — typically from `bootstrap.rs` — to override the
+/// Called at boot - typically from `bootstrap.rs` - to override the
 /// compile-time [`DEFAULT_MAX_MULTIPART_BODY_BYTES`]. Setting `0` is
 /// special: it means "use the default". Setting `usize::MAX` disables
 /// the cap entirely.
@@ -102,7 +102,7 @@ pub fn global_max_multipart_body_bytes() -> usize {
 ///
 /// Setting `0` is special: it means "use [`DEFAULT_UPLOAD_SPILL_THRESHOLD`]".
 /// Setting `usize::MAX` effectively disables spilling (every part is
-/// buffered fully — only do this if you're certain about your body cap).
+/// buffered fully - only do this if you're certain about your body cap).
 ///
 /// Thread-safe; can be called multiple times. The most recent value
 /// wins for any subsequent request.
@@ -126,7 +126,7 @@ pub fn global_upload_spill_threshold() -> usize {
 /// multipart request.
 ///
 /// The total-byte cap bounds raw payload bytes, but multipart framing
-/// (boundary + per-part headers) is not counted toward it — so without a
+/// (boundary + per-part headers) is not counted toward it - so without a
 /// part ceiling a body composed of many tiny parts can drive unbounded
 /// `MultipartPayload` growth while staying within the byte budget. 1000
 /// mirrors PHP's `max_input_vars` and sits comfortably above any
@@ -199,7 +199,7 @@ pub struct MultipartLimits<'a> {
     pub spill_threshold: usize,
     /// Per-field count ceilings keyed by wire field name. When a field
     /// reaches its ceiling, the next part carrying that name is rejected
-    /// with HTTP 422 before it is read — so the (ceiling + 1)-th part
+    /// with HTTP 422 before it is read - so the (ceiling + 1)-th part
     /// never allocates. Names absent from this list are bounded only by
     /// `max_parts`.
     pub per_field_max_counts: &'a [(&'a str, usize)],
@@ -209,12 +209,12 @@ pub struct MultipartLimits<'a> {
 ///
 /// Pre-allocated by the multipart parser based on whether the part
 /// crossed the spill threshold. End users construct `UploadedFile` via
-/// the parser + derive macro — they don't build this enum directly.
+/// the parser + derive macro - they don't build this enum directly.
 #[doc(hidden)]
 pub enum UploadedFileBacking {
-    /// Small part — buffered entirely in memory.
+    /// Small part - buffered entirely in memory.
     Memory(Bytes),
-    /// Large part — written to a temp file as the body streamed in.
+    /// Large part - written to a temp file as the body streamed in.
     /// The temp file is auto-deleted when this enum drops, so partial
     /// uploads abandoned mid-request never accumulate on disk.
     Disk(NamedTempFile),
@@ -225,10 +225,10 @@ pub enum UploadedFileBacking {
 /// Backed either by an in-memory `Bytes` (for parts below the spill
 /// threshold) or a `tempfile::NamedTempFile` (for larger parts streamed
 /// to disk as they arrived). Use `UploadedFile::store_as` to write
-/// to a registered storage disk — that path is fully streaming for
+/// to a registered storage disk - that path is fully streaming for
 /// disk-backed parts and a single-op write for in-memory parts.
 ///
-/// To inspect the raw bytes, call [`UploadedFile::bytes`] (async — the
+/// To inspect the raw bytes, call [`UploadedFile::bytes`] (async - the
 /// disk-backed path reads asynchronously). For size checks, prefer the
 /// synchronous [`UploadedFile::size`] accessor.
 pub struct UploadedFile<V: UploadValidator = ()> {
@@ -239,12 +239,12 @@ pub struct UploadedFile<V: UploadValidator = ()> {
     pub size: u64,
     /// File extension inferred from magic bytes captured during parse
     /// (a bounded ≤16 KiB sniff buffer). `None` when the format is
-    /// unknown; callers should fall back to `"bin"` — the
+    /// unknown; callers should fall back to `"bin"` - the
     /// [`UploadedFile::extension_from_magic`] helper does exactly that.
     inferred_extension: Option<&'static str>,
-    /// Original filename declared by the client, if any. Untrusted input — never use as a filesystem path.
+    /// Original filename declared by the client, if any. Untrusted input - never use as a filesystem path.
     pub file_name: Option<String>,
-    /// `Content-Type` the client declared for this part, if any. Untrusted — verify against `inferred_extension` for security-sensitive paths.
+    /// `Content-Type` the client declared for this part, if any. Untrusted - verify against `inferred_extension` for security-sensitive paths.
     pub content_type: Option<String>,
     _v: std::marker::PhantomData<V>,
 }
@@ -297,7 +297,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     /// Read the entire upload into memory.
     ///
     /// For in-memory parts this is a cheap `Bytes::clone()`. For
-    /// disk-backed parts this asynchronously reads the temp file — so
+    /// disk-backed parts this asynchronously reads the temp file - so
     /// it allocates `size` bytes plus reads `size` bytes from disk.
     /// Prefer `UploadedFile::store_as` whenever the destination is a
     /// storage disk: that path streams in 64 KiB chunks and never
@@ -333,7 +333,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     ///
     /// # Errors
     ///
-    /// Returns [`FrameworkError::Internal`] on any I/O failure — opening
+    /// Returns [`FrameworkError::Internal`] on any I/O failure - opening
     /// the temp file, reading from it, opening the destination writer,
     /// writing a chunk, or closing the destination writer. Each path
     /// uses a distinct message prefix so failures are identifiable in
@@ -386,7 +386,7 @@ impl<V: UploadValidator> UploadedFile<V> {
     /// when the content type cannot be identified (binary blobs,
     /// unrecognised formats).
     ///
-    /// Synchronous — the extension is pre-computed during multipart
+    /// Synchronous - the extension is pre-computed during multipart
     /// parsing, so this never re-reads the spilled temp file.
     ///
     /// # Why this matters
@@ -421,33 +421,33 @@ pub struct MultipartPayload {
     pub fields: Vec<(String, MultipartValue)>,
 }
 
-/// A parsed multipart field — either a file part (whose backing is
+/// A parsed multipart field - either a file part (whose backing is
 /// either in-memory or a disk-spilled temp file) or a text part.
 pub enum MultipartValue {
     /// File part. `backing` decides where the content lives; `size`
     /// is the byte count; `inferred_extension` is the result of
-    /// `infer::get` over the bounded sniff buffer captured during parse
-    /// — pre-computed so the derive macro can hand it to
+    /// `infer::get` over the bounded sniff buffer captured during parse -
+    /// pre-computed so the derive macro can hand it to
     /// [`UploadedFile::from_memory`] / [`UploadedFile::from_disk`]
     /// without re-reading the spilled temp file. `sniff` is the same
     /// bounded ≤16 KiB prefix captured during parse, surfaced here so
     /// `validate_final` callers (the derive macro, primarily) can run
     /// content-aware checks without re-reading the spilled file.
     File {
-        /// Where the bytes live — in-memory `Bytes` or a disk-spilled temp file.
+        /// Where the bytes live - in-memory `Bytes` or a disk-spilled temp file.
         backing: UploadedFileBacking,
         /// Total size of the part in bytes.
         size: u64,
-        /// Client-declared filename, if any. Untrusted input — never use as a filesystem path.
+        /// Client-declared filename, if any. Untrusted input - never use as a filesystem path.
         file_name: Option<String>,
-        /// Client-declared `Content-Type`, if any. Untrusted — cross-check with `inferred_extension`.
+        /// Client-declared `Content-Type`, if any. Untrusted - cross-check with `inferred_extension`.
         content_type: Option<String>,
         /// Extension inferred from the magic-byte sniff buffer; `None` when the format is unknown.
         inferred_extension: Option<&'static str>,
         /// Bounded ≤16 KiB prefix captured during parse, for content-aware validators.
         sniff: Vec<u8>,
     },
-    /// Text part — a non-file field carrying its UTF-8 value.
+    /// Text part - a non-file field carrying its UTF-8 value.
     Text(String),
 }
 
@@ -482,7 +482,7 @@ enum PartBacking {
 /// ourselves for exceeding the raw byte cap" (413).
 ///
 /// Needed because multer reports a failure in the underlying stream as an
-/// opaque read error — by the time it surfaces here, the fact that *we*
+/// opaque read error - by the time it surfaces here, the fact that *we*
 /// produced it is gone. `tripped` carries that one bit back out.
 fn multipart_stream_error(
     err: multer::Error,
@@ -504,8 +504,8 @@ fn multipart_stream_error(
 
 /// The request-wide byte budget, threaded through part collection.
 ///
-/// These three always travel together — the ceiling, the running total,
-/// and the flag saying we already cut the transport off for exceeding it —
+/// These three always travel together - the ceiling, the running total,
+/// and the flag saying we already cut the transport off for exceeding it -
 /// so they are one parameter rather than three.
 struct BodyBudget<'a> {
     /// Ceiling on accumulated payload bytes across all parts.
@@ -551,7 +551,7 @@ where
         }
 
         // Capture sniff bytes up to SNIFF_BYTES. Once the buffer is
-        // full, additional chunks contribute nothing to it — bound is
+        // full, additional chunks contribute nothing to it - bound is
         // hard so a 200 MiB upload's sniff stays at 16 KiB.
         let remaining_sniff = SNIFF_BYTES.saturating_sub(sniff.len());
         if remaining_sniff > 0 {
@@ -713,13 +713,13 @@ where
     //
     // Multipart bodies are never pre-buffered by middleware (CSRF only
     // buffers form-urlencoded). If we somehow see a buffered body here
-    // it's a programming error — return a clear 400 rather than
+    // it's a programming error - return a clear 400 rather than
     // silently truncating.
     let incoming = match body {
         crate::http::BodyState::Streaming(inc) => inc,
         crate::http::BodyState::Buffered(_) => {
             return Err(FrameworkError::Domain {
-                message: "multipart upload received a pre-buffered body — this is a \
+                message: "multipart upload received a pre-buffered body - this is a \
                           framework bug; multipart bodies must arrive as streams"
                     .into(),
                 status_code: 400,
@@ -727,7 +727,7 @@ where
         }
         crate::http::BodyState::Consumed => {
             return Err(FrameworkError::Domain {
-                message: "multipart upload received a fully consumed body — middleware \
+                message: "multipart upload received a fully consumed body - middleware \
                           drained the body without buffering"
                     .into(),
                 status_code: 400,
@@ -737,8 +737,8 @@ where
     // SEC-05: cap the RAW stream, not just the bytes that reach a part.
     //
     // `total_bytes` below only accumulates payload bytes handed back by
-    // `field.chunk()`. Multipart framing — the preamble before the first
-    // boundary, boundary lines, and part headers — never reaches that
+    // `field.chunk()`. Multipart framing - the preamble before the first
+    // boundary, boundary lines, and part headers - never reaches that
     // counter, and `max_parts` only counts parts multer actually yields.
     // So a body that is *entirely* framing trips neither cap: a gigantic
     // preamble, or a part header that never terminates, keeps multer
@@ -857,7 +857,7 @@ where
                 sniff: collected.sniff,
             }
         } else {
-            // Text parts must fit in memory — the spill threshold is a
+            // Text parts must fit in memory - the spill threshold is a
             // sizing hint for opaque file payloads, not arbitrary form
             // fields. A multi-MiB text field is an attack signal: reject
             // with 400.
@@ -923,8 +923,8 @@ where
 /// fills [`MultipartLimits`] from the process-global accessors
 /// ([`global_max_multipart_body_bytes`], [`global_max_multipart_parts`],
 /// [`global_upload_spill_threshold`]) and applies no per-field count
-/// ceilings. Callers that need to pin limits to known values — or enforce
-/// per-field `max_count` — should call
+/// ceilings. Callers that need to pin limits to known values - or enforce
+/// per-field `max_count` - should call
 /// [`parse_multipart_streaming_with_limits`] directly;
 /// `#[derive(MultipartRequest)]` does exactly that.
 pub async fn parse_multipart_streaming<F>(

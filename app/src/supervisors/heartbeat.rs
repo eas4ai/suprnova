@@ -1,4 +1,4 @@
-//! LogHeartbeat — a dogfood [`Supervisor`] that emits a periodic INFO trace.
+//! LogHeartbeat - a dogfood [`Supervisor`] that emits a periodic INFO trace.
 //!
 //! In production this would tick every 60 seconds as a steady heartbeat
 //! confirming the process is alive. The dogfood interval is 5 seconds so the

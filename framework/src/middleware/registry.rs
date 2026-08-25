@@ -10,7 +10,7 @@ use std::sync::{OnceLock, RwLock};
 /// Global middleware registry (populated via `global_middleware!` macro in bootstrap.rs).
 ///
 /// Entries are keyed by the middleware's concrete `TypeId` so registration
-/// is idempotent per type — see [`register_global_middleware`].
+/// is idempotent per type - see [`register_global_middleware`].
 static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<(TypeId, BoxedMiddleware)>>> = OnceLock::new();
 
 /// Register a global middleware that runs on every request.
@@ -20,15 +20,15 @@ static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<(TypeId, BoxedMiddleware)>>> = Onc
 ///
 /// Registration is **idempotent per middleware type**: registering the
 /// same `Middleware` type twice keeps only the first registration. This
-/// makes re-running app bootstrap — tests, hot-reload, or constructing
-/// more than one `Server` in a process — safe; without it, global
+/// makes re-running app bootstrap - tests, hot-reload, or constructing
+/// more than one `Server` in a process - safe; without it, global
 /// logging / auth / CSRF / Inertia middleware would silently double-run
 /// on every request. To install several logical instances of the same
 /// behavior with different configuration, wrap each in a distinct newtype
 /// so they carry distinct `TypeId`s and all register.
 ///
-/// A poisoned write lock — possible if one middleware panicked while
-/// another thread held the registry lock during boot — is recovered
+/// A poisoned write lock - possible if one middleware panicked while
+/// another thread held the registry lock during boot - is recovered
 /// via `PoisonError::into_inner` rather than silently dropping the
 /// registration. Silently failing here would mean global auth / CSRF /
 /// logging middleware vanish from every subsequent request based on
@@ -97,7 +97,7 @@ fn insert_unique_global<M: Middleware + 'static>(
 /// middleware list.
 ///
 /// Poisoned read locks recover via `PoisonError::into_inner` for the
-/// same reason as [`register_global_middleware`] — a panic during one
+/// same reason as [`register_global_middleware`] - a panic during one
 /// global middleware's `handle()` must not silently disable the
 /// remaining global middleware on every subsequent request.
 pub fn get_global_middleware() -> Vec<BoxedMiddleware> {
@@ -114,7 +114,7 @@ pub fn get_global_middleware() -> Vec<BoxedMiddleware> {
 /// Prepend a global middleware so it runs **before** every existing
 /// global middleware. Mirrors Laravel's `Kernel::prependMiddleware`.
 ///
-/// Registration is still idempotent per concrete type — re-registering
+/// Registration is still idempotent per concrete type - re-registering
 /// an existing global is a no-op. Used by the bootstrap surface when an
 /// extension wants to ensure its middleware runs ahead of everything the
 /// app registered itself (e.g. an APM probe that must wrap the entire
@@ -228,7 +228,7 @@ impl MiddlewareRegistry {
     /// scaffolded boot order does this for you (`bootstrap()` runs, then
     /// `Server::from_config` / `Server::new` builds the server). A
     /// `global_middleware!` call made AFTER a server is built does not
-    /// retroactively apply to that already-constructed server — that is
+    /// retroactively apply to that already-constructed server - that is
     /// deliberate, so a running server's middleware stack cannot shift
     /// underneath it.
     pub fn from_global() -> Self {

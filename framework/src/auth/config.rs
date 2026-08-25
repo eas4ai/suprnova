@@ -1,4 +1,4 @@
-//! Authentication configuration — Laravel's `config/auth.php`.
+//! Authentication configuration - Laravel's `config/auth.php`.
 //!
 //! Declares the *wiring*: the default guard, and each named guard's
 //! driver + which provider it resolves users through. It is the
@@ -116,7 +116,7 @@ impl AuthConfig {
     /// Load the configuration from the environment.
     ///
     /// Only the **default guard** is env-driven (`AUTH_GUARD`, default
-    /// `web`) — mirroring Laravel, where guards live in code and only the
+    /// `web`) - mirroring Laravel, where guards live in code and only the
     /// default is environment-selectable. Apps that need additional or
     /// renamed guards build an [`AuthConfig`] explicitly.
     pub fn from_env() -> Self {

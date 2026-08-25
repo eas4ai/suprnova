@@ -13,7 +13,7 @@ use crate::FrameworkError;
 /// Gates registered with [`Gate::define`](crate::Gate::define) return `bool`
 /// and are wrapped into a bare allow/deny `Response`. Gates registered with
 /// [`Gate::define_with`](crate::Gate::define_with) return a `Response`
-/// directly — that is how a custom denial message reaches
+/// directly - that is how a custom denial message reaches
 /// [`Gate::inspect`](crate::Gate::inspect).
 ///
 /// # Naming
@@ -42,7 +42,7 @@ use crate::FrameworkError;
 ///
 /// # Serialization
 ///
-/// `Response` serializes to Laravel's `toArray()` shape —
+/// `Response` serializes to Laravel's `toArray()` shape -
 /// `{ "allowed", "message", "code" }`. The HTTP `status` is intentionally
 /// **not** serialized (it is a server-side routing concern, not part of the
 /// decision the frontend consumes), matching Laravel.
@@ -70,7 +70,7 @@ impl Response {
         }
     }
 
-    /// A bare denial — no message, no status. Through
+    /// A bare denial - no message, no status. Through
     /// [`authorize`](Self::authorize) this maps to the canonical
     /// `FrameworkError::Unauthorized` (403).
     pub fn deny() -> Self {
@@ -105,7 +105,7 @@ impl Response {
     }
 
     /// A denial that surfaces as `404 Not Found` rather than `403`. Mirrors
-    /// Laravel's `Response::denyAsNotFound()` — used to hide a resource's
+    /// Laravel's `Response::denyAsNotFound()` - used to hide a resource's
     /// existence from a user who may not view it.
     pub fn deny_as_not_found() -> Self {
         Self {
@@ -128,7 +128,7 @@ impl Response {
     ///
     /// Note: `code` is reachable via [`code`](Self::code) on the inspected
     /// `Response` but does **not** round-trip through
-    /// [`authorize`](Self::authorize) — `FrameworkError` has no code field.
+    /// [`authorize`](Self::authorize) - `FrameworkError` has no code field.
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
         self
@@ -165,7 +165,7 @@ impl Response {
 
     /// The machine-readable reason code, if any.
     ///
-    /// Available on the inspected `Response` only — it does not survive
+    /// Available on the inspected `Response` only - it does not survive
     /// [`authorize`](Self::authorize) (`FrameworkError` carries no code).
     pub fn code(&self) -> Option<&str> {
         self.code.as_deref()
@@ -182,11 +182,11 @@ impl Response {
     ///
     /// - Allowed → `Ok(self)` (so the response can be chained, as in Laravel).
     /// - Bare denial (no message / code / status) → `FrameworkError::Unauthorized`
-    ///   (403, `"This action is unauthorized."`) — the canonical denial.
+    ///   (403, `"This action is unauthorized."`) - the canonical denial.
     /// - Rich denial → `FrameworkError::Domain { message, status_code }` carrying
     ///   the custom message (or the default) and the custom status (or 403).
     ///
-    /// `code` is **not** represented in the resulting error — it has no field
+    /// `code` is **not** represented in the resulting error - it has no field
     /// on `FrameworkError`. Inspect the `Response` directly if you need it.
     pub fn authorize(self) -> Result<Response, FrameworkError> {
         if self.allowed {
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn authorize_bare_deny_is_unauthorized() {
-        // A bare denial maps to the canonical 403 Unauthorized — preserving
+        // A bare denial maps to the canonical 403 Unauthorized - preserving
         // the pre-Response behaviour of bool gates.
         assert!(matches!(
             Response::deny().authorize(),

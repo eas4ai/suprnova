@@ -139,7 +139,7 @@ impl Job for RoutedDeadJob {
     }
 }
 
-// The failed record must carry the queue the job actually died on — an
+// The failed record must carry the queue the job actually died on - an
 // operator triaging the `billing` pool filters failed jobs by queue, and a
 // record stamped `default` hides the failure from the pool that owns it.
 // Previously the worker hardcoded "default" for every dead letter.

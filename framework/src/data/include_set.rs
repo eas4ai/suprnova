@@ -7,10 +7,10 @@ use std::sync::Arc;
 /// Parsed `?include=`/`?exclude=`/`?only=`/`?except=` query parameters.
 ///
 /// Semantics (Laravel-Data parity):
-/// - `include` — lazy fields to resolve (default: none resolved).
-/// - `exclude` — fields to drop from the response.
-/// - `only` — when set, the response includes ONLY these fields.
-/// - `except` — fields to drop (same effect as `exclude`; both names
+/// - `include` - lazy fields to resolve (default: none resolved).
+/// - `exclude` - fields to drop from the response.
+/// - `only` - when set, the response includes ONLY these fields.
+/// - `except` - fields to drop (same effect as `exclude`; both names
 ///   exist for Laravel-Data API parity).
 ///
 /// The four fields are `pub` for back-compat with code that builds an
@@ -25,9 +25,9 @@ pub struct RequestIncludeSet {
     pub include: Vec<String>,
     /// Field paths to drop via `?exclude=`. Removed from the resolved set after `include` is applied.
     pub exclude: Vec<String>,
-    /// Field paths from `?only=` — when present, the resolved set is reduced to exactly this list.
+    /// Field paths from `?only=` - when present, the resolved set is reduced to exactly this list.
     pub only: Option<Vec<String>>,
-    /// Field paths from `?except=` — removed from the resolved set, equivalent to `exclude` but distinct so query-string round-trips preserve operator intent.
+    /// Field paths from `?except=` - removed from the resolved set, equivalent to `exclude` but distinct so query-string round-trips preserve operator intent.
     pub except: Vec<String>,
 }
 
@@ -37,7 +37,7 @@ impl RequestIncludeSet {
     ///
     /// # Input contract
     ///
-    /// - `raw` must NOT include the leading `?` — caller strips it.
+    /// - `raw` must NOT include the leading `?` - caller strips it.
     /// - The parser URL-decodes pairs via `url::form_urlencoded::parse`
     ///   before splitting, so `include=foo%2Cbar` decodes to two
     ///   entries `[foo, bar]`, and array-form keys may also be encoded
@@ -48,7 +48,7 @@ impl RequestIncludeSet {
     ///   and accumulates the same way.
     /// - Whitespace around values is trimmed; empty values are dropped
     ///   (`include= a , , b` → `[a, b]`).
-    /// - Unknown keys are silently ignored — only the four canonical names
+    /// - Unknown keys are silently ignored - only the four canonical names
     ///   are recognized.
     /// - Malformed percent-encoding sequences are tolerated lossily by
     ///   `form_urlencoded::parse`; bad bytes are decoded with replacement
@@ -77,7 +77,7 @@ impl RequestIncludeSet {
         s
     }
 
-    /// Returns `true` when none of the four lists carry any directive — i.e.
+    /// Returns `true` when none of the four lists carry any directive - i.e.
     /// the request did not constrain the include set in any way.
     pub fn is_empty(&self) -> bool {
         self.include.is_empty()
@@ -107,7 +107,7 @@ impl RequestIncludeSet {
     }
 
     /// Returns `true` when `field` appears in the `except` list.
-    /// Laravel-Data treats `except` as a permanent drop signal — the
+    /// Laravel-Data treats `except` as a permanent drop signal - the
     /// field is removed even if `only` would otherwise include it.
     pub fn is_excepted(&self, field: &str) -> bool {
         self.except
@@ -118,7 +118,7 @@ impl RequestIncludeSet {
     /// Returns `true` when `only` is set AND `field` is on the
     /// allowlist. Returns `true` when `only` is unset (no narrowing
     /// requested). Returns `false` when `only` is set but `field` is
-    /// not on the list — that field has been narrowed out.
+    /// not on the list - that field has been narrowed out.
     pub fn is_only_listed(&self, field: &str) -> bool {
         match &self.only {
             None => true,
@@ -131,12 +131,12 @@ impl RequestIncludeSet {
     /// Compose all four lists into one verdict: is `field` visible in
     /// the response? Laravel-Data's resolution order:
     ///
-    /// 1. `except` wins over everything — excepted fields are dropped.
+    /// 1. `except` wins over everything - excepted fields are dropped.
     /// 2. `exclude` also drops the field.
     /// 3. `only` narrows: when set, only listed fields survive.
     /// 4. Otherwise the field is visible.
     ///
-    /// `?include=` is NOT part of this predicate — `include` flips
+    /// `?include=` is NOT part of this predicate - `include` flips
     /// lazy fields from "omit" to "resolve", but doesn't gate the
     /// visibility of eager fields. Use [`Self::includes`] for that.
     pub fn is_visible(&self, field: &str) -> bool {
@@ -154,7 +154,7 @@ impl RequestIncludeSet {
     /// Matches `Spatie\LaravelData\Concerns\IncludeableData::include(...$fields)`.
     /// Strings are trimmed; empty strings are dropped. Duplicates
     /// against existing entries are preserved (matching Laravel's
-    /// append-semantics — the resolver de-dupes downstream).
+    /// append-semantics - the resolver de-dupes downstream).
     pub fn include<I, S>(mut self, fields: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -180,7 +180,7 @@ impl RequestIncludeSet {
     ///
     /// Matches `Spatie\LaravelData\Concerns\IncludeableData::only(...$fields)`.
     /// Calling `only(...)` for the first time initialises the list;
-    /// subsequent calls APPEND to it (idempotent — once `only` is set,
+    /// subsequent calls APPEND to it (idempotent - once `only` is set,
     /// it stays set). To clear it, construct a fresh set.
     pub fn only<I, S>(mut self, fields: I) -> Self
     where
@@ -339,7 +339,7 @@ where
 /// # impl User { fn is_admin(&self) -> bool { true } }
 /// # async fn ex() -> Result<(), Box<dyn std::error::Error>> {
 /// # let user = User;
-/// // Inside a handler — admins get the audit-log relationship
+/// // Inside a handler - admins get the audit-log relationship
 /// // appended to whatever the client asked for.
 /// let body = with_include_overrides(
 ///     |set| if user.is_admin() { set.include(["audit_log"]) } else { set },
@@ -353,7 +353,7 @@ where
 /// ```
 ///
 /// Calling this when no set is currently bound starts from the empty
-/// default — equivalent to `scope_include_set(f(RequestIncludeSet::default()), ...)`.
+/// default - equivalent to `scope_include_set(f(RequestIncludeSet::default()), ...)`.
 pub async fn with_include_overrides<M, F, R>(mutate: M, f: F) -> R
 where
     M: FnOnce(RequestIncludeSet) -> RequestIncludeSet,
@@ -361,7 +361,7 @@ where
 {
     let current = current_include_set();
     // `Arc::try_unwrap` would clone the underlying set anyway when the
-    // refcount is > 1 (it nearly always is — the middleware holds one).
+    // refcount is > 1 (it nearly always is - the middleware holds one).
     // Clone via `(*current).clone()` keeps the borrow explicit.
     let mutated = mutate((*current).clone());
     REQUEST_INCLUDE_SET.scope(Arc::new(mutated), f).await
@@ -575,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_include_overrides_from_empty_starts_at_default() {
-        // No outer scope_include_set — current_include_set returns
+        // No outer scope_include_set - current_include_set returns
         // the default empty set; the override is applied on top.
         let observed =
             with_include_overrides(|set| set.include(["author"]).exclude(["secret"]), async {

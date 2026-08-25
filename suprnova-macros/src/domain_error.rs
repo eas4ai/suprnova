@@ -25,8 +25,8 @@ impl Default for DomainErrorAttrs {
 
 /// Parse `#[domain_error(status = 404, message = "...")]`.
 ///
-/// Domain 5 audit M-D5-4: this used to silently swallow EVERY error
-/// — bad punctuation in the attribute body, overflowed status values
+/// Domain 5 audit M-D5-4: this used to silently swallow EVERY error -
+/// bad punctuation in the attribute body, overflowed status values
 /// (`status = 100000`), wrong literal types (`message = 42`), and
 /// unknown keys all collapsed to the defaults with no compile error.
 /// A user setting `status = 70_000` to mark "rate-limited" expected
@@ -105,7 +105,7 @@ fn parse_attrs(attr: TokenStream2) -> syn::Result<DomainErrorAttrs> {
                 return Err(syn::Error::new_spanned(
                     &nv.path,
                     format!(
-                        "unknown key `{other}` in #[domain_error(...)] — \
+                        "unknown key `{other}` in #[domain_error(...)] - \
                          supported keys: status, message"
                     ),
                 ));
@@ -197,7 +197,7 @@ pub fn domain_error_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
                         // `#message` is a user-supplied string literal embedded
                         // via quote! into the call site. Passing it as the
                         // format-spec argument of `write!` would re-interpret
-                        // any `{...}` it contains as a positional argument —
+                        // any `{...}` it contains as a positional argument -
                         // a hostile compile error for messages like
                         // `"User {id} not found"`. `f.write_str` skips the
                         // format machinery and prints the message verbatim.
@@ -247,7 +247,7 @@ mod tests {
     fn ok_attrs(src: &str) -> DomainErrorAttrs {
         let tokens: proc_macro2::TokenStream = src.parse().expect("test attr parses as tokens");
         // `parse_attrs` takes a `proc_macro2::TokenStream` (aliased
-        // `TokenStream2`), which is exactly what the tests build — no
+        // `TokenStream2`), which is exactly what the tests build - no
         // conversion needed. The real macro entry point is what bridges
         // `proc_macro::TokenStream` into `proc_macro2` before calling in.
         parse_attrs(tokens).expect("attrs parse")

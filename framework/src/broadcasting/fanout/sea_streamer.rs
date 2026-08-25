@@ -26,11 +26,11 @@
 //! Each hub instance is assigned a random `Uuid` on construction. Envelopes
 //! are wrapped in a `TaggedEnvelope` that carries the origin `instance_id`.
 //! The consumer pump drops non-presence messages whose `instance_id` matches
-//! the local hub's own ID — this prevents local subscribers from seeing each
+//! the local hub's own ID - this prevents local subscribers from seeing each
 //! event twice (once from the direct local publish and once looped back through
 //! the stream).
 //!
-//! Presence meta-channel messages are **not** skipped based on instance_id —
+//! Presence meta-channel messages are **not** skipped based on instance_id -
 //! each hub needs its own events to appear in the cross_process_view so the
 //! read path is unified (all members, local and remote, flow through the same
 //! replicated view).
@@ -69,14 +69,14 @@
 //!
 //! For multi-process deployments, use `redis://host:6379` (or `rediss://` for
 //! TLS). Redis Streams persists events, supports consumer groups, and survives
-//! a hub restart — the cross-process fanout works exactly like the loopback
+//! a hub restart - the cross-process fanout works exactly like the loopback
 //! test scenario.
 //!
 //! ## Loopback mode
 //!
 //! `SeaStreamerBroadcastHub::new_loopback` enables the stdio loopback option,
 //! which feeds produced messages back to consumers in the same process. This
-//! is intended for **testing only** — the duplicate guard (instance_id) ensures
+//! is intended for **testing only** - the duplicate guard (instance_id) ensures
 //! the local hub still sees each app-data event only once. Loopback is a
 //! stdio-specific option; if you pass `loopback = true` with a non-stdio URI
 //! the option is silently ignored by the non-stdio backends (each one has its
@@ -178,7 +178,7 @@ struct MemberRecord {
     last_seen: Instant,
 }
 
-/// Returns milliseconds since UNIX_EPOCH — used as a lightweight logical
+/// Returns milliseconds since UNIX_EPOCH - used as a lightweight logical
 /// timestamp in presence events.
 ///
 /// Uses `u64` rather than `u128` because `serde_json` does not support
@@ -194,7 +194,7 @@ fn now_ms() -> u64 {
 // ── cross-process view type alias ─────────────────────────────────────────────
 
 /// Outer key: channel name.
-/// Inner key: (instance_id_string, member_id) — uniquely identifies a member
+/// Inner key: (instance_id_string, member_id) - uniquely identifies a member
 /// across all hub instances.
 type CrossProcessView = Arc<AsyncRwLock<HashMap<String, HashMap<(String, String), MemberRecord>>>>;
 
@@ -206,8 +206,8 @@ type CrossProcessView = Arc<AsyncRwLock<HashMap<String, HashMap<(String, String)
 /// Local subscribers (this process's WS handlers) are served by the inner
 /// `InMemoryBroadcastHub` immediately on every `publish`. The same
 /// serialised envelope is also written to a sea-streamer stream; a spawned
-/// consumer pump drives any other process's hub — or, in loopback / test
-/// mode, this process's own hub — by calling `local.publish` for each
+/// consumer pump drives any other process's hub - or, in loopback / test
+/// mode, this process's own hub - by calling `local.publish` for each
 /// inbound message whose `instance_id` differs from the hub's own ID.
 ///
 /// Presence state is replicated across processes via the `__presence__`
@@ -240,8 +240,8 @@ impl Drop for SeaStreamerBroadcastHub {
 impl SeaStreamerBroadcastHub {
     /// Connect using the stdio backend in normal (non-loopback) mode.
     ///
-    /// `streamer_uri` — the streamer URI, e.g. `"stdio://"`.
-    /// `stream_key`   — the stream name shared by all processes, e.g.
+    /// `streamer_uri` - the streamer URI, e.g. `"stdio://"`.
+    /// `stream_key`   - the stream name shared by all processes, e.g.
     ///                  `"suprnova-broadcast"`.
     ///
     /// Uses the default presence TTL (60 s). See
@@ -257,15 +257,15 @@ impl SeaStreamerBroadcastHub {
 
     /// Connect with a custom presence TTL.
     ///
-    /// `streamer_uri` — the streamer URI, e.g. `"stdio://"`.
-    /// `stream_key`   — the stream name shared by all processes, e.g.
+    /// `streamer_uri` - the streamer URI, e.g. `"stdio://"`.
+    /// `stream_key`   - the stream name shared by all processes, e.g.
     ///                  `"suprnova-broadcast"`.
     ///
     /// Presence members whose `last_seen` exceeds `ttl` are pruned. The
     /// heartbeat interval is derived as `ttl / 6` so that live members
     /// are refreshed well within the TTL window.
     ///
-    /// **Mostly useful for tests** — setting `ttl` to e.g.
+    /// **Mostly useful for tests** - setting `ttl` to e.g.
     /// `Duration::from_millis(600)` gives a 100 ms heartbeat and a
     /// sub-second prune cycle, allowing the crash-recovery path to be
     /// exercised without multi-minute waits.
@@ -310,7 +310,7 @@ impl SeaStreamerBroadcastHub {
 
     /// Internal constructor.
     ///
-    /// Backend selection is driven by the URI scheme — see the module-level
+    /// Backend selection is driven by the URI scheme - see the module-level
     /// "Backends" table. `loopback` is a stdio-only option (other backends
     /// have native cross-process behaviour); we set it on the stdio sub-options
     /// unconditionally and let other backends ignore it.
@@ -380,7 +380,7 @@ impl SeaStreamerBroadcastHub {
         let local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>> =
             Arc::new(AsyncRwLock::new(HashMap::new()));
 
-        // Spawn the unified consumer pump — handles both app-data envelopes
+        // Spawn the unified consumer pump - handles both app-data envelopes
         // (routed to local hub) and presence meta-channel envelopes (routed
         // to cross_process_view).
         let pump_local = Arc::clone(&local);
@@ -390,7 +390,7 @@ impl SeaStreamerBroadcastHub {
             consumer_pump_task(consumer, pump_local, pump_instance_id, pump_view).await;
         });
 
-        // Spawn the heartbeat task — re-publishes local members every
+        // Spawn the heartbeat task - re-publishes local members every
         // `heartbeat_interval` so other process instances refresh last_seen.
         let hb_producer = producer.clone();
         let hb_instance_id = instance_id.to_string();
@@ -405,7 +405,7 @@ impl SeaStreamerBroadcastHub {
             .await;
         });
 
-        // Spawn the pruning task — drops MemberRecord entries whose last_seen
+        // Spawn the pruning task - drops MemberRecord entries whose last_seen
         // exceeds `presence_ttl`, cleaning up after crashed processes.
         let prune_view = Arc::clone(&cross_process_view);
         let prune_task = tokio::spawn(async move {
@@ -506,7 +506,7 @@ impl SeaStreamerBroadcastHub {
 ///
 /// Per-iteration scope is intentional: the long-lived resources (consumer,
 /// producer, cross-process view, local-member snapshot) are owned by the
-/// outer `loop` frame that never unwinds — only the body of one iteration
+/// outer `loop` frame that never unwinds - only the body of one iteration
 /// crosses the catch boundary. `cross_process_view` is a
 /// `tokio::sync::RwLock` (does NOT poison on panic), so a panic mid-write
 /// drops the guard and the next iteration acquires cleanly.
@@ -567,7 +567,7 @@ async fn consumer_pump_task(
                     let bytes = payload.as_bytes();
                     match serde_json::from_slice::<TaggedEnvelope>(bytes) {
                         Ok(tagged) if tagged.envelope.channel == PRESENCE_META_CHANNEL => {
-                            // Presence meta-channel — update the replicated view.
+                            // Presence meta-channel - update the replicated view.
                             // We process our OWN presence events too (no instance_id skip)
                             // so our members appear in cross_process_view via the same
                             // code path as remote members.
@@ -582,7 +582,7 @@ async fn consumer_pump_task(
                             }
                         }
                         Ok(tagged) if tagged.instance_id == own_id => {
-                            // Our own app-data message reflected back — skip to avoid
+                            // Our own app-data message reflected back - skip to avoid
                             // double delivery to local subscribers.
                         }
                         Ok(tagged) => {
@@ -676,9 +676,9 @@ async fn apply_presence_event(view: &CrossProcessView, event: PresenceEvent) {
 }
 
 /// Periodically re-publishes all locally-tracked members as `Heartbeat`
-/// events. This refreshes `last_seen` on all consumers — including remote
+/// events. This refreshes `last_seen` on all consumers - including remote
 /// process instances that started after the original `MemberAdded` was
-/// published — so stale TTL pruning doesn't evict live members.
+/// published - so stale TTL pruning doesn't evict live members.
 async fn heartbeat_task(
     producer: SeaProducer,
     instance_id: String,
@@ -713,7 +713,7 @@ async fn heartbeat_task(
 /// Periodically drops cross_process_view entries whose `last_seen` is older
 /// than `ttl`. Cleans up after processes that crashed without publishing
 /// `MemberRemoved`. All entries are pruned uniformly regardless of which
-/// hub instance produced them — including this hub's own instance_id, which
+/// hub instance produced them - including this hub's own instance_id, which
 /// is important for crash-recovery tests where a dropped hub's heartbeat
 /// task has been aborted.
 async fn prune_task(
@@ -819,14 +819,14 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         // Reject reserved meta-channel names BEFORE any side effect. A
         // publish to `__presence__` here would serialise a TaggedEnvelope
         // to the stream that every peer's consumer pump routes straight
-        // into `apply_presence_event` — injecting phantom presence into
+        // into `apply_presence_event` - injecting phantom presence into
         // every process's `cross_process_view`. The hub itself fans
         // presence out via a dedicated producer path (`send_presence_event`)
         // that never traverses this method, so the guard never blocks
         // legitimate framework traffic.
         reject_reserved_channel(&envelope.channel)?;
 
-        // Local fanout — immediate, no round-trip. Local subscribers
+        // Local fanout - immediate, no round-trip. Local subscribers
         // see this envelope even if the cross-process fanout below
         // fails: the local delivery and the wire delivery are
         // independent and we don't want a broker hiccup to silently
@@ -834,7 +834,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         self.local.publish(envelope.clone()).await?;
 
         // Cross-process fanout via sea-streamer. A failure here is a
-        // real loss — other processes' subscribers won't see the event.
+        // real loss - other processes' subscribers won't see the event.
         // Surface it to the caller so a Broadcastable dispatch returns
         // Err and the operator can react.
         let tagged = TaggedEnvelope {
@@ -867,7 +867,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         info: Value,
     ) -> Result<(), FrameworkError> {
         // 1. Update the local replicated view immediately for write-after-read
-        //    consistency — callers don't need to wait for the round-trip.
+        //    consistency - callers don't need to wait for the round-trip.
         {
             let mut map = self.cross_process_view.write().await;
             map.entry(channel.to_string()).or_default().insert(
@@ -932,7 +932,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
     }
 
     async fn list_members(&self, channel: &str) -> Vec<Value> {
-        // Read from the unified cross_process_view — includes local members
+        // Read from the unified cross_process_view - includes local members
         // (written directly in track_member) and remote members (written by
         // the consumer pump from inbound presence events).
         let map = self.cross_process_view.read().await;
@@ -968,7 +968,7 @@ mod tests {
         assert!(outcome.is_err());
     }
 
-    /// A non-panicking body should return `Ok(())` — i.e. the guard only
+    /// A non-panicking body should return `Ok(())` - i.e. the guard only
     /// fires on real panics, not on every successful iteration.
     #[tokio::test]
     async fn guarded_iteration_passes_through_success() {
@@ -976,7 +976,7 @@ mod tests {
         assert!(outcome.is_ok());
     }
 
-    /// Successive panicking iterations must each be caught independently —
+    /// Successive panicking iterations must each be caught independently -
     /// proving the helper is reentrant and not a one-shot guard.
     #[tokio::test]
     async fn guarded_iteration_handles_repeated_panics() {

@@ -9,7 +9,7 @@
 //!   - `Cargo.toml` declares the `console` `[[bin]]` entry
 //!   - `src/lib.rs` declares `pub mod commands;`
 //!
-//! These are file-shape assertions — we don't try to `cargo build` the
+//! These are file-shape assertions - we don't try to `cargo build` the
 //! scaffolded project because it depends on the released `suprnova`
 //! crate from crates.io, which would either pull a stale version or
 //! fail offline. The existing dogfood path (app/src/bin/console.rs)

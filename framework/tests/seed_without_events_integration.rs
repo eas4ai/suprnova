@@ -3,7 +3,7 @@
 //! The unit tests in `seeders.rs` prove `dispatch_after` /
 //! `dispatch_cancellable` short-circuit when the `EVENTS_MUTED`
 //! task-local is set. This file proves the same thing through a
-//! `Model::create` call site — the user-facing surface a real
+//! `Model::create` call site - the user-facing surface a real
 //! seeder would invoke.
 //!
 //! The model + observer here are local to this test binary so the
@@ -47,7 +47,7 @@ impl Observer<SweUser> for WithoutEventsObserver {
 }
 
 /// Sequential tests can race the global observer registry, so combine
-/// both assertions into one `#[tokio::test]` — same approach
+/// both assertions into one `#[tokio::test]` - same approach
 /// `eloquent_observers.rs` takes for the same reason. The full
 /// chokepoint coverage (`dispatch_after` vs `dispatch_cancellable`
 /// independently) is already proven by the unit tests in
@@ -55,7 +55,7 @@ impl Observer<SweUser> for WithoutEventsObserver {
 /// integration with the real `Model::create` path.
 #[tokio::test]
 async fn model_create_fires_events_normally_and_is_muted_inside_without_events_scope() {
-    // The `db` handle MUST stay alive for the duration of the test —
+    // The `db` handle MUST stay alive for the duration of the test -
     // dropping `TestDatabase` removes the singleton binding that
     // `Model::create` resolves via `DB::connection()`. Inline the
     // setup so the binding is kept in scope.
@@ -117,7 +117,7 @@ async fn model_create_fires_events_normally_and_is_muted_inside_without_events_s
         "seed::without_events mutes the after `created` event on Model::create",
     );
 
-    // After leaving the scope, events fire again — task-locals are
+    // After leaving the scope, events fire again - task-locals are
     // strictly scoped to the future, not process-globally toggled.
     CREATING_FIRES.store(0, Ordering::SeqCst);
     CREATED_FIRES.store(0, Ordering::SeqCst);

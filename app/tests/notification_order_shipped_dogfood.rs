@@ -1,7 +1,7 @@
-//! Phase 5B Task 20 dogfood — pin that `Notify::queue(...)` pushes a
+//! Phase 5B Task 20 dogfood - pin that `Notify::queue(...)` pushes a
 //! `SendNotificationJob` for the registered `OrderShipped` notification.
 //!
-//! Symmetric to `mail_welcome_dogfood.rs` — proves the
+//! Symmetric to `mail_welcome_dogfood.rs` - proves the
 //! `register_notification_factory` + `Notify::queue` wiring for the
 //! `OrderShipped` type registered in `app/src/bootstrap.rs`. The factory
 //! itself runs at worker-dispatch time; this test pins the queue-push

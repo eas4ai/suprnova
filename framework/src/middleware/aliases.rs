@@ -3,19 +3,19 @@
 //! Mirrors three Laravel kernel surfaces that previously had no Suprnova
 //! analogue:
 //!
-//! - **`middlewareAliases`** — string-keyed lookups so consumers can refer
+//! - **`middlewareAliases`** - string-keyed lookups so consumers can refer
 //!   to `"auth"` / `"throttle"` instead of a fully-qualified type. Laravel
 //!   uses the alias map in `Kernel::$middlewareAliases`.
-//! - **`middlewareGroups`** — string-keyed bundles of middleware that
+//! - **`middlewareGroups`** - string-keyed bundles of middleware that
 //!   expand at resolution time. Laravel's `web` and `api` groups are the
 //!   canonical examples.
-//! - **`middlewarePriority`** — an ordered list of TypeIds the registry
+//! - **`middlewarePriority`** - an ordered list of TypeIds the registry
 //!   should sort to the front of the chain regardless of registration
 //!   order. The Laravel kernel ships a built-in priority list ensuring
 //!   `SubstituteBindings` always runs after `StartSession`, etc.
 //!
 //! These three registries are intentionally separate from
-//! [`MiddlewareRegistry`] — they're lookup tables, not execution slots.
+//! [`MiddlewareRegistry`] - they're lookup tables, not execution slots.
 //! The registry consults them at boot time when materialising its global
 //! chain. They are also process-global so the bootstrap macros can write
 //! into them without having to thread a config object through.
@@ -26,11 +26,11 @@ use std::sync::{OnceLock, RwLock};
 
 /// A factory closure that produces a fresh `BoxedMiddleware`. Used by
 /// the alias and group registries because a `Middleware: 'static` trait
-/// object can't be cheaply cloned for repeated registrations — we
+/// object can't be cheaply cloned for repeated registrations - we
 /// instantiate per registration site via a factory instead.
 pub type MiddlewareFactory = std::sync::Arc<dyn Fn() -> BoxedMiddleware + Send + Sync>;
 
-/// Stored shape of the alias registry — extracted to a `type` alias so
+/// Stored shape of the alias registry - extracted to a `type` alias so
 /// the `OnceLock<RwLock<...>>` declaration below doesn't trip
 /// `clippy::type_complexity`.
 type AliasMap = Vec<(String, MiddlewareFactory)>;
@@ -71,7 +71,7 @@ fn priority_lock() -> &'static RwLock<Vec<TypeId>> {
 /// [`resolve_middleware_alias`] / [`resolve_middleware_group`] hit, so
 /// per-route registration produces independent instances.
 ///
-/// Registration is **last-wins** for the same name — re-registering an
+/// Registration is **last-wins** for the same name - re-registering an
 /// alias swaps the factory rather than panicking, mirroring Laravel's
 /// reassignable kernel array. This keeps test setup and hot-reload
 /// flows simple.
@@ -146,7 +146,7 @@ pub fn registered_middleware_aliases() -> Vec<String> {
     guard.iter().map(|(n, _)| n.clone()).collect()
 }
 
-/// Remove a registered alias by name. Idempotent — returns `true` if a
+/// Remove a registered alias by name. Idempotent - returns `true` if a
 /// binding was removed, `false` if no such alias existed. Exposed so
 /// tests and hot-reload tooling can teardown cleanly.
 pub fn clear_middleware_alias(name: &str) -> bool {
@@ -176,13 +176,13 @@ pub fn clear_all_middleware_aliases_for_test() {
 ///
 /// Mirrors Laravel's `Kernel::$middlewareGroups['web' => [EncryptCookies::class, ...]]`.
 /// Each entry in `aliases` must resolve via
-/// [`resolve_middleware_alias`] when the group is consulted — calling
+/// [`resolve_middleware_alias`] when the group is consulted - calling
 /// [`resolve_middleware_group`] on a group whose entries can't be
 /// resolved returns an `Err` listing the missing names.
 ///
 /// Registration is last-wins for the same group name. Recursive groups
 /// (a group referencing another group) ARE supported via a single
-/// pass — see [`resolve_middleware_group`].
+/// pass - see [`resolve_middleware_group`].
 pub fn register_middleware_group(name: &str, aliases: impl IntoIterator<Item = String>) {
     let aliases: Vec<String> = aliases.into_iter().collect();
     let lock = group_lock();
@@ -295,7 +295,7 @@ fn resolve_group_inner(
         // works when both registries share a name (Laravel resolves the
         // same way).
         if is_registered_group(&entry) {
-            // Recurse — but pass through any UnknownAlias / nested error.
+            // Recurse - but pass through any UnknownAlias / nested error.
             resolve_group_inner(&entry, visited, out).map_err(|e| match e {
                 MiddlewareResolveError::UnknownGroup(missing) => {
                     MiddlewareResolveError::UnknownNestedGroup {
@@ -485,7 +485,7 @@ mod tests {
         register_middleware_alias("auth", || ThrottleMw);
         // Still one alias under the same name.
         assert_eq!(registered_middleware_aliases().len(), 1);
-        // Resolution succeeds — the second registration won.
+        // Resolution succeeds - the second registration won.
         assert!(resolve_middleware_alias("auth").is_some());
     }
 

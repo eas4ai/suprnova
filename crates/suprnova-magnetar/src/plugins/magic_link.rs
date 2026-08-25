@@ -8,7 +8,7 @@
 //! through the typed mail driver. Consume is atomic single-use, stamps
 //! `email_verified_at` (FLAGGED hardening: clicking a link mailed to the
 //! address is the same ownership proof as 05's verification), and passes
-//! the principal through the shared factor gate — never straight to a
+//! the principal through the shared factor gate - never straight to a
 //! session.
 
 use std::sync::Arc;

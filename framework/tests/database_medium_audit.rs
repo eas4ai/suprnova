@@ -2,7 +2,7 @@
 //!
 //! 1. `EntityExt`/`EntityExtMut` previously called `DB::connection()`
 //!    directly, bypassing the tx routing layer. A write inside
-//!    `DB::transaction` survived rollback — a silent data-integrity
+//!    `DB::transaction` survived rollback - a silent data-integrity
 //!    bug. Both surfaces now route through `ExecutorChoice`.
 //! 2. SQLite parent-directory creation now propagates filesystem
 //!    errors with path context instead of swallowing them.
@@ -236,7 +236,7 @@ fn validate_pool_accepts_zero_min_connections() {
 
 #[tokio::test]
 async fn db_connection_connect_rejects_invalid_pool() {
-    // Validation runs at the single chokepoint — DB::init / init_with
+    // Validation runs at the single chokepoint - DB::init / init_with
     // both go through DbConnection::connect. A zero-sized pool must
     // fail-fast instead of producing a sick pool.
     let cfg = DatabaseConfig::builder()
@@ -272,7 +272,7 @@ async fn db_table_insert_errors_on_uuid_primary_key() {
         .unwrap_err();
     let msg = err.to_string();
     // The SQL error from `RETURNING id` on a table with no `id` column
-    // surfaces verbatim — we just need a clear failure (not a silent 0).
+    // surfaces verbatim - we just need a clear failure (not a silent 0).
     assert!(
         msg.contains("audit_uuid") || msg.contains("id"),
         "expected loud failure mentioning the table or the missing column, got: {msg}",
@@ -294,7 +294,7 @@ async fn db_table_insert_errors_when_returning_id_value_is_not_i64() {
     let db = TestDatabase::sqlite_memory().await.unwrap();
     // Table has an `id` column but it's TEXT, not an integer. The
     // `RETURNING id` clause succeeds but the value cannot be read as
-    // i64 — the fix must turn the previously-silent `0` into a clear
+    // i64 - the fix must turn the previously-silent `0` into a clear
     // error.
     db.execute_unprepared("CREATE TABLE audit_text_id (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
         .await

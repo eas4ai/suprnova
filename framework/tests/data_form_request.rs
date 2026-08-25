@@ -141,12 +141,12 @@ async fn data_struct_form_request_rejects_invalid_payload() {
 // The old `#[data(custom_authorize)]` flag suppressed the WHOLE FormRequest
 // impl, forcing callers to reimplement body parsing, validation, and
 // Precognition by hand. The replacement routes ONLY `authorize` to a
-// user-provided free function — the rest of the lifecycle stays generated.
+// user-provided free function - the rest of the lifecycle stays generated.
 //
 // These tests prove three things:
-//   1. Authorize gates the request — a `false` return surfaces 403.
+//   1. Authorize gates the request - a `false` return surfaces 403.
 //   2. When authorize returns `true`, body parsing + validation still run
-//      (so a bad payload still hits 422 — proves the impl wasn't skipped).
+//      (so a bad payload still hits 422 - proves the impl wasn't skipped).
 //   3. Happy path returns the validated DTO.
 
 /// Header-based role gate driven by a test header. Realistic apps would
@@ -239,7 +239,7 @@ async fn custom_authorize_blocks_unauthorized() {
 
 #[tokio::test]
 async fn custom_authorize_allows_authorized_and_runs_validation() {
-    // Authorize PASSES (role = admin) but the payload fails validation —
+    // Authorize PASSES (role = admin) but the payload fails validation -
     // `action` violates `length(min = 1)` because it is empty. If the
     // FormRequest impl had been skipped the way `custom_authorize` used to
     // skip it, we'd see an Ok or a parse error, not 422. 422 proves that
@@ -280,8 +280,8 @@ async fn custom_authorize_full_happy_path() {
 
 // ---------------------------------------------------------------------------
 // Content-Type media-type handling: form-urlencoded and JSON (including the
-// `application/*+json` suffix) are accepted; everything else — including a
-// missing Content-Type — is rejected with 415 rather than parsed as JSON.
+// `application/*+json` suffix) are accepted; everything else - including a
+// missing Content-Type - is rejected with 415 rather than parsed as JSON.
 // ---------------------------------------------------------------------------
 
 /// POST a raw body with an explicit (or absent) `Content-Type`. Unlike
@@ -386,8 +386,8 @@ async fn form_urlencoded_body_is_accepted() {
 // ---------------------------------------------------------------------------
 //
 // `validator`'s `field_errors()` yields only `Field` leaves, so
-// `#[validate(nested)]` failures — `Struct` for a nested struct, `List`
-// for a `Vec<T>` of them — used to be dropped between the validator and
+// `#[validate(nested)]` failures - `Struct` for a nested struct, `List`
+// for a `Vec<T>` of them - used to be dropped between the validator and
 // the response. The request was still rejected with 422, but the `errors`
 // map was empty, so the client had no field to point at. These tests drive
 // the real extract path and assert on the rendered body.

@@ -1,9 +1,9 @@
-//! P2-02(a)/(c) — the credential-issuance routes must be throttled.
+//! P2-02(a)/(c) - the credential-issuance routes must be throttled.
 //!
 //! Before this, the only rate-limited route in the whole app was the
 //! `/ping` demo. `/auth/password/request`, `/auth/password/reset`,
-//! `/auth/verify` and `/auth/verify/resend` — every endpoint that mints
-//! or consumes a single-use credential — carried no limiter at all, so
+//! `/auth/verify` and `/auth/verify/resend` - every endpoint that mints
+//! or consumes a single-use credential - carried no limiter at all, so
 //! password-reset mail could be issued to any address as fast as the
 //! process could send it.
 //!
@@ -81,7 +81,7 @@ struct TestApp {
 async fn spawn_app() -> TestApp {
     let lock = TEST_LOCK.lock().await;
     // One router for the whole server, so every request shares the one
-    // limiter instance the route builder created — which is the point.
+    // limiter instance the route builder created - which is the point.
     let router = Arc::new(app::routes::register());
 
     // `SessionMiddleware` fails closed without `Crypt`; without this every
@@ -178,7 +178,7 @@ async fn the_issuance_routes_start_refusing_within_the_budget() {
 
     assert!(
         saw_429,
-        "no request in a burst of {} was refused — the issuance routes are \
+        "no request in a burst of {} was refused - the issuance routes are \
          unthrottled, which is the defect. Statuses: {statuses:?}",
         BUDGET + 5
     );

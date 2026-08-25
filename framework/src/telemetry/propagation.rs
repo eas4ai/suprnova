@@ -2,7 +2,7 @@
 //!
 //! Installs the standard `traceparent`/`tracestate` propagator into the
 //! OTel global so the framework can inject context on outbound HTTP
-//! client calls and extract it from inbound server requests — the two
+//! client calls and extract it from inbound server requests - the two
 //! halves of joining a distributed trace.
 //!
 //! - Outbound: `http_client::inject_w3c_trace_context` injects the active
@@ -13,12 +13,12 @@
 //!   spans appear as children of the caller's span instead of starting a
 //!   fresh root trace.
 //!
-//! Also re-exports the header bridge types from `opentelemetry-http` —
+//! Also re-exports the header bridge types from `opentelemetry-http` -
 //! `HeaderExtractor` / `HeaderInjector` adapt a `http::HeaderMap` to the
 //! `TextMapPropagator` interface.
 
 /// Install the W3C `TraceContextPropagator` as the global text-map
-/// propagator. Idempotent — calling repeatedly simply overwrites the
+/// propagator. Idempotent - calling repeatedly simply overwrites the
 /// previous installation.
 #[cfg(feature = "otel")]
 pub fn install_trace_context_propagator() {
@@ -39,17 +39,17 @@ pub use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 /// installed by `init_telemetry`).
 ///
 /// When the request carries a valid `traceparent`, the returned context's
-/// span context is valid and carries the upstream trace/span ids — pass it
+/// span context is valid and carries the upstream trace/span ids - pass it
 /// to [`join_upstream_trace`] (or `OpenTelemetrySpanExt::set_parent`) to
 /// continue the distributed trace. When no usable trace header is present
 /// (the common direct-browser-hit case), the propagator returns a context
-/// whose span context is **invalid** — callers MUST check
+/// whose span context is **invalid** - callers MUST check
 /// `ctx.span().span_context().is_valid()` before using it as a parent so an
 /// untraced request stays a fresh root span rather than depending on the
 /// SDK's treatment of an invalid parent.
 ///
 /// This is the pure, testable counterpart to the outbound
-/// `inject_w3c_trace_context`. It does not touch any span — it only reads
+/// `inject_w3c_trace_context`. It does not touch any span - it only reads
 /// headers and returns a context.
 ///
 /// [`Context`]: opentelemetry::Context
@@ -62,8 +62,8 @@ pub fn extract_w3c_trace_context(headers: &http::HeaderMap) -> opentelemetry::Co
 
 /// Reparent `span` onto the upstream trace described by `headers`, if any.
 ///
-/// Extracts the inbound W3C context and — only when it carries a **valid**
-/// remote span context — sets it as `span`'s parent via
+/// Extracts the inbound W3C context and - only when it carries a **valid**
+/// remote span context - sets it as `span`'s parent via
 /// `tracing-opentelemetry`. The validity guard is the correctness contract:
 ///
 /// - request **with** a usable `traceparent` → `span` becomes a child of
@@ -85,7 +85,7 @@ pub fn join_upstream_trace(span: &tracing::Span, headers: &http::HeaderMap) {
     let parent = extract_w3c_trace_context(headers);
     if parent.span().span_context().is_valid() {
         // `set_parent` errs only when no `tracing-opentelemetry` bridge
-        // layer is registered on the active subscriber — i.e. the `otel`
+        // layer is registered on the active subscriber - i.e. the `otel`
         // feature is on but `init_telemetry` never installed the bridge.
         // There's no upstream to join in that case, so downgrade to a
         // debug line rather than failing the request.
@@ -100,7 +100,7 @@ pub fn join_upstream_trace(span: &tracing::Span, headers: &http::HeaderMap) {
     }
 }
 
-/// No-op stub when the `otel` feature is disabled — there is no propagator
+/// No-op stub when the `otel` feature is disabled - there is no propagator
 /// installed and no OTel span to reparent, so inbound extraction has
 /// nothing to do. The per-request `tracing` span is still created by
 /// `RequestIdMiddleware` for plain structured logging.
@@ -120,7 +120,7 @@ mod tests {
     fn install() {
         // The propagator is a process-global. It is stateless and the
         // install is idempotent, so every test can (re)install it without
-        // racing — they all end up with the same `TraceContextPropagator`.
+        // racing - they all end up with the same `TraceContextPropagator`.
         install_trace_context_propagator();
     }
 
@@ -154,7 +154,7 @@ mod tests {
     fn extract_with_no_trace_header_yields_an_invalid_context() {
         install();
         // The common case: a direct browser hit with no `traceparent`.
-        // Extraction MUST NOT fabricate a parent — the span context stays
+        // Extraction MUST NOT fabricate a parent - the span context stays
         // invalid so `join_upstream_trace` leaves the request a root span.
         let headers = http::HeaderMap::new();
 

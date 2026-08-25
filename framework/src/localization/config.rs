@@ -1,4 +1,4 @@
-//! Localization configuration — env-driven with a programmatic builder,
+//! Localization configuration - env-driven with a programmatic builder,
 //! same shape as `SessionConfig` / `CacheConfig`.
 
 use super::locale::Locale;
@@ -25,7 +25,7 @@ pub struct LocalizationConfig {
     /// catalog. Env: `APP_FALLBACK_LOCALE`.
     pub fallback_locale: Locale,
     /// Whether Fluent wraps interpolations in Unicode isolation marks
-    /// (U+2068/U+2069). Off by default — see the manual's divergence
+    /// (U+2068/U+2069). Off by default - see the manual's divergence
     /// note; turn on when shipping RTL locales.
     pub use_isolating: bool,
     /// Detection order; first hit wins.
@@ -35,11 +35,11 @@ pub struct LocalizationConfig {
     /// Cookie name holding a locale override.
     pub cookie_name: String,
     /// Per-locale fallback parents (`child -> parent`), walked before
-    /// `fallback_locale` when a key is missing from the child's catalog —
+    /// `fallback_locale` when a key is missing from the child's catalog -
     /// e.g. `pt-PT` gaining Brazilian Portuguese as an intermediate
     /// fallback ahead of `en`. Env: `APP_LOCALE_PARENTS`, a comma-separated
     /// list of `child=parent` pairs (`pt-PT=pt-BR,en-AU=en-GB`). Empty or
-    /// unset means no per-locale overrides — only `fallback_locale`
+    /// unset means no per-locale overrides - only `fallback_locale`
     /// applies.
     pub parents: HashMap<Locale, Locale>,
 }
@@ -101,7 +101,7 @@ impl LocalizationConfig {
     }
 
     /// Add (or overwrite) a single fallback parent: `child` resolves
-    /// through `parent` before `fallback_locale`. Last write wins here —
+    /// through `parent` before `fallback_locale`. Last write wins here -
     /// unlike `parse_parents`, a programmatic builder call is not an
     /// ambiguous config, just a later override.
     pub fn parent(mut self, child: Locale, parent: Locale) -> Self {
@@ -127,21 +127,21 @@ pub(crate) fn parse_parents(raw: &str) -> Result<HashMap<Locale, Locale>, Framew
         }
         let (child, parent) = segment.split_once('=').ok_or_else(|| {
             FrameworkError::param(format!(
-                "`APP_LOCALE_PARENTS` entry `{segment}` is missing `=` — expected `child=parent`"
+                "`APP_LOCALE_PARENTS` entry `{segment}` is missing `=` - expected `child=parent`"
             ))
         })?;
         let child = child.trim();
         let parent = parent.trim();
         if child.is_empty() || parent.is_empty() {
             return Err(FrameworkError::param(format!(
-                "`APP_LOCALE_PARENTS` entry `{segment}` has an empty child or parent — expected `child=parent`"
+                "`APP_LOCALE_PARENTS` entry `{segment}` has an empty child or parent - expected `child=parent`"
             )));
         }
         let child = Locale::parse(child)?;
         let parent = Locale::parse(parent)?;
         if parents.insert(child.clone(), parent).is_some() {
             return Err(FrameworkError::param(format!(
-                "`APP_LOCALE_PARENTS` names `{}` as a child more than once — ambiguous config, not last-wins",
+                "`APP_LOCALE_PARENTS` names `{}` as a child more than once - ambiguous config, not last-wins",
                 child.as_str()
             )));
         }
@@ -161,11 +161,11 @@ pub(crate) fn parse_parents(raw: &str) -> Result<HashMap<Locale, Locale>, Framew
 
 /// Detect a cycle in a `child -> parent` map. Walks the parent chain from
 /// each key in turn (iteration order is `HashMap`-dependent, so which key
-/// is tried first — and therefore which cycle is reported when several
-/// exist — is not deterministic) with a fresh per-walk `HashSet`, stopping
+/// is tried first - and therefore which cycle is reported when several
+/// exist - is not deterministic) with a fresh per-walk `HashSet`, stopping
 /// the first time a locale is revisited within that walk. The returned
 /// path is the walk taken, in order, with the repeated locale appended
-/// once more at the end — its *last* two elements are always equal (e.g.
+/// once more at the end - its *last* two elements are always equal (e.g.
 /// `pt-PT -> pt-BR -> pt-PT` when the walk starts on a cycle member), but
 /// its *first* element need not be part of the cycle at all: for a
 /// feed-in shape like `a=b, b=c, c=b`, starting the walk from `a` returns
@@ -257,7 +257,7 @@ mod tests {
 
     // The brief's illustrative cycle input is `"a=b,b=a"`, but a bare
     // single-letter subtag is not valid BCP-47 (`unic-langid`'s `Language`
-    // subtag requires 2-8 alphabetic characters) — `Locale::parse("a")`
+    // subtag requires 2-8 alphabetic characters) - `Locale::parse("a")`
     // errs before cycle detection ever runs. Substituting real two-letter
     // codes (`en`/`es`) exercises the same two-node cycle shape while
     // actually reaching `parents_cycle`; `"es=es"` (the brief's self-cycle

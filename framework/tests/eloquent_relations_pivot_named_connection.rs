@@ -4,8 +4,8 @@
 //! Mirrors the shape of `eloquent_eager_named_connection.rs`: register
 //! ONLY a named pool (no default), point every model at it, then
 //! exercise the pivot surface. Pre-A2-H-001 the pivot writes called
-//! `ExecutorChoice::resolve_write(None, None, None)` — dropping the
-//! per-model default — and fell through to the primary pool. With no
+//! `ExecutorChoice::resolve_write(None, None, None)` - dropping the
+//! per-model default - and fell through to the primary pool. With no
 //! primary registered, every pivot write would error with "default
 //! connection not initialised". The fix threads
 //! `L::default_connection_name()` so the named pool is consulted.

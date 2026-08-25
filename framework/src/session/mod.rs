@@ -62,16 +62,16 @@ pub use store::{SessionData, SessionStore, is_valid_session_id};
 ///
 /// Called after security-state transitions where a credential rotation
 /// must not leave stale sessions valid:
-/// - [`crate::auth_flows::PasswordReset::complete`] — password rotated,
+/// - [`crate::auth_flows::PasswordReset::complete`] - password rotated,
 ///   stolen sessions revoked.
 /// - Future hooks for 2FA disable, account recovery, admin-forced
 ///   logout.
 ///
-/// # Security — SEC-02(b)
+/// # Security - SEC-02(b)
 ///
 /// This used to construct a fresh [`DatabaseSessionDriver`]
 /// unconditionally, regardless of what store the app actually
-/// configured `SessionMiddleware` with — so an app running a custom
+/// configured `SessionMiddleware` with - so an app running a custom
 /// [`SessionStore`] (Redis, for instance) had every revocation call
 /// silently no-op against the wrong backend while still reporting
 /// success. `SessionMiddleware::new` / `with_store` now register the
@@ -79,8 +79,8 @@ pub use store::{SessionData, SessionStore, is_valid_session_id};
 /// (see `session::middleware::register_configured_store`), so this
 /// resolves the *actually configured* store from the container first.
 /// The `DatabaseSessionDriver` construction below only fires when
-/// nothing is registered — e.g. a test or embedder that drives session
-/// state without ever constructing a `SessionMiddleware` — preserving
+/// nothing is registered - e.g. a test or embedder that drives session
+/// state without ever constructing a `SessionMiddleware` - preserving
 /// the original default-driver behaviour for that case.
 pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::FrameworkError> {
     if let Some(store) = crate::container::App::make::<dyn SessionStore>() {
@@ -90,7 +90,7 @@ pub async fn destroy_all_for_user(user_id: &str) -> Result<u64, crate::error::Fr
     driver.destroy_for_user(user_id).await
 }
 
-// Test helpers — these mirror the per-request session scope that
+// Test helpers - these mirror the per-request session scope that
 // `SessionMiddleware` sets up at runtime. Crates outside the framework
 // shouldn't need these; they exist for unit/integration tests that
 // drive code paths reading the session without booting a full server.

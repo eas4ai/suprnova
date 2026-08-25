@@ -69,7 +69,7 @@ struct PatchUserDto {
 
 #[test]
 fn deserialize_treats_option_as_absent_default_none() {
-    // Neither `name` nor `bio` is present — both should default rather than
+    // Neither `name` nor `bio` is present - both should default rather than
     // trigger a missing_field error.
     let j = serde_json::json!({"id": 1});
     let u: PatchUserDto = serde_json::from_value(j).unwrap();
@@ -126,8 +126,8 @@ fn allow_include_fields_register_via_inventory() {
         artist: None,
     };
 
-    // Audit HIGH #336: registry keys are fully-qualified type names —
-    // `concat!(module_path!(), "::", stringify!(StructName))` — to
+    // Audit HIGH #336: registry keys are fully-qualified type names -
+    // `concat!(module_path!(), "::", stringify!(StructName))` - to
     // prevent collisions between same-named DTOs in different modules.
     let key = ::std::concat!(::std::module_path!(), "::TestAlbumDtoT8");
     assert!(registry::is_allowed(key, "songs"));

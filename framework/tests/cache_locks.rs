@@ -83,7 +83,7 @@ async fn refresh_extends_ttl_only_for_the_owner() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Alice refreshes before expiry — lock should last another 200ms from now
+    // Alice refreshes before expiry - lock should last another 200ms from now
     let refreshed = s
         .refresh_lock("printer", &alice, Duration::from_millis(200))
         .await

@@ -1,8 +1,8 @@
-//! Phase 10A T8 — `#[accessor]` and `#[mutator]` function-level macros.
+//! Phase 10A T8 - `#[accessor]` and `#[mutator]` function-level macros.
 //!
 //! Each model is declared at module scope (NOT inside the test fns).
 //! `#[suprnova::model]` emits an inner module whose `use super::*;`
-//! only sees the test file's top-level imports — putting models inside
+//! only sees the test file's top-level imports - putting models inside
 //! `#[tokio::test]` fns breaks SeaORM type resolution. See
 //! `eloquent_casts_primitive.rs` for the same constraint.
 
@@ -96,7 +96,7 @@ impl T8Counter {
     }
 }
 
-// Exercises both appends and hidden on the same model — hidden
+// Exercises both appends and hidden on the same model - hidden
 // strips fields from the base map, then appends inserts accessor
 // outputs afterwards.
 #[model(
@@ -240,7 +240,7 @@ async fn visible_allowlist_drops_non_listed_fields() {
 #[tokio::test]
 async fn mutator_works_with_non_string_typed_fields() {
     // Proves the value-style mutator contract works for any runtime
-    // type — i32 here. The macro never inspects the setter signature;
+    // type - i32 here. The macro never inspects the setter signature;
     // the user's body owns the deserialise step.
     let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate_counters(&_db).await;

@@ -1,28 +1,28 @@
-//! Phase 11 dogfood — email verification.
+//! Phase 11 dogfood - email verification.
 //!
 //! Two handlers:
 //!
-//! - `POST /auth/verify/resend?email=alice@…` — request a fresh
+//! - `POST /auth/verify/resend?email=alice@…` - request a fresh
 //!   verification link. Anti-enumeration: always responds 200 with
 //!   the same body whether or not the email is on file. The mail
 //!   dispatch is owned by `EmailVerification::resend`, which looks the
 //!   user up through the configured provider and only mints + sends a
 //!   token when an account exists (so probing cannot differentiate via
 //!   status code or payload).
-//! - `GET  /auth/verify?token=…` — consume the token via the
+//! - `GET  /auth/verify?token=…` - consume the token via the
 //!   `EmailVerification` facade and 302 back to `/`.
 //!
 //! Both handlers split the body into a thin public wrapper +
 //! `_inner` returning `Result<HttpResponse, FrameworkError>` so the
 //! `?` operator works on framework errors without re-wrapping every
-//! call site — same pattern as `controllers::posts`.
+//! call site - same pattern as `controllers::posts`.
 
 use std::collections::HashMap;
 
 use suprnova::auth_flows::EmailVerification;
 use suprnova::{FrameworkError, HttpResponse, Request, Response};
 
-/// `POST /auth/verify/resend?email=...` — anti-enumeration resend.
+/// `POST /auth/verify/resend?email=...` - anti-enumeration resend.
 ///
 /// Always returns 200 with the same body. The actual lookup + dispatch
 /// is owned by `EmailVerification::resend`, which resolves the user
@@ -57,12 +57,12 @@ async fn resend_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
     ))
 }
 
-/// `GET /auth/verify?token=...` — consume a verification token.
+/// `GET /auth/verify?token=...` - consume a verification token.
 ///
 /// Delegates the actual mutation to `EmailVerification::verify` (which
 /// also fires the `EmailVerified` event). On success, 302s the user
 /// back to `/`. On failure, the framework's standard error mapping
-/// turns the `FrameworkError` into the right HTTP status — invalid /
+/// turns the `FrameworkError` into the right HTTP status - invalid /
 /// expired tokens propagate as a `400 Bad Request` from the facade.
 pub async fn verify(req: Request) -> Response {
     verify_inner(req).await.map_err(HttpResponse::from)

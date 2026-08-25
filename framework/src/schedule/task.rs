@@ -19,7 +19,7 @@ use std::time::Duration;
 /// [`super::TaskBuilder::without_overlapping_for`].
 pub const DEFAULT_WITHOUT_OVERLAPPING_TTL: Duration = Duration::from_secs(30 * 60);
 
-/// Default single-server lock TTL: 60 seconds — exactly one minute-aligned
+/// Default single-server lock TTL: 60 seconds - exactly one minute-aligned
 /// tick.
 ///
 /// The window has two edges and both matter. Too short and a replica whose
@@ -37,7 +37,7 @@ pub const DEFAULT_ON_ONE_SERVER_TTL: Duration = Duration::from_secs(60);
 /// Holds counters needed to enforce [`TaskBuilder::without_overlapping`] in
 /// the absence of a distributed [`Cache`] lock. Wrap in `Arc` so the same
 /// instance is observed by the inline call path and any `tokio::spawn`
-/// children — they need a shared view of whether a previous run is still
+/// children - they need a shared view of whether a previous run is still
 /// in flight.
 ///
 /// [`TaskBuilder::without_overlapping`]: super::TaskBuilder::without_overlapping
@@ -53,12 +53,12 @@ pub struct TaskState {
     /// Number of times this task has been observed and skipped due to an
     /// overlap lock (Cache-side or in-process) **or** because the
     /// same-minute dedup CAS rejected a repeat invocation. Read via
-    /// [`TaskState::skip_count`] — the field stays `pub(crate)` so the
+    /// [`TaskState::skip_count`] - the field stays `pub(crate)` so the
     /// atomic implementation can change without breaking external code.
     pub(crate) skip_count: AtomicUsize,
     /// Minutes-since-UNIX-epoch of the most recent invocation attempt.
     /// `fetch_max` against the current minute is the same-minute dedup
-    /// gate — if the prior value is `>= now`, we already tried this minute
+    /// gate - if the prior value is `>= now`, we already tried this minute
     /// and the new call must skip. Init to `0`: any post-epoch run wins
     /// the first CAS unconditionally.
     pub(crate) last_run_minute: AtomicI64,
@@ -72,7 +72,7 @@ impl TaskState {
         Arc::new(Self::default())
     }
 
-    /// Snapshot the skip counter — convenient for tests that need to assert
+    /// Snapshot the skip counter - convenient for tests that need to assert
     /// "this task was skipped N times" without unwrapping atomics.
     pub fn skip_count(&self) -> usize {
         self.skip_count.load(Ordering::SeqCst)
@@ -166,10 +166,10 @@ pub struct TaskEntry {
     pub run_in_background: bool,
     /// TTL applied to the overlap lock when `without_overlapping` is set.
     /// Acts as a safety net for crashed tasks that fail to release the
-    /// lock — the next tick after this duration sees a fresh lock and can
+    /// lock - the next tick after this duration sees a fresh lock and can
     /// proceed.
     pub overlap_ttl: Duration,
-    /// Run on exactly one server per due tick — see
+    /// Run on exactly one server per due tick - see
     /// [`super::TaskBuilder::on_one_server`].
     pub on_one_server: bool,
     /// TTL applied to the single-server election lock. Unlike
@@ -182,7 +182,7 @@ pub struct TaskEntry {
     /// behaviour: evaluate against the scheduler process's local zone.
     /// See [`super::TaskBuilder::timezone`].
     pub timezone: Option<chrono_tz::Tz>,
-    /// Shared runtime state — in-process overlap flag and skip counter.
+    /// Shared runtime state - in-process overlap flag and skip counter.
     pub state: Arc<TaskState>,
 }
 
@@ -209,7 +209,7 @@ impl TaskEntry {
     /// `Cache` is not bootstrapped at all (`FrameworkError::ServiceNotFound`)
     /// the executor degrades to a per-process `AtomicBool` CAS and emits a
     /// single warn-once telling the operator they're getting the weaker
-    /// guarantee. A contended lock is treated as a successful skip — the
+    /// guarantee. A contended lock is treated as a successful skip - the
     /// task returns `Ok(())` and increments the [`TaskState`] skip counter
     /// so observability surfaces can see it without poisoning the
     /// `schedule:run` exit code.
@@ -218,7 +218,7 @@ impl TaskEntry {
     /// reason (a Redis connection blip, for example) is a different case
     /// and is **not** treated as "absent": falling back to the in-process
     /// flag there would let every replica run the task at once. That path
-    /// fails closed — the task is skipped for this tick and the error is
+    /// fails closed - the task is skipped for this tick and the error is
     /// returned rather than swallowed.
     ///
     /// [`Cache::lock`]: crate::cache::Cache::lock
@@ -251,7 +251,7 @@ fn warn_cache_fallback_once() {
     if !CACHE_FALLBACK_WARNED.swap(true, Ordering::SeqCst) {
         tracing::warn!(
             target: "suprnova::schedule",
-            "without_overlapping() falling back to in-process AtomicBool protection — \
+            "without_overlapping() falling back to in-process AtomicBool protection - \
              Cache is not bootstrapped. Multi-process deployments (multiple `schedule:work` \
              or external-cron `schedule:run` callers) will NOT see each other's locks. \
              Configure Cache (CACHE_DRIVER=memory|redis) before relying on cross-process \
@@ -260,7 +260,7 @@ fn warn_cache_fallback_once() {
     }
 }
 
-/// RAII guard that clears [`TaskState::in_process_running`] on drop —
+/// RAII guard that clears [`TaskState::in_process_running`] on drop -
 /// including when the guarded handler panics.
 ///
 /// The in-process fallback used to clear the flag with a plain
@@ -271,7 +271,7 @@ fn warn_cache_fallback_once() {
 /// the time a panic is caught, this function's stack has already unwound
 /// and the flag update never ran. `in_process_running` has no TTL (unlike
 /// the Redis lock it stands in for), so a leaked `true` value jams the task
-/// for the rest of the process's life — every later tick sees the flag set
+/// for the rest of the process's life - every later tick sees the flag set
 /// and skips forever. Binding a guard whose `Drop` clears the flag makes
 /// the release run during unwinding too, the same way `AbortOnDrop` in
 /// `workflow::mod` guarantees heartbeat cleanup on early return.
@@ -294,7 +294,7 @@ fn warn_one_server_memory_once(task: &str) {
         tracing::warn!(
             target: "suprnova::schedule",
             task = %task,
-            "on_one_server() is holding a per-process lock — Cache is not \
+            "on_one_server() is holding a per-process lock - Cache is not \
              bootstrapped, so replicas cannot see each other's elections and \
              every replica will run this task. Bootstrap Cache with \
              CACHE_DRIVER=redis before relying on single-server execution. \
@@ -311,7 +311,7 @@ fn warn_one_server_memory_once(task: &str) {
 /// # Why the lock is never released
 ///
 /// [`Cache::lock`] has no `Drop` auto-release, and this deliberately does
-/// not call `release()`. The lock's job is not to bracket the handler — it
+/// not call `release()`. The lock's job is not to bracket the handler - it
 /// is to make a replica that arrives *later in the same tick* find the
 /// tick already claimed. Releasing on completion would hand the tick to
 /// the next replica to look, which is the whole defect. It expires on its
@@ -349,7 +349,7 @@ async fn claim_tick_for_this_server(
         }
         Err(FrameworkError::ServiceNotFound { .. }) => {
             // Cache is not bootstrapped at all. In production this never
-            // reaches here — `Schedule::validate_single_server_locking`
+            // reaches here - `Schedule::validate_single_server_locking`
             // fails the boot. Outside production, running is the useful
             // behaviour for a single-process dev loop; warn so nobody
             // mistakes it for the real guarantee.
@@ -357,7 +357,7 @@ async fn claim_tick_for_this_server(
             true
         }
         Err(err) => {
-            // Cache is bootstrapped but the lock attempt failed — a Redis
+            // Cache is bootstrapped but the lock attempt failed - a Redis
             // blip, say. Fail CLOSED, matching `without_overlapping`'s
             // stance: running anyway would let every replica through at
             // exactly the moment coordination is unavailable, which is the
@@ -394,7 +394,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
     // `fetch_max` returns the previous value and atomically bumps the
     // stored value to the max of (prev, now). If the previous value was
     // already at-or-past `now_minute`, this minute has already been
-    // claimed — skip silently with a tick to `skip_count`. The audit's
+    // claimed - skip silently with a tick to `skip_count`. The audit's
     // HIGH #3 case (a daemon loop or repeated `schedule:run` invocation
     // executing the same minute-level task multiple times) is closed at
     // this gate; cross-process protection is layered on by Cache::lock
@@ -415,7 +415,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
 
     // Cross-replica election. The dedup above is an `AtomicI64` in *this*
     // process, so N replicas each claim the same minute for themselves and
-    // all N run — measured as exactly that: three replicas, three
+    // all N run - measured as exactly that: three replicas, three
     // executions per minute, every minute.
     if on_one_server && !claim_tick_for_this_server(name, now_minute, one_server_ttl, &state).await
     {
@@ -449,7 +449,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
         }
         Err(FrameworkError::ServiceNotFound { .. }) => {
             // Cache genuinely isn't bootstrapped (no `CacheStore` binding in
-            // the container) — degrade to in-process CAS. Warn operator once
+            // the container) - degrade to in-process CAS. Warn operator once
             // that they're getting the weaker, single-process guarantee.
             warn_cache_fallback_once();
             if state
@@ -457,8 +457,8 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
-                // Guard released on drop — including on unwind if `handler`
-                // panics — so the flag can never stick at `true` forever.
+                // Guard released on drop - including on unwind if `handler`
+                // panics - so the flag can never stick at `true` forever.
                 let _guard = InProcessOverlapGuard {
                     flag: &state.in_process_running,
                 };
@@ -477,7 +477,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
             // Cache IS bootstrapped but the lock acquisition itself failed
             // (e.g. a Redis connection blip returning
             // `FrameworkError::Internal` from `RedisCache::acquire_lock`).
-            // This is NOT "cache absent" — silently degrading to the
+            // This is NOT "cache absent" - silently degrading to the
             // in-process AtomicBool here would convert a cross-process lock
             // into N independent per-process flags, and every replica would
             // run the task concurrently, which is exactly what
@@ -490,7 +490,7 @@ pub(crate) async fn run_handler_with_optional_overlap_guard(
                 target: "suprnova::schedule",
                 task = %name,
                 error = %err,
-                "without_overlapping: cache lock acquisition failed (not just absent) — \
+                "without_overlapping: cache lock acquisition failed (not just absent) - \
                  skipping this run rather than risk every replica running it simultaneously",
             );
             Err(err)
@@ -568,7 +568,7 @@ mod tests {
 
     /// A `CacheStore` whose `acquire_lock` always fails with a "real" backend
     /// error, while every other operation delegates to a working in-memory
-    /// backend. Simulates a Redis connection blip on a *bootstrapped* cache —
+    /// backend. Simulates a Redis connection blip on a *bootstrapped* cache -
     /// distinct from "no `CacheStore` binding at all", which is the only case
     /// that should degrade to the in-process fallback. Mirrors the
     /// `FailingReleaseCache` pattern in `framework/tests/idempotency.rs`.
@@ -586,9 +586,9 @@ mod tests {
     /// keeps the branch under test deterministic regardless of suite order.
     #[derive(Clone, Copy)]
     enum LockFailure {
-        /// A bootstrapped cache whose backend blipped — must fail closed.
+        /// A bootstrapped cache whose backend blipped - must fail closed.
         Blip,
-        /// No `CacheStore` bound — must degrade to the in-process guard.
+        /// No `CacheStore` bound - must degrade to the in-process guard.
         Absent,
     }
 
@@ -674,8 +674,8 @@ mod tests {
 
     /// A bootstrapped `Cache` whose lock acquisition errors (not "absent")
     /// must fail CLOSED: the handler must not run. Simulates 3 independent
-    /// replicas — each with its own fresh `TaskState`, exactly as separate
-    /// processes would have — sharing only the (broken) `Cache`. Before the
+    /// replicas - each with its own fresh `TaskState`, exactly as separate
+    /// processes would have - sharing only the (broken) `Cache`. Before the
     /// fix, `Err(_)` unconditionally degraded to the in-process `AtomicBool`,
     /// which is per-process: every "replica" here would have happily run the
     /// handler concurrently, exactly what `without_overlapping()` exists to
@@ -696,7 +696,7 @@ mod tests {
 
         for _ in 0..3 {
             let handler: BoxedTask = Arc::new(CountingTask(ran.clone()));
-            // Fresh state per iteration — simulates independent replica
+            // Fresh state per iteration - simulates independent replica
             // processes, which never share an in-process AtomicBool in
             // reality.
             let result = run_handler_with_optional_overlap_guard(
@@ -718,13 +718,13 @@ mod tests {
         assert_eq!(
             ran.load(Ordering::SeqCst),
             0,
-            "handler must never run while the lock backend is erroring — running it would mean \
+            "handler must never run while the lock backend is erroring - running it would mean \
              every replica executed the task simultaneously"
         );
     }
 
     /// The in-process fallback flag must be released by RAII, not by a
-    /// plain post-await `.store(false, ...)` — a panicking handler unwinds
+    /// plain post-await `.store(false, ...)` - a panicking handler unwinds
     /// straight past that line. Before the fix this test would hang forever
     /// on the second call (the flag stuck at `true`, no TTL to self-heal),
     /// or the second `assert_eq!` would see `ran == 0`.
@@ -736,7 +736,7 @@ mod tests {
         // Bind a store that reports the cache as absent, rather than binding
         // nothing and hoping the global container is also empty. Both produce
         // the identical `Err(ServiceNotFound)` that routes through the
-        // in-process AtomicBool fallback — the path this regression targets —
+        // in-process AtomicBool fallback - the path this regression targets -
         // but only this one is deterministic: `TestContainer::fake()` layers
         // an empty container above the global one and lookup falls through,
         // so a `CacheStore` bound globally by any earlier test in this binary
@@ -761,7 +761,7 @@ mod tests {
         let handler: BoxedTask = Arc::new(PanickingTask);
 
         // No catch_unwind at this layer by design (that boundary lives one
-        // level up, in `schedule/mod.rs`) — spawn on a tokio task so the
+        // level up, in `schedule/mod.rs`) - spawn on a tokio task so the
         // panic is contained to that task instead of aborting the test
         // process, and assert it really was a panic.
         let join = tokio::spawn(run_handler_with_optional_overlap_guard(
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(
             ran.load(Ordering::SeqCst),
             1,
-            "handler must actually execute — the overlap flag was not stuck at true"
+            "handler must actually execute - the overlap flag was not stuck at true"
         );
     }
 }

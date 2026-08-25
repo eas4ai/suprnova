@@ -1,7 +1,7 @@
 //! SeaORM mirror entity for `payments_webhook_events`.
 //!
 //! Records every inbound provider webhook for idempotency and audit.
-//! `provider_event_id` + `provider` uniquely identify an event — the
+//! `provider_event_id` + `provider` uniquely identify an event - the
 //! unique index on the table enforces this at the DB level.
 //!
 //! `processed_at` is `None` until the event is dispatched through the
@@ -12,17 +12,17 @@ use chrono::{DateTime, Utc};
 
 /// Mirror row for an inbound provider webhook.
 ///
-/// `(provider, provider_event_id)` is unique — the DB index doubles as the
+/// `(provider, provider_event_id)` is unique - the DB index doubles as the
 /// idempotency guard for replay protection.
 ///
-/// Note: no `timestamps` flag — this entity uses `received_at` /
+/// Note: no `timestamps` flag - this entity uses `received_at` /
 /// `processed_at` instead of the standard `created_at` / `updated_at`
 /// pair. The macro's auto-touch logic is not applied.
 #[suprnova::model(table = "payments_webhook_events")]
 pub struct WebhookEvent {
     /// Surrogate primary key.
     pub id: i64,
-    /// Provider name (kebab-case — `"stripe"`, `"paddle"`, etc.).
+    /// Provider name (kebab-case - `"stripe"`, `"paddle"`, etc.).
     pub provider: String,
     /// Provider-issued event identifier (e.g. Stripe's `evt_…`). Unique
     /// with `provider`.
@@ -33,7 +33,7 @@ pub struct WebhookEvent {
     /// the framework can normalise; `None` when only the provider-specific
     /// type is meaningful.
     pub neutral_event_kind: Option<String>,
-    /// Raw JSON payload as received from the provider — kept verbatim for
+    /// Raw JSON payload as received from the provider - kept verbatim for
     /// audit and reprocessing.
     pub payload: serde_json::Value,
     /// Wall-clock time the framework received and persisted the event.

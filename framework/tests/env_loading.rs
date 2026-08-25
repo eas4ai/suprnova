@@ -6,7 +6,7 @@
 //!    files for the same invocation.
 //! 2. Apply file precedence: `.env` (lowest) <
 //!    `.env.local` < `.env.<env>` < `.env.<env>.local` < system env.
-//! 3. Preserve real system env values — files never override what was
+//! 3. Preserve real system env values - files never override what was
 //!    set in the actual process environment when `load_dotenv` ran.
 //!
 //! These tests mutate `std::env` (process-global) so we serialize them
@@ -115,7 +115,7 @@ fn app_env_in_base_dotenv_selects_environment_specific_file() {
 
 #[test]
 fn system_env_app_env_selects_environment_file() {
-    // The "old" path — `APP_ENV=production` in real system env — must
+    // The "old" path - `APP_ENV=production` in real system env - must
     // still work after the reorder.
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
@@ -159,7 +159,7 @@ fn no_app_env_defaults_to_local() {
 fn system_env_wins_over_dotenv_files() {
     // Real system env must beat every file. Without the system-env
     // restore at the end of `load_dotenv`, an env-specific file using
-    // `from_path_override` would clobber a system value — that would
+    // `from_path_override` would clobber a system value - that would
     // be a precedence inversion (system env is highest, files are
     // lower).
     let _guard = ENV_LOCK.lock().unwrap();
@@ -173,7 +173,7 @@ fn system_env_wins_over_dotenv_files() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    // Files try to set the same key — system env value must survive.
+    // Files try to set the same key - system env value must survive.
     write_env_file(dir, ".env", "DOTENV_TEST_SYS_WINS=from-base\n");
     write_env_file(
         dir,
@@ -256,7 +256,7 @@ fn malformed_dotenv_returns_error() {
 #[test]
 fn missing_optional_env_files_are_ok() {
     // Missing `.env.local`, `.env.<env>`, `.env.<env>.local` are the
-    // expected case — the loader must NOT promote ENOENT to an error.
+    // expected case - the loader must NOT promote ENOENT to an error.
     let _guard = ENV_LOCK.lock().unwrap();
     __reset_loaded_keys_for_tests();
     let _snap = EnvSnapshot::capture(&["APP_ENV"]);
@@ -267,7 +267,7 @@ fn missing_optional_env_files_are_ok() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    // No files at all — every dotenvy call returns Error::Io(NotFound),
+    // No files at all - every dotenvy call returns Error::Io(NotFound),
     // which the loader must treat as success.
     let env = load_dotenv(dir).expect("missing files must not error");
     assert_eq!(env, Environment::Production);
@@ -300,7 +300,7 @@ fn repeat_load_does_not_promote_stale_keys_to_system_tier() {
     assert_eq!(
         std::env::var("DOTENV_TEST_LEAK").as_deref(),
         Ok("from-b"),
-        "second project root's .env value must win — first call's value \
+        "second project root's .env value must win - first call's value \
          must not be frozen in the system-env snapshot"
     );
 }

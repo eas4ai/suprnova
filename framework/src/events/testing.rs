@@ -1,4 +1,4 @@
-//! `Event::fake()` — replaces the global dispatcher with one that
+//! `Event::fake()` - replaces the global dispatcher with one that
 //! records dispatched events instead of invoking listeners.
 //!
 //! `install_fake()` acquires a process-wide serialization mutex for the
@@ -6,7 +6,7 @@
 //! that fake events run one at a time and cannot clobber each other's
 //! recorded-events store. This mirrors [`crate::queue::testing`]. The
 //! single shared `FAKE` store means nested `Event::fake()` on one task is
-//! unsupported (it would deadlock on the serializer) — fake exactly once
+//! unsupported (it would deadlock on the serializer) - fake exactly once
 //! per test.
 
 use super::Event;
@@ -23,10 +23,10 @@ struct FakeStore {
     /// can report the count without iterating every `TypeId`.
     recorded_by_name: HashMap<&'static str, usize>,
     /// Mode controlling which events the fake intercepts:
-    /// - `All` — every event is faked (default `Event::fake()`)
-    /// - `Only(names)` — only the listed names are faked; everything else
+    /// - `All` - every event is faked (default `Event::fake()`)
+    /// - `Only(names)` - only the listed names are faked; everything else
     ///   passes through to the real dispatcher (`Event::fake_only`)
-    /// - `Except(names)` — every event is faked EXCEPT the listed names
+    /// - `Except(names)` - every event is faked EXCEPT the listed names
     ///   (`Event::fake_except` / Laravel's `EventFake::except`)
     mode: FakeMode,
     /// Registered listener types observed while the fake is active. Powers
@@ -55,7 +55,7 @@ tokio::task_local! {
 }
 
 /// Poison-safe access to the fake store (never aborts the process on a
-/// poisoned mutex — a panicking test must not take the whole suite down).
+/// poisoned mutex - a panicking test must not take the whole suite down).
 fn lock_fake() -> MutexGuard<'static, Option<FakeStore>> {
     FAKE.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -66,7 +66,7 @@ fn lock_fake() -> MutexGuard<'static, Option<FakeStore>> {
 /// real dispatcher.
 ///
 /// For `fake_only` / `fake_except`, events outside the configured filter pass
-/// through to the real dispatcher — that's the parity match for Laravel's
+/// through to the real dispatcher - that's the parity match for Laravel's
 /// `EventFake::shouldFakeEvent`.
 pub(crate) fn is_active<E: Event>() -> bool {
     if MUTE_FLAG.try_with(|_| ()).is_ok() {
@@ -85,7 +85,7 @@ pub(crate) fn is_active<E: Event>() -> bool {
 
 /// True iff a fake is currently installed on the global dispatcher (regardless
 /// of `fake_only` / `fake_except` filtering). Used by `Event::push` to skip
-/// recording — Laravel's `EventFake::push` is a deliberate no-op.
+/// recording - Laravel's `EventFake::push` is a deliberate no-op.
 pub(crate) fn fake_installed() -> bool {
     lock_fake().is_some()
 }
@@ -155,7 +155,7 @@ pub fn install_fake_except(names: &[&'static str]) -> EventFakeGuard {
 /// scoped to a callback.
 ///
 /// Unlike [`install_fake`], `muted` does NOT acquire the process-wide
-/// serializer — the mute flag is task-local, so two tasks can be muted in
+/// serializer - the mute flag is task-local, so two tasks can be muted in
 /// parallel without contention. Inside `muted` the global fake (if any) is
 /// also bypassed for recording; assertions made on the fake after `muted`
 /// returns will see no dispatches captured from inside `muted`.
@@ -291,7 +291,7 @@ pub fn dispatched<E: Event>(pred: impl Fn(&E) -> bool) -> Vec<E> {
 /// Return a map of every dispatched event's name to its dispatch count.
 /// Mirrors Laravel's `EventFake::dispatchedEvents()` (Laravel returns the
 /// payload arrays; we return counts, which is the shape Suprnova tests
-/// typically need — use [`dispatched`] for the typed-payload form).
+/// typically need - use [`dispatched`] for the typed-payload form).
 pub fn dispatched_events() -> HashMap<&'static str, usize> {
     let guard = lock_fake();
     guard
@@ -476,7 +476,7 @@ mod tests {
         assert_dispatched::<Noted>(|e| e.note == "captured");
         assert!(
             !has_dispatched::<OneShot>(),
-            "OneShot is not in fake_only's list — must not be recorded"
+            "OneShot is not in fake_only's list - must not be recorded"
         );
     }
 
@@ -492,13 +492,13 @@ mod tests {
         assert_dispatched::<Noted>(|e| e.note == "captured");
         assert!(
             !has_dispatched::<OneShot>(),
-            "OneShot is in the except list — must pass through, not record"
+            "OneShot is in the except list - must pass through, not record"
         );
     }
 
     #[tokio::test]
     async fn muted_discards_events_silently() {
-        // muted does NOT acquire the FAKE_SERIAL lock — it's task-local.
+        // muted does NOT acquire the FAKE_SERIAL lock - it's task-local.
         EventFacade::muted(async {
             EventFacade::dispatch(OneShot).await.unwrap();
             EventFacade::dispatch(Noted {
@@ -510,7 +510,7 @@ mod tests {
         .await;
         // After muted returns, the global fake is not installed (we never
         // installed one), so verify state by ensuring no panic and no
-        // tracking. Nothing else to assert — silence is the contract.
+        // tracking. Nothing else to assert - silence is the contract.
     }
 
     // ----- assert_listening ------------------------------------------------

@@ -146,7 +146,7 @@ impl TaskBuilder {
     /// # Errors
     ///
     /// Returns `Err` with a descriptive message when [`CronExpression::parse`]
-    /// rejects `expression` — i.e. when the expression does not have exactly
+    /// rejects `expression` - i.e. when the expression does not have exactly
     /// 5 whitespace-separated fields, or any field contains an unparseable
     /// numeric segment (step, range bound, list element, or single value).
     pub fn try_cron(mut self, expression: &str) -> Result<Self, String> {
@@ -479,7 +479,7 @@ impl TaskBuilder {
     ///
     /// Panics if `day` is outside `1..=31`. Use
     /// [`try_monthly_on`](Self::try_monthly_on) for a fallible alternative.
-    /// Months without a 31st silently skip — that is cron-standard behaviour.
+    /// Months without a 31st silently skip - that is cron-standard behaviour.
     pub fn monthly_on(mut self, day: u32) -> Self {
         self.expression = CronExpression::monthly_on(day);
         self
@@ -587,8 +587,8 @@ impl TaskBuilder {
     /// Prevent overlapping task runs.
     ///
     /// Enforcement order:
-    /// 1. [`Cache::lock`] (cross-process, fail-closed if Cache is bootstrapped
-    ///    — typical production setup with a Redis or in-memory driver).
+    /// 1. [`Cache::lock`] (cross-process, fail-closed if Cache is bootstrapped -
+    ///    typical production setup with a Redis or in-memory driver).
     /// 2. In-process `AtomicBool` CAS when Cache is not bootstrapped. A single
     ///    warn-once log line tells the operator they're getting the weaker
     ///    guarantee.
@@ -607,7 +607,7 @@ impl TaskBuilder {
     /// Like [`Self::without_overlapping`] but with a caller-supplied lock TTL.
     ///
     /// The TTL is the safety net for tasks that crash without releasing the
-    /// lock — the next tick after this duration will see a free lock and can
+    /// lock - the next tick after this duration will see a free lock and can
     /// proceed. Pick `max(2 × expected_task_duration, 5 min)`. The default
     /// when [`Self::without_overlapping`] is used bare is 30 minutes.
     pub fn without_overlapping_for(mut self, ttl: Duration) -> Self {
@@ -629,7 +629,7 @@ impl TaskBuilder {
     /// They solve different problems and compose. `without_overlapping`
     /// keys its lock on the task and holds it for the task's *duration*,
     /// which stops a slow run from overlapping its own next tick. For a
-    /// fast task — the common case — the lock is taken and released before
+    /// fast task - the common case - the lock is taken and released before
     /// a second replica even looks, so all N still run.
     ///
     /// This keys the lock on the task **and the tick it is running for**,
@@ -646,7 +646,7 @@ impl TaskBuilder {
     /// `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION=true` says the deployment
     /// really does run a single scheduler.
     ///
-    /// Default TTL is 60 seconds — one minute-aligned tick. Use
+    /// Default TTL is 60 seconds - one minute-aligned tick. Use
     /// [`Self::on_one_server_for`] for coarser schedules.
     ///
     /// [`Cache::lock`]: crate::cache::Cache::lock
@@ -658,8 +658,8 @@ impl TaskBuilder {
     /// Like [`Self::on_one_server`] but with a caller-supplied lock TTL.
     ///
     /// The TTL must outlive the window in which replicas could still
-    /// decide the same tick is due, and must expire before the *next* tick
-    /// — otherwise the following run finds the lock still held and skips.
+    /// decide the same tick is due, and must expire before the *next* tick -
+    /// otherwise the following run finds the lock still held and skips.
     /// For a `* * * * *` task the default 60s is right; for an hourly task
     /// anything from a minute to just under an hour works.
     pub fn on_one_server_for(mut self, ttl: Duration) -> Self {
@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(entry.name, "closure-task-5");
     }
 
-    /// `Duration::ZERO` is undefined across cache backends — Redis errors,
+    /// `Duration::ZERO` is undefined across cache backends - Redis errors,
     /// in-memory expires immediately, Memcached treats 0 as "never expire".
     /// The builder must coerce it to the documented default so every backend
     /// sees the same contract.
@@ -823,7 +823,7 @@ mod tests {
 
         assert!(
             entry.without_overlapping,
-            "the flag is still set — only the TTL is rewritten",
+            "the flag is still set - only the TTL is rewritten",
         );
         assert_eq!(
             entry.overlap_ttl, DEFAULT_WITHOUT_OVERLAPPING_TTL,
@@ -891,8 +891,8 @@ mod tests {
 
     #[test]
     fn at_returns_self_unchanged_on_malformed_time() {
-        // `at` keeps its lenient contract — no panic, no silent partial
-        // mutation, no schedule change — but now logs at `warn!` so the
+        // `at` keeps its lenient contract - no panic, no silent partial
+        // mutation, no schedule change - but now logs at `warn!` so the
         // failure is visible. Behaviour callers depend on is preserved.
         let baseline_expr = create_test_builder()
             .daily()

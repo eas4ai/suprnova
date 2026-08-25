@@ -1,15 +1,15 @@
-//! Regression: HIGH audit finding `data` #336 — completeness pass.
+//! Regression: HIGH audit finding `data` #336 - completeness pass.
 //!
 //! The original fix called `Self::max_body_bytes()` from the inlined-
 //! lifecycle `FormRequest::extract` arm, so per-DTO body-cap overrides
 //! were nominally honored. BUT: there was no way for a user to actually
-//! override `max_body_bytes` — the derive emitted the FormRequest impl
+//! override `max_body_bytes` - the derive emitted the FormRequest impl
 //! itself, which made a manual `impl FormRequest for Dto` conflict.
 //!
 //! `#[data(max_body_bytes = N)]` closes that gap: it tells the derive
 //! to emit `fn max_body_bytes() -> usize { N }` as part of the
 //! FormRequest impl, so the override propagates everywhere the trait
-//! method is consulted — both the route-param-aware extract arm AND
+//! method is consulted - both the route-param-aware extract arm AND
 //! the default no-route-param arm.
 //!
 //! These tests prove:
@@ -20,7 +20,7 @@
 //!   3. A body at the cap is still accepted in the no-route-param arm
 //!      (off-by-one guard).
 //!
-//! 413 PayloadTooLarge is the cap-exceeded signal — see
+//! 413 PayloadTooLarge is the cap-exceeded signal - see
 //! `framework/src/http/body.rs::over_limit`.
 
 use std::collections::HashMap;
@@ -37,12 +37,12 @@ use hyper_util::rt::TokioIo;
 use suprnova::error::FrameworkError;
 use suprnova::{FormRequest, HttpResponse, Request};
 
-// Override is 256 bytes — small enough that a 1 KiB body trips it but
+// Override is 256 bytes - small enough that a 1 KiB body trips it but
 // well clear of the framework's default 64 MiB cap (so the override is
 // the load-bearing signal, not the global default).
 const TINY_CAP: usize = 256;
 
-// Arm 1: no route-param field — emits the simple FormRequest impl
+// Arm 1: no route-param field - emits the simple FormRequest impl
 // arm in `build_form_request`.
 #[derive(Debug, suprnova::Data, validator::Validate)]
 #[data(max_body_bytes = 256)]
@@ -51,7 +51,7 @@ struct SmallBodyDto {
     pub name: String,
 }
 
-// Arm 2: has a route-param field — emits the inlined-lifecycle arm,
+// Arm 2: has a route-param field - emits the inlined-lifecycle arm,
 // which calls `Self::max_body_bytes()` inside `body_bytes_with_cap`.
 #[derive(Debug, suprnova::Data, validator::Validate)]
 #[data(max_body_bytes = 256)]

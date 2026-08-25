@@ -2,14 +2,14 @@
 //!
 //! Plain messages (no attachments) ride the `Content.Simple` JSON path.
 //! Anything with attachments is rendered to RFC 5322 MIME via lettre,
-//! base64-encoded, and sent as `Content.Raw.Data` — the only SES path
+//! base64-encoded, and sent as `Content.Raw.Data` - the only SES path
 //! that supports attachments.
 //!
 //! Both paths forward `OutgoingMessage::headers`: `Content.Simple` in its
 //! `Headers` list of `{Name, Value}` pairs, the raw path as real MIME
 //! header lines. Which path a message takes is decided by whether it has
 //! an attachment, which the caller who set `List-Unsubscribe` has no
-//! reason to think about — so a header that rode only one of them would
+//! reason to think about - so a header that rode only one of them would
 //! vanish the first time somebody attached a PDF.
 //!
 //! One exception: `X-SES-TENANT-NAME`, `X-SES-CONFIGURATION-SET`, and
@@ -21,7 +21,7 @@
 //!
 //! A header name repeated more than once is not handled identically on
 //! both shapes: `Content.Simple` forwards every entry, but the raw MIME
-//! path keeps only the last value for a given name — the same behaviour
+//! path keeps only the last value for a given name - the same behaviour
 //! `mail/smtp.rs` has, and a limit of the underlying MIME header map
 //! rather than a choice made here.
 
@@ -285,7 +285,7 @@ fn is_ses_control_header(name: &str) -> bool {
 /// One entry of SES v2's `Content.Simple.Headers` list.
 ///
 /// AWS calls the shape `MessageHeader` and spells its fields `Name` /
-/// `Value` — the same pair Postmark uses for its own `Headers` array
+/// `Value` - the same pair Postmark uses for its own `Headers` array
 /// (`mail/postmark.rs:107-113`), and the same pair `SesTag` above uses.
 /// A misspelled field here fails the entire `SendEmail` call, not just the
 /// header, so the renames are load-bearing.
@@ -358,14 +358,14 @@ fn addrs_only(a: &[Address]) -> Vec<String> {
 /// carry an attachment.
 ///
 /// Two checks make up that one rule:
-/// - CR, LF and NUL are the injection characters — a caller-supplied
+/// - CR, LF and NUL are the injection characters - a caller-supplied
 ///   string containing one turns into a second header on the raw path, or
 ///   corrupts the `Content.Simple.Headers` list. Mirrors the identical
 ///   guard in `mail/mailgun.rs`, which is the only other transport that
 ///   has one.
-/// - Everything `HeaderName::new_from_ascii` itself rejects — an empty
+/// - Everything `HeaderName::new_from_ascii` itself rejects - an empty
 ///   name, a name over 76 bytes, a non-ASCII byte, or a `:` or space in
-///   the name — is rejected here too. That check does not see CR/LF/NUL:
+///   the name - is rejected here too. That check does not see CR/LF/NUL:
 ///   they are valid ASCII bytes, so the first check is still needed.
 ///
 /// Applied before the content branch, not inside it: attachments are the
@@ -390,7 +390,7 @@ fn validate_header_name(name: &str) -> Result<(), FrameworkError> {
 /// Build a lettre header from a caller-supplied name/value pair for the raw
 /// MIME path. `validate_header_name` above enforces the identical rule
 /// up front, so `HeaderName::new_from_ascii` here should never actually
-/// reject anything it hasn't already rejected — this call exists to
+/// reject anything it hasn't already rejected - this call exists to
 /// produce the `HeaderName` type `raw_header` needs, not as a second gate.
 /// Same helper, same shape, as `mail/smtp.rs`.
 fn custom_header(name: &str, value: &str) -> Result<HeaderValue, FrameworkError> {
@@ -491,7 +491,7 @@ impl MailTransport for SesMailTransport {
         // depend on whether this particular message happens to have an
         // attachment. `validate_header_name` enforces the same rule
         // `build_mime`'s `HeaderName::new_from_ascii` would apply on the raw
-        // path — one rule for both content shapes, not two.
+        // path - one rule for both content shapes, not two.
         for (name, _) in &msg.headers {
             validate_header_name(name)?;
         }
@@ -542,7 +542,7 @@ impl MailTransport for SesMailTransport {
                 tracing::warn!(
                     tag_index = i,
                     tag_value = %t,
-                    "SES: dropping msg.tag at index {i} — value contains chars outside \
+                    "SES: dropping msg.tag at index {i} - value contains chars outside \
                      [A-Za-z0-9_-]; AWS would reject the entire send call"
                 );
                 continue;
@@ -557,7 +557,7 @@ impl MailTransport for SesMailTransport {
                 tracing::warn!(
                     metadata_key = %k,
                     metadata_value = %v,
-                    "SES: dropping msg.metadata entry — key or value contains chars outside \
+                    "SES: dropping msg.metadata entry - key or value contains chars outside \
                      [A-Za-z0-9_-]; AWS would reject the entire send call"
                 );
                 continue;

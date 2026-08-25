@@ -1,4 +1,4 @@
-//! Regression: HIGH audit finding `database` #3 — closure-form
+//! Regression: HIGH audit finding `database` #3 - closure-form
 //! transactions where the user leaks a `TxHandle` clone past the
 //! closure boundary used to be silently "best effort" on the Err
 //! path: the original closure error surfaced, but explicit rollback
@@ -6,17 +6,17 @@
 //! `DatabaseTransaction::drop` rollback only fired when the LAST
 //! leaked handle eventually dropped.
 //!
-//! In the meantime the transaction sat in zombie state — queries
+//! In the meantime the transaction sat in zombie state - queries
 //! through the leaked handle continued to run against the still-open
 //! tx. That's a real data-integrity hazard, and the previous
 //! `tracing::warn!` only fired when explicit rollback *failed* (which
-//! it doesn't in the leak case — we never even called rollback).
+//! it doesn't in the leak case - we never even called rollback).
 //!
 //! The fix escalates the leak case to `tracing::error!` with the
 //! leak count and the original closure error, so operators can
 //! observe and alert on the condition. The fix doesn't (and can't,
 //! without runtime cooperation from SeaORM) force-rollback through a
-//! shared `Arc<DatabaseTransaction>` — the close is still deferred
+//! shared `Arc<DatabaseTransaction>` - the close is still deferred
 //! to the last drop, but now it's deferred LOUDLY.
 //!
 //! This test forces the leak and asserts the ERROR log fires + the
@@ -34,7 +34,7 @@ use tracing_test::traced_test;
 async fn leaked_txhandle_on_err_path_logs_error_and_surfaces_closure_err() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
 
-    // Share a slot with the closure via Arc<Mutex<...>> — the
+    // Share a slot with the closure via Arc<Mutex<...>> - the
     // closure's HRTB signature requires `'static` captures, so a
     // bare `&mut` to a local won't compile.
     let leaked: Arc<Mutex<Option<TxHandle>>> = Arc::new(Mutex::new(None));
@@ -44,7 +44,7 @@ async fn leaked_txhandle_on_err_path_logs_error_and_surfaces_closure_err() {
         let slot = leaked_for_closure.clone();
         let handle = tx.handle();
         Box::pin(async move {
-            // Stash the handle outside the closure — the audit-flagged
+            // Stash the handle outside the closure - the audit-flagged
             // misuse this regression test exercises.
             *slot.lock().unwrap() = Some(handle);
             Err(FrameworkError::database(
@@ -79,7 +79,7 @@ async fn leaked_txhandle_on_err_path_logs_error_and_surfaces_closure_err() {
         }
     });
 
-    // 3. Drop the leaked clone so the transaction can finally close —
+    // 3. Drop the leaked clone so the transaction can finally close -
     //    SeaORM's Drop rollback runs when the last Arc reference
     //    falls. Without this drop the tx would linger until end of
     //    test process; we explicitly close to keep the test clean.
@@ -90,7 +90,7 @@ async fn leaked_txhandle_on_err_path_logs_error_and_surfaces_closure_err() {
 #[traced_test]
 async fn no_leak_means_no_zombie_error_log() {
     // The negative control: a normal Err-returning closure with no
-    // leaked clones must NOT fire the leak diagnostic — only the
+    // leaked clones must NOT fire the leak diagnostic - only the
     // expected rollback path runs.
     let _db = TestDatabase::sqlite_memory().await.unwrap();
 

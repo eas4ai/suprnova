@@ -13,7 +13,7 @@
 //!
 //! Route is gated by `suprnova::AuthMiddleware::new()` in `routes.rs` so
 //! the 401 path is owned by the middleware; the controller can assume
-//! that `Auth::id()` is `Some` whenever it runs — but we still guard
+//! that `Auth::id()` is `Some` whenever it runs - but we still guard
 //! against `Auth::user_as` returning `None` (e.g. session refers to a
 //! user that was deleted between login and this request) to keep the
 //! happy path explicit.
@@ -25,7 +25,7 @@ use suprnova::{
 
 use crate::models::users::User;
 
-/// 5 MiB cap on avatar uploads — short-circuits oversize bodies at the
+/// 5 MiB cap on avatar uploads - short-circuits oversize bodies at the
 /// byte boundary without buffering the whole upload first.
 const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
 

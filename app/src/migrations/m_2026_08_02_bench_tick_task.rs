@@ -3,7 +3,7 @@
 //! The scheduler experiment now runs two tasks side by side in one
 //! window: a plain one and an `.on_one_server()` one. That is the only
 //! honest way to measure the fix, because single-server execution is
-//! opt-in — a run that showed one row per minute without saying which task
+//! opt-in - a run that showed one row per minute without saying which task
 //! it came from would look like the default had changed, and it has not.
 //!
 //! Both arms in one window rather than two sequential runs: the replicas,

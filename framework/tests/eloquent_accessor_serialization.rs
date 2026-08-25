@@ -1,4 +1,4 @@
-//! Phase 10B P8 — `#[accessor]` + `appends` + `to_json` integration pins.
+//! Phase 10B P8 - `#[accessor]` + `appends` + `to_json` integration pins.
 //!
 //! Phase 10A T8 already covered:
 //!   - accessor callable directly (`u.full_name()`)
@@ -19,7 +19,7 @@
 //! 3. `hidden = ["full_name"]` + `appends = ["full_name"]` → the
 //!    accessor STILL appears in `to_json`. `append_inserts` runs after
 //!    `filter_apply`, matching Laravel's "$appends always serialises"
-//!    semantics. The doc comment on the macro emits this claim — this
+//!    semantics. The doc comment on the macro emits this claim - this
 //!    test pins it.
 //! 4. `visible = ["id"]` + `appends = ["full_name"]` → the accessor
 //!    appears even though it isn't in the visible allowlist. Same
@@ -47,7 +47,7 @@ impl P8NoAppends {
 
 /// Multiple accessors with different `Serialize` return types. Pins
 /// that the macro's `serde_json::to_value(&self.#method())` emission
-/// is generic over return type — it doesn't assume `String`.
+/// is generic over return type - it doesn't assume `String`.
 #[model(
     table = "p8_multi_types",
     timestamps = false,
@@ -88,7 +88,7 @@ impl P8MultiTypes {
 }
 
 /// `hidden` and `appends` collide on the same key. Per the macro doc
-/// comment ("$appends always serialises"), the accessor wins — the
+/// comment ("$appends always serialises"), the accessor wins - the
 /// hidden filter is applied to the base struct map, then accessor
 /// inserts happen afterwards. Pins this resolution.
 #[model(
@@ -142,7 +142,7 @@ async fn accessor_without_appends_does_not_appear_in_to_json() {
         last_name: "Smith".into(),
         ..Default::default()
     };
-    // The method is callable directly — pin that the `#[accessor]`
+    // The method is callable directly - pin that the `#[accessor]`
     // attribute is a pure pass-through.
     assert_eq!(u.full_name(), "Alice Smith");
     let v = u.to_array();
