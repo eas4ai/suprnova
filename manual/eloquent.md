@@ -407,6 +407,7 @@ WHERE clauses).
 ```php
 // Laravel
 $user->refresh();                          // reload from DB
+$user->refreshForUpdate();                 // reload under a row lock
 $copy = $user->fresh();                    // fetch + return copy
 $replica = $user->replicate();             // unsaved clone with fresh PK
 $replica = $user->replicate(['email']);    // skip a field
@@ -415,14 +416,23 @@ $replica = $user->replicate(['email']);    // skip a field
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
 `refresh` mutates in place; `fresh` returns a separately-fetched
-copy. `replicate` builds an in-memory clone with the PK reset
-(`Default::default()` for the key type). Caller saves explicitly.
+copy. `refresh_for_update` is `refresh` under a `SELECT ... FOR UPDATE`
+row lock - use it inside a transaction when you need the row's current
+values and the exclusive lock in one statement. `replicate` builds an
+in-memory clone with the PK reset (`Default::default()` for the key
+type). Caller saves explicitly.
+
+`refresh` and `refresh_for_update` both return an error when the row no
+longer exists, rather than leaving the model holding stale values.
+SQLite has no row-level locking, so `refresh_for_update` reloads without
+a lock there - see [Row locking](#row-locking).
 
 ### Replicating event
 
@@ -816,6 +826,19 @@ statement - after every `UNION` arm, every `ORDER BY`, every
 `LIMIT` / `OFFSET`. A `union(...)` of two builders followed by
 `.lock_for_update()` emits exactly **one** `FOR UPDATE` at the
 outer scope, not one per arm.
+
+To reload a model you already hold and take the lock in the same
+statement, use `refresh_for_update`:
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### Use inside a transaction
 

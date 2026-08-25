@@ -5,8 +5,10 @@
 //! per-test container, so any `DB::connection()` inside the trait methods
 //! resolves to this DB.
 
+use serial_test::serial;
+use std::sync::{Arc, Mutex};
 use suprnova::testing::TestDatabase;
-use suprnova::{FirstOrCreate, Model, attrs, model};
+use suprnova::{DB, FirstOrCreate, Model, QueryExecuted, attrs, model};
 
 #[model(table = "t4_users", timestamps = false)]
 pub struct T4User {
@@ -28,6 +30,7 @@ async fn migrate(db: &TestDatabase) {
 }
 
 #[tokio::test]
+#[serial]
 async fn create_then_find() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -47,6 +50,7 @@ async fn create_then_find() {
 }
 
 #[tokio::test]
+#[serial]
 async fn find_or_fail_returns_error_on_missing() {
     let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&_db).await;
@@ -60,6 +64,7 @@ async fn find_or_fail_returns_error_on_missing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn find_many_preserves_order_of_request_args() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -81,6 +86,7 @@ async fn find_many_preserves_order_of_request_args() {
 }
 
 #[tokio::test]
+#[serial]
 async fn all_returns_every_row() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -97,6 +103,7 @@ async fn all_returns_every_row() {
 }
 
 #[tokio::test]
+#[serial]
 async fn save_persists_changes() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -112,6 +119,7 @@ async fn save_persists_changes() {
 }
 
 #[tokio::test]
+#[serial]
 async fn update_applies_partial_attrs() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -128,6 +136,7 @@ async fn update_applies_partial_attrs() {
 }
 
 #[tokio::test]
+#[serial]
 async fn delete_removes_row() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -141,6 +150,7 @@ async fn delete_removes_row() {
 }
 
 #[tokio::test]
+#[serial]
 async fn first_or_create_creates_when_missing() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -157,6 +167,7 @@ async fn first_or_create_creates_when_missing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn first_or_create_returns_existing_when_present() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -177,6 +188,7 @@ async fn first_or_create_returns_existing_when_present() {
 }
 
 #[tokio::test]
+#[serial]
 async fn update_or_create_updates_when_present() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -194,6 +206,7 @@ async fn update_or_create_updates_when_present() {
 }
 
 #[tokio::test]
+#[serial]
 async fn first_or_new_returns_unsaved_when_missing() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -210,6 +223,7 @@ async fn first_or_new_returns_unsaved_when_missing() {
 }
 
 #[tokio::test]
+#[serial]
 async fn refresh_pulls_fresh_data() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -225,6 +239,86 @@ async fn refresh_pulls_fresh_data() {
 }
 
 #[tokio::test]
+#[serial]
+async fn refresh_for_update_pulls_fresh_data() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+
+    let alice = T4User::create(attrs! { name: "Alice", email: "a@x.com" })
+        .await
+        .unwrap();
+    let mut alice_handle = alice.clone();
+
+    alice.update(attrs! { name: "Alice X" }).await.unwrap();
+    alice_handle.refresh_for_update().await.unwrap();
+    assert_eq!(alice_handle.name, "Alice X");
+}
+
+#[tokio::test]
+#[serial]
+async fn refresh_for_update_errors_when_the_row_is_gone() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+
+    let alice = T4User::create(attrs! { name: "Alice", email: "a@x.com" })
+        .await
+        .unwrap();
+    let mut handle = alice.clone();
+    alice.delete().await.unwrap();
+
+    let err = handle
+        .refresh_for_update()
+        .await
+        .expect_err("a vanished row must not silently succeed");
+    assert!(
+        format!("{err}").contains("no longer exists"),
+        "expected the not-found message, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn refresh_for_update_selects_by_primary_key_and_emits_no_lock_on_sqlite() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    DB::flush_listeners().unwrap();
+    migrate(&db).await;
+    let mut alice = T4User::create(attrs! { name: "Alice", email: "a@x.com" })
+        .await
+        .unwrap();
+
+    // Install the recorder AFTER seeding so only the refresh is captured.
+    let sink: Arc<Mutex<Vec<QueryExecuted>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink_cb = sink.clone();
+    DB::listen(move |event: &QueryExecuted| {
+        sink_cb.lock().unwrap().push(event.clone());
+    })
+    .unwrap();
+
+    alice.refresh_for_update().await.unwrap();
+
+    let events = sink.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "refresh_for_update issues exactly one SELECT; got {}",
+        events.len()
+    );
+    let sql = &events[0].sql;
+    assert!(sql.contains("t4_users"), "got: {sql}");
+    assert!(
+        sql.contains("id ="),
+        "must filter by the primary key; got: {sql}"
+    );
+    assert!(
+        !sql.contains("FOR UPDATE"),
+        "SQLite has no row-level locking, so the clause is a documented no-op; got: {sql}"
+    );
+    drop(events);
+    DB::flush_listeners().unwrap();
+}
+
+#[tokio::test]
+#[serial]
 async fn fresh_returns_copy_without_mutating() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -244,6 +338,7 @@ async fn fresh_returns_copy_without_mutating() {
 }
 
 #[tokio::test]
+#[serial]
 async fn replicate_clones_with_reset_pk() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -258,6 +353,7 @@ async fn replicate_clones_with_reset_pk() {
 }
 
 #[tokio::test]
+#[serial]
 async fn replicate_clones_full_row_with_reset_pk() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -285,6 +381,7 @@ pub struct T4UserDraft {
 }
 
 #[tokio::test]
+#[serial]
 async fn replicate_into_other_model_resets_pk() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -314,6 +411,7 @@ async fn replicate_into_other_model_resets_pk() {
 }
 
 #[tokio::test]
+#[serial]
 async fn increment_atomic_update() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     db.execute_unprepared(
@@ -329,6 +427,7 @@ async fn increment_atomic_update() {
 }
 
 #[tokio::test]
+#[serial]
 async fn decrement_atomic_update() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     db.execute_unprepared(
@@ -344,6 +443,7 @@ async fn decrement_atomic_update() {
 }
 
 #[tokio::test]
+#[serial]
 async fn force_delete_alias_calls_hard_delete() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -357,6 +457,7 @@ async fn force_delete_alias_calls_hard_delete() {
 }
 
 #[tokio::test]
+#[serial]
 async fn create_rejects_unknown_column() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -380,6 +481,7 @@ async fn create_rejects_unknown_column() {
 // every other variant.
 
 #[tokio::test]
+#[serial]
 async fn create_or_first_returns_existing_row_on_unique_violation() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
@@ -402,6 +504,7 @@ async fn create_or_first_returns_existing_row_on_unique_violation() {
 }
 
 #[tokio::test]
+#[serial]
 async fn create_or_first_propagates_non_database_errors_unchanged() {
     let db = TestDatabase::sqlite_memory().await.expect("sqlite");
     migrate(&db).await;
