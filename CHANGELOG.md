@@ -4,6 +4,12 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.4 - 2026-08-25
+
+### Added
+
+- **`Builder::in_order_of` sorts rows into an explicit sequence.** Pass a column and the values in the order you want them; rows whose value is not in the list sort last. The values bind as parameters, so they are safe to take from request data.
+
 ## 1.3.2 - 2026-08-25
 
 ### Added

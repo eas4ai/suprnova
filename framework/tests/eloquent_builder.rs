@@ -926,3 +926,116 @@ async fn model_keys_surfaces_a_decode_error_instead_of_a_silent_skip() {
         "model_keys decode error should retain operation context: {err}"
     );
 }
+
+// ---- in_order_of (Laravel `inOrderOf`) ---------------------------------
+
+/// Stands in for an `AsEnum<E>` column's runtime type. `AsEnum` stores
+/// `v.as_ref()`, so `as_ref()` is what an enum-valued ordering must
+/// compare against.
+#[derive(strum::AsRefStr)]
+enum T5Role {
+    Admin,
+    Member,
+}
+
+#[tokio::test]
+async fn in_order_of_sorts_rows_into_the_listed_sequence() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    for (name, role) in [
+        ("G", "guest"),
+        ("A", "admin"),
+        ("Z", "ghost"),
+        ("M", "member"),
+    ] {
+        T5User::create(attrs!(
+            name: name,
+            email: format!("{name}@x.com"),
+            age: 30,
+            active: true,
+            role: role,
+            balance: 0.0
+        ))
+        .await
+        .unwrap();
+    }
+
+    let rows = T5User::query()
+        .in_order_of("role", ["admin", "member", "guest"])
+        .get()
+        .await
+        .unwrap();
+
+    let order: Vec<&str> = rows.iter().map(|r| r.role.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["admin", "member", "guest", "ghost"],
+        "listed values sort in list order; an unlisted value sorts last"
+    );
+}
+
+#[test]
+fn in_order_of_binds_values_and_renders_a_case_expression() {
+    use sea_orm::DbBackend;
+    let (sql, vals) = T5User::query()
+        .filter("active", true)
+        .in_order_of("role", ["admin", "member"])
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(sql.contains("active = $1"), "got: {sql}");
+    assert!(
+        sql.contains("ORDER BY CASE WHEN role = $2 THEN 0 WHEN role = $3 THEN 1 ELSE 2 END"),
+        "ORDER BY must render a bound CASE that continues the WHERE numbering; got: {sql}"
+    );
+    assert_eq!(
+        vals.len(),
+        3,
+        "one WHERE binding plus one per ordered value; got: {vals:?}"
+    );
+    assert!(
+        !sql.contains("'admin'"),
+        "ordering values must be bound, never inlined; got: {sql}"
+    );
+}
+
+#[test]
+fn in_order_of_with_an_empty_list_adds_no_ordering() {
+    use sea_orm::DbBackend;
+    let empty: [&str; 0] = [];
+    let sql = T5User::query()
+        .filter("active", true)
+        .in_order_of("role", empty)
+        .to_sql_for(DbBackend::Sqlite);
+
+    assert!(
+        !sql.contains("ORDER BY"),
+        "an empty value list is a no-op (Laravel Builder.php:3153-3155); got: {sql}"
+    );
+}
+
+#[tokio::test]
+async fn in_order_of_accepts_enum_variants_through_as_ref() {
+    let db = TestDatabase::sqlite_memory().await.expect("sqlite");
+    migrate(&db).await;
+    for (name, role) in [("M", "Member"), ("A", "Admin")] {
+        T5User::create(attrs!(
+            name: name,
+            email: format!("{name}@x.com"),
+            age: 30,
+            active: true,
+            role: role,
+            balance: 0.0
+        ))
+        .await
+        .unwrap();
+    }
+
+    let rows = T5User::query()
+        .in_order_of("role", [T5Role::Admin.as_ref(), T5Role::Member.as_ref()])
+        .get()
+        .await
+        .unwrap();
+
+    assert_eq!(rows[0].role, "Admin");
+    assert_eq!(rows[1].role, "Member");
+}

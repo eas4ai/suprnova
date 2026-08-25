@@ -288,3 +288,14 @@ async fn aggregate_projection_columns_are_validated() {
         .await
         .expect("a normal SUM column must still execute");
 }
+
+#[tokio::test]
+async fn injection_in_in_order_of_column_is_rejected() {
+    let _db = setup().await;
+    let err = T338BuilderIdentUser::query()
+        .in_order_of("id) THEN 0 END, (SELECT 1", ["a", "b"])
+        .get()
+        .await
+        .expect_err("attacker-controlled in_order_of column must be rejected at terminal");
+    assert!(format!("{err}").contains("SQL identifier"));
+}

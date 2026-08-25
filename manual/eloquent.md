@@ -636,6 +636,47 @@ let users = User::query().in_random_order().get().await?;
 `Direction::Asc` / `Direction::Desc` is the Suprnova enum
 re-exported from SeaORM.
 
+#### Ordering by an explicit sequence
+
+`in_order_of` sorts rows into the order you list. Anything whose value
+is not in the list sorts after everything that is.
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnova renders this as a bound `CASE` expression, so the values are
+parameters and are safe to take from request data:
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+The column name is an SQL identifier, not a parameter. Hardcode it or
+pick it from an allowlist, the same as every other column argument. An
+empty value list adds no ordering at all, so you can build the sequence
+conditionally without special-casing the empty case.
+
+For a column that uses the `AsEnum<E>` cast, pass each variant through
+`as_ref()`. That is the exact string the cast stores:
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` ships on the typed `Builder<M>` surface. The model-less
+`DB::table(...)` builder orders by column and direction only.
+
 ### Grouping + having
 
 ```php

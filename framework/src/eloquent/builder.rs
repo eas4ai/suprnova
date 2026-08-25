@@ -259,6 +259,12 @@ pub(crate) enum OrderTerm {
     Col(String, Direction),
     Raw(String),
     Random,
+    /// `ORDER BY CASE WHEN col = ? THEN 0 ... ELSE <len> END` from
+    /// [`Builder::in_order_of`]. The values are bound, not inlined, so
+    /// the sequence can come from request data; the column is an
+    /// identifier and is validated by `Builder::validate_inputs`
+    /// before the renderer ever sees it.
+    InOrderOf(String, Vec<Value>),
 }
 
 /// Row-locking hint applied to a SELECT.
@@ -854,6 +860,9 @@ impl<M> Builder<M> {
         for o in &self.orders {
             match o {
                 OrderTerm::Col(c, _) => {
+                    validate_identifier(c)?;
+                }
+                OrderTerm::InOrderOf(c, _) => {
                     validate_identifier(c)?;
                 }
                 OrderTerm::Raw(_) | OrderTerm::Random => {
@@ -1599,6 +1608,44 @@ impl<M> Builder<M> {
     /// helper.
     pub fn in_random_order(mut self) -> Self {
         self.orders.push(OrderTerm::Random);
+        self
+    }
+
+    /// `ORDER BY` an explicit sequence of values - rows whose column
+    /// matches the first value come first, then the second, and so on.
+    /// Anything not in the list sorts after everything that is.
+    ///
+    /// Mirrors Laravel's `inOrderOf`. An empty `values` adds no
+    /// ordering at all, so a caller can pass a sequence it built
+    /// conditionally without special-casing the empty result.
+    ///
+    /// The values are bound as parameters, so they are safe to take
+    /// from untrusted input. `col` is **not** - it is an SQL
+    /// identifier interpolated into the statement, same contract as
+    /// every other [`IntoColumn`] argument.
+    ///
+    /// For a column that uses the `AsEnum<E>` cast, pass each variant
+    /// through `as_ref()`: that is exactly the string the cast writes
+    /// to the column (`AsEnum::to_storage`), and a `Serialize`-derived
+    /// spelling can differ from it.
+    ///
+    /// ```rust,ignore
+    /// User::query()
+    ///     .in_order_of("role", ["admin", "member", "guest"])
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn in_order_of<C, V, I>(mut self, col: C, values: I) -> Self
+    where
+        C: IntoColumn,
+        V: IntoVal,
+        I: IntoIterator<Item = V>,
+    {
+        let vals: Vec<Value> = values.into_iter().map(IntoVal::into_val).collect();
+        if vals.is_empty() {
+            return self;
+        }
+        self.orders.push(OrderTerm::InOrderOf(col.col_name(), vals));
         self
     }
 
@@ -2433,20 +2480,42 @@ impl<M> Builder<M> {
         })
     }
 
-    fn render_orders(&self) -> String {
+    /// Render the ORDER BY list.
+    ///
+    /// Takes the statement's binding vector and placeholder counter
+    /// because [`OrderTerm::InOrderOf`] emits bound parameters. ORDER
+    /// BY renders after WHERE and HAVING and before the UNION arms, so
+    /// pushing here keeps Postgres `$N` numbering monotonic with the
+    /// SQL text - see the union comment in `render_select_into`.
+    fn render_orders(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
         if self.orders.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        let parts: Vec<String> = self
-            .orders
-            .iter()
-            .map(|o| match o {
+        let mut parts: Vec<String> = Vec::with_capacity(self.orders.len());
+        for o in &self.orders {
+            let rendered = match o {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 OrderTerm::Random => "RANDOM()".to_string(),
-            })
-            .collect();
-        format!(" ORDER BY {}", parts.join(", "))
+                OrderTerm::InOrderOf(col, vs) => {
+                    let mut cases = String::new();
+                    for (idx, v) in vs.iter().enumerate() {
+                        *n += 1;
+                        let ph = placeholder(backend, *n)?;
+                        values.push(json_value_to_sea_value(v));
+                        cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
+                    }
+                    format!("CASE{cases} ELSE {} END", vs.len())
+                }
+            };
+            parts.push(rendered);
+        }
+        Ok(format!(" ORDER BY {}", parts.join(", ")))
     }
 
     fn render_having(
@@ -2659,7 +2728,7 @@ impl<M> Builder<M> {
         }
 
         sql.push_str(&self.render_having(backend, values, n)?);
-        sql.push_str(&self.render_orders());
+        sql.push_str(&self.render_orders(backend, values, n)?);
 
         if let Some(l) = self.limit {
             sql.push_str(&format!(" LIMIT {l}"));
