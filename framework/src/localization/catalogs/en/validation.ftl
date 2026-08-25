@@ -40,6 +40,12 @@ validation-gt = The { $field } field must be greater than { $other }.
 validation-gte = The { $field } field must be greater than or equal to { $other }.
 validation-lt = The { $field } field must be less than { $other }.
 validation-lte = The { $field } field must be less than or equal to { $other }.
+validation-password-mixed = The { $field } field must contain at least one uppercase and one lowercase letter.
+validation-password-letters = The { $field } field must contain at least one letter.
+validation-password-symbols = The { $field } field must contain at least one symbol.
+validation-password-numbers = The { $field } field must contain at least one number.
+validation-password-unverifiable = The { $field } could not be checked against known data leaks. Please try again.
+validation-password-uncompromised = The given { $field } has appeared in a data leak. Please choose a different { $field }.
 
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.

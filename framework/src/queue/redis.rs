@@ -116,7 +116,8 @@
 use crate::error::FrameworkError;
 use crate::lock;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
-use crate::queue::envelope::Envelope;
+use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
+use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use chrono::Utc;
 use redis::AsyncCommands;
@@ -556,6 +557,191 @@ impl QueueDriver for RedisQueueDriver {
         self.xpending_count().await
     }
 
+    /// Envelopes that have never been delivered to any consumer in this
+    /// group - scanned via `XRANGE (<last-delivered-id> +` in batches of
+    /// `PROMOTE_DUE_BATCH`, starting just past the group's delivery
+    /// cursor (`XINFO GROUPS`).
+    ///
+    /// # Why the cursor, not a whole-stream scan skipping this process's map
+    ///
+    /// `ack` only `XACK`s an entry - this driver never `XDEL`/`XTRIM`s the
+    /// stream - so a whole-stream `XRANGE` that excluded only this
+    /// process's in-memory `pending` map would report every acked job as
+    /// pending forever, plus every job a *different* consumer in the group
+    /// is currently holding. The group's `last-delivered-id` is the
+    /// correct boundary instead: everything at or below it has been
+    /// handed to *some* consumer at least once (acked, still reserved, or
+    /// lost and awaiting `XAUTOCLAIM`), and everything above it has not.
+    /// A released or nacked job is re-`XADD`ed under a fresh id above the
+    /// cursor, so it reappears here exactly once its retry goes live -
+    /// nothing is permanently hidden by this scheme.
+    ///
+    /// Cheaper than a whole-stream walk too: the scan starts at the cursor
+    /// instead of the beginning of the stream, so cost tracks the backlog
+    /// of never-delivered entries rather than the stream's full history.
+    ///
+    /// # Snapshot, not a lock-step guarantee
+    ///
+    /// Same "upper bound" register [`pending_size`](Self::pending_size)
+    /// documents: the cursor is read once (`XINFO GROUPS`), then the scan
+    /// runs; a concurrent `pop` that advances the cursor after the read
+    /// can claim an entry this call already decided was unclaimed. Treat
+    /// the result as a snapshot at the moment the cursor was read, not a
+    /// guarantee that every listed job is still unclaimed by the time the
+    /// caller sees it.
+    ///
+    /// # No group yet
+    ///
+    /// `XINFO GROUPS` errors when the stream key does not exist at all
+    /// (nothing pushed yet); an existing stream with no group created for
+    /// it yet returns an empty group list. Both fold to "no cursor, scan
+    /// everything from the start" (`-`), matching `xpending_count`'s
+    /// established "unknown group reads as empty" convention.
+    ///
+    /// Only those two. Every other `XINFO GROUPS` failure - a dropped
+    /// connection, an auth error, a wrong-type key - propagates, because
+    /// folding it into "no cursor" turns an outage into a silent full-stream
+    /// scan that reports every acked job in the stream's history as pending.
+    ///
+    /// # Read-ahead
+    ///
+    /// Redis `XREADGROUP` claims a batch of entries at once, so the cursor can
+    /// sit well past the entry a worker is actually running: entries already
+    /// read into a consumer's buffer are below the cursor and do not appear
+    /// here, even though no handler has touched them yet. The listing is the
+    /// never-delivered backlog, not "everything not yet started".
+    async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let mut conn = self.conn.clone();
+
+        let groups: redis::streams::StreamInfoGroupsReply =
+            match conn.xinfo_groups(self.stream_key.name()).await {
+                Ok(groups) => groups,
+                // "Nothing has happened here yet" reads as no cursor, the same way
+                // `xpending_count` folds "no group" into "0 reserved". Anything
+                // else is an error the caller has to see.
+                Err(e) if is_missing_stream_or_group(&e) => Default::default(),
+                Err(e) => {
+                    return Err(FrameworkError::internal(format!("redis XINFO GROUPS: {e}")));
+                }
+            };
+        let mut start = groups
+            .groups
+            .iter()
+            .find(|g| g.name == self.group_name)
+            .map(|g| format!("({}", g.last_delivered_id))
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut out = Vec::new();
+
+        loop {
+            let reply: redis::streams::StreamRangeReply = conn
+                .xrange_count(
+                    self.stream_key.name(),
+                    start.as_str(),
+                    "+",
+                    PROMOTE_DUE_BATCH,
+                )
+                .await
+                .map_err(|e| FrameworkError::internal(format!("redis XRANGE: {e}")))?;
+
+            let batch_len = reply.ids.len();
+            if batch_len == 0 {
+                break;
+            }
+
+            for entry in &reply.ids {
+                let payload: Option<String> = entry
+                    .map
+                    .get("msg")
+                    .and_then(|v| redis::FromRedisValue::from_redis_value(v.clone()).ok());
+                let Some(payload) = payload else {
+                    tracing::warn!(
+                        entry_id = %entry.id,
+                        "redis pending_jobs: stream entry missing a `msg` field; skipping"
+                    );
+                    continue;
+                };
+                let env = match Envelope::from_json(&payload) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        tracing::warn!(
+                            entry_id = %entry.id,
+                            error = %e,
+                            "redis pending_jobs: unparseable stream entry; skipping"
+                        );
+                        continue;
+                    }
+                };
+                if !queue_matches(env.queue.as_deref(), &filter) {
+                    continue;
+                }
+                out.push(InspectedJob::from_envelope(&env));
+            }
+
+            if batch_len < PROMOTE_DUE_BATCH {
+                break;
+            }
+            // Exclusive-start form: "(" + the last id seen, so the next page
+            // picks up immediately after it instead of re-reading it.
+            let Some(last) = reply.ids.last() else {
+                break;
+            };
+            start = format!("({}", last.id);
+        }
+
+        Ok(out)
+    }
+
+    /// Envelopes parked on the `<stream>:delayed` ZSET because their
+    /// `available_at` is still in the future. `ZRANGE` returns members
+    /// without their scores - fine here, since a listing carries no
+    /// ordering contract the way promotion's due-order processing does.
+    async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let mut conn = self.conn.clone();
+        let members: Vec<String> = conn
+            .zrange(&self.delayed_key, 0, -1)
+            .await
+            .map_err(|e| FrameworkError::internal(format!("redis ZRANGE delayed: {e}")))?;
+        Ok(members
+            .iter()
+            .filter_map(|json| match Envelope::from_json(json) {
+                Ok(env) => Some(env),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "redis delayed_jobs: unparseable ZSET member; skipping"
+                    );
+                    None
+                }
+            })
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(|env| InspectedJob::from_envelope(&env))
+            .collect())
+    }
+
+    /// Envelopes this consumer has popped but not yet acked, nacked, or
+    /// released - this process's slice of the consumer group's Pending
+    /// Entries List.
+    ///
+    /// **Per-consumer, not per-group**: another process's in-flight
+    /// reservations are not visible here, only through Redis's own
+    /// `XPENDING` - see the module doc's "Connection topology" note. Use
+    /// [`reserved_size`](Self::reserved_size) for the group-wide count.
+    async fn reserved_jobs(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.pending, "redis queue pending map")?;
+        Ok(g.values()
+            .map(|(env, _msg)| env)
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect())
+    }
+
     /// Delete every envelope the driver tracks: the stream itself, the
     /// delayed ZSET, and the in-process pending-reservation map.
     ///
@@ -761,4 +947,35 @@ impl RedisQueueDriver {
         };
         Ok(count)
     }
+}
+
+/// True for the two Redis errors that mean "this stream or group has not been
+/// created yet", and false for every other failure.
+///
+/// The distinction matters because the caller's fallback for these is a
+/// full-stream scan from `-`. That is right when there is genuinely nothing to
+/// scan past, and wrong for a dropped connection or an auth failure, where it
+/// would turn an outage into a listing of every acked entry in the stream's
+/// history.
+///
+/// What the `redis` crate hands back (1.2):
+///
+/// - Missing stream key: the server replies `ERR no such key`, which the crate
+///   models as `ErrorKind::Server(ServerErrorKind::ResponseError)` with
+///   `detail()` carrying the text. `ERR` is the generic server code, so the
+///   detail is the only thing that separates this from any other `ERR`.
+/// - Missing group: the server replies `NOGROUP ...`. `NOGROUP` is not one of
+///   the crate's known `ServerErrorKind`s, so it arrives as
+///   `ErrorKind::Extension` with `code() == Some("NOGROUP")` - matched on the
+///   code, which needs no string search.
+fn is_missing_stream_or_group(e: &redis::RedisError) -> bool {
+    if e.code() == Some("NOGROUP") {
+        return true;
+    }
+    matches!(
+        e.kind(),
+        redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+    ) && e
+        .detail()
+        .is_some_and(|d| d.to_ascii_lowercase().contains("no such key"))
 }

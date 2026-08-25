@@ -1284,12 +1284,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
 
 [[package]]
-name = "color_quant"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1308,6 +1302,12 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "compcol"
+version = "0.6.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c11ff3545f0554bd738d69ab7d4556713f7b986706563b0554a89339cee83396"
 
 [[package]]
 name = "comrak"
@@ -2522,16 +2522,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gif"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
-dependencies = [
- "color_quant",
- "weezl",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3340,24 +3330,9 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
- "color_quant",
- "gif",
- "image-webp",
  "moxcms",
  "num-traits",
  "png",
- "zune-core",
- "zune-jpeg",
-]
-
-[[package]]
-name = "image-webp"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
-dependencies = [
- "byteorder-lite",
- "quick-error",
 ]
 
 [[package]]
@@ -4737,6 +4712,92 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
+name = "oxideav-bmp"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf5cb4a75f7168df267e81413d9e18b06e05892096a28e322784d137f5d83c39"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a68d9a74d6d0a7373589eca0c0bb8ab380c46fd1d7fc807e696d716cdad078c"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "oxideav-gif"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f2d324fc3bbff4cd4456fec2d418812f9fd355e31b813b0395942893422b34"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-image-filter"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0258f70f5716ab26b30c774b2b4b0bc7d531f1848f180d157648ecc591dbb417"
+dependencies = [
+ "oxideav-core",
+ "serde_json",
+]
+
+[[package]]
+name = "oxideav-mjpeg"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3a94d32ce7c27be0c0174b761cbf5bbd79e7131ec9420eb2bdadea8e7e752dc"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-pixfmt"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "868d5cd1d9cf3f4d527241b6ed85fcd628c65e303fe4efb2998e4d6104c7ce4b"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-png"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c78483db4263204f6f9e2e63354b45f0fe2f83e0e08282f68c8a9647d537fa1f"
+dependencies = [
+ "compcol",
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "043a9d81b6c0cb1d7abb3653c53a8463063637836ed469f260bb4cc60f7ab917"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-webp"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cce95e65b90f1382e20b8774204ae07337b4f9051dcfe5d452c3cc9d13fd08a"
+dependencies = [
+ "oxideav-core",
+ "oxideav-vp8",
+]
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5388,12 +5449,6 @@ dependencies = [
  "image",
  "qrcodegen",
 ]
-
-[[package]]
-name = "quick-error"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
@@ -7239,6 +7294,7 @@ dependencies = [
  "bigdecimal",
  "bytes",
  "chrono",
+ "chrono-tz",
  "clap",
  "comrak",
  "dashmap 6.2.1",
@@ -7268,7 +7324,6 @@ dependencies = [
  "icu_experimental",
  "icu_list",
  "icu_locale_core",
- "image",
  "indexmap 2.14.0",
  "infer",
  "intl-memoizer",
@@ -7286,6 +7341,14 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "oxideav-bmp",
+ "oxideav-core",
+ "oxideav-gif",
+ "oxideav-image-filter",
+ "oxideav-mjpeg",
+ "oxideav-pixfmt",
+ "oxideav-png",
+ "oxideav-webp",
  "percent-encoding",
  "prometheus-client",
  "qdrant-client",
@@ -8708,12 +8771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "weezl"
-version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
 name = "whoami"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9364,18 +9421,3 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
-
-[[package]]
-name = "zune-core"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb8a0807f7c01457d0379ba880ba6322660448ddebc890ce29bb64da71fb40f9"
-
-[[package]]
-name = "zune-jpeg"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
-dependencies = [
- "zune-core",
-]

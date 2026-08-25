@@ -50,6 +50,7 @@
 //! DB_PING_AFTER_IDLE=30
 //! ```
 
+pub(crate) mod after_commit;
 pub mod config;
 pub mod connection;
 pub mod connection_registry;

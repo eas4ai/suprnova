@@ -10,7 +10,7 @@
 //! [`assert_pushed_later`] without leaving the fake surface.
 
 use crate::error::FrameworkError;
-use crate::queue::{EnvelopeOverrides, Job};
+use crate::queue::{EnvelopeOverrides, InspectedJob, Job};
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use std::any::TypeId;
@@ -30,6 +30,15 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct FakePush {
     id: Uuid,
+    /// `J::job_name()` at record time - carried so a listing that spans
+    /// every job type (see [`pending_jobs`] / [`delayed_jobs`]) can name
+    /// what it captured without knowing `J`.
+    job_name: &'static str,
+    /// The queue this push would have been routed to:
+    /// `overrides.queue.clone().or_else(|| J::queue().map(str::to_owned))`.
+    /// Never consults [`Queue::route`](crate::queue::Queue::route) -
+    /// routing resolution doesn't run under the fake.
+    queue: Option<String>,
     payload: serde_json::Value,
     available_at: DateTime<Utc>,
     /// Per-push [`EnvelopeOverrides`] as declared to
@@ -39,6 +48,25 @@ struct FakePush {
     /// (`push`, `push_later`, `bulk`, `push_unique`, …), none of which
     /// take one.
     overrides: EnvelopeOverrides,
+}
+
+impl FakePush {
+    /// Project this recorded push as an [`InspectedJob`]. `attempts` is
+    /// always `0` (nothing runs under the fake, so nothing is ever
+    /// retried) and `created_at` is always `None` - the fake never records
+    /// a dispatch timestamp distinct from `available_at`, so there is
+    /// nothing honest to report there; use [`pushed_with_available_at`] if
+    /// the scheduled time matters to your test.
+    fn to_inspected(&self) -> InspectedJob {
+        InspectedJob {
+            id: Some(self.id),
+            queue: self.queue.clone(),
+            name: self.job_name.to_string(),
+            attempts: 0,
+            payload: self.payload.clone(),
+            created_at: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -76,6 +104,10 @@ pub(crate) fn record_with_overrides<J: Job>(
     let payload =
         serde_json::to_value(job).map_err(|e| FrameworkError::internal(format!("encode: {e}")))?;
     let id = Uuid::new_v4();
+    let queue = overrides
+        .queue
+        .clone()
+        .or_else(|| J::queue().map(str::to_owned));
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
         store
@@ -84,6 +116,8 @@ pub(crate) fn record_with_overrides<J: Job>(
             .or_default()
             .push(FakePush {
                 id,
+                job_name: J::job_name(),
+                queue,
                 payload,
                 available_at,
                 overrides,
@@ -302,4 +336,45 @@ pub fn assert_pushed_on_connection<J: Job>(connection: &str) {
         entries.len(),
         entries.iter().map(|(_, o)| o).collect::<Vec<_>>()
     );
+}
+
+/// Every recorded push, across every job type, whose `available_at <= now`,
+/// projected as [`InspectedJob`]. The fake's stand-in for
+/// [`QueueDriver::pending_jobs`](crate::queue::driver::QueueDriver::pending_jobs) -
+/// `attempts` is always `0` and `created_at` is always `None`, since nothing
+/// runs (and so nothing is ever retried) under the fake, and the fake never
+/// records a dispatch timestamp separate from `available_at`.
+///
+/// Unlike [`pushed`], this is not generic over `J`: `InspectedJob` is
+/// already type-erased (`name` + `payload`), so it aggregates across every
+/// job type the fake has recorded, matching what a real driver's listing
+/// would return.
+pub fn pending_jobs() -> Vec<InspectedJob> {
+    let g = lock_fake();
+    let store = g.as_ref().expect("Queue::fake() must be active");
+    let now = Utc::now();
+    store
+        .pushed
+        .values()
+        .flatten()
+        .filter(|p| p.available_at <= now)
+        .map(FakePush::to_inspected)
+        .collect()
+}
+
+/// Every recorded push, across every job type, whose `available_at > now`.
+/// The fake's stand-in for
+/// [`QueueDriver::delayed_jobs`](crate::queue::driver::QueueDriver::delayed_jobs).
+/// See [`pending_jobs`] for the projection caveats.
+pub fn delayed_jobs() -> Vec<InspectedJob> {
+    let g = lock_fake();
+    let store = g.as_ref().expect("Queue::fake() must be active");
+    let now = Utc::now();
+    store
+        .pushed
+        .values()
+        .flatten()
+        .filter(|p| p.available_at > now)
+        .map(FakePush::to_inspected)
+        .collect()
 }

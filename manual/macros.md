@@ -106,19 +106,19 @@ and uploaded files in one struct, with per-field type-level validators.
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-Built-in validators (`Image`, `MimeAllowlist<…>`, `MaxSize<…>`,
+Built-in validators (`ImageFile`, `MimeAllowlist<…>`, `MaxSize<…>`,
 `MimeType<…>`) compose via tuples. See [Requests](requests.md).
 
 ## Responses

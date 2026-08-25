@@ -358,3 +358,31 @@ impl Event for QueueResumed {
         "queue::QueueResumed"
     }
 }
+
+/// A push failed over from one connection to the next in a
+/// [`FailoverQueueDriver`](crate::queue::FailoverQueueDriver)'s list.
+///
+/// Edge-triggered: it fires when a connection *enters* failure, not on every
+/// rejected push, and re-arms when the connection recovers. A queue whose
+/// primary has been down for an hour therefore produces one alert, not one
+/// per dispatch - which is what makes it usable as an alerting signal rather
+/// than a log firehose.
+///
+/// `connection` is the configured label of the connection that failed, not
+/// the one that eventually accepted the job. Mirrors Laravel's
+/// `Illuminate\Queue\Events\QueueFailedOver`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueFailedOver {
+    /// The configured label of the failing connection (e.g. `"redis"`).
+    pub connection: String,
+    /// The job that was being pushed.
+    pub job_name: String,
+    /// Display form of the error the failing connection returned.
+    pub exception: String,
+}
+
+impl Event for QueueFailedOver {
+    fn event_name() -> &'static str {
+        "queue::QueueFailedOver"
+    }
+}

@@ -31,6 +31,7 @@
 //! }
 //! ```
 
+use crate::schedule::tz_display::DisplayExpressions;
 use crate::{Router, Schedule, Server};
 use clap::{Parser, Subcommand};
 use sea_orm_migration::prelude::*;
@@ -103,7 +104,11 @@ enum Commands {
     ScheduleRun,
     /// List all registered scheduled tasks
     #[command(name = "schedule:list")]
-    ScheduleList,
+    ScheduleList {
+        /// IANA timezone the listing should be read in (default: UTC)
+        #[arg(long)]
+        timezone: Option<String>,
+    },
     /// Run the workflow worker daemon
     #[command(name = "workflow:work")]
     WorkflowWork,
@@ -246,13 +251,74 @@ pub(crate) fn build_schedule(schedule_fn: Option<ScheduleFn>) -> Schedule {
     schedule
 }
 
+/// Resolve the `--timezone` option into the zone the listing is read in.
+///
+/// Defaults to UTC rather than the process's local zone: naming the local
+/// zone needs an IANA lookup (`iana-time-zone`) that neither `chrono` nor
+/// `chrono-tz` re-exports, and the converter needs a *named* zone, not the
+/// fixed offset `chrono::Local` can supply. UTC is the one zone every
+/// operator can convert from without ambiguity; pass `--timezone` to read
+/// the listing in any other.
+///
+/// # Errors
+///
+/// When `name` is a non-blank string the bundled tzdb does not know. Blank
+/// is treated as unset, matching how the rest of this file reads optional
+/// string configuration.
+fn resolve_display_timezone(name: Option<&str>) -> Result<chrono_tz::Tz, String> {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        None => Ok(chrono_tz::Tz::UTC),
+        Some(name) => name.parse::<chrono_tz::Tz>().map_err(|_| {
+            format!(
+                "unknown --timezone `{name}`: expected an IANA zone name such as \
+                 `America/New_York` or `UTC`"
+            )
+        }),
+    }
+}
+
+/// The next two instants `expr` fires at, starting from `now` in whichever
+/// zone the task is evaluated in, normalised to UTC.
+///
+/// Two are needed, not one: the display converter compares the zone offset
+/// at both to detect a DST transition sitting between them, which is the
+/// case where no single converted expression can be correct.
+fn next_two_runs<Tz: chrono::TimeZone>(
+    expr: &crate::schedule::CronExpression,
+    now: chrono::DateTime<Tz>,
+) -> (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let first = expr.next_run_after(now);
+    let second = first
+        .clone()
+        .and_then(|first| expr.next_run_after(first))
+        .map(|d| d.with_timezone(&chrono::Utc));
+    (first.map(|d| d.with_timezone(&chrono::Utc)), second)
+}
+
 /// Render the `schedule:list` output for a built [`Schedule`].
 ///
 /// Returns the exact string the handler would print to stdout, so callers can
 /// either `print!("{}", …)` from a CLI handler or assert on it from a test
 /// without capturing stdout. Trailing newline is included so the caller does
 /// not have to worry about whether the schedule is empty.
-pub(crate) fn format_schedule_listing(schedule: &Schedule) -> String {
+///
+/// `now` is a parameter rather than a `Utc::now()` call so the rendered
+/// next-run column is reproducible in tests.
+///
+/// A task that pinned a timezone has its expression rewritten into
+/// `display_tz` where that is possible, and one such task can occupy
+/// several lines: an expression that straddles midnight in the display zone
+/// needs one cron line per side. A task with no pinned zone is evaluated
+/// against the process's local zone, which has no IANA name to convert
+/// from, so its expression is printed as written and carries no zone label.
+pub(crate) fn format_schedule_listing(
+    schedule: &Schedule,
+    display_tz: chrono_tz::Tz,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     if schedule.is_empty() {
@@ -265,11 +331,62 @@ pub(crate) fn format_schedule_listing(schedule: &Schedule) -> String {
     }
     out.push_str("Registered scheduled tasks:\n");
     for entry in schedule.tasks() {
-        let expr = entry.expression.expression();
-        let _ = match &entry.description {
-            Some(desc) => writeln!(out, "  {} [{expr}] - {desc}", entry.name),
-            None => writeln!(out, "  {} [{expr}]", entry.name),
+        // The zone label always names the zone the *printed* fields are in:
+        // the display zone once they have been rewritten, the task's own
+        // zone when the converter refused and left them as written. That
+        // comes from the converter's own verdict rather than from comparing
+        // its output against its input, because a genuine rewrite can
+        // reproduce the text it started from.
+        let (next, expressions, zone_label) = match entry.timezone {
+            Some(event_tz) => {
+                let (next, next2) = next_two_runs(&entry.expression, now.with_timezone(&event_tz));
+                match crate::schedule::tz_display::expressions_for_display(
+                    &entry.expression,
+                    event_tz,
+                    display_tz,
+                    next,
+                    next2,
+                ) {
+                    DisplayExpressions::Rewritten(expressions) => {
+                        (next, expressions, Some(display_tz))
+                    }
+                    DisplayExpressions::AsWritten(raw) => (next, vec![raw], Some(event_tz)),
+                }
+            }
+            // No pinned zone: the expression is read against the process's
+            // local zone, which has no IANA name for the converter to work
+            // from, so only the next-run instant is computed - and only
+            // once, since nothing needs the second sample.
+            None => (
+                entry
+                    .expression
+                    .next_run_after(now.with_timezone(&chrono::Local))
+                    .map(|at| at.with_timezone(&chrono::Utc)),
+                vec![entry.expression.expression().to_string()],
+                None,
+            ),
         };
+
+        let next_text = next.map_or_else(
+            || "never".to_string(),
+            |at| {
+                at.with_timezone(&display_tz)
+                    .format("%Y-%m-%d %H:%M %Z")
+                    .to_string()
+            },
+        );
+
+        for expression in &expressions {
+            let _ = write!(out, "  {} [{expression}]", entry.name);
+            if let Some(zone) = zone_label {
+                let _ = write!(out, " ({zone})");
+            }
+            let _ = write!(out, " next: {next_text}");
+            let _ = match &entry.description {
+                Some(desc) => writeln!(out, " - {desc}"),
+                None => writeln!(out),
+            };
+        }
     }
     out
 }
@@ -719,8 +836,8 @@ where
             Some(Commands::ScheduleRun) => {
                 Self::run_scheduled_tasks_internal(bootstrap_fn, schedule_fn).await;
             }
-            Some(Commands::ScheduleList) => {
-                Self::list_scheduled_tasks(schedule_fn).await;
+            Some(Commands::ScheduleList { timezone }) => {
+                Self::list_scheduled_tasks(schedule_fn, timezone).await;
             }
             Some(Commands::WorkflowWork) => {
                 Self::run_workflow_worker_internal(bootstrap_fn).await;
@@ -1102,9 +1219,19 @@ where
     }
 
     /// `schedule:list`: print every registered task and its cron expression.
-    async fn list_scheduled_tasks(schedule_fn: Option<ScheduleFn>) {
+    async fn list_scheduled_tasks(schedule_fn: Option<ScheduleFn>, timezone: Option<String>) {
+        let display_tz = match resolve_display_timezone(timezone.as_deref()) {
+            Ok(tz) => tz,
+            Err(message) => {
+                eprintln!("suprnova: {message}");
+                std::process::exit(1);
+            }
+        };
         let schedule = build_schedule(schedule_fn);
-        print!("{}", format_schedule_listing(&schedule));
+        print!(
+            "{}",
+            format_schedule_listing(&schedule, display_tz, chrono::Utc::now())
+        );
     }
 
     async fn run_workflow_worker_internal(bootstrap_fn: Option<BootstrapFn>) {
@@ -1855,10 +1982,20 @@ mod tests {
         assert!(schedule.find("b").is_some());
     }
 
+    /// Fixed clock for the listing tests. Any instant works; pinning one
+    /// keeps the rendered `next:` column reproducible.
+    fn listing_clock() -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone as _;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 5, 28, 12, 0, 0)
+            .single()
+            .expect("test clock must be unambiguous")
+    }
+
     #[test]
     fn format_schedule_listing_empty_includes_registration_hint() {
         let schedule = build_schedule(None);
-        let out = format_schedule_listing(&schedule);
+        let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
         assert!(
             out.contains("No scheduled tasks registered."),
             "empty listing should announce no tasks: {out:?}",
@@ -1885,13 +2022,164 @@ mod tests {
             sched.add(b);
         });
         let schedule = build_schedule(Some(f));
-        let out = format_schedule_listing(&schedule);
+        let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
         assert!(out.starts_with("Registered scheduled tasks:\n"));
         assert!(out.contains("nightly-cleanup"));
         assert!(out.contains("[* * * * *]"));
         assert!(out.contains(" - Remove stale upload temp files"));
         assert!(out.contains("plain-hourly"));
         assert!(out.contains("[0 * * * *]"));
+        // No task pinned a zone, so no zone label is printed - but the
+        // next-run column is unconditional.
+        assert!(
+            !out.contains('('),
+            "an unpinned task must not carry a zone label: {out:?}",
+        );
+        assert_eq!(
+            out.matches("next: ").count(),
+            2,
+            "every listed task gets a next-run column: {out:?}",
+        );
+    }
+
+    /// A pinned zone changes three things at once: the expression is
+    /// rewritten into the display zone, a zone label appears, and the
+    /// next-run column is the *same instant* rendered in the display zone.
+    #[test]
+    fn format_schedule_listing_converts_and_labels_a_pinned_timezone() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 3 * * *")
+                .name("tokyo-report")
+                .timezone(chrono_tz::Asia::Tokyo);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
+        // 03:00 Tokyo is 18:00 UTC the day before; the clock is
+        // 2026-05-28 12:00 UTC = 2026-05-28 21:00 JST, so the next 03:00
+        // JST is 2026-05-29, which is 2026-05-28 18:00 UTC.
+        assert_eq!(
+            out,
+            "Registered scheduled tasks:\n  \
+             tokyo-report [0 18 * * *] (UTC) next: 2026-05-28 18:00 UTC\n",
+        );
+    }
+
+    /// A conversion the algorithm refuses prints the expression the user
+    /// wrote, labelled with the task's own zone rather than the display
+    /// zone - the label always names the zone the printed fields are in.
+    #[test]
+    fn format_schedule_listing_labels_a_refused_conversion_with_the_task_zone() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            // 03:00 Tokyo is 18:00 UTC the *previous* day, and that day
+            // roll would have to move a restricted day-of-month and a
+            // restricted day-of-week at once, which cron ORs rather than
+            // ANDs. Refuse.
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 3 1 * 1")
+                .name("month-start-monday")
+                .timezone(chrono_tz::Asia::Tokyo);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
+        assert!(
+            out.contains("[0 3 1 * 1] (Asia/Tokyo)"),
+            "a refused conversion keeps the raw expression and its own zone: {out:?}",
+        );
+    }
+
+    /// One event, several lines: an expression that straddles midnight in
+    /// the display zone needs one cron line per side (Laravel's `flatMap`).
+    #[test]
+    fn format_schedule_listing_renders_one_line_per_converted_expression() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 14,20 * * 1")
+                .name("monday-twice")
+                .timezone(chrono_tz::Tz::UTC);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Asia::Tokyo, listing_clock());
+        // The clock is Thursday 2026-05-28; the next Monday 14:00 UTC is
+        // 2026-06-01, which is 23:00 JST the same day. The next-run column
+        // belongs to the task, so it repeats on both lines.
+        assert_eq!(
+            out,
+            "Registered scheduled tasks:\n  \
+             monday-twice [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST\n  \
+             monday-twice [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST\n",
+        );
+    }
+
+    /// An expression that never fires renders `never` rather than a
+    /// fabricated date.
+    #[test]
+    fn format_schedule_listing_reports_an_unsatisfiable_expression_as_never() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 0 30 2 *")
+                .name("never-runs")
+                .timezone(chrono_tz::Tz::UTC);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
+        assert!(out.contains("next: never"), "{out:?}");
+    }
+
+    /// A February 29 task is *matchable* - it runs every four years - so it
+    /// must show a real date and a converted expression.
+    ///
+    /// This is the end-to-end shape of the one-year-scan-bound defect: the
+    /// next leap day is more than a year past the clock, so `next_run_after`
+    /// returned `None`; that made the listing print `next: never` for a task
+    /// that genuinely runs, and because the converter needs two real run
+    /// instants to sample zone offsets from, the missing `next` also
+    /// short-circuited it into refusing the (perfectly convertible)
+    /// expression and printing it raw with the wrong zone label.
+    #[test]
+    fn format_schedule_listing_converts_a_february_29_task_years_ahead() {
+        let f: ScheduleFn = Box::new(|sched: &mut Schedule| {
+            let b = sched
+                .call(|| async { Ok(()) })
+                .cron("0 3 29 2 *")
+                .name("leap-day-audit")
+                .timezone(chrono_tz::Tz::UTC);
+            sched.add(b);
+        });
+        let schedule = build_schedule(Some(f));
+        let out = format_schedule_listing(&schedule, chrono_tz::Asia::Tokyo, listing_clock());
+        // 03:00 UTC is 12:00 JST the same day - no day carry, so the Feb 29
+        // refusal is never reached. The clock is 2026-05-28, so the next
+        // leap day is 2028-02-29, roughly 641 days out.
+        assert_eq!(
+            out,
+            "Registered scheduled tasks:\n  \
+             leap-day-audit [0 12 29 2 *] (Asia/Tokyo) next: 2028-02-29 12:00 JST\n",
+        );
+    }
+
+    #[test]
+    fn resolve_display_timezone_defaults_to_utc_and_rejects_unknown_zones() {
+        assert_eq!(resolve_display_timezone(None), Ok(chrono_tz::Tz::UTC));
+        assert_eq!(resolve_display_timezone(Some("  ")), Ok(chrono_tz::Tz::UTC));
+        assert_eq!(
+            resolve_display_timezone(Some("Asia/Tokyo")),
+            Ok(chrono_tz::Asia::Tokyo)
+        );
+        let err = resolve_display_timezone(Some("Mars/Olympus_Mons"))
+            .expect_err("an unknown zone must be refused");
+        assert!(
+            err.contains("Mars/Olympus_Mons"),
+            "the message names the rejected zone: {err}",
+        );
     }
 
     /// `evaluate_due_once` is what `schedule:run` delegates to. The handler
@@ -1988,7 +2276,7 @@ mod tests {
             sched.add(b);
         });
         let schedule = build_schedule(Some(f));
-        let listing = format_schedule_listing(&schedule);
+        let listing = format_schedule_listing(&schedule, chrono_tz::Tz::UTC, listing_clock());
         assert!(listing.contains("cleanup"));
         assert!(listing.contains("[* * * * *]"));
 

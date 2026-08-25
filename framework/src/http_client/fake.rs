@@ -70,6 +70,12 @@ struct CannedResponse {
     url_substring: String,
     status: u16,
     body: Bytes,
+    /// `content-type` header value the intercepted response answers with.
+    /// `"application/json"` for [`fake_response`], `"text/plain; charset=utf-8"`
+    /// for [`fake_response_text`] - the two entry points differ only in how
+    /// the body is *produced* (JSON-encoded vs. verbatim bytes); this field
+    /// keeps the header truthful either way.
+    content_type: String,
 }
 
 /// Queue a canned response. The first request whose method matches
@@ -92,6 +98,34 @@ pub fn fake_response(method: &str, url_substring: &str, status: u16, body: serde
             url_substring: url_substring.to_string(),
             status,
             body: Bytes::from(bytes),
+            content_type: "application/json".to_string(),
+        });
+    });
+}
+
+/// Queue a canned response whose body is sent back to the caller verbatim
+/// as text, without JSON-encoding - the raw-body sibling of
+/// [`fake_response`] for upstream APIs that speak `text/plain` rather than
+/// JSON (the HIBP k-anonymity range endpoint [`crate::HibpVerifier`] calls
+/// is the motivating case). Same method/URL-substring matching and
+/// consume-on-match semantics as `fake_response`; the response's
+/// `content-type` header is `text/plain; charset=utf-8` instead of
+/// `application/json`.
+///
+/// Reached through [`crate::http_client::Http::fake_response_text`], the
+/// public entry point - kept `pub(crate)` here because there is no reason
+/// for a caller to reach the `fake` module directly.
+///
+/// **Must be called inside a `Http::fake(|| async { ... })` scope.**
+/// Panics if no fake scope is active on the current task.
+pub(crate) fn fake_response_text(method: &str, url_substring: &str, status: u16, body: &str) {
+    with_state(|s| {
+        s.canned.push(CannedResponse {
+            method: method.to_string(),
+            url_substring: url_substring.to_string(),
+            status,
+            body: Bytes::from(body.as_bytes().to_vec()),
+            content_type: "text/plain; charset=utf-8".to_string(),
         });
     });
 }
@@ -220,7 +254,7 @@ pub(crate) fn intercept(req: &RequestBuilder) -> Result<ClientResponse, crate::F
                 let c = s.canned.remove(i);
                 Ok(ClientResponse::fake(
                     c.status,
-                    vec![("content-type".to_string(), "application/json".to_string())],
+                    vec![("content-type".to_string(), c.content_type.clone())],
                     c.body,
                 ))
             }

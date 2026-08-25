@@ -81,12 +81,14 @@
 pub mod builder;
 pub mod expression;
 pub mod task;
+pub(crate) mod tz_display;
 
 pub use builder::TaskBuilder;
 pub use expression::{CronExpression, DayOfWeek};
 pub use task::{BoxedFuture, BoxedTask, Task, TaskEntry, TaskHandler, TaskResult};
 
 use crate::error::FrameworkError;
+use chrono_tz::Tz;
 use futures::FutureExt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -135,6 +137,7 @@ pub type ScheduledTaskJoin = (String, Result<(), FrameworkError>);
 /// ```
 pub struct Schedule {
     tasks: Vec<TaskEntry>,
+    default_timezone: Option<Tz>,
 }
 
 /// Acknowledgement that a per-process scheduler lock is accurate because
@@ -176,7 +179,35 @@ fn check_single_server_locking(
 impl Schedule {
     /// Create a new empty schedule
     pub fn new() -> Self {
-        Self { tasks: Vec::new() }
+        Self {
+            tasks: Vec::new(),
+            default_timezone: None,
+        }
+    }
+
+    /// Interpret every task registered from here on in `tz`, unless the
+    /// task set its own with [`TaskBuilder::timezone`].
+    ///
+    /// This is Suprnova's answer to Laravel's `app.schedule_timezone`
+    /// config key: an app whose whole schedule belongs to one business
+    /// zone should say so once rather than repeating it on every task.
+    ///
+    /// Applied at [`add`](Self::add) time, so it only affects tasks
+    /// registered *after* the call - which is what makes "set the default,
+    /// then register, then override a few" read top to bottom.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use suprnova::Schedule;
+    /// # fn register(schedule: &mut Schedule) {
+    /// schedule.timezone(suprnova::chrono_tz::America::Chicago);
+    /// let task = schedule.call(|| async { Ok(()) }).daily().at("02:00").name("nightly");
+    /// schedule.add(task); // runs at 02:00 America/Chicago
+    /// # }
+    /// ```
+    pub fn timezone(&mut self, tz: Tz) -> &mut Self {
+        self.default_timezone = Some(tz);
+        self
     }
 
     /// Refuse to start when a task asks for single-server execution the
@@ -304,7 +335,14 @@ impl Schedule {
     /// ```
     pub fn add(&mut self, builder: TaskBuilder) -> &mut Self {
         let task_index = self.tasks.len();
-        self.tasks.push(builder.build(task_index));
+        let mut entry = builder.build(task_index);
+        // The schedule-wide default only fills a gap; a task that named its
+        // own zone always wins, the same way Laravel's per-event
+        // `timezone()` outranks `app.schedule_timezone`.
+        if entry.timezone.is_none() {
+            entry.timezone = self.default_timezone;
+        }
+        self.tasks.push(entry);
         self
     }
 
@@ -1099,6 +1137,72 @@ mod tests {
         assert!(
             !expr.is_due_at(wrong_hour),
             "0 3 * * * must NOT be due at 04:00 (hour mismatch)",
+        );
+    }
+
+    /// The same synthetic-clock hook, driven through a named zone: a task
+    /// pinned to Asia/Tokyo fires when it is 03:00 *in Tokyo*, which is
+    /// 18:00 UTC the day before - and does not fire when it is 03:00 UTC.
+    #[test]
+    fn is_due_at_reads_the_clock_in_the_tasks_timezone() {
+        use chrono::{TimeZone as _, Utc};
+
+        let tokyo = chrono_tz::Asia::Tokyo;
+        let expr = expression::CronExpression::daily().at("03:00");
+
+        let due = Utc
+            .with_ymd_and_hms(2026, 5, 27, 18, 0, 0)
+            .single()
+            .expect("test clock construction must yield a single instant");
+        assert!(
+            expr.is_due_at(due.with_timezone(&tokyo)),
+            "18:00 UTC is 03:00 the next day in Tokyo, so the task is due",
+        );
+
+        let not_due = Utc
+            .with_ymd_and_hms(2026, 5, 28, 3, 0, 0)
+            .single()
+            .expect("test clock construction must yield a single instant");
+        assert!(
+            !expr.is_due_at(not_due.with_timezone(&tokyo)),
+            "03:00 UTC is 12:00 in Tokyo, so a Tokyo-pinned task is NOT due",
+        );
+    }
+
+    /// A schedule-wide default fills only the tasks that did not name a
+    /// zone, and only for tasks registered after it is set.
+    #[test]
+    fn schedule_timezone_default_applies_to_unpinned_tasks_only() {
+        let mut schedule = Schedule::new();
+
+        let before = schedule.call(|| async { Ok(()) }).daily().name("before");
+        schedule.add(before);
+
+        schedule.timezone(chrono_tz::America::Chicago);
+
+        let unpinned = schedule.call(|| async { Ok(()) }).daily().name("unpinned");
+        schedule.add(unpinned);
+
+        let pinned = schedule
+            .call(|| async { Ok(()) })
+            .daily()
+            .name("pinned")
+            .timezone(chrono_tz::Asia::Tokyo);
+        schedule.add(pinned);
+
+        assert_eq!(
+            schedule.find("before").expect("registered").timezone,
+            None,
+            "a task registered before the default was set keeps the local zone",
+        );
+        assert_eq!(
+            schedule.find("unpinned").expect("registered").timezone,
+            Some(chrono_tz::America::Chicago),
+        );
+        assert_eq!(
+            schedule.find("pinned").expect("registered").timezone,
+            Some(chrono_tz::Asia::Tokyo),
+            "an explicit per-task zone outranks the schedule default",
         );
     }
 

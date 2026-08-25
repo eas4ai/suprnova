@@ -315,6 +315,12 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
         "validation-gte",
         "validation-lt",
         "validation-lte",
+        "validation-password-mixed",
+        "validation-password-letters",
+        "validation-password-symbols",
+        "validation-password-numbers",
+        "validation-password-uncompromised",
+        "validation-password-unverifiable",
     ];
 
     // The `#[derive(Validate)]` path speaks the validator crate's codes;

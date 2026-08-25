@@ -134,6 +134,7 @@ impl ChainLink {
             timeout_secs: self.timeout_secs,
             fail_on_timeout: self.fail_on_timeout,
             idempotency_key: None,
+            unique_lock_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }

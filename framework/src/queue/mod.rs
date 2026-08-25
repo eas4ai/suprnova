@@ -8,6 +8,8 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod failed;
+pub mod failover;
+pub mod inspect;
 pub mod job;
 pub mod memory;
 pub mod middleware;
@@ -33,6 +35,8 @@ pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
 pub use failed::{
     DatabaseFailedJobStore, FailedJob, FailedJobStore, MemoryFailedJobStore, NullFailedJobStore,
 };
+pub use failover::FailoverQueueDriver;
+pub use inspect::InspectedJob;
 pub use job::{BackoffSchedule, Job};
 pub use memory::MemoryQueueDriver;
 pub use middleware::{
@@ -97,6 +101,17 @@ pub struct EnvelopeOverrides {
     pub max_tries: Option<u32>,
     /// Backoff schedule. Outranks `Job::backoff()`.
     pub backoff: Option<BackoffSchedule>,
+    /// Whether this one push waits for the surrounding transaction to commit.
+    /// Outranks [`Job::after_commit`].
+    ///
+    /// `Some(true)` defers a job that did not opt in (see
+    /// [`Queue::push_after_commit`]); `Some(false)` is Laravel's
+    /// `beforeCommit()` - it pushes immediately even inside a transaction, for
+    /// the dispatch that must be visible to a worker before the commit lands.
+    ///
+    /// Unlike every other field here this one never reaches the envelope: it
+    /// decides *when* the push happens, not what the pushed envelope contains.
+    pub after_commit: Option<bool>,
 }
 
 /// `Queue` facade.
@@ -176,29 +191,32 @@ impl Queue {
     /// [`Queue::push_later`] / [`Queue::later`] for a delay that varies
     /// per dispatch - those take an explicit timestamp and never consult
     /// `Job::delay`.
+    ///
+    /// Honors [`Job::after_commit`]: inside a
+    /// [`DB::transaction`](crate::DB::transaction) an opted-in job's push
+    /// waits for the commit and a rollback discards it.
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
-        if testing::is_active() {
-            let id = testing::record::<J>(&job, available_at)?;
-            Self::dispatch_fake_queued_events::<J>(id).await;
-            return Ok(());
-        }
-        let env = envelope_for::<J>(&job, available_at)?;
-        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
-            job_name: J::job_name().into(),
-            connection: routing::resolve_connection::<J>(Self::connection_name()),
-        })
-        .await;
-        let drv = current_driver()?;
-        let env_id = env.id;
-        drv.push(env).await?;
-        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
-            id: env_id,
-            job_name: J::job_name().into(),
-            connection: routing::resolve_connection::<J>(Self::connection_name()),
-        })
-        .await;
-        Ok(())
+        Self::dispatch_push(job, AvailableAt::FromJobDelay, EnvelopeOverrides::default()).await
+    }
+
+    /// Push `job`, deferring it until the surrounding transaction commits.
+    ///
+    /// Sugar for [`Queue::push_with`] with
+    /// [`EnvelopeOverrides::after_commit`] set to `Some(true)` - use it for a
+    /// job type that does not opt in via [`Job::after_commit`], typically
+    /// because only some of its dispatch sites read rows the surrounding
+    /// transaction wrote.
+    ///
+    /// Outside a transaction this is exactly [`Queue::push`].
+    pub async fn push_after_commit<J: Job>(job: J) -> Result<(), FrameworkError> {
+        Self::push_with(
+            job,
+            EnvelopeOverrides {
+                after_commit: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Push a typed job available at `available_at`. Driver is responsible
@@ -207,31 +225,20 @@ impl Queue {
     /// Does **not** consult [`Job::delay`] - the explicit `available_at`
     /// always wins over the job's own default. [`Queue::push`] is the
     /// entry point that honors `Job::delay`.
+    ///
+    /// [`Job::after_commit`] still applies: the push can wait for the
+    /// surrounding transaction, and `available_at` is preserved exactly as
+    /// given when it does.
     pub async fn push_later<J: Job>(
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), FrameworkError> {
-        if testing::is_active() {
-            let id = testing::record::<J>(&job, available_at)?;
-            Self::dispatch_fake_queued_events::<J>(id).await;
-            return Ok(());
-        }
-        let env = envelope_for::<J>(&job, available_at)?;
-        let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
-            job_name: J::job_name().into(),
-            connection: routing::resolve_connection::<J>(Self::connection_name()),
-        })
-        .await;
-        let drv = current_driver()?;
-        let env_id = env.id;
-        drv.push(env).await?;
-        let _ = crate::events::EventFacade::dispatch(events::JobQueued {
-            id: env_id,
-            job_name: J::job_name().into(),
-            connection: routing::resolve_connection::<J>(Self::connection_name()),
-        })
-        .await;
-        Ok(())
+        Self::dispatch_push(
+            job,
+            AvailableAt::Fixed(available_at),
+            EnvelopeOverrides::default(),
+        )
+        .await
     }
 
     /// Emit the `JobQueueing` + `JobQueued` pair from inside
@@ -243,12 +250,14 @@ impl Queue {
     /// would disagree about what an enqueue looks like to a listener, and
     /// the fake's envelope id would have nothing to correlate against.
     ///
-    /// Only `push` / `push_later` call this, because only `push` /
-    /// `push_later` emit the pair on the real path: `bulk` and
-    /// `push_unique_at` dispatch neither event, and the fake must not
-    /// invent one.
-    async fn dispatch_fake_queued_events<J: Job>(id: Uuid) {
-        let connection = routing::resolve_connection::<J>(Self::connection_name());
+    /// Only the [`Queue::push`] family calls this, because only that family
+    /// emits the pair on the real path: `bulk` and `push_unique_at` dispatch
+    /// neither event, and the fake must not invent one.
+    ///
+    /// `connection` is passed in rather than resolved here so the fake reports
+    /// the same connection the real path would, including an
+    /// [`EnvelopeOverrides::connection`] that outranks the routing table.
+    async fn dispatch_fake_queued_events<J: Job>(id: Uuid, connection: String) {
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
             connection: connection.clone(),
@@ -280,8 +289,7 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
-        Self::push_with_at(job, available_at, overrides).await
+        Self::dispatch_push(job, AvailableAt::FromJobDelay, overrides).await
     }
 
     /// `push_with` variant that takes a delay from now, mirroring
@@ -294,14 +302,62 @@ impl Queue {
         let available_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
-        Self::push_with_at(job, available_at, overrides).await
+        Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides).await
     }
 
-    /// Shared body for [`Queue::push_with`] / [`Queue::later_with`].
+    /// The single funnel for the whole [`Queue::push`] family: fake, then
+    /// after-commit deferral, then the real push.
+    ///
+    /// The fake check comes first and skips deferral entirely, so a test that
+    /// pushes inside a transaction can assert on the push without committing
+    /// anything - the same choice Laravel's `Bus::fake` makes.
+    ///
+    /// When the push is deferred, everything below this point moves into the
+    /// callback: `available_at` resolution, the envelope, both lifecycle
+    /// events and the driver write. Laravel defers the whole of `enqueueUsing`
+    /// for the same reason - a listener that observes `JobQueued` for a job
+    /// that a rollback then discarded has been told something untrue.
+    async fn dispatch_push<J: Job>(
+        job: J,
+        when: AvailableAt,
+        overrides: EnvelopeOverrides,
+    ) -> Result<(), FrameworkError> {
+        if testing::is_active() {
+            let available_at = when.resolve::<J>()?;
+            // Records `overrides` too, so a test can assert on the
+            // queue/connection/etc a push_with call declared - see
+            // `testing::record_with_overrides`.
+            let connection = overrides
+                .connection
+                .clone()
+                .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
+            let id = testing::record_with_overrides::<J>(&job, available_at, overrides)?;
+            Self::dispatch_fake_queued_events::<J>(id, connection).await;
+            return Ok(());
+        }
+        if overrides.after_commit.unwrap_or_else(J::after_commit)
+            && crate::database::after_commit::in_transaction()
+        {
+            return crate::database::after_commit::register_callback(Box::new(move || {
+                Box::pin(async move {
+                    let available_at = when.resolve::<J>()?;
+                    Self::push_immediately::<J>(job, available_at, overrides).await
+                })
+            }))
+            .await;
+        }
+        let available_at = when.resolve::<J>()?;
+        Self::push_immediately::<J>(job, available_at, overrides).await
+    }
+
+    /// Build the envelope, emit `JobQueueing`, write to the driver, emit
+    /// `JobQueued`. Shared by the immediate and deferred paths so a deferred
+    /// push is byte-for-byte the push that would have happened, only later.
+    ///
     /// `overrides.connection`, when set, short-circuits
     /// `routing::resolve_connection` (connection isn't stored on the
     /// envelope, only reported on the events below).
-    async fn push_with_at<J: Job>(
+    async fn push_immediately<J: Job>(
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
         overrides: EnvelopeOverrides,
@@ -310,25 +366,6 @@ impl Queue {
             .connection
             .clone()
             .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
-        if testing::is_active() {
-            // Mirrors `push`/`push_later` under the fake (Design note 4),
-            // and additionally records `overrides` so a test can assert
-            // on the queue/connection/etc a push_with call declared -
-            // see `testing::record_with_overrides`.
-            let id = testing::record_with_overrides::<J>(&job, available_at, overrides)?;
-            let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
-                job_name: J::job_name().into(),
-                connection: connection.clone(),
-            })
-            .await;
-            let _ = crate::events::EventFacade::dispatch(events::JobQueued {
-                id,
-                job_name: J::job_name().into(),
-                connection,
-            })
-            .await;
-            return Ok(());
-        }
         let mut env = envelope_for::<J>(&job, available_at)?;
         apply_overrides(&mut env, &overrides);
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
@@ -381,9 +418,12 @@ impl Queue {
     /// Requires the cache layer to be bootstrapped (the dedupe lock lives
     /// in [`Cache`](crate::cache::Cache)). Returns an internal error if
     /// `J::unique_id(&job)` returns `None`.
+    /// Honors [`Job::after_commit`] too, with one asymmetry that matters: the
+    /// dedupe lock is taken **now**, so a second `push_unique` inside the same
+    /// transaction is still suppressed, and only the envelope waits for the
+    /// commit. A rollback releases that lock owner-scoped.
     pub async fn push_unique<J: Job>(job: J) -> Result<bool, FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
-        Self::push_unique_at::<J>(job, available_at).await
+        Self::push_unique_at::<J>(job, AvailableAt::FromJobDelay).await
     }
 
     /// `push_unique` variant that schedules the envelope for delivery at
@@ -394,7 +434,7 @@ impl Queue {
         job: J,
         available_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, FrameworkError> {
-        Self::push_unique_at::<J>(job, available_at).await
+        Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
     }
 
     /// `push_unique` variant that takes a delay from now (the unique
@@ -406,20 +446,17 @@ impl Queue {
         let available_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
-        Self::push_unique_at::<J>(job, available_at).await
+        Self::push_unique_at::<J>(job, AvailableAt::Fixed(available_at)).await
     }
 
     /// Common path for the three `*_unique*` entrypoints - builds the
     /// dedupe key, runs the enqueue under `Idempotency::commit_on_success`,
     /// and reports `true` for `Fresh` and `FreshUnfenced` (the envelope
     /// reached the driver either way), `false` only for `Duplicate`.
-    async fn push_unique_at<J: Job>(
-        job: J,
-        available_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, FrameworkError> {
+    async fn push_unique_at<J: Job>(job: J, when: AvailableAt) -> Result<bool, FrameworkError> {
         if testing::is_active() {
             // In fake mode, dedupe is irrelevant - record and report fresh.
-            testing::record::<J>(&job, available_at)?;
+            testing::record::<J>(&job, when.resolve::<J>()?)?;
             return Ok(true);
         }
         let id = job.unique_id().ok_or_else(|| {
@@ -428,17 +465,47 @@ impl Queue {
             )
         })?;
         let ttl = J::unique_for();
-        let key = format!("queue-unique:{}:{}", J::job_name(), id);
+        let key = unique_key(J::job_name(), &id);
         // The closure below takes `id` by value to stamp the envelope's
         // idempotency key, so keep a copy for the event payload.
         let unique_id = id.clone();
+        // Read before the lock is taken so the decision is made on the task
+        // that owns the ambient transaction; `commit_on_success_owned` runs the
+        // body on this same task, but reading it once keeps that an
+        // implementation detail rather than a dependency.
+        let defer = J::after_commit() && crate::database::after_commit::in_transaction();
+        let deferred_key = key.clone();
 
-        let outcome =
-            crate::idempotency::Idempotency::commit_on_success(&key, ttl, move || async move {
-                let mut env = envelope_for::<J>(&job, available_at)?;
-                env.idempotency_key = Some(id);
-                let drv = current_driver()?;
-                drv.push(env).await
+        // `commit_on_success_owned` rather than `commit_on_success`: the owner
+        // token of the lock we are holding right now has to reach the envelope,
+        // because for a `unique_until_processing` job the worker - a different
+        // task, possibly a different process - is what releases it.
+        let (outcome, _owner) =
+            crate::idempotency::Idempotency::commit_on_success_owned(&key, ttl, move |owner| {
+                // Converted outside the async block so the future borrows
+                // nothing from `owner`, which the higher-ranked closure bound
+                // forbids.
+                let owner_token = owner.map(str::to_owned);
+                async move {
+                    if defer {
+                        // The lock stays taken through the transaction: dedupe
+                        // has to work for a second dispatch inside the same
+                        // transaction, so only the envelope waits.
+                        return Self::defer_unique_push::<J>(
+                            job,
+                            when,
+                            id,
+                            owner_token,
+                            deferred_key,
+                        )
+                        .await;
+                    }
+                    let mut env = envelope_for::<J>(&job, when.resolve::<J>()?)?;
+                    env.idempotency_key = Some(id);
+                    env.unique_lock_owner = owner_token;
+                    let drv = current_driver()?;
+                    drv.push(env).await
+                }
             })
             .await?;
 
@@ -476,6 +543,69 @@ impl Queue {
         }
     }
 
+    /// Hold the dedupe lock this call just took, and move the envelope itself
+    /// into the surrounding transaction's commit.
+    ///
+    /// Two callbacks go on the transaction, and the pair is the whole point:
+    /// the commit one publishes the envelope, and the rollback one hands the
+    /// lock back. Without the second, a dispatch that never happened would
+    /// keep blocking re-dispatch for the rest of `unique_for`.
+    ///
+    /// The release is owner-scoped ([`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned)):
+    /// there is no release-by-key and no force-release anywhere in the
+    /// framework, because a forced release can delete a lock a newer dispatch
+    /// now holds.
+    async fn defer_unique_push<J: Job>(
+        job: J,
+        when: AvailableAt,
+        unique_id: String,
+        owner: Option<String>,
+        lock_key: String,
+    ) -> Result<(), FrameworkError> {
+        if let Some(owner) = owner.clone() {
+            let key = lock_key.clone();
+            crate::database::after_commit::register_rollback_callback(Box::new(move || {
+                Box::pin(async move {
+                    crate::idempotency::Idempotency::release_owned(&key, &owner).await?;
+                    Ok(())
+                })
+            }))
+            .await?;
+        }
+        crate::database::after_commit::register_callback(Box::new(move || {
+            Box::pin(async move {
+                let mut env = envelope_for::<J>(&job, when.resolve::<J>()?)?;
+                env.idempotency_key = Some(unique_id);
+                env.unique_lock_owner = owner.clone();
+                let result = async {
+                    let drv = current_driver()?;
+                    drv.push(env).await
+                }
+                .await;
+                if let Err(e) = result {
+                    // The dedupe key gates re-submission of a dispatch that
+                    // happened; this one did not. Same rule
+                    // `commit_on_success` applies when its body fails, just one
+                    // commit later - and the error still surfaces, so the
+                    // release is a cleanup, not a recovery.
+                    if let Some(owner) = owner
+                        && let Err(release_err) =
+                            crate::idempotency::Idempotency::release_owned(&lock_key, &owner).await
+                    {
+                        tracing::warn!(
+                            error = %release_err,
+                            "after-commit unique push failed and its dedupe lock could not \
+                             be released; re-dispatch is blocked until the lock expires"
+                        );
+                    }
+                    return Err(e);
+                }
+                Ok(())
+            })
+        }))
+        .await
+    }
+
     /// Push every job in `jobs` onto the queue. Mirrors Laravel's
     /// `Queue::bulk($jobs, $data, $queue)`. Each job is encoded and
     /// committed via the driver's [`QueueDriver::bulk_push`] hook (with a
@@ -484,14 +614,34 @@ impl Queue {
     /// Honors [`Job::delay`], resolved once for the whole call: every
     /// element of `jobs` shares the same concrete `J`, so they share the
     /// same declared delay.
+    ///
+    /// Honors [`Job::after_commit`] the same way, and for the same reason the
+    /// partition is all-or-nothing: `jobs` is monomorphic, so one `J` decides
+    /// for the whole batch. Laravel partitions a heterogeneous array here;
+    /// Suprnova has nothing to partition.
     pub async fn bulk<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
-        let available_at = resolve_job_delay::<J>(Utc::now())?;
         if testing::is_active() {
+            let available_at = resolve_job_delay::<J>(Utc::now())?;
             for j in jobs {
                 testing::record::<J>(&j, available_at)?;
             }
             return Ok(());
         }
+        if J::after_commit() && crate::database::after_commit::in_transaction() {
+            return crate::database::after_commit::register_callback(Box::new(move || {
+                Box::pin(async move { Self::bulk_immediately::<J>(jobs).await })
+            }))
+            .await;
+        }
+        Self::bulk_immediately::<J>(jobs).await
+    }
+
+    /// Encode every job and hand the batch to the driver. Split out of
+    /// [`Queue::bulk`] so the deferred path resolves `Job::delay` against the
+    /// commit rather than against the push, exactly as a single deferred push
+    /// does.
+    async fn bulk_immediately<J: Job + Clone>(jobs: Vec<J>) -> Result<(), FrameworkError> {
+        let available_at = resolve_job_delay::<J>(Utc::now())?;
         let mut envs = Vec::with_capacity(jobs.len());
         for j in jobs {
             envs.push(envelope_for::<J>(&j, available_at)?);
@@ -533,6 +683,30 @@ impl Queue {
     /// Envelopes currently held by an unfinished reservation.
     pub async fn reserved_size() -> Result<u64, FrameworkError> {
         current_driver()?.reserved_size().await
+    }
+
+    /// Every envelope whose `available_at <= now` and which is not
+    /// currently reserved, optionally filtered to one `queue`. Mirrors
+    /// Laravel's `Queue::pendingJobs($queue)`; `queue: None` collapses that
+    /// with the separate `allPendingJobs()` into one call. See
+    /// [`QueueDriver::pending_jobs`] for the trait's error-default
+    /// contract.
+    pub async fn pending_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.pending_jobs(queue).await
+    }
+
+    /// Every envelope whose `available_at > now`, optionally filtered to
+    /// one `queue`. Mirrors Laravel's `Queue::delayedJobs($queue)` /
+    /// `allDelayedJobs()`.
+    pub async fn delayed_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.delayed_jobs(queue).await
+    }
+
+    /// Every envelope currently held by an unfinished reservation,
+    /// optionally filtered to one `queue`. Mirrors Laravel's
+    /// `Queue::reservedJobs($queue)` / `allReservedJobs()`.
+    pub async fn reserved_jobs(queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        current_driver()?.reserved_jobs(queue).await
     }
 
     /// Drop every envelope on the configured driver. Returns the number
@@ -677,9 +851,9 @@ impl Queue {
 
     /// Re-enqueue a previously dead-lettered job by id. Loads the
     /// envelope from the configured [`FailedJobStore`], resets its
-    /// `attempts`, `available_at`, and `idempotency_key`, pushes it
-    /// through the configured driver, then deletes the failed-job
-    /// record. Mirrors `php artisan queue:retry <id>`.
+    /// `attempts`, `available_at`, `idempotency_key`, and
+    /// `unique_lock_owner`, pushes it through the configured driver, then
+    /// deletes the failed-job record. Mirrors `php artisan queue:retry <id>`.
     ///
     /// Returns `Ok(true)` when the record was retried, `Ok(false)` when
     /// the id had no record in the store.
@@ -698,6 +872,7 @@ impl Queue {
         env.attempts = 0;
         env.available_at = Utc::now();
         env.idempotency_key = None;
+        env.unique_lock_owner = None;
         let drv = current_driver()?;
         drv.push(env).await?;
         store.forget(id).await?;
@@ -732,6 +907,7 @@ impl Queue {
             env.attempts = 0;
             env.available_at = Utc::now();
             env.idempotency_key = None;
+            env.unique_lock_owner = None;
             drv.push(env).await?;
             store.forget(record.id).await?;
             count += 1;
@@ -857,15 +1033,57 @@ pub async fn bootstrap_default() {
 /// Read `QUEUE_DRIVER` env and configure the matching driver. Falls back to the
 /// in-memory default on any unrecognized value or when `QUEUE_DRIVER` is unset.
 ///
+/// `QUEUE_DRIVER=failover` additionally reads `QUEUE_FAILOVER_CONNECTIONS` (a
+/// comma-separated, priority-ordered list such as `redis,database`) and wires a
+/// [`FailoverQueueDriver`] over one inner driver per entry - see the "Failover
+/// connections" section of the queue manual chapter.
+///
 /// Unlike [`bootstrap_default`], this call **always replaces** the registered
 /// driver - long-running processes (workers, tests) that re-invoke
 /// `bootstrap_from_env` after `QUEUE_DRIVER` changes (or after an earlier
 /// Redis/database boot) will pick up the new driver instead of being pinned to
 /// the first one installed.
 pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
-    let driver = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
-    match driver.as_str() {
-        "memory" => Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new())),
+    let requested = std::env::var("QUEUE_DRIVER").unwrap_or_else(|_| "memory".into());
+    let driver = match requested.as_str() {
+        "failover" => build_failover_from_env().await?,
+        // `None` is an unrecognized *name*, a typo this call absorbs exactly as
+        // it always has. An `Err` is a name it does recognize whose backend will
+        // not come up, which is a real boot failure and propagates. Keeping the
+        // two apart in the type is what stops the recognized-name list from
+        // existing in two places.
+        other => match build_driver_from_env(other).await? {
+            Some(driver) => driver,
+            None => {
+                tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
+                Arc::new(memory::MemoryQueueDriver::new()) as Arc<dyn QueueDriver>
+            }
+        },
+    };
+    Queue::set_driver(driver);
+    Ok(())
+}
+
+/// Build one queue driver by connection name, reading that driver's own env.
+///
+/// Split out of [`bootstrap_from_env`] because a failover connection needs to
+/// build several of these from one boot, and every inner connection must be
+/// configured exactly the way it would be if it were `QUEUE_DRIVER` on its own.
+///
+/// Returns `Ok(None)` for a name this build does not recognize, leaving each
+/// caller to decide what an unrecognized name means: `bootstrap_from_env` warns
+/// and falls back to memory, exactly as it always has, while
+/// `build_failover_from_env` rejects it. That distinction has to exist -
+/// inside `QUEUE_FAILOVER_CONNECTIONS` a typo that quietly became an in-memory
+/// connection would splice an ephemeral backend into a durable chain - and
+/// carrying it in the return type keeps the list of recognized names in exactly
+/// one place, here.
+///
+/// An `Err`, by contrast, always means a recognized backend that would not come
+/// up. Every caller propagates that.
+async fn build_driver_from_env(name: &str) -> Result<Option<Arc<dyn QueueDriver>>, FrameworkError> {
+    match name {
+        "memory" => Ok(Some(Arc::new(memory::MemoryQueueDriver::new()))),
         "redis" => {
             let url = std::env::var("QUEUE_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -882,21 +1100,20 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             );
             let d = redis::RedisQueueDriver::connect(&url, &stream, &group, &consumer, visibility)
                 .await?;
-            Queue::set_driver(Arc::new(d));
+            Ok(Some(Arc::new(d)))
         }
         "database" => {
             let table = std::env::var("QUEUE_DB_TABLE").unwrap_or_else(|_| "jobs".into());
             // Requires DB::init() (or DB::init_with(...)) to have been called first.
             let db = crate::database::DB::connection().map_err(|e| {
                 FrameworkError::internal(format!(
-                    "QUEUE_DRIVER=database requires DB::init() to run first: {e}"
+                    "the `database` queue connection requires DB::init() to run first: {e}"
                 ))
             })?;
             // DatabaseConnection is Arc-backed (SeaORM pool), so clone is cheap.
             // `new` validates QUEUE_DB_TABLE as a SQL identifier - a malformed
             // env value fails here instead of reaching SQL composition.
             let driver = database::DatabaseQueueDriver::new(db.inner().clone(), table)?;
-            Queue::set_driver(Arc::new(driver));
 
             // The `failed_jobs` table is part of this driver's contract -
             // `queue:retry` reads it, and `Queue::retry_failed` fails
@@ -908,6 +1125,10 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
             // Only for this driver. `memory` is ephemeral by construction,
             // and `redis` has no table to write to, so inventing a
             // database dependency for either would be worse than the gap.
+            // A failover chain that lists `database` anywhere therefore still
+            // gets a durable dead-letter store, which is the right outcome:
+            // the store is bound to the database, not to the queue's rank in
+            // the chain.
             let failed_table =
                 std::env::var("QUEUE_FAILED_DB_TABLE").unwrap_or_else(|_| "failed_jobs".into());
             match failed::DatabaseFailedJobStore::new(db.inner().clone(), failed_table) {
@@ -924,13 +1145,81 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
                     );
                 }
             }
+            Ok(Some(Arc::new(driver)))
         }
-        other => {
-            tracing::warn!(driver = %other, "unknown QUEUE_DRIVER, falling back to memory");
-            Queue::set_driver(Arc::new(memory::MemoryQueueDriver::new()));
+        _ => Ok(None),
+    }
+}
+
+/// Wire a [`FailoverQueueDriver`] from `QUEUE_FAILOVER_CONNECTIONS`.
+///
+/// Every entry is built by [`build_driver_from_env`], so an inner connection
+/// is configured exactly as it would be were it `QUEUE_DRIVER` alone - the
+/// `database` entry still needs `DB::init()` first, and still brings its
+/// failed-jobs store with it.
+async fn build_failover_from_env() -> Result<Arc<dyn QueueDriver>, FrameworkError> {
+    // A blank value is treated as missing: `QUEUE_FAILOVER_CONNECTIONS=` in a
+    // `.env` is a half-finished edit, not a request for a queue with nowhere
+    // to push.
+    let list = std::env::var("QUEUE_FAILOVER_CONNECTIONS")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "QUEUE_DRIVER=failover requires QUEUE_FAILOVER_CONNECTIONS \
+                 (comma-separated, e.g. `redis,database`)",
+            )
+        })?;
+
+    let mut drivers: Vec<(String, Arc<dyn QueueDriver>)> = Vec::new();
+    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if name == "failover" {
+            // Nesting would let a chain reference itself and recurse at boot,
+            // and it buys nothing a flat list cannot express.
+            return Err(FrameworkError::internal(
+                "QUEUE_FAILOVER_CONNECTIONS must not contain `failover` (no nesting)",
+            ));
+        }
+        let driver = build_driver_from_env(name).await?.ok_or_else(|| {
+            FrameworkError::internal(format!(
+                "QUEUE_FAILOVER_CONNECTIONS names unknown queue connection `{name}`; \
+                 expected one of memory, redis, database"
+            ))
+        })?;
+        drivers.push((name.to_string(), driver));
+    }
+    Ok(Arc::new(FailoverQueueDriver::new(drivers)?))
+}
+
+/// How a push decides its `available_at`, carried far enough down the call
+/// chain that a deferred push can decide it again at commit time.
+///
+/// This exists because the two entry-point families mean different things by a
+/// delay, and after-commit dispatch makes the difference observable:
+///
+/// - [`Queue::push`] / [`Queue::push_with`] apply [`Job::delay`], which reads
+///   "wait this long after dispatch". Deferred, dispatch is the commit, so the
+///   delay is re-resolved then - a job with a five-minute delay is available
+///   five minutes after the commit, not five minutes after a `push` that a
+///   long transaction then sat on.
+/// - [`Queue::push_later`] / [`Queue::later`] / [`Queue::later_with`] carry an
+///   absolute timestamp the caller computed. That is the caller's intent about
+///   a moment in time, so the deferral preserves it exactly.
+#[derive(Clone, Copy)]
+enum AvailableAt {
+    /// Resolve [`Job::delay`] against the moment the push actually happens.
+    FromJobDelay,
+    /// Use the caller's timestamp verbatim.
+    Fixed(chrono::DateTime<chrono::Utc>),
+}
+
+impl AvailableAt {
+    fn resolve<J: Job>(&self) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
+        match self {
+            Self::FromJobDelay => resolve_job_delay::<J>(Utc::now()),
+            Self::Fixed(at) => Ok(*at),
         }
     }
-    Ok(())
 }
 
 /// Resolve `available_at` for the entry points that consult
@@ -939,12 +1228,14 @@ pub async fn bootstrap_from_env() -> Result<(), FrameworkError> {
 /// declares no delay.
 ///
 /// `push_later` / `later` / `later_with` / [`Queue::push_unique_later`] /
-/// [`Queue::later_unique`] (and the shared `push_unique_at` they and
-/// `push_unique` funnel through) never call this on their own - they take
-/// an explicit `available_at` (or delay) from the caller, and that always
-/// wins over the job's own declared default. `push_unique` is the one
-/// exception: it takes no `available_at` at all, so it resolves the delay
-/// itself before handing an explicit timestamp down to `push_unique_at`.
+/// [`Queue::later_unique`] never reach it - they take an explicit
+/// `available_at` (or delay) from the caller, and that always wins over the
+/// job's own declared default.
+///
+/// Which of the two applies is carried as an [`AvailableAt`] rather than a
+/// resolved timestamp, so a push deferred to a transaction commit can resolve
+/// the delay against the commit while an explicit timestamp survives the
+/// deferral unchanged.
 fn resolve_job_delay<J: Job>(
     base: chrono::DateTime<chrono::Utc>,
 ) -> Result<chrono::DateTime<chrono::Utc>, FrameworkError> {
@@ -956,6 +1247,17 @@ fn resolve_job_delay<J: Job>(
         }
         None => Ok(base),
     }
+}
+
+/// The idempotency key a `push_unique` dispatch takes its dedupe lock under.
+///
+/// Shared by the push side ([`Queue::push_unique`]) and the worker side (the
+/// `unique_until_processing` release), because those two are the only places
+/// that address this key and a drift between them is invisible: the release
+/// would report "nothing to release" and the lock would linger for its full
+/// TTL.
+pub(crate) fn unique_key(job_name: &str, id: &str) -> String {
+    format!("queue-unique:{job_name}:{id}")
 }
 
 fn envelope_for<J: Job>(
@@ -1010,6 +1312,7 @@ pub(crate) fn build_envelope<J: Job>(
         timeout_secs,
         fail_on_timeout: J::fail_on_timeout(),
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     })

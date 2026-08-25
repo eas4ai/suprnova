@@ -76,6 +76,8 @@ pub(crate) mod lock;
 pub mod logging;
 pub mod magnetar_integration;
 pub mod mail;
+#[cfg(feature = "media")]
+pub mod media;
 pub mod middleware;
 pub mod notifications;
 pub mod pagination;
@@ -268,7 +270,7 @@ pub use http::body::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, collect_body_with_cap, global_max_request_body_bytes,
     set_global_max_request_body_bytes,
 };
-pub use http::upload::validators::{Image, MaxSize, MimeAllowlist, MimeType};
+pub use http::upload::validators::{ImageFile, MaxSize, MimeAllowlist, MimeType};
 pub use http::upload::{
     DEFAULT_MAX_MULTIPART_BODY_BYTES, DEFAULT_MAX_MULTIPART_PARTS, DEFAULT_UPLOAD_SPILL_THRESHOLD,
     MultipartLimits, MultipartPayload, MultipartRequestHooks, MultipartValue, UploadedFile,
@@ -325,12 +327,13 @@ pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
     DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
     DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, EnvelopeError, EnvelopeOverrides,
-    FailOnException, FailedJob, FailedJobStore, Job, JobMiddleware, JobMiddlewareNext, JobOutcome,
-    ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore,
-    MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue,
-    QueueDriver, QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Settled,
-    Skip, SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded,
-    UpdatedBatchJobCounts, WithoutOverlapping,
+    FailOnException, FailedJob, FailedJobStore, FailoverQueueDriver, InspectedJob, Job,
+    JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed, MaxAttemptsExceeded,
+    MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver, NullFailedJobStore,
+    NullQueueDriver, PendingBatch, PendingChain, Queue, QueueDriver, QueueRoute, RateLimited,
+    RedisQueueDriver, Reservation, ReservationToken, Settled, Skip, SkipIfBatchCancelled,
+    SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts,
+    WithoutOverlapping,
 };
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,
@@ -383,6 +386,15 @@ pub use routing::{
     verify_signature,
 };
 pub use schedule::{CronExpression, DayOfWeek, Schedule, Task, TaskBuilder, TaskEntry, TaskResult};
+// chrono-tz escape hatch, same principle as the opendal block above:
+// `TaskBuilder::timezone` takes a `chrono_tz::Tz` and `TaskEntry::timezone`
+// hands one back, so consumers need to name that type. Re-exporting `Tz` at
+// the crate root - and the whole module for the zone constants
+// (`chrono_tz::America::New_York`) - lets them do it without adding
+// `chrono-tz` to their own Cargo.toml or risking a version-skew mismatch
+// against the version Suprnova links.
+pub use ::chrono_tz;
+pub use ::chrono_tz::Tz;
 pub use seed::Seeder;
 pub use server::{Server, handle_request, handle_request_with_peer};
 pub use session::{
@@ -404,10 +416,20 @@ pub use validation::rule::{
     AsyncRule, ContextualRule, FormContext, Rule, Unique, ValueRule, async_rules, rules,
     rules::{
         Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
-        Different, Distinct, DoesntContain, Email, Gt, Gte, HttpUrl, In, InArray, Integer, Lt, Lte,
-        Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith,
-        RequiredWithAll, Same, Url, UrlProtocols, Uuid,
+        Different, Distinct, DoesntContain, Email, Gt, Gte, HibpVerifier, HttpUrl, In, InArray,
+        Integer, Lt, Lte, Max, Min, NotIn, Numeric, Password, Required, RequiredIf, RequiredUnless,
+        RequiredWith, RequiredWithAll, Same, UncompromisedVerifier, Url, UrlProtocols, Uuid,
     },
+};
+// The media subsystem's flat names. `Image` is the image-manipulation
+// pipeline, mirroring `Illuminate\Image\Image`; the upload validator that used
+// to hold this name is now `ImageFile`, mirroring
+// `Illuminate\Validation\Rules\ImageFile`.
+#[cfg(feature = "media")]
+pub use media::{
+    DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES, DEFAULT_IMAGE_MAX_DIMENSION,
+    DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver, ImageDriverKind, ImagePipeline,
+    MagickCliDriver, OutputFormat, OxideAvImageDriver, Transformation,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

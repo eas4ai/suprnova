@@ -369,8 +369,8 @@ plus `with_message` / `with_code` / `with_status` / `as_not_found` builders.
 | Decision | `authorize` result |
 |---|---|
 | allowed | `Ok(())` |
-| bare `deny()` (no message/code/status) | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
-| rich denial (message and/or status set) | `FrameworkError::Domain { message, status_code }` |
+| bare `deny()` (no message/code/status) - what an unconfigured default denial response falls back to | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
+| rich denial (message and/or status set) - including a configured default denial response that carries one | `FrameworkError::Domain { message, status_code }` |
 
 So `deny_as_not_found()` surfaces as a 404, `deny_with_status(422, "…")` as a
 422, and `deny_with("…")` as a 403 carrying your message. The `code` is
@@ -383,8 +383,42 @@ you need it.
 `Gate::raw` (and `raw_async`) returns `Option<Response>`: `None` means *no
 rule applied* - no `before` hook fired, no gate is registered, no `after`
 hook filled in - as distinct from an explicit `Some(deny)`. `inspect`
-normalizes that `None` to a default deny; `raw` preserves it for diagnostics
-("is this action governed at all?").
+normalizes that `None` to the configured default denial response (a bare
+deny unless `Gate::default_denial_response` has set something else); `raw`
+preserves the `None` for diagnostics ("is this action governed at all?").
+
+### Default denial response
+
+Laravel's `Gate::defaultDenialResponse($response)` reshapes what an
+*undecided* denial looks like - not every denial, only the ones that would
+otherwise fall back to the bare `Response::deny()`. Set it once, typically
+in `bootstrap::register()`:
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+After that call, two kinds of outcome pick up the new shape: a bare `false`
+- from a bool gate (`define`/`define_async`, including a `#[policy]` method
+returning `bool`), or from a `before`/`after` hook that decided `false` -
+and an evaluation nothing else decided at all: an undefined ability with no
+hook opinion either. All of those used to surface as a bare
+`Response::deny()` (a 403); now they surface as whatever
+`default_denial_response` was given - a 404 in the example above. That is
+the standard "hide the resource's existence from a user who may not view
+it" move (see the `Secret` example earlier in this chapter), applied once
+for the whole application instead of gate by gate.
+
+The default applies to **bare `false` only**. A gate registered with
+`define_with` (or `define_async_with`) already returned the `Response` it
+wanted - `Response::deny_with("…")`, `Response::deny_as_not_found()`, even
+an explicit bare `Response::deny()` - and every one of those passes through
+`inspect` untouched. This mirrors Laravel's own rule: `Gate::inspect` only
+substitutes the default for a truly falsy callback result, never for a
+`Response` object the callback built itself.
 
 ## `before` / `after` hooks
 
@@ -428,6 +462,13 @@ Suprnova ties policy methods to the type-erased `(action, U, R)` key at
 registration time, so a `Post` policy and a `Comment` policy with the same
 method name register two distinct gates without a naming convention or a
 discovery scan.
+
+`Gate::default_denial_response` also diverges from Laravel in one respect:
+passing it an allow-shaped `Response::allow()` is logged and ignored rather
+than accepted. Laravel's `defaultDenialResponse` has no such guard, but this
+is a *denial* default - accepting an allow-shaped one would silently invert
+every bare `false` gate result to allowed, the one fail-open direction on
+this surface.
 
 ## Next
 

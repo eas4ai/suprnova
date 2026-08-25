@@ -185,7 +185,8 @@ boots with the framework's embedded English validation catalog.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`) | Active queue backend. Unknown values log a `warn!` and fall back to memory. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Active queue backend. Unknown values log a `warn!` and fall back to memory. `failover` wraps an ordered list of the others - see `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (comma-separated, e.g. `redis,database`) | Priority-ordered connection list for `QUEUE_DRIVER=failover`. Required when that driver is selected; a missing or blank value is a boot error, as is an entry naming `failover` (no nesting) or a driver that doesn't exist. Each entry reads its own driver's variables. Only pushes fall through the list; every read and every acknowledgement goes to the first connection, so each fallback needs its own worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `QUEUE_DRIVER=redis`). |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis Stream key used for fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Consumer-group name. |
@@ -295,6 +296,24 @@ selected; an unknown driver value logs a `warn!` and falls back to
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
 
+## Images
+
+Image driver selection and the decode limits that bound hostile input.
+Out-of-range limits clamp with a `warn!` rather than failing boot: a
+limit of zero would reject every image in the application. An unknown
+`IMAGE_DRIVER` fails at first use, naming the valid values.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Selects the image backend. `oxideav` is pure Rust with no host dependency; `magick` shells out to a host-installed ImageMagick 7 for wider input support. Case-insensitive. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Cap on the width and height of a decoded image, checked against the input's own header before anything is allocated. Also caps resize targets. Minimum `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | `u64` | Cap on the decoded RGBA footprint (`width * height * 4`). Also caps the size of the source file itself, whether it arrives from a path, a disk, or `Image::from_stream` (which checks while collecting). Minimum `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation. It is both ImageMagick's own `-limit time` argument and the Rust-side deadline that kills the child's whole process group two seconds later, because `-limit time` is enforced by a monitor that a child wedged inside a delegate never engages. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
+
+See [Images](images.md) for the two-tier limit enforcement and how to
+choose between the drivers.
+
 ## Hashing
 
 Password-hashing driver and per-algorithm parameters. Invalid values
@@ -309,6 +328,12 @@ misconfiguration immediately instead of silently defaulting.
 | `HASH_TIME` | `4` | `u32` | Argon2 time / iterations. Minimum `1`. Argon-only. |
 | `HASH_THREADS` | `1` | `u32` | Argon2 parallelism (matches OWASP / libsodium). Minimum `1`. Argon-only. |
 | `HASH_VERIFY` | `false` | `bool` | When true, `verify()` rejects hashes from a different algorithm than `HASH_DRIVER` (returns `Ok(false)`). Default `false` so legacy bcrypt hashes still verify after a driver flip until they're rotated. |
+
+## Validation
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (seconds) | `u64` | Request timeout for `Password::uncompromised()`'s Have I Been Pwned range check, read fresh each time a default `HibpVerifier` is constructed. A slow or unreachable HIBP still fails open - see [Validation](validation.md). |
 
 ## Auth Flows
 
