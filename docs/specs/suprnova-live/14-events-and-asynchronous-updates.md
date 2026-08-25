@@ -222,6 +222,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented the independent canonical async-envelope protocol
+  v1 with required bounded logical-subscription identity, registered stream,
+  monotonic epoch/sequence position, and the closed refresh, typed browser
+  event, declared presentation signal, heartbeat, completion, or error payload
+  union. The sequence machine applies only the exact same-epoch successor,
+  ignores duplicates and older epochs, preserves its last authoritative
+  position across gaps and newer epochs, and cannot restore currentness or
+  adopt a non-regressing baseline without explicit trusted replay proof or an
+  authoritative refresh.
 - 2026-08-25 -- Implemented the canonical subscription-v1 descriptor with the
   exact `suprnova-live/async-subscription/v1` HKDF purpose, bounded exact-key
   claims, overlapping key-ID verification, exclusive expiry, and a

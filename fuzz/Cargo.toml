@@ -105,3 +105,17 @@ path = "fuzz_targets/upload_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "async_envelope"
+path = "fuzz_targets/async_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "async_sequence"
+path = "fuzz_targets/async_sequence.rs"
+test = false
+doc = false
+bench = false

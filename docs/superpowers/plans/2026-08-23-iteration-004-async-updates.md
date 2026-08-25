@@ -220,7 +220,7 @@
 
 **Files:** `src/async_updates/{envelope,sequence}.rs`, envelope tests, v4 fixtures, fuzz targets
 
-- [ ] Add failing golden/property tests for event/refresh/signal/heartbeat/completion/error envelopes, unknown majors, duplicates, gaps, epoch changes, oversized payloads, duplicate fields, and malformed operations:
+- [x] Add failing golden/property tests for event/refresh/signal/heartbeat/completion/error envelopes, unknown majors, duplicates, gaps, epoch changes, oversized payloads, duplicate fields, and malformed operations:
 
   ```rust
   proptest! {
@@ -236,8 +236,8 @@
   }
   ```
 
-- [ ] Run `rtk cargo test --test async_envelope`; record failure because the async protocol is absent.
-- [ ] Implement independent async protocol v1 and a closed payload union:
+- [x] Run `rtk cargo test --test async_envelope`; record failure because the async protocol is absent.
+- [x] Implement independent async protocol v1 and a closed payload union:
 
   ```rust
   pub const SUPPORTED_ASYNC_PROTOCOL_VERSIONS: &[u16] = &[1];
@@ -268,8 +268,8 @@
   current epoch, degrades on gaps, and requires replay proof or authoritative
   refresh before adopting a new baseline.
 
-- [ ] Add both fuzz targets, run fixtures/properties/security, and prove Live action/morph versions remain `[1, 2]`.
-- [ ] Commit: `feat(async): add bounded event envelope and sequence model`.
+- [x] Add both fuzz targets, run fixtures/properties/security, and prove Live action/morph versions remain `[1, 2]`.
+- [x] Commit: `feat(async): add bounded event envelope and sequence model`.
 
 ## Task 4: Build transport-neutral logical sessions and multiplexed document transports
 

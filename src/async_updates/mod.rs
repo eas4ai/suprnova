@@ -1,7 +1,9 @@
 //! Typed, bounded declarations for authorized asynchronous updates.
 
 mod authorization;
+mod envelope;
 mod metadata;
+mod sequence;
 mod subscription;
 
 pub use authorization::{
@@ -14,6 +16,13 @@ pub use authorization::{
     SubscriptionIssueRequest, SubscriptionRegistryPort, SubscriptionRegistryRequest,
     SubscriptionService, TrustedMountParameters,
 };
+pub use envelope::{
+    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeError,
+    AsyncEnvelopeErrorKind, AsyncPayload, BoundedPresentationSignalContracts, CompletionReason,
+    Heartbeat, PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
+    RegisteredRefresh, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId,
+    decode_async_envelope, encode_async_envelope,
+};
 
 pub use metadata::{
     BoundedEventNames, BoundedTargets, BoundedTopics, BrowserPayloadSchema, EventCyclePolicy,
@@ -21,6 +30,10 @@ pub use metadata::{
     MAX_SUBSCRIPTION_EVENTS, MAX_SUBSCRIPTION_MODES, MAX_SUBSCRIPTION_TOPICS, MAX_SUBSCRIPTIONS,
     ReconnectPolicy, StreamName, SubscriptionMetadata, SubscriptionMode, SubscriptionModes,
     TopicName,
+};
+pub use sequence::{
+    BaselineDisposition, ContinuityProof, SequenceDegradation, SequenceDisposition, SequenceError,
+    SequenceErrorKind, SequenceMachine, SequenceState,
 };
 pub use subscription::{
     ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, CapabilityVersion,

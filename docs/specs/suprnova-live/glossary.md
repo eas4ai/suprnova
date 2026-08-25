@@ -383,6 +383,28 @@ required. One host-owned transaction consumes Connect and persists Renew, or
 consumes Renew and persists Connect, after all non-mutating checks succeed.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
 
+**Subscription ID**:
+A bounded opaque non-secret identity for routing one authorized logical
+subscription inside a compatible multiplexed document transport. It must match
+active membership before sequence observation or dispatch and grants no
+authorization by itself.
+_Avoid_: transport credential, channel authority, document transport handle, session ID
+
+**Asynchronous event envelope**:
+The independently versioned canonical bounded message that binds an active
+subscription ID, registered stream, monotonic position, and one closed
+registered presentation or lifecycle payload. It is not a Live action/morph
+response and cannot carry HTML, snapshots, arbitrary actions, or executable
+effects.
+_Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push payload
+
+**Sequence authority**:
+The per-logical-subscription state machine that applies only an exact
+same-epoch successor, ignores duplicates and older epochs, degrades on gaps or
+new epochs, and adopts a new non-regressing baseline only from trusted replay
+proof or authoritative refresh.
+_Avoid_: last message wins, transport ordering, reconnect success, client timestamp
+
 **Credential rotation uncertainty**:
 A subscription credential rotation that committed predecessor consumption and
 successor persistence but lost the successor response. The predecessor cannot

@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -252,6 +252,13 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented asynchronous event-envelope protocol v1 as a
+  canonical exact-key JSON contract independent from the unchanged Live
+  action/morph protocol versions `[1, 2]`. Its bounded decoder rejects unknown
+  majors, duplicate or unknown fields, noncanonical bytes, malformed positions,
+  inactive subscription or stream routing, oversized payloads, and every
+  operation outside the registered refresh/event/presentation and closed
+  heartbeat/completion/error union before dispatch.
 - 2026-08-23 -- Kept the Live action/morph protocol at v2 for Iteration 004.
   Upload handles may travel as typed opaque values, while upload transfer and
   asynchronous event envelopes own independent major versions and capability

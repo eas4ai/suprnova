@@ -8,7 +8,10 @@ and malformed JPEG-marker inputs so every smoke campaign enters the bounded
 format-specific parser paths. The upload-protocol target starts from one valid
 canonical create command so arbitrary mutations cover both accepted and rejected
 closed-schema paths; the upload-state target interprets bounded raw transition
-sequences directly. Every campaign remains deterministic under a fixed `-seed`.
+sequences directly. The async-envelope target starts from one valid heartbeat
+and one forbidden HTML payload, while the async-sequence target interprets a
+bounded raw baseline plus transition stream. Every campaign remains
+deterministic under a fixed `-seed`.
 Any crashing, timing-out, or otherwise interesting input discovered by a longer
 campaign must be minimized with `cargo fuzz cmin`, copied into the matching
 target corpus directory, and added as a small named case in

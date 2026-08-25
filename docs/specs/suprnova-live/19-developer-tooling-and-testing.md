@@ -448,6 +448,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added executable v4 async-envelope and continuity golden
+  conformance, adversarial/property coverage for membership, registration,
+  canonical bounds, gaps, epoch change, recovery, regression, and overflow,
+  plus separate async-envelope decode and sequence-transition fuzz targets.
+  Both targets carry bounded named seeds, build under the nightly fuzz workspace,
+  and completed 1,000-run smoke campaigns without a production-code panic; the
+  sequence campaign also found and fixed a partial-chunk harness indexing defect.
 - 2026-08-25 -- Added bounded upload protocol, transition-sequence, and media
   header fuzz targets and exercised each for 1,000 runs after building the full
   fuzz workspace. Re-recorded the exact production ESM artifact

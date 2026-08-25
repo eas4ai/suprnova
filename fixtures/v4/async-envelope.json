@@ -6,22 +6,22 @@
   "subscription_states": ["disconnected", "connecting", "current", "degraded", "reconnecting", "closed"],
   "codec_limits": {"max_bytes": 65536, "max_depth": 8, "max_entries": 64, "max_string_bytes": 4096, "max_payload_bytes": 32768},
   "envelope_cases": [
-    {"id":"refresh","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"refresh\",\"name\":\"refresh\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"41\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"browser-event","expected":"accepted","encoded":"{\"payload\":{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1},\"schema_version\":1,\"target\":\"self\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"42\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"presentation-signal","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":50},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"43\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"heartbeat","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"44\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"complete","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"complete\",\"reason\":\"server_shutdown\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"45\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"error","expected":"accepted","encoded":"{\"payload\":{\"code\":\"authorization_lost\",\"kind\":\"error\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"46\"},\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"unknown-major","expected":"unsupported_protocol","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"41\"},\"protocol_version\":2,\"stream\":\"orders\"}"},
-    {"id":"duplicate-field","expected":"duplicate_field","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"41\"},\"protocol_version\":1,\"protocol_version\":1,\"stream\":\"orders\"}"},
-    {"id":"forbidden-html","expected":"unsupported_payload","encoded":"{\"payload\":{\"html\":\"<p>unsafe</p>\",\"kind\":\"html\"},\"position\":{\"epoch\":\"epoch-04\",\"sequence\":\"41\"},\"protocol_version\":1,\"stream\":\"orders\"}"}
+    {"id":"refresh","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"refresh\",\"name\":\"refresh\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"41\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"browser-event","expected":"accepted","encoded":"{\"payload\":{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1},\"schema_version\":1,\"target\":\"self\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"42\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"presentation-signal","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":50},\"position\":{\"epoch\":\"4\",\"sequence\":\"43\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"heartbeat","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"44\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"complete","expected":"accepted","encoded":"{\"payload\":{\"kind\":\"complete\",\"reason\":\"server_shutdown\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"45\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"error","expected":"accepted","encoded":"{\"payload\":{\"code\":\"authorization_lost\",\"kind\":\"error\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"46\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"unknown-major","expected":"unsupported_protocol","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"41\"},\"protocol_version\":2,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"duplicate-field","expected":"duplicate_field","encoded":"{\"payload\":{\"kind\":\"heartbeat\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"41\"},\"protocol_version\":1,\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"},
+    {"id":"forbidden-html","expected":"unsupported_payload","encoded":"{\"payload\":{\"html\":\"<p>unsafe</p>\",\"kind\":\"html\"},\"position\":{\"epoch\":\"4\",\"sequence\":\"41\"},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"c3Vic2NyaXB0aW9uLTAwMQ\"}"}
   ],
   "continuity_cases": [
-    {"id":"next-sequence","baseline":{"epoch":"epoch-04","sequence":"40"},"observed":{"epoch":"epoch-04","sequence":"41"},"expected":"apply","state":"current"},
-    {"id":"duplicate-sequence","baseline":{"epoch":"epoch-04","sequence":"41"},"observed":{"epoch":"epoch-04","sequence":"41"},"expected":"ignore_duplicate","state":"current"},
-    {"id":"sequence-gap","baseline":{"epoch":"epoch-04","sequence":"41"},"observed":{"epoch":"epoch-04","sequence":"43"},"expected":"degrade","state":"degraded"},
-    {"id":"epoch-change-without-proof","baseline":{"epoch":"epoch-04","sequence":"41"},"observed":{"epoch":"epoch-05","sequence":"1"},"expected":"degrade","state":"degraded"},
-    {"id":"trusted-replay-proof","baseline":{"epoch":"epoch-04","sequence":"41"},"proof":{"kind":"replay","through":{"epoch":"epoch-04","sequence":"43"}},"expected":"adopt_baseline","state":"current"},
-    {"id":"authoritative-refresh-baseline","baseline":{"epoch":"epoch-04","sequence":"41"},"proof":{"kind":"authoritative_refresh","through":{"epoch":"epoch-05","sequence":"7"}},"expected":"adopt_baseline","state":"current"}
+    {"id":"next-sequence","baseline":{"epoch":"4","sequence":"40"},"observed":{"epoch":"4","sequence":"41"},"expected":"apply","state":"current"},
+    {"id":"duplicate-sequence","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"4","sequence":"41"},"expected":"ignore_duplicate","state":"current"},
+    {"id":"sequence-gap","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"4","sequence":"43"},"expected":"degrade","state":"degraded"},
+    {"id":"epoch-change-without-proof","baseline":{"epoch":"4","sequence":"41"},"observed":{"epoch":"5","sequence":"1"},"expected":"degrade","state":"degraded"},
+    {"id":"trusted-replay-proof","baseline":{"epoch":"4","sequence":"41"},"proof":{"kind":"replay","through":{"epoch":"4","sequence":"43"}},"expected":"adopt_baseline","state":"current"},
+    {"id":"authoritative-refresh-baseline","baseline":{"epoch":"4","sequence":"41"},"proof":{"kind":"authoritative_refresh","through":{"epoch":"5","sequence":"7"}},"expected":"adopt_baseline","state":"current"}
   ]
 }

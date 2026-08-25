@@ -246,6 +246,14 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made active subscription membership and registered stream
+  identity prerequisites for constructing an asynchronous envelope, so an
+  invalid or cross-subscription message cannot reach sequence observation or
+  dispatch. Protocol-v1 decoding applies raw byte, nesting, entry, string, and
+  canonical payload limits; accepted productive payloads are closed to the
+  registered fresh render, exact typed browser-event contract and target, or
+  declared presentation-signal schema. HTML, snapshots, actions, effects, and
+  arbitrary operation names have no representable accepted form.
 - 2026-08-25 -- Bound upload cleanup observability to closed identifier-free
   age/volume/outcome/retry/orphan values and made observers non-authoritative.
   Cleanup leases bind exact ledger revision while opaque handle, lease, scope,
