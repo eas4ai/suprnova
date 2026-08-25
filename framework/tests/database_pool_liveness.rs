@@ -194,15 +194,24 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
     // The knobs are wired onto `ConnectOptions` in `connect_as`; this is
     // the test that proves the wiring matches SeaORM's real signatures
     // and that no combination stops the pool from coming up.
-    let _guard = ENV_LOCK.lock().unwrap();
-    let cfg = DatabaseConfig::builder()
-        .url("sqlite::memory:")
-        .idle_timeout(60)
-        .max_lifetime(300)
-        .acquire_timeout(5)
-        .test_before_acquire(true)
-        .ping_after_idle(10)
-        .build();
+    //
+    // The lock is scoped to the synchronous build only - `from_env()`
+    // (called inside `.build()`) is what needs to be serialized with the
+    // sibling tests' `set_var`/`remove_var` calls, and holding a
+    // std::sync::Mutex guard across an `.await` is a clippy
+    // `await_holding_lock` lint (and a real risk: nothing here awaits
+    // the env-mutating tests, but the pattern generalizes badly).
+    let cfg = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .idle_timeout(60)
+            .max_lifetime(300)
+            .acquire_timeout(5)
+            .test_before_acquire(true)
+            .ping_after_idle(10)
+            .build()
+    };
 
     let conn = DbConnection::connect(&cfg)
         .await
@@ -212,12 +221,16 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
 
 #[tokio::test]
 async fn a_pool_builds_with_reaping_disabled() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let cfg = DatabaseConfig::builder()
-        .url("sqlite::memory:")
-        .idle_timeout(0)
-        .max_lifetime(0)
-        .build();
+    // See the lock-scoping note on the previous test - the guard must
+    // not be held across the `.await` below.
+    let cfg = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .idle_timeout(0)
+            .max_lifetime(0)
+            .build()
+    };
 
     let conn = DbConnection::connect(&cfg)
         .await
