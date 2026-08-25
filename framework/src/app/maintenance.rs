@@ -48,6 +48,18 @@ const BYPASS_TTL_SECS: i64 = 12 * 60 * 60;
 /// [`BYPASS_TTL_SECS`] as a `Duration`, for the cookie's `max-age`.
 const BYPASS_TTL: Duration = Duration::from_secs(BYPASS_TTL_SECS as u64);
 
+/// How far past [`BYPASS_TTL_SECS`] a deadline may sit before
+/// [`has_valid_bypass_cookie`] refuses it as one it could not have issued.
+///
+/// This is an allowance for clock differences between hosts, not a grace
+/// period: it does not extend how long a cookie lives. Multi-pod is the
+/// default topology, every pod mints from its own clock, and a pod running
+/// a second or two ahead would otherwise have every cookie it issues
+/// refused by a correctly-clocked peer - killing a legitimate bypass in the
+/// middle of the incident it was needed for. A minute comfortably covers
+/// NTP-disciplined drift while still capping a cookie at one TTL.
+const BYPASS_SKEW_SECS: i64 = 60;
+
 /// The data recorded when the application is taken down. Mirrors the fields
 /// Laravel writes to its "down" file.
 ///
@@ -115,6 +127,13 @@ impl Default for MaintenancePayload {
     }
 }
 
+impl MaintenancePayload {
+    /// A fresh payload: status `503`, no options set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// What the encrypted bypass cookie carries.
 ///
 /// The cookie used to carry the bare secret, which left its 12-hour TTL a
@@ -138,13 +157,6 @@ struct BypassCookie {
     secret: String,
     /// Unix timestamp, in seconds, after which this cookie is refused.
     expires_at: i64,
-}
-
-impl MaintenancePayload {
-    /// A fresh payload: status `503`, no options set.
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 /// Storage backend for maintenance-mode state.
@@ -531,12 +543,20 @@ fn bypass_response(secret: &str) -> Response {
 /// Five ways to fail, all closed: no cookie, a value that does not decrypt,
 /// a plaintext that is not a [`BypassCookie`] (which is what a pre-upgrade
 /// bare-secret cookie looks like), a deadline that has passed, or a deadline
-/// further out than [`BYPASS_TTL_SECS`] from now. That last one is a cap
-/// rather than a check on anything the client controls: this build only ever
-/// stamps `now + BYPASS_TTL_SECS`, so a longer deadline was issued by
-/// something else, and refusing it means no cookie is ever worth more than
-/// one TTL. A clock that jumps backwards can retire a live cookie early
-/// under the same rule, which fails closed - visit the secret URL again.
+/// further out than [`BYPASS_TTL_SECS`] plus [`BYPASS_SKEW_SECS`] from now.
+/// That last one is a cap rather than a check on anything the client
+/// controls: this build only ever stamps `now + BYPASS_TTL_SECS`, so a
+/// longer deadline was issued by something else, and refusing it means no
+/// cookie is ever worth more than one TTL.
+///
+/// The cap is widened by [`BYPASS_SKEW_SECS`] because the mint and the check
+/// routinely happen on different hosts. In the multi-pod deployment this
+/// framework treats as the default, a pod whose clock runs slightly ahead
+/// stamps a deadline that a correctly-clocked peer would otherwise reject
+/// outright, so a working bypass would die on the second request. The
+/// allowance absorbs that; a clock that jumps backwards by more than a
+/// minute can still retire a live cookie early, which fails closed - visit
+/// the secret URL again.
 ///
 /// Rotating the secret still invalidates every outstanding cookie, because
 /// the secret comparison runs after the deadline check rather than instead
@@ -552,7 +572,10 @@ fn has_valid_bypass_cookie(request: &Request, secret: &str) -> bool {
         return false;
     };
     let now = chrono::Utc::now().timestamp();
-    if payload.expires_at <= now || payload.expires_at > now.saturating_add(BYPASS_TTL_SECS) {
+    let latest_issuable = now
+        .saturating_add(BYPASS_TTL_SECS)
+        .saturating_add(BYPASS_SKEW_SECS);
+    if payload.expires_at <= now || payload.expires_at > latest_issuable {
         return false;
     }
     payload.secret.as_bytes().ct_eq(secret.as_bytes()).into()

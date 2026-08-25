@@ -505,3 +505,110 @@ async fn a_bypass_cookie_whose_deadline_outlives_the_ttl_is_refused() {
         "a deadline beyond the issuing TTL must not grant access"
     );
 }
+
+/// Mirrors the framework's private `BYPASS_TTL_SECS`. The cap these tests
+/// probe is expressed in terms of it, so the value has to be restated here.
+const BYPASS_TTL_SECS: i64 = 12 * 60 * 60;
+
+#[tokio::test]
+async fn a_bypass_cookie_minted_by_a_clock_slightly_ahead_is_accepted() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // Multi-pod is the default topology and every pod mints from its own
+    // clock. A deadline a few seconds past one TTL means the issuing pod
+    // ran slightly ahead, not that the cookie was forged - refusing it
+    // would kill a working bypass mid-incident.
+    let now = chrono::Utc::now().timestamp();
+    let slightly_ahead = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": now + BYPASS_TTL_SECS + 30,
+    }));
+    let (status, _headers, body) =
+        request(addr, "GET", "/", &[("Cookie", slightly_ahead.as_str())]).await;
+    assert_eq!(
+        status, 200,
+        "a deadline inside the clock-skew allowance must still grant access"
+    );
+    assert_eq!(body, "home");
+
+    // Past the allowance, the cap applies again: no cookie is ever worth
+    // more than one TTL plus the slack real clocks need.
+    let beyond_allowance = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + BYPASS_TTL_SECS + 120,
+    }));
+    let (status, _headers, _body) =
+        request(addr, "GET", "/", &[("Cookie", beyond_allowance.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a deadline past the clock-skew allowance must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_with_an_unknown_payload_field_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // `deny_unknown_fields` is contract, not decoration: the payload shape
+    // is what rejects anything this build did not mint, so a payload that
+    // carries extra keys is not a payload this build recognises.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": chrono::Utc::now().timestamp() + 3600,
+        "admin": true,
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "an unknown field in the payload must not grant access"
+    );
+}
+
+#[tokio::test]
+async fn a_bypass_cookie_with_a_non_integer_deadline_is_refused() {
+    ensure_crypt();
+    let path = unique_down_path();
+    FileMaintenanceMode::with_path(path.clone())
+        .activate(&MaintenancePayload {
+            secret: Some("opensesame".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let addr = spawn_server(router(), registry_for(&path), 2).await;
+
+    // `expires_at` is typed `i64`, so a stringly-typed deadline never
+    // reaches the comparison at all - it fails to deserialize first.
+    let cookie = forged_bypass_cookie(serde_json::json!({
+        "secret": "opensesame",
+        "expires_at": (chrono::Utc::now().timestamp() + 3600).to_string(),
+    }));
+
+    let (status, _headers, _body) = request(addr, "GET", "/", &[("Cookie", cookie.as_str())]).await;
+    assert_eq!(
+        status, 503,
+        "a deadline that is not an integer must not grant access"
+    );
+}

@@ -398,13 +398,15 @@ includes the secret. `up` removes the marker.
 The secret is a bearer credential: anyone who visits `/<secret>` is issued
 a bypass cookie good for 12 hours. The deadline is sealed inside the
 encrypted cookie and re-checked on every request, so a captured cookie
-stops working on time even if the browser ignores its `max-age`. Both the
-URL match and the cookie's secret comparison run in constant time, so
-response timing does not tell a prober how long a prefix they guessed
-correctly. Prefer `--with-secret`, which mints one for you (16 random
-bytes, 32 hex characters) and prints the bypass URL, over picking a
-memorable string for `--secret` - and treat it like any other credential in
-your incident notes.
+stops working on time even if the browser ignores its `max-age`. A cookie
+whose deadline is further out than one TTL is refused, with a short
+allowance for clock differences between hosts. Both the URL match and the
+cookie's secret comparison run in constant time, so response timing does
+not tell a prober how long a prefix they guessed correctly. Prefer
+`--with-secret`, which mints one for you (16 random bytes, 32 hex
+characters) and prints the bypass URL, over picking a memorable string for
+`--secret` - and treat it like any other credential in your incident
+notes.
 
 ## Scaling
 
