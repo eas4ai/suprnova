@@ -29,8 +29,8 @@
 //! - `morph_to_dispatches_to_second_target_via_registry` - same,
 //!   second target, ensuring dispatch doesn't bias toward the
 //!   first arm.
-//! - `morph_to_dispatches_via_snake_fallback_for_implicit_default_target`
-//!   - target without an explicit `morph_type` attribute is absent
+//! - `morph_to_dispatches_via_snake_fallback_for_implicit_default_target` -
+//!   target without an explicit `morph_type` attribute is absent
 //!   from the registry; emission falls back to
 //!   `to_snake(target_type_name)`, matching the parent-side write
 //!   convention. Pins the implicit-default contract end-to-end.

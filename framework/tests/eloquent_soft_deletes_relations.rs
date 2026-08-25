@@ -16,8 +16,8 @@
 //!   `user.posts().with_trashed().get()` and the closure form
 //!   `User::query().with_where(("posts", |q| q.with_trashed()))`
 //!   both work.
-//! - Does `force_delete` / `restore` / `delete` cascade to children?
-//!   - NO. Pinned here. Laravel doesn't cascade either; cascade is a
+//! - Does `force_delete` / `restore` / `delete` cascade to children? -
+//!   NO. Pinned here. Laravel doesn't cascade either; cascade is a
 //!   per-app concern users can handle via the event surface (10C).
 //!
 //! The tests below use throwaway tables (`sdrel_*` prefix) to avoid

@@ -17,8 +17,8 @@
 //!   operation into the transaction with `Builder::with_tx(&tx)` or
 //!   the `Model::*_with_tx` shims.
 //!
-//! - [`DB::transaction_with_attempts`](crate::DB::transaction_with_attempts)
-//!   - retry-on-deadlock closure form. Re-runs the closure up to `n`
+//! - [`DB::transaction_with_attempts`](crate::DB::transaction_with_attempts) -
+//!   retry-on-deadlock closure form. Re-runs the closure up to `n`
 //!   times when the inner `FrameworkError` looks like a serialization
 //!   failure or deadlock (Postgres SQLSTATE `40001` / `40P01`, or any
 //!   error containing the case-insensitive substring `"deadlock"`).

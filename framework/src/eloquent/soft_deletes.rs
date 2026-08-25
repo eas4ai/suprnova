@@ -72,8 +72,8 @@ where
 /// - `Model::query().with_trashed()` - equivalent to the static
 ///   `Model::with_trashed()`, but discoverable from a builder
 ///   you already have in hand.
-/// - `User::query().with_where(("posts", |q: Builder<Post>| q.with_trashed()))`
-///   - the only path through the eager-load closure surface for
+/// - `User::query().with_where(("posts", |q: Builder<Post>| q.with_trashed()))` -
+///   the only path through the eager-load closure surface for
 ///   widening child scope, because the closure receives a
 ///   `Builder<R>` not a `Post`-the-struct.
 /// - `user.posts().with_trashed()` - relation wrappers forward to
