@@ -33,11 +33,6 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
-- **Queue manual: `RedisQueueDriver` does implement `size` and `clear`.** The
-  Introspection section said it returned an "unsupported" error for both and sent
-  you to redis-cli. It counts with `XLEN` plus `ZCARD` and clears by deleting the
-  stream and its delayed sorted set; the "unsupported" error is what the
-  `QueueDriver` trait's own defaults return for a driver that implements neither.
 - **`suprnova serve` runs a frontend-less project.** A project scaffolded with `suprnova new --api` has no `frontend/` directory, and `serve` rejected it as "No frontend directory found. Are you in a Suprnova project directory?" unless you passed `--backend-only`. It now skips the Vite pane and the TypeScript generation that feeds it, and serves the backend. `--frontend-only` still fails on such a project, with a message that says why.
 
 ### Upgrading

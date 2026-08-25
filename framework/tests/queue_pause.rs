@@ -466,22 +466,6 @@ async fn pausable_false_worker_ignores_the_global_pause_signal() {
 // Worker-side pause/resume events (Laravel #61142)
 // ============================================================================
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct WorkerEventJob;
-
-#[async_trait]
-impl Job for WorkerEventJob {
-    fn job_name() -> &'static str {
-        "queue_pause::WorkerEventJob"
-    }
-    fn queue() -> Option<&'static str> {
-        Some("pause_evt_a")
-    }
-    async fn handle(self) -> Result<(), FrameworkError> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 #[serial]
 async fn a_worker_emits_one_paused_and_one_resumed_event_per_named_queue() {
