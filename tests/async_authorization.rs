@@ -619,6 +619,29 @@ fn key_ring() -> SnapshotKeyRing {
     SnapshotKeyRing::new(active, Vec::new()).expect("key ring")
 }
 
+fn rotating_key_rings() -> (SnapshotKeyRing, SnapshotKeyRing) {
+    let old = KeyRecord::new(
+        KeyId::parse("async-key-old").expect("old key id"),
+        RootKey::new(vec![0x51; 32]).expect("old root key"),
+        UnixMillis::new(0),
+        UnixMillis::new(5_000),
+        UnixMillis::new(10_000),
+    )
+    .expect("old key record");
+    let current = KeyRecord::new(
+        KeyId::parse("async-key-current").expect("current key id"),
+        RootKey::new(vec![0x52; 32]).expect("current root key"),
+        UnixMillis::new(1_000),
+        UnixMillis::new(8_000),
+        UnixMillis::new(12_000),
+    )
+    .expect("current key record");
+    (
+        SnapshotKeyRing::new(old.clone(), Vec::new()).expect("old key ring"),
+        SnapshotKeyRing::new(current, vec![old]).expect("overlapping rotated key ring"),
+    )
+}
+
 fn issue_request(expires_at: UnixMillis) -> SubscriptionIssueRequest {
     SubscriptionIssueRequest::new(
         metadata().stream().clone(),
@@ -920,6 +943,59 @@ async fn connect_and_renew_recheck_current_authorization_and_rotate_credentials(
             SubscriptionAuthorizationOperation::Renew,
         ]
     );
+}
+
+#[tokio::test]
+async fn authorized_subscription_retains_the_exact_signed_descriptor_binding_across_rotation() {
+    let ports = ControlledSubscriptionPorts::allowing();
+    let context = trusted_context(ports);
+    let (old_ring, rotated_ring) = rotating_key_rings();
+    let old_service = SubscriptionService::new(old_ring);
+    let rotated_service = SubscriptionService::new(rotated_ring);
+    let request_time = UnixMillis::new(1_000);
+    let request = issue_request(UnixMillis::new(5_000));
+    let old = old_service
+        .issue(&context, request.clone(), request_time)
+        .await
+        .expect("old key descriptor");
+    let current = rotated_service
+        .issue(&context, request, request_time)
+        .await
+        .expect("current key descriptor");
+    let old_authorized = rotated_service
+        .connect(
+            &context,
+            old.descriptor(),
+            old.transport_credential(),
+            UnixMillis::new(1_100),
+        )
+        .await
+        .expect("overlapping old key remains connectable");
+    let current_authorized = rotated_service
+        .connect(
+            &context,
+            current.descriptor(),
+            current.transport_credential(),
+            UnixMillis::new(1_100),
+        )
+        .await
+        .expect("current key connects independently");
+
+    assert_eq!(
+        old_authorized.verified().claims(),
+        current_authorized.verified().claims(),
+        "the descriptor claims are intentionally identical"
+    );
+    assert_ne!(
+        old_authorized.binding(),
+        current_authorized.binding(),
+        "key id and signature are part of the exact descriptor binding"
+    );
+    assert_eq!(
+        format!("{:?}", old_authorized.binding()),
+        "<SubscriptionBinding>"
+    );
+    assert!(!format!("{old_authorized:?}").contains(old.descriptor().as_str()));
 }
 
 #[tokio::test]

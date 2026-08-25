@@ -6,17 +6,20 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use sha2::{Digest as _, Sha256};
 
-use crate::identity::UnixMillis;
+use crate::host::HostScopeFacts;
+use crate::identity::{ContentDigest, UnixMillis};
 
 use super::{
-    AsyncEnvelope, AsyncEnvelopeContext, AsyncMembershipRegistryPort, AuthorizationMemo,
-    AuthorizedSubscription, BoundedEventContracts, BoundedTopics, StreamName, StreamPosition,
-    SubscriptionId, SubscriptionMode, SubscriptionModes, VerifiedSubscriptionDescriptor,
+    AsyncEnvelope, AsyncEnvelopeContext, AsyncMembershipRegistryPort, AsyncPayload,
+    AuthorizationMemo, AuthorizedSubscription, BoundedEventContracts, BoundedTopics, StreamName,
+    StreamPosition, SubscriptionBinding, SubscriptionId, SubscriptionMode, SubscriptionModes,
+    VerifiedSubscriptionDescriptor,
 };
 
 const MIN_DOCUMENT_HANDLE_BYTES: usize = 16;
@@ -25,13 +28,65 @@ const MAX_DOCUMENT_HANDLE_BYTES: usize = 32;
 /// Maximum logical subscriptions retained by one document transport.
 pub const MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS: usize = 128;
 
+/// Compact trusted sharing key for one physical document transport.
+///
+/// The scope binds connection-level host identity and aggregate transport
+/// policy only. Component identity and component contract remain part of each
+/// logical membership's separate authorization memo.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct DocumentAuthorizationScope(ContentDigest);
+
+impl DocumentAuthorizationScope {
+    /// Derives a collision-resistant scope from trusted host facts and policy.
+    pub fn derive(
+        facts: &HostScopeFacts,
+        transport_policy: &ContentDigest,
+    ) -> Result<Self, AsyncTransportError> {
+        let mut digest = Sha256::new();
+        digest.update(b"suprnova-live/document-transport-scope/v1\0");
+        hash_document_scope_part(&mut digest, facts.scope().as_bytes());
+        hash_optional_document_scope_part(
+            &mut digest,
+            facts.session().map(|value| value.digest().as_bytes()),
+        );
+        hash_optional_document_scope_part(
+            &mut digest,
+            facts.principal().map(|value| value.digest().as_bytes()),
+        );
+        hash_optional_document_scope_part(
+            &mut digest,
+            facts.tenant().map(|value| value.digest().as_bytes()),
+        );
+        hash_document_scope_part(&mut digest, transport_policy.as_bytes());
+        let bytes: [u8; 32] = digest.finalize().into();
+        ContentDigest::from_bytes(&bytes)
+            .map(Self)
+            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))
+    }
+
+    /// Returns the canonical non-secret sharing key for trusted host storage.
+    #[must_use]
+    pub fn to_base64url(&self) -> String {
+        self.0.to_base64url()
+    }
+}
+
+impl fmt::Debug for DocumentAuthorizationScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<DocumentAuthorizationScope:redacted>")
+    }
+}
+
 /// Executor-neutral future returned by asynchronous transport ports.
 pub type AsyncTransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Result of closing one logical or document transport session.
+/// Result of accepting one logical or document close transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseDisposition {
     /// This call performed the close transition.
+    ///
+    /// For document membership removal, this means routing authority was
+    /// detached; provider cleanup may remain owned by the retirement lane.
     Closed,
     /// The session had already completed its close transition.
     AlreadyClosed,
@@ -309,7 +364,9 @@ pub enum TransportMembershipOperation {
 pub struct AsyncTransportAuthorityRequest<'a> {
     operation: TransportMembershipOperation,
     descriptor: &'a VerifiedSubscriptionDescriptor,
+    binding: &'a SubscriptionBinding,
     subscription: &'a SubscriptionId,
+    document_scope: &'a DocumentAuthorizationScope,
     document_origin: &'a VerifiedOrigin,
     document_kind: DocumentTransportKind,
     document_handle: &'a DocumentTransportHandle,
@@ -328,10 +385,22 @@ impl<'a> AsyncTransportAuthorityRequest<'a> {
         self.descriptor
     }
 
+    /// Returns the compact binding of the exact signed descriptor wire.
+    #[must_use]
+    pub const fn binding(self) -> &'a SubscriptionBinding {
+        self.binding
+    }
+
     /// Returns the exact signed logical routing identity.
     #[must_use]
     pub const fn subscription(self) -> &'a SubscriptionId {
         self.subscription
+    }
+
+    /// Returns the trusted physical document authorization scope.
+    #[must_use]
+    pub const fn document_scope(self) -> &'a DocumentAuthorizationScope {
+        self.document_scope
     }
 
     /// Returns the exact normalized origin owning the physical document transport.
@@ -362,6 +431,8 @@ impl fmt::Debug for AsyncTransportAuthorityRequest<'_> {
             .field("document_origin", &self.document_origin)
             .field("document_kind", &self.document_kind)
             .field("document_handle", &self.document_handle)
+            .field("document_scope", &self.document_scope)
+            .field("binding", &self.binding)
             .field("descriptor", &"<redacted>")
             .finish()
     }
@@ -375,6 +446,7 @@ impl fmt::Debug for AsyncTransportAuthorityRequest<'_> {
 /// The authorization memo is Task 2's binding of component contract and host
 /// scope; the remaining values are compared independently here.
 pub struct AsyncTransportAuthorityValidation {
+    expected_document_scope: DocumentAuthorizationScope,
     expected_memo: AuthorizationMemo,
     expected_stream: StreamName,
     expected_topics: BoundedTopics,
@@ -388,6 +460,7 @@ impl AsyncTransportAuthorityValidation {
     /// Accepts a coherent fresh host snapshot; stale or drifted facts stay closed.
     pub fn accept_current(
         &mut self,
+        document_scope: &DocumentAuthorizationScope,
         authorization_memo: &AuthorizationMemo,
         stream: &StreamName,
         topics: &BoundedTopics,
@@ -400,7 +473,8 @@ impl AsyncTransportAuthorityValidation {
             )));
             return false;
         }
-        let exact_current = authorization_memo == &self.expected_memo
+        let exact_current = document_scope == &self.expected_document_scope
+            && authorization_memo == &self.expected_memo
             && stream == &self.expected_stream
             && topics == &self.expected_topics
             && events == &self.expected_events
@@ -470,6 +544,8 @@ impl DocumentTransportLimits {
 pub struct AuthorizedTransportSubscription {
     context: AsyncEnvelopeContext,
     verified: VerifiedSubscriptionDescriptor,
+    binding: SubscriptionBinding,
+    document_scope: DocumentAuthorizationScope,
     origin: VerifiedOrigin,
     authorized_modes: SubscriptionModes,
     authority: Arc<dyn AsyncTransportAuthorityPort>,
@@ -482,11 +558,16 @@ impl AuthorizedTransportSubscription {
     /// resolved for Task 2 authorization. Construction captures descriptor-bound
     /// facts only; it does not replace the fresh authority-port checks performed
     /// whenever an external add or remove consumes this request.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "transport admission keeps each independently trusted authority input explicit"
+    )]
     pub fn new(
         authorized: &AuthorizedSubscription,
         subscription: SubscriptionId,
         registry: &dyn AsyncMembershipRegistryPort,
         origin: VerifiedOrigin,
+        document_scope: DocumentAuthorizationScope,
         authorized_modes: SubscriptionModes,
         authority: Arc<dyn AsyncTransportAuthorityPort>,
         now: UnixMillis,
@@ -501,6 +582,8 @@ impl AuthorizedTransportSubscription {
         Ok(Self {
             context,
             verified: authorized.verified().clone(),
+            binding: authorized.binding().clone(),
+            document_scope,
             origin,
             authorized_modes,
             authority,
@@ -531,8 +614,16 @@ impl AuthorizedTransportSubscription {
         &self.origin
     }
 
-    fn authorization_memo(&self) -> &AuthorizationMemo {
-        self.verified.claims().authorization_memo()
+    /// Returns the compact binding of the exact signed descriptor wire.
+    #[must_use]
+    pub const fn binding(&self) -> &SubscriptionBinding {
+        &self.binding
+    }
+
+    /// Returns the trusted physical document sharing scope.
+    #[must_use]
+    pub const fn document_scope(&self) -> &DocumentAuthorizationScope {
+        &self.document_scope
     }
 
     async fn validate_current(
@@ -547,6 +638,7 @@ impl AuthorizedTransportSubscription {
         }
         let claims = self.verified.claims();
         let mut validation = AsyncTransportAuthorityValidation {
+            expected_document_scope: self.document_scope.clone(),
             expected_memo: claims.authorization_memo().clone(),
             expected_stream: claims.stream().clone(),
             expected_topics: claims.topics().clone(),
@@ -560,7 +652,9 @@ impl AuthorizedTransportSubscription {
                 AsyncTransportAuthorityRequest {
                     operation,
                     descriptor: &self.verified,
+                    binding: &self.binding,
                     subscription: self.subscription(),
+                    document_scope: &document.authorization_scope,
                     document_origin: &document.origin,
                     document_kind: document.kind,
                     document_handle: &document.handle,
@@ -592,40 +686,50 @@ pub trait AsyncEventSource: Send + Sync {
     fn subscribe<'a>(
         &'a self,
         request: &'a AuthorizedTransportSubscription,
-    ) -> AsyncTransportFuture<'a, Result<Box<dyn AsyncEventSession>, AsyncTransportError>>;
+    ) -> AsyncTransportFuture<'a, Result<Pin<Box<dyn AsyncEventSession>>, AsyncTransportError>>;
 }
 
 /// Host-neutral session for one currently authorized logical subscription.
 ///
-/// `next` must be cancellation-safe: dropping a pending future may not consume
-/// or reorder a message. This permits bounded document fan-in without binding
-/// the engine to an executor or spawning detached tasks. Implementations must
-/// also release provider resources when dropped; `close` is the explicit
-/// graceful-shutdown path, not the only cleanup safety net.
+/// Persistent polling avoids allocating and dropping one boxed future per
+/// membership on every document wake. Implementations must not consume or
+/// reorder a message when a poll returns `Pending`, and must release provider
+/// resources when dropped; `poll_close` is the explicit graceful-shutdown path.
 pub trait AsyncEventSession: Send {
     /// Returns the exact authoritative baseline bound to this logical session.
     fn baseline(&self) -> StreamPosition;
 
     /// Returns the next bounded authorized envelope, or `None` after completion.
-    fn next<'a>(
-        &'a mut self,
-    ) -> AsyncTransportFuture<'a, Result<Option<AsyncEnvelope>, AsyncTransportError>>;
+    fn poll_next(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<Option<AsyncEnvelope>, AsyncTransportError>>;
 
     /// Closes this logical session idempotently.
     ///
-    /// Like `next`, this operation must be cancellation-safe. A caller may
-    /// drop the returned future and invoke `close` again during controlled
-    /// shutdown without losing the logical session's cleanup authority.
-    fn close<'a>(
-        &'a mut self,
-    ) -> AsyncTransportFuture<'a, Result<CloseDisposition, AsyncTransportError>>;
+    /// A `Pending` or failed close retains cleanup authority in the document's
+    /// bounded retirement lane and may be polled again without duplicating the
+    /// logical close transition.
+    fn poll_close(
+        self: Pin<&mut Self>,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<CloseDisposition, AsyncTransportError>>;
 }
 
 struct LogicalTransportSession {
-    authorization: VerifiedSubscriptionDescriptor,
+    authorization: SubscriptionBinding,
     subscription: SubscriptionId,
-    session: Box<dyn AsyncEventSession>,
-    retiring: bool,
+    session: Pin<Box<dyn AsyncEventSession>>,
+}
+
+struct RetiringTransportSession {
+    session: Pin<Box<dyn AsyncEventSession>>,
+}
+
+enum DocumentPoll {
+    Envelope(AsyncEnvelope),
+    Retired,
+    Empty,
 }
 
 /// Bounded fan-in owner for compatible logical subscriptions.
@@ -634,9 +738,12 @@ pub struct DocumentTransportSession {
     kind: DocumentTransportKind,
     handle: DocumentTransportHandle,
     limits: DocumentTransportLimits,
-    authorization_scope: Option<AuthorizationMemo>,
+    authorization_scope: DocumentAuthorizationScope,
     memberships: Vec<LogicalTransportSession>,
+    retiring: Vec<RetiringTransportSession>,
     cursor: usize,
+    cleanup_cursor: usize,
+    last_cleanup_error: Option<AsyncTransportErrorKind>,
     closing: bool,
     closed: bool,
 }
@@ -649,15 +756,19 @@ impl DocumentTransportSession {
         kind: DocumentTransportKind,
         handle: DocumentTransportHandle,
         limits: DocumentTransportLimits,
+        authorization_scope: DocumentAuthorizationScope,
     ) -> Self {
         Self {
             origin,
             kind,
             handle,
             limits,
-            authorization_scope: None,
+            authorization_scope,
             memberships: Vec::new(),
+            retiring: Vec::new(),
             cursor: 0,
+            cleanup_cursor: 0,
+            last_cleanup_error: None,
             closing: false,
             closed: false,
         }
@@ -687,6 +798,18 @@ impl DocumentTransportSession {
         self.memberships.len()
     }
 
+    /// Returns the bounded logical sessions detached from routing but still cleaning up.
+    #[must_use]
+    pub fn retiring_count(&self) -> usize {
+        self.retiring.len()
+    }
+
+    /// Returns the most recently observed provider cleanup failure, if any.
+    #[must_use]
+    pub const fn last_cleanup_error(&self) -> Option<AsyncTransportErrorKind> {
+        self.last_cleanup_error
+    }
+
     /// Returns whether one logical subscription is currently multiplexed here.
     #[must_use]
     pub fn contains_membership(&self, subscription: &SubscriptionId) -> bool {
@@ -701,13 +824,14 @@ impl DocumentTransportSession {
         source: &dyn AsyncEventSource,
         authorization: AuthorizedTransportSubscription,
     ) -> Result<(), AsyncTransportError> {
-        self.validate_add(&authorization)?;
+        self.validate_common(&authorization)?;
         authorization
             .validate_current(self, TransportMembershipOperation::Subscribe)
             .await?;
-        let mut session = source.subscribe(&authorization).await?;
+        self.validate_add_after_authority(&authorization)?;
+        let session = source.subscribe(&authorization).await?;
         if session.baseline() != authorization.baseline() {
-            let _ = session.close().await;
+            self.retire_opened_session(session).await;
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::BaselineMismatch,
             ));
@@ -716,22 +840,21 @@ impl DocumentTransportSession {
             .validate_current(self, TransportMembershipOperation::Subscribe)
             .await
         {
-            let _ = session.close().await;
+            self.retire_opened_session(session).await;
             return Err(error);
         }
-        if self.authorization_scope.is_none() {
-            self.authorization_scope = Some(authorization.authorization_memo().clone());
-        }
         self.memberships.push(LogicalTransportSession {
-            authorization: authorization.verified,
+            authorization: authorization.binding,
             subscription: authorization.context.subscription().clone(),
             session,
-            retiring: false,
         });
         Ok(())
     }
 
-    /// Removes and closes one membership only with matching current authorization.
+    /// Removes one membership from routing with matching current authorization.
+    ///
+    /// Provider cleanup is polled once immediately and otherwise remains owned
+    /// by the bounded retirement lane, so it cannot block healthy siblings.
     pub async fn remove(
         &mut self,
         authorization: &AuthorizedTransportSubscription,
@@ -749,16 +872,14 @@ impl DocumentTransportSession {
                 AsyncTransportErrorKind::UnknownMembership,
             ));
         };
-        if self.memberships[index].authorization != authorization.verified {
+        if self.memberships[index].authorization != authorization.binding {
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::DescriptorMismatch,
             ));
         }
-        self.memberships[index].retiring = true;
-        let disposition = self.memberships[index].session.close().await?;
-        self.memberships.remove(index);
-        self.repair_cursor_after_removal(index);
-        Ok(disposition)
+        let retirement = self.detach_membership(index);
+        self.poll_exact_retirement_once(retirement).await;
+        Ok(CloseDisposition::Closed)
     }
 
     /// Waits for the next envelope from any logical session in bounded round-robin order.
@@ -767,59 +888,10 @@ impl DocumentTransportSession {
             return Err(AsyncTransportError::new(AsyncTransportErrorKind::Closed));
         }
         loop {
-            if self.memberships.is_empty() {
-                return Ok(None);
-            }
-            if let Some(index) = self.memberships.iter().position(|logical| logical.retiring) {
-                self.memberships[index].session.close().await?;
-                self.memberships.remove(index);
-                self.repair_cursor_after_removal(index);
-                continue;
-            }
-            let (index, result) = poll_fn(|task| {
-                let count = self.memberships.len();
-                for offset in 0..count {
-                    let index = (self.cursor + offset) % count;
-                    let polled = {
-                        let mut next = self.memberships[index].session.next();
-                        next.as_mut().poll(task)
-                    };
-                    if let Poll::Ready(result) = polled {
-                        return Poll::Ready((index, result));
-                    }
-                }
-                Poll::Pending
-            })
-            .await;
-            match result {
-                Err(error) => {
-                    self.memberships[index].retiring = true;
-                    if self.memberships[index].session.close().await.is_ok() {
-                        self.memberships.remove(index);
-                        self.repair_cursor_after_removal(index);
-                    }
-                    return Err(error);
-                }
-                Ok(Some(envelope)) => {
-                    if envelope.subscription() != &self.memberships[index].subscription {
-                        self.memberships[index].retiring = true;
-                        if self.memberships[index].session.close().await.is_ok() {
-                            self.memberships.remove(index);
-                            self.repair_cursor_after_removal(index);
-                        }
-                        return Err(AsyncTransportError::new(
-                            AsyncTransportErrorKind::RoutingMismatch,
-                        ));
-                    }
-                    self.cursor = (index + 1) % self.memberships.len();
-                    return Ok(Some(envelope));
-                }
-                Ok(None) => {
-                    self.memberships[index].retiring = true;
-                    self.memberships[index].session.close().await?;
-                    self.memberships.remove(index);
-                    self.repair_cursor_after_removal(index);
-                }
+            match poll_fn(|task| self.poll_document_next(task)).await? {
+                DocumentPoll::Envelope(envelope) => return Ok(Some(envelope)),
+                DocumentPoll::Retired => {}
+                DocumentPoll::Empty => return Ok(None),
             }
         }
     }
@@ -830,48 +902,41 @@ impl DocumentTransportSession {
             return Ok(CloseDisposition::AlreadyClosed);
         }
         self.closing = true;
-        let mut first_error = None;
-        let mut index = self.memberships.len();
-        while index > 0 {
-            index -= 1;
-            match self.memberships[index].session.close().await {
-                Ok(_) => {
-                    self.memberships.remove(index);
-                }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
+        while !self.memberships.is_empty() {
+            self.detach_membership(self.memberships.len() - 1);
+        }
+        poll_fn(|task| {
+            let error = self.poll_all_retirements_once(task);
+            if self.retiring.is_empty() {
+                self.closed = true;
+                self.closing = false;
+                Poll::Ready(Ok(CloseDisposition::Closed))
+            } else if let Some(error) = error {
+                Poll::Ready(Err(error))
+            } else {
+                Poll::Pending
             }
-        }
-        self.repair_cursor();
-        self.closed = self.memberships.is_empty();
-        self.closing = !self.closed;
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(CloseDisposition::Closed),
-        }
+        })
+        .await
     }
 
-    fn validate_add(
+    fn validate_add_after_authority(
         &self,
         authorization: &AuthorizedTransportSubscription,
     ) -> Result<(), AsyncTransportError> {
-        self.validate_common(authorization)?;
         if let Some(existing) = self
             .memberships
             .iter()
             .find(|logical| &logical.subscription == authorization.subscription())
         {
-            let kind = if existing.authorization == authorization.verified {
+            let kind = if existing.authorization == authorization.binding {
                 AsyncTransportErrorKind::DuplicateMembership
             } else {
                 AsyncTransportErrorKind::DescriptorMismatch
             };
             return Err(AsyncTransportError::new(kind));
         }
-        if self.memberships.len() == self.limits.max_memberships() {
+        if self.memberships.len() + self.retiring.len() >= self.limits.max_memberships() {
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::MembershipLimit,
             ));
@@ -891,11 +956,7 @@ impl DocumentTransportSession {
                 AsyncTransportErrorKind::OriginMismatch,
             ));
         }
-        if self
-            .authorization_scope
-            .as_ref()
-            .is_some_and(|scope| scope != authorization.authorization_memo())
-        {
+        if self.authorization_scope != *authorization.document_scope() {
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::AuthorizationScopeMismatch,
             ));
@@ -917,6 +978,137 @@ impl DocumentTransportSession {
         }
         self.repair_cursor();
     }
+
+    fn detach_membership(&mut self, index: usize) -> usize {
+        let logical = self.memberships.remove(index);
+        self.repair_cursor_after_removal(index);
+        self.retiring.push(RetiringTransportSession {
+            session: logical.session,
+        });
+        self.retiring.len() - 1
+    }
+
+    async fn retire_opened_session(&mut self, session: Pin<Box<dyn AsyncEventSession>>) {
+        self.retiring.push(RetiringTransportSession { session });
+        let index = self.retiring.len() - 1;
+        self.poll_exact_retirement_once(index).await;
+    }
+
+    async fn poll_exact_retirement_once(&mut self, index: usize) {
+        poll_fn(|task| {
+            self.poll_retirement_at(index, task);
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    fn poll_retirement_at(&mut self, index: usize, task: &mut Context<'_>) {
+        if index >= self.retiring.len() {
+            return;
+        }
+        match self.retiring[index].session.as_mut().poll_close(task) {
+            Poll::Ready(Ok(_)) => {
+                self.retiring.remove(index);
+                self.repair_cleanup_cursor();
+            }
+            Poll::Ready(Err(error)) => {
+                self.last_cleanup_error = Some(error.kind());
+                self.cleanup_cursor = (index + 1) % self.retiring.len();
+            }
+            Poll::Pending => {
+                self.cleanup_cursor = (index + 1) % self.retiring.len();
+            }
+        }
+    }
+
+    fn poll_one_retirement(&mut self, task: &mut Context<'_>) {
+        if self.retiring.is_empty() {
+            return;
+        }
+        let index = self.cleanup_cursor % self.retiring.len();
+        self.poll_retirement_at(index, task);
+    }
+
+    fn poll_all_retirements_once(&mut self, task: &mut Context<'_>) -> Option<AsyncTransportError> {
+        let target = self.retiring.len();
+        let mut first_error = None;
+        for _ in 0..target {
+            if self.retiring.is_empty() {
+                break;
+            }
+            let index = self.cleanup_cursor % self.retiring.len();
+            match self.retiring[index].session.as_mut().poll_close(task) {
+                Poll::Ready(Ok(_)) => {
+                    self.retiring.remove(index);
+                    self.repair_cleanup_cursor();
+                }
+                Poll::Ready(Err(error)) => {
+                    self.last_cleanup_error = Some(error.kind());
+                    first_error.get_or_insert(error);
+                    self.cleanup_cursor = (index + 1) % self.retiring.len();
+                }
+                Poll::Pending => {
+                    self.cleanup_cursor = (index + 1) % self.retiring.len();
+                }
+            }
+        }
+        first_error
+    }
+
+    fn poll_document_next(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<DocumentPoll, AsyncTransportError>> {
+        self.poll_one_retirement(task);
+        if self.memberships.is_empty() {
+            return Poll::Ready(Ok(DocumentPoll::Empty));
+        }
+        let count = self.memberships.len();
+        for offset in 0..count {
+            let index = (self.cursor + offset) % self.memberships.len();
+            let result = self.memberships[index].session.as_mut().poll_next(task);
+            let Poll::Ready(result) = result else {
+                continue;
+            };
+            match result {
+                Err(error) => {
+                    let retirement = self.detach_membership(index);
+                    self.poll_retirement_at(retirement, task);
+                    return Poll::Ready(Err(error));
+                }
+                Ok(None) => {
+                    let retirement = self.detach_membership(index);
+                    self.poll_retirement_at(retirement, task);
+                    return Poll::Ready(Ok(DocumentPoll::Retired));
+                }
+                Ok(Some(envelope)) => {
+                    if envelope.subscription() != &self.memberships[index].subscription {
+                        let retirement = self.detach_membership(index);
+                        self.poll_retirement_at(retirement, task);
+                        return Poll::Ready(Err(AsyncTransportError::new(
+                            AsyncTransportErrorKind::RoutingMismatch,
+                        )));
+                    }
+                    if matches!(envelope.payload(), AsyncPayload::Complete(_)) {
+                        let retirement = self.detach_membership(index);
+                        self.poll_retirement_at(retirement, task);
+                    } else {
+                        self.cursor = (index + 1) % self.memberships.len();
+                    }
+                    return Poll::Ready(Ok(DocumentPoll::Envelope(envelope)));
+                }
+            }
+        }
+        Poll::Pending
+    }
+
+    fn repair_cleanup_cursor(&mut self) {
+        if self.retiring.is_empty() {
+            self.cleanup_cursor = 0;
+        } else {
+            self.cleanup_cursor %= self.retiring.len();
+        }
+    }
 }
 
 impl fmt::Debug for DocumentTransportSession {
@@ -927,6 +1119,7 @@ impl fmt::Debug for DocumentTransportSession {
             .field("kind", &self.kind)
             .field("handle", &self.handle)
             .field("membership_count", &self.memberships.len())
+            .field("retiring_count", &self.retiring.len())
             .field("max_memberships", &self.limits.max_memberships())
             .field("closing", &self.closing)
             .field("closed", &self.closed)
@@ -936,6 +1129,21 @@ impl fmt::Debug for DocumentTransportSession {
 
 fn invalid_origin() -> AsyncTransportError {
     AsyncTransportError::new(AsyncTransportErrorKind::InvalidOrigin)
+}
+
+fn hash_document_scope_part(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn hash_optional_document_scope_part(digest: &mut Sha256, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            hash_document_scope_part(digest, value);
+        }
+        None => digest.update([0]),
+    }
 }
 
 fn valid_origin_host(host: &str) -> bool {

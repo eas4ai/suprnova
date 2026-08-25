@@ -153,8 +153,12 @@ Acceptance criteria:
   initial SSR state to the first required event; absent replay from that
   position requires refresh.
 - The browser owns one physical document transport per compatible `(origin,
-  transport, authorization scope)` and multiplexes island subscriptions through
-  it. SSE uses an authenticated same-origin membership control path around a
+  transport, document authorization scope)` and multiplexes island subscriptions
+  through it. The document scope is a compact collision-resistant derivation of
+  trusted aggregate scope, principal, session, tenant, and explicit host
+  transport-policy identity; it excludes component name and component contract,
+  which remain isolated in each logical membership's authorization memo. SSE
+  uses an authenticated same-origin membership control path around a
   non-authority document-transport handle; WebSocket uses bounded
   subscribe/unsubscribe frames.
 - A cookie-authorized WebSocket upgrade rejects missing, null, or unapproved
@@ -169,7 +173,10 @@ Acceptance criteria:
   session, tenant, and aggregate scope), active logical membership, registered
   stream, resolved topics, full event contracts, canonical subscription modes,
   and exact document/control authority; the framework independently rechecks
-  exclusive descriptor expiry and exact agreement with the Task 2 descriptor.
+  exclusive descriptor expiry, the current document authorization scope, and a
+  compact binding of the exact signed Task 2 descriptor wire. That binding
+  includes signing key ID and signature, so equal claims signed during key
+  rotation cannot replace, remove, or control one another's membership.
   A retained descriptor-bound request, document handle, or browser control is
   never reusable current authority.
 - Subscription establishment validates before source work and again after the
@@ -179,6 +186,13 @@ Acceptance criteria:
   reauthorizes, while completion, revocation retirement, cancellation recovery,
   and controlled shutdown retain internal cleanup authority after browser
   credentials expire.
+- Logical completion, source failure, routing failure, removal, and shutdown
+  detach a membership from active routing before cleanup. The document retains
+  cleanup ownership in the same hard-bounded retirement lane and polls it fairly
+  through a persistent executor-neutral interface; a pending or failing close
+  cannot stall active siblings, monopolize a wake, spawn an unowned task, or
+  permit post-terminal delivery. Active plus retiring sessions share the same
+  membership ceiling.
 - Current registered `SubscriptionModes` are authority. The physical document
   kind is compatibility only: SSE-only cannot use WebSocket, WebSocket-only
   cannot use SSE, and any same-name mode-set revision invalidates a retained
@@ -205,6 +219,10 @@ Acceptance criteria:
 - Stream messages never carry trusted replacement HTML, snapshots, executable
   effects, or keyed DOM fragments.
 - Gaps, duplicates, reconnects, and stream completion have explicit behavior.
+  `Complete` is terminal: the membership is detached before its single terminal
+  envelope is returned and all later provider items are ignored. A typed
+  `Error` payload is nonterminal protocol information; a source/session failure
+  is terminal and retires only that logical membership.
 - Backpressure bounds server buffers and slow-client resource use.
 - Stream lifetime, cancellation, heartbeat, and deployment shutdown are
   observable and bounded.
@@ -255,6 +273,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Bound logical membership to the exact signed-descriptor digest,
+  including key ID and signature, rather than claims equality. Split physical
+  `DocumentAuthorizationScope` from component-specific authorization memos so
+  heterogeneous component contracts may share one connection only under exact
+  principal/session/tenant/aggregate-policy identity. Replaced per-wake boxed
+  read/close futures and inline close waits with persistent session polling and
+  a bounded document-owned retirement lane. `Complete` now detaches before its
+  single terminal delivery and suppresses all later source output; typed Error
+  payloads remain nonterminal.
 - 2026-08-25 -- Replaced retained transport admission with a fresh host
   authority port at every external add/remove boundary. Add validates both
   before and after asynchronous source subscription; authority loss, exclusive

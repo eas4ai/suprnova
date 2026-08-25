@@ -289,7 +289,11 @@ impl WebSocketCodec {
         to_canonical_bytes(&canonical, &control_limits()?).map_err(|_| invalid_envelope())
     }
 
-    /// Decodes exact control fields and enforces current membership expectations.
+    /// Decodes exact control fields and rejects unknown removals.
+    ///
+    /// Existing Subscribe identities continue to the authenticated membership
+    /// boundary so it can distinguish an exact duplicate from another signed
+    /// descriptor attempting to replace the membership.
     pub fn decode_control(
         &self,
         frame: WebSocketFrame<'_>,
@@ -306,13 +310,6 @@ impl WebSocketCodec {
         let wire: ControlWire = serde_json::from_value(value).map_err(|_| invalid_envelope())?;
         let control = wire.into_control()?;
         match &control {
-            WebSocketControlRecord::Subscribe(subscription)
-                if document.contains_membership(subscription) =>
-            {
-                Err(AsyncTransportError::new(
-                    AsyncTransportErrorKind::DuplicateMembership,
-                ))
-            }
             WebSocketControlRecord::Unsubscribe(subscription)
                 if !document.contains_membership(subscription) =>
             {

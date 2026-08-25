@@ -769,6 +769,7 @@ impl fmt::Debug for IssuedSubscription {
 /// Connect-authorized subscription with a separate operation-scoped renewal credential.
 pub struct AuthorizedSubscription {
     verified: VerifiedSubscriptionDescriptor,
+    binding: SubscriptionBinding,
     renewal_credential: TransportCredential,
 }
 
@@ -777,6 +778,15 @@ impl AuthorizedSubscription {
     #[must_use]
     pub const fn verified(&self) -> &VerifiedSubscriptionDescriptor {
         &self.verified
+    }
+
+    /// Returns the compact digest of the exact signed descriptor wire.
+    ///
+    /// Unlike verified claims, this binding includes the signing key identity
+    /// and signature and therefore remains distinct during rotation overlap.
+    #[must_use]
+    pub const fn binding(&self) -> &SubscriptionBinding {
+        &self.binding
     }
 
     /// Returns the separate secret accepted only at the renewal boundary.
@@ -918,6 +928,7 @@ impl SubscriptionService {
         .await?;
         Ok(AuthorizedSubscription {
             verified,
+            binding,
             renewal_credential,
         })
     }

@@ -252,6 +252,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Required every connect-authorized subscription to retain a
+  compact digest of its exact signed descriptor serialization, including key ID
+  and signature. Transport membership/control compares that binding rather than
+  verified claims equality, preserving distinct authority for simultaneously
+  valid rotation keys without exposing descriptor or credential material in
+  debug output, URLs, SSE IDs, history, or errors.
 - 2026-08-25 -- Made WebSocket frame shape and raw byte ceilings a pre-decode
   boundary: complete text-envelope frames allow at most 65,536 bytes and control
   frames at most 512 bytes, with first-over and very-large valid/invalid UTF-8

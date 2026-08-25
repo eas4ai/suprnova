@@ -383,6 +383,13 @@ required. One host-owned transaction consumes Connect and persists Renew, or
 consumes Renew and persists Connect, after all non-mutating checks succeed.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
 
+**Subscription binding**:
+A compact non-secret digest of the exact signed subscription-descriptor wire,
+including signing key ID and signature. It distinguishes equal claims signed
+under overlapping keys and is compared at membership/control boundaries without
+making the descriptor or credential loggable.
+_Avoid_: claims hash, authorization memo, transport credential, subscription ID
+
 **Subscription ID**:
 A bounded opaque non-secret identity for routing one authorized logical
 subscription inside a compatible multiplexed document transport. It must match
@@ -421,6 +428,21 @@ not the subscription descriptor, browser control record, document transport
 handle, physical adapter kind, or a reusable caller-constructible token.
 _Avoid_: authorized transport token, document-handle authority, cached membership check, mode hint
 
+**Document authorization scope**:
+The compact collision-resistant physical-transport sharing key derived only
+from trusted aggregate scope, principal, session, tenant, and explicit host
+transport-policy identity. It deliberately excludes component name and contract;
+each logical membership still requires its own component authorization memo and
+exact subscription binding.
+_Avoid_: component memo, browser scope string, document handle, origin, transport kind
+
+**Transport retirement lane**:
+The document-owned hard-bounded collection of logical sessions already detached
+from active routing but still requiring idempotent provider cleanup. Persistent
+fair close polling retains ownership across pending calls, failures, cancellation,
+completion, authorization expiry, and shutdown without spawning detached work.
+_Avoid_: active membership, background leak, unbounded cleanup queue, Task 5 backpressure buffer
+
 **Asynchronous event envelope**:
 The independently versioned canonical bounded message that binds an active
 subscription ID, registered stream, monotonic position, and one closed
@@ -457,7 +479,7 @@ _Avoid_: retryable provider failure, reusable credential, Task 3 sequence result
 
 **Document transport**:
 One physical SSE or WebSocket connection owned by a browser document for a
-compatible origin, transport kind, and authorization scope. It multiplexes
+compatible origin, transport kind, and document authorization scope. It multiplexes
 bounded subscription identities; it is not one connection per Live island.
 _Avoid_: island socket, global shared socket, subscription authority, event bus
 

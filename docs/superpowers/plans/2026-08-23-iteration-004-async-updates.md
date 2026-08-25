@@ -309,15 +309,17 @@
 
   pub trait AsyncEventSession: Send {
       fn baseline(&self) -> StreamPosition;
-      fn next<'a>(&'a mut self) -> AsyncFuture<'a, Result<Option<AsyncEnvelope>, AsyncError>>;
-      fn close<'a>(&'a mut self) -> AsyncFuture<'a, Result<CloseDisposition, AsyncError>>;
+      fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>)
+          -> Poll<Result<Option<AsyncEnvelope>, AsyncError>>;
+      fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>)
+          -> Poll<Result<CloseDisposition, AsyncError>>;
   }
 
   pub struct DocumentTransportSession {
       origin: VerifiedOrigin,
       transport: DocumentTransportKind,
       memberships: BoundedSubscriptionMemberships,
-      sessions: BoundedLogicalSessions,
+      retiring: BoundedLogicalSessions,
   }
   ```
 
@@ -337,6 +339,16 @@
   after `subscribe().await` immediately before commit; failed post-validation
   closes/disposes the opened session once and installs nothing. Internal
   retirement and shutdown remain independent from expired browser authority.
+
+  The connect-authorized result retains a compact redacted binding of the exact
+  signed descriptor wire. Duplicate, remove, and control paths compare that
+  binding, so equal claims signed under overlapping key IDs remain distinct.
+  Physical sharing instead uses a trusted `DocumentAuthorizationScope` derived
+  from aggregate scope, session, principal, tenant, and host transport policy;
+  component identity remains in each logical authorization memo. Active and
+  retiring logical sessions share one hard bound. Completion detaches before its
+  one terminal envelope, typed Error payloads remain nonterminal, and persistent
+  fair close polling prevents pending/failing cleanup from stalling siblings.
 
   `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus
   heartbeat comments. SSE membership changes use authenticated same-origin
