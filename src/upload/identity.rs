@@ -87,6 +87,22 @@ pub enum UploadErrorKind {
     UploadExpired,
     /// The owning upload service lifecycle has retired.
     ServiceRetired,
+    /// Server-side quarantine identity generation was unavailable.
+    RandomUnavailable,
+    /// The host quarantine provider could not complete bounded I/O.
+    ProviderUnavailable,
+    /// A generated quarantine object already existed.
+    StorageConflict,
+    /// The streaming request body ended with a transport failure.
+    BodyInterrupted,
+    /// Declared chunk or whole-file integrity did not match authoritative bytes.
+    ChecksumMismatch,
+    /// The complete authoritative byte range was not present.
+    IncompleteTransfer,
+    /// Per-upload or provider-wide cancellation stopped the operation.
+    TransferCanceled,
+    /// A bounded descriptor, chunk, queue, or memory permit was unavailable.
+    ResourceExhausted,
 }
 
 impl UploadErrorKind {
@@ -119,6 +135,14 @@ impl UploadErrorKind {
             Self::FileCountExceeded => "upload_file_count_exceeded",
             Self::UploadExpired => "upload_expired",
             Self::ServiceRetired => "upload_service_retired",
+            Self::RandomUnavailable => "upload_random_unavailable",
+            Self::ProviderUnavailable => "upload_provider_unavailable",
+            Self::StorageConflict => "upload_storage_conflict",
+            Self::BodyInterrupted => "upload_body_interrupted",
+            Self::ChecksumMismatch => "upload_checksum_mismatch",
+            Self::IncompleteTransfer => "upload_incomplete_transfer",
+            Self::TransferCanceled => "upload_transfer_canceled",
+            Self::ResourceExhausted => "upload_resource_exhausted",
         }
     }
 }

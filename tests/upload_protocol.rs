@@ -138,6 +138,7 @@ fn upload_limits_cover_every_amplification_dimension_and_reject_unbounded_profil
     assert!(limits.max_files_per_field() > 0);
     assert!(limits.max_pending_per_scope() >= limits.max_files_per_field());
     assert!(limits.max_file_bytes() >= limits.max_chunk_bytes() as u64);
+    assert!(limits.max_chunks_per_file() > 0);
     assert!(limits.max_aggregate_bytes() >= limits.max_file_bytes());
     assert!(limits.max_in_flight_bytes() >= limits.max_chunk_bytes());
     assert!(limits.max_concurrent_transfers() > 0);
@@ -154,6 +155,10 @@ fn upload_limits_cover_every_amplification_dimension_and_reject_unbounded_profil
     let mut zero = config;
     zero.max_chunk_bytes = 0;
     assert!(UploadLimits::new(zero).is_err());
+
+    let mut zero_chunks = config;
+    zero_chunks.max_chunks_per_file = 0;
+    assert!(UploadLimits::new(zero_chunks).is_err());
 
     let mut unbounded = config;
     unbounded.max_pending_per_scope = usize::MAX;

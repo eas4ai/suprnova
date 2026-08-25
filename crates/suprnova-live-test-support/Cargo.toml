@@ -14,6 +14,7 @@ default = []
 [dependencies]
 async-trait = "=0.1.92"
 suprnova-live = { path = "../.." }
+tokio = { version = "=1.53.1", features = ["fs", "io-util"] }
 
 [lints.rust]
 missing_docs = "deny"

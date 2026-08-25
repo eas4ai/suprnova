@@ -119,6 +119,8 @@ pub struct UploadLimitConfig {
     pub max_aggregate_bytes: u64,
     /// Maximum bytes accepted by one chunk request.
     pub max_chunk_bytes: usize,
+    /// Maximum accepted chunk records retained for one file.
+    pub max_chunks_per_file: usize,
     /// Maximum aggregate chunk bytes admitted to process memory.
     pub max_in_flight_bytes: usize,
     /// Maximum simultaneously active transfers for one resource owner.
@@ -153,6 +155,7 @@ impl UploadLimitConfig {
             max_file_bytes: 64 * 1024 * 1024,
             max_aggregate_bytes: 256 * 1024 * 1024,
             max_chunk_bytes: 256 * 1024,
+            max_chunks_per_file: 4_096,
             max_in_flight_bytes: 8 * 1024 * 1024,
             max_concurrent_transfers: 8,
             max_creations_per_window: 64,
@@ -189,6 +192,7 @@ impl UploadLimits {
             && config.max_file_bytes > 0
             && config.max_aggregate_bytes > 0
             && config.max_chunk_bytes > 0
+            && config.max_chunks_per_file > 0
             && config.max_in_flight_bytes > 0
             && config.max_concurrent_transfers > 0
             && config.max_creations_per_window > 0
@@ -210,6 +214,7 @@ impl UploadLimits {
             && config.max_file_bytes <= TIB
             && config.max_aggregate_bytes <= 16 * TIB
             && config.max_chunk_bytes <= 64 * 1024 * 1024
+            && config.max_chunks_per_file <= 1_000_000
             && config.max_in_flight_bytes <= 1024 * 1024 * 1024
             && config.max_concurrent_transfers <= 1_024
             && config.max_creations_per_window <= 1_000_000
@@ -255,6 +260,12 @@ impl UploadLimits {
     #[must_use]
     pub const fn max_chunk_bytes(self) -> usize {
         self.0.max_chunk_bytes
+    }
+
+    /// Returns the accepted chunk-record bound for one file.
+    #[must_use]
+    pub const fn max_chunks_per_file(self) -> usize {
+        self.0.max_chunks_per_file
     }
 
     /// Returns the admitted in-flight byte bound.

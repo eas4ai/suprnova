@@ -308,6 +308,12 @@ provider tests and test-support fixtures
             &'a self,
             object: &'a QuarantineObject,
         ) -> UploadFuture<'a, Result<(), UploadError>>;
+        fn read_at<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+            offset: u64,
+            maximum_bytes: usize,
+        ) -> UploadFuture<'a, Result<Bytes, UploadError>>;
         fn read_prefix<'a>(
             &'a self,
             object: &'a QuarantineObject,
@@ -329,7 +335,10 @@ provider tests and test-support fixtures
     }
     ```
 
-    `QuarantinedFileProvider<S: QuarantineStore>` stays in the engine. It creates
+    `read_at` is the bounded primitive required for engine-owned streaming
+    whole-file hashing and recovery; `read_prefix` is the inspection-oriented
+    convenience used by later validation. `QuarantinedFileProvider<S:
+    QuarantineStore>` stays in the engine. It creates
     server-random `QuarantineObject` names, owns path policy, chunk/whole-file
     hashing, revision state, a shared `ResourceOwner`, descriptor/chunk
     `PermitPool`s, `CancellationFlag`, and at most two chunk buffers per active

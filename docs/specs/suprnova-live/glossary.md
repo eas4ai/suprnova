@@ -285,6 +285,18 @@ keeps executor and filesystem choice outside the engine while server-generated
 identity, hashing, lifecycle, and policy remain Live-owned.
 _Avoid_: public storage, client path, blocking engine filesystem, upload ledger
 
+**Quarantine object**:
+A server-random, fixed-grammar storage identity used only behind the quarantine
+store boundary. It is neither a client filename or path nor an upload handle,
+and it exposes no public or serving location.
+_Avoid_: browser path, original filename, public object key, upload handle
+
+**Transfer checkpoint**:
+Bounded non-path provider state that records an opaque quarantine object,
+sequential accepted chunks, byte count, and transfer identity so a host can
+persist and reconstruct interrupted work without trusting browser metadata.
+_Avoid_: local file path, component snapshot, transfer grant, ambient browser resume
+
 **Subscription descriptor**:
 A signed, expiring server-issued declaration of one permitted asynchronous
 subscription, including registered stream identity, capabilities, topics, typed
