@@ -181,7 +181,7 @@ macro_rules! pivot_filter_methods {
         /// [`Builder::filter`](crate::Builder::filter)) and is checked
         /// against the identifier allowlist when the read executes.
         /// Never take it from untrusted input. `val` binds as a
-        /// parameter and is safe to.
+        /// parameter and is safe to take from untrusted input.
         pub fn where_pivot(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
             self.pivot_filters
                 .push(WhereTerm::Eq(col.col_name(), val.into_val()));
@@ -373,6 +373,18 @@ macro_rules! pivot_filter_methods {
         /// builder - ordering, limits, grouping, eager loads - has no
         /// meaning inside a predicate group and is discarded.
         ///
+        /// # Security
+        ///
+        /// The closure's terms render into the same hand-built pivot
+        /// statement the rest of the family does, so a
+        /// [`Builder::where_raw`](crate::Builder::where_raw) or
+        /// [`Builder::where_has`](crate::Builder::where_has) inside it
+        /// lands there verbatim - the identifier allowlist deliberately
+        /// skips the raw escape hatch, and `where_has` splices a
+        /// correlated subquery. Same trust boundary as
+        /// `Builder::where_raw`: the closure is not a place for
+        /// fragments built from untrusted input.
+        ///
         /// ```ignore
         /// // (active = 1 AND note IS NOT NULL) OR pinned = 1
         /// user.roles()
@@ -503,6 +515,63 @@ mod tests {
             .render_and(DbBackend::Sqlite, &mut values, &mut n)
             .expect("renders");
         assert_eq!(sql, " AND ((pinned = ? OR (active = ? AND tier = ?)))");
+    }
+
+    #[test]
+    fn a_group_nested_inside_a_group_keeps_both_parentheses() {
+        // Only reachable by building the term directly today - no
+        // `Builder` method emits a `Group` - but the renderer recurses,
+        // so pin the shape before a future producer relies on it.
+        let mut filters = PivotFilters::default();
+        filters.push(WhereTerm::Group(vec![
+            eq("a", 1),
+            WhereTerm::Group(vec![eq("b", 2), eq("c", 3)]),
+        ]));
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n = 0usize;
+        let sql = filters
+            .render_and(DbBackend::Sqlite, &mut values, &mut n)
+            .expect("renders");
+        assert_eq!(sql, " AND ((a = ? AND (b = ? AND c = ?)))");
+        assert_eq!(values.len(), 3);
+    }
+
+    #[test]
+    fn a_disjunction_nested_inside_a_group_keeps_its_own_parentheses() {
+        // This is the shape a closure actually produces: `q.filter(..)
+        // .or_filter(..).filter(..)` leaves an `Or` beside a plain term
+        // on the inner builder. Without the inner parentheses SQL
+        // precedence would re-associate the whole predicate.
+        let mut filters = PivotFilters::default();
+        filters.push(WhereTerm::Group(vec![
+            WhereTerm::Or(vec![eq("a", 1), eq("b", 2)]),
+            eq("c", 3),
+        ]));
+
+        let mut values: Vec<SeaValue> = Vec::new();
+        let mut n = 0usize;
+        let sql = filters
+            .render_and(DbBackend::Sqlite, &mut values, &mut n)
+            .expect("renders");
+        assert_eq!(sql, " AND (((a = ? OR b = ?) AND c = ?))");
+    }
+
+    #[test]
+    fn nested_groups_number_postgres_placeholders_left_to_right() {
+        let mut filters = PivotFilters::default();
+        filters.push(WhereTerm::Group(vec![
+            eq("a", 1),
+            WhereTerm::Group(vec![eq("b", 2), eq("c", 3)]),
+        ]));
+
+        let mut values: Vec<SeaValue> = vec![SeaValue::from(7i64)];
+        let mut n = 1usize;
+        let sql = filters
+            .render_and(DbBackend::Postgres, &mut values, &mut n)
+            .expect("renders");
+        assert_eq!(sql, " AND ((a = $2 AND (b = $3 AND c = $4)))");
+        assert_eq!(n, 4);
     }
 
     #[test]

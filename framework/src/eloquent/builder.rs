@@ -180,7 +180,7 @@ pub(crate) enum WhereTerm {
     /// A parenthesised conjunction: `(t1 AND t2 AND ...)`. Rendered as
     /// one atom so an enclosing `Or` fold cannot split it. Built by the
     /// closure forms of the pivot filters
-    /// ([`BelongsToMany::where_pivot_group`](crate::BelongsToMany)),
+    /// ([`BelongsToMany::where_pivot_group`](crate::BelongsToMany::where_pivot_group)),
     /// which is the only place a caller can hand the builder a list of
     /// terms that must stay together. `Or` is the disjunctive twin.
     Group(Vec<WhereTerm>),

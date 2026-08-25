@@ -483,6 +483,65 @@ async fn a_closure_group_stays_atomic_inside_a_disjunction() {
 }
 
 #[tokio::test]
+async fn a_disjunction_nested_inside_a_closure_group_keeps_its_parentheses() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let (u, admin, _editor, viewer) = seed_roles().await;
+
+    // ((active = 1 OR note = 'keep') AND pf_role_id = admin) -> admin.
+    // Flattened, SQL precedence would read the same terms as
+    //   active = 1 OR (note = 'keep' AND pf_role_id = admin),
+    // which also returns viewer. One row is what proves the inner
+    // disjunction kept its own parentheses inside the group.
+    let inner = u
+        .roles()
+        .where_pivot_group(|q| {
+            q.filter("active", 1i64)
+                .or_filter("note", "keep")
+                .filter("pf_role_id", admin.id)
+        })
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    assert_eq!(ids(&inner), vec![admin.id]);
+
+    // ... and the group as a whole is still one atom for a following
+    // `or_where_pivot`, so nesting does not cost atomicity.
+    let combined = u
+        .roles()
+        .where_pivot_group(|q| {
+            q.filter("active", 1i64)
+                .or_filter("note", "keep")
+                .filter("pf_role_id", admin.id)
+        })
+        .or_where_pivot("pf_role_id", viewer.id)
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    let got = ids(&combined);
+    assert_eq!(got.len(), 2, "expected admin + viewer, got {got:?}");
+    assert!(got.contains(&admin.id));
+    assert!(got.contains(&viewer.id));
+
+    assert_eq!(
+        u.roles()
+            .where_pivot_group(|q| {
+                q.filter("active", 1i64)
+                    .or_filter("note", "keep")
+                    .filter("pf_role_id", admin.id)
+            })
+            .or_where_pivot("pf_role_id", viewer.id)
+            .count()
+            .await
+            .unwrap(),
+        2,
+        "count must render the nesting the same way get does",
+    );
+}
+
+#[tokio::test]
 async fn a_closure_group_narrows_count_the_same_way_it_narrows_get() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;

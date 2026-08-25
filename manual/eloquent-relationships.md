@@ -297,6 +297,12 @@ identifiers, the same contract as `Builder::filter`. Never take one
 from request data. The values bind as parameters, so those are safe to
 take from request data.
 
+The closure form runs on the same statement, so a `where_raw` or a
+`where_has` inside it lands in the pivot SQL verbatim - the identifier
+allowlist skips the raw escape hatch by design. Treat the closure the
+way you treat `Builder::where_raw`: never build its fragments from
+untrusted input.
+
 The same family is on `MorphToMany` and `MorphedByMany`.
 
 ### Why Suprnova diverges: pivot filters are read-only
