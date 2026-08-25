@@ -24,17 +24,42 @@
 //! | `delete` | both, fallback first |
 //! | `presign` read/stat | primary if it holds the object, else the fallback |
 //! | `presign` write/delete | primary only - an upload has to land where writes land |
+//!
+//! # Promotion is published atomically
+//!
+//! A promotion must never be observable half-written, because the object it
+//! writes is exactly the one a concurrent reader is about to route by
+//! existence. A local filesystem creates the target file and then fills it in
+//! place, so a direct write leaves a zero-length object visible for the
+//! duration of the write - long enough for another cold reader to see it,
+//! delegate to the primary, and read nothing at all with no error to show for
+//! it. So the promotion stages the bytes at a unique sibling path and publishes
+//! them with a `rename` whenever the primary advertises one. Backends without a
+//! rename (memory, S3, Azure Blob, GCS) publish a write as a single indivisible
+//! operation, so for those the direct write is already atomic and is what runs.
 
-use opendal::options::{DeleteOptions, WriteOptions};
+use opendal::options::{DeleteOptions, ReadOptions, WriteOptions};
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
     OpWrite, PresignOperation, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service,
     ServiceInfo, Servicer, oio,
 };
 use opendal::{
-    Buffer, BytesRange, Capability, Error, ErrorKind, OperationContext, Operator, Result,
+    Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Operator, Result,
 };
 use std::sync::Arc;
+use uuid::Uuid;
+
+/// Build the sibling path a promotion stages its bytes at before renaming them
+/// onto `path`.
+///
+/// The suffix is random so two promoters never collide on the staging object,
+/// and the path is a sibling so the rename stays inside the same directory or
+/// key prefix - a rename across filesystems is not atomic, and on an object
+/// store a cross-prefix rename can be a different operation entirely.
+fn staging_path(path: &str) -> String {
+    format!("{path}.suprnova-promote-{}.tmp", Uuid::new_v4().simple())
+}
 
 /// [`Layer`] that turns the primary disk it wraps into a read-through disk over
 /// `fallback`. Applied by `Storage::register_read_through`.
@@ -57,15 +82,16 @@ pub(crate) struct ReadThroughLayer {
 
 impl Layer for ReadThroughLayer {
     fn apply_service(&self, inner: Servicer) -> Servicer {
-        // Read the conditional-write capability once here rather than per read:
-        // it is a property of the backend, not of any single operation.
-        let promote_conditionally = inner.capability().write_with_if_not_exists;
+        // Read the primary's capabilities once here rather than per read: they
+        // are properties of the backend, not of any single operation.
+        let capability = inner.capability();
         Arc::new(ReadThroughService {
             inner,
             primary: self.primary.clone(),
             fallback: self.fallback.clone(),
             throw_on_promotion_failure: self.throw_on_promotion_failure,
-            promote_conditionally,
+            promote_conditionally: capability.write_with_if_not_exists,
+            promote_atomically: capability.rename,
         })
     }
 }
@@ -84,6 +110,8 @@ pub(crate) struct ReadThroughService {
     throw_on_promotion_failure: bool,
     /// Whether the primary can express a "write only if absent" condition.
     promote_conditionally: bool,
+    /// Whether the primary can publish a promotion with an atomic `rename`.
+    promote_atomically: bool,
 }
 
 impl Service for ReadThroughService {
@@ -142,15 +170,18 @@ impl Service for ReadThroughService {
         // `read` cannot await, so the primary-or-fallback decision happens in
         // the reader. Building the primary's reader here is free: backends
         // return a lazy handle and open nothing until the first range is asked
-        // for.
-        let primary_reader = self.inner.read(ctx, path, args)?;
+        // for. The reader keeps its own clone of `args` because a fallback read
+        // has to carry the caller's version and conditional headers too.
+        let primary_reader = self.inner.read(ctx, path, args.clone())?;
         Ok(ReadThroughReader {
             primary_reader,
             primary: self.primary.clone(),
             fallback: self.fallback.clone(),
             path: path.to_owned(),
+            args,
             throw_on_promotion_failure: self.throw_on_promotion_failure,
             promote_conditionally: self.promote_conditionally,
+            promote_atomically: self.promote_atomically,
         })
     }
 
@@ -235,13 +266,53 @@ pub(crate) struct ReadThroughReader {
     fallback: Operator,
     /// The object this reader was opened for.
     path: String,
+    /// The caller's read arguments, replayed onto the fallback read.
+    args: OpRead,
     /// Whether a failed promotion fails the read.
     throw_on_promotion_failure: bool,
     /// Whether the promotion write can be made conditional on absence.
     promote_conditionally: bool,
+    /// Whether the promotion can be published with an atomic `rename`.
+    promote_atomically: bool,
 }
 
 impl ReadThroughReader {
+    /// Whether this read is plain enough for its result to be promoted.
+    ///
+    /// A versioned read asks for one specific historical object, and a
+    /// conditional read asks for the object only if it still matches what the
+    /// caller last saw. Writing either answer to the primary under the
+    /// unversioned, unconditional path would publish a value the caller never
+    /// asked to make current - an old version presented as the live object, or
+    /// a body cached under a validator it does not match. Such a read is served
+    /// from the fallback and left there.
+    fn is_promotable(&self) -> bool {
+        self.args.version().is_none()
+            && self.args.if_match().is_none()
+            && self.args.if_none_match().is_none()
+            && self.args.if_modified_since().is_none()
+            && self.args.if_unmodified_since().is_none()
+    }
+
+    /// The options the fallback read runs under.
+    ///
+    /// Everything the caller set on the original read that selects *which*
+    /// object comes back is replayed here. Dropping any of it would answer a
+    /// versioned read with the fallback's current object, or hand back a body
+    /// where the caller expected `ConditionNotMatch`. The range is deliberately
+    /// left at its default: promotion needs the whole object, and the requested
+    /// range is sliced out of it afterwards.
+    fn fallback_read_options(&self) -> ReadOptions {
+        ReadOptions {
+            version: self.args.version().map(str::to_owned),
+            if_match: self.args.if_match().map(str::to_owned),
+            if_none_match: self.args.if_none_match().map(str::to_owned),
+            if_modified_since: self.args.if_modified_since(),
+            if_unmodified_since: self.args.if_unmodified_since(),
+            ..Default::default()
+        }
+    }
+
     /// Resolve one range.
     ///
     /// `Ok(None)` means the primary owns the object and the caller should
@@ -256,7 +327,10 @@ impl ReadThroughReader {
         // Promotion needs the whole object, so the whole object is what we
         // fetch. A fallback-resolved read therefore holds the object in memory
         // until the promotion write completes.
-        let full = self.fallback.read(&self.path).await?;
+        let full = self
+            .fallback
+            .read_options(&self.path, self.fallback_read_options())
+            .await?;
 
         // Re-check after the fetch: a writer that landed on the primary while
         // we were pulling the fallback bytes must win, not be overwritten by a
@@ -265,7 +339,14 @@ impl ReadThroughReader {
             return Ok(None);
         }
 
-        self.promote(&full).await?;
+        if self.is_promotable() {
+            // The fallback's own metadata rides along with the bytes. Without
+            // it an S3-to-S3 read-through would silently drop `Content-Type`
+            // the first time each object crossed over, and nothing would ever
+            // restore it.
+            let metadata = self.fallback.stat(&self.path).await?;
+            self.promote(&full, &metadata).await?;
+        }
 
         let slice = range.to_content_range(full.len())?;
         Ok(Some(full.slice(slice)))
@@ -273,24 +354,15 @@ impl ReadThroughReader {
 
     /// Write a fallback hit through to the primary.
     ///
-    /// When the primary can express it, the write is conditional on the object
-    /// not already existing. That closes the gap the re-check above leaves open:
-    /// the re-check makes a concurrent *writer* win, but two concurrent readers
-    /// can both pass it, and only a conditional write stops both from issuing
-    /// the promotion. Losing that condition is success, not failure - the object
-    /// that won came from the same fallback read and holds the same bytes.
-    async fn promote(&self, contents: &Buffer) -> Result<()> {
-        let options = WriteOptions {
-            if_not_exists: self.promote_conditionally,
-            ..Default::default()
-        };
-
-        match self
-            .primary
-            .write_options(&self.path, contents.clone(), options)
-            .await
-        {
-            Ok(_) => Ok(()),
+    /// Failure is a performance problem rather than a read failure unless
+    /// `throw_on_promotion_failure` is set: the caller already holds the bytes
+    /// it asked for, so an unwritable primary degrades the disk to "read the
+    /// fallback every time" instead of taking the application down. Losing a
+    /// conditional write is not a failure at all - the object that won came
+    /// from the same fallback and holds the same bytes.
+    async fn promote(&self, contents: &Buffer, metadata: &Metadata) -> Result<()> {
+        match self.publish(contents, metadata).await {
+            Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => Ok(()),
             Err(e) if self.throw_on_promotion_failure => Err(Error::new(
                 ErrorKind::Unexpected,
@@ -301,10 +373,6 @@ impl ReadThroughReader {
             )
             .set_source(e)),
             Err(e) => {
-                // The caller already has the bytes it asked for, so a failed
-                // promotion is a performance problem, not a read failure. An
-                // unwritable primary degrades the disk to "read the fallback
-                // every time" instead of taking the application down.
                 tracing::warn!(
                     path = %self.path,
                     error = %e,
@@ -312,6 +380,86 @@ impl ReadThroughReader {
                 );
                 Ok(())
             }
+        }
+    }
+
+    /// Put the promoted bytes on the primary so that no reader can observe them
+    /// half-written.
+    ///
+    /// Where the primary advertises a `rename`, the bytes are staged at a
+    /// unique sibling and renamed onto the target, because that backend - the
+    /// local filesystem - creates the target file first and fills it in place.
+    /// Where it does not, the write itself is the atomic publish and runs
+    /// directly, conditional on the object not already existing so two
+    /// concurrent readers do not both promote.
+    ///
+    /// The staged form cannot use that condition: its path is unique, so the
+    /// condition would be vacuous. It re-checks the primary immediately before
+    /// the rename instead, which leaves the same best-effort window Laravel's
+    /// own re-check leaves and no larger one.
+    async fn publish(&self, contents: &Buffer, metadata: &Metadata) -> Result<()> {
+        if !self.promote_atomically {
+            let options = self.promotion_options(metadata, self.promote_conditionally);
+            self.primary
+                .write_options(&self.path, contents.clone(), options)
+                .await?;
+            return Ok(());
+        }
+
+        let staged = staging_path(&self.path);
+        let options = self.promotion_options(metadata, false);
+        self.primary
+            .write_options(&staged, contents.clone(), options)
+            .await?;
+
+        match self.primary.exists(&self.path).await {
+            // Somebody published while we were staging. Their object wins.
+            Ok(true) => {
+                self.discard(&staged).await;
+                return Ok(());
+            }
+            Ok(false) => {}
+            // The staged object is already written, so every path out of here
+            // has to clean it up or it is left behind for good.
+            Err(e) => {
+                self.discard(&staged).await;
+                return Err(e);
+            }
+        }
+
+        if let Err(e) = self.primary.rename(&staged, &self.path).await {
+            self.discard(&staged).await;
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    /// The write options a promotion runs under, carrying the fallback
+    /// object's content metadata so the promoted copy is not a downgrade.
+    fn promotion_options(&self, metadata: &Metadata, if_not_exists: bool) -> WriteOptions {
+        WriteOptions {
+            if_not_exists,
+            content_type: metadata.content_type().map(str::to_owned),
+            cache_control: metadata.cache_control().map(str::to_owned),
+            content_disposition: metadata.content_disposition().map(str::to_owned),
+            content_encoding: metadata.content_encoding().map(str::to_owned),
+            user_metadata: metadata.user_metadata().cloned(),
+            ..Default::default()
+        }
+    }
+
+    /// Remove a staging object that will never be published. Best-effort: the
+    /// caller is already returning the bytes or a more useful error, so a
+    /// failure here is logged and dropped rather than replacing that outcome.
+    async fn discard(&self, staged: &str) {
+        if let Err(e) = self.primary.delete(staged).await {
+            tracing::warn!(
+                path = %self.path,
+                staging_path = %staged,
+                error = %e,
+                "failed to remove a read-through staging object; it will need cleaning up by hand"
+            );
         }
     }
 }
@@ -364,5 +512,309 @@ impl oio::Delete for ReadThroughDeleter {
 
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opendal::{EntryMode, services};
+    use std::sync::Mutex;
+
+    /// What a [`StubDisk`] was asked to do.
+    #[derive(Debug, Default)]
+    struct Journal {
+        reads: Mutex<Vec<OpRead>>,
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl Journal {
+        fn reads(&self) -> Vec<OpRead> {
+            self.reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn writes(&self) -> Vec<String> {
+            self.writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    /// A disk that answers from a fixed body and records what it is asked for.
+    ///
+    /// It exists because opendal rejects a versioned or conditional read before
+    /// it reaches a backend that does not advertise support for one, and
+    /// neither the in-memory nor the local-filesystem service does. So whether
+    /// this layer replays the caller's read arguments onto the fallback is only
+    /// observable against a disk that accepts them - which in production means
+    /// an object store, and here means this. Reaching it through
+    /// [`Operator::from_parts`] also keeps opendal's correctness check out of
+    /// the stack, so the arguments arrive exactly as the layer sent them.
+    #[derive(Debug)]
+    struct StubDisk {
+        info: ServiceInfo,
+        contents: Option<Buffer>,
+        journal: Arc<Journal>,
+    }
+
+    impl StubDisk {
+        fn operator(contents: Option<&'static str>) -> (Operator, Arc<Journal>) {
+            let journal = Arc::new(Journal::default());
+            let stub = StubDisk {
+                // Borrowing an in-memory disk's identity avoids inventing a
+                // scheme; nothing under test reads it.
+                info: memory().service().info(),
+                contents: contents.map(Buffer::from),
+                journal: Arc::clone(&journal),
+            };
+            (
+                Operator::from_parts(OperationContext::default(), Arc::new(stub)),
+                journal,
+            )
+        }
+
+        fn missing(&self) -> Error {
+            Error::new(ErrorKind::NotFound, "the stub disk does not hold this path")
+        }
+    }
+
+    struct StubReader(Buffer);
+
+    impl oio::Read for StubReader {
+        async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+            let slice = range.to_content_range(self.0.len())?;
+            Ok((
+                RpRead::default(),
+                Box::new(self.0.slice(slice)) as Box<dyn oio::ReadStreamDyn>,
+            ))
+        }
+
+        async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+            let slice = range.to_content_range(self.0.len())?;
+            Ok((RpRead::default(), self.0.slice(slice)))
+        }
+    }
+
+    fn unsupported() -> Error {
+        Error::new(ErrorKind::Unsupported, "the stub disk does not do this")
+    }
+
+    impl Service for StubDisk {
+        type Reader = StubReader;
+        type Writer = oio::Writer;
+        type Lister = oio::Lister;
+        type Deleter = oio::Deleter;
+        type Copier = oio::Copier;
+
+        fn info(&self) -> ServiceInfo {
+            self.info.clone()
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                read: true,
+                stat: true,
+                write: true,
+                read_with_version: true,
+                read_with_if_match: true,
+                read_with_if_none_match: true,
+                read_with_if_modified_since: true,
+                read_with_if_unmodified_since: true,
+                ..Default::default()
+            }
+        }
+
+        async fn create_dir(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpCreateDir,
+        ) -> Result<RpCreateDir> {
+            Err(unsupported())
+        }
+
+        async fn stat(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpStat,
+        ) -> Result<RpStat> {
+            match &self.contents {
+                Some(contents) => Ok(RpStat::new(
+                    Metadata::new(EntryMode::FILE).with_content_length(contents.len() as u64),
+                )),
+                None => Err(self.missing()),
+            }
+        }
+
+        fn read(&self, _ctx: &OperationContext, _path: &str, args: OpRead) -> Result<Self::Reader> {
+            self.journal
+                .reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(args);
+            // Real backends hand back a lazy reader and only fail once a range
+            // is asked for, which is what lets the layer build the primary's
+            // reader before it knows whether the primary holds the object.
+            Ok(StubReader(self.contents.clone().unwrap_or_default()))
+        }
+
+        fn write(
+            &self,
+            _ctx: &OperationContext,
+            path: &str,
+            _args: OpWrite,
+        ) -> Result<Self::Writer> {
+            self.journal
+                .writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(path.to_owned());
+            Err(unsupported())
+        }
+
+        fn delete(&self, _ctx: &OperationContext) -> Result<Self::Deleter> {
+            Err(unsupported())
+        }
+
+        fn list(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpList,
+        ) -> Result<Self::Lister> {
+            Err(unsupported())
+        }
+
+        fn copy(
+            &self,
+            _ctx: &OperationContext,
+            _from: &str,
+            _to: &str,
+            _args: OpCopy,
+            _opts: OpCopier,
+        ) -> Result<Self::Copier> {
+            Err(unsupported())
+        }
+
+        async fn rename(
+            &self,
+            _ctx: &OperationContext,
+            _from: &str,
+            _to: &str,
+            _args: OpRename,
+        ) -> Result<RpRename> {
+            Err(unsupported())
+        }
+
+        async fn presign(
+            &self,
+            _ctx: &OperationContext,
+            _path: &str,
+            _args: OpPresign,
+        ) -> Result<RpPresign> {
+            Err(unsupported())
+        }
+    }
+
+    fn memory() -> Operator {
+        Operator::new(services::Memory::default()).expect("memory service is infallible")
+    }
+
+    /// A read-through disk whose primary holds nothing and whose fallback holds
+    /// `cold bytes`. Returns the composite and the two journals.
+    fn stub_read_through() -> (Operator, Arc<Journal>, Arc<Journal>) {
+        let (primary, primary_journal) = StubDisk::operator(None);
+        let (fallback, fallback_journal) = StubDisk::operator(Some("cold bytes"));
+        let assets = primary.clone().layer(ReadThroughLayer {
+            primary,
+            fallback,
+            throw_on_promotion_failure: false,
+        });
+        (assets, primary_journal, fallback_journal)
+    }
+
+    #[tokio::test]
+    async fn a_plain_read_reaches_the_fallback_unconditionally_and_is_promoted() {
+        let (assets, primary, fallback) = stub_read_through();
+
+        let bytes = assets.read("cold.txt").await.expect("read resolves");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+
+        let reads = fallback.reads();
+        assert_eq!(reads.len(), 1, "the fallback was read once");
+        assert!(
+            reads[0].version().is_none()
+                && reads[0].if_match().is_none()
+                && reads[0].if_none_match().is_none()
+                && reads[0].if_modified_since().is_none()
+                && reads[0].if_unmodified_since().is_none(),
+            "a plain read must not invent a version or a condition"
+        );
+        assert_eq!(
+            primary.writes(),
+            vec!["cold.txt".to_string()],
+            "a plain fallback hit is promoted to the requested path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_versioned_read_reaches_the_fallback_and_is_not_promoted() {
+        let (assets, primary, fallback) = stub_read_through();
+
+        let bytes = assets
+            .read_with("cold.txt")
+            .version("v7")
+            .await
+            .expect("a versioned read is still served");
+        assert_eq!(&bytes.to_vec(), b"cold bytes");
+
+        let reads = fallback.reads();
+        assert_eq!(reads.len(), 1, "the fallback was read once");
+        assert_eq!(
+            reads[0].version(),
+            Some("v7"),
+            "the caller's version must reach the fallback, or it answers with \
+             whatever is current there"
+        );
+        assert!(
+            primary.writes().is_empty(),
+            "a versioned read asks for one historical object; publishing it as \
+             the primary's live copy would answer later plain reads with it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_read_reaches_the_fallback_and_is_not_promoted() {
+        let (assets, primary, fallback) = stub_read_through();
+
+        assets
+            .read_with("cold.txt")
+            .if_match("\"etag-live\"")
+            .if_none_match("\"etag-cached\"")
+            .await
+            .expect("the stub disk ignores conditions, so this resolves");
+
+        let reads = fallback.reads();
+        assert_eq!(reads.len(), 1, "the fallback was read once");
+        assert_eq!(
+            reads[0].if_match(),
+            Some("\"etag-live\""),
+            "if_match must reach the fallback, or a read the caller expected to \
+             fail comes back with a body"
+        );
+        assert_eq!(
+            reads[0].if_none_match(),
+            Some("\"etag-cached\""),
+            "if_none_match must reach the fallback"
+        );
+        assert!(
+            primary.writes().is_empty(),
+            "a conditional hit is served from the fallback but never promoted"
+        );
     }
 }

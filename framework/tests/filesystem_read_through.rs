@@ -550,3 +550,197 @@ async fn a_failed_promotion_is_swallowed_by_default_and_surfaced_on_request() {
     // Restore the mode so TempDir::drop can clean up.
     let _ = std::fs::set_permissions(&primary_root, PermissionsExt::from_mode(0o755));
 }
+
+/// Register an fs primary rooted in a fresh tempdir, a memory fallback, and an
+/// `assets` read-through disk over them. The tempdir is returned so the caller
+/// keeps it alive for the length of the test.
+fn register_local_primary_pair() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let primary_root = tmp.path().join("primary");
+    std::fs::create_dir_all(&primary_root).expect("create the primary root");
+    Storage::register_fs("primary", &primary_root).expect("fs primary");
+    Storage::register_memory("fallback");
+    Storage::register_read_through(
+        "assets",
+        ReadThroughConfig {
+            primary: "primary".into(),
+            fallback: "fallback".into(),
+            ..Default::default()
+        },
+    )
+    .expect("read-through registration succeeds");
+    tmp
+}
+
+/// Assert that no reader can ever see the promoted object on the primary at a
+/// length other than its full one.
+///
+/// A local filesystem creates the target file and fills it in place, so a
+/// promotion written straight to the target is visible at every intermediate
+/// length for the duration of the write. That matters because the promoted path
+/// is exactly the object a second cold reader routes by existence: it sees the
+/// partial file, delegates to the primary, and gets a short body with no error
+/// attached. Sampling the primary while a promotion runs is the direct
+/// observation of that, and it does not depend on winning a race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_promotion_is_never_visible_on_the_primary_at_a_partial_length() {
+    let _guard = Storage::fake();
+    let _tmp = register_local_primary_pair();
+
+    // Large enough that the write spans many milliseconds, so the sampling loop
+    // below takes a meaningful number of looks at the primary.
+    let payload = vec![b'x'; 64 * 1024 * 1024];
+    let full_len = payload.len() as u64;
+    Storage::disk("fallback")
+        .expect("fallback disk")
+        .write("big.bin", payload)
+        .await
+        .expect("seed the fallback");
+
+    let assets = Storage::disk("assets").expect("read-through disk");
+    let promoter = assets.clone();
+    let handle =
+        tokio::spawn(async move { promoter.read("big.bin").await.expect("promote").len() });
+
+    let primary = Storage::disk("primary").expect("primary disk");
+    let mut samples = 0usize;
+    let mut partial = Vec::new();
+    while !handle.is_finished() && samples < 4096 {
+        tokio::time::sleep(std::time::Duration::from_micros(250)).await;
+        samples += 1;
+        if let Ok(metadata) = primary.stat("big.bin").await
+            && metadata.content_length() != full_len
+        {
+            partial.push(metadata.content_length());
+        }
+    }
+
+    let promoted = handle.await.expect("the promoting task did not panic");
+    assert_eq!(
+        promoted as u64, full_len,
+        "the promoter read the whole object"
+    );
+    assert!(
+        samples >= 8,
+        "the promotion finished too quickly to sample; the test would prove nothing"
+    );
+    assert!(
+        partial.is_empty(),
+        "the promoted object was visible at a partial length: {:?}",
+        &partial.iter().take(8).collect::<Vec<_>>()
+    );
+
+    let listed = primary.files("", true).await.expect("listing succeeds");
+    assert_eq!(
+        listed,
+        vec!["big.bin".to_string()],
+        "a promotion must leave no staging object behind"
+    );
+}
+
+/// Seed a cold object and read it from several parallel tasks, asserting none
+/// of them observes a partially promoted object and that the staging path a
+/// rename-capable primary uses is always cleaned up.
+async fn assert_concurrent_cold_reads_are_whole(rounds: usize, payload_len: usize, readers: usize) {
+    let fallback = Storage::disk("fallback").expect("fallback disk");
+    let assets = Storage::disk("assets").expect("read-through disk");
+    let payload = vec![b'x'; payload_len];
+
+    for round in 0..rounds {
+        let path = format!("cold-{round}.bin");
+        fallback
+            .write(path.as_str(), payload.clone())
+            .await
+            .expect("seed the fallback");
+
+        let handles: Vec<_> = (0..readers)
+            .map(|reader| {
+                let disk = assets.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    // Stagger the readers so some of them arrive while another
+                    // is midway through its promotion.
+                    tokio::time::sleep(std::time::Duration::from_micros(200 * reader as u64)).await;
+                    disk.read(path.as_str()).await
+                })
+            })
+            .collect();
+
+        for (reader, handle) in handles.into_iter().enumerate() {
+            let bytes = handle
+                .await
+                .expect("the reader task did not panic")
+                .expect("the read resolves");
+            assert_eq!(
+                bytes.len(),
+                payload_len,
+                "round {round}, reader {reader}: read a partially promoted object"
+            );
+        }
+    }
+
+    let listed = Storage::disk("primary")
+        .expect("primary disk")
+        .files("", true)
+        .await
+        .expect("listing succeeds");
+    assert!(
+        listed.iter().all(|name| !name.contains("suprnova-promote")),
+        "a promotion must leave no staging object behind, found: {listed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cold_reads_over_a_local_primary_are_never_partial() {
+    let _guard = Storage::fake();
+    let _tmp = register_local_primary_pair();
+
+    assert_concurrent_cold_reads_are_whole(8, 4 * 1024 * 1024, 4).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cold_reads_over_a_memory_primary_are_never_partial() {
+    let _guard = Storage::fake();
+    register_memory_pair();
+
+    assert_concurrent_cold_reads_are_whole(8, 4 * 1024 * 1024, 4).await;
+}
+
+#[tokio::test]
+async fn a_promotion_carries_the_fallback_objects_content_metadata() {
+    let _guard = Storage::fake();
+    register_memory_pair();
+
+    Storage::disk("fallback")
+        .expect("fallback disk")
+        .write_with("logo.png", "pretend png bytes")
+        .content_type("image/png")
+        .cache_control("public, max-age=31536000")
+        .content_disposition("inline; filename=\"logo.png\"")
+        .content_encoding("identity")
+        .await
+        .expect("seed the fallback with content metadata");
+
+    Storage::disk("assets")
+        .expect("read-through disk")
+        .read("logo.png")
+        .await
+        .expect("read promotes");
+
+    let promoted = Storage::disk("primary")
+        .expect("primary disk")
+        .stat("logo.png")
+        .await
+        .expect("the primary holds the promoted object");
+    assert_eq!(
+        promoted.content_type(),
+        Some("image/png"),
+        "a promotion that drops Content-Type loses it permanently"
+    );
+    assert_eq!(promoted.cache_control(), Some("public, max-age=31536000"));
+    assert_eq!(
+        promoted.content_disposition(),
+        Some("inline; filename=\"logo.png\"")
+    );
+    assert_eq!(promoted.content_encoding(), Some("identity"));
+}

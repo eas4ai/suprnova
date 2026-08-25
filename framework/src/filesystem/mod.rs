@@ -195,6 +195,26 @@ impl std::fmt::Debug for GcsConfig {
 /// name leaves this disk working against the operators it captured - disks are
 /// meant to be registered once at boot, and the alternative would be a disk
 /// that starts failing halfway through a request.
+///
+/// # How a promotion is published
+///
+/// A promotion is published so that no reader can observe it half-written,
+/// because the object it writes is exactly the one another cold reader routes
+/// by existence. Where the primary advertises a `rename` - the local
+/// filesystem, which creates the target file and then fills it in place - the
+/// bytes are staged at a unique sibling path and renamed into place. Where it
+/// does not (in-memory, S3, Azure Blob, GCS), a write is already a single
+/// indivisible publish and the promotion writes the target directly,
+/// conditional on the object not already existing. A backend offering neither
+/// guarantee would leave that window open; no driver Suprnova ships is one.
+///
+/// # Versioned and conditional reads
+///
+/// A read carrying a version or an `If-Match` / `If-None-Match` /
+/// `If-Modified-Since` / `If-Unmodified-Since` condition is replayed onto the
+/// fallback with that condition intact, and is served but never promoted:
+/// writing an old version or a validator-matched body to the primary would
+/// publish it as the live object.
 #[derive(Clone, Debug, Default)]
 pub struct ReadThroughConfig {
     /// Name of the disk that answers writes and listings, and that promoted
