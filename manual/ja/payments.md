@@ -15,8 +15,8 @@ Laravelは、コアのドキュメントの中で、Cashierを第一級のStripe
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 起動時に、プロバイダーとwebhookのルーターを登録します。webhookのルーターは、あなたの `routes::register()` の中へ合成する、普通の `Router` です:
@@ -99,7 +99,7 @@ pub async fn start_checkout(
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 必要な環境変数:
@@ -130,7 +130,7 @@ Stripeは、オプションの `Payment`（PaymentIntents経由のサーバー�
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.1" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
 ```
 
 必要な環境変数:
