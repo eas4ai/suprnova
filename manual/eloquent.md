@@ -570,6 +570,8 @@ so rustdoc search finds either.
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | Equality |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | Arbitrary operator |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | PK filter as a disjunct |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | Negated PK filter as a disjunct |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -3777,7 +3779,10 @@ builder, which the loosely-typed `whereHasMorph` cannot.
 // PK filters.
 User::query().where_key(7).first().await?;        // sugar for filter("id", 7)
 User::query().where_key_not(7).get().await?;      // sugar for filter_op("id", "!=", 7)
-// Rust-idiomatic aliases: filter_key / filter_key_not.
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// Rust-idiomatic aliases: filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not.
 
 // Order by created_at.
 Post::query().latest().get().await?;              // ORDER BY created_at DESC

@@ -1201,8 +1201,21 @@ impl<M> Builder<M> {
     /// clause to form a disjunction. If there is no previous clause,
     /// the new equality stands alone.
     #[doc(alias = "or_where")]
-    pub fn or_filter(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+    pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         let new = WhereTerm::Eq(col.col_name(), val.into_val());
+        self.or_push_term(new)
+    }
+
+    /// Fold an already-built term into the preceding WHERE clause as a
+    /// disjunction.
+    ///
+    /// Every `or_*` method routes through here so the three cases stay
+    /// in one place: append into a trailing `Or` group so consecutive
+    /// `or_*` calls stay flat, wrap the previous term and the new one
+    /// when the last clause is a plain term, and - with no prior
+    /// clause - push the term plain so the renderer doesn't emit a
+    /// dangling `()` wrapper around a single disjunct.
+    fn or_push_term(mut self, new: WhereTerm) -> Self {
         match self.where_terms.last_mut() {
             Some(WhereTerm::Or(group)) => group.push(new),
             Some(_) => {
@@ -1215,8 +1228,8 @@ impl<M> Builder<M> {
             }
             None => {
                 // No prior clause - the disjunction reduces to the new
-                // equality. Push as a plain Eq so the renderer doesn't
-                // emit a dangling `()` wrapper.
+                // term. Push it plain so the renderer doesn't emit a
+                // dangling `()` wrapper.
                 self.where_terms.push(new);
             }
         }
@@ -3118,6 +3131,36 @@ where
     /// Rust-idiomatic alias for [`Self::where_key_not`].
     pub fn filter_key_not(self, id: impl IntoVal) -> Self {
         self.where_key_not(id)
+    }
+
+    /// Laravel-shape `orWhereKey` - `WHERE (... OR pk = id)`. Folds
+    /// into the previous clause as a disjunction, the same way
+    /// [`Self::or_filter`] does, so it widens the result set instead of
+    /// narrowing it.
+    pub fn or_where_key(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        self.or_filter(pk, id)
+    }
+
+    /// Rust-idiomatic alias for [`Self::or_where_key`].
+    pub fn or_filter_key(self, id: impl IntoVal) -> Self {
+        self.or_where_key(id)
+    }
+
+    /// Laravel-shape `orWhereKeyNot` - `WHERE (... OR pk <> id)`.
+    ///
+    /// Emits the same `!=` comparison [`Self::where_key_not`] does, so
+    /// the two spellings render identically apart from the boolean that
+    /// joins them to the preceding clause.
+    pub fn or_where_key_not(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        let term = WhereTerm::Op(pk.to_string(), "!=".to_string(), id.into_val());
+        self.or_push_term(term)
+    }
+
+    /// Rust-idiomatic alias for [`Self::or_where_key_not`].
+    pub fn or_filter_key_not(self, id: impl IntoVal) -> Self {
+        self.or_where_key_not(id)
     }
 
     /// Laravel-shape `latest()` - `ORDER BY <col> DESC`. Defaults to

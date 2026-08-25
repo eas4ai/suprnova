@@ -212,6 +212,7 @@ gaps as of the shipped framework.
 | Lifecycle: chunking / lazy / cursor | `Builder::chunk(n, \|page\| async { ... })`, `lazy()`, `cursor()` | shipped | Memory-bounded iteration over large tables |
 | Pessimistic locking | `Builder::lock_for_update()`, `shared_lock()` | shipped | Inside a transaction |
 | `inOrderOf(col, values)` | `Builder::in_order_of(col, values)` | shipped | Bound `CASE WHEN` ordering; unlisted values sort last. Typed builder only. [Ordering](eloquent.md#ordering) |
+| `orWhereKey` / `orWhereKeyNot` | `Builder::or_where_key(id)` / `Builder::or_where_key_not(id)` | shipped | Fold into the preceding clause as a disjunction; `or_filter_key` / `or_filter_key_not` aliases |
 | `whereJsonContains` family | Available via SeaORM's column expressions (driver-aware) | shipped | The exact spelling differs per backend; helpers ship for the common cases |
 
 ## Pagination
