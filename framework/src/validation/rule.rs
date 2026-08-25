@@ -6,13 +6,14 @@
 //! - [`Rule`] - pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
 //!   [`rules::Max`], [`rules::Between`], [`rules::In`],
-//!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
-//!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
-//!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
-//!   [`rules::HttpUrl`], [`rules::Uuid`].
+//!   [`rules::NotIn`], [`rules::InArray`], [`rules::Integer`],
+//!   [`rules::Numeric`], [`rules::Boolean`], [`rules::Alpha`],
+//!   [`rules::AlphaNum`], [`rules::AlphaDash`], [`rules::Url`],
+//!   [`rules::UrlProtocols`], [`rules::HttpUrl`], [`rules::Uuid`].
 //! - [`ValueRule`] - pure sync check on a JSON-shaped value (array or
 //!   object), for rules a bare string can't carry enough structure for.
-//!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
+//!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`],
+//!   [`rules::Contains`], [`rules::DoesntContain`].
 //! - [`ContextualRule`] - sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
@@ -122,7 +123,8 @@ pub trait Rule {
 /// dispatches to `Rule` or `ValueRule` automatically, by whichever
 /// trait the rule's type implements.
 ///
-/// Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
+/// Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`],
+/// [`rules::Contains`], [`rules::DoesntContain`].
 ///
 /// [`validate!`]: crate::validate
 pub trait ValueRule {
@@ -1014,6 +1016,124 @@ pub mod rules {
                 }
             }
             Ok(())
+        }
+    }
+
+    /// Laravel `in_array:other.*` - the value must appear in a list taken
+    /// from elsewhere in the form.
+    ///
+    /// Laravel names the other field in a rule string and the validator
+    /// globs it out of the request data at run time. Suprnova has no
+    /// rule-string parser - a rule is a value you construct - so you hand
+    /// the list over directly and the compiler checks the field exists:
+    /// `InArray(&self.allowed_roles)`. `S: AsRef<str>` on the impl so a
+    /// `Vec<String>` field and a `&[&str]` literal both work.
+    ///
+    /// Comparison is exact `str` equality, like [`In`]. Nothing is
+    /// coerced, so `"1"` matches only `"1"`.
+    ///
+    /// An empty haystack is ordinary data - a sibling field can be empty
+    /// at run time - so the value fails with the normal keyed message
+    /// rather than the construction error [`ArrayKeys`] reports for its
+    /// empty allow-list.
+    pub struct InArray<'a, S>(pub &'a [S]);
+    impl<S: AsRef<str>> Rule for InArray<'_, S> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if self.0.iter().any(|allowed| allowed.as_ref() == value) {
+                Ok(())
+            } else {
+                // The haystack is submitted data. Naming its contents here
+                // would reflect request input into a response body, which
+                // is the same reason `validation-must-match` deliberately
+                // drops its `$other` parameter.
+                Err(ValidationMessage::keyed("validation-in-array")
+                    .fallback("must be one of the allowed values"))
+            }
+        }
+    }
+
+    /// Laravel `contains:foo,bar` - the value must be a JSON array holding
+    /// every listed parameter.
+    ///
+    /// An element matches a parameter only when the element is a JSON
+    /// string equal to it: `["1"]` contains `"1"` and `[1]` does not. JSON
+    /// is already typed, and PHP's coercing `in_array` is the bug class
+    /// #61318/#61319 closed upstream - Suprnova does not reintroduce it
+    /// for the sake of matching Laravel's `validateContains`, which is
+    /// still loose. A value that is not an array fails, matching Laravel's
+    /// own `! is_array($value)` guard.
+    ///
+    /// An empty parameter list can never usefully constrain an array, so
+    /// `passes` reports it as a **keyless** message - a construction error
+    /// to fix, not a translatable failure - the pattern [`ArrayKeys`] uses.
+    pub struct Contains(pub &'static [&'static str]);
+    impl ValueRule for Contains {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            if self.0.is_empty() {
+                return Err(
+                    "Contains requires at least one value; an empty list can never \
+                     usefully constrain an array"
+                        .into(),
+                );
+            }
+            let fail = || {
+                ValidationMessage::keyed("validation-contains")
+                    .fallback("is missing a required value")
+            };
+            let Some(items) = value.as_array() else {
+                return Err(fail());
+            };
+            let held = |wanted: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, Value::String(s) if s == wanted))
+            };
+            if self.0.iter().all(|wanted| held(wanted)) {
+                Ok(())
+            } else {
+                Err(fail())
+            }
+        }
+    }
+
+    /// Laravel `doesnt_contain:foo,bar` - the value must be a JSON array
+    /// holding none of the listed parameters.
+    ///
+    /// Matching is the same exact string comparison [`Contains`] uses, so
+    /// `[1]` does not contain the forbidden value `"1"`. A value that is
+    /// not an array fails, matching Laravel's `! is_array($value)` guard -
+    /// the rule states "this array holds none of these," and a non-array
+    /// cannot make that true.
+    ///
+    /// An empty parameter list is a keyless construction error, as in
+    /// [`Contains`].
+    pub struct DoesntContain(pub &'static [&'static str]);
+    impl ValueRule for DoesntContain {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            if self.0.is_empty() {
+                return Err(
+                    "DoesntContain requires at least one value; an empty list can never \
+                     usefully constrain an array"
+                        .into(),
+                );
+            }
+            let fail = || {
+                ValidationMessage::keyed("validation-doesnt-contain")
+                    .fallback("contains a forbidden value")
+            };
+            let Some(items) = value.as_array() else {
+                return Err(fail());
+            };
+            let held = |forbidden: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, Value::String(s) if s == forbidden))
+            };
+            if self.0.iter().any(|forbidden| held(forbidden)) {
+                Err(fail())
+            } else {
+                Ok(())
+            }
         }
     }
 }

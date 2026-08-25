@@ -33,6 +33,9 @@ validation-confirmed = The { $field } field confirmation does not match.
 validation-unique = The { $field } has already been taken.
 validation-array-keys = The { $field } field must only contain the following keys: { $values }.
 validation-distinct = The { $field } field has a duplicate value.
+validation-in-array = The selected { $field } is invalid.
+validation-contains = The { $field } field is missing a required value.
+validation-doesnt-contain = The { $field } field contains a forbidden value.
 
 ### Ids for the `#[derive(Validate)]` path, whose failure codes are the
 ### validator crate's own vocabulary rather than the rule objects'.

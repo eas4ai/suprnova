@@ -308,6 +308,9 @@ async fn every_builtin_key_resolves_in_the_embedded_catalog() {
         "validation-unique",
         "validation-array-keys",
         "validation-distinct",
+        "validation-in-array",
+        "validation-contains",
+        "validation-doesnt-contain",
     ];
 
     // The `#[derive(Validate)]` path speaks the validator crate's codes;

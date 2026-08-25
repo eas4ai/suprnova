@@ -28,9 +28,10 @@ A rule is a value implementing one of four traits:
 | `AsyncRule` | `async passes(&self, value)` | check that `.await`s (DB, HTTP) |
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
-`NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. Built-in `ValueRule`s: `ArrayKeys`,
-`Distinct`. Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
+`NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
+`AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`. Built-in
+`ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`.
+Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
 `RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`:
 [`Unique`](#the-unique-rule).
 
@@ -158,12 +159,57 @@ accept `Rule`s and `ValueRule`s in the same field list; which trait runs
 is resolved by which one the rule's type implements, not by anything
 you write in the row.
 
+### Membership rules
+
+Three rules answer "is this value in that list?", each over the shape it
+needs:
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// Laravel's in_array:allowed_roles.* - the value must appear in another
+// field's list. Pass the list itself: a Vec<String> field and a &[&str]
+// literal both work.
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// Laravel's contains:rust,web - the array must hold every listed value.
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// Laravel's doesnt_contain:banned - the array must hold none of them.
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+Every comparison is exact. `InArray` compares strings with `==`, and
+`Contains` and `DoesntContain` match a parameter against a JSON string
+element only, so `["1"]` contains `"1"` and `[1]` does not. A value that
+is not an array fails `Contains` and `DoesntContain` outright.
+
+`Contains` and `DoesntContain` reject an empty parameter list as a keyless
+construction error, the same way `ArrayKeys` does - a list with nothing in
+it constrains nothing. An empty `InArray` haystack is different: a sibling
+field can legitimately be empty at run time, so the value simply fails.
+
+`InArray`'s failure message names no values, because its list comes out of
+the request and a validation message is rendered into a response body.
+
 ### Why Suprnova diverges
 
 Laravel's `distinct:strict` leans on PHP's coercing `==`. JSON values are
 already typed, so Suprnova's `strict` only changes whether two *numbers*
 with different internal representations (`1` vs `1.0`) count as equal -
 it never makes a string and a number "the same," in either mode.
+
+Laravel writes the other field into a rule string - `in_array:allowed_roles.*` -
+and the validator globs it out of the request data at run time. Suprnova
+has no rule-string parser: you hand `InArray` the list directly, and the
+compiler checks the field exists.
+
+Laravel 13.27 tightened `in`, `in_array`, and `doesnt_contain` to strict
+comparison because PHP's `==` turned `"1abc"`, `true`, and `"0x1"` into
+matches. Suprnova never had that hole - `In` and `NotIn` compare `&str`
+with `==` - and the new rules match JSON values variant by variant. Laravel's
+`contains` stayed loose; Suprnova's does not. The cost is that these rules
+cannot check a numeric array: `Contains(&["1"])` does not match `[1]`.
 
 ## The `validate!` macro
 

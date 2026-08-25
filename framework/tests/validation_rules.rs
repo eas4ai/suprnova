@@ -3,9 +3,9 @@
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
-    Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Different, Distinct, Email,
-    HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless,
-    RequiredWith, Same, Url, UrlProtocols, Uuid,
+    Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Contains, Different,
+    Distinct, DoesntContain, Email, HttpUrl, In, InArray, Integer, Max, Min, NotIn, Numeric,
+    Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url, UrlProtocols, Uuid,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique, ValueRule};
@@ -685,6 +685,179 @@ fn distinct_ignore_case_and_strict_flags_change_comparison() {
     assert!(
         strict.passes(&serde_json::json!([1, 1.0])).is_ok(),
         "strict keeps representations apart"
+    );
+}
+
+// --- membership rules (in_array, contains, doesnt_contain) ---
+
+#[test]
+fn in_array_matches_a_sibling_list_exactly() {
+    let allowed = ["red".to_string(), "green".to_string()];
+    let rule = InArray(&allowed);
+    assert!(rule.passes("red").is_ok());
+    assert!(rule.passes("green").is_ok());
+    assert!(rule.passes("blue").is_err());
+}
+
+#[test]
+fn in_array_accepts_a_str_slice_haystack_and_never_coerces() {
+    let rule = InArray(&["1", "2"]);
+    assert!(rule.passes("1").is_ok());
+    assert!(
+        rule.passes("01").is_err(),
+        "membership is exact string equality, not numeric equality"
+    );
+    assert!(
+        rule.passes(" 1").is_err(),
+        "the value is compared verbatim; nothing is trimmed"
+    );
+    assert!(
+        rule.passes("1abc").is_err(),
+        "the PHP prefix-coercion bypass #61146 closed has no analogue here"
+    );
+}
+
+#[test]
+fn in_array_fails_an_empty_haystack_without_calling_it_a_construction_error() {
+    let empty: [String; 0] = [];
+    let err = InArray(&empty).passes("red").unwrap_err();
+    assert!(
+        err.is_keyed(),
+        "an empty sibling list is ordinary data, so the failure stays translatable"
+    );
+    assert_eq!(err.key, "validation-in-array");
+}
+
+#[test]
+fn in_array_never_echoes_the_submitted_haystack_into_its_message() {
+    let allowed = ["s3cret-tier".to_string()];
+    let err = InArray(&allowed).passes("public").unwrap_err();
+    assert!(
+        err.args.is_empty(),
+        "no request data may reach the message arguments"
+    );
+    assert!(!err.to_string().contains("s3cret-tier"));
+}
+
+#[test]
+fn contains_requires_every_listed_value() {
+    let rule = Contains(&["admin", "editor"]);
+    assert!(
+        rule.passes(&serde_json::json!(["admin", "editor", "viewer"]))
+            .is_ok(),
+        "extra elements are fine; all parameters must be present"
+    );
+    assert!(
+        rule.passes(&serde_json::json!(["admin"])).is_err(),
+        "one missing parameter fails the rule"
+    );
+    assert!(
+        rule.passes(&serde_json::json!("admin")).is_err(),
+        "a non-array fails, matching Laravel's !is_array guard"
+    );
+}
+
+#[test]
+fn contains_compares_json_strings_only() {
+    let rule = Contains(&["1"]);
+    assert!(rule.passes(&serde_json::json!(["1"])).is_ok());
+    assert!(
+        rule.passes(&serde_json::json!([1])).is_err(),
+        "a JSON number is not the string that spells it"
+    );
+    assert!(
+        rule.passes(&serde_json::json!([true])).is_err(),
+        "nor is a JSON boolean"
+    );
+}
+
+#[test]
+fn contains_with_an_empty_list_is_a_construction_error() {
+    let err = Contains(&[])
+        .passes(&serde_json::json!(["admin"]))
+        .unwrap_err();
+    assert!(
+        !err.is_keyed(),
+        "an empty parameter list is a programming error, not a translatable one"
+    );
+    assert!(err.to_string().contains("at least one"));
+}
+
+#[test]
+fn doesnt_contain_rejects_any_listed_value() {
+    let rule = DoesntContain(&["admin", "root"]);
+    assert!(
+        rule.passes(&serde_json::json!(["viewer", "editor"]))
+            .is_ok()
+    );
+    assert!(
+        rule.passes(&serde_json::json!(["viewer", "admin"]))
+            .is_err()
+    );
+    assert!(
+        rule.passes(&serde_json::json!("viewer")).is_err(),
+        "a non-array fails closed, exactly as Laravel's !is_array guard does"
+    );
+}
+
+#[test]
+fn doesnt_contain_compares_json_strings_only() {
+    let rule = DoesntContain(&["1"]);
+    assert!(
+        rule.passes(&serde_json::json!([1])).is_ok(),
+        "a JSON number is not the string that spells it, so it is not forbidden"
+    );
+    assert!(rule.passes(&serde_json::json!(["1"])).is_err());
+}
+
+#[test]
+fn doesnt_contain_with_an_empty_list_is_a_construction_error() {
+    let err = DoesntContain(&[])
+        .passes(&serde_json::json!(["admin"]))
+        .unwrap_err();
+    assert!(!err.is_keyed());
+    assert!(err.to_string().contains("at least one"));
+}
+
+#[test]
+fn membership_rules_mix_in_one_validate_row_list() {
+    use suprnova::{ValidationErrors, validate};
+
+    struct RoleForm {
+        role: String,
+        allowed_roles: Vec<String>,
+        tags: serde_json::Value,
+    }
+
+    impl RoleForm {
+        fn check(&self) -> Result<(), ValidationErrors> {
+            validate! { self =>
+                role => InArray(&self.allowed_roles);
+                tags => Contains(&["rust"]), DoesntContain(&["banned"]);
+            }
+        }
+    }
+
+    let ok = RoleForm {
+        role: "editor".into(),
+        allowed_roles: vec!["editor".into(), "viewer".into()],
+        tags: serde_json::json!(["rust", "web"]),
+    };
+    assert!(ok.check().is_ok());
+
+    let bad = RoleForm {
+        role: "admin".into(),
+        allowed_roles: vec!["editor".into()],
+        tags: serde_json::json!(["banned"]),
+    };
+    let errs = bad.check().unwrap_err();
+    assert!(
+        errs.errors.contains_key("role"),
+        "a borrowed-haystack Rule must dispatch through RuleCheck<str>"
+    );
+    assert!(
+        errs.errors.contains_key("tags"),
+        "a ValueRule row must dispatch through RuleCheck<serde_json::Value>"
     );
 }
 
