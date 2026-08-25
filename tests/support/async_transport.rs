@@ -5,7 +5,7 @@ use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::task::{Context, Poll, Waker};
 
 use suprnova_live::async_updates::{
@@ -76,15 +76,18 @@ struct WakeGateState {
 pub struct RegistrationInterleaving {
     state: Mutex<RegistrationInterleavingState>,
     observed_unreleased: Condvar,
-    release_call_entered: Condvar,
-    sequence: AtomicUsize,
-    release_call_order: AtomicUsize,
-    waiter_registration_order: AtomicUsize,
+    release_state_lock_attempted: Condvar,
 }
 
 struct RegistrationInterleavingState {
     observed_unreleased: bool,
-    release_call_entered: bool,
+    release_state_lock_attempt: Option<ReleaseStateLockAttempt>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseStateLockAttempt {
+    WouldBlock,
+    Acquired,
 }
 
 impl RegistrationInterleaving {
@@ -93,13 +96,10 @@ impl RegistrationInterleaving {
         Self {
             state: Mutex::new(RegistrationInterleavingState {
                 observed_unreleased: false,
-                release_call_entered: false,
+                release_state_lock_attempt: None,
             }),
             observed_unreleased: Condvar::new(),
-            release_call_entered: Condvar::new(),
-            sequence: AtomicUsize::new(0),
-            release_call_order: AtomicUsize::new(0),
-            waiter_registration_order: AtomicUsize::new(0),
+            release_state_lock_attempted: Condvar::new(),
         }
     }
 
@@ -108,9 +108,9 @@ impl RegistrationInterleaving {
         state.observed_unreleased = true;
         self.observed_unreleased.notify_one();
         drop(
-            self.release_call_entered
-                .wait_while(state, |state| !state.release_call_entered)
-                .expect("release call entered wait"),
+            self.release_state_lock_attempted
+                .wait_while(state, |state| state.release_state_lock_attempt.is_none())
+                .expect("release state-lock attempt wait"),
         );
     }
 
@@ -124,27 +124,19 @@ impl RegistrationInterleaving {
         );
     }
 
-    /// Records entry into the release call immediately before its state-lock attempt.
-    pub fn signal_release_call_entered(&self) {
-        let order = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        self.release_call_order.store(order, Ordering::Release);
+    fn record_release_state_lock_attempt(&self, attempt: ReleaseStateLockAttempt) {
         let mut state = self.state.lock().expect("registration interleaving lock");
-        state.release_call_entered = true;
-        self.release_call_entered.notify_one();
+        state.release_state_lock_attempt = Some(attempt);
+        self.release_state_lock_attempted.notify_one();
     }
 
-    fn mark_waiter_registered(&self) {
-        let order = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        self.waiter_registration_order
-            .store(order, Ordering::Release);
-    }
-
-    /// Returns ordered release-entry and waiter-registration trace positions.
-    pub fn trace_orders(&self) -> (usize, usize) {
-        (
-            self.release_call_order.load(Ordering::Acquire),
-            self.waiter_registration_order.load(Ordering::Acquire),
-        )
+    /// Returns whether release observed contention on the exact fixture-state mutex.
+    pub fn release_state_lock_would_block(&self) -> bool {
+        self.state
+            .lock()
+            .expect("registration interleaving lock")
+            .release_state_lock_attempt
+            .is_some_and(|attempt| attempt == ReleaseStateLockAttempt::WouldBlock)
     }
 }
 
@@ -185,10 +177,28 @@ impl WakeGate {
             interleaving.before_waiter_registration();
         }
         register_current_waker(&mut state.waiter, task.waker());
-        if let Some(interleaving) = &interleaving {
-            interleaving.mark_waiter_registered();
-        }
         Poll::Pending
+    }
+
+    /// Proves release contends on this gate's exact state mutex during registration.
+    pub fn assert_release_state_lock_contended(&self, interleaving: &RegistrationInterleaving) {
+        let attempt = match self.state.try_lock() {
+            Err(TryLockError::WouldBlock) => ReleaseStateLockAttempt::WouldBlock,
+            Ok(guard) => {
+                drop(guard);
+                ReleaseStateLockAttempt::Acquired
+            }
+            Err(TryLockError::Poisoned(error)) => {
+                drop(error.into_inner());
+                ReleaseStateLockAttempt::Acquired
+            }
+        };
+        interleaving.record_release_state_lock_attempt(attempt);
+        assert_eq!(
+            attempt,
+            ReleaseStateLockAttempt::WouldBlock,
+            "release must contend on the exact wake-gate state mutex"
+        );
     }
 
     /// Returns whether the controlled operation reached this gate.
@@ -1017,6 +1027,27 @@ impl ControlledSubscribeSource {
         }
     }
 
+    /// Proves release contends on this source's exact state mutex during registration.
+    pub fn assert_release_state_lock_contended(&self, interleaving: &RegistrationInterleaving) {
+        let attempt = match self.state.try_lock() {
+            Err(TryLockError::WouldBlock) => ReleaseStateLockAttempt::WouldBlock,
+            Ok(guard) => {
+                drop(guard);
+                ReleaseStateLockAttempt::Acquired
+            }
+            Err(TryLockError::Poisoned(error)) => {
+                drop(error.into_inner());
+                ReleaseStateLockAttempt::Acquired
+            }
+        };
+        interleaving.record_release_state_lock_attempt(attempt);
+        assert_eq!(
+            attempt,
+            ReleaseStateLockAttempt::WouldBlock,
+            "release must contend on the exact subscribe-source state mutex"
+        );
+    }
+
     /// Returns how many opened sessions completed their close transition.
     pub fn close_count(&self) -> usize {
         self.close_count.load(Ordering::Acquire)
@@ -1045,9 +1076,6 @@ impl AsyncEventSource for ControlledSubscribeSource {
                 interleaving.before_waiter_registration();
             }
             register_current_waker(&mut state.waiter, task.waker());
-            if let Some(interleaving) = &interleaving {
-                interleaving.mark_waiter_registered();
-            }
             Poll::Pending
         }))
     }
