@@ -86,6 +86,40 @@ O framework reexporta o contrato `OAuthProvider`, os cinco provedores próprios 
 
 `MagnetarConfig` cria seu esquema quando `apply_migrations` está habilitado, que é o padrão. Use `.apply_migrations(false)` somente quando a implantação preparar o mesmo esquema separadamente. Uma segunda inicialização retorna um erro em vez de substituir qualquer mecanismo instalado.
 
+### Manter os usuários e as sessões existentes
+
+Uma aplicação pode usar o Magnetar para cerimônias OAuth e prova do provedor
+sem tornar o Magnetar a autoridade de senhas, passkeys, sessões do framework
+ou estado de lembrar-me. Construa o mesmo `MagnetarOAuthHostConfig` e depois
+instale-o com o inicializador somente de OAuth:
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+Inicie a cerimônia normalmente com `Auth::oauth(provider).begin()`. No
+callback, chame `verify_oauth_identity(code, state)`, mapeie o subject
+verificado do provedor para a tabela de usuários da aplicação e estabeleça a
+sessão existente do framework com `Auth::login`. Não chame `complete` neste
+modo: `complete` aplica o mapeamento padrão de contas e sessões do Magnetar,
+enquanto a inicialização somente de OAuth deixa essas decisões com a
+aplicação.
+
+A inicialização somente de OAuth e a inicialização padrão completa são
+alternativas. Um segundo inicializador falha em vez de misturar duas
+autoridades de sessão.
+
 ### Requisitos do provedor GitHub
 
 O endpoint REST de usuário do GitHub exige um `User-Agent`; um provedor da comunidade o adiciona, junto com qualquer valor `Accept` de tipo de mídia de que precise, por meio de `OAuthProvider::userinfo_headers`. O Suprnova adiciona separadamente o cabeçalho bearer `Authorization` e rejeita tentativas do provedor de substituí-lo.

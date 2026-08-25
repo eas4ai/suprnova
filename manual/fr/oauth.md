@@ -81,6 +81,41 @@ Le framework réexporte le contrat `OAuthProvider`, les cinq fournisseurs intern
 
 `MagnetarConfig` crée son schéma lorsque `apply_migrations` est activé, ce qui est le comportement par défaut. Utilisez `.apply_migrations(false)` uniquement lorsque le déploiement prépare séparément le même schéma. Une seconde initialisation renvoie une erreur au lieu de remplacer un moteur installé.
 
+### Conserver les utilisateurs et les sessions existants
+
+Une application peut utiliser Magnetar pour les cérémonies OAuth et la preuve
+du fournisseur sans faire de Magnetar l'autorité pour les mots de passe, les
+passkeys, les sessions du framework ou l'état remember-me. Construisez le même
+`MagnetarOAuthHostConfig`, puis installez-le avec l'initialiseur OAuth
+uniquement :
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+Démarrez la cérémonie normalement avec `Auth::oauth(provider).begin()`. Dans
+le callback, appelez `verify_oauth_identity(code, state)`, associez le subject
+vérifié du fournisseur à la table utilisateur de l'application, puis
+établissez la session existante du framework avec `Auth::login`. N'appelez pas
+`complete` dans ce mode : `complete` applique l'association de comptes et de
+sessions par défaut de Magnetar, tandis que l'initialisation OAuth uniquement
+laisse ces décisions à l'application.
+
+L'initialisation OAuth uniquement et l'initialisation complète par défaut sont
+des alternatives. Un second initialiseur échoue au lieu de mélanger deux
+autorités de session.
+
 ### Exigences du fournisseur GitHub
 
 Le point de terminaison utilisateur REST de GitHub exige un `User-Agent`; un fournisseur communautaire l'ajoute, ainsi que toute valeur `Accept` de type média dont il a besoin, via `OAuthProvider::userinfo_headers`. Suprnova ajoute séparément l'en-tête bearer `Authorization` et rejette les tentatives du fournisseur de le remplacer.

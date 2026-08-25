@@ -24,7 +24,8 @@ use sea_orm::{
 
 use super::engine::{
     HostLifecycleDeduplication, HostPasswordLockout, HostUserAdapter, LifecycleDeliveryClaim,
-    MagnetarBinding, MagnetarHostEngine, MagnetarHostEngineParts,
+    MagnetarBinding, MagnetarHostEngine, MagnetarHostEngineParts, MagnetarPasskeyAuthEngine,
+    MagnetarPasswordAuthEngine,
 };
 #[cfg(feature = "magnetar-oauth")]
 use super::engine::{HostOAuthError, MagnetarOAuthAuthEngine, MagnetarOAuthHostConfig};
@@ -100,6 +101,35 @@ impl MagnetarConfig {
     #[must_use]
     pub fn two_factor_config(mut self, two_factor: TwoFactorConfig) -> Self {
         self.two_factor = two_factor;
+        self
+    }
+}
+
+/// Configuration for installing the default OAuth engine without taking over
+/// password, passkey, framework-session, or remember-me authority.
+#[cfg(feature = "magnetar-oauth")]
+pub struct MagnetarOAuthOnlyConfig {
+    connection: DatabaseConnection,
+    apply_migrations: bool,
+    oauth: MagnetarOAuthHostConfig,
+}
+
+#[cfg(feature = "magnetar-oauth")]
+impl MagnetarOAuthOnlyConfig {
+    /// Bind OAuth ceremony storage to the application's SeaORM connection.
+    #[must_use]
+    pub fn from_sea_orm(connection: DatabaseConnection, oauth: MagnetarOAuthHostConfig) -> Self {
+        Self {
+            connection,
+            apply_migrations: true,
+            oauth,
+        }
+    }
+
+    /// Control whether the default Magnetar storage tables are created.
+    #[must_use]
+    pub fn apply_migrations(mut self, apply: bool) -> Self {
+        self.apply_migrations = apply;
         self
     }
 }
@@ -345,6 +375,17 @@ impl HostLifecycleDeduplication for SqlLifecycleDedup {
     }
 }
 
+#[cfg(feature = "magnetar-oauth")]
+type BuiltOAuthEngine = Option<Arc<dyn MagnetarOAuthAuthEngine>>;
+#[cfg(not(feature = "magnetar-oauth"))]
+type BuiltOAuthEngine = ();
+
+struct DefaultEngineBundle {
+    password: Arc<dyn MagnetarPasswordAuthEngine>,
+    passkey: Arc<dyn MagnetarPasskeyAuthEngine>,
+    oauth: BuiltOAuthEngine,
+}
+
 /// Initialize the default Magnetar password, passkey, session, lockout,
 /// two-factor, and configured OAuth engines.
 ///
@@ -358,6 +399,46 @@ impl HostLifecycleDeduplication for SqlLifecycleDedup {
 /// installed.
 pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError> {
     let reservation = super::reserve_magnetar_engines()?;
+    let bundle = build_default_engines(config).await?;
+    reservation.install(bundle.password, bundle.passkey, bundle.oauth)
+}
+
+/// Install only the default OAuth engine and leave framework session authority
+/// with the application's existing guard and user provider.
+///
+/// This mode supports applications that use Magnetar for OAuth ceremonies and
+/// provider verification but map the verified identity into an existing user
+/// table themselves through `Auth::oauth(...).verify_oauth_identity(...)`.
+///
+/// # Errors
+///
+/// Returns an error when application encryption is unavailable, schema setup or
+/// OAuth composition fails, or any Magnetar engine is already installed.
+#[cfg(feature = "magnetar-oauth")]
+pub async fn init_magnetar_oauth_only(
+    config: MagnetarOAuthOnlyConfig,
+) -> Result<(), FrameworkError> {
+    let reservation = super::reserve_magnetar_engines()?;
+    let full = MagnetarConfig {
+        connection: config.connection,
+        apply_migrations: config.apply_migrations,
+        passkey: PasskeyConfig::default(),
+        sessions: OpaqueConfig::default(),
+        lockout: LockoutConfig::default(),
+        two_factor: TwoFactorConfig::default(),
+        oauth: Some(config.oauth),
+    };
+    let mut bundle = build_default_engines(full).await?;
+    let oauth = bundle
+        .oauth
+        .take()
+        .ok_or_else(|| FrameworkError::internal("OAuth-only configuration omitted OAuth"))?;
+    reservation.install_oauth_only(oauth)
+}
+
+async fn build_default_engines(
+    config: MagnetarConfig,
+) -> Result<DefaultEngineBundle, FrameworkError> {
     if !Crypt::is_initialized() {
         return Err(FrameworkError::internal(
             "Crypt is not initialized - set APP_KEY before initializing Magnetar",
@@ -417,9 +498,10 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
         })
         .map_err(map_error)?,
     );
-    let passkey = Arc::new(engine.passkey_service(&config.passkey).map_err(map_error)?);
+    let passkey: Arc<dyn MagnetarPasskeyAuthEngine> =
+        Arc::new(engine.passkey_service(&config.passkey).map_err(map_error)?);
     #[cfg(feature = "magnetar-oauth")]
-    let oauth: Option<Arc<dyn MagnetarOAuthAuthEngine>> = config
+    let oauth: BuiltOAuthEngine = config
         .oauth
         .map(|oauth| {
             engine
@@ -441,8 +523,12 @@ pub async fn init_magnetar(config: MagnetarConfig) -> Result<(), FrameworkError>
             .await
             .map_err(map_error)?;
     }
-    reservation.install(engine, passkey, oauth)?;
-    Ok(())
+    let password: Arc<dyn MagnetarPasswordAuthEngine> = engine;
+    Ok(DefaultEngineBundle {
+        password,
+        passkey,
+        oauth,
+    })
 }
 
 fn database_error(error: sea_orm::DbErr) -> magnetar::Error {

@@ -81,6 +81,36 @@ pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
 
 当启用 `apply_migrations` 时，`MagnetarConfig` 会创建其架构，这是默认设置。仅当部署会单独准备相同架构时，才使用 `.apply_migrations(false)`。第二次初始化会返回错误，而不是替换任何已安装的引擎。
 
+### 保留现有用户和会话体系
+
+应用可以只使用 Magnetar 处理 OAuth 认证仪式和提供方证明，而不让 Magnetar
+接管密码、passkey、框架会话或记住我状态。构建相同的
+`MagnetarOAuthHostConfig`，然后通过仅 OAuth 初始化器进行安装：
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+照常使用 `Auth::oauth(provider).begin()` 启动认证仪式。在回调中调用
+`verify_oauth_identity(code, state)`，把已验证的提供方 subject 映射到应用自己的
+用户表，然后通过 `Auth::login` 建立现有的框架会话。此模式下不要调用
+`complete`：`complete` 会应用 Magnetar 默认的账户和会话映射，而仅 OAuth
+初始化的目的正是把这些决定留给应用。
+
+仅 OAuth 初始化与完整的默认初始化是二选一的方案。第二个初始化器会失败，而不会
+混合两个会话权威来源。
+
 ### GitHub 提供方要求
 
 GitHub 的 REST 用户端点需要 `User-Agent`；社区提供方会通过 `OAuthProvider::userinfo_headers` 添加它，以及所需的任何媒体类型 `Accept` 值。Suprnova 会单独添加 bearer `Authorization` 标头，并拒绝提供方覆盖它的尝试。

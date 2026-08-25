@@ -6,6 +6,22 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## 1.3.3 - 2026-08-25
+
+> The v1.3.3 release notes are intentionally kept in English to preserve the complete normative record.
+
+### Añadido
+
+- **OAuth can now be installed without replacing an application's existing password and session authority.** `MagnetarOAuthOnlyConfig` and `init_magnetar_oauth_only` install the default ceremony and provider engine while leaving the password and passkey slots empty. Applications with an existing `users` table can call `verify_oauth_identity`, map the verified provider subject themselves, and establish their normal framework session.
+
+### Corregido
+
+- **Installing OAuth no longer forces provider-backed applications into Magnetar web-binding validation.** The full `init_magnetar` path remains atomic and unchanged. The OAuth-only path reserves the engine slots during construction, publishes only OAuth, and fails rather than mixing two authentication authorities.
+
+### Actualización
+
+- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application already owns users, passwords, framework sessions, and remember-me state. OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications continue to use `complete`.
+
 ## 1.3.2 - 2026-08-25
 
 > The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.

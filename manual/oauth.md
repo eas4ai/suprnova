@@ -94,6 +94,39 @@ the default. Use `.apply_migrations(false)` only when deployment prepares the
 same schema separately. A second initialization returns an error instead of
 replacing any installed engine.
 
+### Keep an existing user and session stack
+
+An application can use Magnetar for OAuth ceremonies and provider proof without
+making Magnetar authoritative for password, passkey, framework-session, or
+remember-me state. Build the same `MagnetarOAuthHostConfig`, then install it
+through the OAuth-only initializer:
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+Start the ceremony normally with `Auth::oauth(provider).begin()`. In the
+callback, call `verify_oauth_identity(code, state)`, map the verified provider
+subject into the application's own user table, and establish the existing
+framework session with `Auth::login`. Do not call `complete` in this mode:
+`complete` applies Magnetar's default account and session mapping, while the
+purpose of OAuth-only initialization is to leave those decisions with the
+application.
+
+OAuth-only and full default initialization are alternatives. A second
+initializer fails instead of mixing session authorities.
+
 ### GitHub provider requirements
 
 GitHub's REST user endpoint requires a `User-Agent`; a community provider adds

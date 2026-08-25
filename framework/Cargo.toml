@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-suprnova-macros = { path = "../suprnova-macros", version = "1.3.2" }
+suprnova-macros = { path = "../suprnova-macros", version = "1.3.3" }
 dotenvy = "0.15"
 inventory = "0.3"
 sea-orm = { version = "2.0", features = ["runtime-tokio-rustls", "macros", "postgres-use-serial-pk", "with-rust_decimal", "with-bigdecimal"] }
@@ -45,7 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 uuid = { version = "1", features = ["v4", "v5", "v7", "fast-rng", "serde"] }
 dashmap = "6"
 webauthn-rs = { version = "0.5", features = ["resident-key-support", "danger-allow-state-serialisation"] }
-suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.3.2", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
+suprnova-magnetar = { path = "../crates/suprnova-magnetar", version = "1.3.3", default-features = false, features = ["password", "password-management", "magic-link", "passkey", "two-factor"] }
 secrecy = "0.10"
 
 # Used by the `pagination` module to round-trip `sea_orm::Value::Decimal` /
@@ -150,7 +150,7 @@ sea-streamer-redis = { version = "0.5.2", features = ["runtime-tokio"] }
 lettre = { version = "0.11.22", default-features = false, features = ["smtp-transport", "pool", "rustls-tls", "hostname", "builder", "tokio1", "tokio1-rustls"] }
 tera = "1"
 aws-sigv4 = "1"
-suprnova-web-push = { version = "1.3.2", path = "../crates/suprnova-web-push", optional = true }
+suprnova-web-push = { version = "1.3.3", path = "../crates/suprnova-web-push", optional = true }
 aws-credential-types = "1.2.14"
 fake = { version = "5.1.0", features = ["chrono", "derive", "uuid"] }
 envy = "0.4.2"

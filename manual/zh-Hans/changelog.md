@@ -2,6 +2,22 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
+## 1.3.3 - 2026-08-25
+
+> The v1.3.3 release notes are intentionally kept in English to preserve the complete normative record.
+
+### 新增
+
+- **OAuth can now be installed without replacing an application's existing password and session authority.** `MagnetarOAuthOnlyConfig` and `init_magnetar_oauth_only` install the default ceremony and provider engine while leaving the password and passkey slots empty. Applications with an existing `users` table can call `verify_oauth_identity`, map the verified provider subject themselves, and establish their normal framework session.
+
+### 修复
+
+- **Installing OAuth no longer forces provider-backed applications into Magnetar web-binding validation.** The full `init_magnetar` path remains atomic and unchanged. The OAuth-only path reserves the engine slots during construction, publishes only OAuth, and fails rather than mixing two authentication authorities.
+
+### 升级
+
+- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application already owns users, passwords, framework sessions, and remember-me state. OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications continue to use `complete`.
+
 ## 1.3.2 - 2026-08-25
 
 > The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.
