@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::action::ActionAuthorizationPort;
+use crate::async_updates::{SubscriptionAuthorizationPort, SubscriptionCredentialPort};
 use crate::identity::{ContentDigest, IdentityError, ScopeFingerprint};
 use crate::upload::UploadAuthorizationPort;
 
@@ -112,6 +113,8 @@ pub struct HostCapabilities {
     scope: HostScopeFacts,
     action_authorization: Option<Arc<dyn ActionAuthorizationPort>>,
     upload_authorization: Option<Arc<dyn UploadAuthorizationPort>>,
+    subscription_authorization: Option<Arc<dyn SubscriptionAuthorizationPort>>,
+    subscription_credentials: Option<Arc<dyn SubscriptionCredentialPort>>,
 }
 
 impl HostCapabilities {
@@ -122,6 +125,8 @@ impl HostCapabilities {
             scope,
             action_authorization: None,
             upload_authorization: None,
+            subscription_authorization: None,
+            subscription_credentials: None,
         }
     }
 
@@ -145,6 +150,26 @@ impl HostCapabilities {
         self
     }
 
+    /// Installs current authorization for asynchronous subscription boundaries.
+    #[must_use]
+    pub fn with_subscription_authorization(
+        mut self,
+        authorization: Arc<dyn SubscriptionAuthorizationPort>,
+    ) -> Self {
+        self.subscription_authorization = Some(authorization);
+        self
+    }
+
+    /// Installs the host-owned descriptor-scoped transport credential provider.
+    #[must_use]
+    pub fn with_subscription_credentials(
+        mut self,
+        credentials: Arc<dyn SubscriptionCredentialPort>,
+    ) -> Self {
+        self.subscription_credentials = Some(credentials);
+        self
+    }
+
     pub(crate) const fn scope(&self) -> &HostScopeFacts {
         &self.scope
     }
@@ -155,6 +180,14 @@ impl HostCapabilities {
 
     pub(crate) fn upload_authorization(&self) -> Option<&dyn UploadAuthorizationPort> {
         self.upload_authorization.as_deref()
+    }
+
+    pub(crate) fn subscription_authorization(&self) -> Option<&dyn SubscriptionAuthorizationPort> {
+        self.subscription_authorization.as_deref()
+    }
+
+    pub(crate) fn subscription_credentials(&self) -> Option<&dyn SubscriptionCredentialPort> {
+        self.subscription_credentials.as_deref()
     }
 }
 

@@ -161,7 +161,7 @@
 
 **Files:** `src/async_updates/{subscription,authorization}.rs`, host capabilities/context, subscription/authorization/security tests
 
-- [ ] Add failing tests for descriptor field binding, authoritative baseline, expiry, topic interpolation rejection, token redaction, renewal authorization, and principal/tenant/component/stream/topic revocation:
+- [x] Add failing tests for descriptor field binding, authoritative baseline, expiry, topic interpolation rejection, token redaction, renewal authorization, and principal/tenant/component/stream/topic revocation:
 
   ```rust
   #[test]
@@ -174,8 +174,8 @@
   }
   ```
 
-- [ ] Run subscription/authorization/security tests; record failure because descriptors do not exist.
-- [ ] Implement a canonical signed descriptor and secret transport credential:
+- [x] Run subscription/authorization/security tests; record failure because descriptors do not exist.
+- [x] Implement a canonical signed descriptor and secret transport credential:
 
   ```rust
   pub struct SubscriptionClaims {
@@ -204,8 +204,8 @@
   renewal. Topics come only from registered server metadata and trusted mount
   parameters; directive interpolation cannot select endpoints or topics.
 
-- [ ] Run authorization-loss, expiry/renewal, redaction, snapshot/HTML/URL/history sentinel, and hostile-context tests.
-- [ ] Commit: `feat(async): sign authorized subscription descriptors`.
+- [x] Run authorization-loss, expiry/renewal, redaction, snapshot/HTML/URL/history sentinel, and hostile-context tests.
+- [x] Commit: `feat(async): sign authorized subscription descriptors`.
 
 ## Task 3: Implement the independent bounded async envelope and sequence authority
 

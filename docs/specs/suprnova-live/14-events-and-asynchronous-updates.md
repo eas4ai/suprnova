@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-08-24
+Last revised: 2026-08-25
 
 ## Scope
 
@@ -206,6 +206,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented the canonical subscription-v1 descriptor with the
+  exact `suprnova-live/async-subscription/v1` HKDF purpose, bounded exact-key
+  claims, overlapping key-ID verification, exclusive expiry, and a
+  principal/session/tenant/component context memo. Connect and renewal verify
+  current registered stream/topic scope before host policy, while a separate
+  zeroizing host credential is issued and verified against the exact descriptor
+  binding.
 - 2026-08-24 -- Multiplexed compatible subscriptions over one document transport,
   made subscription identity explicit in every envelope, and required strict
   WebSocket `Origin` validation. Polling is fresh-render-only; signed descriptors

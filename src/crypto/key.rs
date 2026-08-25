@@ -17,6 +17,7 @@ const SEED_INFO_V1: &[u8] = b"suprnova-live/seed-signature/v1";
 const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
 const CHILD_PARAMETERS_INFO_V1: &[u8] = b"suprnova-live/child-params-signature/v1";
 const UPLOAD_GRANT_INFO_V1: &[u8] = b"suprnova-live/upload-grant/v1";
+const ASYNC_SUBSCRIPTION_INFO_V1: &[u8] = b"suprnova-live/async-subscription/v1";
 
 /// Versioned purpose used to derive a capability MAC key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +30,8 @@ pub enum SnapshotPurpose {
     ChildParametersV1,
     /// Temporary upload transfer-grant schema version 1.
     UploadGrantV1,
+    /// Authorized asynchronous subscription descriptor schema version 1.
+    AsyncSubscriptionV1,
 }
 
 impl SnapshotPurpose {
@@ -38,6 +41,7 @@ impl SnapshotPurpose {
             Self::InstanceV1 => INSTANCE_INFO_V1,
             Self::ChildParametersV1 => CHILD_PARAMETERS_INFO_V1,
             Self::UploadGrantV1 => UPLOAD_GRANT_INFO_V1,
+            Self::AsyncSubscriptionV1 => ASYNC_SUBSCRIPTION_INFO_V1,
         }
     }
 }

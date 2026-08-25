@@ -253,7 +253,9 @@ production feature or public convenience constructor.
 - 2026-08-24 -- Closed cross-site WebSocket hijacking by requiring strict
   pre-upgrade `Origin` validation for cookie-authorized transports. Explicit
   cross-origin use requires a non-wildcard allowlist plus separate credential
-  policy; multiplexing handles and subscription descriptors remain non-authority.
+  policy. Multiplexing handles remain non-authority; a subscription descriptor
+  is a signed non-secret integrity authority memo, never a transport credential
+  or substitute for current connect and renewal authorization.
 - 2026-08-23 -- Separated Iteration 004 upload handles from secret transfer
   grants and signed subscription descriptions from any required transport
   credentials. Every operation reauthorizes current scope, and aggregate

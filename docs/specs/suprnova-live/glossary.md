@@ -370,11 +370,12 @@ abandons the upload; capped idempotent reconciliation continues.
 _Avoid_: permanent leak, dropped retry, browser-owned cleanup, failed upload state
 
 **Subscription descriptor**:
-A signed, expiring server-issued declaration of one permitted asynchronous
-subscription, including registered stream identity, capabilities, topics, typed
-events, authorization-context memo, authoritative baseline epoch/sequence,
-reconnect policy, and bounded hybrid fallback. Transport credentials remain
-separately secret when required.
+A signed, expiring, non-secret server-issued integrity authority memo for one
+permitted asynchronous subscription, including registered stream identity,
+capabilities, topics, typed events, authorization-context memo, authoritative
+baseline epoch/sequence, reconnect policy, and bounded hybrid fallback. It is
+not proof of current authorization. Transport credentials remain separately
+secret and descriptor-scoped when required.
 _Avoid_: channel name from HTML, WebSocket URL authority, global event bus, action dispatch token
 
 **Document transport**:
