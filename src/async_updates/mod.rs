@@ -4,7 +4,10 @@ mod authorization;
 mod envelope;
 mod metadata;
 mod sequence;
+mod sse;
 mod subscription;
+mod transport;
+mod websocket;
 
 pub use authorization::{
     AuthoritativeStreamPosition, AuthorizedSubscription, CurrentSubscriptionRegistration,
@@ -40,6 +43,7 @@ pub use sequence::{
     SequenceDegradation, SequenceDisposition, SequenceError, SequenceErrorKind, SequenceMachine,
     SequenceState,
 };
+pub use sse::{SseEncoder, SseEvent, SseMembershipControl, SseResponseContract};
 pub use subscription::{
     ASYNC_SUBSCRIPTION_PROTOCOL_V1, AuthorizationMemo, BoundedEventContracts, CapabilityVersion,
     MAX_CANONICAL_SUBSCRIPTION_CLAIMS_BYTES, MAX_POLL_INTERVAL_MS, MAX_POLL_JITTER_BASIS_POINTS,
@@ -48,4 +52,14 @@ pub use subscription::{
     StreamEpoch, StreamPosition, StreamSequence, SubscriptionClaims, SubscriptionDescriptor,
     SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
     SubscriptionEventContract, TransportCredential, VerifiedSubscriptionDescriptor,
+};
+pub use transport::{
+    AsyncEventSession, AsyncEventSource, AsyncTransportError, AsyncTransportErrorKind,
+    AsyncTransportFuture, AuthorizedTransportSubscription, CloseDisposition,
+    DocumentTransportHandle, DocumentTransportKind, DocumentTransportLimits,
+    DocumentTransportSession, MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, VerifiedOrigin,
+};
+pub use websocket::{
+    AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,
+    WebSocketFrame, WebSocketMembershipControl, WebSocketOriginPolicy,
 };

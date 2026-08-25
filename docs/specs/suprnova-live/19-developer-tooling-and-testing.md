@@ -448,6 +448,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Added deterministic shared transport conformance for signed
+  baselines, contiguous replay, ordered multiplexed routing, Task 3
+  duplicate/gap behavior, heartbeat/completion/error envelopes, cancellation,
+  authorization loss, hard membership/frame limits, same-origin SSE control,
+  strict WebSocket origin policy, authenticated membership changes, idempotent
+  close, and controlled shutdown. Ordinary HTTP endpoint regressions remain in
+  the same focused gate.
 - 2026-08-25 -- Added constructor/decode agreement vectors at browser-safe
   integer boundaries, large finite doubles, canonical zero, and non-finite
   exclusion; fresh-membership and dispatch-failure tests; first/middle/final

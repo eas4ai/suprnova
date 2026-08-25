@@ -284,7 +284,7 @@
 
 **Files:** `src/async_updates/{transport,sse,websocket}.rs`, transport conformance tests, test support
 
-- [ ] Add a shared failing conformance suite for connect/baseline/replay, ordered delivery, subscription routing, duplicates, gaps, heartbeat, completion, typed errors, cancellation, auth loss, strict WebSocket origin validation, logical membership, limits, slow clients, and shutdown:
+- [x] Add a shared failing conformance suite for connect/baseline/replay, ordered delivery, subscription routing, duplicates, gaps, heartbeat, completion, typed errors, cancellation, auth loss, strict WebSocket origin validation, logical membership, limits, slow clients, and shutdown:
 
   ```rust
   pub async fn assert_async_transport(factory: impl AsyncTransportFactory) {
@@ -298,8 +298,8 @@
   }
   ```
 
-- [ ] Run `rtk cargo test --test async_transport_conformance`; record failure because transports are absent.
-- [ ] Define host-neutral source/session interfaces and two wire adapters:
+- [x] Run `rtk cargo test --test async_transport_conformance`; record failure because transports are absent.
+- [x] Define host-neutral source/session interfaces and two wire adapters:
 
   ```rust
   pub trait AsyncEventSource: Send + Sync {
@@ -315,6 +315,7 @@
 
   pub struct DocumentTransportSession {
       origin: VerifiedOrigin,
+      transport: DocumentTransportKind,
       memberships: BoundedSubscriptionMemberships,
       sessions: BoundedLogicalSessions,
   }
@@ -322,8 +323,9 @@
 
   `AsyncEventSource` and `AsyncEventSession` remain the host-neutral interfaces
   for one authorized logical subscription. `DocumentTransportSession` is the
-  bounded fan-in layer: it routes each envelope by signed `SubscriptionId` and
-  never merges logical sequence authority.
+  bounded fan-in layer: it routes each envelope by exact currently authorized
+  `SubscriptionId` and never merges logical sequence authority. The ID itself
+  remains non-secret routing identity and grants no authority.
 
   `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus
   heartbeat comments. SSE membership changes use authenticated same-origin
@@ -337,10 +339,10 @@
   subscription credential is accepted. Both adapters consume the same verified
   descriptor and sequence semantics.
 
-- [ ] Run shared conformance against both transports, cross-site WebSocket
+- [x] Run shared conformance against both transports, cross-site WebSocket
   hijacking cases, membership add/remove/replay cases, ordinary HTTP endpoint
   regression tests, and controlled shutdown.
-- [ ] Commit: `feat(async): add SSE and WebSocket transport sessions`.
+- [x] Commit: `feat(async): add SSE and WebSocket transport sessions`.
 
 ## Task 5: Enforce server-side fanout and backpressure bounds
 

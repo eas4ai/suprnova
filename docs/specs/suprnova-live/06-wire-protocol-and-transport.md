@@ -252,6 +252,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Adapted the same canonical async-envelope v1 bytes to bounded
+  SSE `id`/`event`/`data` records and complete WebSocket text messages. SSE IDs
+  are non-authoritative correlation only. WebSocket membership controls use an
+  independent exact-key canonical record and reject binary, fragmented,
+  invalid UTF-8, duplicate, unknown, noncanonical, oversized, and
+  membership-incoherent input before application.
 - 2026-08-25 -- Unified server-authored asynchronous payload construction with
   wire decode's canonical serialize, bounded parse, canonical re-encode, and
   registered-payload validation profile. Integer schemas admit only lossless

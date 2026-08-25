@@ -234,6 +234,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented host-neutral cancellation-safe logical event
+  sessions and one bounded document fan-in per compatible origin, transport,
+  and authorization scope. The document layer routes only exact active
+  subscription identities and never owns or mutates their independent Task 3
+  sequence machines. SSE emits canonical bounded records with same-origin
+  authenticated membership control around a correlation-only handle;
+  WebSocket emits canonical bounded text/control frames and applies controls
+  only with matching current descriptor authorization.
 - 2026-08-25 -- Required a fresh non-cloneable active-membership guard for every
   sequence observation and made sequence application dispatch-aware. Exact-next
   position commits only after the closed registered dispatcher succeeds. Replay

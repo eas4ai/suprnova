@@ -246,6 +246,13 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented exact normalized HTTP(S) WebSocket origin policy
+  before descriptor or credential processing. Missing, duplicate, opaque,
+  wildcard, malformed, userinfo-bearing, path/query-bearing, and unapproved
+  origins fail closed; cross-origin use requires both an exact finite allowlist
+  entry and separately authenticated non-cookie authority. Transport errors,
+  frames, descriptors, credentials, and document handles expose only bounded
+  redacted diagnostics.
 - 2026-08-25 -- Demoted the cloneable async envelope context to a static
   authorization/codec contract. Every queue admission now rechecks exclusive
   descriptor expiry, active host membership, exact subscription and stream,
