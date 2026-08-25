@@ -295,7 +295,7 @@ gaps as of the shipped framework.
 | `make:controller` / `make:model` / etc. | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task` | shipped | [Generators](cli-generators.md) |
 | `serve` | `suprnova serve` (backend + Vite dev server together) | shipped | [Serve](cli-serve.md) |
 | `migrate` family | `suprnova migrate / migrate:rollback / migrate:status / migrate:fresh` | shipped | [Migrations CLI](cli-migrations.md) |
-| `db:seed` | `cargo run --bin console db:seed` (via per-app console) | shipped | Seeders registered via `Seeder` trait |
+| `db:seed` | `cargo run --bin console db:seed` (via per-app console) | shipped | Seeders registered via `Seeder` trait; a targeted run prints RUNNING / DONE with elapsed milliseconds |
 | `schedule:run` / `schedule:work` / `schedule:list` | Same names via per-app console binary | shipped | [Scheduling CLI](cli-scheduling.md) |
 | `queue:work` | Same name via per-app console binary | shipped | Graceful shutdown on SIGTERM/SIGINT |
 | `tinker` | No REPL | by design no | See the row in "Digging deeper" |

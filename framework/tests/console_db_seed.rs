@@ -184,3 +184,80 @@ async fn db_seed_class_unknown_returns_not_found_error() {
     );
     seed::clear();
 }
+
+// --- Progress reporting on a targeted run (Wave 6 T51) ------------------
+//
+// The lines themselves go to stdout, which the libtest harness owns, so
+// these tests assert the behaviour that must NOT change: a targeted run
+// still returns Ok, a failing targeted run still returns the seeder's
+// Err, and the seeder still runs exactly once. The line layout is
+// pinned by the unit tests on `console::output::two_column_detail`.
+
+#[tokio::test]
+#[serial]
+async fn targeted_run_reports_progress_and_still_returns_ok() {
+    seed::clear();
+    OTHER_RAN.store(0, Ordering::SeqCst);
+    seed::register::<OtherSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=OtherSeeder".to_string(),
+    ];
+    console::dispatch_argv(argv)
+        .await
+        .expect("progress reporting must not change the exit contract");
+
+    assert_eq!(
+        OTHER_RAN.load(Ordering::SeqCst),
+        1,
+        "the seeder still runs exactly once"
+    );
+    seed::clear();
+}
+
+#[tokio::test]
+#[serial]
+async fn targeted_run_that_fails_still_propagates_the_error() {
+    seed::clear();
+    FAILING_RAN.store(0, Ordering::SeqCst);
+    seed::register::<FailingSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=FailingSeeder".to_string(),
+    ];
+    let err = console::dispatch_argv(argv)
+        .await
+        .expect_err("a failing targeted seeder must still fail the command");
+
+    assert!(
+        format!("{err}").contains("FailingSeeder fails on purpose"),
+        "the seeder's own error must survive the progress wrapper: {err}"
+    );
+    assert_eq!(FAILING_RAN.load(Ordering::SeqCst), 1);
+    seed::clear();
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unknown_targeted_class_still_reports_not_found() {
+    // The RUNNING line prints before the lookup, but the not-found error
+    // must still be what the caller sees.
+    seed::clear();
+    seed::register::<RecordingSeeder>();
+
+    let argv = vec![
+        "console".to_string(),
+        "db:seed".to_string(),
+        "--class=StillNotReal".to_string(),
+    ];
+    let err = console::dispatch_argv(argv).await.unwrap_err();
+    assert!(
+        format!("{err}").contains("no seeder registered for `StillNotReal`"),
+        "got: {err}"
+    );
+    seed::clear();
+}
