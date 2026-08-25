@@ -3363,20 +3363,22 @@ where
     /// Render the SQL for the live DB connection's backend, returning
     /// both the SQL string and the bound values.
     ///
-    /// **Panics** when this builder contains an identifier or
-    /// operator that fails [`crate::database::validate_identifier`] /
-    /// [`crate::database::validate_sql_operator`] - the same
-    /// validation the execution path applies. The debug-only API
-    /// keeps an infallible signature; the execution path
-    /// ([`Self::get`] / [`Self::count`] / ...) surfaces the same
-    /// condition as `Err(FrameworkError)` instead.
+    /// **Panics** when this builder cannot render for that backend -
+    /// an identifier or operator that fails
+    /// [`crate::database::validate_identifier`] /
+    /// [`crate::database::validate_sql_operator`], or a
+    /// backend-specific clause such as [`Self::filter_binary`] on
+    /// Postgres or SQLite. The debug-only API keeps an infallible
+    /// signature; the execution path ([`Self::get`] / [`Self::count`]
+    /// / ...) surfaces the same condition as `Err(FrameworkError)`
+    /// instead.
     pub fn to_sql_with_bindings(&self) -> (String, Vec<SeaValue>) {
         let backend = DB::connection()
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
         self.render_select_for(backend, M::TABLE, "*")
-            .expect("to_sql_with_bindings: builder contains invalid identifier/operator")
+            .expect("to_sql_with_bindings: builder cannot render for the live connection's backend")
     }
 
     /// Render the SQL for a specific dialect. Useful when debugging
@@ -3509,13 +3511,20 @@ where
     /// The legacy `table` argument is retained for source compatibility but
     /// is deliberately ignored. Delete targets always come from `M::TABLE`;
     /// callers cannot inject or redirect the executable statement.
+    ///
+    /// **Panics** when a WHERE clause on this builder has no rendering
+    /// for `backend` - [`Self::filter_binary`] on Postgres or SQLite,
+    /// a raw fragment whose placeholders do not match its bindings, or
+    /// a backend this renderer does not know. The execution path
+    /// ([`Self::delete_all`]) surfaces the same condition as
+    /// `Err(FrameworkError)` instead.
     pub fn to_delete_sql_with_bindings_for(
         &self,
         backend: DbBackend,
         _table: &str,
     ) -> (String, Vec<SeaValue>) {
         self.render_model_delete_sql_with_bindings(backend)
-            .expect("SeaORM returned an unsupported backend to the pure SQL renderer")
+            .expect("to_delete_sql_with_bindings_for: builder cannot render for this backend")
     }
 
     fn render_model_delete_sql_with_bindings(
