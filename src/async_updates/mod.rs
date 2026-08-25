@@ -1,11 +1,13 @@
 //! Typed, bounded declarations for authorized asynchronous updates.
 
 mod authorization;
+mod backpressure;
 mod envelope;
 mod metadata;
 mod sequence;
 mod sse;
 mod subscription;
+mod telemetry;
 mod transport;
 mod websocket;
 
@@ -18,6 +20,11 @@ pub use authorization::{
     SubscriptionCredentialRotationRequest, SubscriptionCredentialScope, SubscriptionFuture,
     SubscriptionIssueRequest, SubscriptionRegistryPort, SubscriptionRegistryRequest,
     SubscriptionService, TrustedMountParameters,
+};
+pub use backpressure::{
+    AsyncBackpressure, AsyncBackpressureError, AsyncBufferEntry, AsyncCloseCode, AsyncDelivery,
+    AsyncPolicy, BufferDisposition, MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS,
+    MAX_ASYNC_PAYLOAD_BYTES,
 };
 pub use envelope::{
     ActiveAsyncMembershipGuard, AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext,
@@ -53,6 +60,7 @@ pub use subscription::{
     SubscriptionDescriptorCodec, SubscriptionError, SubscriptionErrorKind,
     SubscriptionEventContract, TransportCredential, VerifiedSubscriptionDescriptor,
 };
+pub use telemetry::{AsyncTelemetryCounter, AsyncTelemetrySnapshot};
 pub use transport::{
     AsyncEventSession, AsyncEventSource, AsyncTransportAuthorityPort,
     AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,

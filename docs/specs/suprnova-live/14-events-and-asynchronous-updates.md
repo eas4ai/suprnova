@@ -237,6 +237,29 @@ Acceptance criteria:
   `Error` payload is nonterminal protocol information; a source/session failure
   is terminal and retires only that logical membership.
 - Backpressure bounds server buffers and slow-client resource use.
+- Server delivery pressure is one policy wrapper over the shared resource owner,
+  bounded queue, permit pool, and cancellation flag. It does not create a
+  second queue, permit counter, lifetime owner, detached worker, or sequence
+  authority. One owning document delivery queue retains at most 64 unapplied
+  envelopes and 256 KiB of canonical envelope bytes.
+- Admission checks the 32 KiB canonical payload ceiling, replay count and
+  aggregate bytes, current descriptor-bound event fanout, deployment fanout
+  policy, queue count/bytes, and owner cancellation before per-target cloning or
+  delivery work. Delivery acquires one shared permit before removing a queued
+  envelope, so saturation leaves the queue unchanged. Replay preflight is
+  atomic: a rejected transcript changes no queue position.
+- Coalescing may replace only the newest exact contiguous refresh for the same
+  subscription, stream, and epoch, or presentation signal with that same scope
+  and registered signal identity and schema contract. Replacement retains the
+  latest envelope but marks continuity degraded because an earlier sequence was
+  superseded.
+  Required ordered browser events, heartbeats, completion, and errors never
+  coalesce; pressure never evicts one while claiming continuity.
+- Admission returns the closed `Queued`, `Coalesced`, `Degraded`, or
+  `Closed(code)` disposition. Terminal policy violations cancel and drain the
+  owning delivery scope once. Telemetry uses only the finite queued, coalesced,
+  degraded, closed, rejected, and cleanup labels; subscription, stream, event,
+  principal, payload, descriptor, and raw-error values are forbidden labels.
 - Stream lifetime, cancellation, heartbeat, and deployment shutdown are
   observable and bounded.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
@@ -286,6 +309,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Implemented server delivery pressure as a policy wrapper over
+  the shared bounded-resource owner, queue, permits, and cancellation flag.
+  Document queues retain at most 64 unapplied canonical envelopes or 256 KiB;
+  payload, replay, and fanout are preflighted before delivery allocation, with
+  event fanout capped by both current signed registration and deployment
+  policy. Only an exact contiguous same-scope refresh or presentation-signal
+  tail with the same registered schema contract may be replaced, and
+  replacement truthfully marks continuity degraded.
+  Ordered browser events and lifecycle records never coalesce or disappear;
+  terminal close drains once, and observability has a fixed redaction-safe
+  counter vocabulary.
 - 2026-08-25 -- Split every external transport membership mutation into
   synchronous document snapshot, owned asynchronous authority/source work, and
   one-use synchronous commit. No document borrow crosses an await. Exact

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::bounds::validate_permit_limit;
+use super::queue::ReplaceBack;
 use super::{
     BoundedQueue, CancellationFlag, ResourceBounds, ResourceBoundsError, ResourceError, Retirement,
 };
@@ -147,6 +148,29 @@ impl<T> ResourceQueue<T> {
         }
     }
 
+    /// Replaces the newest queued value without changing its FIFO position.
+    ///
+    /// Returns `true` when a queued value was replaced and `false` when the
+    /// queue was empty. Replaced and rejected payloads are dropped only after
+    /// the queue accounting lock is released.
+    pub fn try_replace_back(&self, bytes: usize, value: T) -> Result<bool, ResourceError> {
+        let replacement = self.lock().try_replace_back_preserving(bytes, value);
+        match replacement {
+            Ok(ReplaceBack::Replaced(previous)) => {
+                drop(previous);
+                Ok(true)
+            }
+            Ok(ReplaceBack::Empty(rejected)) => {
+                drop(rejected);
+                Ok(false)
+            }
+            Err((error, rejected)) => {
+                drop(rejected);
+                Err(error)
+            }
+        }
+    }
+
     /// Removes the oldest value and releases its byte reservation.
     pub fn pop(&self) -> Option<T> {
         self.lock().pop()
@@ -168,6 +192,12 @@ impl<T> ResourceQueue<T> {
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.lock().retained_bytes()
+    }
+
+    /// Returns the immutable queue item and retained-byte ceilings.
+    #[must_use]
+    pub fn bounds(&self) -> ResourceBounds {
+        self.lock().bounds()
     }
 
     /// Returns whether the owning lifecycle has retired this queue.

@@ -124,6 +124,43 @@ fn queue_is_fifo_and_releases_each_reservation_on_pop() {
 }
 
 #[test]
+fn queue_can_replace_only_its_newest_item_with_exact_byte_accounting() {
+    let mut queue = BoundedQueue::new(ResourceBounds::new(3, 10).expect("valid bounds"));
+    assert_eq!(queue.bounds(), ResourceBounds::new(3, 10).expect("bounds"));
+    queue.try_push(2, "first").expect("first item");
+    queue.try_push(3, "replaceable").expect("replaceable item");
+
+    assert_eq!(
+        queue.try_replace_back(5, "replacement"),
+        Ok(Some("replaceable"))
+    );
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.retained_bytes(), 7);
+    assert_eq!(queue.pop(), Some("first"));
+    assert_eq!(queue.pop(), Some("replacement"));
+
+    queue.try_push(8, "full").expect("full item");
+    assert_eq!(
+        queue.try_replace_back(11, "too-large"),
+        Err(ResourceError::BytesExceeded)
+    );
+    assert_eq!(queue.retained_bytes(), 8);
+    assert_eq!(queue.pop(), Some("full"));
+
+    let owner = ResourceOwner::<u8>::new(ResourceBounds::new(2, 4).expect("owner bounds"));
+    assert_eq!(
+        owner.queue().bounds(),
+        ResourceBounds::new(2, 4).expect("owner bounds")
+    );
+    owner.queue().try_push(1, 1).expect("owned first");
+    owner.queue().try_push(1, 2).expect("owned newest");
+    assert_eq!(owner.queue().try_replace_back(2, 3), Ok(true));
+    assert_eq!(owner.queue().retained_bytes(), 3);
+    assert_eq!(owner.queue().pop(), Some(1));
+    assert_eq!(owner.queue().pop(), Some(3));
+}
+
+#[test]
 fn permit_exhaustion_release_and_reuse_are_exact() {
     let pool = PermitPool::new(2).expect("valid permit bound");
     let first = pool.try_acquire().expect("first permit");

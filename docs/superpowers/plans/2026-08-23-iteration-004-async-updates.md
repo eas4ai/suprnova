@@ -395,7 +395,7 @@
 
 **Files:** `src/async_updates/{backpressure,telemetry}.rs`, backpressure/security tests
 
-- [ ] Add failing tests for subscription/message/payload/heartbeat/replay/fanout/buffer limits, global outage, multi-island pressure, slow clients, and low-cardinality observability:
+- [x] Add failing tests for subscription/message/payload/heartbeat/replay/fanout/buffer limits, global outage, multi-island pressure, slow clients, and low-cardinality observability:
 
   ```rust
   #[test]
@@ -410,8 +410,11 @@
   }
   ```
 
-- [ ] Run backpressure/security tests; record failure because buffer/fanout policies are absent.
-- [ ] Implement typed dispositions:
+- [x] Run `rtk cargo test --test async_backpressure`; record the expected RED
+  because `AsyncBackpressure`, `AsyncBufferEntry`, `AsyncPolicy`, and
+  `BufferDisposition` did not exist. A separate shared-resource RED proved the
+  bounded queue lacked exact newest-item replacement.
+- [x] Implement typed dispositions:
 
   ```rust
   pub enum BufferDisposition {
@@ -439,8 +442,11 @@
   or closes with a typed code; it never drops a required event and claims
   continuity.
 
-- [ ] Run fanout, slow-client, outage, memory-bound, and telemetry tests.
-- [ ] Commit: `feat(async): bound fanout and stream backpressure`.
+- [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
+  implementation reuses the shared owner/queue/permit/cancellation primitives,
+  preflights replay and registered fanout before allocation, preserves required
+  ordered events, and exposes only finite redaction-safe counters.
+- [x] Commit: `feat(async): bound fanout and stream backpressure`.
 
 ## Task 6: Implement browser envelope validation and subscription continuity
 

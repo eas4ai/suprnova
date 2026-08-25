@@ -487,6 +487,23 @@ next required successor through at least its recorded gap high-water. Claimed
 cross-scope or cross-epoch messages are not proof.
 _Avoid_: boolean continuity flag, claimed range, reconnect success, transport ordering
 
+**Async backpressure buffer**:
+The server delivery admission policy wrapped around the shared resource owner,
+bounded queue, permit pool, and cancellation flag. It applies hard item, byte,
+payload, replay, descriptor fanout, policy fanout, and delivery-work limits;
+only an exact contiguous replaceable tail with the same subscription, stream,
+epoch, registered identity, and presentation schema contract may coalesce, and
+that replacement marks continuity degraded. It is neither the transport
+retirement lane nor a second sequence or lifecycle authority.
+_Avoid_: private async queue, event bus, replay authority, transport retirement lane
+
+**Buffer disposition**:
+The closed outcome of one server delivery admission: `Queued`, `Coalesced`,
+`Degraded`, or `Closed(code)`. Coalesced means bounded replacement occurred,
+not that sequence continuity remains current; degraded requires replay or an
+authoritative refresh before currentness can be claimed.
+_Avoid_: success boolean, best-effort drop, currentness proof, transport status
+
 **Credential rotation uncertainty**:
 A subscription credential rotation that committed predecessor consumption and
 successor persistence but lost the successor response. The predecessor cannot

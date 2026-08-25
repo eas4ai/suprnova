@@ -97,6 +97,11 @@ pub(super) struct BoundedItem<T> {
     value: T,
 }
 
+pub(super) enum ReplaceBack<T> {
+    Replaced(T),
+    Empty(T),
+}
+
 /// A payload-neutral bounded first-in, first-out queue.
 ///
 /// Callers supply the retained byte reservation for each value. The queue does
@@ -142,6 +147,25 @@ impl<T> BoundedQueue<T> {
             .map_err(|(error, _rejected)| error)
     }
 
+    /// Replaces the newest queued value while preserving its FIFO position.
+    ///
+    /// The replacement reserves its declared bytes atomically. Failed
+    /// replacement leaves the existing value and accounting unchanged. An
+    /// empty queue returns `Ok(None)` and consumes no reservation.
+    pub fn try_replace_back(&mut self, bytes: usize, value: T) -> Result<Option<T>, ResourceError> {
+        match self.try_replace_back_preserving(bytes, value) {
+            Ok(ReplaceBack::Replaced(previous)) => Ok(Some(previous)),
+            Ok(ReplaceBack::Empty(rejected)) => {
+                drop(rejected);
+                Ok(None)
+            }
+            Err((error, rejected)) => {
+                drop(rejected);
+                Err(error)
+            }
+        }
+    }
+
     pub(super) fn try_push_preserving(
         &mut self,
         bytes: usize,
@@ -163,6 +187,38 @@ impl<T> BoundedQueue<T> {
         self.retained_bytes = next;
         self.items.push_back(BoundedItem { bytes, value });
         Ok(())
+    }
+
+    pub(super) fn try_replace_back_preserving(
+        &mut self,
+        bytes: usize,
+        value: T,
+    ) -> Result<ReplaceBack<T>, (ResourceError, T)> {
+        if self.retired {
+            return Err((ResourceError::Retired, value));
+        }
+        let Some(current) = self.items.back() else {
+            return Ok(ReplaceBack::Empty(value));
+        };
+        let retained_without_current = self
+            .retained_bytes
+            .checked_sub(current.bytes)
+            .expect("bounded queue byte accounting invariant");
+        let Some(next) = retained_without_current.checked_add(bytes) else {
+            return Err((ResourceError::BytesExceeded, value));
+        };
+        if next > self.bounds.max_bytes() {
+            return Err((ResourceError::BytesExceeded, value));
+        }
+
+        let current = self
+            .items
+            .back_mut()
+            .expect("bounded queue newest item remains present");
+        let previous = std::mem::replace(&mut current.value, value);
+        current.bytes = bytes;
+        self.retained_bytes = next;
+        Ok(ReplaceBack::Replaced(previous))
     }
 
     /// Removes the oldest value and releases its byte reservation exactly once.

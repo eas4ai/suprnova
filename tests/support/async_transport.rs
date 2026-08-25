@@ -18,15 +18,16 @@ use suprnova_live::async_updates::{
     BrowserPayloadSchema, CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EventCyclePolicy, EventOrder, EventSource,
-    EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy, ReconnectPolicy,
-    StreamEpoch, StreamName, StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
-    SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialPort,
-    SubscriptionCredentialRequest, SubscriptionCredentialRotationOutcome,
-    SubscriptionCredentialRotationRequest, SubscriptionError, SubscriptionId,
-    SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode, SubscriptionModes,
-    SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService, TopicName,
-    TransportCredential, TransportMembershipOperation, TrustedMountParameters, VerifiedOrigin,
+    EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
+    PresentationSignalContract, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition,
+    StreamSequence, SubscriptionAuthorizationDecision, SubscriptionAuthorizationPort,
+    SubscriptionAuthorizationRequest, SubscriptionBaselineRequest, SubscriptionBinding,
+    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
+    SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
+    SubscriptionError, SubscriptionId, SubscriptionIssueRequest, SubscriptionMetadata,
+    SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
+    SubscriptionService, TopicName, TransportCredential, TransportMembershipOperation,
+    TrustedMountParameters, VerifiedOrigin,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
@@ -334,7 +335,7 @@ pub struct MembershipRegistry {
     stream: StreamName,
     topics: BoundedTopics,
     events: BoundedEventContracts,
-    signals: BoundedPresentationSignalContracts,
+    signals: Mutex<BoundedPresentationSignalContracts>,
     modes: Mutex<SubscriptionModes>,
     authorization_memo: Mutex<suprnova_live::async_updates::AuthorizationMemo>,
     document_scope: Mutex<DocumentAuthorizationScope>,
@@ -367,6 +368,16 @@ impl MembershipRegistry {
     pub fn set_modes(&self, modes: Vec<SubscriptionMode>) {
         *self.modes.lock().expect("membership mode lock") =
             SubscriptionModes::new(modes).expect("current modes");
+    }
+
+    /// Replaces the current generated presentation-signal contract set.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes contract drift only to Task 5 backpressure tests"
+    )]
+    pub fn set_presentation_signals(&self, signals: Vec<PresentationSignalContract>) {
+        *self.signals.lock().expect("presentation signal lock") =
+            BoundedPresentationSignalContracts::new(signals).expect("bounded presentation signals");
     }
 
     /// Revokes browser-initiated removal while preserving internal retirement.
@@ -447,7 +458,11 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                 .iter()
                 .any(|subscription| subscription == request.subscription());
         if active {
-            validation.accept_current(&self.stream, &self.events, &self.signals);
+            validation.accept_current(
+                &self.stream,
+                &self.events,
+                &self.signals.lock().expect("presentation signal lock"),
+            );
         }
     }
 }
@@ -720,7 +735,9 @@ impl TransportFixture {
             stream: stream(),
             topics: authorized.verified().claims().topics().clone(),
             events: authorized.verified().claims().events().clone(),
-            signals: BoundedPresentationSignalContracts::new(Vec::new()).expect("empty signals"),
+            signals: Mutex::new(
+                BoundedPresentationSignalContracts::new(Vec::new()).expect("empty signals"),
+            ),
             modes: Mutex::new(modes),
             authorization_memo: Mutex::new(
                 authorized.verified().claims().authorization_memo().clone(),

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::num::NonZeroU16;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -566,6 +567,7 @@ pub struct RegisteredBrowserEvent {
     schema_version: u16,
     target: EventTarget,
     payload: CanonicalValue,
+    maximum_fanout: NonZeroU16,
 }
 
 impl fmt::Debug for RegisteredBrowserEvent {
@@ -589,11 +591,13 @@ impl RegisteredBrowserEvent {
         target: EventTarget,
         payload: CanonicalValue,
     ) -> Result<Self, AsyncEnvelopeError> {
+        let maximum_fanout = registered_event_contract(context, &name)?.maximum_fanout();
         let event = Self {
             name,
             schema_version,
             target,
             payload,
+            maximum_fanout,
         };
         match validate_programmatic_payload(context, &AsyncPayload::BrowserEvent(event))? {
             AsyncPayload::BrowserEvent(event) => Ok(event),
@@ -624,6 +628,12 @@ impl RegisteredBrowserEvent {
     pub const fn payload(&self) -> &CanonicalValue {
         &self.payload
     }
+
+    /// Returns the current descriptor-bound delivery fanout ceiling.
+    #[must_use]
+    pub const fn maximum_fanout(&self) -> NonZeroU16 {
+        self.maximum_fanout
+    }
 }
 
 /// Declared presentation-only local-signal update.
@@ -631,6 +641,7 @@ impl RegisteredBrowserEvent {
 pub struct RegisteredPresentationSignal {
     name: BrowserOperationName,
     value: CanonicalValue,
+    schema: BrowserPayloadSchema,
 }
 
 impl fmt::Debug for RegisteredPresentationSignal {
@@ -650,7 +661,12 @@ impl RegisteredPresentationSignal {
         name: BrowserOperationName,
         value: CanonicalValue,
     ) -> Result<Self, AsyncEnvelopeError> {
-        let signal = Self { name, value };
+        let schema = registered_presentation_signal_contract(context, &name)?.schema();
+        let signal = Self {
+            name,
+            value,
+            schema,
+        };
         match validate_programmatic_payload(context, &AsyncPayload::PresentationSignal(signal))? {
             AsyncPayload::PresentationSignal(signal) => Ok(signal),
             _ => unreachable!("validated presentation-signal payload preserves its closed variant"),
@@ -667,6 +683,12 @@ impl RegisteredPresentationSignal {
     #[must_use]
     pub const fn value(&self) -> &CanonicalValue {
         &self.value
+    }
+
+    /// Returns the current registered payload schema used for coalescing identity.
+    #[must_use]
+    pub const fn schema(&self) -> BrowserPayloadSchema {
+        self.schema
     }
 }
 
@@ -1079,6 +1101,16 @@ pub fn encode_async_envelope(
     to_canonical_bytes(&value, &limits.input()).map_err(map_canonical)
 }
 
+pub(crate) fn canonical_async_payload_len(
+    envelope: &AsyncEnvelope,
+) -> Result<usize, AsyncEnvelopeError> {
+    let limits = AsyncCodecLimits::v1();
+    let payload = payload_value(envelope.payload())?;
+    to_canonical_bytes(&payload, &limits.input())
+        .map(|bytes| bytes.len())
+        .map_err(map_canonical)
+}
+
 fn parse_position(value: CanonicalValue) -> Result<StreamPosition, AsyncEnvelopeError> {
     let mut fields = object(value, AsyncEnvelopeErrorKind::InvalidEnvelope)?;
     require_exact_keys(
@@ -1188,18 +1220,14 @@ fn parse_browser_event(
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
     let target = parse_target(&string(take(&mut fields, "target")?)?)?;
     let payload = take(&mut fields, "payload")?;
-    let contract = context
-        .events
-        .as_slice()
-        .iter()
-        .find(|contract| contract.name() == &name)
-        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
+    let contract = registered_event_contract(context, &name)?;
     validate_event(contract, schema_version, &target, &payload)?;
     Ok(RegisteredBrowserEvent {
         name,
         schema_version,
         target,
         payload,
+        maximum_fanout: contract.maximum_fanout(),
     })
 }
 
@@ -1224,12 +1252,12 @@ fn validate_registered_event(
     context: &AsyncEnvelopeContext,
     event: &RegisteredBrowserEvent,
 ) -> Result<(), AsyncEnvelopeError> {
-    let contract = context
-        .events
-        .as_slice()
-        .iter()
-        .find(|contract| contract.name() == event.name())
-        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
+    let contract = registered_event_contract(context, event.name())?;
+    if event.maximum_fanout() != contract.maximum_fanout() {
+        return Err(AsyncEnvelopeError::new(
+            AsyncEnvelopeErrorKind::UnregisteredPayload,
+        ));
+    }
     validate_event(
         contract,
         event.schema_version(),
@@ -1238,20 +1266,39 @@ fn validate_registered_event(
     )
 }
 
+fn registered_event_contract<'a>(
+    context: &'a AsyncEnvelopeContext,
+    name: &BrowserOperationName,
+) -> Result<&'a SubscriptionEventContract, AsyncEnvelopeError> {
+    context
+        .events
+        .as_slice()
+        .iter()
+        .find(|contract| contract.name() == name)
+        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))
+}
+
 fn validate_registered_signal(
     context: &AsyncEnvelopeContext,
     signal: &RegisteredPresentationSignal,
 ) -> Result<(), AsyncEnvelopeError> {
-    let contract = context
-        .presentation_signals
-        .find(signal.name())
-        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
-    if !schema_matches(contract.schema(), signal.value()) {
+    let contract = registered_presentation_signal_contract(context, signal.name())?;
+    if signal.schema() != contract.schema() || !schema_matches(contract.schema(), signal.value()) {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
         ));
     }
     Ok(())
+}
+
+fn registered_presentation_signal_contract<'a>(
+    context: &'a AsyncEnvelopeContext,
+    name: &BrowserOperationName,
+) -> Result<&'a PresentationSignalContract, AsyncEnvelopeError> {
+    context
+        .presentation_signals
+        .find(name)
+        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))
 }
 
 fn validate_registered_payload(
@@ -1303,16 +1350,17 @@ fn parse_presentation_signal(
     let name = BrowserOperationName::parse(&string(take(&mut fields, "name")?)?)
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
     let value = take(&mut fields, "value")?;
-    let contract = context
-        .presentation_signals
-        .find(&name)
-        .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
+    let contract = registered_presentation_signal_contract(context, &name)?;
     if !schema_matches(contract.schema(), &value) {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
         ));
     }
-    Ok(RegisteredPresentationSignal { name, value })
+    Ok(RegisteredPresentationSignal {
+        name,
+        value,
+        schema: contract.schema(),
+    })
 }
 
 fn parse_target(value: &str) -> Result<EventTarget, AsyncEnvelopeError> {
