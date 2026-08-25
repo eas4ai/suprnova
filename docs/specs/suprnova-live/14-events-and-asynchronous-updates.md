@@ -179,20 +179,33 @@ Acceptance criteria:
   rotation cannot replace, remove, or control one another's membership.
   A retained descriptor-bound request, document handle, or browser control is
   never reusable current authority.
-- Subscription establishment validates before source work and again after the
-  asynchronous source subscribe completes, immediately before membership
-  commit. Failed post-subscribe validation closes/disposes the newly opened
-  logical session exactly once and installs nothing. External removal similarly
-  reauthorizes, while completion, revocation retirement, cancellation recovery,
+- Subscription establishment is a split one-use control operation: synchronous
+  preparation snapshots the exact document tuple and control generation; an
+  owned pending operation obtains fresh authority without borrowing the
+  document; a synchronous pre-source gate rechecks generation, physical scope,
+  exact server-owned document instance, expiry, duplicate/retirement fences,
+  and capacity; source establishment and
+  post-subscribe authority then run without a document borrow; and one
+  synchronous commit repeats those checks immediately before mutation. A
+  pending authority/source operation therefore cannot block delivery or another
+  control. Failed or canceled post-subscribe validation and failed/stale commit
+  close/dispose the newly opened logical session exactly once and install
+  nothing. External removal uses the same prepare/authorize/commit split. It
+  authenticates before classifying unknown or descriptor-mismatched local
+  membership, while completion, revocation retirement, cancellation recovery,
   and controlled shutdown retain internal cleanup authority after browser
-  credentials expire.
+  credentials expire. Pending external controls are document-owned through
+  one-use permits and have a hard count bound independent of Task 5 fanout.
 - Logical completion, source failure, routing failure, removal, and shutdown
   detach a membership from active routing before cleanup. The document retains
   cleanup ownership in the same hard-bounded retirement lane and polls it fairly
   through a persistent executor-neutral interface; a pending or failing close
   cannot stall active siblings, monopolize a wake, spawn an unowned task, or
-  permit post-terminal delivery. Active plus retiring sessions share the same
-  membership ceiling.
+  permit post-terminal delivery. A retiring entry retains the exact
+  subscription ID and signed-descriptor binding as a fence until cleanup
+  succeeds, so it consumes capacity, rejects same-ID re-admission under either
+  the same or an overlapping-key binding, and cannot clean up a later
+  replacement. Active plus retiring sessions share the same membership ceiling.
 - Current registered `SubscriptionModes` are authority. The physical document
   kind is compatibility only: SSE-only cannot use WebSocket, WebSocket-only
   cannot use SSE, and any same-name mode-set revision invalidates a retained
@@ -273,6 +286,15 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Split every external transport membership mutation into
+  synchronous document snapshot, owned asynchronous authority/source work, and
+  one-use synchronous commit. No document borrow crosses an await. Exact
+  physical scope and owner, expiry, control generation, active-plus-retiring identity
+  fences, and capacity are checked immediately before source work and commit;
+  opened sessions retain once-only cleanup ownership through cancellation or a
+  failed/stale commit. Pending controls have a hard RAII permit bound. Removal
+  authenticates before local membership classification, preventing a WebSocket
+  membership oracle.
 - 2026-08-25 -- Bound logical membership to the exact signed-descriptor digest,
   including key ID and signature, rather than claims equality. Split physical
   `DocumentAuthorizationScope` from component-specific authorization memos so

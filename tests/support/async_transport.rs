@@ -12,7 +12,7 @@ use suprnova_live::async_updates::{
     AsyncEnvelope, AsyncEventSession, AsyncEventSource, AsyncMembershipRegistryPort,
     AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AsyncTransportAuthorityPort,
     AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
-    AsyncTransportErrorKind, AsyncTransportFuture, AuthoritativeStreamPosition,
+    AsyncTransportErrorKind, AsyncTransportFuture, AuthoritativeStreamPosition, AuthorizationMemo,
     AuthorizedSubscription, AuthorizedTransportSubscription, BoundedEventContracts,
     BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics,
     BrowserPayloadSchema, CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
@@ -21,12 +21,12 @@ use suprnova_live::async_updates::{
     EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy, ReconnectPolicy,
     StreamEpoch, StreamName, StreamPosition, StreamSequence, SubscriptionAuthorizationDecision,
     SubscriptionAuthorizationPort, SubscriptionAuthorizationRequest, SubscriptionBaselineRequest,
-    SubscriptionContinuityPort, SubscriptionCredentialPort, SubscriptionCredentialRequest,
-    SubscriptionCredentialRotationOutcome, SubscriptionCredentialRotationRequest,
-    SubscriptionError, SubscriptionId, SubscriptionIssueRequest, SubscriptionMetadata,
-    SubscriptionMode, SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
-    SubscriptionService, TopicName, TransportCredential, TransportMembershipOperation,
-    TrustedMountParameters, VerifiedOrigin,
+    SubscriptionBinding, SubscriptionContinuityPort, SubscriptionCredentialPort,
+    SubscriptionCredentialRequest, SubscriptionCredentialRotationOutcome,
+    SubscriptionCredentialRotationRequest, SubscriptionError, SubscriptionId,
+    SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode, SubscriptionModes,
+    SubscriptionRegistryPort, SubscriptionRegistryRequest, SubscriptionService, TopicName,
+    TransportCredential, TransportMembershipOperation, TrustedMountParameters, VerifiedOrigin,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
@@ -36,7 +36,8 @@ use suprnova_live::host::{
     ScopeRequirement, SessionFingerprint, TenantFingerprint, TrustedLiveRequestContext,
 };
 use suprnova_live::identity::{
-    BrowserOperationName, BuildId, ContentDigest, IslandSlot, KeyId, ScopeFingerprint, UnixMillis,
+    BrowserOperationName, BuildId, ComponentName, ContentDigest, IslandSlot, KeyId,
+    ScopeFingerprint, UnixMillis,
 };
 use suprnova_live::metadata::{ComponentMetadata, EventMetadata, EventPayloadMetadata};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
@@ -58,6 +59,78 @@ impl EventPayloadMetadata for OrdersUpdated {
 }
 
 type TestFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Deterministic one-way gate that records and wakes its current waiter.
+pub struct WakeGate {
+    released: AtomicBool,
+    observed: AtomicBool,
+    waiter: Mutex<Option<Waker>>,
+}
+
+impl WakeGate {
+    /// Creates one unreleased gate.
+    pub fn new() -> Self {
+        Self {
+            released: AtomicBool::new(false),
+            observed: AtomicBool::new(false),
+            waiter: Mutex::new(None),
+        }
+    }
+
+    fn poll(&self, task: &mut Context<'_>) -> Poll<()> {
+        self.observed.store(true, Ordering::Release);
+        if self.released.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        *self.waiter.lock().expect("wake gate waiter lock") = Some(task.waker().clone());
+        Poll::Pending
+    }
+
+    /// Returns whether the controlled operation reached this gate.
+    pub fn observed(&self) -> bool {
+        self.observed.load(Ordering::Acquire)
+    }
+
+    /// Returns whether a pending poll registered a waker.
+    pub fn waiter_registered(&self) -> bool {
+        self.waiter.lock().expect("wake gate waiter lock").is_some()
+    }
+
+    /// Releases the gate and wakes the exact waiter, if present.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        if let Some(waiter) = self.waiter.lock().expect("wake gate waiter lock").take() {
+            waiter.wake();
+        }
+    }
+}
+
+impl Default for WakeGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Redaction-safe exact authority request observed by the trusted test port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityObservation {
+    /// Membership operation that crossed the authority boundary.
+    pub operation: TransportMembershipOperation,
+    /// Exact physical origin.
+    pub origin: VerifiedOrigin,
+    /// Exact physical transport kind.
+    pub kind: DocumentTransportKind,
+    /// Correlation-only document handle.
+    pub handle: DocumentTransportHandle,
+    /// Trusted document sharing scope.
+    pub document_scope: DocumentAuthorizationScope,
+    /// Exact component-specific authorization memo.
+    pub component_memo: AuthorizationMemo,
+    /// Binding of the exact signed descriptor wire.
+    pub binding: SubscriptionBinding,
+    /// Exact logical subscription routing identity.
+    pub subscription: SubscriptionId,
+}
 
 struct SubscriptionFixturePorts {
     component: ComponentMetadata,
@@ -138,6 +211,10 @@ pub struct MembershipRegistry {
     modes: Mutex<SubscriptionModes>,
     authorization_memo: Mutex<suprnova_live::async_updates::AuthorizationMemo>,
     document_scope: Mutex<DocumentAuthorizationScope>,
+    authority_calls: AtomicUsize,
+    authority_pause_call: AtomicUsize,
+    authority_gate: Mutex<Option<Arc<WakeGate>>>,
+    authority_observations: Mutex<Vec<AuthorityObservation>>,
 }
 
 impl MembershipRegistry {
@@ -173,6 +250,28 @@ impl MembershipRegistry {
     /// Makes the trusted-port fixture attempt two current-snapshot acceptances.
     pub fn accept_twice(&self) {
         self.accept_twice.store(true, Ordering::Release);
+    }
+
+    /// Pauses one exact future transport-authority call at a controlled boundary.
+    pub fn pause_authority_on_call(&self, call: usize) -> Arc<WakeGate> {
+        assert!(call > 0, "authority call is one-based");
+        let gate = Arc::new(WakeGate::new());
+        self.authority_pause_call.store(call, Ordering::Release);
+        *self.authority_gate.lock().expect("authority gate lock") = Some(gate.clone());
+        gate
+    }
+
+    /// Returns how many fresh authority checks were entered.
+    pub fn authority_call_count(&self) -> usize {
+        self.authority_calls.load(Ordering::Acquire)
+    }
+
+    /// Returns the exact redaction-safe authority requests observed so far.
+    pub fn authority_observations(&self) -> Vec<AuthorityObservation> {
+        self.authority_observations
+            .lock()
+            .expect("authority observations lock")
+            .clone()
     }
 
     /// Simulates a principal, session, tenant, or component-contract scope change.
@@ -237,6 +336,29 @@ impl AsyncTransportAuthorityPort for MembershipRegistry {
         validation: &'a mut AsyncTransportAuthorityValidation,
     ) -> AsyncTransportFuture<'a, ()> {
         Box::pin(async move {
+            let call = self.authority_calls.fetch_add(1, Ordering::AcqRel) + 1;
+            if self.authority_pause_call.load(Ordering::Acquire) == call {
+                let gate = self
+                    .authority_gate
+                    .lock()
+                    .expect("authority gate lock")
+                    .clone()
+                    .expect("configured authority gate");
+                std::future::poll_fn(|task| gate.poll(task)).await;
+            }
+            self.authority_observations
+                .lock()
+                .expect("authority observations lock")
+                .push(AuthorityObservation {
+                    operation: request.operation(),
+                    origin: request.document_origin().clone(),
+                    kind: request.document_kind(),
+                    handle: request.document_handle().clone(),
+                    document_scope: request.document_scope().clone(),
+                    component_memo: request.descriptor().claims().authorization_memo().clone(),
+                    binding: request.binding().clone(),
+                    subscription: request.subscription().clone(),
+                });
             let operation_allowed = match request.operation() {
                 TransportMembershipOperation::Subscribe => {
                     self.allow_subscribe.load(Ordering::Acquire)
@@ -297,6 +419,8 @@ pub struct TransportFixture {
     pub registry: Arc<MembershipRegistry>,
     /// Connection-level scope shared independently from component contracts.
     pub document_scope: DocumentAuthorizationScope,
+    /// Exact registered component identity for heterogeneous sharing assertions.
+    pub component_name: ComponentName,
 }
 
 impl TransportFixture {
@@ -381,6 +505,22 @@ impl TransportFixture {
         .await
     }
 
+    /// Builds the same async contract under a genuinely distinct component identity.
+    pub async fn new_with_component_name(baseline: StreamPosition, name: &str) -> Self {
+        Self::new_with_configuration(
+            baseline,
+            component_support::fixture_host_scope(),
+            SubscriptionModes::new(vec![
+                SubscriptionMode::ServerSentEvents,
+                SubscriptionMode::WebSocket,
+            ])
+            .expect("modes"),
+            subscription_component_metadata_with_name(name),
+            subscription_key_ring(),
+        )
+        .await
+    }
+
     async fn new_with_scope(
         baseline: StreamPosition,
         scope: HostScopeFacts,
@@ -407,6 +547,7 @@ impl TransportFixture {
             ContentDigest::from_bytes(&[0xd4; 32]).expect("transport policy identity");
         let document_scope = DocumentAuthorizationScope::derive(&scope, &transport_policy)
             .expect("document authorization scope");
+        let component_name = component.identity().clone();
         let ports = Arc::new(SubscriptionFixturePorts {
             component,
             parameters: TrustedMountParameters::new(Vec::new()).expect("mount parameters"),
@@ -458,11 +599,16 @@ impl TransportFixture {
                 authorized.verified().claims().authorization_memo().clone(),
             ),
             document_scope: Mutex::new(document_scope.clone()),
+            authority_calls: AtomicUsize::new(0),
+            authority_pause_call: AtomicUsize::new(usize::MAX),
+            authority_gate: Mutex::new(None),
+            authority_observations: Mutex::new(Vec::new()),
         });
         Self {
             authorized,
             registry,
             document_scope,
+            component_name,
         }
     }
 
@@ -545,6 +691,8 @@ pub enum ScriptItem {
     Error(AsyncTransportErrorKind),
     /// A cancellation-safe pending read used to prove bounded fan-in fairness.
     Pending,
+    /// A controlled pending read resumed by its registered waker.
+    Wait(Arc<WakeGate>),
     /// Graceful logical completion without another envelope.
     End,
 }
@@ -559,6 +707,8 @@ pub struct ScriptedSource {
     close_error_kind: AsyncTransportErrorKind,
     close_count: Arc<AtomicUsize>,
     close_poll_count: Arc<AtomicUsize>,
+    drop_count: Arc<AtomicUsize>,
+    close_gate: Option<Arc<WakeGate>>,
 }
 
 impl ScriptedSource {
@@ -573,6 +723,8 @@ impl ScriptedSource {
             close_error_kind: AsyncTransportErrorKind::SourceFailed,
             close_count: Arc::new(AtomicUsize::new(0)),
             close_poll_count: Arc::new(AtomicUsize::new(0)),
+            drop_count: Arc::new(AtomicUsize::new(0)),
+            close_gate: None,
         }
     }
 
@@ -591,6 +743,13 @@ impl ScriptedSource {
     /// Makes every logical close remain cancellation-safe pending forever.
     pub fn with_permanently_pending_close(mut self) -> Self {
         self.permanently_pending_close = true;
+        self.close_gate = Some(Arc::new(WakeGate::new()));
+        self
+    }
+
+    /// Holds close at a controlled waker-aware boundary until explicitly released.
+    pub fn with_controlled_close(mut self, gate: Arc<WakeGate>) -> Self {
+        self.close_gate = Some(gate);
         self
     }
 
@@ -613,6 +772,11 @@ impl ScriptedSource {
     /// Returns the total number of persistent close polls across logical sessions.
     pub fn close_poll_count(&self) -> usize {
         self.close_poll_count.load(Ordering::Acquire)
+    }
+
+    /// Returns how many logical session owners released provider resources by drop.
+    pub fn drop_count(&self) -> usize {
+        self.drop_count.load(Ordering::Acquire)
     }
 }
 
@@ -650,6 +814,7 @@ impl AsyncEventSource for ScriptedSource {
                         events.push_back(SessionStep::Ready(Err(AsyncTransportError::new(kind))))
                     }
                     ScriptItem::Pending => events.push_back(SessionStep::Pending),
+                    ScriptItem::Wait(gate) => events.push_back(SessionStep::Wait(gate)),
                     ScriptItem::End => events.push_back(SessionStep::Ready(Ok(None))),
                 }
             }
@@ -664,6 +829,10 @@ impl AsyncEventSource for ScriptedSource {
                 close_error_kind: self.close_error_kind,
                 close_count: self.close_count.clone(),
                 close_poll_count: self.close_poll_count.clone(),
+                drop_count: self.drop_count.clone(),
+                close_gate: self.close_gate.clone(),
+                pending_read_waker: None,
+                pending_close_waker: None,
             }) as Pin<Box<dyn AsyncEventSession>>)
         })
     }
@@ -675,6 +844,7 @@ pub struct ControlledSubscribeSource {
     released: AtomicBool,
     waiter: Mutex<Option<Waker>>,
     close_count: Arc<AtomicUsize>,
+    drop_count: Arc<AtomicUsize>,
 }
 
 impl ControlledSubscribeSource {
@@ -685,6 +855,7 @@ impl ControlledSubscribeSource {
             released: AtomicBool::new(false),
             waiter: Mutex::new(None),
             close_count: Arc::new(AtomicUsize::new(0)),
+            drop_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -704,6 +875,11 @@ impl ControlledSubscribeSource {
     /// Returns how many opened sessions completed their close transition.
     pub fn close_count(&self) -> usize {
         self.close_count.load(Ordering::Acquire)
+    }
+
+    /// Returns how many opened sessions released provider resources by drop.
+    pub fn drop_count(&self) -> usize {
+        self.drop_count.load(Ordering::Acquire)
     }
 }
 
@@ -730,6 +906,10 @@ impl AsyncEventSource for ControlledSubscribeSource {
                 close_error_kind: AsyncTransportErrorKind::SourceFailed,
                 close_count: self.close_count.clone(),
                 close_poll_count: Arc::new(AtomicUsize::new(0)),
+                drop_count: self.drop_count.clone(),
+                close_gate: None,
+                pending_read_waker: None,
+                pending_close_waker: None,
             }) as Pin<Box<dyn AsyncEventSession>>))
         }))
     }
@@ -746,11 +926,16 @@ struct ScriptedSession {
     close_error_kind: AsyncTransportErrorKind,
     close_count: Arc<AtomicUsize>,
     close_poll_count: Arc<AtomicUsize>,
+    drop_count: Arc<AtomicUsize>,
+    close_gate: Option<Arc<WakeGate>>,
+    pending_read_waker: Option<Waker>,
+    pending_close_waker: Option<Waker>,
 }
 
 enum SessionStep {
     Ready(Result<Option<AsyncEnvelope>, AsyncTransportError>),
     Pending,
+    Wait(Arc<WakeGate>),
 }
 
 impl AsyncEventSession for ScriptedSession {
@@ -760,7 +945,7 @@ impl AsyncEventSession for ScriptedSession {
 
     fn poll_next(
         self: Pin<&mut Self>,
-        _task: &mut Context<'_>,
+        task: &mut Context<'_>,
     ) -> Poll<Result<Option<AsyncEnvelope>, AsyncTransportError>> {
         let this = self.get_mut();
         if this.closed {
@@ -768,31 +953,49 @@ impl AsyncEventSession for ScriptedSession {
                 AsyncTransportErrorKind::Closed,
             )));
         }
-        match this.events.front() {
-            Some(SessionStep::Pending) => Poll::Pending,
-            Some(SessionStep::Ready(_)) => {
-                let Some(SessionStep::Ready(result)) = this.events.pop_front() else {
-                    unreachable!("front variant checked before pop")
-                };
-                Poll::Ready(result)
+        loop {
+            match this.events.front() {
+                Some(SessionStep::Pending) => {
+                    this.pending_read_waker = Some(task.waker().clone());
+                    return Poll::Pending;
+                }
+                Some(SessionStep::Wait(gate)) => match gate.poll(task) {
+                    Poll::Ready(()) => {
+                        this.events.pop_front();
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                Some(SessionStep::Ready(_)) => {
+                    let Some(SessionStep::Ready(result)) = this.events.pop_front() else {
+                        unreachable!("front variant checked before pop")
+                    };
+                    return Poll::Ready(result);
+                }
+                None => return Poll::Ready(Ok(None)),
             }
-            None => Poll::Ready(Ok(None)),
         }
     }
 
     fn poll_close(
         self: Pin<&mut Self>,
-        _task: &mut Context<'_>,
+        task: &mut Context<'_>,
     ) -> Poll<Result<CloseDisposition, AsyncTransportError>> {
         let this = self.get_mut();
         this.close_poll_count.fetch_add(1, Ordering::AcqRel);
+        if let Some(gate) = &this.close_gate
+            && gate.poll(task).is_pending()
+        {
+            return Poll::Pending;
+        }
         if this.permanently_pending_close {
             return Poll::Pending;
         }
         if this.pending_first_close && !this.close_was_pending {
             this.close_was_pending = true;
+            this.pending_close_waker = Some(task.waker().clone());
             return Poll::Pending;
         }
+        this.pending_close_waker.take();
         if this.close_error_attempts > 0 {
             this.close_error_attempts -= 1;
             return Poll::Ready(Err(AsyncTransportError::new(this.close_error_kind)));
@@ -803,6 +1006,12 @@ impl AsyncEventSession for ScriptedSession {
         this.closed = true;
         this.close_count.fetch_add(1, Ordering::AcqRel);
         Poll::Ready(Ok(CloseDisposition::Closed))
+    }
+}
+
+impl Drop for ScriptedSession {
+    fn drop(&mut self) {
+        self.drop_count.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -834,6 +1043,23 @@ fn subscription_component_metadata_with_hops(maximum_hops: u8) -> ComponentMetad
         .expect("modes"),
         maximum_hops,
     )
+}
+
+fn subscription_component_metadata_with_name(name: &str) -> ComponentMetadata {
+    let base = component_support::metadata();
+    let metadata = subscription_component_metadata_with_hops(4);
+    ComponentMetadata::new_with_async_contracts(
+        ComponentName::parse(name).expect("component identity"),
+        base.view().clone(),
+        metadata.versions(),
+        metadata.fields().to_vec(),
+        metadata.actions().to_vec(),
+        metadata.events().to_vec(),
+        metadata.effects().to_vec(),
+        metadata.subscriptions().to_vec(),
+        metadata.refresh_on_promote(),
+    )
+    .expect("subscription component metadata")
 }
 
 fn subscription_component_metadata_with_modes_and_hops(

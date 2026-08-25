@@ -1,16 +1,17 @@
 //! Shared transport conformance for multiplexed asynchronous sessions.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use proptest::prelude::*;
 use suprnova_live::async_updates::{
     AsyncCodecLimits, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
-    AsyncEventSession, AsyncEventSource, AsyncPayload, AsyncTransportErrorKind,
-    AsyncTransportFuture, AuthorizedTransportSubscription, CloseDisposition, CompletionReason,
-    DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
-    DocumentTransportLimits, DocumentTransportSession, Heartbeat,
+    AsyncEventSession, AsyncEventSource, AsyncPayload, AsyncTransportError,
+    AsyncTransportErrorKind, AsyncTransportFuture, AuthorizedTransportSubscription,
+    CloseDisposition, CompletionReason, DocumentAuthorizationScope, DocumentTransportHandle,
+    DocumentTransportKind, DocumentTransportLimits, DocumentTransportSession, Heartbeat,
     MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, SequenceDegradation,
     SequenceDisposition, SequenceMachine, SseEncoder, SseMembershipControl, SseResponseContract,
     StreamErrorCode, SubscriptionMode, VerifiedOrigin, WebSocketAuthentication, WebSocketCodec,
@@ -26,7 +27,8 @@ use suprnova_live::identity::{ContentDigest, ScopeFingerprint, UnixMillis};
 mod support;
 
 use support::{
-    ControlledSubscribeSource, ScriptItem, ScriptedSource, TransportFixture, position, subscription,
+    ControlledSubscribeSource, ScriptItem, ScriptedSource, TransportFixture, WakeGate, position,
+    subscription,
 };
 
 #[test]
@@ -42,6 +44,616 @@ fn task_four_transport_surface_is_present() {
     let _sse = std::mem::size_of::<SseEncoder>();
     let _websocket = std::mem::size_of::<WebSocketCodec>();
     let _origin = std::mem::size_of::<VerifiedOrigin>();
+}
+
+async fn establish_membership(
+    document: &mut DocumentTransportSession,
+    source: &dyn AsyncEventSource,
+    authorization: AuthorizedTransportSubscription,
+) -> Result<(), AsyncTransportError> {
+    let pending = document.prepare_add(authorization)?;
+    let authorized = pending.authorize().await?;
+    let establishing = document.prepare_establish(authorized)?;
+    let ready = establishing.establish(source).await?;
+    document.commit_add(ready)
+}
+
+async fn remove_membership(
+    document: &mut DocumentTransportSession,
+    authorization: &AuthorizedTransportSubscription,
+) -> Result<CloseDisposition, AsyncTransportError> {
+    let pending = document.prepare_remove(authorization)?;
+    let ready = pending.authorize().await?;
+    document.commit_remove(ready)
+}
+
+async fn sse_subscribe(
+    document: &mut DocumentTransportSession,
+    handle: &DocumentTransportHandle,
+    origin: &VerifiedOrigin,
+    source: &dyn AsyncEventSource,
+    authorization: AuthorizedTransportSubscription,
+) -> Result<(), AsyncTransportError> {
+    let pending = SseMembershipControl::prepare_subscribe(document, handle, origin, authorization)?;
+    let authorized = pending.authorize().await?;
+    let establishing = document.prepare_establish(authorized)?;
+    let ready = establishing.establish(source).await?;
+    document.commit_add(ready)
+}
+
+async fn sse_unsubscribe(
+    document: &mut DocumentTransportSession,
+    handle: &DocumentTransportHandle,
+    origin: &VerifiedOrigin,
+    authorization: &AuthorizedTransportSubscription,
+) -> Result<CloseDisposition, AsyncTransportError> {
+    let pending =
+        SseMembershipControl::prepare_unsubscribe(document, handle, origin, authorization)?;
+    let ready = pending.authorize().await?;
+    document.commit_remove(ready)
+}
+
+async fn websocket_subscribe(
+    document: &mut DocumentTransportSession,
+    control: &WebSocketControlRecord,
+    source: &dyn AsyncEventSource,
+    authorization: AuthorizedTransportSubscription,
+) -> Result<(), AsyncTransportError> {
+    let pending = WebSocketMembershipControl::prepare_subscribe(document, control, authorization)?;
+    let authorized = pending.authorize().await?;
+    let establishing = document.prepare_establish(authorized)?;
+    let ready = establishing.establish(source).await?;
+    document.commit_add(ready)
+}
+
+async fn websocket_unsubscribe(
+    document: &mut DocumentTransportSession,
+    control: &WebSocketControlRecord,
+    authorization: &AuthorizedTransportSubscription,
+) -> Result<CloseDisposition, AsyncTransportError> {
+    let pending =
+        WebSocketMembershipControl::prepare_unsubscribe(document, control, authorization)?;
+    let ready = pending.authorize().await?;
+    document.commit_remove(ready)
+}
+
+trait LegacyDocumentTestControl {
+    fn add<'a>(
+        &'a mut self,
+        source: &'a dyn AsyncEventSource,
+        authorization: AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<(), AsyncTransportError>>;
+
+    fn remove<'a>(
+        &'a mut self,
+        authorization: &'a AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<CloseDisposition, AsyncTransportError>>;
+}
+
+impl LegacyDocumentTestControl for DocumentTransportSession {
+    fn add<'a>(
+        &'a mut self,
+        source: &'a dyn AsyncEventSource,
+        authorization: AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<(), AsyncTransportError>> {
+        Box::pin(async move {
+            let pending = self.prepare_add(authorization)?;
+            let authorized = pending.authorize().await?;
+            let establishing = self.prepare_establish(authorized)?;
+            let ready = establishing.establish(source).await?;
+            self.commit_add(ready)
+        })
+    }
+
+    fn remove<'a>(
+        &'a mut self,
+        authorization: &'a AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<CloseDisposition, AsyncTransportError>> {
+        Box::pin(async move {
+            let pending = self.prepare_remove(authorization)?;
+            let ready = pending.authorize().await?;
+            self.commit_remove(ready)
+        })
+    }
+}
+
+#[derive(Default)]
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+impl WakeCounter {
+    fn count(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[tokio::test]
+async fn pending_admission_leaves_document_progress_available_and_stale_commit_cleans_up() {
+    let fixture = TransportFixture::new(position(19, 0)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Envelope(
+        position(19, 1),
+        AsyncPayload::Heartbeat(Heartbeat),
+    )]]);
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xb1,
+        3,
+    );
+    let active = fixture.request(subscription(0xb1), origin.clone());
+    establish_membership(&mut document, &source, active)
+        .await
+        .expect("active sibling");
+
+    let controlled = ControlledSubscribeSource::new();
+    let pending = document
+        .prepare_add(fixture.request(subscription(0xb2), origin.clone()))
+        .expect("pending admission snapshot");
+    let authorized = pending.authorize().await.expect("fresh add authority");
+    let source_establishment = document
+        .prepare_establish(authorized)
+        .expect("pre-source document gate");
+    let mut establishing = Box::pin(source_establishment.establish(&controlled));
+    let waker = Waker::noop();
+    let mut task = Context::from_waker(waker);
+    assert!(establishing.as_mut().poll(&mut task).is_pending());
+    assert!(controlled.observed());
+
+    let delivered = document
+        .next()
+        .await
+        .expect("healthy sibling progress")
+        .expect("heartbeat");
+    assert_eq!(delivered.subscription(), &subscription(0xb1));
+    let active_removal = fixture.request(subscription(0xb1), origin);
+    let removal = document
+        .prepare_remove(&active_removal)
+        .expect("concurrent control snapshot");
+    let ready_removal = removal
+        .authorize()
+        .await
+        .expect("current removal authority");
+    document
+        .commit_remove(ready_removal)
+        .expect("concurrent removal commits");
+
+    controlled.release();
+    let ready = establishing.await.expect("opened logical session");
+    let error = document
+        .commit_add(ready)
+        .expect_err("document mutation invalidates pending ready admission");
+    assert_eq!(error.kind(), AsyncTransportErrorKind::StaleControl);
+    assert_eq!(controlled.close_count(), 1);
+    assert_eq!(controlled.drop_count(), 1);
+}
+
+#[tokio::test]
+async fn pending_authority_leaves_document_delivery_and_other_controls_available() {
+    let fixture = TransportFixture::new(position(19, 10)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Envelope(
+        position(19, 11),
+        AsyncPayload::Heartbeat(Heartbeat),
+    )]]);
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xbc,
+        3,
+    );
+    let active = fixture.request(subscription(0xbc), origin.clone());
+    establish_membership(&mut document, &source, active)
+        .await
+        .expect("active sibling");
+
+    let gate = fixture.registry.pause_authority_on_call(3);
+    let controlled = ControlledSubscribeSource::new();
+    let pending = document
+        .prepare_add(fixture.request(subscription(0xbd), origin.clone()))
+        .expect("pending authority snapshot");
+    let mut authorization = Box::pin(pending.authorize());
+    let waker = Waker::noop();
+    let mut task = Context::from_waker(waker);
+    assert!(authorization.as_mut().poll(&mut task).is_pending());
+    assert!(gate.observed());
+    assert!(gate.waiter_registered());
+
+    let delivered = document
+        .next()
+        .await
+        .expect("healthy sibling progresses during authority wait")
+        .expect("heartbeat");
+    assert_eq!(delivered.subscription(), &subscription(0xbc));
+
+    let removal_authorization = fixture.request(subscription(0xbc), origin);
+    let removal = document
+        .prepare_remove(&removal_authorization)
+        .expect("independent control snapshot");
+    let ready_removal = removal
+        .authorize()
+        .await
+        .expect("independent control authority");
+    document
+        .commit_remove(ready_removal)
+        .expect("independent control commits");
+
+    gate.release();
+    let authorized = authorization.await.expect("held authority resumes");
+    let error = document
+        .prepare_establish(authorized)
+        .expect_err("document mutation invalidates held authority result");
+    assert_eq!(error.kind(), AsyncTransportErrorKind::StaleControl);
+    assert!(
+        !controlled.observed(),
+        "stale control must fail before source work"
+    );
+}
+
+#[tokio::test]
+async fn ready_control_is_bound_to_the_exact_document_owner_not_a_matching_tuple() {
+    let fixture = TransportFixture::new(position(19, 20)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ControlledSubscribeSource::new();
+    source.release();
+    let first = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xbe,
+        1,
+    );
+    let mut matching_but_distinct = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xbe,
+        1,
+    );
+    let pending = first
+        .prepare_add(fixture.request(subscription(0xbe), origin))
+        .expect("first document snapshot");
+    let authorized = pending.authorize().await.expect("fresh authority");
+    let establishing = first
+        .prepare_establish(authorized)
+        .expect("first document pre-source gate");
+    let ready = establishing
+        .establish(&source)
+        .await
+        .expect("opened session");
+
+    let error = matching_but_distinct
+        .commit_add(ready)
+        .expect_err("a matching public tuple is not the exact document owner");
+    assert_eq!(error.kind(), AsyncTransportErrorKind::StaleControl);
+    assert_eq!(source.close_count(), 1);
+    assert_eq!(source.drop_count(), 1);
+}
+
+#[tokio::test]
+async fn canceled_post_subscribe_authorization_releases_the_opened_session_owner() {
+    let fixture = TransportFixture::new(position(20, 0)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let gate = fixture.registry.pause_authority_on_call(2);
+    let source = ControlledSubscribeSource::new();
+    source.release();
+    let document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xb2,
+        2,
+    );
+    let pending = document
+        .prepare_add(fixture.request(subscription(0xb3), origin))
+        .expect("pending admission snapshot");
+    let authorized = pending.authorize().await.expect("fresh add authority");
+    let source_establishment = document
+        .prepare_establish(authorized)
+        .expect("pre-source document gate");
+    let mut establishing = Box::pin(source_establishment.establish(&source));
+    let waker = Waker::noop();
+    let mut task = Context::from_waker(waker);
+    assert!(establishing.as_mut().poll(&mut task).is_pending());
+    assert!(gate.observed());
+    assert!(gate.waiter_registered());
+    assert_eq!(fixture.registry.authority_call_count(), 2);
+
+    drop(establishing);
+    assert_eq!(source.close_count(), 1);
+    assert_eq!(source.drop_count(), 1);
+}
+
+#[tokio::test]
+async fn document_bounds_owned_pending_controls_without_borrowing_document_state() {
+    let fixture = TransportFixture::new(position(20, 10)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xbb,
+        1,
+    );
+    let mut pending = Vec::new();
+    for marker in 0..MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS {
+        pending.push(
+            document
+                .prepare_add(fixture.request(subscription(marker as u8), origin.clone()))
+                .expect("bounded pending control"),
+        );
+    }
+    assert_eq!(
+        document
+            .prepare_add(fixture.request(subscription(0xfe), origin.clone()))
+            .expect_err("first control beyond the hard in-flight bound")
+            .kind(),
+        AsyncTransportErrorKind::MembershipLimit
+    );
+    pending.pop();
+    document
+        .prepare_remove(&fixture.request(subscription(0xfd), origin))
+        .expect("add and remove controls share the released bounded permit");
+}
+
+#[tokio::test]
+async fn retiring_membership_fences_exact_id_binding_and_capacity_until_woken_cleanup() {
+    let baseline = position(21, 0);
+    let first = TransportFixture::new_with_signing_key(baseline, "retiring-old", 0x81).await;
+    let second = TransportFixture::new_with_signing_key(baseline, "retiring-new", 0x82).await;
+    assert_eq!(
+        first.authorized.verified().claims(),
+        second.authorized.verified().claims()
+    );
+    assert_ne!(first.authorized.binding(), second.authorized.binding());
+
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let close_gate = Arc::new(WakeGate::new());
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]])
+        .with_controlled_close(close_gate.clone());
+    let mut document = first.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xb3,
+        1,
+    );
+    let installed = first.request(subscription(0xb4), origin.clone());
+    establish_membership(&mut document, &source, installed)
+        .await
+        .expect("installed membership");
+    remove_membership(
+        &mut document,
+        &first.request(subscription(0xb4), origin.clone()),
+    )
+    .await
+    .expect("logical removal");
+    assert_eq!(document.membership_count(), 0);
+    assert_eq!(document.retiring_count(), 1);
+    assert!(close_gate.waiter_registered());
+
+    let duplicate_pending = document
+        .prepare_add(first.request(subscription(0xb4), origin.clone()))
+        .expect("same binding preparation");
+    let duplicate_authorized = duplicate_pending
+        .authorize()
+        .await
+        .expect("same binding authority");
+    assert_eq!(
+        document
+            .prepare_establish(duplicate_authorized)
+            .expect_err("retirement fence rejects exact duplicate")
+            .kind(),
+        AsyncTransportErrorKind::DuplicateMembership
+    );
+
+    let overlap_pending = document
+        .prepare_add(second.request(subscription(0xb4), origin.clone()))
+        .expect("overlap binding preparation");
+    let overlap_authorized = overlap_pending
+        .authorize()
+        .await
+        .expect("overlap binding authority");
+    assert_eq!(
+        document
+            .prepare_establish(overlap_authorized)
+            .expect_err("retirement fence rejects another exact signed wire")
+            .kind(),
+        AsyncTransportErrorKind::DescriptorMismatch
+    );
+
+    let capacity_pending = document
+        .prepare_add(first.request(subscription(0xb5), origin.clone()))
+        .expect("capacity preparation");
+    let capacity_authorized = capacity_pending
+        .authorize()
+        .await
+        .expect("capacity authority");
+    assert_eq!(
+        document
+            .prepare_establish(capacity_authorized)
+            .expect_err("retiring membership consumes capacity")
+            .kind(),
+        AsyncTransportErrorKind::MembershipLimit
+    );
+
+    close_gate.release();
+    assert!(document.next().await.expect("cleanup poll").is_none());
+    assert_eq!(document.retiring_count(), 0);
+    assert_eq!(source.drop_count(), 1);
+    let replacement_source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    establish_membership(
+        &mut document,
+        &replacement_source,
+        second.request(subscription(0xb4), origin),
+    )
+    .await
+    .expect("replacement is admitted only after old cleanup leaves the fence");
+}
+
+#[tokio::test]
+async fn controlled_read_and_close_pending_states_register_and_use_exact_wakers() {
+    let fixture = TransportFixture::new(position(22, 0)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let read_gate = Arc::new(WakeGate::new());
+    let close_gate = Arc::new(WakeGate::new());
+    let source = ScriptedSource::new(vec![vec![
+        ScriptItem::Wait(read_gate.clone()),
+        ScriptItem::Envelope(position(22, 1), AsyncPayload::Heartbeat(Heartbeat)),
+    ]])
+    .with_controlled_close(close_gate.clone());
+    let mut document = fixture.document(
+        origin.clone(),
+        DocumentTransportKind::ServerSentEvents,
+        0xb4,
+        1,
+    );
+    establish_membership(
+        &mut document,
+        &source,
+        fixture.request(subscription(0xb6), origin),
+    )
+    .await
+    .expect("membership");
+
+    let read_wakes = Arc::new(WakeCounter::default());
+    let read_waker = Waker::from(read_wakes.clone());
+    let mut read_task = Context::from_waker(&read_waker);
+    let mut next = Box::pin(document.next());
+    assert!(next.as_mut().poll(&mut read_task).is_pending());
+    assert!(read_gate.waiter_registered());
+    read_gate.release();
+    assert_eq!(read_wakes.count(), 1);
+    assert!(next.await.expect("woken read").is_some());
+
+    let close_wakes = Arc::new(WakeCounter::default());
+    let close_waker = Waker::from(close_wakes.clone());
+    let mut close_task = Context::from_waker(&close_waker);
+    let mut close = Box::pin(document.close());
+    assert!(close.as_mut().poll(&mut close_task).is_pending());
+    assert!(close_gate.waiter_registered());
+    close_gate.release();
+    assert_eq!(close_wakes.count(), 1);
+    assert_eq!(close.await.expect("woken close"), CloseDisposition::Closed);
+}
+
+#[tokio::test]
+async fn websocket_decode_is_state_blind_and_unauthorized_removal_never_gets_membership_oracle() {
+    let fixture = TransportFixture::new(position(23, 0)).await;
+    let overlap = TransportFixture::new_with_signing_key(position(23, 0), "oracle-new", 0x91).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let mut document = fixture.document(origin.clone(), DocumentTransportKind::WebSocket, 0xb5, 2);
+    establish_membership(
+        &mut document,
+        &source,
+        fixture.request(subscription(0xb7), origin.clone()),
+    )
+    .await
+    .expect("existing membership");
+
+    let codec = WebSocketCodec::v1();
+    let unknown_control = WebSocketControlRecord::Unsubscribe(subscription(0xb8));
+    let unknown_bytes = codec
+        .encode_control(&unknown_control)
+        .expect("control bytes");
+    assert_eq!(
+        codec
+            .decode_control(WebSocketFrame::Text {
+                payload: &unknown_bytes,
+                final_fragment: true,
+            })
+            .expect("syntactically valid unknown membership remains opaque"),
+        unknown_control
+    );
+
+    fixture.registry.deny_unsubscribe();
+    overlap.registry.deny_unsubscribe();
+    let denied = [
+        fixture.request(subscription(0xb7), origin.clone()),
+        fixture.request(subscription(0xb8), origin.clone()),
+        overlap.request(subscription(0xb7), origin),
+    ];
+    for authorization in &denied {
+        let control = WebSocketControlRecord::Unsubscribe(authorization.subscription().clone());
+        let pending =
+            WebSocketMembershipControl::prepare_unsubscribe(&document, &control, authorization)
+                .expect("state-blind WebSocket removal preparation");
+        assert_eq!(
+            pending
+                .authorize()
+                .await
+                .expect_err("denied authority precedes membership classification")
+                .kind(),
+            AsyncTransportErrorKind::AuthorizationLost
+        );
+    }
+    assert_eq!(document.membership_count(), 1);
+    assert_eq!(fixture.registry.authority_call_count(), 4);
+    assert_eq!(overlap.registry.authority_call_count(), 1);
+}
+
+#[tokio::test]
+async fn distinct_components_share_physical_scope_and_authority_observes_every_exact_fact() {
+    let baseline = position(24, 0);
+    let first = TransportFixture::new_with_component_name(baseline, "tests.async.alpha").await;
+    let second = TransportFixture::new_with_component_name(baseline, "tests.async.beta").await;
+    assert_ne!(first.component_name, second.component_name);
+    assert_eq!(first.document_scope, second.document_scope);
+
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let handle = DocumentTransportHandle::from_bytes(&[0xb6; 16]).expect("handle");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending], vec![ScriptItem::Pending]]);
+    let mut document = DocumentTransportSession::new(
+        origin.clone(),
+        DocumentTransportKind::WebSocket,
+        handle.clone(),
+        DocumentTransportLimits::new(2).expect("limits"),
+        first.document_scope.clone(),
+    );
+    let first_request = first.request(subscription(0xb9), origin.clone());
+    let first_binding = first_request.binding().clone();
+    let second_request = second.request(subscription(0xba), origin.clone());
+    let second_binding = second_request.binding().clone();
+    establish_membership(&mut document, &source, first_request)
+        .await
+        .expect("first component");
+    establish_membership(&mut document, &source, second_request)
+        .await
+        .expect("second component");
+
+    for (fixture, binding, identity) in [
+        (&first, first_binding, subscription(0xb9)),
+        (&second, second_binding, subscription(0xba)),
+    ] {
+        let observations = fixture.registry.authority_observations();
+        assert_eq!(observations.len(), 2);
+        for observation in observations {
+            assert_eq!(
+                observation.operation,
+                suprnova_live::async_updates::TransportMembershipOperation::Subscribe
+            );
+            assert_eq!(observation.origin, origin);
+            assert_eq!(observation.kind, DocumentTransportKind::WebSocket);
+            assert_eq!(observation.handle, handle);
+            assert_eq!(observation.document_scope, fixture.document_scope);
+            assert_eq!(
+                observation.component_memo,
+                fixture
+                    .authorized
+                    .verified()
+                    .claims()
+                    .authorization_memo()
+                    .clone()
+            );
+            assert_eq!(observation.binding, binding);
+            assert_eq!(observation.subscription, identity);
+        }
+    }
 }
 
 fn host_scope(marker: u8) -> HostScopeFacts {
@@ -618,7 +1230,10 @@ async fn terminal_completion_detaches_before_delivery_and_pending_cleanup_cannot
 
 #[tokio::test]
 async fn permanent_close_error_is_observable_without_monopolizing_healthy_delivery() {
-    let fixture = TransportFixture::new(position(9, 30)).await;
+    let fixture =
+        TransportFixture::new_with_signing_key(position(9, 30), "failing-old", 0xa1).await;
+    let overlap =
+        TransportFixture::new_with_signing_key(position(9, 30), "failing-new", 0xa2).await;
     let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
     let failing = ScriptedSource::new(vec![vec![ScriptItem::Envelope(
         position(9, 31),
@@ -640,7 +1255,7 @@ async fn permanent_close_error_is_observable_without_monopolizing_healthy_delive
         .await
         .expect("failing-close membership");
     document
-        .add(&healthy, fixture.request(subscription(30), origin))
+        .add(&healthy, fixture.request(subscription(30), origin.clone()))
         .await
         .expect("healthy membership");
 
@@ -663,6 +1278,35 @@ async fn permanent_close_error_is_observable_without_monopolizing_healthy_delive
     assert_eq!(
         document.last_cleanup_error(),
         Some(AsyncTransportErrorKind::SourceFailed)
+    );
+
+    let same_pending = document
+        .prepare_add(fixture.request(subscription(29), origin.clone()))
+        .expect("same-binding preparation");
+    let same_authorized = same_pending
+        .authorize()
+        .await
+        .expect("same-binding authority");
+    assert_eq!(
+        document
+            .prepare_establish(same_authorized)
+            .expect_err("permanent cleanup error retains exact fence")
+            .kind(),
+        AsyncTransportErrorKind::DuplicateMembership
+    );
+    let overlap_pending = document
+        .prepare_add(overlap.request(subscription(29), origin))
+        .expect("overlap preparation");
+    let overlap_authorized = overlap_pending
+        .authorize()
+        .await
+        .expect("overlap authority");
+    assert_eq!(
+        document
+            .prepare_establish(overlap_authorized)
+            .expect_err("permanent cleanup error fences another signed binding")
+            .kind(),
+        AsyncTransportErrorKind::DescriptorMismatch
     );
 }
 
@@ -904,37 +1548,32 @@ impl AdapterHarness {
         coverage: &mut AdapterCoverage,
     ) -> Result<(), suprnova_live::async_updates::AsyncTransportError> {
         coverage.subscribe_controls += 1;
-        match self.adapter {
-            AdapterKind::Sse => {
-                SseMembershipControl::subscribe(
-                    &mut self.document,
-                    &self.handle,
-                    &self.origin,
-                    source,
-                    authorization,
-                )
-                .await
-            }
+        let pending = match self.adapter {
+            AdapterKind::Sse => SseMembershipControl::prepare_subscribe(
+                &self.document,
+                &self.handle,
+                &self.origin,
+                authorization,
+            ),
             AdapterKind::WebSocket => {
                 let control =
                     WebSocketControlRecord::Subscribe(authorization.subscription().clone());
                 let encoded = self.websocket.encode_control(&control)?;
-                let decoded = self.websocket.decode_control(
-                    WebSocketFrame::Text {
-                        payload: &encoded,
-                        final_fragment: true,
-                    },
+                let decoded = self.websocket.decode_control(WebSocketFrame::Text {
+                    payload: &encoded,
+                    final_fragment: true,
+                })?;
+                WebSocketMembershipControl::prepare_subscribe(
                     &self.document,
-                )?;
-                WebSocketMembershipControl::subscribe(
-                    &mut self.document,
                     &decoded,
-                    source,
                     authorization,
                 )
-                .await
             }
-        }
+        }?;
+        let authorized = pending.authorize().await?;
+        let establishing = self.document.prepare_establish(authorized)?;
+        let ready = establishing.establish(source).await?;
+        self.document.commit_add(ready)
     }
 
     async fn unsubscribe(
@@ -943,31 +1582,30 @@ impl AdapterHarness {
         coverage: &mut AdapterCoverage,
     ) -> Result<CloseDisposition, suprnova_live::async_updates::AsyncTransportError> {
         coverage.unsubscribe_controls += 1;
-        match self.adapter {
-            AdapterKind::Sse => {
-                SseMembershipControl::unsubscribe(
-                    &mut self.document,
-                    &self.handle,
-                    &self.origin,
-                    authorization,
-                )
-                .await
-            }
+        let pending = match self.adapter {
+            AdapterKind::Sse => SseMembershipControl::prepare_unsubscribe(
+                &self.document,
+                &self.handle,
+                &self.origin,
+                authorization,
+            ),
             AdapterKind::WebSocket => {
                 let control =
                     WebSocketControlRecord::Unsubscribe(authorization.subscription().clone());
                 let encoded = self.websocket.encode_control(&control)?;
-                let decoded = self.websocket.decode_control(
-                    WebSocketFrame::Text {
-                        payload: &encoded,
-                        final_fragment: true,
-                    },
+                let decoded = self.websocket.decode_control(WebSocketFrame::Text {
+                    payload: &encoded,
+                    final_fragment: true,
+                })?;
+                WebSocketMembershipControl::prepare_unsubscribe(
                     &self.document,
-                )?;
-                WebSocketMembershipControl::unsubscribe(&mut self.document, &decoded, authorization)
-                    .await
+                    &decoded,
+                    authorization,
+                )
             }
-        }
+        }?;
+        let ready = pending.authorize().await?;
+        self.document.commit_remove(ready)
     }
 
     async fn next_wire(
@@ -1869,7 +2507,7 @@ async fn membership_revalidates_expiry_and_registration_mode_after_subscribe_wai
         DocumentTransportLimits::new(1).expect("limits"),
         mode_fixture.document_scope.clone(),
     );
-    let mut mode_add = Box::pin(SseMembershipControl::subscribe(
+    let mut mode_add = Box::pin(sse_subscribe(
         &mut mode_document,
         &mode_handle,
         &origin,
@@ -1941,11 +2579,11 @@ async fn registered_modes_are_authority_and_external_remove_rechecks_policy() {
         DocumentTransportLimits::new(1).expect("limits"),
         sse_only.document_scope.clone(),
     );
-    let websocket_subscribe = WebSocketControlRecord::Subscribe(subscription(37));
+    let websocket_control = WebSocketControlRecord::Subscribe(subscription(37));
     assert_eq!(
-        WebSocketMembershipControl::subscribe(
+        websocket_subscribe(
             &mut websocket_document,
-            &websocket_subscribe,
+            &websocket_control,
             &source,
             sse_only.request(subscription(37), origin.clone()),
         )
@@ -1966,7 +2604,7 @@ async fn registered_modes_are_authority_and_external_remove_rechecks_policy() {
         ws_only.document_scope.clone(),
     );
     assert_eq!(
-        SseMembershipControl::subscribe(
+        sse_subscribe(
             &mut sse_document,
             &sse_handle,
             &origin,
@@ -1989,7 +2627,7 @@ async fn registered_modes_are_authority_and_external_remove_rechecks_policy() {
         DocumentTransportLimits::new(1).expect("limits"),
         both.document_scope.clone(),
     );
-    SseMembershipControl::subscribe(
+    sse_subscribe(
         &mut both_document,
         &both_handle,
         &origin,
@@ -2072,7 +2710,7 @@ async fn sse_encodes_canonical_envelopes_heartbeats_headers_and_same_origin_cont
         DocumentTransportLimits::new(1).expect("limits"),
         fixture.document_scope.clone(),
     );
-    let rejected = SseMembershipControl::subscribe(
+    let rejected = sse_subscribe(
         &mut wrong_transport,
         &handle,
         &origin,
@@ -2090,13 +2728,13 @@ async fn sse_encodes_canonical_envelopes_heartbeats_headers_and_same_origin_cont
         DocumentTransportLimits::new(1).expect("limits"),
         fixture.document_scope.clone(),
     );
-    SseMembershipControl::subscribe(&mut document, &handle, &origin, &source, authorization)
+    sse_subscribe(&mut document, &handle, &origin, &source, authorization)
         .await
         .expect("same-origin control");
     assert_eq!(document.membership_count(), 1);
 
     let wrong_handle = DocumentTransportHandle::from_bytes(&[0x48; 16]).expect("handle");
-    let rejected = SseMembershipControl::unsubscribe(
+    let rejected = sse_unsubscribe(
         &mut document,
         &wrong_handle,
         &origin,
@@ -2106,7 +2744,7 @@ async fn sse_encodes_canonical_envelopes_heartbeats_headers_and_same_origin_cont
     .expect_err("correlation handle mismatch");
     assert_eq!(rejected.kind(), AsyncTransportErrorKind::RoutingMismatch);
     let wrong_origin = VerifiedOrigin::parse("https://other.example.test").expect("origin");
-    let rejected = SseMembershipControl::unsubscribe(
+    let rejected = sse_unsubscribe(
         &mut document,
         &handle,
         &wrong_origin,
@@ -2116,7 +2754,7 @@ async fn sse_encodes_canonical_envelopes_heartbeats_headers_and_same_origin_cont
     .expect_err("same-origin control is mandatory");
     assert_eq!(rejected.kind(), AsyncTransportErrorKind::OriginMismatch);
     assert_eq!(
-        SseMembershipControl::unsubscribe(
+        sse_unsubscribe(
             &mut document,
             &handle,
             &origin,
@@ -2261,22 +2899,10 @@ proptest! {
         let origin_text = String::from_utf8_lossy(&origin_bytes);
         let _ = VerifiedOrigin::parse(&origin_text);
 
-        let application = VerifiedOrigin::parse("https://app.example.test").expect("origin");
-        let document = DocumentTransportSession::new(
-            application,
-            DocumentTransportKind::WebSocket,
-            DocumentTransportHandle::from_bytes(&[0x54; 16]).expect("handle"),
-            DocumentTransportLimits::new(1).expect("limits"),
-            DocumentAuthorizationScope::derive(&host_scope(0x51), &transport_policy(0x61))
-                .expect("document scope"),
-        );
-        let _ = WebSocketCodec::v1().decode_control(
-            WebSocketFrame::Text {
-                payload: &frame_bytes,
-                final_fragment: true,
-            },
-            &document,
-        );
+        let _ = WebSocketCodec::v1().decode_control(WebSocketFrame::Text {
+            payload: &frame_bytes,
+            final_fragment: true,
+        });
     }
 }
 
@@ -2412,7 +3038,7 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
         DocumentTransportLimits::new(2).expect("limits"),
         fixture.document_scope.clone(),
     );
-    let rejected = WebSocketMembershipControl::subscribe(
+    let rejected = websocket_subscribe(
         &mut wrong_transport,
         &initial_subscribe,
         &source,
@@ -2429,41 +3055,30 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
         DocumentTransportLimits::new(2).expect("limits"),
         fixture.document_scope.clone(),
     );
-    WebSocketMembershipControl::subscribe(
-        &mut document,
-        &initial_subscribe,
-        &source,
-        authorization,
-    )
-    .await
-    .expect("authenticated membership");
+    websocket_subscribe(&mut document, &initial_subscribe, &source, authorization)
+        .await
+        .expect("authenticated membership");
 
     let subscribe = WebSocketControlRecord::Subscribe(subscription(15));
     let subscribe_bytes = codec.encode_control(&subscribe).expect("subscribe frame");
     assert_eq!(
         codec
-            .decode_control(
-                WebSocketFrame::Text {
-                    payload: &subscribe_bytes,
-                    final_fragment: true,
-                },
-                &document,
-            )
+            .decode_control(WebSocketFrame::Text {
+                payload: &subscribe_bytes,
+                final_fragment: true,
+            })
             .expect("new subscribe"),
         subscribe
     );
     let unknown_unsubscribe = codec
-        .decode_control(
-            WebSocketFrame::Text {
-                payload: br#"{"kind":"unsubscribe","subscription":"EREREREREREREREREREREQ"}"#,
-                final_fragment: true,
-            },
-            &document,
-        )
-        .expect_err("unknown unsubscribe");
+        .decode_control(WebSocketFrame::Text {
+            payload: br#"{"kind":"unsubscribe","subscription":"EREREREREREREREREREREQ"}"#,
+            final_fragment: true,
+        })
+        .expect("syntactically valid unsubscribe remains state-blind");
     assert_eq!(
-        unknown_unsubscribe.kind(),
-        AsyncTransportErrorKind::UnknownMembership
+        unknown_unsubscribe,
+        WebSocketControlRecord::Unsubscribe(subscription(17))
     );
     for hostile in [
         br#"{"kind":"subscribe","kind":"unsubscribe","subscription":"Dw8PDw8PDw8PDw8PDw8PDw"}"#
@@ -2473,26 +3088,20 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
     ] {
         assert!(
             codec
-                .decode_control(
-                    WebSocketFrame::Text {
-                        payload: hostile,
-                        final_fragment: true,
-                    },
-                    &document,
-                )
+                .decode_control(WebSocketFrame::Text {
+                    payload: hostile,
+                    final_fragment: true,
+                })
                 .is_err()
         );
     }
     let oversized_control = vec![b' '; 513];
     assert_eq!(
         codec
-            .decode_control(
-                WebSocketFrame::Text {
-                    payload: &oversized_control,
-                    final_fragment: true,
-                },
-                &document,
-            )
+            .decode_control(WebSocketFrame::Text {
+                payload: &oversized_control,
+                final_fragment: true,
+            })
             .expect_err("oversized control frame")
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
@@ -2500,13 +3109,10 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
     let invalid_utf8_at_control_limit = vec![0xff; 512];
     assert_eq!(
         codec
-            .decode_control(
-                WebSocketFrame::Text {
-                    payload: &invalid_utf8_at_control_limit,
-                    final_fragment: true,
-                },
-                &document,
-            )
+            .decode_control(WebSocketFrame::Text {
+                payload: &invalid_utf8_at_control_limit,
+                final_fragment: true,
+            })
             .expect_err("invalid UTF-8 at the exact control limit")
             .kind(),
         AsyncTransportErrorKind::UnsupportedFrame
@@ -2514,13 +3120,10 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
     let oversized_invalid_utf8_control = vec![0xff; 513];
     assert_eq!(
         codec
-            .decode_control(
-                WebSocketFrame::Text {
-                    payload: &oversized_invalid_utf8_control,
-                    final_fragment: true,
-                },
-                &document,
-            )
+            .decode_control(WebSocketFrame::Text {
+                payload: &oversized_invalid_utf8_control,
+                final_fragment: true,
+            })
             .expect_err("size preflight precedes control UTF-8 validation")
             .kind(),
         AsyncTransportErrorKind::FrameTooLarge
@@ -2528,20 +3131,17 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
     for payload in [vec![b'a'; 1_048_576], vec![0xff; 1_048_576]] {
         assert_eq!(
             codec
-                .decode_control(
-                    WebSocketFrame::Text {
-                        payload: &payload,
-                        final_fragment: true,
-                    },
-                    &document,
-                )
+                .decode_control(WebSocketFrame::Text {
+                    payload: &payload,
+                    final_fragment: true,
+                })
                 .expect_err("very large control preflight")
                 .kind(),
             AsyncTransportErrorKind::FrameTooLarge
         );
     }
     let forged_control = WebSocketControlRecord::Unsubscribe(subscription(16));
-    let forged = WebSocketMembershipControl::unsubscribe(
+    let forged = websocket_unsubscribe(
         &mut document,
         &forged_control,
         &fixture.request(
@@ -2558,16 +3158,13 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
         .encode_control(&unsubscribe)
         .expect("unsubscribe frame");
     let decoded_unsubscribe = codec
-        .decode_control(
-            WebSocketFrame::Text {
-                payload: &unsubscribe_bytes,
-                final_fragment: true,
-            },
-            &document,
-        )
+        .decode_control(WebSocketFrame::Text {
+            payload: &unsubscribe_bytes,
+            final_fragment: true,
+        })
         .expect("current unsubscribe");
     assert_eq!(
-        WebSocketMembershipControl::unsubscribe(
+        websocket_unsubscribe(
             &mut document,
             &decoded_unsubscribe,
             &fixture.request(

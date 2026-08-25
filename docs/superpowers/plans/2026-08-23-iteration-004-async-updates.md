@@ -335,9 +335,14 @@
   document kind, and correlation-only handle. The framework compares one fresh
   current host snapshot for component/identity authorization memo, stream,
   topics, full event contracts, and canonical registered modes and independently
-  checks exclusive descriptor expiry. Add validates before source work and again
-  after `subscribe().await` immediately before commit; failed post-validation
-  closes/disposes the opened session once and installs nothing. Internal
+  checks exclusive descriptor expiry. Control is split so no mutable or shared
+  document borrow crosses an await: synchronous preparation snapshots the exact
+  document tuple, exact server-owned instance, and generation; owned fresh authority runs; a synchronous
+  pre-source gate checks generation, duplicate/retirement fences, and capacity;
+  owned source establishment plus post-authority runs; and a one-use synchronous
+  commit repeats the exact checks before mutation. Failed/canceled
+  post-validation or stale commit closes/disposes an opened session once and
+  installs nothing. Pending controls own hard-bounded RAII permits. Internal
   retirement and shutdown remain independent from expired browser authority.
 
   The connect-authorized result retains a compact redacted binding of the exact
@@ -346,16 +351,20 @@
   Physical sharing instead uses a trusted `DocumentAuthorizationScope` derived
   from aggregate scope, session, principal, tenant, and host transport policy;
   component identity remains in each logical authorization memo. Active and
-  retiring logical sessions share one hard bound. Completion detaches before its
-  one terminal envelope, typed Error payloads remain nonterminal, and persistent
-  fair close polling prevents pending/failing cleanup from stalling siblings.
+  retiring logical sessions share one hard bound; a retiring entry retains its
+  exact ID and binding fence until cleanup succeeds. Completion detaches before
+  its one terminal envelope, typed Error payloads remain nonterminal, and
+  persistent fair close polling prevents pending/failing cleanup from stalling
+  siblings.
 
   `SseEncoder` emits bounded `id`, `event`, and canonical `data` records plus
   heartbeat comments. SSE membership changes use authenticated same-origin
   control requests and a non-authoritative document transport handle.
   `WebSocketCodec` emits canonical text frames for envelopes and bounded
   subscribe/unsubscribe control records, and rejects binary, fragmentation,
-  unknown membership, and oversize violations. Before upgrade, the host must
+  noncanonical syntax, and oversize violations. Decoding never consults local
+  membership state; fresh authority precedes unknown/binding classification at
+  synchronous unsubscribe commit. Before upgrade, the host must
   validate `Origin` against the application origin; cross-origin WebSockets
   require an explicit allowlist and a separate non-cookie credential. A missing,
   malformed, wildcard-authorized, or unapproved origin is rejected before any
@@ -374,7 +383,12 @@
   WebSocket origin/control/envelope paths; adapter-tagged counters prove both
   executed every case. Controlled clocks and barriers cover preflight and
   post-subscribe expiry, revocation, scope/mode drift, once-only disposal, and
-  unauthorized external removal without sleeps.
+  unauthorized external removal without sleeps. They also prove document
+  delivery and independent controls progress during pending authority/source
+  work, stale one-use commits clean up, active-plus-retiring fences survive key
+  overlap, WebSocket denial reveals no membership oracle, hard pending-control
+  bounds release on drop, and controlled pending reads/closes register and wake
+  exact waiters.
 - [x] Commit: `feat(async): add SSE and WebSocket transport sessions`.
 
 ## Task 5: Enforce server-side fanout and backpressure bounds

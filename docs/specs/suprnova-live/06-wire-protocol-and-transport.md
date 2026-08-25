@@ -252,6 +252,12 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Made WebSocket control decoding purely bounded syntactic and
+  canonical validation. It never consults document membership state. After
+  strict Origin validation, every well-formed unsubscribe is freshly
+  authenticated against its exact descriptor/document authority before a
+  synchronous commit may classify unknown membership or descriptor mismatch,
+  preventing the control channel from becoming a membership oracle.
 - 2026-08-25 -- Required every connect-authorized subscription to retain a
   compact digest of its exact signed descriptor serialization, including key ID
   and signature. Transport membership/control compares that binding rather than
@@ -271,8 +277,9 @@ blob store merely to replay bytes.
   SSE `id`/`event`/`data` records and complete WebSocket text messages. SSE IDs
   are non-authoritative correlation only. WebSocket membership controls use an
   independent exact-key canonical record and reject binary, fragmented,
-  invalid UTF-8, duplicate, unknown, noncanonical, oversized, and
-  membership-incoherent input before application.
+  invalid UTF-8, duplicate-key, unknown-field, noncanonical, and oversized
+  input before application. Membership existence and exact descriptor binding
+  are deliberately not decoding concerns.
 - 2026-08-25 -- Unified server-authored asynchronous payload construction with
   wire decode's canonical serialize, bounded parse, canonical re-encode, and
   registered-payload validation profile. Integer schemas admit only lossless

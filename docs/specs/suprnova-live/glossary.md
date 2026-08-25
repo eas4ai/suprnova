@@ -436,11 +436,29 @@ each logical membership still requires its own component authorization memo and
 exact subscription binding.
 _Avoid_: component memo, browser scope string, document handle, origin, transport kind
 
+**Document control generation**:
+The monotonic document-owned version captured with an exact private document-
+owner identity by a prepared external membership control and compared again at
+its pre-source gate or final synchronous commit.
+Any intervening membership or retirement mutation makes the one-use control
+stale. It is internal concurrency metadata, not a browser nonce, revision,
+subscription sequence, or authorization source.
+_Avoid_: component revision, document handle, browser generation, sequence position
+
+**Pending transport control**:
+A one-use, hard-bounded server capability carrying an exact document snapshot
+through fresh asynchronous membership authorization or source establishment
+without borrowing the document transport. It owns its permit and, after a
+source opens, once-only cleanup until synchronous commit accepts ownership.
+_Avoid_: reusable admission token, async mutable document lock, browser control authority, detached task
+
 **Transport retirement lane**:
 The document-owned hard-bounded collection of logical sessions already detached
 from active routing but still requiring idempotent provider cleanup. Persistent
 fair close polling retains ownership across pending calls, failures, cancellation,
 completion, authorization expiry, and shutdown without spawning detached work.
+Each entry retains its exact subscription ID and signed-descriptor binding as a
+re-admission and capacity fence until cleanup succeeds.
 _Avoid_: active membership, background leak, unbounded cleanup queue, Task 5 backpressure buffer
 
 **Asynchronous event envelope**:

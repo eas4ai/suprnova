@@ -6,10 +6,10 @@ use crate::canonical::{CanonicalValue, parse_canonical_value, to_canonical_bytes
 use crate::limits::InputLimits;
 
 use super::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEventSource, AsyncTransportError,
-    AsyncTransportErrorKind, AuthorizedTransportSubscription, CloseDisposition,
-    DocumentTransportKind, DocumentTransportSession, SubscriptionId, VerifiedOrigin,
-    decode_async_envelope, encode_async_envelope,
+    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncTransportError,
+    AsyncTransportErrorKind, AuthorizedTransportSubscription, DocumentTransportKind,
+    DocumentTransportSession, PendingTransportAdd, PendingTransportRemove, SubscriptionId,
+    VerifiedOrigin, decode_async_envelope, encode_async_envelope,
 };
 
 const MAX_WEBSOCKET_CONTROL_BYTES: usize = 512;
@@ -68,19 +68,18 @@ pub enum WebSocketControlRecord {
 pub struct WebSocketMembershipControl;
 
 impl WebSocketMembershipControl {
-    /// Adds the exact subscription named by a verified subscribe record.
-    pub async fn subscribe(
-        document: &mut DocumentTransportSession,
+    /// Prepares the exact subscription named by a verified subscribe record.
+    pub fn prepare_subscribe(
+        document: &DocumentTransportSession,
         control: &WebSocketControlRecord,
-        source: &dyn AsyncEventSource,
         authorization: AuthorizedTransportSubscription,
-    ) -> Result<(), AsyncTransportError> {
+    ) -> Result<PendingTransportAdd, AsyncTransportError> {
         validate_document_kind(document)?;
         match control {
             WebSocketControlRecord::Subscribe(subscription)
                 if subscription == authorization.subscription() =>
             {
-                document.add(source, authorization).await
+                document.prepare_add(authorization)
             }
             WebSocketControlRecord::Subscribe(_) | WebSocketControlRecord::Unsubscribe(_) => Err(
                 AsyncTransportError::new(AsyncTransportErrorKind::RoutingMismatch),
@@ -88,18 +87,18 @@ impl WebSocketMembershipControl {
         }
     }
 
-    /// Removes the exact subscription named by a verified unsubscribe record.
-    pub async fn unsubscribe(
-        document: &mut DocumentTransportSession,
+    /// Prepares authenticated removal for the exact unsubscribe record.
+    pub fn prepare_unsubscribe<'a>(
+        document: &DocumentTransportSession,
         control: &WebSocketControlRecord,
-        authorization: &AuthorizedTransportSubscription,
-    ) -> Result<CloseDisposition, AsyncTransportError> {
+        authorization: &'a AuthorizedTransportSubscription,
+    ) -> Result<PendingTransportRemove<'a>, AsyncTransportError> {
         validate_document_kind(document)?;
         match control {
             WebSocketControlRecord::Unsubscribe(subscription)
                 if subscription == authorization.subscription() =>
             {
-                document.remove(authorization).await
+                document.prepare_remove(authorization)
             }
             WebSocketControlRecord::Subscribe(_) | WebSocketControlRecord::Unsubscribe(_) => Err(
                 AsyncTransportError::new(AsyncTransportErrorKind::RoutingMismatch),
@@ -289,15 +288,13 @@ impl WebSocketCodec {
         to_canonical_bytes(&canonical, &control_limits()?).map_err(|_| invalid_envelope())
     }
 
-    /// Decodes exact control fields and rejects unknown removals.
+    /// Decodes exact control fields without consulting document membership state.
     ///
-    /// Existing Subscribe identities continue to the authenticated membership
-    /// boundary so it can distinguish an exact duplicate from another signed
-    /// descriptor attempting to replace the membership.
+    /// Every syntactically valid identity continues to fresh authorization;
+    /// only the later synchronous commit may classify local membership state.
     pub fn decode_control(
         &self,
         frame: WebSocketFrame<'_>,
-        document: &DocumentTransportSession,
     ) -> Result<WebSocketControlRecord, AsyncTransportError> {
         let payload = text_payload(frame, MAX_WEBSOCKET_CONTROL_BYTES)?;
         let limits = control_limits()?;
@@ -308,17 +305,7 @@ impl WebSocketCodec {
         }
         let value = canonical.to_serde_value().map_err(|_| invalid_envelope())?;
         let wire: ControlWire = serde_json::from_value(value).map_err(|_| invalid_envelope())?;
-        let control = wire.into_control()?;
-        match &control {
-            WebSocketControlRecord::Unsubscribe(subscription)
-                if !document.contains_membership(subscription) =>
-            {
-                Err(AsyncTransportError::new(
-                    AsyncTransportErrorKind::UnknownMembership,
-                ))
-            }
-            _ => Ok(control),
-        }
+        wire.into_control()
     }
 }
 

@@ -6,6 +6,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use base64::Engine as _;
@@ -111,6 +112,8 @@ pub enum AsyncTransportErrorKind {
     UnknownMembership,
     /// A membership operation used a different signed descriptor.
     DescriptorMismatch,
+    /// A one-use prepared control no longer matches the document control generation.
+    StaleControl,
     /// The configured hard membership ceiling was reached.
     MembershipLimit,
     /// The source baseline differed from the descriptor's signed baseline.
@@ -142,6 +145,7 @@ impl AsyncTransportErrorKind {
             Self::DuplicateMembership => "duplicate_membership",
             Self::UnknownMembership => "unknown_membership",
             Self::DescriptorMismatch => "descriptor_mismatch",
+            Self::StaleControl => "stale_control",
             Self::MembershipLimit => "membership_limit",
             Self::BaselineMismatch => "baseline_mismatch",
             Self::RoutingMismatch => "routing_mismatch",
@@ -540,6 +544,58 @@ impl DocumentTransportLimits {
     }
 }
 
+#[derive(Clone)]
+struct DocumentControlSnapshot {
+    owner: Arc<()>,
+    generation: u64,
+    origin: VerifiedOrigin,
+    kind: DocumentTransportKind,
+    handle: DocumentTransportHandle,
+    authorization_scope: DocumentAuthorizationScope,
+}
+
+impl DocumentControlSnapshot {
+    fn validate_physical(
+        &self,
+        document: &DocumentTransportSession,
+    ) -> Result<(), AsyncTransportError> {
+        if document.closed || document.closing || document.generation_exhausted {
+            return Err(AsyncTransportError::new(AsyncTransportErrorKind::Closed));
+        }
+        if !Arc::ptr_eq(&self.owner, &document.control_owner) {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::StaleControl,
+            ));
+        }
+        if self.origin != document.origin {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::OriginMismatch,
+            ));
+        }
+        if self.kind != document.kind {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::TransportMismatch,
+            ));
+        }
+        if self.handle != document.handle {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::RoutingMismatch,
+            ));
+        }
+        if self.authorization_scope != document.authorization_scope {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationScopeMismatch,
+            ));
+        }
+        if self.generation != document.control_generation {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::StaleControl,
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Descriptor-bound membership request that grants no reusable current authority.
 pub struct AuthorizedTransportSubscription {
     context: AsyncEnvelopeContext,
@@ -628,7 +684,7 @@ impl AuthorizedTransportSubscription {
 
     async fn validate_current(
         &self,
-        document: &DocumentTransportSession,
+        document: &DocumentControlSnapshot,
         operation: TransportMembershipOperation,
     ) -> Result<(), AsyncTransportError> {
         if self.authority.now() >= self.verified.expires_at() {
@@ -716,6 +772,227 @@ pub trait AsyncEventSession: Send {
     ) -> Poll<Result<CloseDisposition, AsyncTransportError>>;
 }
 
+struct UncommittedSession {
+    session: Option<Pin<Box<dyn AsyncEventSession>>>,
+}
+
+#[derive(Default)]
+struct PendingControlCapacity {
+    in_flight: AtomicUsize,
+}
+
+impl PendingControlCapacity {
+    fn acquire(self: &Arc<Self>) -> Result<PendingControlPermit, AsyncTransportError> {
+        let mut observed = self.in_flight.load(Ordering::Acquire);
+        loop {
+            if observed >= MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS {
+                return Err(AsyncTransportError::new(
+                    AsyncTransportErrorKind::MembershipLimit,
+                ));
+            }
+            match self.in_flight.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(PendingControlPermit {
+                        capacity: Arc::clone(self),
+                    });
+                }
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+}
+
+struct PendingControlPermit {
+    capacity: Arc<PendingControlCapacity>,
+}
+
+impl Drop for PendingControlPermit {
+    fn drop(&mut self) {
+        let previous = self.capacity.in_flight.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "pending control permit count underflowed");
+    }
+}
+
+impl UncommittedSession {
+    fn new(session: Pin<Box<dyn AsyncEventSession>>) -> Self {
+        Self {
+            session: Some(session),
+        }
+    }
+
+    fn take(&mut self) -> Option<Pin<Box<dyn AsyncEventSession>>> {
+        self.session.take()
+    }
+}
+
+impl Drop for UncommittedSession {
+    fn drop(&mut self) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+        let waker = std::task::Waker::noop();
+        let mut task = Context::from_waker(waker);
+        let _ = session.as_mut().poll_close(&mut task);
+    }
+}
+
+/// One-use add operation whose fresh authority phase borrows no document session.
+pub struct PendingTransportAdd {
+    document: DocumentControlSnapshot,
+    authorization: AuthorizedTransportSubscription,
+    permit: PendingControlPermit,
+}
+
+impl PendingTransportAdd {
+    /// Performs fresh pre-source authority without classifying document membership state.
+    pub async fn authorize(self) -> Result<AuthorizedTransportAdd, AsyncTransportError> {
+        self.authorization
+            .validate_current(&self.document, TransportMembershipOperation::Subscribe)
+            .await?;
+        Ok(AuthorizedTransportAdd {
+            document: self.document,
+            authorization: self.authorization,
+            permit: self.permit,
+        })
+    }
+}
+
+impl fmt::Debug for PendingTransportAdd {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<PendingTransportAdd:redacted>")
+    }
+}
+
+/// Freshly authorized add awaiting a synchronous pre-source document gate.
+pub struct AuthorizedTransportAdd {
+    document: DocumentControlSnapshot,
+    authorization: AuthorizedTransportSubscription,
+    permit: PendingControlPermit,
+}
+
+impl fmt::Debug for AuthorizedTransportAdd {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AuthorizedTransportAdd:redacted>")
+    }
+}
+
+/// One-use logical-source establishment that owns no document borrow.
+pub struct EstablishingTransportAdd {
+    document: DocumentControlSnapshot,
+    authorization: AuthorizedTransportSubscription,
+    permit: PendingControlPermit,
+}
+
+impl EstablishingTransportAdd {
+    /// Opens a logical source and rechecks current authority after the await.
+    pub async fn establish(
+        self,
+        source: &dyn AsyncEventSource,
+    ) -> Result<ReadyTransportAdd, AsyncTransportError> {
+        let session = source.subscribe(&self.authorization).await?;
+        let mut cleanup = UncommittedSession::new(session);
+        let baseline_matches = cleanup
+            .session
+            .as_ref()
+            .is_some_and(|session| session.baseline() == self.authorization.baseline());
+        if !baseline_matches {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::BaselineMismatch,
+            ));
+        }
+        self.authorization
+            .validate_current(&self.document, TransportMembershipOperation::Subscribe)
+            .await?;
+        Ok(ReadyTransportAdd {
+            document: self.document,
+            subscription: self.authorization.subscription().clone(),
+            binding: self.authorization.binding.clone(),
+            expires_at: self.authorization.verified.expires_at(),
+            authority: self.authorization.authority.clone(),
+            permit: self.permit,
+            session: UncommittedSession::new(
+                cleanup.take().ok_or_else(|| {
+                    AsyncTransportError::new(AsyncTransportErrorKind::SourceFailed)
+                })?,
+            ),
+        })
+    }
+}
+
+impl fmt::Debug for EstablishingTransportAdd {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<EstablishingTransportAdd:redacted>")
+    }
+}
+
+/// One-use capability ready for a synchronous exact document commit.
+pub struct ReadyTransportAdd {
+    document: DocumentControlSnapshot,
+    subscription: SubscriptionId,
+    binding: SubscriptionBinding,
+    expires_at: UnixMillis,
+    authority: Arc<dyn AsyncTransportAuthorityPort>,
+    permit: PendingControlPermit,
+    session: UncommittedSession,
+}
+
+impl fmt::Debug for ReadyTransportAdd {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ReadyTransportAdd:redacted>")
+    }
+}
+
+/// One-use removal operation whose asynchronous authority phase borrows no document.
+pub struct PendingTransportRemove<'a> {
+    document: DocumentControlSnapshot,
+    authorization: &'a AuthorizedTransportSubscription,
+    permit: PendingControlPermit,
+}
+
+impl PendingTransportRemove<'_> {
+    /// Rechecks current authenticated removal authority without document state classification.
+    pub async fn authorize(self) -> Result<ReadyTransportRemove, AsyncTransportError> {
+        self.authorization
+            .validate_current(&self.document, TransportMembershipOperation::Unsubscribe)
+            .await?;
+        Ok(ReadyTransportRemove {
+            document: self.document,
+            subscription: self.authorization.subscription().clone(),
+            binding: self.authorization.binding.clone(),
+            expires_at: self.authorization.verified.expires_at(),
+            authority: self.authorization.authority.clone(),
+            permit: self.permit,
+        })
+    }
+}
+
+impl fmt::Debug for PendingTransportRemove<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<PendingTransportRemove:redacted>")
+    }
+}
+
+/// One-use capability ready for synchronous authenticated removal classification.
+pub struct ReadyTransportRemove {
+    document: DocumentControlSnapshot,
+    subscription: SubscriptionId,
+    binding: SubscriptionBinding,
+    expires_at: UnixMillis,
+    authority: Arc<dyn AsyncTransportAuthorityPort>,
+    permit: PendingControlPermit,
+}
+
+impl fmt::Debug for ReadyTransportRemove {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ReadyTransportRemove:redacted>")
+    }
+}
+
 struct LogicalTransportSession {
     authorization: SubscriptionBinding,
     subscription: SubscriptionId,
@@ -723,6 +1000,8 @@ struct LogicalTransportSession {
 }
 
 struct RetiringTransportSession {
+    authorization: SubscriptionBinding,
+    subscription: SubscriptionId,
     session: Pin<Box<dyn AsyncEventSession>>,
 }
 
@@ -739,6 +1018,10 @@ pub struct DocumentTransportSession {
     handle: DocumentTransportHandle,
     limits: DocumentTransportLimits,
     authorization_scope: DocumentAuthorizationScope,
+    control_owner: Arc<()>,
+    control_generation: u64,
+    generation_exhausted: bool,
+    pending_controls: Arc<PendingControlCapacity>,
     memberships: Vec<LogicalTransportSession>,
     retiring: Vec<RetiringTransportSession>,
     cursor: usize,
@@ -751,7 +1034,7 @@ pub struct DocumentTransportSession {
 impl DocumentTransportSession {
     /// Creates one physical transport owner with no active logical memberships.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         origin: VerifiedOrigin,
         kind: DocumentTransportKind,
         handle: DocumentTransportHandle,
@@ -764,6 +1047,10 @@ impl DocumentTransportSession {
             handle,
             limits,
             authorization_scope,
+            control_owner: Arc::new(()),
+            control_generation: 0,
+            generation_exhausted: false,
+            pending_controls: Arc::new(PendingControlCapacity::default()),
             memberships: Vec::new(),
             retiring: Vec::new(),
             cursor: 0,
@@ -818,67 +1105,101 @@ impl DocumentTransportSession {
             .any(|logical| &logical.subscription == subscription)
     }
 
-    /// Adds one currently authorized descriptor-bound logical session.
-    pub async fn add(
-        &mut self,
-        source: &dyn AsyncEventSource,
+    /// Snapshots one descriptor-bound admission without borrowing this document across await.
+    pub fn prepare_add(
+        &self,
         authorization: AuthorizedTransportSubscription,
-    ) -> Result<(), AsyncTransportError> {
+    ) -> Result<PendingTransportAdd, AsyncTransportError> {
         self.validate_common(&authorization)?;
-        authorization
-            .validate_current(self, TransportMembershipOperation::Subscribe)
-            .await?;
-        self.validate_add_after_authority(&authorization)?;
-        let session = source.subscribe(&authorization).await?;
-        if session.baseline() != authorization.baseline() {
-            self.retire_opened_session(session).await;
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::BaselineMismatch,
-            ));
-        }
-        if let Err(error) = authorization
-            .validate_current(self, TransportMembershipOperation::Subscribe)
-            .await
-        {
-            self.retire_opened_session(session).await;
-            return Err(error);
-        }
+        let permit = self.pending_controls.acquire()?;
+        Ok(PendingTransportAdd {
+            document: self.control_snapshot(),
+            authorization,
+            permit,
+        })
+    }
+
+    /// Rechecks document generation, duplicate fences, and capacity before source work.
+    pub fn prepare_establish(
+        &self,
+        authorized: AuthorizedTransportAdd,
+    ) -> Result<EstablishingTransportAdd, AsyncTransportError> {
+        self.validate_ready_control(
+            &authorized.document,
+            authorized.authorization.verified.expires_at(),
+            authorized.authorization.authority.as_ref(),
+        )?;
+        self.validate_ready_add(
+            authorized.authorization.subscription(),
+            authorized.authorization.binding(),
+        )?;
+        Ok(EstablishingTransportAdd {
+            document: self.control_snapshot(),
+            authorization: authorized.authorization,
+            permit: authorized.permit,
+        })
+    }
+
+    /// Commits one freshly established logical session synchronously and exactly once.
+    pub fn commit_add(&mut self, mut ready: ReadyTransportAdd) -> Result<(), AsyncTransportError> {
+        self.validate_ready_control(&ready.document, ready.expires_at, ready.authority.as_ref())?;
+        self.validate_ready_add(&ready.subscription, &ready.binding)?;
+        self.ensure_generation_available()?;
+        let _permit = ready.permit;
+        let session = ready
+            .session
+            .take()
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::SourceFailed))?;
         self.memberships.push(LogicalTransportSession {
-            authorization: authorization.binding,
-            subscription: authorization.context.subscription().clone(),
+            authorization: ready.binding,
+            subscription: ready.subscription,
             session,
         });
+        self.advance_control_generation();
         Ok(())
     }
 
-    /// Removes one membership from routing with matching current authorization.
+    /// Snapshots authenticated removal without classifying local membership state.
+    pub fn prepare_remove<'a>(
+        &self,
+        authorization: &'a AuthorizedTransportSubscription,
+    ) -> Result<PendingTransportRemove<'a>, AsyncTransportError> {
+        self.validate_common(authorization)?;
+        let permit = self.pending_controls.acquire()?;
+        Ok(PendingTransportRemove {
+            document: self.control_snapshot(),
+            authorization,
+            permit,
+        })
+    }
+
+    /// Classifies and commits one freshly authorized removal synchronously.
     ///
     /// Provider cleanup is polled once immediately and otherwise remains owned
     /// by the bounded retirement lane, so it cannot block healthy siblings.
-    pub async fn remove(
+    pub fn commit_remove(
         &mut self,
-        authorization: &AuthorizedTransportSubscription,
+        ready: ReadyTransportRemove,
     ) -> Result<CloseDisposition, AsyncTransportError> {
-        self.validate_common(authorization)?;
-        authorization
-            .validate_current(self, TransportMembershipOperation::Unsubscribe)
-            .await?;
+        self.validate_ready_control(&ready.document, ready.expires_at, ready.authority.as_ref())?;
+        let _permit = ready.permit;
         let Some(index) = self
             .memberships
             .iter()
-            .position(|logical| &logical.subscription == authorization.subscription())
+            .position(|logical| logical.subscription == ready.subscription)
         else {
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::UnknownMembership,
             ));
         };
-        if self.memberships[index].authorization != authorization.binding {
+        if self.memberships[index].authorization != ready.binding {
             return Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::DescriptorMismatch,
             ));
         }
+        self.ensure_generation_available()?;
         let retirement = self.detach_membership(index);
-        self.poll_exact_retirement_once(retirement).await;
+        self.poll_exact_retirement_once(retirement);
         Ok(CloseDisposition::Closed)
     }
 
@@ -920,16 +1241,24 @@ impl DocumentTransportSession {
         .await
     }
 
-    fn validate_add_after_authority(
+    fn validate_ready_add(
         &self,
-        authorization: &AuthorizedTransportSubscription,
+        subscription: &SubscriptionId,
+        binding: &SubscriptionBinding,
     ) -> Result<(), AsyncTransportError> {
-        if let Some(existing) = self
+        let active = self
             .memberships
             .iter()
-            .find(|logical| &logical.subscription == authorization.subscription())
+            .map(|logical| (&logical.subscription, &logical.authorization));
+        let retiring = self
+            .retiring
+            .iter()
+            .map(|logical| (&logical.subscription, &logical.authorization));
+        if let Some((_, existing_binding)) = active
+            .chain(retiring)
+            .find(|(existing, _)| *existing == subscription)
         {
-            let kind = if existing.authorization == authorization.binding {
+            let kind = if existing_binding == binding {
                 AsyncTransportErrorKind::DuplicateMembership
             } else {
                 AsyncTransportErrorKind::DescriptorMismatch
@@ -948,7 +1277,7 @@ impl DocumentTransportSession {
         &self,
         authorization: &AuthorizedTransportSubscription,
     ) -> Result<(), AsyncTransportError> {
-        if self.closed || self.closing {
+        if self.closed || self.closing || self.generation_exhausted {
             return Err(AsyncTransportError::new(AsyncTransportErrorKind::Closed));
         }
         if authorization.origin() != &self.origin {
@@ -962,6 +1291,46 @@ impl DocumentTransportSession {
             ));
         }
         Ok(())
+    }
+
+    fn control_snapshot(&self) -> DocumentControlSnapshot {
+        DocumentControlSnapshot {
+            owner: Arc::clone(&self.control_owner),
+            generation: self.control_generation,
+            origin: self.origin.clone(),
+            kind: self.kind,
+            handle: self.handle.clone(),
+            authorization_scope: self.authorization_scope.clone(),
+        }
+    }
+
+    fn validate_ready_control(
+        &self,
+        snapshot: &DocumentControlSnapshot,
+        expires_at: UnixMillis,
+        authority: &dyn AsyncTransportAuthorityPort,
+    ) -> Result<(), AsyncTransportError> {
+        snapshot.validate_physical(self)?;
+        if authority.now() >= expires_at {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::AuthorizationLost,
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_generation_available(&self) -> Result<(), AsyncTransportError> {
+        if self.control_generation == u64::MAX {
+            return Err(AsyncTransportError::new(AsyncTransportErrorKind::Closed));
+        }
+        Ok(())
+    }
+
+    fn advance_control_generation(&mut self) {
+        match self.control_generation.checked_add(1) {
+            Some(generation) => self.control_generation = generation,
+            None => self.generation_exhausted = true,
+        }
     }
 
     fn repair_cursor(&mut self) {
@@ -983,23 +1352,18 @@ impl DocumentTransportSession {
         let logical = self.memberships.remove(index);
         self.repair_cursor_after_removal(index);
         self.retiring.push(RetiringTransportSession {
+            authorization: logical.authorization,
+            subscription: logical.subscription,
             session: logical.session,
         });
+        self.advance_control_generation();
         self.retiring.len() - 1
     }
 
-    async fn retire_opened_session(&mut self, session: Pin<Box<dyn AsyncEventSession>>) {
-        self.retiring.push(RetiringTransportSession { session });
-        let index = self.retiring.len() - 1;
-        self.poll_exact_retirement_once(index).await;
-    }
-
-    async fn poll_exact_retirement_once(&mut self, index: usize) {
-        poll_fn(|task| {
-            self.poll_retirement_at(index, task);
-            Poll::Ready(())
-        })
-        .await;
+    fn poll_exact_retirement_once(&mut self, index: usize) {
+        let waker = std::task::Waker::noop();
+        let mut task = Context::from_waker(waker);
+        self.poll_retirement_at(index, &mut task);
     }
 
     fn poll_retirement_at(&mut self, index: usize, task: &mut Context<'_>) {
@@ -1010,6 +1374,7 @@ impl DocumentTransportSession {
             Poll::Ready(Ok(_)) => {
                 self.retiring.remove(index);
                 self.repair_cleanup_cursor();
+                self.advance_control_generation();
             }
             Poll::Ready(Err(error)) => {
                 self.last_cleanup_error = Some(error.kind());
@@ -1041,6 +1406,7 @@ impl DocumentTransportSession {
                 Poll::Ready(Ok(_)) => {
                     self.retiring.remove(index);
                     self.repair_cleanup_cursor();
+                    self.advance_control_generation();
                 }
                 Poll::Ready(Err(error)) => {
                     self.last_cleanup_error = Some(error.kind());

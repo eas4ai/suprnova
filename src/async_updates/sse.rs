@@ -4,9 +4,9 @@ use http::HeaderMap;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue, X_CONTENT_TYPE_OPTIONS};
 
 use super::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncEventSource, AsyncTransportError,
-    AsyncTransportErrorKind, AuthorizedTransportSubscription, CloseDisposition,
-    DocumentTransportHandle, DocumentTransportKind, DocumentTransportSession, VerifiedOrigin,
+    AsyncCodecLimits, AsyncEnvelope, AsyncTransportError, AsyncTransportErrorKind,
+    AuthorizedTransportSubscription, DocumentTransportHandle, DocumentTransportKind,
+    DocumentTransportSession, PendingTransportAdd, PendingTransportRemove, VerifiedOrigin,
     encode_async_envelope,
 };
 
@@ -128,27 +128,26 @@ impl SseResponseContract {
 pub struct SseMembershipControl;
 
 impl SseMembershipControl {
-    /// Adds one currently authorized logical membership to the document stream.
-    pub async fn subscribe(
-        document: &mut DocumentTransportSession,
+    /// Prepares one logical add without borrowing the document across asynchronous work.
+    pub fn prepare_subscribe(
+        document: &DocumentTransportSession,
         handle: &DocumentTransportHandle,
         origin: &VerifiedOrigin,
-        source: &dyn AsyncEventSource,
         authorization: AuthorizedTransportSubscription,
-    ) -> Result<(), AsyncTransportError> {
+    ) -> Result<PendingTransportAdd, AsyncTransportError> {
         validate_control(document, handle, origin)?;
-        document.add(source, authorization).await
+        document.prepare_add(authorization)
     }
 
-    /// Removes one logical membership only with matching current authorization.
-    pub async fn unsubscribe(
-        document: &mut DocumentTransportSession,
+    /// Prepares authenticated removal without classifying document membership state.
+    pub fn prepare_unsubscribe<'a>(
+        document: &DocumentTransportSession,
         handle: &DocumentTransportHandle,
         origin: &VerifiedOrigin,
-        authorization: &AuthorizedTransportSubscription,
-    ) -> Result<CloseDisposition, AsyncTransportError> {
+        authorization: &'a AuthorizedTransportSubscription,
+    ) -> Result<PendingTransportRemove<'a>, AsyncTransportError> {
         validate_control(document, handle, origin)?;
-        document.remove(authorization).await
+        document.prepare_remove(authorization)
     }
 }
 
