@@ -1101,6 +1101,77 @@ async fn rolling_back_to_the_outer_savepoint_discards_the_inner_one_too() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn a_repeated_savepoint_name_unwinds_to_the_innermost_one() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    // Every backend resolves `ROLLBACK TO SAVEPOINT x` to the most recent `x`
+    // and leaves that savepoint usable afterwards, so the mark stack has to do
+    // the same or the registry and the rows stop describing the same savepoint.
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            tx.savepoint("dup").await?;
+            Queue::push(AfterCommitJob).await?;
+            // Rolls the first `dup` back but does not release it.
+            tx.rollback_to("dup").await?;
+
+            Queue::push(OtherAfterCommitJob).await?;
+
+            // A second `dup` shadows the first from here on.
+            tx.savepoint("dup").await?;
+            Queue::push(DelayedAfterCommitJob).await?;
+            tx.rollback_to("dup").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    let env = driver.only();
+    assert_eq!(
+        env.job_name, "wave5-after-commit-other",
+        "the second rollback must unwind to the *second* `dup`, keeping the push \
+         made between the two; unwinding to the first would discard it, and \
+         treating the name as already spent would keep the third"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_savepoint_issued_as_raw_sql_is_not_unwound() {
+    let driver = install_driver();
+    let _db = TestDatabase::sqlite_memory().await.expect("sqlite");
+
+    // `SAVEPOINT` issued out of band leaves no mark, so `rollback_to` has no
+    // recorded length to unwind to. It rolls the rows back, warns, and keeps the
+    // callbacks: discarding a deferred dispatch on a guess is the worse failure,
+    // and a push that happens when it should not is at least visible.
+    DB::transaction(|tx| {
+        Box::pin(async move {
+            let backend = tx.backend();
+            tx.query_all(sea_orm::Statement::from_string(
+                backend,
+                "SAVEPOINT raw_sp".to_owned(),
+            ))
+            .await?;
+            Queue::push(AfterCommitJob).await?;
+            tx.rollback_to("raw_sp").await?;
+            Ok::<(), FrameworkError>(())
+        })
+    })
+    .await
+    .expect("commit");
+
+    assert_eq!(
+        driver.count(),
+        1,
+        "an unmarked savepoint leaves the registry intact; use Transaction::savepoint \
+         if the deferred dispatches are meant to unwind with the rows"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn a_manual_transaction_savepoint_leaves_the_enclosing_registry_alone() {
@@ -1122,13 +1193,23 @@ async fn a_manual_transaction_savepoint_leaves_the_enclosing_registry_alone() {
     // savepoints must not reach that registry: they belong to a different
     // physical transaction, and unwinding the closure's deferred pushes on its
     // `rollback_to` would discard dispatches whose rows are still there.
+    //
+    // The push sits deliberately *between* the manual savepoint and its
+    // rollback, which is what makes this test discriminate. Read the registry
+    // from the ambient `CURRENT_TX` instead of from the handle and the mark
+    // lands at length 0, the push takes the list to 1, and `rollback_to`
+    // truncates it back to 0 - the enclosing transaction's job silently never
+    // dispatches. With the registry on the handle the manual transaction has
+    // none, marks nothing, unwinds nothing, and the push survives.
     TestContainer::scope(async move {
         TestContainer::singleton(conn);
         DB::transaction(|_tx| {
             Box::pin(async move {
-                Queue::push(AfterCommitJob).await?;
                 let manual = DB::begin_transaction().await?;
                 manual.savepoint("sp_manual").await?;
+                // Registered against the enclosing closure - the only registry
+                // in play - while the manual savepoint is open.
+                Queue::push(AfterCommitJob).await?;
                 manual.rollback_to("sp_manual").await?;
                 manual.rollback().await?;
                 Ok::<(), FrameworkError>(())

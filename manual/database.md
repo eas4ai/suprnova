@@ -368,6 +368,13 @@ Repeating a savepoint name is allowed, and the registry follows the database:
 savepoints established after it. Manual transactions have no after-commit
 registry, so their savepoints roll back rows and nothing else.
 
+Only `Transaction::savepoint` marks the registry. A savepoint you create with
+raw SQL is invisible to it, so `rollback_to` rolls those rows back, logs a
+warning, and leaves every deferred dispatch registered inside it in place -
+discarding one on a guess would be the worse failure. Use
+`Transaction::savepoint` when the deferred dispatches are meant to unwind with
+the rows.
+
 ## Observability
 
 Laravel 13's `DB::listen` / `QueryExecuted` / query log surface, ported

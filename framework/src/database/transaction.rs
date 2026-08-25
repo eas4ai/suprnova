@@ -904,11 +904,16 @@ impl Transaction {
     ///
     /// The compensations run with the transaction still open and `CURRENT_TX`
     /// still installed - unlike the end-of-transaction drain, there is no way to
-    /// step out of a task-local scope from inside it. That costs nothing for the
-    /// one compensation the framework registers
-    /// ([`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned),
-    /// which goes to the cache store, never to the database), but a caller
-    /// writing its own must not assume it is running outside the transaction.
+    /// step out of a task-local scope from inside it. Say that plainly, because a
+    /// caller writing its own compensation has to plan for it: any database write
+    /// such a compensation makes is routed onto this transaction's connection, so
+    /// it commits or rolls back with the transaction rather than standing on its
+    /// own, and a later `rollback_to` on an *earlier* savepoint undoes it like any
+    /// other row this transaction wrote. Compensate outside the database - or hand
+    /// the work to something that is not this transaction - if that is not what
+    /// you want. The one compensation the framework registers is unaffected:
+    /// [`Idempotency::release_owned`](crate::idempotency::Idempotency::release_owned)
+    /// goes to the cache store, and neither shipped store is database-backed.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = super::identifier::validate_savepoint_name(name)?;
         let sql = format!("ROLLBACK TO SAVEPOINT {validated}");
