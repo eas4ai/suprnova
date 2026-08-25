@@ -8,6 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A paused worker now tells you it is paused.** `queue:work` prints one line per
+  transition - `2026-08-25 14:03:11 Queue billing PAUSED`, and `RESUMED` on the way
+  back - and the worker emits `WorkerQueuePaused` / `WorkerQueueResumed` so you can
+  route the same signal into your own alerting. These are the worker-side pair; the
+  existing `QueuePaused` / `QueueResumed` fire in whichever process ran
+  `queue:pause`, which is never the worker, so until now a worker that went quiet
+  because somebody paused its queue was indistinguishable from a hung one. Each
+  event fires once per transition, not once per poll. Their `queue` field is
+  optional: a worker started without `--queue` drains everything and has no queue
+  names to report under `pause_all`, so it reports `None` rather than inventing a
+  name a listener could match on.
 - **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
 - **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
@@ -22,6 +33,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Queue manual: `RedisQueueDriver` does implement `size` and `clear`.** The
+  Introspection section said it returned an "unsupported" error for both and sent
+  you to redis-cli. It counts with `XLEN` plus `ZCARD` and clears by deleting the
+  stream and its delayed sorted set; the "unsupported" error is what the
+  `QueueDriver` trait's own defaults return for a driver that implements neither.
 - **`suprnova serve` runs a frontend-less project.** A project scaffolded with `suprnova new --api` has no `frontend/` directory, and `serve` rejected it as "No frontend directory found. Are you in a Suprnova project directory?" unless you passed `--backend-only`. It now skips the Vite pane and the TypeScript generation that feeds it, and serves the backend. `--frontend-only` still fails on such a project, with a message that says why.
 
 ### Upgrading
