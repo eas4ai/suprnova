@@ -90,7 +90,7 @@ a pair: setting a threshold turns the per-checkout ping off, because
 running both would ping on every acquire and make the threshold
 meaningless.
 
-### Why Suprnova diverges: pool recycling instead of TCP keepalives
+### Why Suprnova diverges
 
 Keepalives and pool recycling solve the same failure from opposite
 ends. Keepalives keep a middlebox from expiring the connection;

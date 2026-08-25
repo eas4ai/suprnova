@@ -154,6 +154,7 @@ fn an_unparseable_value_falls_back_instead_of_failing_the_boot() {
 
 #[test]
 fn validate_pool_rejects_a_zero_acquire_timeout() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let cfg = DatabaseConfig::builder()
         .url("sqlite::memory:")
         .acquire_timeout(0)
@@ -193,6 +194,7 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
     // The knobs are wired onto `ConnectOptions` in `connect_as`; this is
     // the test that proves the wiring matches SeaORM's real signatures
     // and that no combination stops the pool from coming up.
+    let _guard = ENV_LOCK.lock().unwrap();
     let cfg = DatabaseConfig::builder()
         .url("sqlite::memory:")
         .idle_timeout(60)
@@ -210,6 +212,7 @@ async fn a_pool_builds_with_every_liveness_knob_set() {
 
 #[tokio::test]
 async fn a_pool_builds_with_reaping_disabled() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let cfg = DatabaseConfig::builder()
         .url("sqlite::memory:")
         .idle_timeout(0)
