@@ -172,13 +172,18 @@ impl RedisCache {
 #[async_trait]
 impl CacheStore for RedisCache {
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
-        let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let value: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("Cache get error: {}", e)))?;
+        // GET is a pure read: running it twice returns the same answer, so a
+        // connection that died under the first attempt costs a reconnect, not
+        // a failed cache read.
+        let value: Option<String> = crate::redis_retry::retry_read("cache GET", || {
+            let mut conn = self.conn.clone();
+            let key = key.clone();
+            async move { conn.get(&key).await }
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("Cache get error: {}", e)))?;
 
         Ok(value)
     }
@@ -272,13 +277,16 @@ impl CacheStore for RedisCache {
     }
 
     async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
-        let mut conn = self.conn.clone();
         let key = self.prefixed_key(key);
 
-        let exists: bool = conn
-            .exists(&key)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("Cache exists error: {}", e)))?;
+        // EXISTS, like GET, answers the same way however many times it runs.
+        let exists: bool = crate::redis_retry::retry_read("cache EXISTS", || {
+            let mut conn = self.conn.clone();
+            let key = key.clone();
+            async move { conn.exists(&key).await }
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("Cache exists error: {}", e)))?;
 
         Ok(exists)
     }
@@ -323,13 +331,23 @@ impl CacheStore for RedisCache {
         let pattern = format!("{}*", self.prefix);
         let mut cursor: u64 = 0;
         loop {
-            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(500)
-                .query_async(&mut conn)
+            // SCAN is a pure read; the DEL below is not, and is deliberately
+            // left un-retried.
+            let (next_cursor, batch): (u64, Vec<String>) =
+                crate::redis_retry::retry_read("cache SCAN", || {
+                    let mut conn = self.conn.clone();
+                    let pattern = pattern.clone();
+                    async move {
+                        redis::cmd("SCAN")
+                            .arg(cursor)
+                            .arg("MATCH")
+                            .arg(&pattern)
+                            .arg("COUNT")
+                            .arg(500)
+                            .query_async(&mut conn)
+                            .await
+                    }
+                })
                 .await
                 .map_err(|e| FrameworkError::internal(format!("Cache flush scan error: {}", e)))?;
             if !batch.is_empty() {
@@ -448,12 +466,23 @@ impl CacheStore for RedisCache {
                 // every element present for the full scan is returned at
                 // least once, and elements removed mid-scan are exactly the
                 // ones already handled.
-                let (next, members): (u64, Vec<String>) = redis::cmd("SSCAN")
-                    .arg(&tag_key)
-                    .arg(cursor)
-                    .arg("COUNT")
-                    .arg(TAG_SCAN_BATCH)
-                    .query_async(&mut conn)
+                // SSCAN is a pure read and its cursor contract already
+                // tolerates a page being served twice. The EVAL below deletes
+                // values, so it is never retried.
+                let (next, members): (u64, Vec<String>) =
+                    crate::redis_retry::retry_read("cache SSCAN", || {
+                        let mut conn = self.conn.clone();
+                        let tag_key = tag_key.clone();
+                        async move {
+                            redis::cmd("SSCAN")
+                                .arg(&tag_key)
+                                .arg(cursor)
+                                .arg("COUNT")
+                                .arg(TAG_SCAN_BATCH)
+                                .query_async(&mut conn)
+                                .await
+                        }
+                    })
                     .await
                     .map_err(|e| FrameworkError::internal(format!("Cache tag scan: {e}")))?;
 
