@@ -549,7 +549,7 @@ fn wake_gate_release_between_state_check_and_registration_cannot_be_lost() {
     let release_interleaving = interleaving.clone();
     let release = std::thread::spawn(move || {
         release_interleaving.wait_until_observed_unreleased();
-        release_interleaving.signal_release_attempt_started();
+        release_interleaving.signal_release_call_entered();
         release_gate.release();
     });
     let wakes = Arc::new(WakeCounter::default());
@@ -558,6 +558,8 @@ fn wake_gate_release_between_state_check_and_registration_cannot_be_lost() {
 
     assert!(gate.poll(&mut task).is_pending());
     release.join().expect("controlled gate release thread");
+    let (release_call, registration) = interleaving.trace_orders();
+    assert!(release_call < registration);
     assert_eq!(wakes.count(), 1, "registered waiter receives release wake");
     assert!(gate.poll(&mut task).is_ready());
     assert!(!gate.waiter_registered(), "release consumes the waiter");
@@ -578,7 +580,7 @@ async fn controlled_subscribe_release_between_state_check_and_registration_canno
     let release_interleaving = interleaving.clone();
     let release = std::thread::spawn(move || {
         release_interleaving.wait_until_observed_unreleased();
-        release_interleaving.signal_release_attempt_started();
+        release_interleaving.signal_release_call_entered();
         release_source.release();
     });
     let mut subscribe = source.subscribe(&authorization);
@@ -588,6 +590,8 @@ async fn controlled_subscribe_release_between_state_check_and_registration_canno
 
     assert!(subscribe.as_mut().poll(&mut task).is_pending());
     release.join().expect("controlled subscribe release thread");
+    let (release_call, registration) = interleaving.trace_orders();
+    assert!(release_call < registration);
     assert_eq!(
         wakes.count(),
         1,

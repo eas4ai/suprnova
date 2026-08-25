@@ -5,7 +5,7 @@ use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use suprnova_live::async_updates::{
@@ -74,32 +74,77 @@ struct WakeGateState {
 
 /// Deterministic coordination for the exact release-versus-registration boundary.
 pub struct RegistrationInterleaving {
-    observed_unreleased: Barrier,
-    release_attempt_started: Barrier,
+    state: Mutex<RegistrationInterleavingState>,
+    observed_unreleased: Condvar,
+    release_call_entered: Condvar,
+    sequence: AtomicUsize,
+    release_call_order: AtomicUsize,
+    waiter_registration_order: AtomicUsize,
+}
+
+struct RegistrationInterleavingState {
+    observed_unreleased: bool,
+    release_call_entered: bool,
 }
 
 impl RegistrationInterleaving {
     /// Creates one two-party poll/release choreography.
     pub fn new() -> Self {
         Self {
-            observed_unreleased: Barrier::new(2),
-            release_attempt_started: Barrier::new(2),
+            state: Mutex::new(RegistrationInterleavingState {
+                observed_unreleased: false,
+                release_call_entered: false,
+            }),
+            observed_unreleased: Condvar::new(),
+            release_call_entered: Condvar::new(),
+            sequence: AtomicUsize::new(0),
+            release_call_order: AtomicUsize::new(0),
+            waiter_registration_order: AtomicUsize::new(0),
         }
     }
 
     fn before_waiter_registration(&self) {
-        self.observed_unreleased.wait();
-        self.release_attempt_started.wait();
+        let mut state = self.state.lock().expect("registration interleaving lock");
+        state.observed_unreleased = true;
+        self.observed_unreleased.notify_one();
+        drop(
+            self.release_call_entered
+                .wait_while(state, |state| !state.release_call_entered)
+                .expect("release call entered wait"),
+        );
     }
 
     /// Waits until poll observes unreleased while holding the state mutex.
     pub fn wait_until_observed_unreleased(&self) {
-        self.observed_unreleased.wait();
+        let state = self.state.lock().expect("registration interleaving lock");
+        drop(
+            self.observed_unreleased
+                .wait_while(state, |state| !state.observed_unreleased)
+                .expect("observed unreleased wait"),
+        );
     }
 
-    /// Announces that release is about to attempt the state mutex.
-    pub fn signal_release_attempt_started(&self) {
-        self.release_attempt_started.wait();
+    /// Records entry into the release call immediately before its state-lock attempt.
+    pub fn signal_release_call_entered(&self) {
+        let order = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        self.release_call_order.store(order, Ordering::Release);
+        let mut state = self.state.lock().expect("registration interleaving lock");
+        state.release_call_entered = true;
+        self.release_call_entered.notify_one();
+    }
+
+    fn mark_waiter_registered(&self) {
+        let order = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        self.waiter_registration_order
+            .store(order, Ordering::Release);
+    }
+
+    /// Returns ordered release-entry and waiter-registration trace positions.
+    pub fn trace_orders(&self) -> (usize, usize) {
+        (
+            self.release_call_order.load(Ordering::Acquire),
+            self.waiter_registration_order.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -140,6 +185,9 @@ impl WakeGate {
             interleaving.before_waiter_registration();
         }
         register_current_waker(&mut state.waiter, task.waker());
+        if let Some(interleaving) = &interleaving {
+            interleaving.mark_waiter_registered();
+        }
         Poll::Pending
     }
 
@@ -997,6 +1045,9 @@ impl AsyncEventSource for ControlledSubscribeSource {
                 interleaving.before_waiter_registration();
             }
             register_current_waker(&mut state.waiter, task.waker());
+            if let Some(interleaving) = &interleaving {
+                interleaving.mark_waiter_registered();
+            }
             Poll::Pending
         }))
     }
