@@ -18,7 +18,7 @@ Suprnova 在两条互补的轨道上验证请求输入：
 | `ContextualRule` | `passes(&self, value, ctx)` | 会读取兄弟字段的检查 |
 | `AsyncRule` | `async passes(&self, value)` | 会 `.await` 的检查（数据库、HTTP） |
 
-内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`。内置的 `ValueRule`：`ArrayKeys`、`Distinct`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则)。
+内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#密码强度)（只做强度检查）。内置的 `ValueRule`：`ArrayKeys`、`Distinct`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则) 和 [`Password`](#密码强度)（强度，外加它那项 `uncompromised()` HIBP 检查 - 唯一一个同时实现了 `Rule` 和 `AsyncRule` 的内置规则）。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -49,6 +49,70 @@ HttpUrl.passes("https://example.com")?;
 ```
 
 `Url::protocols(...)` 是**替换**这份允许列表，而不是收窄它，所以一个应用可以接受自己的深链协议方案（`myapp://…`），而框架对此不持任何意见 - “`://` 加主机”这条要求对那个自定义协议方案同样适用。对于回调、webhook 和头像这类输入，请用 `HttpUrl`（或者 `Url::protocols(&["https"])`） - 一个解析到 `ftp://internal-host/` 的 webhook 目标，仍然能被解析成一个 `Url`，而一个 `ftp:` 目标不是一个 webhook 目标。
+
+### 密码强度
+
+`Password` 会检查长度和字符类别的强度，外加一项可选的 Have I Been Pwned `uncompromised()` 检查 - 它是 Laravel 那个 `Password` 规则对象的移植。用 `Password::min(n)` 把它构建出来，再链上那些强度构建器：
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - 太短，没有数字，也没有符号
+```
+
+| 构建器 | 要求 | Laravel 的正则 |
+|---|---|---|
+| `.min(n)`（通过 `Password::min`） | 至少 `n` 个字符（下限为 1） | 长度检查 |
+| `.max(n)` | 至多 `n` 个字符 | 长度检查 |
+| `.letters()` | 至少一个 Unicode 字母 | `/\pL/u` |
+| `.mixed_case()` | 一个大写字母和一个小写字母，先后不限 | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | 至少一个 Unicode 数字 | `/\pN/u` |
+| `.symbols()` | 至少一个分隔符、符号或标点字符 - **一个普通空格也算** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())` 从 `bootstrap::register()` 里调用一次，就设定了 `Password::defaults()` 在别处返回的那个进程级默认值 - 对应 Laravel 的 `Password::defaults(fn () => ...)`。第二次调用会被忽略（并附带一条 `tracing::warn!`），而不是悄悄替换掉这个应用第一次选定的那份策略。
+
+#### `uncompromised()` - 因为光有强度还不够
+
+`.uncompromised()`（或者 `.uncompromised_with_threshold(n)`）会加上一项针对 Have I Been Pwned 泄露语料库的检查，用的是它的 k-匿名 range API：只有密码那份大写 SHA-1 哈希的**前 5 个字符**会离开进程 - `GET https://api.pwnedpasswords.com/range/{prefix}` - 而与完整哈希的比对是在本地做的，比对的是这个 API 为那个前缀返回的那些 `SUFFIX:COUNT` 行。这项服务从来看不到密码，甚至看不到它的完整哈希。阈值比较是严格的（`count > threshold`），所以默认的 `uncompromised()`（阈值 `0`）只要它出现过一次就会失败；而一次网络故障、超时或者非 2xx 响应会**失败开放** - 这个密码会被当作干净的，而不是在 Have I Been Pwned 故障期间把每一次注册都挡下来。这与 Laravel 的 `NotPwnedVerifier` 完全一致。
+
+因为那项检查是一次 HTTP 往返，`uncompromised()` 需要的是 `AsyncRule`，而不是只做强度检查时就够用的那个同步 `Rule`。请通过 `after_validation_async` 把它接起来，配方和 [`Unique`](#unique-规则) 用的那份一样：
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+在一个设了 `uncompromised()` 的 `Password` 上调用同步的 `Rule::passes`，会是一个**醒目的错误**，而不是一次悄无声息的跳过 - 一项悄悄什么都不做的安全检查，比一项从未存在过的更糟。这条错误消息会点名 `after_validation_async` 作为修复办法。
+
+`HIBP_TIMEOUT_SECS`（默认 `30`）控制的是请求超时 - 参见[环境变量](env-vars.md)。
+
+一个返回 `Err` 的自定义校验器，和一次失败的检查是两回事：它的错误文本会以 `error` 级别记进日志，绝不会到达客户端，而响应携带的是 `validation-password-unverifiable` 这个语料表键（“The { $field } could not be checked against known data leaks. Please try again.”）。如果您自带一份校验语料表，请把这个键加上。
+
+### 为什么 Suprnova 有所不同：Password
+
+- Laravel 的 `Password` 会把每一项失败的强度检查都收进同一个数组里。Suprnova 的 `Rule` 契约返回的是单条 `ValidationMessage`，所以 `Rule::passes` 报告的是**第一项**失败的检查，顺序是 min、max、大小写混合、字母、符号、数字 - 一次修一个，而不是一上来就看到整张清单。
+- Laravel 的同步校验器可以直接调用 `uncompromised()`；一个 PHP 请求本来就处在一个能容忍阻塞式 HTTP 调用的事件循环里。Suprnova 的 `Rule::passes` 按契约是同步的，所以没有哪个安全的地方能从它里面去发那个 HIBP 请求。与其悄悄跳过这项检查 - 对一条与安全相关的规则来说，那是唯一不可接受的结局 - Suprnova 的 `Rule::passes` 会返回一个醒目的、面向开发者的错误，点名 `after_validation_async` 作为修复办法。
+- `Password::defaults_with` 接受的是一个朴素的 `fn` 指针，而不是一个闭包，这样被配置的那个默认值就保持 `Copy`、也不需要堆分配 - 这是相对 Laravel 的 `Closure` 的一次刻意收窄。
 
 ### 编写您自己的规则
 
@@ -264,7 +328,6 @@ let user = new_user
 ```
 
 有关错误包、`with_all_errors` 和重定向指向的位置，请参见 [Inertia 响应](frontend-inertia-responses.md#validation-failures)。
-
 
 ## 设计说明
 

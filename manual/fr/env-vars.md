@@ -195,14 +195,15 @@ validation anglais embarqué du framework.
 
 | Var | Défaut | Type | Objet |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`) | Backend de file d'attente actif. Les valeurs inconnues journalisent un `warn!` et retombent sur memory. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Backend de file d'attente actif. Les valeurs inconnues journalisent un `warn!` et retombent sur la mémoire. `failover` enveloppe une liste ordonnée des autres - voir `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (séparée par des virgules, ex. `redis,database`) | Liste de connexions par ordre de priorité pour `QUEUE_DRIVER=failover`. Requise quand ce driver est sélectionné ; une valeur manquante ou vide est une erreur d'amorçage, tout comme une entrée nommant `failover` (pas d'imbrication) ou un driver qui n'existe pas. Chaque entrée lit les variables de son propre driver. Seuls les pushes parcourent la liste ; chaque lecture et chaque acquittement vont à la première connexion, si bien que chaque repli a besoin de son propre worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL Redis (requise par le driver quand `QUEUE_DRIVER=redis`). |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Clé de Redis Stream utilisée pour le fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Nom du groupe de consommateurs. |
-| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Nom du consommateur au sein du groupe. À définir par worker pour des workers parallèles. |
-| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | Combien de temps un job réclamé reste invisible avant qu'un autre consommateur puisse le réclamer. Faites correspondre ceci à votre job le plus lent. |
-| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Nom de table pour le driver database. Validé comme un identifiant SQL - une valeur malformée fait échouer l'amorçage, pas la composition SQL. Requise par le driver quand `QUEUE_DRIVER=database` ; le driver requiert aussi que `DB::init()` se soit déjà exécuté. |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table dans laquelle le magasin de lettre morte écrit. Lié automatiquement quand `QUEUE_DRIVER=database` - `queue:retry` la lit et `Queue::retry_failed` en a besoin, donc la table fait partie du contrat de ce driver. Non utilisée par `memory` (éphémère par construction) ni par `redis` (aucune table où écrire). À la différence de `QUEUE_DB_TABLE`, un identifiant malformé ici ne fait **pas** échouer l'amorçage : il journalise en `error!` et ne lie aucun magasin, si bien que les jobs mis en lettre morte sont journalisés en entier plutôt que persistés. Récupérable à la main, mais pas par `queue:retry`. |
+| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Nom du consommateur au sein du groupe. À définir par worker lorsque plusieurs workers tournent en parallèle. |
+| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | Combien de temps un job réclamé reste invisible avant qu'un autre consommateur puisse le reprendre. À aligner sur votre job le plus lent. |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Nom de table pour le driver database. Validé comme identifiant SQL - une valeur malformée échoue à l'amorçage, pas au moment de la composition du SQL. Requis par le driver quand `QUEUE_DRIVER=database` ; le driver exige aussi que `DB::init()` ait été exécuté d'abord. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table dans laquelle écrit le magasin de lettres mortes. Liée automatiquement quand `QUEUE_DRIVER=database` - `queue:retry` la lit et `Queue::retry_failed` en a besoin, donc la table fait partie du contrat de ce driver. Non utilisée par `memory` (éphémère par construction) ni par `redis` (aucune table où écrire). Contrairement à `QUEUE_DB_TABLE`, un identifiant malformé ici ne fait **pas** échouer l'amorçage : il journalise en `error!` et ne laisse aucun magasin lié, si bien que les jobs mis en lettre morte sont journalisés en entier plutôt que persistés. Récupérables à la main, mais pas par `queue:retry`. |
 
 ## Planification
 
@@ -306,6 +307,25 @@ quand ce driver est sélectionné ; une valeur de driver inconnue journalise un
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL Redis (requise par le driver quand `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Préfixe de clé dans Redis. |
 
+## Images
+
+Sélection du driver d'image et limites de décodage qui bornent une entrée
+hostile. Les limites hors plage sont bornées avec un `warn!` plutôt que de
+faire échouer l'amorçage : une limite de zéro rejetterait toutes les
+images de l'application. Un `IMAGE_DRIVER` inconnu échoue à la première
+utilisation, en nommant les valeurs valides.
+
+| Var | Défaut | Type | Objet |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Sélectionne le backend d'image. `oxideav` est en Rust pur, sans dépendance à l'hôte ; `magick` shelle vers un ImageMagick 7 installé sur l'hôte pour une prise en charge plus large des formats d'entrée. Insensible à la casse. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Plafond de la largeur et de la hauteur d'une image décodée, vérifié contre l'en-tête de l'entrée elle-même avant toute allocation. Plafonne aussi les cibles de redimensionnement. Minimum `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 Mio) | `u64` | Plafond de l'empreinte RGBA décodée (`width * height * 4`). Plafonne aussi la taille du fichier source lui-même, qu'il arrive d'un chemin, d'un disque ou de `Image::from_stream` (qui vérifie pendant la collecte). Minimum `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binaire qu'invoque le driver `magick`. ImageMagick 7 uniquement ; le nom `convert` d'ImageMagick 6 n'est pas accepté. Un binaire manquant est une erreur claire dès la première utilisation. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Plafond en temps réel d'une seule invocation d'ImageMagick. C'est à la fois l'argument `-limit time` propre à ImageMagick et l'échéance côté Rust qui tue tout le groupe de processus de l'enfant deux secondes plus tard, car `-limit time` est appliqué par un moniteur qu'un enfant coincé à l'intérieur d'un délégué n'enclenche jamais. Borne un délégué bloqué qui retiendrait sinon un worker bloquant pendant toute la vie du processus. Driver `magick` uniquement. Minimum `1`. |
+
+Voir [Images](images.md) pour l'application des limites à deux niveaux et
+pour choisir entre les drivers.
+
 ## Hachage
 
 Driver de hachage de mot de passe et paramètres par algorithme. Des
@@ -321,6 +341,12 @@ plutôt que de silencieusement revenir au défaut.
 | `HASH_TIME` | `4` | `u32` | Temps / itérations Argon2. Minimum `1`. Argon uniquement. |
 | `HASH_THREADS` | `1` | `u32` | Parallélisme Argon2 (correspond à OWASP / libsodium). Minimum `1`. Argon uniquement. |
 | `HASH_VERIFY` | `false` | `bool` | Quand vrai, `verify()` rejette les hachages d'un algorithme différent de `HASH_DRIVER` (retourne `Ok(false)`). Défaut `false` pour que les hachages bcrypt hérités se vérifient encore après un changement de driver, jusqu'à ce qu'ils soient rotés. |
+
+## Validation
+
+| Var | Défaut | Type | Objet |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (secondes) | `u64` | Délai d'attente de requête pour la vérification de plage Have I Been Pwned de `Password::uncompromised()`, relu à chaque construction d'un `HibpVerifier` par défaut. Un HIBP lent ou injoignable reste malgré tout fail-open - voir [Validation](validation.md). |
 
 ## Flux d'authentification
 

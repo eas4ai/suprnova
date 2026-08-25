@@ -67,6 +67,8 @@ run_worker(driver, cfg, shutdown).await;
 
 `Queue::bootstrap_from_env()` は `QUEUE_DRIVER` を読み取り、一致するドライバーを配線します。`Queue::bootstrap_default()` は常にメモリドライバーを配線します。サーバーの起動経路は、あなたに代わってこれらのどちらかを呼び出します - ほとんどのアプリは、環境変数を介して設定するだけです。
 
+`FailoverQueueDriver` は6つ目のバックエンドではありません。上記のドライバーの順序付きリストをラップし、ある接続が拒否したプッシュが次へ落ちていくようにします。[フェイルオーバー接続](#フェイルオーバー接続)を参照してください。
+
 ### 環境変数による設定
 
 ```bash
@@ -88,6 +90,93 @@ QUEUE_DB_TABLE=jobs
 
 Laravelは、あらゆるqueueable（キュー可能なもの）をBusを通じてルーティングし、ディスパッチ時に `ShouldQueue` ジョブを区別します。Suprnovaはこの2つを分離しています: 型付きの結果を返す同期的な作業には `Bus`、プロセスのクラッシュを生き延びる非同期の作業には `Queue` です。PHPが暗黙のルーティングを必要とするのは、そのリクエストごとにプロセスを立てるモデルが、「これを後で、別のプロセスで行う」ことを、そうでなければモデル化しにくくしているからです。Tokioはそうではありません - 明示的な `Bus::dispatch` と `Queue::push` の方が明快で速く、永続性の選択を呼び出し箇所で表面化させます。並べての比較は[`bus.md`](bus.md)を参照してください。
 
+## フェイルオーバー接続
+
+`FailoverQueueDriver` は、順序付きの接続リストをラップします。最初の接続が拒否したプッシュは次で再試行され、以下同様にリストを落ちていくため、Redisの障害があらゆるディスパッチを失われたジョブに変えてしまうことはありません。
+
+環境変数から設定します:
+
+```bash
+QUEUE_DRIVER=failover
+QUEUE_FAILOVER_CONNECTIONS=redis,database
+
+# 各接続は、それ自身が単独で QUEUE_DRIVER であった場合とまったく同じように、
+# 自身の変数を読みます。
+QUEUE_REDIS_URL=redis://127.0.0.1:6379
+QUEUE_DB_TABLE=jobs
+```
+
+あるいは、接続が環境変数では表現できない実行時の設定を必要とするときは、自分で配線してください:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::queue::{
+    DatabaseQueueDriver, FailoverQueueDriver, Queue, QueueDriver, RedisQueueDriver,
+};
+use suprnova::{DB, FrameworkError};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    let redis = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        "suprnova-queue",
+        "default",
+        "consumer-1",
+        Duration::from_secs(60),
+    )
+    .await?;
+    let database =
+        DatabaseQueueDriver::new(DB::connection()?.inner().clone(), "jobs".to_string())?;
+
+    let failover = FailoverQueueDriver::new(vec![
+        ("redis".to_string(), Arc::new(redis) as Arc<dyn QueueDriver>),
+        ("database".to_string(), Arc::new(database) as Arc<dyn QueueDriver>),
+    ])?;
+    Queue::set_driver(Arc::new(failover));
+    Ok(())
+}
+```
+
+各エントリの `String` は、`QueueFailedOver` イベントで報告される接続のラベルです。2つの接続が同じドライバーで動くこともあるため、これはドライバーの型からは導かれません。
+
+`QUEUE_FAILOVER_CONNECTIONS` は `QUEUE_DRIVER=failover` のときに必須であり、そのリストは `failover` 自身を含められません。存在しないドライバーを指すエントリは、`QUEUE_DRIVER` が自分自身に適用する「警告してメモリを使う」というフォールバックではなく、起動エラーになります: フェイルオーバーの連なりの内側では、タイプミスが黙ってインメモリの接続になってしまえば、永続的なリストの中に揮発性のバックエンドを置くことになるからです。
+
+### 書き込みはフェイルオーバーし、読み取りはしない
+
+接続のリストを歩くのは `push` と `bulk_push` だけです。それ以外のすべての操作 - `pop`、`ack`、`nack`、`release`、`settle`、`clear`、4つのカウンター、3つの検査の一覧 - は、**最初の**接続へ行き、ほかへは行きません。
+
+その非対称性は、抜け落ちではなく契約です。予約のトークンは、それを発行したドライバーにとってしか意味を持たないため、別の接続に対してackしても何も決着させず、両方を壊してしまいます。カウンターと一覧も同じ規則に従います。そうすることで、あなたが検査するものが、どのワーカーの視界とも一致しないバックエンドをまたいだ合計ではなく、この接続のワーカーがドレインするものと一致するからです。
+
+**フェイルオーバー接続の上のワーカーは、プライマリだけをドレインします。** フォールバックへフェイルオーバーしたジョブには、そのフォールバックの接続に対して直接走るワーカーが必要です:
+
+```bash
+# フェイルオーバーの連なりのプライマリをドレインします。
+QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
+
+# データベースへフェイルオーバーしたものをドレインします。これも走らせてください。
+QUEUE_DRIVER=database ./app queue:work
+```
+
+Laravelのドキュメントも、同じ理由で同じ警告を載せています。
+
+これはチェーンにも及びますが、通るのは1つの扉だけです。ワーカーは1回の呼び出し、`settle` で、ジョブを決着させると同時に[キューに入れたチェーン](#キューに入れたチェーン)の次の環をエンキューし、デコレーターはその呼び出しをプライマリだけに委譲します。そのため、databaseドライバーのようなトランザクション的なプライマリでは、プライマリが落ちていれば決着が失敗し、何もフェイルオーバーしません: ワーカーは予約をそのまま残し、可視性の失効がジョブを再配送します。フェイルオーバーが起こるのは、プライマリが `Settled::Unsupported` と答えたときです。memoryとRedisのドライバーがそう答えます。というのも、そのときワーカーは次の環を、ほかのどのプッシュとも同じようにバインドされたドライバーを通じてプッシュし - そのプッシュがフェイルオーバーするからです。そのチェーンの残りは、そこでフォールバック接続のワーカーを待つことになります。それがなければ、チェーンは止まります - 環は永続化されていて何も失われませんが、それを走らせるものもありません。
+
+### `QueueFailedOver` イベント
+
+プッシュを拒否した各接続は、`queue::events::QueueFailedOver { connection, job_name, exception }` をディスパッチしますが、それはその接続を失敗状態*へ*移すプッシュのときだけです。すでに失敗していると分かっている接続は、後のプッシュがそこで成功して再び武装するまで、静かなままです。4時間の障害は、ディスパッチごとに1つではなく1つのイベントを生みます。これが、それをアラートとして使えるものにしています。
+
+`connection` は、ジョブを受け入れた接続ではなく、失敗した接続のラベルです。
+
+すべての接続がプッシュを拒否したとき、そのプッシュは最後の接続のエラーを返します。`bulk_push` は各エンベロープを個別にプッシュするため、それぞれが自分だけで落ちていきます: プライマリが半分だけ受け入れたバッチが、まるごとフォールバックへ再プッシュされることは決してなく、各エンベロープは構築されたときの `available_at` を保ちます。バッチは原子的ではありません。1つのエンベロープがすべての接続に拒否された場合、`bulk_push` は、それより前のエンベロープをすでにエンキューしたうえで、そのエンベロープのエラーを返します。
+
+フェイルオーバーは重複排除ではありません。デコレーターは、ある接続が受け入れたエンベロープを再試行することは決してありませんが、エンベロープを書き込んで*その後*に失敗を報告する接続は、次の接続で重複を生みます。「書き込んだが確認応答を失った」ことは、「そもそも受け取らなかった」ことと区別できないからです。どちらのコピーも同じジョブidを運びます。それがこのフレームワークの少なくとも1回の配信の契約であり、ほかのあらゆる場所でハンドラのべき等性を要件にしているのと同じものです - [べき等性は、ワーカーとあなたの間の契約](#べき等性は-ワーカーとあなたの間の契約)を参照してください。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelのフェイルオーバー接続は `config/queue.php` の `connections` の配列であり、接続のレジストリを通じて解決されます。Suprnovaには接続ごとのドライバーのレジストリがなく - 1つのドライバーがプロセス全体にバインドされます - そのため、ラベルは `QUEUE_FAILOVER_CONNECTIONS`（あるいは `FailoverQueueDriver::new` に渡す `String`）から来て、読み取りは名前付きの接続にではなく最初の*ドライバー*へ委譲されます。
+
+Laravelの `FailoverQueue::bulk` は、それぞれの遅延が生き残るようジョブを個別にループします。Suprnovaは、どのドライバーがそれを見るよりも前に遅延をエンベロープの上で解決するため、エンベロープごとのループはそれを無償で保ちます - ただし、半分だけ着地したバッチが二重にプッシュされるのを防いでいるのはやはりそのループなので、ループは残ります。
+
 ## プッシュの変種
 
 どのプッシュの変種も、型付きの `J: Job` の値を取り、エンベロープがドライバーへコミットされた時点で返ります - ハンドラが走る時点ではありません。
@@ -98,6 +187,7 @@ Laravelは、あらゆるqueueable（キュー可能なもの）をBusを通じ�
 | `Queue::push_later(job, at)` | 特定の `DateTime<Utc>` に利用可能になる |
 | `Queue::later(delay, job)` | 今から `delay` の後に利用可能になる |
 | `Queue::push_with(job, overrides)` | 1回のプッシュごとの `EnvelopeOverrides` でただちにエンキューする |
+| `Queue::push_after_commit(job)` | 周囲の `DB::transaction` がコミットしたときにエンキューする |
 | `Queue::later_with(delay, job, overrides)` | `delay` 後に利用可能。1回のプッシュごとの `EnvelopeOverrides` を伴う |
 | `Queue::push_unique(job)` | `J::unique_for` の間、`J::unique_id` で重複排除する。エンベロープがプッシュされたときは `Ok(true)`、生きている重複排除キーがそれを抑制したときは `Ok(false)` を返す |
 | `Queue::push_unique_later(job, at)` | 一意 + スケジュール |
@@ -107,6 +197,51 @@ Laravelは、あらゆるqueueable（キュー可能なもの）をBusを通じ�
 `push_unique` は、キャッシュ層がブートストラップされていることを必要とします - 重複排除のロックは[`Cache`](cache.md)の中に、[`Idempotency::commit_on_success`](idempotency.md)を介して存在します。プッシュが失敗すると重複排除キーは解放されるため、呼び出し元はリトライできます。プッシュが成功すると、`J::unique_for` 秒の間それを保持します。ジョブは、`Some(id)` を返すよう `Job::unique_id(&self)` をオーバーライドしなければなりません - `None` は内部エラーを返します。
 
 この真偽値が答えるのは1つの問い - 「このジョブはキューに載ったか?」 - であり、その裏には3つ目のケースがあります。プッシュの実行中に重複排除のロックのリースが失われた場合でも、プッシュは完了し（べき等性の層は、すでに効果を及ぼしたかもしれない本体を決してキャンセルしません）、あなたはやはり `Ok(true)` を受け取り、ジョブとその一意キーを名指しする `warn` レベルのログが出ます。ジョブはキューに載っています。証明されていないのは、他の誰も同じものを並行してキューに載せなかった、ということのほうです。あなたのハンドラは、すでに再配信に耐えなければならないため、これに追加の対処は必要ありません - しかし、それが大量に出るということは、重複排除のロックを支えるキャッシュが苦しんでいるということなので、ログはそこにあります。
+
+### 処理が始まるまでの一意性
+
+一意性のロックは通常、ジョブが走り終えた後も含め、`unique_for` の窓の全体にわたって持続します。そのロックが実行を直列化するためではなく、*キューに入った*重複をまとめるために存在するのなら、処理が始まった瞬間にロックを解放することへオプトインしてください:
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebuildSearchIndex {
+    index: String,
+}
+
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "rebuild-search-index" }
+    fn unique_id(&self) -> Option<String> { Some(self.index.clone()) }
+    fn unique_until_processing() -> bool { true }
+    fn unique_for() -> Duration { Duration::from_secs(3600) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // 20分走る再構築が、2分目に届いた再ディスパッチを
+        // 飲み込んでしまうことは、もうありません。
+        Ok(())
+    }
+}
+```
+
+ワーカーは、ジョブのミドルウェアの通過の後、ハンドラが走る直前にロックを解放します。そこから4つの帰結が出てきます:
+
+- ミドルウェアがキューへ戻したジョブは、そのロックを保ちます。まだ処理を始めていないため、重複にとっては何も変わっていないからです。
+- ミドルウェアがそれ以外の方法でショートサーキットしたジョブは、そのロックを手放します。そもそも処理されることがないからです。これには、ジョブを削除すること、デッドレターに送ること、そしてハンドラを一度も呼ばずに完了と報告することが含まれます。
+- 失敗したジョブはロックを解放し、それでもリトライされます。処理が始まった瞬間にロックは去っているため、失敗した試行がバックオフを待つあいだに重複がエンキューでき、同じ一意idに対して2つのエンベロープを抱えることになります。これが、このオプトインが行う取引です。リトライがその枠を保持し続けなければならないのなら、`unique_until_processing` はオフのままにして、試行の連なり全体を `unique_for` のTTLに任せてください。
+- 解放は所有者スコープです。`push_unique` はロックの所有者トークンをエンベロープに記録し、ワーカーはそのトークンで解放するため、再配送された試行が、その後により新しいディスパッチが獲得したロックを解放することは決してありません。
+
+`unique_until_processing` が必要とするのは、`push_unique` が必要とするのと同じ2つです: `Some(id)` を返す `unique_id` と、ブートストラップ済みのキャッシュ層です。
+
+`sync` ドライバーの下では、ハンドラはロックを取った `push_unique` の呼び出しの内側でインラインに走るため、ジョブは、自身の呼び出し元が名目上まだ保持しているロックを解放することになります。そのハンドラが `unique_for` の3分の1より長く走ると、重複排除のリースを更新する側はロックが消えていることに気づいてリース喪失の警告をログに記録し、その上に `push_unique` 自身の「排他性を証明できなかった」という警告が重なります。ここではどちらも、障害ではなく想定どおりです: ジョブは走り、プッシュは `Ok(true)` を返し、ロックはジョブ自身が解放したから消えているのです。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelは、*普通の*一意ジョブのロックを、ハンドラが返った時点で解放します。Suprnovaは代わりに、そのロックを `unique_for` のTTLとともに失効させます。これは、ワーカーがジョブの途中で死んだときにも重複排除の窓を誠実に保ちます: あなたが設定した窓が、ハンドラが返ったかどうかにかかわらず、あなたが得る窓です。`unique_until_processing` の振る舞いは、両方のフレームワークで同じです。
+
+またSuprnovaは、一意性のロックを強制的に解放することも決してありません。Laravelは、所有者トークンを運ばない最初の試行のために、強制解放へフォールバックします。Suprnovaのワーカーにトークンなしで届くエンベロープは、そのトークンが存在するより前にキューへ入れられたエンベロープだけであり、それらは、より新しいディスパッチのロックを削除する危険を冒すのではなく、TTLによる失効を保ちます。
 
 ### `EnvelopeOverrides` によるプッシュごとの上書き
 
@@ -125,7 +260,7 @@ let overrides = EnvelopeOverrides {
 
 Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
 
-// The delayed counterpart, mirroring `Queue::later`'s relationship to `Queue::push`.
+// 遅延させる対応物です。`Queue::later` と `Queue::push` の関係を映しています。
 Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
 ```
 
@@ -139,6 +274,7 @@ Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, ove
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
+| `after_commit` | `Job::after_commit()` |
 
 `EnvelopeOverrides` は `Mail::on_queue` / `.on_connection()` と `Notify::queue` の通知ごとのキュー調整の両方が構築されるプリミティブです。[メール](mail.md#queueing)と[通知](notifications.md)を参照してください。
 
@@ -163,6 +299,85 @@ impl Job for SendDigest {
 
 Laravelの `$job->delay` はインスタンスプロパティであり、ディスパッチごとに設定されます（`SendDigest::dispatch($user)->delay(60)`）。そのため同じクラスの2つのディスパッチが異なる遅延を持てます。ここでの `Job::delay()` は `Job::queue()` や `Job::max_tries()` のような、クラスレベルの既定値です。自身のデータから遅延を計算するディスパッチには `Queue::later` / `push_later` を使います。これはすでに宣言済みの既定値より優先されます。
 
+### コミット後のディスパッチ
+
+[`DB::transaction`](database.md#transactions)の内側でプッシュされたジョブは、そのトランザクションと競争しています。別のプロセスのワーカーがエンベロープをpopし、トランザクションがまだ開いたまま保持している行を探して失敗する - あるいはもっと悪いことに、トランザクションがロールバックし、ジョブがもう存在しないデータに対して走る - ということが起こり得ます。
+
+そのジョブを、コミットを待つようオプトインさせてください:
+
+```rust
+use suprnova::{DB, FrameworkError, Job, Queue, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    order_id: i64,
+}
+
+#[async_trait]
+impl Job for SendReceipt {
+    fn job_name() -> &'static str { "send-receipt" }
+    fn after_commit() -> bool { true }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // これが走る時点で、注文の行が永続化されていることが保証されます。
+        Ok(())
+    }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // ここではドライバーには何も届きません。
+        Queue::push(SendReceipt { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// エンベロープは今キューにあります。そして、今になってはじめてです。
+```
+
+3つの規則が、すべてのケースをカバーします:
+
+- **トランザクションの内側では、プッシュ全体がコミットを待ちます。** ドライバーへの書き込みだけではありません: エンベロープの構築も、`JobQueueing` イベントも、`JobQueued` イベントも、すべてコミットの時点で起こります。そのため、ロールバックが捨てることになるジョブについて、リスナーが知らされることは決してありません。
+- **ロールバックはそれを捨てます。** プッシュは、単に起こりません。一意性のロックを取っていたなら、ロールバックがそのロックを返します。
+- **トランザクションの外側では、プッシュは即座に起こります。** これが、このオプトインをジョブ型の上で宣言しても安全である理由です: ディスパッチする側は、自分が乗っているコードの経路がトランザクション的かどうかを知らなくてよいのです。
+
+[セーブポイント](database.md#savepoints)のロールバックは、その内側に登録されたすべてにとってのロールバックとして数えられます。`tx.rollback_to("name")` は、`tx.savepoint("name")` 以降に先送りされたプッシュを捨て、それらが取ったロックをその場で解放するため、同じトランザクションの内側での再ディスパッチが、そのキーを再び獲得できます。セーブポイントより前に行われたプッシュは手つかずで、決してロールバックしなかったセーブポイントは、その内側に登録されたものをすべて保ちます。
+
+ジョブ型ごとではなくディスパッチごとに指定するには、`EnvelopeOverrides::after_commit` を使ってください。`Some(true)` はLaravelの `afterCommit()` であり、`Queue::push_after_commit(job)` という短縮形があります。`Some(false)` はLaravelの `beforeCommit()` で、コミットが着地する前にワーカーから見えていなければならない、唯一のディスパッチのためのものです:
+
+```rust
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+// 型がオプトインしていないジョブを先送りします。
+Queue::push_after_commit(SendWelcomeEmail { user_id: 42 }).await?;
+
+// ジョブ型がオプトインしていても、即座にプッシュします。
+Queue::push_with(
+    SendReceipt { order_id: 7 },
+    EnvelopeOverrides { after_commit: Some(false), ..Default::default() },
+)
+.await?;
+```
+
+先送りされた `Queue::push` は、[`Job::delay()`](#ジョブが宣言する遅延)を、プッシュに対してではなくコミットに対して再解決します。遅延は「ディスパッチからこれだけ待つ」という意味であり、先送りされたジョブにとって、ディスパッチとは*コミットそのもの*だからです。明示的なタイムスタンプは、ある時点についての呼び出し側の意図であるため、`Queue::push_later`、`Queue::later`、`Queue::later_with` は、それぞれのタイムスタンプを先送りを通じてそのまま運びます。
+
+`Queue::push_unique` は、1つの意図的な非対称性を伴って先送りします: 重複排除のロックは即座に取られるため、同じトランザクションの内側での、同じ一意idに対する2回目の `push_unique` は、やはり抑制され、やはり `Ok(false)` を報告します。待つのはエンベロープだけです。勝った側は、そのプッシュが保留中であっても `Ok(true)` を報告します。そのプッシュはこれから起こるからです。ロールバックは、それが取ったロックを所有者スコープで解放するため、`unique_for` の窓が、起こらなかったディスパッチによって塞がれることは決してありません - 拒否された `COMMIT` を含め、コミットが着地しないほかのどの終わり方でも同じです。この保証の唯一の境界はTTLそのものです: `unique_for` より長く開いたままのトランザクションは、そのロックが飛行中に失効して別のディスパッチに取られ得るため、重複排除が重要なら、いちばん長いトランザクションより余裕を持たせて `unique_for` を設定してください。`push_unique*` のファミリーは `EnvelopeOverrides` を取らないため、一意のプッシュが先送りされるかどうかを決めるのは `Job::after_commit()` だけです - それに対するプッシュごとの上書きはありません。
+
+バッチとチェーンは、`Job::delay()` を参照しないのと同じように、先送りもしません: `Queue::batch()` と `Queue::chain()` は、それぞれのエンベロープを直接構築してプッシュします。バッチがコミットを待たなければならないのなら、`.dispatch()` の呼び出しを、トランザクションが返った後に走るように包んでください。
+
+キューに入れられた[メール](mail.md#queueing)と[通知](notifications.md)も、先送りしません。それぞれが1つの共有されたジョブ型（`SendMailJob` / `SendNotificationJob`）に乗っており、`Mailable` や `Notification` に `ShouldQueueAfterCommit` 相当はまだないため、トランザクションの内側での `Mail::queue` や `Notify::queue` の呼び出しは、即座にドライバーへ到達します。それらは、トランザクションが返った後に送ってください。
+
+`Queue::fake()` の下では、プッシュは先送りも含めて即座に記録されるため、テストは何もコミットせずにそれをアサートできます。これはLaravelの `Bus::fake` と一致し、トランザクション的なハンドラを1つ走らせて、そのディスパッチを同じ流れの中でアサートできるようにしているものです。
+
+### Suprnovaが異なる設計を選んだ理由
+
+`Queue::bulk` は単相です - すべての要素が1つの具体的な `J` を共有します - そのため、コミット後についての分割は、その呼び出しにとって全部か無かです。Laravelは異種の配列を、先送りする側と即座に送る側へ分割しますが、ここには分割すべきものがありません。
+
+先送りはクロージャの形式に結び付いています。手動の [`DB::begin_transaction`](database.md#manual-form) の内側でのプッシュは、**即座に**起こります。手動モードはアンビエントなトランザクションをインストールせず、したがってコールバックをぶら下げるコミットを持たないからです。そこで先送りすれば、誰も走らせないコールバックをキューに積むことになり、黙って消えるディスパッチは、早すぎるディスパッチより悪いものです。ディスパッチがコミットを待たなければならないときは、`DB::transaction` に手を伸ばしてください。
+
+Laravelはさらに、優先順位の連なりの最後のフォールバックとして、接続レベルの `after_commit` という設定キーも読みます。Suprnovaは、プッシュごとの上書きと、その次のジョブ自身の `Job::after_commit()` で止まります: ここでのキューの接続は、自身のディスパッチのポリシーを持ちません。
+
 ## ジョブの設定
 
 実装ごとに振る舞いを調整するには、`Job` の関連関数をオーバーライドしてください。
@@ -176,7 +391,7 @@ impl Job for SendWelcomeEmail {
     fn job_name() -> &'static str { "SendWelcomeEmail" }
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
-    fn delay() -> Option<Duration> { None }                // default: no delay
+    fn delay() -> Option<Duration> { None }                // デフォルト: 遅延なし
 
     fn max_tries() -> u32 { 5 }                            // デフォルト: 3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
@@ -188,6 +403,7 @@ impl Job for SendWelcomeEmail {
         Some(format!("welcome:{}", self.user_id))
     }
     fn unique_for() -> Duration { Duration::from_secs(600) }  // デフォルト: 5分
+    fn unique_until_processing() -> bool { true }          // デフォルト: false（TTLが窓になる）
     fn middleware() -> Vec<std::sync::Arc<dyn JobMiddleware>> {
         vec![/* 下の「ジョブミドルウェア」を参照 */]
     }
@@ -618,7 +834,40 @@ Queue::clear().await?;           // すべてのエンベロープを捨て、�
 Queue::driver_name()?;           // ログ/管理用の、設定済みドライバー名
 ```
 
-`QueueDriver` トレイトは、`size` / `pending_size` / `reserved_size` / `delayed_size` / `clear` のデフォルトを宣言しています。`MemoryQueueDriver` と `DatabaseQueueDriver` はこれらをネイティブに実装します。`RedisQueueDriver` は `size` / `clear` に対して「unsupported」エラーを返します - それらには管理用のredis-cliを使ってください。
+`QueueDriver` トレイトは、`size` / `pending_size` / `reserved_size` / `delayed_size` / `clear` のデフォルトを宣言しています。`MemoryQueueDriver`、`DatabaseQueueDriver`、`RedisQueueDriver` は、いずれもこれらをネイティブに実装します。
+
+### キューを検査する
+
+件数は、どれだけキューに載っているかを教えてくれます。ときには実際のエンベロープを見る必要があります - 管理ダッシュボード、デバッグの作業、「正確に何が詰まっているのか」という問いです。`Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` は、サイズのカウンターが数えているのと同じ情報を、`InspectedJob` のDTOの一覧として返します:
+
+```rust
+use suprnova::queue::{InspectedJob, Queue};
+
+let pending: Vec<InspectedJob> = Queue::pending_jobs(None).await?;
+let billing_only: Vec<InspectedJob> = Queue::pending_jobs(Some("billing")).await?;
+let delayed = Queue::delayed_jobs(None).await?;
+let reserved = Queue::reserved_jobs(None).await?;
+
+for job in &pending {
+    println!(
+        "{} attempts={} queue={:?} payload={}",
+        job.name, job.attempts, job.queue, job.payload
+    );
+}
+```
+
+`InspectedJob` は `id`、`queue`、`name`、`attempts`、`payload`、`created_at` を運びます。`id` と `created_at` は `Option` です: databaseドライバーの一覧は、`envelope_json` のデコードに失敗した行も - `id: None` と `payload: {"unparseable": true}` として - 落とさずに報告し、ポイズンジョブを見ている人から隠しません。`Queue::fake()` の射影は、ディスパッチのタイムスタンプを `available_at` とは別に記録することが決してないため、そこでの `created_at` は常に `None` です。
+
+memoryドライバーでは、`delayed_size()` は遅延ストアの長さを直接読みますが、`delayed_jobs()` と `pending_jobs()` は、`available_at` がすでに過ぎているエントリを先に昇格させます。ジョブが実行可能になってから、バックグラウンドの回収係の次の50msのティックまでの狭い窓では、`delayed_jobs()` がすでに `pending_jobs()` へ昇格させたジョブを `delayed_size()` がまだ数えていることがあります - 一覧のほうが、より現在に近い眺めです。そこでの食い違いは、バグではなく想定どおりです。
+
+可視性タイムアウトが失効した予約は、`pop` かバックグラウンドの回収係がそれを再要求するまで、`reserved_jobs()` に現れ続けます。再要求するのはその2つだけであり、再要求こそが試行を1回消費するものであるため、一覧を取る呼び出しは、どれだけ呼んでもジョブの試行回数を変えることはありません。
+
+#### Suprnovaが異なる設計を選んだ理由
+
+- **一覧ごとに1組ではなく、`Option<&str>` を取る1つのメソッドです。** Laravelは `pendingJobs($queue)` と並べて、別の `allPendingJobs()` を出荷しています。ここでは `queue: None` が、その2つを1回の呼び出しへ畳み込みます。`delayedJobs`/`allDelayedJobs` と `reservedJobs`/`allReservedJobs` も同じ形です。
+- **トレイトのデフォルトは、空のコレクションではなく誠実な `Err` です。** LaravelのBeanstalkdとSQSのドライバーは、明らかにジョブがあるキューについてさえ、これらのメソッドから `[]` を返します - サードパーティのドライバーの作者が気づかずに真似しかねない、不作為の嘘です。検査を実装していないSuprnovaのドライバーは、そうだと言います。`sync` と `null` は `Ok(vec![])` で上書きします。それらにとって「一覧にすべきものは決してない」ことは、未実装のメソッドではなく文字どおりの真実だからです。
+- **Redisの `reserved_jobs` は、コンシューマーごとです。** このドライバーが知っているのは、自身がプロセス内で手渡した予約だけです。別のコンシューマーの飛行中のエントリは、この呼び出しからではなく、Redis自身の `XPENDING` を通じてしか見えません。
+- **Redisの `pending_jobs` は、「このグループのどのコンシューマーにも一度も配信されていない」という意味です。** これは、ストリーム全体ではなく `XRANGE (<last-delivered-id> +` - グループの配信カーソル（`XINFO GROUPS`）より後のすべて - を走査します。`ack` はエントリを `XACK` するだけであり（このドライバーはストリームを `XDEL`/`XTRIM` することが決してありません）、そのため、1つのコンシューマーのメモリ内の予約を除外しただけの走査は、ackされたすべてのジョブを永遠にpendingとして報告してしまうからです。解放されたジョブやnackされたジョブは、カーソルより上の新しいidの下で再発行されるため、そのリトライが有効になれば再び現れます。`pending_size` と同じ「上限」の位置づけです: カーソルは一度だけ読まれるため、その読み取りと走査のあいだに、並行する `pop` がエントリを要求し得ます。実際には、走っているコンシューマーのバックグラウンドの先読みタスクが、プッシュされたばかりのエントリを、アプリケーションが `pop` を呼ぶよりずっと前、プッシュから数ミリ秒のうちに要求する傾向があります - そのため `pending_jobs` は、たいていの場合「まだ誰も明示的にpopしていない任意のエンベロープ」ではなく、そのストリームのコンシューマーが誰も能動的にポーリングしていないあいだにプッシュされた作業を映します。
 
 ## ワーカーの再起動シグナル
 

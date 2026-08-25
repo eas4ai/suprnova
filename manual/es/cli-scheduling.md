@@ -183,28 +183,43 @@ de todo el proceso (OOM, que mate al padre).
 
 ## schedule:list
 
-Imprime cada tarea registrada con su expresión cron y su descripción.
+Imprime cada tarea registrada con su expresión cron, su próxima
+ejecución y su descripción.
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### Salida de ejemplo
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
-Las tareas que tienen un `.description(...)` encadenado en el builder
-incluyen la descripción después de la expresión cron; las tareas sin
-descripción muestran solo el cron.
+Las tareas con un `.description(...)` encadenado en el builder incluyen
+la descripción después de la próxima ejecución; las tareas sin
+descripción muestran solo el cron y la próxima ejecución.
+
+`next:` es el primer minuto posterior a ahora en el que la expresión
+casa; una expresión que nunca puede casar imprime `next: never`. Las
+horas se muestran en UTC salvo que `--timezone` nombre otra zona IANA, y
+un nombre de zona desconocido sale con error antes de imprimir nada.
+
+Una tarea que fijó su propia zona con `.timezone(...)` ve su expresión
+reescrita a la zona del listado y etiquetada con ella - `report:generate`
+arriba pidió `02:00 America/New_York`. Las tareas sin zona fijada se
+imprimen tal cual y no llevan etiqueta. Consulta [Programación de
+tareas](scheduling.md) para las reglas completas de zona horaria,
+incluido cuándo se rechaza una reescritura y cuándo una sola tarea puede
+ocupar varias líneas.
 
 Cuando no hay nada registrado (falta la llamada al builder
-`.schedule(...)`, o `schedule::register` es un no-op):
+`.schedule(...)`, o `schedule::register` no hace nada):
 
 ```
 No scheduled tasks registered.

@@ -170,9 +170,11 @@ DB::table("users").filter(&request.column_name(), value).get().await?;
 
 ## トランザクション
 
-3つのエントリーポイントがあり、それぞれに `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` の観測フックが配線されています。
+3つのエントリーポイントがあり、いずれも `QueryExecuted` /
+`TransactionBeginning` / `TransactionCommitted` /
+`TransactionRolledBack` の観測フックが配線されています。
 
-### クロージャの形
+### クロージャの形式
 
 ```rust
 use suprnova::DB;
@@ -191,11 +193,15 @@ DB::transaction(|_tx| {
 }).await?;
 ```
 
-`Ok(_)` でコミットします。`Err(_)` でロールバックし、エラーを伝播させます。
+`Ok(_)` でコミットします。`Err(_)` ではロールバックし、エラーを伝播します。
 
-クロージャの内側の操作は、`tokio::task_local` を介して、アクティブなトランザクションを自動的に拾います - すべてのモデル呼び出しに `&tx` ハンドルを通す必要は**ありません**。ネストした `DB::transaction` はデータベースエラーを返します - ネストしたロールバックの振る舞いには、`tx.savepoint(...)` を使ってください。
+`Err` が常にロールバックを意味するとは限りません。[コミット後](queues.md#after-commit-dispatch)のコールバックが失敗した場合、コミットはすでに完了して永続化されています。`DB::transaction` はそれでも `Err` を返し、そのメッセージは `after-commit callback failed (the transaction itself committed): <コールバックのエラー>` となります。クロージャの戻り値は失われますが、その書き込みは失われません。失敗したのは、先送りされたディスパッチだけです。登録されたコールバックはすべて走り、あなたが受け取るのは最初のエラーです。`DB::transaction_with_attempts` は、どれほどデッドロックらしく読めても、そのエラーをリトライすることは決してありません: すでに永続化された書き込みを持つクロージャを再実行すれば、それらを二重に適用してしまいます。
 
-同じ固定された接続上で実行しなければならない、型付きの集計やカスタムSQLには、トランザクションハンドルを直接使ってください:
+クロージャの内側の操作は、`tokio::task_local` を介してアクティブなトランザクションを自動的に取得します - `&tx` のハンドルをすべてのモデル呼び出しに通す必要は**ありません**。ネストした `DB::transaction` はデータベースエラーを返します。ネストしたロールバックの挙動には `tx.savepoint(...)` を使ってください。
+
+クロージャの形式は、作業をコミットまで先送りできる唯一の形式でもあります。型が `Job::after_commit()` を宣言しているジョブ（あるいは `Queue::push_after_commit` で行われたディスパッチ）は、このクロージャの内側で待ち、コミットが成功したときにだけキューのドライバーへ到達します。ロールバックはそれを捨てます。[コミット後のディスパッチ](queues.md#after-commit-dispatch)を参照してください。
+
+同じ固定された接続の上で実行しなければならない、型付きの集計やカスタムSQLには、トランザクションのハンドルを直接使ってください:
 
 ```rust
 use sea_orm::{DbBackend, Statement};
@@ -213,16 +219,16 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-`query_all` は通常の `QueryExecuted` 観測を発し、型付きのSeaORM `QueryResult` の行を返します。動的な値には、バインドされた `Statement::from_sql_and_values` を使ってください - 信頼できない入力を補間しないでください。
+`query_all` は通常の `QueryExecuted` の観測を発行し、型付きのSeaORMの `QueryResult` の行を返します。動的な値にはバインドされた `Statement::from_sql_and_values` を使ってください。信頼できない入力を文字列に埋め込んではいけません。
 
 ### デッドロック時のリトライ
 
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // クロージャの本体は上と同じ。SQLSTATE 40001 / 40P01 /
-        // 「deadlock」を含むあらゆるエラー（大文字小文字を区別しない）で
-        // 最初からやり直す。
+        // 上と同じクロージャの本体です。SQLSTATE 40001 / 40P01、
+        // あるいは "deadlock" を含む（大文字小文字を区別しない）
+        // あらゆるエラーで、最初からやり直します。
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
@@ -235,11 +241,11 @@ use suprnova::{DB, attrs};
 
 let tx = DB::begin_transaction().await?;
 
-// モデルごと: `*_with_tx` のシムは、1つのCRUD操作を手動のtxへ固定する。
+// モデルごと: `*_with_tx` のシムは、1つのCRUD操作を手動のtxへ固定します。
 User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
 Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
 
-// クエリごと: `Builder::with_tx(&tx)` はビルダーの連鎖を固定する。
+// クエリごと: `Builder::with_tx(&tx)` はビルダーのチェーンを固定します。
 let stale = Order::query()
     .filter("status", "pending")
     .with_tx(&tx)
@@ -253,9 +259,11 @@ if some_condition() {
 }
 ```
 
-手動モードは、タスクローカルをインストール**しません** - トランザクションの内側で実行されるべきすべての操作は、連鎖したクエリ上の `Builder::with_tx(&tx)`、あるいは `Model::*_with_tx` のシム（`create_with_tx`、`save_with_tx`、`delete_with_tx` など）のいずれかを介して、オプトインしなければなりません。オプトインを忘れた操作は、グローバルプールに対して実行され、トランザクションの一部には**なりません**。
+手動モードはtask-localをインストール**しません** - トランザクションの内側で実行されるべきすべての操作は、チェーンされたクエリに対する `Builder::with_tx(&tx)` か、`Model::*_with_tx` のシム（`create_with_tx`、`save_with_tx`、`delete_with_tx` など）のいずれかで、明示的にオプトインしなければなりません。オプトインを忘れた操作は、グローバルなプールに対して実行され、トランザクションの一部には**なりません**。
 
-`Transaction` ハンドルを保持することは、その生存期間の間、1つのプール接続を固定します。読み取りが必要な行は、`begin_transaction()` の呼び出しの**前に**プリロードしてください。特にSQLite（単一の共有接続）ではそうしてください。
+`Transaction` のハンドルを保持している間は、プールの接続が1つ、その生存期間のあいだ固定されます。読み取る必要のある行は、`begin_transaction()` の呼び出しより**前**に、とりわけSQLite（単一の共有接続）では先に読み込んでおいてください。
+
+手動モードはtask-localをインストールしないため、先送りされたディスパッチがぶら下がるコミットも持ちません: 手動のトランザクションの内側でプッシュされた[コミット後](queues.md#after-commit-dispatch)のジョブは、即座にプッシュされます。ディスパッチがコミットを待たなければならないときは、クロージャの形式を使ってください。
 
 ### セーブポイント
 
@@ -266,7 +274,7 @@ DB::transaction(|tx| {
 
         tx.savepoint("after_order").await?;
         if let Err(e) = Payment::charge().await {
-            // 支払いの試行は捨てるが、注文は残す。
+            // 支払いの試行は捨てますが、注文は残します。
             tx.rollback_to("after_order").await?;
         }
         Ok::<(), suprnova::FrameworkError>(())
@@ -274,7 +282,13 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-3つのファーストクラスのバックエンドはすべて、`SAVEPOINT` / `ROLLBACK TO SAVEPOINT` をサポートします - SQLiteも含めてです。
+ファーストクラスの3つのバックエンドはすべて `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` をサポートします - SQLiteも含みます。
+
+セーブポイントのロールバックは、[コミット後のレジストリ](queues.md#after-commit-dispatch)も巻き戻します。セーブポイントの内側でコミットまで先送りされたキューへのプッシュは、それが記述していた行とともに捨てられ、それとともに登録された補償処理が即座に走ります。そのため、先送りされた `push_unique` の重複排除ロックは戻り、同じトランザクションの内側での再ディスパッチがそれを獲得できます。セーブポイントより前に登録されたものは手つかずのままで、解放した、あるいは単にロールバックしなかったセーブポイントは、その内側に登録されたものをすべて保ちます。
+
+セーブポイント名の繰り返しは許されており、レジストリはデータベースに従います: `ROLLBACK TO SAVEPOINT x` は最も新しい `x` まで巻き戻し、そのあとに確立されたセーブポイントを破棄します。手動のトランザクションはコミット後のレジストリを持たないため、そのセーブポイントは行をロールバックするだけで、ほかには何もしません。
+
+レジストリに印を付けるのは `Transaction::savepoint` だけです。生のSQLで作ったセーブポイントはレジストリからは見えないため、`rollback_to` はそれらの行をロールバックし、警告をログに記録し、その内側に登録された先送りされたディスパッチはすべてそのまま残します - 推測で1つ捨てるほうが、より悪い失敗になるからです。先送りされたディスパッチを行とともに巻き戻したいときは、`Transaction::savepoint` を使ってください。
 
 ## 可観測性
 

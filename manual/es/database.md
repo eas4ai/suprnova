@@ -211,7 +211,7 @@ genere la cadena SQL.
 
 Tres puntos de entrada, cada uno con los ganchos de observación
 `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` /
-`TransactionRolledBack` ya cableados.
+`TransactionRolledBack` ya conectados.
 
 ### Forma con closure
 
@@ -232,15 +232,35 @@ DB::transaction(|_tx| {
 }).await?;
 ```
 
-Confirma en `Ok(_)`. Revierte y propaga el error en `Err(_)`.
+Confirma con `Ok(_)`. Revierte y propaga el error con `Err(_)`.
 
-Las operaciones dentro del closure recogen automáticamente la transacción
-activa vía un `tokio::task_local` - no hay que hacer pasar un handle `&tx` por
-cada llamada al modelo. Un `DB::transaction` anidado devuelve un error de base
-de datos; usa `tx.savepoint(...)` para un comportamiento de reversión anidada.
+Un `Err` no siempre es un rollback. Si falla un callback [posterior al
+commit](queues.md#after-commit-dispatch), la confirmación ya se ha
+producido y es durable; `DB::transaction` sigue devolviendo `Err`, y el
+mensaje dice `after-commit callback failed (the transaction itself
+committed): <the callback's error>`. El valor de retorno del closure se
+pierde, sus escrituras no, y lo único que falló fue un despacho diferido.
+Todos los callbacks registrados se ejecutan igualmente y el error que
+recibes es el primero.
+`DB::transaction_with_attempts` nunca reintenta ese error, por mucha
+forma de deadlock que tenga: volver a ejecutar un closure cuyas
+escrituras ya son durables las aplicaría dos veces.
 
-Para agregados tipados o SQL personalizado que debe ejecutarse sobre la misma
-conexión fijada, usa el handle de la transacción directamente:
+Las operaciones dentro del closure recogen automáticamente la
+transacción activa a través de un `tokio::task_local` - NO hace falta
+pasar un handle `&tx` por cada llamada de modelo. Un `DB::transaction`
+anidado devuelve un error de base de datos; usa `tx.savepoint(...)` para
+el comportamiento de rollback anidado.
+
+La forma con closure es además la única que puede diferir trabajo hasta
+la confirmación. Un job cuyo tipo declara `Job::after_commit()` (o un
+despacho hecho con `Queue::push_after_commit`) espera dentro de este
+closure y solo llega al driver de cola cuando la confirmación tiene
+éxito; un rollback lo descarta. Consulta [Despacho posterior al
+commit](queues.md#after-commit-dispatch).
+
+Para agregados tipados o SQL propio que tengan que ejecutarse sobre la
+misma conexión fijada, usa el handle de la transacción directamente:
 
 ```rust
 use sea_orm::{DbBackend, Statement};
@@ -258,18 +278,19 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-`query_all` dispara observaciones normales de `QueryExecuted` y devuelve filas
-`QueryResult` tipadas de SeaORM. Usa `Statement::from_sql_and_values` vinculado
-para valores dinámicos; no interpoles entrada no confiable.
+`query_all` emite observaciones `QueryExecuted` normales y devuelve filas
+`QueryResult` tipadas de SeaORM. Usa `Statement::from_sql_and_values` con
+valores vinculados para los valores dinámicos; no interpoles entrada no
+confiable.
 
 ### Reintento ante deadlock
 
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // Mismo cuerpo de closure que arriba. Se re-ejecuta desde cero
-        // ante SQLSTATE 40001 / 40P01 / cualquier error que contenga
-        // "deadlock" (sin distinguir mayúsculas/minúsculas).
+        // El mismo cuerpo de closure que arriba. Se vuelve a ejecutar
+        // desde cero ante SQLSTATE 40001 / 40P01 / cualquier error que
+        // contenga "deadlock" (sin distinguir mayúsculas).
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
@@ -286,7 +307,7 @@ let tx = DB::begin_transaction().await?;
 User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
 Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
 
-// Por consulta: `Builder::with_tx(&tx)` fija una cadena de builder.
+// Por consulta: `Builder::with_tx(&tx)` fija una cadena del builder.
 let stale = Order::query()
     .filter("status", "pending")
     .with_tx(&tx)
@@ -300,16 +321,23 @@ if some_condition() {
 }
 ```
 
-El modo manual NO instala el task-local - cada operación que deba correr
-dentro de la transacción tiene que optar por ello explícitamente, ya sea vía
-`Builder::with_tx(&tx)` sobre una consulta encadenada o uno de los shims
-`Model::*_with_tx` (`create_with_tx`, `save_with_tx`, `delete_with_tx`, etc.).
-Las operaciones que se olvidan de optar corren contra el pool global y NO
-forman parte de la transacción.
+El modo manual NO instala el task-local: cada operación que deba
+ejecutarse dentro de la transacción tiene que sumarse explícitamente, ya
+sea con `Builder::with_tx(&tx)` sobre una consulta encadenada o con uno
+de los shims `Model::*_with_tx` (`create_with_tx`, `save_with_tx`,
+`delete_with_tx`, etc.). Las operaciones que se olvidan de sumarse se
+ejecutan contra el pool global y NO forman parte de la transacción.
 
-Sostener un handle `Transaction` fija una conexión del pool durante toda su
-vida; precarga cualquier fila que se necesite leer ANTES de la llamada a
-`begin_transaction()`, especialmente en SQLite (conexión única compartida).
+Mantener un handle `Transaction` fija una conexión del pool durante toda
+su vida; precarga cualquier fila que necesites leer ANTES de la llamada a
+`begin_transaction()`, sobre todo en SQLite (una sola conexión
+compartida).
+
+Como el modo manual no instala ningún task-local, tampoco tiene una
+confirmación de la que un despacho diferido pueda colgarse: un job
+[posterior al commit](queues.md#after-commit-dispatch) empujado dentro de
+una transacción manual se empuja de inmediato. Usa la forma con closure
+cuando un despacho tenga que esperar a la confirmación.
 
 ### Puntos de guardado
 
@@ -329,7 +357,30 @@ DB::transaction(|tx| {
 ```
 
 Los tres backends de primera clase soportan `SAVEPOINT` / `ROLLBACK TO
-SAVEPOINT` - SQLite incluido.
+SAVEPOINT`, SQLite incluido.
+
+El rollback a un savepoint también deshace el [registro de despachos
+posteriores al commit](queues.md#after-commit-dispatch). Un push a la
+cola diferido hasta la confirmación dentro del savepoint se descarta
+junto con las filas que describía, y la compensación registrada con él se
+ejecuta de inmediato, así que el bloqueo de deduplicación de un
+`push_unique` diferido se devuelve y un nuevo despacho dentro de la misma
+transacción puede ganarlo. Lo registrado antes del savepoint queda
+intacto, y un savepoint que liberes o que sencillamente nunca reviertas
+conserva todo lo registrado dentro de él.
+
+Se permite repetir el nombre de un savepoint, y el registro sigue a la
+base de datos: `ROLLBACK TO SAVEPOINT x` deshace hasta la `x` más
+reciente y destruye los savepoints establecidos después de ella. Las
+transacciones manuales no tienen registro posterior al commit, así que
+sus savepoints revierten filas y nada más.
+
+Solo `Transaction::savepoint` marca el registro. Un savepoint que crees
+con SQL en bruto le resulta invisible, así que `rollback_to` revierte
+esas filas, registra una advertencia y deja en su sitio todos los
+despachos diferidos registrados dentro de él - descartar uno a ciegas
+sería el fallo peor. Usa `Transaction::savepoint` cuando los
+despachos diferidos deban deshacerse junto con las filas.
 
 ## Observabilidad
 

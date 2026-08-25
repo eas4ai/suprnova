@@ -20,21 +20,25 @@ Laravel-/Inertia-Form `{ "message", "errors": { field: [...] } }` (HTTP
 
 ## Regelobjekte
 
-Eine Regel ist ein Wert, der eines von vier Traits implementiert:
+Eine Regel ist ein Wert, der einen von vier Traits implementiert:
 
-| Trait | Form | Verwendung |
+| Trait | Form | Einsatz |
 |-------|-------|-----|
 | `Rule` | `passes(&self, value: &str)` | reine Prüfung eines einzelnen Werts |
-| `ValueRule` | `passes(&self, value: &serde_json::Value)` | Prüfung eines JSON-geformten Werts (Array/Objekt) |
+| `ValueRule` | `passes(&self, value: &serde_json::Value)` | Prüfung eines JSON-förmigen Werts (Array/Objekt) |
 | `ContextualRule` | `passes(&self, value, ctx)` | Prüfung, die Nachbarfelder liest |
-| `AsyncRule` | `async passes(&self, value)` | Prüfung, die `.await`et (DB, HTTP) |
+| `AsyncRule` | `async passes(&self, value)` | Prüfung, die `.await` verwendet (DB, HTTP) |
 
 Eingebaute `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. Eingebaute `ValueRule`s: `ArrayKeys`,
+`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#passwortstärke) (nur die
+Stärke-Prüfungen). Eingebaute `ValueRule`s: `ArrayKeys`,
 `Distinct`. Eingebaute `ContextualRule`s: `RequiredIf`, `RequiredWith`,
 `RequiredUnless`, `Same`, `Different`, `Confirmed`. Eingebaute
-`AsyncRule`: [`Unique`](#die-unique-regel).
+`AsyncRule`s: [`Unique`](#die-unique-regel) und
+[`Password`](#passwortstärke) (Stärke plus dessen
+`uncompromised()`-HIBP-Prüfung - die eine eingebaute Regel, die sowohl
+`Rule` als auch `AsyncRule` implementiert).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -42,37 +46,36 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Hinweis:** `Numeric` akzeptiert eine **endliche** Zahl - `NaN`, `inf`
-> und Größenordnungen, die zu Unendlich überlaufen, werden abgelehnt,
-> auch wenn Rusts Parser die Zeichenketten akzeptieren würde.
+> **Hinweis:** `Numeric` akzeptiert eine **endliche** Zahl - `NaN`, `inf` und
+> Größenordnungen, die zu Unendlich überlaufen, werden abgelehnt, obwohl
+> Rusts Parser die Zeichenketten akzeptieren würde.
 
 ### URL-Schemata
 
-`Url` akzeptiert einen Wert, der als URL parst, dessen Schema auf
-Laravels Allowlist steht - derselben Liste, die
-`Illuminate\Support\Str::isUrl` verwendet -, von `://` gefolgt wird
-**und** darauf wiederum von einem nicht leeren Host, was Laravels Muster
-`^(PROTOCOLS)://HOST` in der Form entspricht (Laravels Host-Gruppe hat
-kein `?` - ein fehlender oder leerer Host matcht nie). Die Schema-Liste
-und die Anforderung aus `://` plus Host sind wörtlich Laravels; der Host
-wird vom `url`-Crate geparst statt von Laravels Regex, sodass hier ein
-Port außerhalb des gültigen Bereichs abgelehnt wird, den Laravel
-akzeptieren würde. Alle drei Bedingungen müssen gelten: `mailto:`,
-`tel:` und `data:` stehen namentlich auf der Allowlist, tragen aber
-überhaupt keine Authority-Komponente, also lehnt `Url` sie ab; und
-`file:///etc/passwd` scheitert aus dem dritten Grund - es hat `://`,
-aber zwischen dem dritten und dem vierten `/` steht nichts, und nichts
-ist auch kein Host. `javascript:` und `vbscript:` werden rundweg
-abgelehnt; sie stehen gar nicht erst auf der Allowlist.
+`Url` akzeptiert einen Wert, der sich als URL parsen lässt, dessen Schema
+auf Laravels Allowlist steht - derselben Liste, die
+`Illuminate\Support\Str::isUrl` verwendet -, dem `://` folgt **und** dem
+darauf ein nicht leerer Host folgt; das entspricht in der Form Laravels
+Muster `^(PROTOCOLS)://HOST` (Laravels Host-Gruppe hat kein `?` - ein
+fehlender oder leerer Host matcht nie). Die Schema-Liste und die
+Anforderung aus `://` plus Host sind wörtlich Laravels; der Host wird vom
+`url`-Crate geparst statt von Laravels Regex, deshalb wird hier ein Port
+außerhalb des gültigen Bereichs abgelehnt, den Laravel akzeptieren würde.
+Alle drei Bedingungen müssen gelten: `mailto:`, `tel:` und `data:` stehen
+namentlich auf der Allowlist, tragen aber überhaupt keine
+Authority-Komponente, `Url` lehnt sie also ab; und `file:///etc/passwd`
+scheitert am dritten Grund - es hat `://`, aber zwischen dem dritten und
+dem vierten `/` steht nichts, und nichts ist auch kein Host.
+`javascript:` und `vbscript:` werden rundweg abgelehnt; sie stehen gar
+nicht erst auf der Allowlist.
 
 `ftp://host/x` und `ssh://host` - echte Hosts, nur eben keine
-Web-Schemata - kommen weiterhin durch, `Url` ist also keine Prüfung
-„das ist eine Webseite“, und es sagt nichts darüber aus, wohin die URL
-auflöst. Dass `javascript:` abgelehnt wird, macht einen validierten Wert
-sicher genug, um ihn in ein `href` zu setzen, nicht sicher genug, um ihn
-abzurufen. Ein Webhook- oder Callback-Ziel braucht weiterhin `HttpUrl`
-(oder Ihre eigenen Schema- und SSRF-Prüfungen); `Url` allein deckt das
-nicht ab.
+Web-Schemata - kommen weiterhin durch, `Url` ist also keine Prüfung auf
+„das ist eine Webseite“ und sagt nichts darüber aus, wohin die URL
+auflöst. `javascript:` abzulehnen macht einen validierten Wert sicher für
+ein `href`, nicht sicher zum Abrufen. Ein Ziel für einen Webhook oder
+Callback braucht weiterhin `HttpUrl` (oder Ihre eigenen Schema- und
+SSRF-Prüfungen); `Url` allein deckt das nicht ab.
 
 Für eine engere Menge benennen Sie die gewünschten Schemata:
 
@@ -89,20 +92,135 @@ HttpUrl.passes("https://example.com")?;
 ```
 
 `Url::protocols(...)` **ersetzt** die Allowlist, statt sie einzuengen,
-sodass eine App ihr eigenes Deep-Link-Schema (`myapp://…`) akzeptieren
-kann, ohne dass das Framework dazu eine Meinung hat - die Anforderung
-aus `://` plus Host gilt auch für dieses eigene Schema. Verwenden Sie
-`HttpUrl` (oder `Url::protocols(&["https"])`) für Callback-, Webhook-
-und Avatar-Eingaben - ein Webhook-Ziel, das zu `ftp://internal-host/`
-auflöst, parst weiterhin als `Url`, und ein `ftp:`-Ziel ist kein
-Webhook-Ziel.
+eine App kann also ihr eigenes Deep-Link-Schema (`myapp://…`)
+akzeptieren, ohne dass das Framework eine Meinung dazu hätte - die
+Anforderung aus `://` plus Host gilt auch für dieses eigene Schema.
+Nehmen Sie `HttpUrl` (oder `Url::protocols(&["https"])`) für Eingaben zu
+Callbacks, Webhooks und Avataren - ein Webhook-Ziel, das auf
+`ftp://internal-host/` auflöst, parst weiterhin als `Url`, und ein
+`ftp:`-Ziel ist kein Webhook-Ziel.
+
+### Passwortstärke
+
+`Password` prüft Länge und Stärke über Zeichenklassen, dazu eine
+optionale `uncompromised()`-Prüfung bei Have I Been Pwned - Laravels
+`Password`-Regelobjekt, portiert. Bauen Sie es mit `Password::min(n)` und
+verketten Sie die Stärke-Builder:
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - zu kurz, keine Ziffer, kein Symbol
+```
+
+| Builder | Verlangt | Laravel-Regex |
+|---|---|---|
+| `.min(n)` (über `Password::min`) | mindestens `n` Zeichen (untere Schranke 1) | Längenprüfung |
+| `.max(n)` | höchstens `n` Zeichen | Längenprüfung |
+| `.letters()` | mindestens einen Unicode-Buchstaben | `/\pL/u` |
+| `.mixed_case()` | einen Groß- und einen Kleinbuchstaben, in beliebiger Reihenfolge | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | mindestens eine Unicode-Ziffer | `/\pN/u` |
+| `.symbols()` | mindestens ein Trennzeichen, Symbol oder Satzzeichen - **ein einfaches Leerzeichen zählt** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())`,
+einmal aus `bootstrap::register()` aufgerufen, setzt den prozessweiten
+Standard, den `Password::defaults()` überall sonst zurückgibt - Laravels
+`Password::defaults(fn () => ...)`. Ein zweiter Aufruf wird ignoriert
+(mit einem `tracing::warn!`), statt die einmal gewählte Policy der App
+stillschweigend zu ersetzen.
+
+#### `uncompromised()` - weil Stärke allein nicht reicht
+
+`.uncompromised()` (oder `.uncompromised_with_threshold(n)`) fügt eine
+Prüfung gegen den Leak-Korpus von Have I Been Pwned hinzu und nutzt
+dessen k-Anonymitäts-Range-API: Nur die **ersten 5 Zeichen** des
+SHA-1-Hashes des Passworts in Großbuchstaben verlassen jemals den
+Prozess - `GET
+https://api.pwnedpasswords.com/range/{prefix}` -, und der Abgleich mit
+dem vollständigen Hash passiert lokal, gegen die `SUFFIX:COUNT`-Zeilen,
+die die API für dieses Präfix zurückgibt. Der Dienst sieht weder das
+Passwort noch dessen vollständigen Hash. Der Schwellenvergleich ist
+strikt (`count > threshold`), das voreingestellte `uncompromised()`
+(Schwelle `0`) schlägt also schon bei einem einzigen Vorkommen fehl, und
+bei einem Netzwerkfehler, einem Timeout oder einer Nicht-2xx-Antwort
+**lässt die Prüfung durch** - das Passwort gilt als sauber, statt
+während eines Ausfalls von Have I Been Pwned jede Anmeldung zu
+blockieren. Das entspricht Laravels `NotPwnedVerifier` genau.
+
+Weil diese Prüfung ein HTTP-Round-Trip ist, braucht `uncompromised()`
+`AsyncRule` und nicht das synchrone `Rule`, mit dem die Stärke-Prüfungen
+allein auskommen. Verdrahten Sie sie über `after_validation_async`, nach
+demselben Rezept, das [`Unique`](#die-unique-regel) nutzt:
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+Das synchrone `Rule::passes` auf einem `Password` aufzurufen, an dem
+`uncompromised()` gesetzt ist, ist ein **lauter Fehler** und kein stilles
+Überspringen - eine Sicherheitsprüfung, die still nichts tut, ist
+schlimmer als eine, die es nie gab. Die Fehlermeldung nennt
+`after_validation_async` als Lösung.
+
+`HIBP_TIMEOUT_SECS` (Standard `30`) steuert das Anfrage-Timeout - siehe
+[Umgebungsvariablen](env-vars.md).
+
+Ein eigener Verifier, der `Err` zurückgibt, ist ein anderer Fall als eine
+fehlgeschlagene Prüfung: Sein Fehlertext wird auf der Ebene `error`
+protokolliert und erreicht den Client nie, und die Antwort trägt
+stattdessen den Katalogschlüssel `validation-password-unverifiable` („The
+{ $field } could not be checked against known data leaks. Please try
+again.“). Ergänzen Sie diesen Schlüssel, wenn Sie Ihren eigenen
+Validierungskatalog ausliefern.
+
+### Warum Suprnova abweicht: Password
+
+- Laravels `Password` sammelt jede fehlgeschlagene Stärke-Prüfung in
+  einem Array. Suprnovas `Rule`-Vertrag gibt eine einzelne
+  `ValidationMessage` zurück, deshalb meldet `Rule::passes` die ERSTE
+  fehlschlagende Prüfung, in der Reihenfolge min, max, gemischte
+  Groß-/Kleinschreibung, Buchstaben, Symbole, Ziffern - Sie beheben eine
+  nach der anderen, statt die ganze Liste vorab zu sehen.
+- Laravels synchroner Validator darf `uncompromised()` direkt aufrufen;
+  eine PHP-Anfrage sitzt ohnehin in einer Ereignisschleife, die einen
+  blockierenden HTTP-Aufruf verträgt. Suprnovas `Rule::passes` ist
+  vertraglich synchron, es gibt darin also keinen sicheren Ort, um die
+  HIBP-Anfrage auszuführen. Statt die Prüfung still zu überspringen -
+  das eine untragbare Ergebnis für eine sicherheitsrelevante Regel -
+  liefert Suprnovas `Rule::passes` einen lauten, an Entwickler
+  gerichteten Fehler, der `after_validation_async` als Lösung nennt.
+- `Password::defaults_with` nimmt einen schlichten `fn`-Zeiger und kein
+  Closure, sodass der konfigurierte Standard `Copy` bleibt und keine
+  Allokation auf dem Heap braucht - eine bewusste Verengung gegenüber
+  Laravels `Closure`.
 
 ### Eine eigene Regel schreiben
 
-Eine eigene Regel ist eine Unit-Struktur (oder eine datentragende) mit
-einer einzigen Impl. Der Trait gibt Ihnen `check()` kostenlos - es legt
-jede Fehlermeldung unter dem benannten Feld in eine
-`ValidationErrors`-Bag - sodass sich die Regel unverändert in
+Eine eigene Regel ist eine Unit-Struktur (oder eine, die Daten trägt) mit
+einer einzigen Implementierung. Der Trait schenkt Ihnen `check()` - es
+legt jede Fehlermeldung unter dem benannten Feld in einen
+`ValidationErrors`-Bag -, sodass sich die Regel unverändert in
 `validate!` und die `after_validation`-Hooks einfügt:
 
 ```rust
@@ -122,38 +240,39 @@ impl Rule for StartsWith {
 
 // Jetzt überall verwendbar:
 StartsWith("acct_").passes("acct_1234")?;
-// oder, in einer validate!-Zeile:
+// oder in einer validate!-Zeile:
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
-Ein `String` konvertiert in eine `ValidationMessage`, die wörtlich
+Ein `String` wird in eine `ValidationMessage` umgewandelt, die wörtlich
 gerendert wird, und mehr braucht eine einsprachige App nicht. Damit die
-Meldung pro Locale übersetzt wird, liefern Sie stattdessen eine
+Meldung pro Locale übersetzt wird, geben Sie stattdessen eine
 *geschlüsselte* Meldung zurück -
 `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
 und definieren die ID in `lang/<locale>/validation.ftl`. Siehe
-[Lokalisierung](localization.md); dort steht auch, wie sich die
-Meldungen der eingebauten Regeln überschreiben lassen und wie die
-Namenskonvention `field-<name>` funktioniert.
+[Lokalisierung](localization.md); dort steht auch, wie Sie die Meldungen
+der eingebauten Regeln überschreiben, samt der Namenskonvention
+`field-<name>`.
 
 Für feldübergreifende Logik implementieren Sie stattdessen
 [`ContextualRule`] - die Methode `passes` bekommt neben dem geprüften
-Wert einen `&FormContext` (eine `HashMap<String, String>` mit den Werten
-der Nachbarfelder). Für datenbankgestützte Prüfungen implementieren Sie
-[`AsyncRule`] und verwenden es aus `after_validation_async`.
-### Regeln mit Wertform
+Wert einen `&FormContext` (eine `HashMap<String, String>` der Werte der
+Nachbarfelder). Für datenbankgestützte Prüfungen implementieren Sie
+[`AsyncRule`] und nutzen es aus `after_validation_async`.
+
+### Regeln über strukturierte Werte
 
 `Rule` sieht immer nur `&str`. Zwei eingebaute Regeln brauchen mehr
-Struktur als ein String trägt, daher implementieren sie stattdessen
-`ValueRule` über `&serde_json::Value`:
+Struktur, als eine Zeichenkette trägt, deshalb implementieren sie
+stattdessen `ValueRule` über `&serde_json::Value`:
 
 ```rust
 use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
 
 // Laravels array:keys - weist Schlüssel außerhalb der erlaubten Menge
-// zurück. Aufgelistete Schlüssel müssen nicht alle vorhanden sein; eine
-// leere erlaubte Liste ist ein Programmierfehler, der als Meldung ohne
-// Feld gemeldet wird.
+// zurück. Die gelisteten Schlüssel müssen nicht alle vorhanden sein; eine
+// leere Erlaubnisliste ist ein Programmierfehler und wird als Meldung ohne
+// Schlüssel gemeldet.
 ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
 
 // Laravels distinct / distinct:ignore_case / distinct:strict.
@@ -161,22 +280,21 @@ Distinct { ignore_case: false, strict: false }
     .passes(&serde_json::json!(["a", "b", "c"]))?;
 ```
 
-Ein durch eine `ValueRule` validiertes Feld muss selbst ein
-`serde_json::Value` enthalten (oder `Option<serde_json::Value>` für eine
-`?:`-/`?=>`-Zeile) - typischerweise ein Request-Feld, das direkt aus dem
-JSON-Body stammt. `validate!`-Zeilen akzeptieren `Rule` und `ValueRule`
-in derselben Feldliste; welcher Trait läuft, wird dadurch aufgelöst,
-welchen Trait der Typ der Regel implementiert, nicht durch etwas, das
-Sie in der Zeile schreiben.
+Ein Feld, das eine `ValueRule` validiert, muss selbst
+`serde_json::Value` halten (oder `Option<serde_json::Value>` für eine
+`?:`-/`?=>`-Zeile) - typischerweise ein Anfragefeld, das direkt aus dem
+JSON-Rumpf stammt. `validate!`-Zeilen nehmen `Rule`s und `ValueRule`s in
+derselben Feldliste; welcher Trait läuft, entscheidet sich daran, welchen
+davon der Typ der Regel implementiert, und nicht an dem, was Sie in die
+Zeile schreiben.
 
 ### Warum Suprnova abweicht
 
-Laravels `distinct:strict` stützt sich auf PHPs erzwungenes `==`.
-JSON-Werte sind bereits typisiert, daher ändert `strict` bei Suprnova
-nur, ob zwei Zahlen mit unterschiedlicher interner Darstellung
-(`1` gegenüber `1.0`) als gleich gelten - ein String und eine Zahl
-werden in keinem Modus als „dasselbe“ betrachtet.
-
+Laravels `distinct:strict` stützt sich auf PHPs typumwandelndes `==`.
+JSON-Werte sind bereits typisiert, deshalb ändert Suprnovas `strict` nur,
+ob zwei *Zahlen* mit unterschiedlicher interner Darstellung (`1`
+gegenüber `1.0`) als gleich zählen - es macht eine Zeichenkette und eine
+Zahl nie „dasselbe“, in keinem der beiden Modi.
 
 ## Das `validate!`-Makro
 

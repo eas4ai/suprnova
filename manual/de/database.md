@@ -215,8 +215,8 @@ I/O-Grenze, bevor der SQL-String gerendert wird.
 
 ## Transaktionen
 
-Drei Einstiegspunkte, jeder mit den Observation-Hooks für
-`QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` /
+Drei Einstiegspunkte, jeder mit den Beobachtungs-Hooks `QueryExecuted` /
+`TransactionBeginning` / `TransactionCommitted` /
 `TransactionRolledBack` verdrahtet.
 
 ### Closure-Form
@@ -238,16 +238,35 @@ DB::transaction(|_tx| {
 }).await?;
 ```
 
-Commit bei `Ok(_)`. Rollback + Fehler durchreichen bei `Err(_)`.
+Commit bei `Ok(_)`. Rollback und Weitergabe des Fehlers bei `Err(_)`.
 
-Operationen innerhalb der Closure greifen automatisch auf die aktive
-Transaktion über ein `tokio::task_local` zu - Sie müssen KEIN
-`&tx`-Handle durch jeden Model-Aufruf fädeln. Verschachteltes
-`DB::transaction` liefert einen Datenbankfehler; verwenden Sie
+Ein `Err` ist nicht immer ein Rollback. Wenn ein Callback
+[nach dem Commit](queues.md#after-commit-dispatch) fehlschlägt, ist der
+Commit bereits gelandet und dauerhaft; `DB::transaction` gibt trotzdem
+`Err` zurück, und die Meldung lautet `after-commit callback failed (the
+transaction itself committed): <the callback's error>`. Der Rückgabewert
+des Closures geht verloren, seine Schreibvorgänge nicht, und
+fehlgeschlagen ist nur ein verzögerter Dispatch. Jeder registrierte
+Callback läuft trotzdem, und der erste Fehler ist der, den Sie bekommen.
+`DB::transaction_with_attempts` wiederholt diesen Fehler nie, so
+deadlock-förmig er auch klingt: Ein Closure erneut auszuführen, dessen
+Schreibvorgänge bereits dauerhaft sind, würde sie zweimal anwenden.
+
+Operationen innerhalb des Closures greifen die aktive Transaktion
+automatisch über ein `tokio::task_local` auf - Sie müssen KEIN
+`&tx`-Handle durch jeden Modellaufruf fädeln. Ein verschachteltes
+`DB::transaction` gibt einen Datenbankfehler zurück; nehmen Sie
 `tx.savepoint(...)` für verschachteltes Rollback-Verhalten.
 
+Die Closure-Form ist außerdem die einzige Form, die Arbeit auf den
+Commit verschieben kann. Ein Job, dessen Typ `Job::after_commit()`
+deklariert (oder ein mit `Queue::push_after_commit` erfolgter Dispatch),
+wartet innerhalb dieses Closures und erreicht den Queue-Treiber erst,
+wenn der Commit gelingt; ein Rollback verwirft ihn. Siehe
+[Dispatch nach dem Commit](queues.md#after-commit-dispatch).
+
 Für typisierte Aggregate oder eigenes SQL, das auf derselben
-gepinnten Connection laufen muss, verwenden Sie das
+angehefteten Connection laufen muss, verwenden Sie das
 Transaktions-Handle direkt:
 
 ```rust
@@ -266,19 +285,19 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-`query_all` löst normale `QueryExecuted`-Observations aus und liefert
-typisierte SeaORM-`QueryResult`-Zeilen. Verwenden Sie gebundenes
-`Statement::from_sql_and_values` für dynamische Werte; interpolieren
-Sie nie nicht vertrauenswürdige Eingaben.
+`query_all` gibt normale `QueryExecuted`-Beobachtungen aus und liefert
+typisierte SeaORM-`QueryResult`-Zeilen. Nehmen Sie für dynamische Werte
+das gebundene `Statement::from_sql_and_values`; interpolieren Sie keine
+nicht vertrauenswürdige Eingabe.
 
 ### Wiederholung bei Deadlock
 
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // Derselbe Closure-Körper wie oben. Läuft von vorn neu, bei
-        // SQLSTATE 40001 / 40P01 / jedem Fehler, der "deadlock"
-        // enthält (unabhängig von Groß- und Kleinschreibung).
+        // Derselbe Closure-Rumpf wie oben. Läuft von vorn bei
+        // SQLSTATE 40001 / 40P01 / jedem Fehler, der "deadlock" enthält
+        // (ohne Beachtung der Groß-/Kleinschreibung).
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
@@ -291,12 +310,11 @@ use suprnova::{DB, attrs};
 
 let tx = DB::begin_transaction().await?;
 
-// Pro Model: Die `*_with_tx`-Shims pinnen einen CRUD-Op an die
-// manuelle tx.
+// Pro Modell: Die `*_with_tx`-Shims heften eine CRUD-Operation an die manuelle tx.
 User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
 Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
 
-// Pro Query: `Builder::with_tx(&tx)` pinnt eine Builder-Kette.
+// Pro Query: `Builder::with_tx(&tx)` heftet eine Builder-Chain an.
 let stale = Order::query()
     .filter("status", "pending")
     .with_tx(&tx)
@@ -311,16 +329,23 @@ if some_condition() {
 ```
 
 Der manuelle Modus installiert das Task-Local NICHT - jede Operation,
-die innerhalb der Transaktion laufen soll, muss explizit opt-in,
-entweder über `Builder::with_tx(&tx)` auf einer verketteten Query oder
-einen der `Model::*_with_tx`-Shims (`create_with_tx`, `save_with_tx`,
-`delete_with_tx` usw.). Operationen, die das Opt-in vergessen, laufen
-gegen den globalen Pool und sind NICHT Teil der Transaktion.
+die innerhalb der Transaktion laufen soll, muss sich dafür anmelden,
+entweder über `Builder::with_tx(&tx)` an einer verketteten Query oder
+über einen der `Model::*_with_tx`-Shims (`create_with_tx`,
+`save_with_tx`, `delete_with_tx` usw.). Operationen, die die Anmeldung
+vergessen, laufen gegen den globalen Pool und sind NICHT Teil der
+Transaktion.
 
-Das Halten eines `Transaction`-Handles pinnt eine Pool-Connection für
-dessen Lebensdauer; laden Sie jede Zeile vorab, die Sie lesen müssen,
-BEVOR Sie `begin_transaction()` aufrufen - besonders auf SQLite
-(einzelne geteilte Connection).
+Ein `Transaction`-Handle zu halten heftet für dessen Lebensdauer eine
+Pool-Connection an; laden Sie alle Zeilen, die Sie lesen müssen, VOR dem
+`begin_transaction()`-Aufruf vor, besonders auf SQLite (eine einzige
+geteilte Connection).
+
+Weil der manuelle Modus kein Task-Local installiert, hat er auch keinen
+Commit, an den sich ein verzögerter Dispatch hängen könnte: Ein Job
+[nach dem Commit](queues.md#after-commit-dispatch), der innerhalb einer
+manuellen Transaktion geschoben wird, wird sofort geschoben. Nehmen Sie
+die Closure-Form, wenn ein Dispatch auf den Commit warten muss.
 
 ### Savepoints
 
@@ -331,7 +356,7 @@ DB::transaction(|tx| {
 
         tx.savepoint("after_order").await?;
         if let Err(e) = Payment::charge().await {
-            // Den Zahlungsversuch verwerfen, aber die Order behalten.
+            // Den Zahlungsversuch verwerfen, die Bestellung aber behalten.
             tx.rollback_to("after_order").await?;
         }
         Ok::<(), suprnova::FrameworkError>(())
@@ -339,8 +364,33 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-Alle drei erstklassigen Backends unterstützen `SAVEPOINT` / `ROLLBACK
-TO SAVEPOINT` - SQLite eingeschlossen.
+Alle drei erstklassigen Backends unterstützen `SAVEPOINT` /
+`ROLLBACK TO SAVEPOINT` - SQLite eingeschlossen.
+
+Ein Savepoint-Rollback wickelt auch die
+[Registry für Callbacks nach dem Commit](queues.md#after-commit-dispatch)
+ab. Ein Queue-Push, der innerhalb des Savepoints auf den Commit
+verschoben wurde, wird zusammen mit den Zeilen verworfen, die er
+beschrieb, und die mit ihm registrierte Kompensation läuft sofort, sodass
+die Dedupe-Sperre eines verzögerten `push_unique` zurückgeht und ein
+erneuter Dispatch innerhalb derselben Transaktion sie gewinnen kann.
+Alles vor dem Savepoint Registrierte bleibt unangetastet, und ein
+Savepoint, den Sie freigeben oder schlicht nie zurückrollen, behält
+alles, was in ihm registriert wurde.
+
+Einen Savepoint-Namen zu wiederholen ist erlaubt, und die Registry folgt
+der Datenbank: `ROLLBACK TO SAVEPOINT x` wickelt bis zum jüngsten `x` ab
+und zerstört die danach angelegten Savepoints. Manuelle Transaktionen
+haben keine Registry für Callbacks nach dem Commit, ihre Savepoints
+rollen also Zeilen zurück und sonst nichts.
+
+Nur `Transaction::savepoint` markiert die Registry. Ein Savepoint, den
+Sie mit rohem SQL anlegen, ist für sie unsichtbar; `rollback_to` rollt
+diese Zeilen also zurück, protokolliert eine Warnung und lässt jeden
+darin registrierten verzögerten Dispatch stehen - einen davon auf
+Verdacht zu verwerfen wäre der schlimmere Fehlschlag. Nehmen Sie
+`Transaction::savepoint`, wenn die verzögerten Dispatches gemeinsam mit
+den Zeilen abgewickelt werden sollen.
 
 ## Beobachtbarkeit
 

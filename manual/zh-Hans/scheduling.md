@@ -281,6 +281,86 @@ use suprnova::DayOfWeek;
 .monthly().at("00:00")         // 每月 1 号午夜
 ```
 
+### 时区
+
+默认情况下，调度器会对着进程的本地时区来读每一个 cron 表达式，也就是这个容器启动时带的那个 `TZ`。当一个任务的计划属于某个地方、而不是属于某台服务器时，请把它钉到一个具名的 IANA 时区上：
+
+```rust
+use suprnova::chrono_tz;
+
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .timezone(chrono_tz::America::New_York)
+        .name("report:generate")
+);
+```
+
+`timezone` 接受一个带类型的 `chrono_tz::Tz`，所以一个拼错的时区是一个编译错误，而不是一个悄悄在错误的钟点上跑起来的任务。这些时区常量住在 `suprnova::chrono_tz` 下面（`chrono_tz::Asia::Tokyo`、`chrono_tz::Europe::Berlin`，等等），它们被重导出了，所以您自己的 `Cargo.toml` 里不需要 `chrono-tz`。
+
+当这个时区名只在运行时才存在时 - 一个配置值，一个租户列 - 请用那个可失败的兄弟方法：
+
+```rust
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .try_timezone(&tenant.timezone)?   // 时区未知时返回 Err(String)
+        .name("report:generate")
+);
+```
+
+一个被钉住的时区只改变一件事：那五个 cron 字段是对着哪一面挂钟来读的。调度器仍然每个进程分钟节拍一次，同一分钟的那道去重关卡也不受影响。
+
+#### 一个覆盖整份调度表的默认值
+
+如果您大部分任务都属于同一个业务时区，那就在这份调度表上设一次，而不是在每一个任务上都重复一遍：
+
+```rust
+pub fn register(schedule: &mut Schedule) {
+    schedule.timezone(chrono_tz::America::Chicago);
+
+    // 按 02:00 America/Chicago 来读
+    let nightly = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("02:00")
+        .name("nightly");
+    schedule.add(nightly);
+
+    // 一个显式的逐任务时区总是胜出
+    let tokyo = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("09:00")
+        .timezone(chrono_tz::Asia::Tokyo)
+        .name("tokyo-open");
+    schedule.add(tokyo);
+}
+```
+
+这个默认值是在一个任务被添加时施加的，所以它覆盖的是那次调用之后注册的任务，而更早的那些不受影响。
+
+#### 夏令时
+
+有些时区实行夏令时。当时钟被调整时，一个钉在这种时区上的任务可能跑两次，也可能一次都不跑：
+
+- 在回拨时，某一个挂钟小时会发生两次。一个定在 `01:30` 的任务两遍都会匹配上。它们是真实时间里的两个不同分钟，所以同一分钟的那道去重关卡不会把它们并起来，于是这个任务跑了两次。
+- 在拨快时，某一个挂钟小时根本不会发生。一个定在 `02:30` 的任务在那一天会被整个跳过。
+
+能避开时区调度就避开，而对任何必须恰好跑一次的东西，请优先用一个不实行夏令时的时区（`chrono_tz::UTC`）。
+
+#### 用另一个时区来读这份列举
+
+`schedule:list` 接受 `--timezone`，会把 cron 表达式和下一次运行时间，都按它们在那个时区里的读法显示出来。可运行的输出请参见[列出任务](#列出任务)。
+
+### 为什么 Suprnova 有所不同：时区
+
+Laravel 的 `timezone()` 接受一个字符串，而它那个覆盖整份调度表的默认值来自一个 `app.schedule_timezone` 配置键。Suprnova 接受的是一个带类型的 `chrono_tz::Tz`，并且没有配置键：您 `schedule::register` 函数里的 `Schedule::timezone` 就是设定默认值的那唯一一处，所以这份调度表可以从上读到下，不必再去查第二个文件。
+
+当什么都没有被钉住时，Suprnova 的默认值是进程的本地时区，而不是一个被配置出来的应用时区。这一直就是调度器的行为，而它仍然是默认值，这样加上这项功能，对那些不使用它的调度表来说什么都没有改变。
+
 ### 自定义 Cron 表达式
 
 要获得完全的控制力，就用 cron 语法：
@@ -455,10 +535,38 @@ suprnova schedule:list
 输出：
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
+
+每一行依次是任务名、cron 表达式、一个可选的时区标注、这个任务下一次触发的时间，以及这个任务的描述（如果它有的话）。
+
+`next:` 是从此刻起这个表达式第一次匹配上的那一分钟，它是在这个任务被求值所用的那个时区里算出来的，然后再按这份列举所用的时区显示出来。一个永远不可能匹配的表达式（`0 0 30 2 *` 点名了一个并不存在的日期）会打印 `next: never`。
+
+除非您传了 `--timezone`，这份列举所用的时区就是 UTC。上面的 `cleanup:logs` 和 `send:reminders` 没有钉住时区，所以它们的表达式是按写下的样子打印的 - 调度器是对着进程的本地时区来读它们的，而那个时区没有可供转换的 IANA 名字 - 它们也不带时区标注。`report:generate` 钉住了 `America/New_York` 并且要的是 `02:00`，所以它的表达式被改写进了这份列举所用的时区，并被标注了出来。
+
+```bash
+suprnova schedule:list --timezone=Asia/Tokyo
+```
+
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 12:00 JST
+  send:reminders [0 9 * * *] next: 2026-05-28 18:00 JST
+  report:generate [0 15 * * *] (Asia/Tokyo) next: 2026-05-29 15:00 JST
+```
+
+一个任务可以占上好几行。一个在这份列举所用的时区里跨越午夜的表达式，需要每一侧各一行 cron，因为没有哪个单独的五字段表达式能同时描述两侧：
+
+```
+  monday-digest [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+  monday-digest [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+```
+
+`next:` 属于这个任务，而不属于某一行，所以它会重复出现：两行描述的是同一个任务和同一次即将到来的运行。
+
+有些转换会被拒绝，而不是被近似处理，而被拒绝的那个表达式会按写下的样子原样打印出来，并标上这个任务自己的时区。以下情况会拒绝一次转换：当一次夏令时切换落在接下来那两次运行之间时（没有哪一个表达式在两侧都是对的）、当一次跨日翻转不得不把一个受限的“月中某日”和一个受限的“周中某日”一起挪动时（cron 会对这两个字段取或，所以两个都挪会改变哪些天能匹配上），或者当一次翻转不得不判定二月有多长时。
 
 ## 生产环境设置
 

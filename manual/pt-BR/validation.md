@@ -31,10 +31,13 @@ Uma regra é um valor que implementa uma de quatro traits:
 
 `Rule`s embutidas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. `ValueRule`s embutidas: `ArrayKeys`,
+`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#força-de-senha)
+(somente as checagens de força). `ValueRule`s embutidas: `ArrayKeys`,
 `Distinct`. `ContextualRule`s embutidas: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule` embutida:
-[`Unique`](#a-regra-unique).
+`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule`s embutidas:
+[`Unique`](#a-regra-unique) e [`Password`](#força-de-senha) (força mais a
+sua checagem HIBP `uncompromised()` - a única regra embutida que implementa
+tanto `Rule` quanto `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -95,6 +98,117 @@ para entradas de callback, webhook, e avatar - um alvo de webhook que
 resolve para `ftp://internal-host/` ainda é interpretado como uma
 `Url`, e um alvo `ftp:` não é um alvo de webhook.
 
+### Força de senha
+
+`Password` verifica comprimento e força por classe de caracteres, além de
+uma checagem opcional `uncompromised()` do Have I Been Pwned - o objeto de
+regra `Password` do Laravel, portado. Monte-o com `Password::min(n)` e
+encadeie os builders de força:
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - curta demais, sem dígito, sem símbolo
+```
+
+| Builder | Exige | Regex do Laravel |
+|---|---|---|
+| `.min(n)` (via `Password::min`) | pelo menos `n` caracteres (piso em 1) | checagem de comprimento |
+| `.max(n)` | no máximo `n` caracteres | checagem de comprimento |
+| `.letters()` | pelo menos uma letra Unicode | `/\pL/u` |
+| `.mixed_case()` | uma letra maiúscula e uma minúscula, em qualquer ordem | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | pelo menos um dígito Unicode | `/\pN/u` |
+| `.symbols()` | pelo menos um separador, símbolo ou caractere de pontuação - **um espaço comum conta** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())`,
+chamado uma vez a partir de `bootstrap::register()`, define o padrão global
+ao processo que o `Password::defaults()` devolve em todo o resto - o
+`Password::defaults(fn () => ...)` do Laravel. Uma segunda chamada é
+ignorada (com um `tracing::warn!`) em vez de substituir em silêncio a
+política escolhida pelo primeiro app.
+
+#### `uncompromised()` - porque só a força não basta
+
+O `.uncompromised()` (ou o `.uncompromised_with_threshold(n)`) acrescenta
+uma checagem contra o corpus de vazamentos do Have I Been Pwned, usando a
+API de intervalos com k-anonimato dele: só os **5 primeiros caracteres** do
+hash SHA-1 em maiúsculas da senha chegam a sair do processo - `GET
+https://api.pwnedpasswords.com/range/{prefix}` - e a comparação com o hash
+completo acontece localmente, contra as linhas `SUFFIX:COUNT` que a API
+devolve para aquele prefixo. O serviço nunca vê a senha, nem sequer o hash
+completo dela. A comparação com o limiar é estrita (`count > threshold`),
+então o `uncompromised()` padrão (limiar `0`) falha em qualquer aparição
+que seja, e uma falha de rede, um timeout ou uma resposta não 2xx **falham
+aberto** - a senha é tratada como limpa em vez de bloquear todo cadastro
+durante uma indisponibilidade do Have I Been Pwned. Isso casa exatamente
+com o `NotPwnedVerifier` do Laravel.
+
+Como essa checagem é uma ida e volta HTTP, o `uncompromised()` precisa de
+`AsyncRule`, e não da `Rule` síncrona que as checagens de força sozinhas
+podem usar. Conecte-o por `after_validation_async`, a mesma receita que
+[`Unique`](#a-regra-unique) usa:
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+Chamar a `Rule::passes` síncrona em um `Password` que tem
+`uncompromised()` definido é um **erro explícito**, não uma omissão
+silenciosa - uma checagem de segurança que não faz nada em silêncio é pior
+do que uma que nunca existiu. A mensagem de erro nomeia o
+`after_validation_async` como a correção.
+
+O `HIBP_TIMEOUT_SECS` (padrão `30`) controla o timeout da solicitação -
+veja [Variáveis de ambiente](env-vars.md).
+
+Um verificador customizado que retorna `Err` é um caso diferente de uma
+checagem que falhou: o texto de erro dele é registrado no nível `error` e
+nunca chega ao cliente, e a resposta carrega a chave de catálogo
+`validation-password-unverifiable` ("The { $field } could not be checked
+against known data leaks. Please try again.") no lugar. Acrescente essa
+chave se você traz o seu próprio catálogo de validação.
+
+### Por que Suprnova diverge: Password
+
+- O `Password` do Laravel junta toda checagem de força que falhou em um
+  único array. O contrato `Rule` do Suprnova devolve uma única
+  `ValidationMessage`, então o `Rule::passes` reporta a PRIMEIRA checagem
+  que falha, na ordem min, max, mixed case, letters, symbols, numbers -
+  corrija uma de cada vez em vez de ver a lista inteira de saída.
+- O validador síncrono do Laravel pode chamar `uncompromised()`
+  diretamente; uma solicitação PHP já está dentro de um loop de eventos
+  que tolera uma chamada HTTP bloqueante. A `Rule::passes` do Suprnova é
+  síncrona por contrato, então não há lugar seguro para rodar a solicitação
+  ao HIBP a partir dela. Em vez de pular a checagem em silêncio - o único
+  desfecho inaceitável para uma regra relevante para segurança -, a
+  `Rule::passes` do Suprnova devolve um erro explícito, voltado ao
+  desenvolvedor, nomeando o `after_validation_async` como a correção.
+- O `Password::defaults_with` recebe um ponteiro `fn` simples, e não uma
+  closure, para que o padrão configurado continue `Copy` e não precise de
+  alocação no heap - um estreitamento deliberado em relação à `Closure` do
+  Laravel.
+
 ### Escrevendo sua própria regra
 
 Uma regra customizada é um struct unitário (ou que carrega dados) com
@@ -149,12 +263,13 @@ do que uma string carrega, por isso implementam `ValueRule`, em vez disso, sobre
 ```rust
 use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
 
-// Laravel's array:keys - reject keys outside the allowed set. Listed
-// keys need not all be present; an empty allowed list is a programming
-// error, reported as a keyless message.
+// O array:keys do Laravel - rejeita chaves fora do conjunto permitido.
+// As chaves listadas não precisam estar todas presentes; uma lista de
+// permitidos vazia é um erro de programação, reportado como uma mensagem
+// sem chave.
 ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
 
-// Laravel's distinct / distinct:ignore_case / distinct:strict.
+// O distinct / distinct:ignore_case / distinct:strict do Laravel.
 Distinct { ignore_case: false, strict: false }
     .passes(&serde_json::json!(["a", "b", "c"]))?;
 ```
@@ -171,7 +286,7 @@ escreve na linha.
 O `distinct:strict` do Laravel apoia-se no `==` coercitivo do PHP. Valores JSON
 já são tipados, portanto o `strict` do Suprnova só altera se dois *números* com
 representações internas diferentes (`1` versus `1.0`) contam como iguais - ele
-nunca torna uma string e um número \"o mesmo\", em nenhum modo.
+nunca torna uma string e um número "o mesmo", em nenhum modo.
 
 ## A macro `validate!`
 

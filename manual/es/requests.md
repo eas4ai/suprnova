@@ -463,24 +463,24 @@ pub async fn store(form: CreateUserRequest) -> Response {
 
 ## Subida de archivos (`MultipartRequest`)
 
-`multipart/form-data` tiene su propio extractor -
-`#[derive(MultipartRequest)]` transmite el cuerpo parte por parte y
-vuelca las partes de archivo grandes a un archivo temporal por encima del
-umbral configurado, de modo que una subida de 200 MiB nunca reside entera
-en RAM. Cada campo lleva una anotación `#[field("name")]` que nombra el
-campo tal como llega por la red; los campos de archivo usan
-`UploadedFile<V>`, donde `V` es un validador (o una tupla de validadores)
-de `suprnova::http::upload::validators`.
+`multipart/form-data` tiene su propio extractor: `#[derive(MultipartRequest)]`
+recorre el cuerpo parte a parte y vuelca las partes de archivo grandes a
+un archivo temporal por encima del umbral configurado, de modo que una
+subida de 200 MiB nunca reside entera en RAM. Cada campo lleva una
+anotación `#[field("name")]` que nombra el campo tal como viaja en la
+solicitud; los campos de archivo usan `UploadedFile<V>`, donde `V` es un
+validador (o una tupla de validadores) de
+`suprnova::http::upload::validators`.
 
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // tope de 5 MiB
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // tope de 5 MiB
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -488,7 +488,7 @@ pub struct AvatarUpload {
 #[handler]
 pub async fn upload_avatar(form: AvatarUpload) -> Response {
     // `avatar` está en memoria o en un archivo temporal según su tamaño.
-    // `.bytes()` lee cualquiera de los dos; `.store_as(...)` transmite a un disco.
+    // `.bytes()` lee cualquiera de los dos; `.store_as(...)` hace streaming a un disco.
     let bytes = form.avatar.bytes().await?;
     json_response!({ "size": bytes.len(), "caption": form.caption })
 }
@@ -496,35 +496,39 @@ pub async fn upload_avatar(form: AvatarUpload) -> Response {
 
 Formas de campo:
 
-| Declaración | Forma en la red |
+| Declaración | Forma en la solicitud |
 |---|---|
-| `UploadedFile<V>` | archivo requerido |
+| `UploadedFile<V>` | archivo obligatorio |
 | `Option<UploadedFile<V>>` | archivo opcional |
 | `Vec<UploadedFile<V>>` | subidas en array (`photos[]`) |
-| `String` / `u32` / cualquier `FromStr` | campo de texto (requerido) |
+| `String` / `u32` / cualquier `FromStr` | campo de texto (obligatorio) |
 | `Option<String>` / `Option<T: FromStr>` | campo de texto opcional |
 | `Vec<String>` / `Vec<T: FromStr>` | campos de texto repetidos |
 
 Validadores integrados en `suprnova::http::upload::validators`:
 
-- `MaxSize<N>` - cortocircuita en el límite de bytes cuando el total
-  acumulado supera `N` bytes (HTTP 413).
-- `Image` - rechaza las partes cuyos magic bytes no declaran `image/*`.
-- `MimeType<L>` - acepta una lista fija de permitidos que proporciona tu
+- `MaxSize<N>` - hace cortocircuito en el límite de byte exacto cuando el
+  total acumulado supera `N` bytes (HTTP 413).
+- `ImageFile` - rechaza las partes cuyos bytes mágicos no declaran
+  `image/*`. (Lleva el nombre de la regla homónima de Laravel; el nombre
+  a secas `Image` pertenece al pipeline de manipulación de
+  imágenes - consulta [Imágenes](images.md).)
+- `MimeType<L>` - acepta una lista de permitidos fija que proporciona tu
   propio tipo `MimeAllowlist`.
-- `()` - no hace nada; `UploadedFile<()>` acepta cualquier byte.
+- `()` - no hace nada; `UploadedFile<()>` acepta cualquier secuencia de
+  bytes.
 
-Los validadores se componen como tuplas: `(Image, MaxSize<5_242_880>)`
-ejecuta ambos y cortocircuita en el primer fallo.
+Los validadores se componen como tuplas: `(ImageFile, MaxSize<5_242_880>)`
+ejecuta ambos y hace cortocircuito ante el primer fallo.
 
 ### Límites por campo y cotas de array
 
-El tope de bytes sobre el cuerpo total es global (8 MiB por defecto para
-multipart, configurable vía
+El tope de bytes del cuerpo completo es global (8 MiB por defecto para
+multipart, configurable mediante
 `suprnova::http::upload::set_global_max_multipart_body_bytes`). Los topes
 por campo evitan el abuso en el que un cuerpo con muchas partes pequeñas
-hace crecer `Vec<UploadedFile<_>>` sin límite dentro del presupuesto de
-bytes:
+hace crecer sin límite un `Vec<UploadedFile<_>>` dentro del presupuesto
+de bytes:
 
 ```rust
 #[derive(MultipartRequest)]
@@ -535,14 +539,14 @@ pub struct Gallery {
 ```
 
 La parte número (`max_count` + 1) con ese nombre devuelve un HTTP 422
-antes de reservar memoria, así que la parte de más nunca llega a hacer
+antes de reservar memoria, así que la parte sobrante nunca llega a hacer
 crecer el `Vec`.
 
-### Ganchos de autorización y de posvalidación
+### Ganchos de autorización y posteriores a la validación
 
 `MultipartRequest` refleja los ganchos de `FormRequest` mediante el trait
-`MultipartRequestHooks`. Por defecto el derive emite un impl vacío; opta
-por el tuyo con `#[multipart(custom_hooks)]`:
+`MultipartRequestHooks`. Por defecto, el derive emite una impl vacía;
+súmate a la tuya propia con `#[multipart(custom_hooks)]`:
 
 ```rust
 use suprnova::{MultipartRequest, Request, ValidationErrors};
@@ -571,15 +575,15 @@ impl MultipartRequestHooks for GuardedUpload {
 }
 ```
 
-### Streaming hacia el almacenamiento
+### Streaming al almacenamiento
 
 `UploadedFile::store_as` escribe la parte en un disco de almacenamiento
-registrado. Para las partes respaldadas por disco el camino es
-completamente en streaming (trozos de 64 KiB vía
+registrado. Para las partes respaldadas por disco la ruta es
+completamente en streaming (trozos de 64 KiB mediante
 `opendal::Operator::writer`); las partes en memoria usan una sola llamada
 de escritura. Usa la extensión derivada del contenido cuando la ruta de
-almacenamiento sea direccionable por contenido - el encabezado con el
-nombre del archivo no es de fiar:
+almacenamiento esté direccionada por contenido: la cabecera con el nombre
+de archivo no es de fiar:
 
 ```rust
 use suprnova::Storage;

@@ -468,22 +468,22 @@ pub async fn store(form: CreateUserRequest) -> Response {
 
 `multipart/form-data` hat einen eigenen Extraktor -
 `#[derive(MultipartRequest)]` streamt den Body Teil für Teil und lagert
-große Datei-Teile oberhalb der konfigurierten Schwelle in eine
-temporäre Datei aus, sodass ein Upload von 200 MiB nie vollständig im
-RAM liegt. Jedes Feld trägt eine `#[field("name")]`-Annotation, die das
-übertragene Feld benennt; Datei-Felder verwenden `UploadedFile<V>`,
-wobei `V` ein Validator (oder ein Tupel von Validatoren) aus
+große Dateiteile oberhalb der konfigurierten Schwelle in eine temporäre
+Datei aus, sodass ein 200-MiB-Upload nie vollständig im RAM liegt. Jedes
+Feld trägt eine `#[field("name")]`-Annotation, die das Feld auf der
+Leitung benennt; Dateifelder verwenden `UploadedFile<V>`, wobei `V` ein
+Validator (oder ein Tupel aus Validatoren) aus
 `suprnova::http::upload::validators` ist.
 
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // Obergrenze 5 MiB
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // Obergrenze 5 MiB
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -499,36 +499,39 @@ pub async fn upload_avatar(form: AvatarUpload) -> Response {
 
 Feldformen:
 
-| Deklaration | Übertragenes Feld |
+| Deklaration | Form auf der Leitung |
 |---|---|
-| `UploadedFile<V>` | Pflicht-Datei |
+| `UploadedFile<V>` | erforderliche Datei |
 | `Option<UploadedFile<V>>` | optionale Datei |
 | `Vec<UploadedFile<V>>` | Array-Uploads (`photos[]`) |
-| `String` / `u32` / jedes `FromStr` | Textfeld (Pflicht) |
+| `String` / `u32` / jedes `FromStr` | Textfeld (erforderlich) |
 | `Option<String>` / `Option<T: FromStr>` | optionales Textfeld |
 | `Vec<String>` / `Vec<T: FromStr>` | wiederholte Textfelder |
 
 Eingebaute Validatoren in `suprnova::http::upload::validators`:
 
-- `MaxSize<N>` - schließt genau an der Byte-Grenze kurz, sobald die
-  laufende Summe `N` Bytes übersteigt (HTTP 413).
-- `Image` - weist Teile zurück, deren Magic Bytes nicht `image/*`
-  behaupten.
+- `MaxSize<N>` - bricht an der Byte-Grenze ab, sobald die laufende Summe
+  `N` Bytes überschreitet (HTTP 413).
+- `ImageFile` - weist Teile zurück, deren Magic Bytes kein `image/*`
+  behaupten. (Benannt nach Laravels eigener Regel; der schlichte Name
+  `Image` gehört der Bildmanipulations-Pipeline - siehe
+  [Bilder](images.md).)
 - `MimeType<L>` - akzeptiert eine feste Allowlist, die Ihr eigener
   `MimeAllowlist`-Typ bereitstellt.
 - `()` - tut nichts; `UploadedFile<()>` akzeptiert beliebige Bytes.
 
-Validatoren komponieren sich als Tupel: `(Image, MaxSize<5_242_880>)`
-führt beide aus und schließt beim ersten Fehlschlag kurz.
+Validatoren lassen sich als Tupel kombinieren:
+`(ImageFile, MaxSize<5_242_880>)` führt beide aus und bricht beim ersten
+Fehlschlag ab.
 
 ### Obergrenzen pro Feld und Array-Schranken
 
-Die Byte-Obergrenze für den gesamten Body ist global (standardmäßig
-8 MiB für Multipart, konfigurierbar über
+Die Byte-Obergrenze für den gesamten Body ist global (standardmäßig 8 MiB
+für Multipart, konfigurierbar über
 `suprnova::http::upload::set_global_max_multipart_body_bytes`).
 Obergrenzen pro Feld verhindern den Missbrauch, bei dem ein Body aus
-vielen kleinen Teilen `Vec<UploadedFile<_>>` innerhalb des
-Byte-Budgets unbegrenzt wachsen lässt:
+vielen kleinen Teilen `Vec<UploadedFile<_>>` innerhalb des Byte-Budgets
+unbegrenzt wachsen lässt:
 
 ```rust
 #[derive(MultipartRequest)]
@@ -539,15 +542,15 @@ pub struct Gallery {
 ```
 
 Der (`max_count` + 1)-te Teil mit diesem Namen liefert HTTP 422, bevor
-alloziert wird, sodass der überzählige Teil nie zum Wachsen des `Vec`
-führt.
+etwas alloziert wird, der überzählige Teil erreicht das Wachstum des
+`Vec` also nie.
 
-### Authorize- und After-Validation-Hooks
+### Autorisierungs- und Nachvalidierungs-Hooks
 
-`MultipartRequest` spiegelt die Hooks von `FormRequest` über den
-`MultipartRequestHooks`-Trait. Standardmäßig gibt das Derive eine leere
-Impl aus; mit `#[multipart(custom_hooks)]` entscheiden Sie sich für
-Ihre eigene:
+`MultipartRequest` spiegelt die Hooks von `FormRequest` über den Trait
+`MultipartRequestHooks`. Standardmäßig gibt das Derive eine leere
+Implementierung aus; mit `#[multipart(custom_hooks)]` melden Sie sich für
+Ihre eigene an:
 
 ```rust
 use suprnova::{MultipartRequest, Request, ValidationErrors};
@@ -576,15 +579,14 @@ impl MultipartRequestHooks for GuardedUpload {
 }
 ```
 
-### Auf eine Storage-Disk streamen
+### In den Speicher streamen
 
 `UploadedFile::store_as` schreibt den Teil auf eine registrierte
-Storage-Disk. Für Teile, die bereits auf der Platte liegen, ist der Weg
-durchgehend streamend (64-KiB-Chunks über
-`opendal::Operator::writer`); Teile im Arbeitsspeicher verwenden einen
-einzigen Schreibaufruf. Verwenden Sie die aus dem Inhalt abgeleitete
-Dateiendung, wenn der Speicherpfad inhaltsadressiert ist - dem
-Dateinamen-Header ist nicht zu trauen:
+Speicher-Disk. Für Disk-gestützte Teile ist der Pfad vollständig
+streamend (64-KiB-Blöcke über `opendal::Operator::writer`); Teile im
+Speicher nutzen einen einzelnen Schreibaufruf. Nehmen Sie die aus dem
+Inhalt abgeleitete Endung, wenn der Speicherpfad inhaltsadressiert ist -
+der Dateiname aus dem Header ist nicht vertrauenswürdig:
 
 ```rust
 use suprnova::Storage;
@@ -594,7 +596,8 @@ let path = format!("{}.{}", user.id, form.avatar.extension_from_magic());
 form.avatar.store_as(&disk, &path).await?;
 ```
 
-Siehe [Dateisystem](filesystem.md) für die Registry der Storage-Disks.
+Die Registry der Speicher-Disks steht unter
+[Dateisystem](filesystem.md).
 
 ## Dateiorganisation
 

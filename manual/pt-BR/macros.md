@@ -110,19 +110,19 @@ validadores por campo em nível de tipo.
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-Validadores built-in (`Image`, `MimeAllowlist<…>`, `MaxSize<…>`,
+Validadores built-in (`ImageFile`, `MimeAllowlist<…>`, `MaxSize<…>`,
 `MimeType<…>`) se compõem via tuples. Veja [Solicitações](requests.md).
 
 ## Respostas

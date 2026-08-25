@@ -169,7 +169,7 @@ DB::table("users").filter(&request.column_name(), value).get().await?;
 
 ## 事务
 
-三个入口点，每一个都接好了 `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` 这些观测钩子。
+三个入口，每一个都接好了 `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` 这几个观察钩子。
 
 ### 闭包形式
 
@@ -190,11 +190,15 @@ DB::transaction(|_tx| {
 }).await?;
 ```
 
-`Ok(_)` 时提交。`Err(_)` 时回滚并把这个错误传播出去。
+`Ok(_)` 时提交。`Err(_)` 时回滚，并把错误往上传播。
 
-闭包内部的操作会通过一个 `tokio::task_local` 自动拿到那个活跃的事务 - 您**不需要**在每一次模型调用里都穿针引线地传一个 `&tx` 句柄。嵌套的 `DB::transaction` 会返回一个数据库错误；嵌套回滚行为请用 `tx.savepoint(...)`。
+一个 `Err` 并不总是意味着一次回滚。如果一个[提交后](queues.md#after-commit-dispatch)回调失败了，那次提交其实已经落地、并且是持久的；`DB::transaction` 仍然返回 `Err`，而那条消息读作 `after-commit callback failed (the transaction itself committed): <the callback's error>`。闭包的返回值丢了，它写下的东西没丢，失败的只是一次被推迟的分发。每一个已登记的回调仍然都会运行，而您拿到的是第一个错误。`DB::transaction_with_attempts` 绝不会重试那个错误，不管它读起来多像死锁：重新运行一个写入已经持久化的闭包，会把那些写入施加两次。
 
-对于必须在同一个被钉住的连接上执行的类型化聚合或自定义 SQL，请直接使用这个事务句柄：
+闭包内部的操作，会通过一个 `tokio::task_local` 自动接上当前生效的那个事务 - 您**不**需要把一个 `&tx` 句柄串到每一次模型调用里去。嵌套的 `DB::transaction` 会返回一个数据库错误；想要嵌套回滚的行为，请用 `tx.savepoint(...)`。
+
+闭包形式也是唯一一种能把工作推迟到提交时刻的形式。一个类型声明了 `Job::after_commit()` 的作业（或者一次用 `Queue::push_after_commit` 做出的分发）会在这个闭包内部等待，只有在提交成功之后才会到达队列驱动程序；一次回滚会把它丢弃。参见[提交后分发](queues.md#after-commit-dispatch)。
+
+对于必须在同一条被钉住的连接上执行的带类型聚合或者自定义 SQL，请直接使用这个事务句柄：
 
 ```rust
 use sea_orm::{DbBackend, Statement};
@@ -212,16 +216,16 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-`query_all` 会发出正常的 `QueryExecuted` 观测，返回类型化的 SeaORM `QueryResult` 行。对动态的值请用带绑定的 `Statement::from_sql_and_values`；不要插值不受信任的输入。
+`query_all` 会发出正常的 `QueryExecuted` 观察，并返回带类型的 SeaORM `QueryResult` 行。动态的值请用带绑定参数的 `Statement::from_sql_and_values`；不要把不受信任的输入插值进去。
 
-### 死锁重试
+### 死锁时重试
 
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // 和上面一样的闭包方法体。在 SQLSTATE 40001 / 40P01，
-        // 或者任何包含“deadlock”的错误（不区分大小写）上，
-        // 会从头重新运行。
+        // 闭包体和上面一样。遇到 SQLSTATE 40001 / 40P01 /
+        // 任何包含 "deadlock" 的错误（不区分大小写）时，
+        // 从头重跑。
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
@@ -234,11 +238,11 @@ use suprnova::{DB, attrs};
 
 let tx = DB::begin_transaction().await?;
 
-// 逐模型：这些 `*_with_tx` 垫片会把一次 CRUD 操作钉在这个手动事务上。
+// 逐模型：`*_with_tx` 这些薄封装把一次 CRUD 操作钉到这个手动事务上。
 User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
 Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
 
-// 逐查询：`Builder::with_tx(&tx)` 会把一条构造器链钉住。
+// 逐查询：`Builder::with_tx(&tx)` 把一条构造器链钉住。
 let stale = Order::query()
     .filter("status", "pending")
     .with_tx(&tx)
@@ -252,9 +256,11 @@ if some_condition() {
 }
 ```
 
-手动模式**不会**安装这个任务本地 - 每一个应该在这个事务内部运行的操作都得自己选择接入，要么通过一次链式查询上的 `Builder::with_tx(&tx)`，要么通过某一个 `Model::*_with_tx` 垫片（`create_with_tx`、`save_with_tx`、`delete_with_tx`，等等）。忘了选择接入的操作，会针对全局连接池运行，**不属于**这个事务。
+手动模式**不会**安装那个 task-local - 每一个应当跑在这个事务内部的操作都必须自己选择加入，途径是在一条链式查询上用 `Builder::with_tx(&tx)`，或者用 `Model::*_with_tx` 那些薄封装之一（`create_with_tx`、`save_with_tx`、`delete_with_tx` 等等）。忘了选择加入的操作会针对全局连接池运行，并**不**属于这个事务。
 
-持有一个 `Transaction` 句柄，会在它的整个生命周期里钉住一个连接池连接；请在调用 `begin_transaction()` 之前，预先加载您需要读取的任何行，在 SQLite（单一共享连接）上尤其如此。
+持有一个 `Transaction` 句柄，会在它的整个生命周期里钉住一条连接池连接；请在 `begin_transaction()` 调用**之前**就把您需要读取的行预先加载好，在 SQLite 上尤其如此（单一共享连接）。
+
+因为手动模式不安装 task-local，它也就没有一次提交可以让一次被推迟的分发挂上去：一个在手动事务内部推送的[提交后](queues.md#after-commit-dispatch)作业会被立即推送。当一次分发必须等待提交时，请用闭包形式。
 
 ### 保存点
 
@@ -273,7 +279,13 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-全部三个一等公民的后端都支持 `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` - SQLite 也包括在内。
+三个一等后端全都支持 `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` - SQLite 也包括在内。
+
+一次保存点回滚同样会把[提交后注册表](queues.md#after-commit-dispatch)一并回退。一次在保存点内部被推迟到提交时刻的队列推送，会连同它所描述的那些行一起被丢弃，而随它一起登记的那份补偿会立即运行，所以一次被推迟的 `push_unique` 的去重锁会被交还回去，同一个事务里的一次重新分发就能把它拿到手。在这个保存点之前登记的一切都不受影响；而一个您释放掉、或者干脆从不回滚的保存点，会把登记在它内部的一切都保留下来。
+
+重复使用一个保存点名字是允许的，而注册表跟随数据库的行为：`ROLLBACK TO SAVEPOINT x` 会回退到最近的那个 `x`，并销毁在它之后建立起来的那些保存点。手动事务没有提交后注册表，所以它们的保存点只回滚行，别的什么都不回滚。
+
+只有 `Transaction::savepoint` 会在注册表上留下标记。一个您用原始 SQL 创建的保存点对它是不可见的，所以 `rollback_to` 会把那些行回滚掉、记一条警告，并把登记在它内部的每一次被推迟的分发原样留在那儿 - 靠猜去丢弃掉一个，才是更糟的那种失败。当那些被推迟的分发本该跟着行一起回退时，请用 `Transaction::savepoint`。
 
 ## 可观测性
 

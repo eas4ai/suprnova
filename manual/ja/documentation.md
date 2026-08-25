@@ -45,6 +45,7 @@
     - [イベント](events.md)
     - [ファイルストレージ](filesystem.md)
     - [HTTP クライアント](http-client.md)
+    - [画像](images.md)
     - [ローカライゼーション](localization.md)
     - [メール](mail.md)
     - [通知](notifications.md)
@@ -122,5 +123,5 @@
     - [用語集](glossary.md)
 
 ---
-
 *[API ドキュメンテーション (rustdoc)](https://docs.rs/suprnova) - 公開後に利用可能。*
+

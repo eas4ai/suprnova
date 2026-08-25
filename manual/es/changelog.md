@@ -6,6 +6,309 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## 1.3.3 - 2026-08-25
+
+### Añadido
+
+- **Conexión de cola con failover.** `FailoverQueueDriver` envuelve una
+  lista ordenada de conexiones: un push que la primera rechaza se
+  reintenta en la siguiente, y así sucesivamente hacia abajo de la lista.
+  Conéctalo desde el entorno con `QUEUE_DRIVER=failover` más
+  `QUEUE_FAILOVER_CONNECTIONS=redis,database` (cada entrada lee las
+  variables de su propio driver, así que una entrada `database` sigue
+  necesitando `DB::init()` antes y sigue trayendo su store de jobs
+  fallidos), o constrúyelo directamente con
+  `FailoverQueueDriver::new(vec![(label, driver), ...])`. Solo las
+  escrituras recorren la lista: `push` y `bulk_push` la caminan, mientras
+  que `pop`, `pop_from`, `ack`, `nack`, `release`, `settle`, `clear`, los
+  cuatro contadores y los tres listados de inspección delegan en la
+  primera conexión y en ninguna otra, porque un token de reserva solo
+  tiene sentido para el driver que lo emitió. La consecuencia operativa
+  está documentada en lugar de disimulada: un worker sobre la conexión de
+  failover drena únicamente la primaria, así que todo lo que haya
+  conmutado a un respaldo necesita su propio worker. `bulk_push` empuja
+  cada sobre por separado en lugar de reenviar un lote, lo que conserva el
+  `available_at` propio de cada sobre (Laravel #60950) y evita que un lote
+  que la primaria aceptó a medias se vuelva a empujar entero al respaldo.
+  Un rechazo despacha
+  `queue::events::QueueFailedOver { connection, job_name, exception }`,
+  disparado por flanco: una conexión se reporta una sola vez cuando entra
+  en fallo y se mantiene callada hasta que un push posterior tiene éxito
+  en ella y la rearma, así que una caída produce una alerta en lugar de
+  una por despacho. Cuando todas las conexiones rechazan, el push devuelve
+  el error de la última. Una lista de conexiones vacía, un
+  `QUEUE_FAILOVER_CONNECTIONS` ausente o en blanco, una entrada `failover`
+  anidada y una entrada que nombre un driver que no existe son todos
+  errores de arranque: el comportamiento de avisar y recaer en memoria se
+  queda en el propio `QUEUE_DRIVER`, donde una errata no puede colar un
+  backend efímero en una cadena durable.
+- **API de inspección de la cola.** `Queue::pending_jobs(queue)` /
+  `delayed_jobs` / `reserved_jobs` listan los sobres reales que hay detrás
+  de los contadores `pending_size`/`delayed_size`/`reserved_size` ya
+  existentes, como DTOs `InspectedJob` (`id`, `queue`, `name`, `attempts`,
+  `payload`, `created_at`), reflejando el `InspectedJob` de Laravel. Un
+  único filtro de cola `Option<&str>` colapsa en una sola llamada el par
+  `pendingJobs($queue)` / `allPendingJobs()` de Laravel (y sus
+  equivalentes `delayedJobs`/`reservedJobs`). El valor por defecto del
+  trait `QueueDriver` es un `Err` honesto, y no el valor por defecto de
+  colección vacía de Beanstalkd/SQS en Laravel, que se lee como "no hay
+  nada encolado" incluso cuando a todas luces sí lo hay, así que un driver
+  que no ha implementado la inspección lo dice; `sync` y `null` lo
+  sobrescriben con `Ok(vec![])` porque para ellos esa sí es la verdad. Los
+  drivers de memoria, base de datos y Redis implementan todos el listado
+  completo: el almacén de retardados del driver de memoria pasó de un
+  `DelayQueue<Envelope>` a secas (que no se puede iterar) a un
+  `DelayQueue<Uuid>` más un mapa indexado por id; el driver de base de
+  datos reutiliza los predicados exactos de los contadores de tamaño más
+  `ORDER BY available_at`, y una fila cuyo `envelope_json` no se puede
+  decodificar se sigue listando (`id: None`,
+  `payload: {"unparseable": true}`) en lugar de descartarse, para que una
+  fila envenenada no pueda dejar a un operador ciego ante el resto de la
+  cola; el `reserved_jobs` de Redis está acotado a las reservas en proceso
+  de este consumidor (documentado), y `pending_jobs` escanea el stream por
+  lotes mediante `XRANGE`. `Queue::fake()` ganó los ayudantes
+  correspondientes `pending_jobs()`/`delayed_jobs()`, que proyectan los
+  push registrados con `attempts` siempre a `0` y `created_at` siempre a
+  `None`.
+- **Despacho posterior al commit.** `Job::after_commit()` retiene un push
+  hasta que confirma el `DB::transaction` circundante, de modo que un
+  worker en otro proceso nunca puede sacar un sobre que describe filas que
+  la transacción todavía no ha hecho durables. Espera el push entero, no
+  solo la escritura en el driver: la construcción del sobre, `JobQueueing`
+  y `JobQueued` ocurren todos en el momento de la confirmación, así que a
+  ningún oyente se le habla nunca de un job que un rollback descarta
+  después. Un rollback descarta el push por completo; fuera de una
+  transacción el push ocurre de inmediato, que es lo que permite a un tipo
+  de job declarar la opción sin que cada sitio de despacho sepa si su ruta
+  de código es transaccional. Por despacho,
+  `EnvelopeOverrides::after_commit` manda sobre el job: `Some(true)` (con
+  el atajo `Queue::push_after_commit(job)`) difiere un job que no se sumó,
+  y `Some(false)` es el `beforeCommit()` de Laravel. Un `Queue::push`
+  diferido vuelve a resolver `Job::delay()` contra la confirmación en
+  lugar de contra el push, mientras que `Queue::push_later` / `later` /
+  `later_with` llevan sin cambios la marca de tiempo absoluta de quien
+  llama. `Queue::push_unique` toma su bloqueo de deduplicación de
+  inmediato incluso cuando el sobre se difiere, así que un duplicado
+  dentro de la misma transacción sigue suprimiéndose, y un rollback libera
+  ese bloqueo acotado al propietario. `Queue::bulk` se difiere como una
+  unidad. `Queue::fake()` registra un push de inmediato, aplazamiento
+  incluido, igual que el `Bus::fake` de Laravel. Un
+  `DB::begin_transaction` manual nunca difiere: no instala ninguna
+  transacción ambiental, así que no hay confirmación de la que colgar un
+  callback. Todos los finales que dejan la confirmación sin aterrizar
+  compensan de forma idéntica, incluidos un `COMMIT` que la base de datos
+  rechaza y un `TxHandle` filtrado que lo bloquea, y
+  `Transaction::rollback_to` cuenta como uno de ellos para el alcance que
+  deshace: un push diferido dentro de un savepoint se descarta cuando ese
+  savepoint revierte y su bloqueo se libera justo entonces, mientras que
+  todo lo registrado antes del savepoint queda intacto. El correo, las
+  notificaciones, los lotes y las cadenas encolados todavía no se
+  difieren.
+- **Jobs únicos hasta el procesamiento.**
+  `Job::unique_until_processing()` libera el bloqueo de unicidad cuando
+  empieza el procesamiento - tras la pasada de middleware del job, justo
+  antes de que se ejecute el handler - en lugar de retenerlo durante toda
+  la ventana `unique_for`, que es lo que quieres cuando el bloqueo existe
+  para fusionar duplicados encolados y no para serializar la ejecución. Un
+  job que un middleware libera de vuelta a la cola conserva su bloqueo,
+  porque no ha empezado a procesarse; un job que un middleware elimina o
+  envía a fallidos cede su bloqueo. La liberación está acotada al
+  propietario: `Queue::push_unique` registra el token de propietario del
+  bloqueo de caché en el sobre (`Envelope::unique_lock_owner`, un campo
+  aditivo que deja el formato en la red congelado byte a byte idéntico
+  para todo push no único), y el worker libera con ese token, así que un
+  intento reentregado nunca puede forzar la liberación de un bloqueo que
+  ahora tiene un despacho más nuevo. La superficie de idempotencia que lo
+  sostiene también es pública:
+  `Idempotency::commit_on_success_owned` entrega al cuerpo el propietario
+  del bloqueo y lo devuelve, e `Idempotency::release_owned(key, owner)`
+  libera de forma acotada al propietario, informando `Ok(false)` en lugar
+  de un error cuando el bloqueo no está o lo tiene otro. Los jobs con
+  `unique_id` a secas no cambian y siguen dejando que el TTL de
+  `unique_for` sea la ventana de deduplicación.
+- **`Gate::default_denial_response` personaliza la forma por defecto de
+  una denegación desnuda.** Refleja el
+  `Gate::defaultDenialResponse($response)` de Laravel. Fijado una sola
+  vez - típicamente en `bootstrap::register()` -, reconfigura exactamente
+  dos desenlaces: un `false` desnudo (de una compuerta de bool -
+  `Gate::define` / `Gate::define_async`, incluido un método `#[policy]`
+  que devuelve `bool` - o de un gancho `before`/`after` que decidió
+  `false`) y una evaluación que nada más decidió en absoluto (una
+  habilidad indefinida sobre la que ningún gancho opinó). Todo eso
+  colapsaba antes a un `Response::deny()` desnudo (un 403); ahora emerge
+  como el `Response` que lleve el valor por defecto, por ejemplo
+  `Response::deny_as_not_found()` para un 404 que oculta la existencia de
+  un recurso en toda la aplicación en lugar de compuerta a compuerta. El
+  valor por defecto se aplica solo al `false` desnudo: una compuerta
+  registrada con `define_with` / `define_async_with` ya devolvió el
+  `Response` que quería, y ese siempre pasa por `Gate::inspect` sin
+  tocarse, igual que la propia regla de Laravel, según la cual el valor
+  por defecto nunca sustituye a un objeto `Response` devuelto. Un valor
+  por defecto con forma de `Response::allow()` se rechaza (se registra y
+  se ignora) en lugar de invertir en silencio a "permitido" toda compuerta
+  de bool - consulta el comentario de documentación de
+  `Gate::default_denial_response` para el único punto en el que esto
+  diverge deliberadamente de Laravel, que no tiene esa salvaguarda.
+- **Se incluye la familia de reglas de validación `Password`, con la
+  comprobación `uncompromised()` de Have I Been Pwned.**
+  `Password::min(n)` más los builders de fortaleza (`.max()`,
+  `.letters()`, `.mixed_case()`, `.numbers()`, `.symbols()`) portan
+  literalmente las expresiones regulares de la regla `Password` de
+  Laravel: un espacio simple satisface `.symbols()`, igual que la clase de
+  separadores `\p{Z}` de Laravel. `.uncompromised()` (o
+  `.uncompromised_with_threshold(n)`) comprueba la contraseña contra la
+  API de rangos con k-anonimato de Have I Been Pwned: del hash SHA-1 de la
+  contraseña solo salen del proceso los 5 primeros caracteres, y un fallo
+  de red, un tiempo de espera agotado o una respuesta que no sea 2xx falla
+  abierto en lugar de bloquear los registros, exactamente igual que el
+  `NotPwnedVerifier` de Laravel. Como esa comprobación es una ida y vuelta
+  HTTP, `Password` es la única regla integrada que implementa a la vez
+  `Rule` (solo fortaleza, para las filas síncronas de `validate!`) y
+  `AsyncRule` (fortaleza y luego la comprobación HIBP, para
+  `after_validation_async`); llamar a la ruta síncrona sobre un `Password`
+  configurado con `uncompromised()` es un error estrepitoso, dirigido al
+  desarrollador, y no una omisión silenciosa. `Password::defaults_with(...)`
+  fija el valor por defecto de todo el proceso que devuelve
+  `Password::defaults()`. Nueva variable de entorno `HIBP_TIMEOUT_SECS`
+  (30 s por defecto). `Http::fake_response_text(...)` es la nueva
+  contraparte de cuerpo en bruto de `fake_response(...)` para pruebas
+  contra APIs remotas `text/plain` como la de HIBP.
+- **Una tarea programada ya puede nombrar la zona horaria en la que se lee
+  su expresión cron, y `schedule:list` puede renderizar la programación
+  entera en cualquier zona.** `.timezone(chrono_tz::Tz)` fija una tarea,
+  `.try_timezone("Area/City")` es la contraparte falible para un nombre de
+  zona que solo existe en tiempo de ejecución, y `Schedule::timezone(tz)`
+  fija un valor por defecto para cada tarea registrada después de ella.
+  Nada cambia para una tarea que no fija zona: se sigue evaluando contra
+  la zona local del proceso. Una zona fijada afecta solo al vencimiento;
+  el planificador sigue haciendo tick una vez por minuto de proceso y la
+  compuerta de deduplicación del mismo minuto queda intacta. Ten en cuenta
+  que una zona que observa el horario de verano hace que algunos minutos
+  de reloj de pared ocurran dos veces y otros no ocurran nunca, así que
+  una tarea fijada a uno de esos minutos puede ejecutarse dos veces o
+  saltarse; el capítulo de programación lleva la advertencia completa.
+  `schedule:list` ganó una opción `--timezone` y dos columnas: la zona en
+  la que está escrita una expresión impresa, y el próximo minuto en que la
+  tarea se dispara. La expresión de una tarea fijada se reescribe a la
+  zona del listado, y se divide en varias líneas cuando ahí cruza la
+  medianoche, y se deja exactamente como está escrita cuando una
+  reescritura fiel es imposible: a través de una transición de horario de
+  verano, cuando un cambio de día tendría que mover a la vez un día del
+  mes y un día de la semana restringidos, o cuando tendría que decidir
+  cuántos días tiene febrero. `chrono_tz::Tz` se reexporta desde la raíz
+  del crate, así que las aplicaciones consumidoras no añaden `chrono-tz` a
+  su propio `Cargo.toml`.
+- **Un subsistema de imágenes con forma de Laravel, en `suprnova::media`
+  detrás de la feature `media`, activa por defecto.**
+  `Image::from_bytes/from_path/from_disk/from_upload/from_stream`
+  construye un pipeline perezoso - `resize`, `scale`, `crop`,
+  `cover`, `contain`, `rotate` en cualquier ángulo,
+  `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
+  `to_format`, `quality` - que se termina con `to_bytes`, `to_response`,
+  `save`, `store`, `dimensions`, `mime_type` o `dominant_color`. Lee y
+  escribe PNG, JPEG, WebP, GIF y BMP; la salida AVIF queda aplazada hasta
+  que se publique el codificador AV1 propio, momento en el que será una
+  nueva variante de `OutputFormat` y ningún otro cambio. Como en la
+  división `gd`/`imagick` de Laravel hay dos drivers:
+  `IMAGE_DRIVER=oxideav` (el de por defecto) corre sobre la familia de
+  códecs en Rust puro [OxideAV](https://github.com/OxideAV), sin
+  biblioteca nativa y sin nada que instalar, e `IMAGE_DRIVER=magick`
+  delega en un ImageMagick 7 instalado en el anfitrión para admitir más
+  formatos de entrada, HEIC incluido. Los límites de decodificación
+  (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) se comprueban contra la
+  propia cabecera de la entrada antes de reservar nada - incluido el
+  bitstream interno de un WebP extendido, cuyo tamaño de lienzo
+  orientativo no puede usarse para colar un frame mayor a través de la
+  compuerta - y todo el trabajo con píxeles corre en un hilo bloqueante.
+  El driver `magick` fija el codificador de entrada por nombre en lugar de
+  dejar que ImageMagick elija uno a partir de los bytes, y acota cada
+  invocación con `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver` es la frontera
+  del trait para cualquier otro. El módulo se llama `media` porque las
+  superficies de audio y vídeo respaldadas por OxideAV vivirán a su lado.
+  [Imágenes](../images.md)
+- **La compuerta de WebP lleva una cota fija y no configurable.** Un WebP
+  declara su tamaño decodificado real en su fragmento de bitstream más
+  interno, así que el framework recorre el contenedor para encontrarlo;
+  ese recorrido visita como mucho 4096 fragmentos por nivel y sigue dos
+  niveles de anidamiento, y un archivo que pase de cualquiera de los dos
+  se rechaza en lugar de medirse. Reportar un número a partir de un
+  recorrido inacabado sería una compuerta que bastantes fragmentos de
+  relleno podrían esquivar. Ninguna variable `IMAGE_MAX_*` la afecta, y el
+  error así lo dice. Una animación de 300 fotogramas no se ve afectada;
+  una de 4100 se rechaza.
+  [Imágenes](../images.md#one-bound-is-not-configurable)
+
+### Cambiado
+
+- **`DB::transaction` ya puede devolver `Err` tras una confirmación
+  correcta**, cuando falla un callback posterior al commit: el mensaje
+  dice `after-commit callback failed (the transaction itself committed):
+  …`, el valor de retorno del closure se pierde y sus escrituras no.
+  `DB::transaction_with_attempts` nunca reintenta ese error, por mucha
+  forma de deadlock que tenga el mensaje del propio callback: volver a
+  ejecutar un closure cuyas escrituras ya son durables las aplicaría dos
+  veces.
+- **Nueva clave del catálogo de validación:
+  `validation-password-unverifiable`.** Un `UncompromisedVerifier` propio
+  que devuelve `Err` ya no pone su propio texto de error literalmente en
+  el cuerpo del 422. Ese texto se registra a nivel `error` en su lugar, y
+  la respuesta lleva esta clave, que se renderiza como "The { $field }
+  could not be checked against known data leaks. Please try again.": la
+  comprobación no llegó a ejecutarse, que no es lo mismo que la contraseña
+  sea mala, y el detalle de infraestructura no pinta nada en una respuesta
+  al cliente. Una aplicación que distribuye su propio catálogo de
+  validación tiene que añadir la clave, o sus usuarios verán el respaldo
+  integrado en inglés.
+- **El validador de subidas `Image` pasa a llamarse `ImageFile`.**
+  `suprnova::Image` es el nuevo tipo del pipeline de manipulación de
+  imágenes, en correspondencia con `Illuminate\Image\Image`, y la regla de
+  subida por bytes mágicos toma el nombre que Laravel da a esa misma clase
+  de regla, `Illuminate\Validation\Rules\ImageFile`. La migración es una
+  línea por sitio de uso: `UploadedFile<(Image, MaxSize<N>)>` pasa a ser
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Churn previo a la 1.0 absorbido
+  por el modelo de distribución por etiquetas de git.
+
+### Eliminado
+
+- **Ya no está la dependencia directa `image`, que no se usaba.** Era una
+  dependencia base con cero sitios de uso en todo el workspace, que traía
+  para nada los códecs de JPEG, PNG, WebP y GIF; quitarla elimina `gif`,
+  `image-webp`, `zune-jpeg`, `color_quant` y `weezl` del árbol. El crate
+  en sí sigue apareciendo de forma transitiva, solo con su feature `png`,
+  detrás del renderizado de códigos QR de `totp-rs`. El nuevo subsistema
+  de imágenes está construido en cambio sobre los crates de OxideAV,
+  detrás de la feature `media`.
+
+### Actualización
+
+- **`Image` es ahora un tipo distinto; el validador de subidas es
+  `ImageFile`.** Rompe el código fuente de quien use la regla de subida
+  por bytes mágicos. Renómbrala en cada sitio de uso:
+  `UploadedFile<(Image, MaxSize<N>)>` pasa a ser
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. `suprnova::Image` sigue
+  resolviendo, pero ahora es el tipo del pipeline de manipulación de
+  imágenes, así que un renombrado que se te pase no compila en lugar de
+  cambiar el comportamiento en silencio.
+- **`EnvelopeOverrides` ganó un campo público
+  `after_commit: Option<bool>`.** Todas las construcciones de este
+  repositorio y de las plantillas con andamiaje usan
+  `..Default::default()`, que no necesita ningún cambio. El código que
+  construye un `EnvelopeOverrides` con un literal de struct exhaustivo
+  tiene que nombrar el campo nuevo; `after_commit: None` mantiene el
+  comportamiento actual, que es ceder a `Job::after_commit()`. Nada más
+  cambia: `after_commit()` vale `false` por defecto, así que ningún job
+  existente empieza a esperar una confirmación que antes no esperaba.
+- **`Envelope` ganó un campo público
+  `unique_lock_owner: Option<String>`.** El formato en la red no cambia -
+  el campo es `#[serde(default)]` y se omite cuando es `None`, así que los
+  sobres hacen el viaje de ida y vuelta byte a byte idénticos en ambos
+  sentidos y `schema_version` se queda en 2 -, pero cualquier código que
+  construya un `Envelope` con un literal de struct ahora tiene que
+  nombrarlo. Añade `unique_lock_owner: None` salvo que estés llevando
+  deliberadamente un bloqueo de unicidad a través del push. El código que
+  solo lee sobres, o que los construye mediante `Queue::push` y sus
+  contrapartes, no necesita ningún cambio.
+
 ## 1.3.2 - 2026-08-25
 
 > The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.

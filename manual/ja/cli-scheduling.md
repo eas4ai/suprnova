@@ -139,25 +139,30 @@ sudo systemctl start myapp-scheduler
 
 ## schedule:list
 
-登録済みのタスクをすべて、そのcron式と説明とともに出力します。
+登録されているすべてのタスクを、そのcron式、次回の実行時刻、説明とともに出力します。
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### 出力例
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
-ビルダーに `.description(...)` が連結されているタスクは、cron式の後に説明を含みます。説明のないタスクは、cronだけを表示します。
+ビルダーに `.description(...)` をチェーンしたタスクは、次回の実行時刻のあとに説明を含みます。説明のないタスクは、cronと次回の実行だけを表示します。
 
-何も登録されていない場合（`.schedule(...)` のビルダー呼び出しが欠けている、あるいは `schedule::register` がno-opである場合）:
+`next:` は、式が一致する現在時刻より後の最初の分です。決して一致し得ない式は `next: never` と出力します。時刻は、`--timezone` が別のIANAゾーンを指定しない限りUTCで表示され、未知のゾーン名は何も出力される前にエラーで終了します。
+
+`.timezone(...)` で自身のゾーンを固定したタスクは、その式が一覧のゾーンへ書き換えられ、そのゾーンのラベルが付きます - 上記の `report:generate` は `02:00 America/New_York` を要求していました。ゾーンを固定していないタスクは書かれたとおりに出力され、ラベルは付きません。書き換えが拒否される場合や、1つのタスクが複数行を占め得る場合を含む、タイムゾーンの規則の全容は[タスク スケジューリング](scheduling.md)を参照してください。
+
+何も登録されていないとき（`.schedule(...)` のビルダー呼び出しが欠けている、あるいは `schedule::register` が何もしない場合）:
 
 ```
 No scheduled tasks registered.

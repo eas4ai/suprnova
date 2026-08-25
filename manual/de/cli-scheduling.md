@@ -184,29 +184,45 @@ Fehlschlag (OOM, Parent-Kill).
 
 ## schedule:list
 
-Gibt jeden registrierten Task mit seinem Cron-Ausdruck und seiner
-Beschreibung aus.
+Gibt jeden registrierten Task mit seinem Cron-Ausdruck, der nächsten
+Laufzeit und der Beschreibung aus.
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### Beispielausgabe
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
-Tasks mit einem an den Builder gehängten `.description(...)` zeigen
-die Beschreibung nach dem Cron-Ausdruck; Tasks ohne Beschreibung
-zeigen nur den Cron-Ausdruck.
+Tasks mit einem an den Builder geketteten `.description(...)` führen die
+Beschreibung nach der nächsten Laufzeit auf; Tasks ohne Beschreibung
+zeigen nur den Cron-Ausdruck und den nächsten Lauf.
 
-Wenn nichts registriert ist (der `.schedule(...)`-Builder-Aufruf
-fehlt, oder `schedule::register` ein No-op ist):
+`next:` ist die erste Minute nach jetzt, in der der Ausdruck passt; ein
+Ausdruck, der nie passen kann, gibt `next: never` aus. Zeiten werden in
+UTC gezeigt, sofern `--timezone` keine andere IANA-Zone benennt, und ein
+unbekannter Zonenname beendet den Befehl mit einem Fehler, bevor
+irgendetwas ausgegeben wird.
+
+Ein Task, der mit `.timezone(...)` seine eigene Zone festgelegt hat,
+bekommt seinen Ausdruck in die Zone der Auflistung umgeschrieben und
+damit beschriftet - `report:generate` oben hat `02:00 America/New_York`
+verlangt. Tasks ohne festgelegte Zone werden so ausgegeben, wie sie
+geschrieben wurden, und tragen keine Beschriftung. Die Zeitzonenregeln
+stehen vollständig in [Task-Planung](scheduling.md), einschließlich der
+Fälle, in denen eine Umschreibung verweigert wird und ein Task mehrere
+Zeilen einnehmen kann.
+
+Wenn nichts registriert ist (der Builder-Aufruf `.schedule(...)` fehlt
+oder `schedule::register` tut nichts):
 
 ```
 No scheduled tasks registered.

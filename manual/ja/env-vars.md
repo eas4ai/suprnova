@@ -130,14 +130,15 @@ HTTPリスナーとリクエストボディの上限です。
 
 | 変数 | デフォルト | 型 | 用途 |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String`（`memory`、`redis`、`database`） | アクティブなキューのバックエンドです。未知の値は `warn!` をログに記録し、memoryへフォールバックします。 |
-| `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URLです（`QUEUE_DRIVER=redis` のときはドライバーにより必須です）。 |
-| `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | ファンアウトに使われるRedis Streamのキーです。 |
+| `QUEUE_DRIVER` | `memory` | `String`（`memory`、`redis`、`database`、`failover`） | 有効なキューのバックエンドです。未知の値は `warn!` を記録し、memoryへフォールバックします。`failover` はほかのものの順序付きリストをラップします - `QUEUE_FAILOVER_CONNECTIONS` を参照してください。 |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String`（カンマ区切り。例: `redis,database`） | `QUEUE_DRIVER=failover` のための、優先順位付きの接続リストです。そのドライバーが選ばれているときは必須で、値が欠けているか空白であれば起動エラーになります。`failover` を指すエントリ（ネストは不可）や、存在しないドライバーを指すエントリも同様です。各エントリは、それ自身のドライバーの変数を読みます。リストを落ちていくのはプッシュだけです。すべての読み取りとすべての確認応答は最初の接続へ向かうため、それぞれのフォールバックには自身のワーカーが必要です。 |
+| `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | RedisのURLです（`QUEUE_DRIVER=redis` のときはドライバーが要求します）。 |
+| `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | ファンアウトに使うRedis Streamのキーです。 |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | コンシューマーグループの名前です。 |
-| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | グループ内でのコンシューマー名です。並列に動くワーカーのために、ワーカーごとに設定してください。 |
-| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | クレームされたジョブが、別のコンシューマーが再クレームできるようになるまで見えなくなっている時間です。あなたの最も遅いジョブに合わせてください。 |
-| `QUEUE_DB_TABLE` | `"jobs"` | `String` | databaseドライバーのためのテーブル名です。SQL識別子として検証されます - 不正な形式の値は、SQLの組み立て時ではなく起動時に失敗します。`QUEUE_DRIVER=database` のときはドライバーにより必須です - このドライバーは、`DB::init()` が先に実行されていることも要求します。 |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | デッドレターストアが書き込むテーブルです。`QUEUE_DRIVER=database` のときは自動的にバインドされます - `queue:retry` がこれを読み、`Queue::retry_failed` がこれを必要とするため、このテーブルはそのドライバーの契約の一部です。`memory`（構造上一時的です）や `redis`（書き込むテーブルがありません）では使われません。`QUEUE_DB_TABLE` とは異なり、ここでの不正な形式の識別子は起動を失敗させ**ません** - `error!` でログに記録され、ストアはバインドされないままになるため、デッドレターにされたジョブは永続化されるのではなく、全文がログに記録されます。手作業では復旧できますが、`queue:retry` では復旧できません。 |
+| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | グループ内のコンシューマー名です。並列のワーカーのためには、ワーカーごとに設定してください。 |
+| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | 要求されたジョブが、別のコンシューマーによって再要求され得るようになるまで、どれだけ不可視のままでいるかです。あなたのいちばん遅いジョブに合わせてください。 |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | databaseドライバーのためのテーブル名です。SQLの識別子として検証されます - 不正な値は、SQLの組み立て時ではなく起動時に失敗します。`QUEUE_DRIVER=database` のときはドライバーが要求し、そのドライバーはさらに `DB::init()` が先に走っていることも要求します。 |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | デッドレターストアが書き込む先のテーブルです。`QUEUE_DRIVER=database` のときに自動的にバインドされます - `queue:retry` がこれを読み、`Queue::retry_failed` がこれを必要とするため、このテーブルはそのドライバーの契約の一部です。`memory`（構造上、揮発性です）や `redis`（書き込む先のテーブルがありません）では使われません。`QUEUE_DB_TABLE` とは違い、ここでの不正な識別子は起動を失敗**させません**: `error!` に記録し、ストアをバインドしないまま残すため、デッドレターに送られたジョブは永続化されるのではなく、そのすべてがログに記録されます。手作業では復旧できますが、`queue:retry` では復旧できません。 |
 
 ## スケジュール
 
@@ -231,6 +232,20 @@ HTTPリスナーとリクエストボディの上限です。
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URLです（`RATE_LIMIT_DRIVER=redis` のときはドライバーにより必須です）。 |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Redisにおけるキー接頭辞です。 |
 
+## 画像
+
+画像ドライバーの選択と、敵対的な入力を境界付けるデコードの上限です。範囲外の上限は、起動を失敗させるのではなく `warn!` を伴ってクランプされます。上限が0であれば、アプリケーション内のあらゆる画像を拒否してしまうからです。未知の `IMAGE_DRIVER` は、最初の使用時に有効な値を挙げて失敗します。
+
+| 変数 | デフォルト | 型 | 用途 |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String`（`oxideav`、`magick`） | 画像のバックエンドを選びます。`oxideav` はホスト側の依存関係を持たない純粋なRustです。`magick` は、より広い入力サポートのために、ホストにインストールされたImageMagick 7へシェルアウトします。大文字小文字を区別しません。 |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | デコードされた画像の幅と高さの上限で、何かが割り当てられる前に、入力自身のヘッダーに対して検査されます。リサイズの目標値にも上限をかけます。最小値は `1` です。 |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456`（256 MiB） | `u64` | デコード後のRGBAのフットプリント（`width * height * 4`）の上限です。ソースファイル自体のサイズにも上限をかけます - パスから来ても、ディスクから来ても、`Image::from_stream`（収集しながら検査します）から来ても同じです。最小値は `4` です。 |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | `magick` ドライバーが起動するバイナリです。ImageMagick 7のみで、ImageMagick 6の `convert` という名前は受け付けません。バイナリが見つからない場合は、最初の使用時に明確なエラーになります。 |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | 1回のImageMagickの起動に対する実時間の上限です。これはImageMagick自身の `-limit time` 引数であると同時に、その2秒後に子プロセスのプロセスグループ全体をkillするRust側の期限でもあります。`-limit time` を強制するのはモニターですが、デリゲートの内側で動かなくなった子プロセスは、そのモニターを決して起動させないからです。放置すればプロセスの寿命のあいだブロッキングワーカーを占有してしまう、停止したデリゲートを境界付けます。`magick` ドライバーのみ。最小値は `1` です。 |
+
+2段構えの上限の強制と、ドライバー間の選び方については、[画像](images.md)を参照してください。
+
 ## ハッシング
 
 パスワードハッシュ化のドライバーと、アルゴリズムごとのパラメータです。不正な値は、最初のハッシュ化の時点で `FrameworkError::param` を返し、無音でデフォルトになるのではなく、設定ミスを即座に明らかにします。
@@ -243,6 +258,12 @@ HTTPリスナーとリクエストボディの上限です。
 | `HASH_TIME` | `4` | `u32` | Argon2の時間 / 反復回数です。最小は `1` です。Argon専用です。 |
 | `HASH_THREADS` | `1` | `u32` | Argon2の並列度です（OWASP / libsodiumに一致します）。最小は `1` です。Argon専用です。 |
 | `HASH_VERIFY` | `false` | `bool` | trueのとき、`verify()` は `HASH_DRIVER` とは異なるアルゴリズムからのハッシュを拒否します（`Ok(false)` を返します）。デフォルトは `false` であり、ドライバーを切り替えた後も、ローテーションされるまでレガシーのbcryptハッシュがそれでも検証できるようにしています。 |
+
+## バリデーション
+
+| 変数 | デフォルト | 型 | 用途 |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30`（秒） | `u64` | `Password::uncompromised()` の Have I Been Pwned のレンジチェックに対するリクエストのタイムアウトで、デフォルトの `HibpVerifier` が構築されるたびに読み直されます。HIBPが遅い、あるいは到達できない場合も、依然としてフェイルオープンします - [バリデーション](validation.md)を参照してください。 |
 
 ## 認証フロー
 

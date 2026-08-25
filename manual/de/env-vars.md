@@ -196,14 +196,15 @@ Validierungskatalog des Frameworks.
 
 | Variable | Standard | Typ | Zweck |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`) | Aktives Queue-Backend. Unbekannte Werte protokollieren eine `warn!`-Meldung und fallen auf Memory zurück. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Aktives Queue-Backend. Unbekannte Werte protokollieren ein `warn!` und fallen auf Memory zurück. `failover` umschließt eine geordnete Liste der übrigen - siehe `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (kommagetrennt, z. B. `redis,database`) | Nach Priorität geordnete Connection-Liste für `QUEUE_DRIVER=failover`. Erforderlich, wenn dieser Treiber gewählt ist; ein fehlender oder leerer Wert ist ein Boot-Fehler, ebenso ein Eintrag, der `failover` benennt (keine Verschachtelung), oder einer, der einen nicht existierenden Treiber benennt. Jeder Eintrag liest die Variablen seines eigenen Treibers. Nur Pushes fallen durch die Liste; jedes Lesen und jede Bestätigung geht an die erste Connection, jeder Fallback braucht also seinen eigenen Worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis-URL (treiberabhängig erforderlich, wenn `QUEUE_DRIVER=redis`). |
-| `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis-Stream-Schlüssel für Fan-out. |
+| `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis-Stream-Schlüssel für das Fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Name der Consumer-Gruppe. |
-| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Consumer-Name innerhalb der Gruppe. Pro Worker setzen für parallele Worker. |
-| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | Wie lange ein beanspruchter Job unsichtbar bleibt, bevor ein anderer Consumer ihn zurückfordern kann. Auf Ihren langsamsten Job abstimmen. |
-| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Tabellenname für den Datenbank-Treiber. Validiert als SQL-Identifier - ein fehlerhafter Wert lässt den Boot fehlschlagen, nicht erst die SQL-Komposition. Treiberabhängig erforderlich, wenn `QUEUE_DRIVER=database`; der Treiber setzt außerdem voraus, dass `DB::init()` zuvor gelaufen ist. |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Tabelle, in die der Dead-Letter-Store schreibt. Wird automatisch gebunden, wenn `QUEUE_DRIVER=database` - `queue:retry` liest sie und `Queue::retry_failed` braucht sie, die Tabelle ist also Teil des Vertrags dieses Treibers. Nicht verwendet von `memory` (naturgemäß flüchtig) oder `redis` (keine Tabelle zum Schreiben). Anders als bei `QUEUE_DB_TABLE` lässt ein fehlerhafter Identifier hier den Boot **nicht** fehlschlagen: Er protokolliert auf `error!` und lässt keinen Store gebunden, sodass Dead-Letter-Jobs vollständig protokolliert statt persistiert werden. Von Hand wiederherstellbar, aber nicht über `queue:retry`. |
+| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | Consumer-Name innerhalb der Gruppe. Für parallele Worker pro Worker setzen. |
+| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | Wie lange ein beanspruchter Job unsichtbar bleibt, bevor ein anderer Consumer ihn erneut beanspruchen kann. Richten Sie das an Ihrem langsamsten Job aus. |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Tabellenname für den Datenbank-Treiber. Wird als SQL-Bezeichner validiert - ein fehlerhafter Wert scheitert beim Boot, nicht erst beim Zusammensetzen des SQL. Treiberabhängig erforderlich, wenn `QUEUE_DRIVER=database`; der Treiber verlangt außerdem, dass `DB::init()` zuvor gelaufen ist. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Tabelle, in die der Dead-Letter-Speicher schreibt. Wird bei `QUEUE_DRIVER=database` automatisch gebunden - `queue:retry` liest sie und `Queue::retry_failed` braucht sie, die Tabelle gehört also zum Vertrag dieses Treibers. Von `memory` (konstruktionsbedingt flüchtig) und `redis` (keine Tabelle zum Schreiben) nicht verwendet. Anders als bei `QUEUE_DB_TABLE` lässt ein fehlerhafter Bezeichner hier den Boot **nicht** scheitern: Er wird auf `error!` protokolliert und es bleibt kein Speicher gebunden, sodass ins Dead-Letter verschobene Jobs vollständig protokolliert statt persistiert werden. Von Hand wiederherstellbar, aber nicht durch `queue:retry`. |
 
 ## Zeitplan
 
@@ -301,6 +302,26 @@ kaputte Konfiguration zu akzeptieren.
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis-URL (treiberabhängig erforderlich, wenn `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Schlüssel-Präfix in Redis. |
 
+## Bilder
+
+Auswahl des Bildtreibers und die Dekodier-Limits, die feindliche Eingabe
+begrenzen. Limits außerhalb des gültigen Bereichs werden mit einem
+`warn!` begrenzt, statt den Boot scheitern zu lassen: Ein Limit von null
+würde jedes Bild in der Anwendung ablehnen. Ein unbekanntes
+`IMAGE_DRIVER` scheitert beim ersten Gebrauch und benennt dabei die
+gültigen Werte.
+
+| Variable | Standard | Typ | Zweck |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Wählt das Bild-Backend. `oxideav` ist pures Rust ohne Host-Abhängigkeit; `magick` ruft ein auf dem Host installiertes ImageMagick 7 auf, für breitere Eingabeunterstützung. Groß-/Kleinschreibung wird nicht beachtet. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Obergrenze für Breite und Höhe eines dekodierten Bildes, geprüft gegen den Header der Eingabe selbst, bevor irgendetwas alloziert wird. Begrenzt auch die Ziele einer Größenänderung. Minimum `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | `u64` | Obergrenze für den dekodierten RGBA-Speicherbedarf (`width * height * 4`). Begrenzt auch die Größe der Quelldatei selbst, ob sie nun aus einem Pfad, von einer Disk oder aus `Image::from_stream` kommt (das schon beim Einsammeln prüft). Minimum `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary, die der `magick`-Treiber aufruft. Nur ImageMagick 7; der Name `convert` aus ImageMagick 6 wird nicht akzeptiert. Eine fehlende Binary ist ein klarer Fehler beim ersten Gebrauch. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Echtzeit-Obergrenze für einen einzelnen ImageMagick-Aufruf. Sie ist zugleich ImageMagicks eigenes `-limit time`-Argument und die Frist auf der Rust-Seite, die zwei Sekunden später die gesamte Prozessgruppe des Kindprozesses tötet, denn `-limit time` wird von einem Monitor durchgesetzt, den ein in einem Delegate feststeckendes Kind nie erreicht. Begrenzt ein hängendes Delegate, das sonst für die Lebensdauer des Prozesses einen blockierenden Worker belegen würde. Nur `magick`-Treiber. Minimum `1`. |
+
+Wie die Limits auf zwei Ebenen durchgesetzt werden und wie Sie zwischen
+den Treibern wählen, steht unter [Bilder](images.md).
+
 ## Hashing
 
 Passwort-Hashing-Treiber und Parameter je Algorithmus. Ungültige
@@ -316,6 +337,12 @@ zu defaulten.
 | `HASH_TIME` | `4` | `u32` | Argon2-Zeit/Iterationen. Minimum `1`. Nur für Argon. |
 | `HASH_THREADS` | `1` | `u32` | Argon2-Parallelität (entspricht OWASP/libsodium). Minimum `1`. Nur für Argon. |
 | `HASH_VERIFY` | `false` | `bool` | Wenn wahr, weist `verify()` Hashes eines anderen Algorithmus als `HASH_DRIVER` zurück (liefert `Ok(false)`). Standard `false`, damit Legacy-Bcrypt-Hashes nach einem Treiberwechsel weiterhin verifizieren, bis sie rotiert wurden. |
+
+## Validierung
+
+| Variable | Standard | Typ | Zweck |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (Sekunden) | `u64` | Anfrage-Timeout für die Have-I-Been-Pwned-Range-Prüfung von `Password::uncompromised()`, bei jeder Konstruktion eines Standard-`HibpVerifier` frisch gelesen. Ein langsames oder nicht erreichbares HIBP lässt das Passwort weiterhin durchgehen - siehe [Validierung](validation.md). |
 
 ## Auth-Flows
 

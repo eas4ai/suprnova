@@ -471,12 +471,12 @@ um validador (ou uma tupla de validadores) de
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // limite de 5 MiB
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // limite de 5 MiB
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -505,12 +505,15 @@ Validadores embutidos em `suprnova::http::upload::validators`:
 
 - `MaxSize<N>` - faz short-circuit na fronteira do byte quando o total
   acumulado excede `N` bytes (HTTP 413).
-- `Image` - rejeita partes cujos magic bytes não declarem `image/*`.
+- `ImageFile` - rejeita partes cujos magic bytes não declarem `image/*`.
+  (Nomeado a partir da própria regra do Laravel; o nome simples `Image`
+  pertence ao pipeline de manipulação de imagens - veja
+  [Imagens](images.md).)
 - `MimeType<L>` - aceita uma allowlist fixa fornecida pelo seu próprio
   tipo `MimeAllowlist`.
 - `()` - no-op; `UploadedFile<()>` aceita quaisquer bytes.
 
-Validadores se compõem como tuplas: `(Image, MaxSize<5_242_880>)` roda
+Validadores se compõem como tuplas: `(ImageFile, MaxSize<5_242_880>)` roda
 os dois, fazendo short-circuit na primeira falha.
 
 ### Limites por campo e limites de array
