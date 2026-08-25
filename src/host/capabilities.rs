@@ -17,6 +17,10 @@ macro_rules! host_fingerprint {
             pub fn from_bytes(bytes: &[u8]) -> Result<Self, IdentityError> {
                 ContentDigest::from_bytes(bytes).map(Self)
             }
+
+            pub(crate) const fn digest(&self) -> &ContentDigest {
+                &self.0
+            }
         }
 
         impl fmt::Debug for $name {

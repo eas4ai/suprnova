@@ -16,6 +16,7 @@ const HKDF_SALT_V1: &[u8] = b"suprnova-live/snapshot-hkdf/v1";
 const SEED_INFO_V1: &[u8] = b"suprnova-live/seed-signature/v1";
 const INSTANCE_INFO_V1: &[u8] = b"suprnova-live/instance-signature/v1";
 const CHILD_PARAMETERS_INFO_V1: &[u8] = b"suprnova-live/child-params-signature/v1";
+const UPLOAD_GRANT_INFO_V1: &[u8] = b"suprnova-live/upload-grant/v1";
 
 /// Versioned purpose used to derive a capability MAC key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +27,8 @@ pub enum SnapshotPurpose {
     InstanceV1,
     /// Parent-to-child parameter capability schema version 1.
     ChildParametersV1,
+    /// Temporary upload transfer-grant schema version 1.
+    UploadGrantV1,
 }
 
 impl SnapshotPurpose {
@@ -34,6 +37,7 @@ impl SnapshotPurpose {
             Self::SeedV1 => SEED_INFO_V1,
             Self::InstanceV1 => INSTANCE_INFO_V1,
             Self::ChildParametersV1 => CHILD_PARAMETERS_INFO_V1,
+            Self::UploadGrantV1 => UPLOAD_GRANT_INFO_V1,
         }
     }
 }

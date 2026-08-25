@@ -52,6 +52,8 @@ pub mod snapshot;
 pub mod state;
 /// Closed low-cardinality observability labels.
 pub mod telemetry;
+/// Opaque temporary upload identities and secret transfer capabilities.
+pub mod upload;
 /// Bounded localizable validation and host-neutral validation ports.
 pub mod validation;
 pub mod view;
