@@ -49,6 +49,26 @@ pub enum UploadErrorKind {
     ScopeMismatch,
     /// The requested upload protocol is not implemented.
     UnsupportedProtocol,
+    /// Encoded upload control input exceeded its byte budget.
+    InputTooLarge,
+    /// An upload control object repeated a JSON field.
+    DuplicateField,
+    /// The upload protocol operation name is not implemented.
+    UnsupportedOperation,
+    /// An upload control object contained a field outside its closed schema.
+    UnknownField,
+    /// A required upload control field was absent.
+    MissingField,
+    /// An upload control field had the wrong type, grammar, range, or value.
+    InvalidField,
+    /// The expected upload revision or retry identity conflicts with current state.
+    UploadConflict,
+    /// The requested state transition is not legal from the current state.
+    InvalidTransition,
+    /// The upload revision cannot advance beyond its integer bound.
+    RevisionExhausted,
+    /// The bounded retained idempotency outcome history is full.
+    IdempotencyHistoryFull,
 }
 
 impl UploadErrorKind {
@@ -61,7 +81,17 @@ impl UploadErrorKind {
             Self::InvalidGrant => "invalid_transfer_grant",
             Self::GrantExpired => "transfer_grant_expired",
             Self::ScopeMismatch => "transfer_grant_scope_mismatch",
-            Self::UnsupportedProtocol => "unsupported_upload_protocol",
+            Self::UnsupportedProtocol => "unsupported_protocol",
+            Self::InputTooLarge => "input_too_large",
+            Self::DuplicateField => "duplicate_field",
+            Self::UnsupportedOperation => "unsupported_operation",
+            Self::UnknownField => "unknown_field",
+            Self::MissingField => "missing_field",
+            Self::InvalidField => "invalid_field",
+            Self::UploadConflict => "upload_conflict",
+            Self::InvalidTransition => "invalid_upload_transition",
+            Self::RevisionExhausted => "upload_revision_exhausted",
+            Self::IdempotencyHistoryFull => "upload_idempotency_history_full",
         }
     }
 }
@@ -73,7 +103,7 @@ pub struct UploadError {
 }
 
 impl UploadError {
-    const fn new(kind: UploadErrorKind) -> Self {
+    pub(crate) const fn new(kind: UploadErrorKind) -> Self {
         Self { kind }
     }
 

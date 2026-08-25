@@ -47,6 +47,17 @@ impl InputLimits {
         })
     }
 
+    /// Returns the locked upload protocol-v1 input limits.
+    #[must_use]
+    pub const fn upload_protocol_v1() -> Self {
+        Self {
+            max_bytes: 16_384,
+            max_depth: 8,
+            max_entries: 64,
+            max_string_bytes: 4_096,
+        }
+    }
+
     /// Maximum encoded input bytes accepted before parsing.
     #[must_use]
     pub const fn max_bytes(self) -> usize {
@@ -94,3 +105,221 @@ impl fmt::Display for LimitConfigurationError {
 }
 
 impl Error for LimitConfigurationError {}
+
+/// Raw configurable upload bounds validated as one coherent profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UploadLimitConfig {
+    /// Maximum selected files bound to one declared upload field.
+    pub max_files_per_field: usize,
+    /// Maximum temporary uploads retained for one normalized host scope.
+    pub max_pending_per_scope: usize,
+    /// Maximum authoritative bytes for one file.
+    pub max_file_bytes: u64,
+    /// Maximum aggregate pending bytes for one normalized host scope.
+    pub max_aggregate_bytes: u64,
+    /// Maximum bytes accepted by one chunk request.
+    pub max_chunk_bytes: usize,
+    /// Maximum aggregate chunk bytes admitted to process memory.
+    pub max_in_flight_bytes: usize,
+    /// Maximum simultaneously active transfers for one resource owner.
+    pub max_concurrent_transfers: usize,
+    /// Maximum creations admitted during one rate window.
+    pub max_creations_per_window: usize,
+    /// Creation-rate window duration in milliseconds.
+    pub creation_window_ms: u64,
+    /// Maximum retries admitted for one operation.
+    pub max_retries: u32,
+    /// Maximum temporary-upload lifetime in milliseconds.
+    pub max_age_ms: u64,
+    /// Maximum authoritative validation duration in milliseconds.
+    pub max_validation_ms: u64,
+    /// Maximum scanner duration in milliseconds.
+    pub max_scan_ms: u64,
+    /// Maximum temporary storage bytes for one configured provider scope.
+    pub max_storage_bytes: u64,
+    /// Maximum records processed by one cleanup batch.
+    pub max_cleanup_batch: usize,
+    /// Maximum retained retry outcomes for one upload record.
+    pub max_idempotency_outcomes: usize,
+}
+
+impl UploadLimitConfig {
+    /// Returns the daemon-free reference profile used by conformance tests.
+    #[must_use]
+    pub const fn reference() -> Self {
+        Self {
+            max_files_per_field: 16,
+            max_pending_per_scope: 128,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_aggregate_bytes: 256 * 1024 * 1024,
+            max_chunk_bytes: 256 * 1024,
+            max_in_flight_bytes: 8 * 1024 * 1024,
+            max_concurrent_transfers: 8,
+            max_creations_per_window: 64,
+            creation_window_ms: 60_000,
+            max_retries: 16,
+            max_age_ms: 24 * 60 * 60 * 1_000,
+            max_validation_ms: 30_000,
+            max_scan_ms: 120_000,
+            max_storage_bytes: 1024 * 1024 * 1024,
+            max_cleanup_batch: 256,
+            max_idempotency_outcomes: 64,
+        }
+    }
+}
+
+impl Default for UploadLimitConfig {
+    fn default() -> Self {
+        Self::reference()
+    }
+}
+
+/// Validated finite limits for upload admission, work, retention, and cleanup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UploadLimits(UploadLimitConfig);
+
+impl UploadLimits {
+    /// Validates a non-zero internally coherent profile under engine ceilings.
+    pub fn new(config: UploadLimitConfig) -> Result<Self, LimitConfigurationError> {
+        const TIB: u64 = 1024 * 1024 * 1024 * 1024;
+        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+
+        let non_zero = config.max_files_per_field > 0
+            && config.max_pending_per_scope > 0
+            && config.max_file_bytes > 0
+            && config.max_aggregate_bytes > 0
+            && config.max_chunk_bytes > 0
+            && config.max_in_flight_bytes > 0
+            && config.max_concurrent_transfers > 0
+            && config.max_creations_per_window > 0
+            && config.creation_window_ms > 0
+            && config.max_retries > 0
+            && config.max_age_ms > 0
+            && config.max_validation_ms > 0
+            && config.max_scan_ms > 0
+            && config.max_storage_bytes > 0
+            && config.max_cleanup_batch > 0
+            && config.max_idempotency_outcomes > 0;
+        let coherent = config.max_pending_per_scope >= config.max_files_per_field
+            && config.max_file_bytes >= config.max_chunk_bytes as u64
+            && config.max_aggregate_bytes >= config.max_file_bytes
+            && config.max_in_flight_bytes >= config.max_chunk_bytes
+            && config.max_storage_bytes >= config.max_aggregate_bytes;
+        let finite = config.max_files_per_field <= 1_024
+            && config.max_pending_per_scope <= 100_000
+            && config.max_file_bytes <= TIB
+            && config.max_aggregate_bytes <= 16 * TIB
+            && config.max_chunk_bytes <= 64 * 1024 * 1024
+            && config.max_in_flight_bytes <= 1024 * 1024 * 1024
+            && config.max_concurrent_transfers <= 1_024
+            && config.max_creations_per_window <= 1_000_000
+            && config.creation_window_ms <= DAY_MS
+            && config.max_retries <= 10_000
+            && config.max_age_ms <= 30 * DAY_MS
+            && config.max_validation_ms <= DAY_MS
+            && config.max_scan_ms <= DAY_MS
+            && config.max_storage_bytes <= 64 * TIB
+            && config.max_cleanup_batch <= 100_000
+            && config.max_idempotency_outcomes <= 100_000;
+        if !non_zero || !coherent || !finite {
+            return Err(LimitConfigurationError);
+        }
+        Ok(Self(config))
+    }
+
+    /// Returns the per-field file count bound.
+    #[must_use]
+    pub const fn max_files_per_field(self) -> usize {
+        self.0.max_files_per_field
+    }
+
+    /// Returns the per-scope pending upload count bound.
+    #[must_use]
+    pub const fn max_pending_per_scope(self) -> usize {
+        self.0.max_pending_per_scope
+    }
+
+    /// Returns the per-file byte bound.
+    #[must_use]
+    pub const fn max_file_bytes(self) -> u64 {
+        self.0.max_file_bytes
+    }
+
+    /// Returns the aggregate pending byte bound.
+    #[must_use]
+    pub const fn max_aggregate_bytes(self) -> u64 {
+        self.0.max_aggregate_bytes
+    }
+
+    /// Returns the per-request chunk byte bound.
+    #[must_use]
+    pub const fn max_chunk_bytes(self) -> usize {
+        self.0.max_chunk_bytes
+    }
+
+    /// Returns the admitted in-flight byte bound.
+    #[must_use]
+    pub const fn max_in_flight_bytes(self) -> usize {
+        self.0.max_in_flight_bytes
+    }
+
+    /// Returns the active transfer concurrency bound.
+    #[must_use]
+    pub const fn max_concurrent_transfers(self) -> usize {
+        self.0.max_concurrent_transfers
+    }
+
+    /// Returns the creation count allowed in one rate window.
+    #[must_use]
+    pub const fn max_creations_per_window(self) -> usize {
+        self.0.max_creations_per_window
+    }
+
+    /// Returns the creation-rate window in milliseconds.
+    #[must_use]
+    pub const fn creation_window_ms(self) -> u64 {
+        self.0.creation_window_ms
+    }
+
+    /// Returns the per-operation retry bound.
+    #[must_use]
+    pub const fn max_retries(self) -> u32 {
+        self.0.max_retries
+    }
+
+    /// Returns the temporary-upload lifetime bound in milliseconds.
+    #[must_use]
+    pub const fn max_age_ms(self) -> u64 {
+        self.0.max_age_ms
+    }
+
+    /// Returns the validation-time bound in milliseconds.
+    #[must_use]
+    pub const fn max_validation_ms(self) -> u64 {
+        self.0.max_validation_ms
+    }
+
+    /// Returns the scanner-time bound in milliseconds.
+    #[must_use]
+    pub const fn max_scan_ms(self) -> u64 {
+        self.0.max_scan_ms
+    }
+
+    /// Returns the configured temporary-storage byte bound.
+    #[must_use]
+    pub const fn max_storage_bytes(self) -> u64 {
+        self.0.max_storage_bytes
+    }
+
+    /// Returns the cleanup batch count bound.
+    #[must_use]
+    pub const fn max_cleanup_batch(self) -> usize {
+        self.0.max_cleanup_batch
+    }
+
+    /// Returns the retained idempotency outcome bound.
+    #[must_use]
+    pub const fn max_idempotency_outcomes(self) -> usize {
+        self.0.max_idempotency_outcomes
+    }
+}

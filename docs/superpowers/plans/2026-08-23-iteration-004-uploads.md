@@ -199,6 +199,7 @@
       Cancel,
       Reject,
       Expire,
+      Fail,
   }
   ```
 
@@ -210,6 +211,8 @@
   verifying and later validation chooses `Accept` or `Reject`; cancel maps to
   `Cancel`; status and reacquire do not transition. Finalize actions map to
   `BeginFinalize` and `CommitFinalize`; cleanup maps to `Expire`. A compile-time
+  provider/host failure maps to `Fail`, making the locked `failed` terminal state
+  reachable without changing the existing fixture bytes. A compile-time
   exhaustive match and fixture test fail when either layer gains an unmapped
   variant.
 
