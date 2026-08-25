@@ -303,3 +303,242 @@ async fn routed_envelope_carries_the_queue_on_the_wire() {
         "a routed job must carry its queue so the driver can honor it"
     );
 }
+
+// ============================================================================
+// Queue::forward - name-keyed redirects (Laravel #61188)
+// ============================================================================
+
+job!(ForwardedJob, "routing::ForwardedJob", queue = "fwd_src");
+job!(
+    ForwardRoutedJob,
+    "routing::ForwardRoutedJob",
+    queue = "fwd_declared"
+);
+job!(
+    ForwardScopedJob,
+    "routing::ForwardScopedJob",
+    queue = "fwd_scoped_src"
+);
+job!(ForwardDefaultJob, "routing::ForwardDefaultJob");
+job!(
+    ForwardChainedJob,
+    "routing::ForwardChainedJob",
+    queue = "fwd_chain_src"
+);
+
+#[tokio::test]
+#[serial]
+async fn a_forward_moves_the_push_to_the_destination_queue() {
+    Queue::forward("fwd_src", "fwd_dest");
+    let env = pushed_envelope(ForwardedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_dest"),
+        "a forwarded queue name must reach the driver rewritten"
+    );
+    let fwd = Queue::forward_for("fwd_src").expect("forward should be registered");
+    assert_eq!(fwd.queue.as_deref(), Some("fwd_dest"));
+    assert_eq!(fwd.connection, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_route_resolves_first_and_the_forward_rewrites_its_result() {
+    // The job declares `fwd_declared`; the operator routes it to `fwd_routed`;
+    // `fwd_routed` is then forwarded to `fwd_final`. Only the last hop applies
+    // to the route's output - forwards are a single lookup, never a chain.
+    Queue::route::<ForwardRoutedJob>(None, Some("fwd_routed"));
+    Queue::forward("fwd_routed", "fwd_final");
+    Queue::forward("fwd_declared", "fwd_never");
+    let env = pushed_envelope(ForwardRoutedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_final"),
+        "the forward applies to what routing resolved, not to the job's own declaration"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_forward_scoped_to_another_connection_is_inert() {
+    Queue::forward_on("fwd_scoped_src", "fwd_scoped_dest", "some-other-connection");
+    let env = pushed_envelope(ForwardScopedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_scoped_src"),
+        "a forward gated on a connection this push is not on must not fire"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn forwarding_the_default_queue_catches_jobs_that_named_none() {
+    Queue::forward("default", "fwd_from_default");
+    let env = pushed_envelope(ForwardDefaultJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_from_default"),
+        "an envelope with no queue means `default`, which a forward on `default` must catch"
+    );
+
+    // `default` is the one source name a test cannot make unique, and there is
+    // no un-forward. Re-registering it onto itself is the documented no-op
+    // form, so the rest of this binary sees `default` passing through again.
+    Queue::forward("default", "default");
+    let env = pushed_envelope(ForwardDefaultJob).await;
+    assert_eq!(
+        env.queue, None,
+        "a forward onto a queue's own name is the identity, so an envelope that \
+         named no queue must still put no queue on the wire"
+    );
+}
+
+/// A chain builds its envelopes through `ChainLink`, not through
+/// `build_envelope`, so the forward has to be applied there too. Without it a
+/// chained job would be pushed to the source queue while every worker started
+/// on that source queue is claiming the destination - the exact stranding this
+/// feature exists to prevent.
+#[tokio::test]
+#[serial]
+async fn a_chained_job_follows_the_forward_too() {
+    Queue::forward("fwd_chain_src", "fwd_chain_dest");
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::chain()
+        .add(ForwardChainedJob)
+        .expect("add link")
+        .dispatch()
+        .await
+        .expect("dispatch chain");
+    let env = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop should succeed")
+        .expect("chain head should be queued")
+        .envelope;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_chain_dest"),
+        "a chained job must follow the forward, or the chain strands on a queue \
+         no worker claims"
+    );
+}
+
+/// The half that makes forwarding usable rather than a way to strand work: a
+/// worker told to drain the source queue must follow the forward, or the
+/// destination accumulates jobs nobody claims.
+#[tokio::test]
+#[serial]
+async fn a_worker_started_on_the_source_queue_drains_the_destination() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use suprnova::App;
+    use suprnova::cache::{Cache, CacheStore, InMemoryCache};
+    use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Serialize, Deserialize)]
+    struct ForwardDrainJob;
+    static DRAIN_RUNS: AtomicU32 = AtomicU32::new(0);
+
+    #[suprnova::async_trait]
+    impl Job for ForwardDrainJob {
+        fn job_name() -> &'static str {
+            "routing::ForwardDrainJob"
+        }
+        fn queue() -> Option<&'static str> {
+            Some("fwd_drain_src")
+        }
+        async fn handle(self) -> Result<(), FrameworkError> {
+            DRAIN_RUNS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    if !Cache::is_initialized() {
+        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    }
+    DRAIN_RUNS.store(0, Ordering::SeqCst);
+    register_job::<ForwardDrainJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::forward("fwd_drain_src", "fwd_drain_dest");
+    Queue::push(ForwardDrainJob).await.expect("push");
+
+    // The envelope now carries `fwd_drain_dest`, so a worker that honoured its
+    // `--queue` list literally would never see it.
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: vec!["fwd_drain_src".to_string()],
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..300 {
+        if DRAIN_RUNS.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    handle.abort();
+    assert_eq!(
+        DRAIN_RUNS.load(Ordering::SeqCst),
+        1,
+        "a forward must move the worker's claim too, or the destination queue \
+         accumulates work nobody drains"
+    );
+}
+
+job!(
+    ForwardOverrideJob,
+    "routing::ForwardOverrideJob",
+    queue = "fwd_ovr_src"
+);
+
+/// A per-push connection override outranks routing, so it has to move the gate
+/// a connection-scoped forward is evaluated against. Miss that and the push
+/// stays on the source queue while a worker on the same connection is already
+/// claiming the destination - a forward applied to one half of the pair.
+#[tokio::test]
+#[serial]
+async fn a_per_push_connection_override_moves_the_gate_of_a_scoped_forward() {
+    use suprnova::queue::EnvelopeOverrides;
+
+    Queue::forward_on("fwd_ovr_src", "fwd_ovr_dest", "fwd-ovr-conn");
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::push_with(
+        ForwardOverrideJob,
+        EnvelopeOverrides {
+            connection: Some("fwd-ovr-conn".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("push should succeed");
+    let env = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop should succeed")
+        .expect("an envelope should be queued")
+        .envelope;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_ovr_dest"),
+        "a push that declared it is on the gated connection must follow the forward"
+    );
+
+    // And the other direction: without the override the push is not on that
+    // connection, so the same forward stays inert.
+    let env = pushed_envelope(ForwardOverrideJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_ovr_src"),
+        "the gate must still hold for a push that never named the connection"
+    );
+}

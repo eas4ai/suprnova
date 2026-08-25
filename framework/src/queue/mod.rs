@@ -183,6 +183,105 @@ impl Queue {
         routing::route_for(J::job_name())
     }
 
+    /// Redirect every job that resolves to the queue named `from` onto `to`.
+    ///
+    /// Where [`Queue::route`] is keyed by job type, this is keyed by queue
+    /// *name*: it is the operational lever for draining one pool through
+    /// another without touching any job's code or any route. Mirrors Laravel's
+    /// `Queue::forward($queue, $to)`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Queue;
+    /// # fn ex() {
+    /// // Every push that resolved to `default` now lands on `high`, and a
+    /// // worker started with `--queue=default` drains `high` instead.
+    /// Queue::forward("default", "high");
+    /// # }
+    /// ```
+    ///
+    /// The redirect applies on **both** sides. On the push side it rewrites the
+    /// name after [`Queue::route`] and the job's own [`Job::queue`] have had
+    /// their say, and after a per-push [`EnvelopeOverrides::queue`] if one was
+    /// given. On the pop side it rewrites the worker's `--queue` list, so the
+    /// destination cannot accumulate work no worker claims. A worker started
+    /// with no `--queue` at all already drains everything and is unaffected.
+    ///
+    /// A forward is a single lookup, not a chain: with `a -> b` and `b -> c`
+    /// registered, a push that resolved to `a` lands on `b`. A forward that
+    /// would close a loop is refused for that reason. Forwarding a queue onto
+    /// its own name is the identity - no redirect at all - which is how a
+    /// registered forward is neutralised.
+    ///
+    /// Only future pushes are redirected. Envelopes already sitting on `from`
+    /// stay there, and the worker that used to drain them is now claiming `to`,
+    /// so drain the source pool before you forward it.
+    ///
+    /// Pausing is evaluated *before* the redirect, on the names the worker was
+    /// started with - so `Queue::pause(conn, "default")` still stops a worker
+    /// started on `--queue=default` even while `default` is forwarded. Laravel
+    /// orders it the same way.
+    ///
+    /// Infallible by design to match Laravel's spelling. The failures it
+    /// swallows are a refused cycle and a registry left unavailable by a
+    /// previous caller panicking while holding its lock; both are logged and
+    /// the forward is dropped. Use [`Queue::try_forward`] when you need to
+    /// handle them.
+    pub fn forward(from: &str, to: &str) {
+        Self::log_forward_failure(from, Self::try_forward(from, to, None));
+    }
+
+    /// [`Queue::forward`], restricted to one connection name.
+    ///
+    /// The forward fires only when the push (or the worker) is on
+    /// `connection`; on any other connection it is inert and the queue name
+    /// passes through unchanged.
+    ///
+    /// # What this cannot do
+    ///
+    /// Laravel's `forward($queue, $to, $connection)` can also move a forwarded
+    /// queue onto a *different* connection, because its `QueueManager` resolves
+    /// a driver per connection name. Suprnova has one process-global driver and
+    /// the connection name only labels lifecycle events (see this module's
+    /// docs), so `connection` here is a **gate**, never a destination: it
+    /// decides whether the queue-name redirect applies, and the push still
+    /// reaches the same driver either way.
+    pub fn forward_on(from: &str, to: &str, connection: &str) {
+        Self::log_forward_failure(from, Self::try_forward(from, to, Some(connection)));
+    }
+
+    /// Fallible sibling of [`Queue::forward`] / [`Queue::forward_on`].
+    ///
+    /// `connection` is `None` for "every connection". Returns `Err` when the
+    /// forward would close a cycle, or when the forward registry's lock is
+    /// poisoned.
+    pub fn try_forward(
+        from: &str,
+        to: &str,
+        connection: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        routing::try_set_forward(from, to, connection)
+    }
+
+    /// The forward registered for the queue named `from`, if any.
+    ///
+    /// The returned [`QueueRoute`]'s `queue` is the destination and its
+    /// `connection` is the gate, `None` meaning "every connection".
+    pub fn forward_for(from: &str) -> Option<routing::QueueRoute> {
+        routing::forward_for(from)
+    }
+
+    /// Shared failure log for the two infallible forward setters, so the
+    /// message stays identical whichever spelling registered the forward.
+    fn log_forward_failure(from: &str, result: Result<(), FrameworkError>) {
+        if let Err(e) = result {
+            tracing::error!(
+                queue = from,
+                error = %e,
+                "queue forward registration failed; the queue will not be redirected"
+            );
+        }
+    }
+
     /// Push a typed job. Returns when the envelope is committed to the
     /// driver (NOT when the job runs).
     ///
@@ -367,7 +466,7 @@ impl Queue {
             .clone()
             .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
         let mut env = envelope_for::<J>(&job, available_at)?;
-        apply_overrides(&mut env, &overrides);
+        apply_overrides::<J>(&mut env, &overrides, &connection);
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
             connection: connection.clone(),
@@ -1270,9 +1369,25 @@ fn envelope_for<J: Job>(
 /// Overlay `overrides` onto an already-resolved envelope, after
 /// `envelope_for` - see [`EnvelopeOverrides`]. No schema change: every
 /// touched field already exists on the frozen envelope.
-fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides) {
-    if let Some(queue) = &overrides.queue {
-        env.queue = Some(queue.clone());
+///
+/// `connection` is the name this push resolved to, needed because an explicit
+/// queue override replaces the name `build_envelope` already forwarded, so the
+/// override has to be forwarded in its place. Forwarding the same envelope
+/// twice would make forwards transitive, which they are not - so both branches
+/// below re-run the redirect from the *pre-forward* name and overwrite, rather
+/// than forwarding what `build_envelope` produced.
+///
+/// The second branch is the one that is easy to miss. `build_envelope` gates a
+/// connection-scoped forward on the connection *routing* resolved, but a
+/// per-push `EnvelopeOverrides::connection` outranks routing, so the gate it
+/// applied was evaluated against the wrong name. Re-running it here is what
+/// stops `Queue::forward_on` from being applied to the worker's claim list and
+/// not to the push - the half-applied forward that strands work.
+fn apply_overrides<J: Job>(env: &mut Envelope, overrides: &EnvelopeOverrides, connection: &str) {
+    let regate = overrides.connection.is_some() && routing::has_forwards();
+    if overrides.queue.is_some() || regate {
+        let resolved = overrides.queue.clone().or_else(routing::resolve_queue::<J>);
+        env.queue = routing::forwarded_queue(resolved.as_deref(), connection);
     }
     if let Some(max_tries) = overrides.max_tries {
         env.max_tries = max_tries;
@@ -1298,11 +1413,20 @@ pub(crate) fn build_envelope<J: Job>(
     let payload = serde_json::to_value(job)
         .map_err(|e| FrameworkError::internal(format!("encode job: {e}")))?;
     let timeout_secs = J::timeout().map(|d| d.as_secs());
+    // Routing decides the name; the forwards map then redirects it, exactly
+    // where Laravel's driver-level `getQueue()` calls `resolveQueue()`. Gated
+    // on `has_forwards` so a deployment that never forwards does not pay a
+    // connection resolution on every push.
+    let mut queue = routing::resolve_queue::<J>();
+    if routing::has_forwards() {
+        let connection = routing::resolve_connection::<J>(Queue::connection_name());
+        queue = routing::forwarded_queue(queue.as_deref(), &connection);
+    }
     Ok(Envelope {
         schema_version: CURRENT_SCHEMA_VERSION,
         id: Uuid::new_v4(),
         job_name: J::job_name().to_string(),
-        queue: routing::resolve_queue::<J>(),
+        queue,
         payload,
         dispatched_at: Utc::now(),
         available_at,

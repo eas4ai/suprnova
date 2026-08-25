@@ -689,6 +689,51 @@ Then dedicate a worker to it:
 A job with no route belongs to `default`, so `--queue=default` drains
 unrouted work rather than stranding it.
 
+### Forwarding a whole queue
+
+`Queue::route` is keyed by job type. When you want to drain one pool through
+another - retiring a queue, absorbing a backlog, moving work off a pool you are
+about to take down - key the redirect by queue name instead:
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::forward("default", "high");
+Queue::forward_on("exports", "heavy", "redis");   // only on the `redis` connection
+```
+
+The redirect applies on both sides, which is what keeps it from stranding work:
+
+- **On the push side**, the name is rewritten after routing and the job's own
+  `Job::queue` have had their say, and after a per-push `EnvelopeOverrides`
+  queue if you passed one.
+- **On the pop side**, a worker started with `--queue=default` drains `high`.
+  Without that half, the destination queue would collect jobs no worker claims.
+
+A worker started with no `--queue` at all already drains everything, so a
+forward changes nothing for it. Forwarding `default` catches jobs that named no
+queue, because an unrouted job belongs to `default`.
+
+A forward is a single lookup, never a chain. With `a -> b` and `b -> c`
+registered, a push that resolved to `a` lands on `b`. Registering a forward that
+closes a loop is an error rather than a redirect, because a loop can only mean
+the chaining that forwards never do. Forwarding a queue onto its own name is the
+identity - no redirect at all - which is how you neutralise a forward you
+already registered.
+
+Only future pushes move. Envelopes already sitting on the source queue stay
+there, and the worker that used to drain them is now claiming the destination,
+so drain the source pool before you forward it. The same applies to
+`queue:retry`: a failed job is re-enqueued onto the queue it died on.
+
+Pausing is evaluated before the redirect, on the names the worker was started
+with. `Queue::pause(&connection, "default")` still stops a worker started on
+`--queue=default`, even while `default` is forwarded to `high`.
+
+Read a registered forward back with `Queue::forward_for("default")`, which
+returns the destination in `queue` and the connection gate in `connection`.
+
 ### Why Suprnova diverges
 
 Laravel's `Queue::route(...)` takes a class string; Suprnova takes the job as a
@@ -703,6 +748,17 @@ wrong pool consumes the wrong jobs - so the misconfiguration is made loud at
 the first poll. The memory and database drivers filter natively; a driver that
 doesn't - the Redis driver is one, since a single stream consumer group has no
 per-queue storage - will error rather than mislead.
+
+`Queue::forward` ports the queue-to-queue half of Laravel's `Queue::forward`
+in full, and only that half. Laravel's third argument can move a forwarded queue
+onto a different *connection*, because its queue manager resolves a driver per
+connection name. Suprnova has one process-global driver and a connection name
+only labels lifecycle events, so `Queue::forward_on(from, to, connection)`
+treats the connection as a **gate** - it decides whether the queue-name redirect
+applies - and never as a destination. For the same reason `to` is required here,
+while Laravel's is optional: an omitted `to` in Laravel means "move only the
+connection", which is precisely the dimension Suprnova cannot honor, so a
+`forward(from, None)` would be a no-op dressed as a configuration change.
 
 ### The `jobs` table
 

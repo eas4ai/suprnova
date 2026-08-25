@@ -8,6 +8,20 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
+  keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -
+  the lever for retiring a pool, absorbing a backlog, or moving work off a pool you
+  are about to take down, without touching a single job or route. It applies on
+  both sides: new pushes that resolved to `default` land on `high`, *and* a worker
+  started with `--queue=default` drains `high`, so the destination cannot collect
+  work nobody claims. Forwarding `default` catches jobs that named no queue. A
+  forward is a single lookup, never a chain, and a forward that closes a loop is
+  refused. Pausing is still evaluated on the names a worker was started with, so
+  `Queue::pause(&connection, "default")` stops that worker even while `default` is
+  forwarded. `Queue::forward_on(from, to, connection)` restricts a forward to one
+  connection name, and `Queue::forward_for(from)` reads one back.
+  `Queue::try_forward` is the fallible sibling.
+
 - **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
 - **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
