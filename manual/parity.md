@@ -174,6 +174,7 @@ gaps as of the shipped framework.
 | Redis | Used by drivers (cache/queue/rate-limit) - no separate `Redis::*` facade | diverged | Reach for `redis` crate directly when you need ad-hoc commands; cache/queue/rate-limit cover 95% of typical use |
 | MongoDB | No first-party adapter yet | not yet | Use `mongodb` crate directly via `App::bind` |
 | Query Builder | `Builder<M>` with `db_where` / `or_where` / `where_in` / `where_between` / `where_null` / `where_has` / `with` / `with_count` / `order_by` / `group_by` / `having` / `paginate` / etc. | shipped | [Queries](queries.md) |
+| `whereBinary()` family | `Builder::where_binary` / `or_where_binary` / `where_not_binary` / `or_where_not_binary`, and `DB::table(...).where_binary(...)` | shipped | MySQL and MariaDB emit `= binary`; Postgres and SQLite return an error instead of a collation-dependent match. [Queries](queries.md) |
 | Pagination | `LengthAwarePaginator`, `Paginator` (simple), `CursorPaginator` | shipped | All three serialise to Laravel-shape JSON. [Pagination](pagination.md) |
 | Migrations | `#[derive(DeriveMigrationName)] struct M;` + `up`/`down` + `Migrator` | shipped | Run via `suprnova migrate`/`migrate:rollback`/`migrate:status`/`migrate:fresh`. [Migrations](migrations.md), [CLI Migrations](cli-migrations.md) |
 | Seeders | `Seeder` trait + `db:seed` subcommand | shipped | Per-model factories. [Seeding](seeding.md) |

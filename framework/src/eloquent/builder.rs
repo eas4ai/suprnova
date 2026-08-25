@@ -164,6 +164,12 @@ pub(crate) enum WhereTerm {
     NotNull(String),
     Like(String, String),
     NotLike(String, String),
+    /// Byte-exact comparison from [`Builder::filter_binary`] and its
+    /// family: `(column, value, negated)`. Renders as MySQL's
+    /// `col = binary ?` / `col != binary ?`; every other backend
+    /// refuses at render time (see
+    /// `crate::database::binary_comparison_unsupported`).
+    Binary(String, String, bool),
     Column(String, String),
     Raw(String, Vec<Value>),
     JsonContains(String, Value),
@@ -746,6 +752,7 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
         | WhereTerm::NotNull(c)
         | WhereTerm::Like(c, _)
         | WhereTerm::NotLike(c, _)
+        | WhereTerm::Binary(c, _, _)
         | WhereTerm::JsonContains(c, _)
         | WhereTerm::DatePart(_, c, _) => {
             validate_identifier(c)?;
@@ -1418,6 +1425,73 @@ impl<M> Builder<M> {
     #[doc(alias = "filter_not_like")]
     pub fn where_not_like(self, col: impl IntoColumn, pattern: impl Into<String>) -> Self {
         self.filter_not_like(col, pattern)
+    }
+
+    // ---- Byte-exact comparison (Laravel `whereBinary`) -------------------
+
+    /// `WHERE col = binary val` - compare the raw bytes instead of the
+    /// column's collation, so the match is case- and accent-sensitive.
+    ///
+    /// **MySQL and MariaDB only.** Postgres and SQLite have no `binary`
+    /// operator modifier; on those backends every terminal on this
+    /// builder returns `Err` when the statement renders, before any
+    /// I/O. That is deliberate: falling back to a plain `=` would
+    /// compare under the column's collation and return rows the caller
+    /// asked to exclude, and a wrong answer is worse than an error.
+    #[doc(alias = "where_binary")]
+    pub fn filter_binary(mut self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.where_terms
+            .push(WhereTerm::Binary(col.col_name(), val.into(), false));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_binary`].
+    #[doc(alias = "filter_binary")]
+    pub fn where_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.filter_binary(col, val)
+    }
+
+    /// `WHERE (... OR col = binary val)` - [`Self::filter_binary`]
+    /// folded into the previous clause as a disjunction. Same backend
+    /// split.
+    #[doc(alias = "or_where_binary")]
+    pub fn or_filter_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        let term = WhereTerm::Binary(col.col_name(), val.into(), false);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_binary`].
+    #[doc(alias = "or_filter_binary")]
+    pub fn or_where_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.or_filter_binary(col, val)
+    }
+
+    /// `WHERE col != binary val` - the negated form of
+    /// [`Self::filter_binary`]. Same backend split.
+    #[doc(alias = "where_not_binary")]
+    pub fn filter_not_binary(mut self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.where_terms
+            .push(WhereTerm::Binary(col.col_name(), val.into(), true));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_not_binary`].
+    #[doc(alias = "filter_not_binary")]
+    pub fn where_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.filter_not_binary(col, val)
+    }
+
+    /// `WHERE (... OR col != binary val)`. Same backend split.
+    #[doc(alias = "or_where_not_binary")]
+    pub fn or_filter_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        let term = WhereTerm::Binary(col.col_name(), val.into(), true);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_not_binary`].
+    #[doc(alias = "or_filter_not_binary")]
+    pub fn or_where_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.or_filter_not_binary(col, val)
     }
 
     // ---- Date / time parts -----------------------------------------------
@@ -2294,6 +2368,12 @@ fn render_subquery_term(
             values.push(SeaValue::String(Some(pat.clone())));
             format!("{} NOT LIKE {ph}", q(col))
         }
+        WhereTerm::Binary(col, val, not) => {
+            *n += 1;
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(val.clone())));
+            render_binary(backend, &q(col), *not, &ph)?
+        }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
             let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
@@ -2330,6 +2410,29 @@ fn render_subquery_term(
         }
         WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
     })
+}
+
+/// Render a byte-exact comparison.
+///
+/// MySQL and MariaDB carry it as the `binary` operator modifier, which
+/// forces the comparison onto the raw bytes instead of the column's
+/// collation. The operator itself is synthesised here from the term's
+/// `negated` flag and never taken from a caller, so it does not go
+/// through the SQL-operator allowlist.
+fn render_binary(
+    backend: DbBackend,
+    col: &str,
+    not: bool,
+    ph: &str,
+) -> Result<String, FrameworkError> {
+    let op = if not { "!=" } else { "=" };
+    match backend {
+        DbBackend::MySql => Ok(format!("{col} {op} binary {ph}")),
+        DbBackend::Postgres | DbBackend::Sqlite => {
+            Err(crate::database::binary_comparison_unsupported(backend))
+        }
+        _ => Err(crate::database::unsupported_database_backend(backend)),
+    }
 }
 
 fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> Result<String, FrameworkError> {
@@ -2454,6 +2557,12 @@ impl<M> Builder<M> {
                 let ph = placeholder(backend, *n)?;
                 values.push(SeaValue::String(Some(pat.clone())));
                 format!("{col} NOT LIKE {ph}")
+            }
+            WhereTerm::Binary(col, val, not) => {
+                *n += 1;
+                let ph = placeholder(backend, *n)?;
+                values.push(SeaValue::String(Some(val.clone())));
+                render_binary(backend, col, *not, &ph)?
             }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
@@ -3279,9 +3388,36 @@ where
 
     /// Render the SQL for a specific dialect, returning both the SQL
     /// string and the bound values.
+    ///
+    /// **Panics** when the builder cannot render for `backend` - an
+    /// identifier or operator that fails validation, or a
+    /// backend-specific clause such as [`Self::filter_binary`] on
+    /// Postgres or SQLite. Use
+    /// [`try_to_sql_with_bindings_for`](Self::try_to_sql_with_bindings_for)
+    /// when you want that as an error; the execution path
+    /// ([`Self::get`] / [`Self::count`] / ...) always surfaces it as
+    /// `Err`.
     pub fn to_sql_with_bindings_for(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
+        self.try_to_sql_with_bindings_for(backend)
+            .expect("to_sql_with_bindings_for: builder cannot render for this backend")
+    }
+
+    /// Fallible sibling of [`Self::to_sql_with_bindings_for`], for the
+    /// cases where "this builder cannot render for this dialect" is an
+    /// answer rather than a bug - cross-dialect inspection, and
+    /// [`Self::filter_binary`], which only MySQL and MariaDB support.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::param`] when an identifier or
+    /// operator on the builder fails validation, or when a clause has
+    /// no rendering on `backend` - `filter_binary` on Postgres or
+    /// SQLite, for instance.
+    pub fn try_to_sql_with_bindings_for(
+        &self,
+        backend: DbBackend,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         self.render_select_for(backend, M::TABLE, "*")
-            .expect("to_sql_with_bindings_for: builder contains invalid identifier/operator")
     }
 
     /// Phase 10C T14 - log the rendered SQL via `tracing` and return

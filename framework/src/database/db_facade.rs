@@ -76,6 +76,21 @@ fn write_value_expression(
     }
 }
 
+/// One WHERE clause captured by [`DbTableBuilder`].
+///
+/// A named struct rather than a `(col, op, val)` tuple because
+/// `where_binary` needs a fourth field and three separate render sites
+/// read it - a fourth tuple position would make each of them count.
+struct DbWhereTerm {
+    column: String,
+    op: String,
+    value: SeaValue,
+    /// `true` for [`DbTableBuilder::where_binary`] /
+    /// [`DbTableBuilder::where_not_binary`]: renders MySQL's
+    /// `col = binary ?`. Every other backend refuses at render time.
+    binary: bool,
+}
+
 /// Standalone query builder returned by
 /// [`DB::table(name)`](crate::DB::table). Mirrors the where / order /
 /// limit / select shape of [`Builder<M>`](crate::eloquent::Builder)
@@ -84,7 +99,7 @@ fn write_value_expression(
 /// See the [module docs](self) for the trust boundary on identifiers.
 pub struct DbTableBuilder {
     table: String,
-    where_terms: Vec<(String, String, SeaValue)>,
+    where_terms: Vec<DbWhereTerm>,
     order: Vec<(String, Direction)>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
@@ -141,7 +156,12 @@ impl DbTableBuilder {
 
     /// Add a `WHERE col = ?` clause. Multiple `filter` calls AND together.
     pub fn filter(mut self, col: impl Into<String>, val: impl Into<SeaValue>) -> Self {
-        self.where_terms.push((col.into(), "=".into(), val.into()));
+        self.where_terms.push(DbWhereTerm {
+            column: col.into(),
+            op: "=".into(),
+            value: val.into(),
+            binary: false,
+        });
         self
     }
 
@@ -154,7 +174,42 @@ impl DbTableBuilder {
         op: impl Into<String>,
         val: impl Into<SeaValue>,
     ) -> Self {
-        self.where_terms.push((col.into(), op.into(), val.into()));
+        self.where_terms.push(DbWhereTerm {
+            column: col.into(),
+            op: op.into(),
+            value: val.into(),
+            binary: false,
+        });
+        self
+    }
+
+    /// Add a `WHERE col = binary ?` clause - compare the raw bytes
+    /// instead of the column's collation, so the match is case- and
+    /// accent-sensitive.
+    ///
+    /// **MySQL and MariaDB only.** On Postgres and SQLite every
+    /// terminal returns `Err` when the statement renders, before any
+    /// I/O: a plain `=` fallback would compare under the column's
+    /// collation and return rows you asked to exclude.
+    pub fn where_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+        self.where_terms.push(DbWhereTerm {
+            column: col.into(),
+            op: "=".into(),
+            value: SeaValue::String(Some(val.into())),
+            binary: true,
+        });
+        self
+    }
+
+    /// Add a `WHERE col != binary ?` clause - the negated form of
+    /// [`Self::where_binary`]. Same backend split.
+    pub fn where_not_binary(mut self, col: impl Into<String>, val: impl Into<String>) -> Self {
+        self.where_terms.push(DbWhereTerm {
+            column: col.into(),
+            op: "!=".into(),
+            value: SeaValue::String(Some(val.into())),
+            binary: true,
+        });
         self
     }
 
@@ -192,9 +247,9 @@ impl DbTableBuilder {
         for col in &self.select_columns {
             crate::database::validate_identifier(col)?;
         }
-        for (col, op, _val) in &self.where_terms {
-            crate::database::validate_identifier(col)?;
-            crate::database::validate_sql_operator(op)?;
+        for term in &self.where_terms {
+            crate::database::validate_identifier(&term.column)?;
+            crate::database::validate_sql_operator(&term.op)?;
         }
         for (col, _dir) in &self.order {
             crate::database::validate_identifier(col)?;
@@ -216,7 +271,7 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
-        let (sql, values) = self.render_select(backend);
+        let (sql, values) = self.render_select(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
         let rows = exec
@@ -268,7 +323,7 @@ impl DbTableBuilder {
         copy.order.clear();
         copy.limit_value = None;
         copy.offset_value = None;
-        let (sql, values) = copy.render_select(backend);
+        let (sql, values) = copy.render_select(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
 
         let row = exec
@@ -443,7 +498,7 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
-        let (sql, values) = self.render_update(&attrs, backend);
+        let (sql, values) = self.render_update(&attrs, backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let result = exec
             .run(stmt)
@@ -486,7 +541,7 @@ impl DbTableBuilder {
         )
         .await?;
         let backend = exec.backend();
-        let (sql, values) = self.render_delete(backend);
+        let (sql, values) = self.render_delete(backend)?;
         let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let result = exec
             .run(stmt)
@@ -509,8 +564,48 @@ impl DbTableBuilder {
 
     // ---- SQL rendering ---------------------------------------------------
 
-    fn render_select(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
+    /// Render the shared WHERE clause list, including the leading
+    /// ` WHERE `. Returns an empty string when the builder carries no
+    /// filters, so callers push the result unconditionally.
+    ///
+    /// Fallible because `where_binary` is a MySQL/MariaDB-only
+    /// comparison: on any other backend this returns `Err` before a
+    /// statement leaves the process, rather than degrading to a
+    /// collation-dependent `=`.
+    fn render_where_clauses(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        counter: &mut usize,
+    ) -> Result<String, FrameworkError> {
+        if self.where_terms.is_empty() {
+            return Ok(String::new());
+        }
+        let mut clauses: Vec<String> = Vec::with_capacity(self.where_terms.len());
+        for term in &self.where_terms {
+            *counter += 1;
+            values.push(term.value.clone());
+            let placeholder = if backend == DbBackend::Postgres {
+                format!("${counter}")
+            } else {
+                "?".to_owned()
+            };
+            let op = if term.binary {
+                match backend {
+                    DbBackend::MySql => format!("{} binary", term.op),
+                    _ => return Err(crate::database::binary_comparison_unsupported(backend)),
+                }
+            } else {
+                term.op.clone()
+            };
+            clauses.push(format!("{} {} {}", term.column, op, placeholder));
+        }
+        Ok(format!(" WHERE {}", clauses.join(" AND ")))
+    }
+
+    fn render_select(&self, backend: DbBackend) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
+        let mut counter = 0usize;
         let mut sql = String::new();
         sql.push_str("SELECT ");
         if self.select_columns.is_empty() {
@@ -521,24 +616,7 @@ impl DbTableBuilder {
         sql.push_str(" FROM ");
         sql.push_str(&self.table);
 
-        if !self.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let mut counter = 0usize;
-            let clauses: Vec<String> = self
-                .where_terms
-                .iter()
-                .map(|(col, op, val)| {
-                    counter += 1;
-                    values.push(val.clone());
-                    if backend == DbBackend::Postgres {
-                        format!("{col} {op} ${counter}")
-                    } else {
-                        format!("{col} {op} ?")
-                    }
-                })
-                .collect();
-            sql.push_str(&clauses.join(" AND "));
-        }
+        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
 
         if !self.order.is_empty() {
             sql.push_str(" ORDER BY ");
@@ -563,10 +641,14 @@ impl DbTableBuilder {
             sql.push_str(&format!(" OFFSET {n}"));
         }
 
-        (sql, values)
+        Ok((sql, values))
     }
 
-    fn render_update(&self, attrs: &Attrs, backend: DbBackend) -> (String, Vec<SeaValue>) {
+    fn render_update(
+        &self,
+        attrs: &Attrs,
+        backend: DbBackend,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
         let mut counter = 0usize;
 
@@ -583,49 +665,17 @@ impl DbTableBuilder {
             .collect();
         sql.push_str(&sets.join(", "));
 
-        if !self.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let clauses: Vec<String> = self
-                .where_terms
-                .iter()
-                .map(|(col, op, val)| {
-                    counter += 1;
-                    values.push(val.clone());
-                    if backend == DbBackend::Postgres {
-                        format!("{col} {op} ${counter}")
-                    } else {
-                        format!("{col} {op} ?")
-                    }
-                })
-                .collect();
-            sql.push_str(&clauses.join(" AND "));
-        }
+        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
 
-        (sql, values)
+        Ok((sql, values))
     }
 
-    fn render_delete(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
+    fn render_delete(&self, backend: DbBackend) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         let mut values: Vec<SeaValue> = Vec::new();
+        let mut counter = 0usize;
         let mut sql = format!("DELETE FROM {}", self.table);
-        if !self.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let mut counter = 0usize;
-            let clauses: Vec<String> = self
-                .where_terms
-                .iter()
-                .map(|(col, op, val)| {
-                    counter += 1;
-                    values.push(val.clone());
-                    if backend == DbBackend::Postgres {
-                        format!("{col} {op} ${counter}")
-                    } else {
-                        format!("{col} {op} ?")
-                    }
-                })
-                .collect();
-            sql.push_str(&clauses.join(" AND "));
-        }
-        (sql, values)
+        sql.push_str(&self.render_where_clauses(backend, &mut values, &mut counter)?);
+        Ok((sql, values))
     }
 }
 
@@ -1162,6 +1212,111 @@ fn parse_database_name(url: &str) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod where_clause_render_tests {
+    //! The three `DbTableBuilder` renderers are private, so the MySQL
+    //! `= binary` shape and the shared placeholder counter can only be
+    //! pinned from inside the crate. The integration test
+    //! (`framework/tests/query_binary_comparison.rs`) covers the
+    //! SQLite refusal end to end through a live terminal.
+
+    use super::*;
+
+    #[test]
+    fn mysql_renders_the_binary_operator_modifier() {
+        let (sql, values) = DbTableBuilder::new("users")
+            .where_binary("email", "Alice@example.com")
+            .render_select(DbBackend::MySql)
+            .expect("MySQL supports binary comparison");
+        assert_eq!(sql, "SELECT * FROM users WHERE email = binary ?");
+        assert_eq!(values.len(), 1, "the value stays bound; got: {values:?}");
+    }
+
+    #[test]
+    fn mysql_renders_the_negated_binary_operator_modifier() {
+        let (sql, _values) = DbTableBuilder::new("users")
+            .where_not_binary("email", "Alice@example.com")
+            .render_select(DbBackend::MySql)
+            .expect("MySQL supports binary comparison");
+        assert_eq!(sql, "SELECT * FROM users WHERE email != binary ?");
+    }
+
+    #[test]
+    fn mysql_mixes_binary_and_plain_terms_in_one_clause() {
+        let (sql, values) = DbTableBuilder::new("users")
+            .filter("active", true)
+            .where_binary("email", "Alice@example.com")
+            .render_select(DbBackend::MySql)
+            .expect("MySQL supports binary comparison");
+        assert_eq!(
+            sql,
+            "SELECT * FROM users WHERE active = ? AND email = binary ?"
+        );
+        assert_eq!(values.len(), 2, "got: {values:?}");
+    }
+
+    #[test]
+    fn postgres_and_sqlite_refuse_the_binary_term() {
+        for backend in [DbBackend::Postgres, DbBackend::Sqlite] {
+            let err = DbTableBuilder::new("users")
+                .where_binary("email", "Alice@example.com")
+                .render_select(backend)
+                .expect_err("no binary comparison operator on this backend");
+            assert!(
+                format!("{err}").contains("where_binary is not supported"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_and_update_refuse_the_binary_term_too() {
+        let err = DbTableBuilder::new("users")
+            .where_binary("email", "Alice@example.com")
+            .render_delete(DbBackend::Sqlite)
+            .expect_err("DELETE renders through the same clause builder");
+        assert!(
+            format!("{err}").contains("where_binary is not supported"),
+            "got: {err}"
+        );
+
+        let mut attrs = Attrs::new();
+        attrs.insert("active", false);
+        let err = DbTableBuilder::new("users")
+            .where_binary("email", "Alice@example.com")
+            .render_update(&attrs, DbBackend::Sqlite)
+            .expect_err("UPDATE renders through the same clause builder");
+        assert!(
+            format!("{err}").contains("where_binary is not supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_placeholder_numbering_stays_monotonic_across_set_and_where() {
+        // Regression guard for the render refactor: `render_update`
+        // shares one counter between the SET list and the WHERE list,
+        // so extracting the WHERE loop must not reset it.
+        let mut attrs = Attrs::new();
+        attrs.insert("name", "Bob");
+        let (sql, values) = DbTableBuilder::new("users")
+            .filter("id", 7i64)
+            .render_update(&attrs, DbBackend::Postgres)
+            .expect("no binary term, so Postgres renders");
+        assert_eq!(sql, "UPDATE users SET name = $1 WHERE id = $2");
+        assert_eq!(values.len(), 2, "got: {values:?}");
+    }
+
+    #[test]
+    fn an_empty_builder_renders_no_where_clause() {
+        let (sql, values) = DbTableBuilder::new("users")
+            .render_select(DbBackend::Sqlite)
+            .expect("no filters, nothing to refuse");
+        assert_eq!(sql, "SELECT * FROM users");
+        assert!(values.is_empty(), "got: {values:?}");
+    }
 }
 
 #[cfg(test)]
