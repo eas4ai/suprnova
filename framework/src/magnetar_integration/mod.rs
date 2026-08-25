@@ -17,6 +17,8 @@ pub mod magic_link;
 pub mod middleware;
 #[cfg(feature = "magnetar-oauth")]
 pub mod oauth;
+#[cfg(feature = "magnetar-oauth")]
+pub mod oauth_transport;
 pub mod passkey;
 pub mod password;
 

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use suprnova::{
-    AbuseLimiter, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides, GoogleOAuthProvider,
-    GoogleProviderConfig, MagnetarConfig, MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig,
-    OAuthAuthorizationConfig, OAuthHttpTransport, PasskeyConfig, RevocationTransport, SecretString,
-    init_magnetar,
+    AbuseLimiter, App, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    FrameworkAbuseLimiter, GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig, OAuthAuthorizationConfig,
+    OAuthHttpTransport, PasskeyConfig, RateLimiterDriver, ReqwestOAuthTransport,
+    RevocationTransport, SecretString, init_magnetar,
 };
 
 fn auth_config(
@@ -44,16 +45,16 @@ fn auth_config(
         .oauth(oauth)
 }
 
-pub async fn register_auth(
-    transport: Arc<dyn OAuthHttpTransport>,
-    revocation: Arc<dyn RevocationTransport>,
-    limiter: Arc<dyn AbuseLimiter>,
-) -> Result<(), suprnova::FrameworkError> {
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
     let database = DB::connection()?;
+    let transport = Arc::new(ReqwestOAuthTransport::try_default()?);
+    let limiter = Arc::new(FrameworkAbuseLimiter::new(App::resolve_make::<
+        dyn RateLimiterDriver,
+    >()?));
     init_magnetar(auth_config(
         database.inner().clone(),
+        transport.clone(),
         transport,
-        revocation,
         limiter,
     ))
     .await

@@ -1613,6 +1613,13 @@ impl magnetar::oauth::provider::OAuthProvider for OfflineOAuthProvider {
         Some("https://offline.example.test/userinfo".to_owned())
     }
 
+    fn userinfo_headers(&self) -> Vec<(String, String)> {
+        vec![(
+            "User-Agent".to_owned(),
+            "suprnova-offline-provider".to_owned(),
+        )]
+    }
+
     fn refresh_policy(&self) -> magnetar::oauth::provider::RefreshPolicy {
         magnetar::oauth::provider::RefreshPolicy {
             supported: false,
@@ -1747,6 +1754,10 @@ impl OfflineOAuthTransport {
 
     fn request_count(&self) -> usize {
         self.requests.lock().expect("transport lock").len()
+    }
+
+    fn requests(&self) -> Vec<magnetar::plugin::HttpRequest> {
+        self.requests.lock().expect("transport lock").clone()
     }
 }
 
@@ -2042,6 +2053,23 @@ async fn oauth_host_delegate_binds_state_resolves_outcomes_and_rotates_session_a
         suprnova::magnetar_integration::engine::MagnetarOAuthCompletion::EmailCompletionRequired { .. }
     ));
     assert_eq!(direct_transport.request_count(), 2);
+    let direct_requests = direct_transport.requests();
+    assert_eq!(
+        direct_requests[1].url,
+        "https://offline.example.test/userinfo"
+    );
+    assert!(
+        direct_requests[1]
+            .headers
+            .iter()
+            .any(|(name, value)| { name == "User-Agent" && value == "suprnova-offline-provider" })
+    );
+    assert!(
+        direct_requests[1]
+            .headers
+            .iter()
+            .any(|(name, value)| { name == "Authorization" && value == "Bearer offline-token" })
+    );
 
     let public_transport = Arc::new(OfflineOAuthTransport::new(vec![
         offline_token(),

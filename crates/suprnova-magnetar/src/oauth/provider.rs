@@ -340,6 +340,14 @@ pub trait OAuthProvider: Send + Sync {
     /// override-aware place instead of being duplicated in host
     /// configuration.
     fn userinfo_endpoint(&self) -> Option<String>;
+    /// Additional headers for the provider's userinfo request.
+    ///
+    /// The host adds the bearer `Authorization` header separately. Providers
+    /// use this seam for requirements such as GitHub's mandatory
+    /// `User-Agent` and media-type `Accept` headers.
+    fn userinfo_headers(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// This provider's refresh/revocation dossier facts.
     fn refresh_policy(&self) -> RefreshPolicy;
     /// Render this provider's client-authentication material for a token

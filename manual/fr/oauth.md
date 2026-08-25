@@ -15,11 +15,12 @@ Configurez OAuth sur la même `MagnetarConfig` qui initialise les services de mo
 
 ```rust,no_run
 use std::sync::Arc;
+
 use suprnova::{
-    AbuseLimiter, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
-    GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
-    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig,
-    OAuthAuthorizationConfig, OAuthHttpTransport, PasskeyConfig,
+    AbuseLimiter, App, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    FrameworkAbuseLimiter, GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig, OAuthAuthorizationConfig,
+    OAuthHttpTransport, PasskeyConfig, RateLimiterDriver, ReqwestOAuthTransport,
     RevocationTransport, SecretString, init_magnetar,
 };
 
@@ -60,25 +61,31 @@ fn auth_config(
         .oauth(oauth)
 }
 
-pub async fn register_auth(
-    transport: Arc<dyn OAuthHttpTransport>,
-    revocation: Arc<dyn RevocationTransport>,
-    limiter: Arc<dyn AbuseLimiter>,
-) -> Result<(), suprnova::FrameworkError> {
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
     let database = DB::connection()?;
+    let transport = Arc::new(ReqwestOAuthTransport::try_default()?);
+    let limiter = Arc::new(FrameworkAbuseLimiter::new(
+        App::resolve_make::<dyn RateLimiterDriver>()?,
+    ));
     init_magnetar(auth_config(
         database.inner().clone(),
+        transport.clone(),
         transport,
-        revocation,
         limiter,
     ))
     .await
 }
 ```
 
-Le framework réexporte le contrat `OAuthProvider`, les cinq implémentations de fournisseurs internes et leurs types de configuration, ainsi que les limites HTTP, de révocation et de limitation des abus nécessaires à un fournisseur personnalisé. Les applications n’ont pas besoin d’une dépendance directe à `suprnova-magnetar`.
+Le framework réexporte le contrat `OAuthProvider`, les cinq fournisseurs internes et les types de configuration, ainsi que tous les types nécessaires pour implémenter un fournisseur personnalisé. `ReqwestOAuthTransport` fournit les E/S de production pour les jetons, userinfo et la révocation. `FrameworkAbuseLimiter` utilise le `RateLimiterDriver` configuré par l'application. Les applications n'ont besoin ni d'une dépendance directe à `suprnova-magnetar` ni d'adaptateurs de transport et de limiteur écrits à la main.
 
 `MagnetarConfig` crée son schéma lorsque `apply_migrations` est activé, ce qui est le comportement par défaut. Utilisez `.apply_migrations(false)` uniquement lorsque le déploiement prépare séparément le même schéma. Une seconde initialisation renvoie une erreur au lieu de remplacer un moteur installé.
+
+### Exigences du fournisseur GitHub
+
+Le point de terminaison utilisateur REST de GitHub exige un `User-Agent`; un fournisseur communautaire l'ajoute, ainsi que toute valeur `Accept` de type média dont il a besoin, via `OAuthProvider::userinfo_headers`. Suprnova ajoute séparément l'en-tête bearer `Authorization` et rejette les tentatives du fournisseur de le remplacer.
+
+La réponse `/user` de GitHub inclut une adresse e-mail uniquement lorsque l'utilisateur l'a rendue publique. L'adresse principale vérifiée nécessite une seconde requête `/user/emails`, tandis que `resolve_identity` n'effectue délibérément aucune E/S et reçoit une réponse userinfo. Un fournisseur GitHub peut renvoyer `email: None` et utiliser la cérémonie de complétion d'e-mail de Suprnova, ou faire pointer `userinfo_endpoint` vers un adaptateur hôte qui combine `/user` avec l'e-mail principal vérifié. Ne traitez pas une adresse non vérifiée ou simplement publique comme une preuve de propriété du compte.
 
 ## Liaison de session
 
@@ -217,7 +224,7 @@ Conservez le plan et le rapport générés dans les archives de déploiement. N'
 
 - Amorçage par défaut : `MagnetarConfig`, `PasskeyConfig` et `init_magnetar`.
 - Façades : `Auth::oauth(provider)` et `Auth::magic_link()`.
-- Installation OAuth : `suprnova::magnetar_integration::install_magnetar_oauth_engine` et les types de configuration dans `suprnova::magnetar_integration::engine`.
+- Installation OAuth : `MagnetarConfig::oauth`, `ReqwestOAuthTransport` et `FrameworkAbuseLimiter`.
 - Bibliothèque de migration : `magnetar::migration` depuis la crate `suprnova-magnetar`.
 - Authentification bearer : `BearerTokenMiddleware`.
 

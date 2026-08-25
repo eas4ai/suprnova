@@ -177,8 +177,6 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
-#[cfg(feature = "magnetar-oauth")]
-pub use magnetar_integration::engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig};
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
@@ -186,6 +184,12 @@ pub use magnetar_integration::engine::{MagnetarOAuthHostConfig, MagnetarOAuthPro
 ))]
 pub use magnetar_integration::{
     MagnetarConfig, PasskeyConfig, init_magnetar, middleware::BearerTokenMiddleware,
+};
+#[cfg(feature = "magnetar-oauth")]
+pub use magnetar_integration::{
+    abuse_limiter::FrameworkAbuseLimiter,
+    engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig},
+    oauth_transport::ReqwestOAuthTransport,
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use secrecy::SecretString;

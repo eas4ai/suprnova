@@ -15,11 +15,12 @@ Suprnova 不会为这些流程安装路由。应用提供简短的起始和回�
 
 ```rust,no_run
 use std::sync::Arc;
+
 use suprnova::{
-    AbuseLimiter, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
-    GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
-    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig,
-    OAuthAuthorizationConfig, OAuthHttpTransport, PasskeyConfig,
+    AbuseLimiter, App, AutoLinkPolicy, DB, DatabaseConnection, EndpointOverrides,
+    FrameworkAbuseLimiter, GoogleOAuthProvider, GoogleProviderConfig, MagnetarConfig,
+    MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig, OAuthAuthorizationConfig,
+    OAuthHttpTransport, PasskeyConfig, RateLimiterDriver, ReqwestOAuthTransport,
     RevocationTransport, SecretString, init_magnetar,
 };
 
@@ -60,25 +61,31 @@ fn auth_config(
         .oauth(oauth)
 }
 
-pub async fn register_auth(
-    transport: Arc<dyn OAuthHttpTransport>,
-    revocation: Arc<dyn RevocationTransport>,
-    limiter: Arc<dyn AbuseLimiter>,
-) -> Result<(), suprnova::FrameworkError> {
+pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
     let database = DB::connection()?;
+    let transport = Arc::new(ReqwestOAuthTransport::try_default()?);
+    let limiter = Arc::new(FrameworkAbuseLimiter::new(
+        App::resolve_make::<dyn RateLimiterDriver>()?,
+    ));
     init_magnetar(auth_config(
         database.inner().clone(),
+        transport.clone(),
         transport,
-        revocation,
         limiter,
     ))
     .await
 }
 ```
 
-该框架会重新导出 `OAuthProvider` 契约、五个第一方提供方实现及其配置类型，以及自定义提供方所需的 HTTP、撤销和滥用限制器边界。应用程序不需要直接依赖 `suprnova-magnetar`。
+该框架重新导出 `OAuthProvider` 契约、五个第一方提供方和配置类型，以及实现自定义提供方所需的所有类型。`ReqwestOAuthTransport` 提供生产用的令牌、userinfo 和撤销 I/O。`FrameworkAbuseLimiter` 使用应用程序配置的 `RateLimiterDriver`。应用程序既不需要直接依赖 `suprnova-magnetar`，也不需要手写传输和限制器适配器。
 
 当启用 `apply_migrations` 时，`MagnetarConfig` 会创建其架构，这是默认设置。仅当部署会单独准备相同架构时，才使用 `.apply_migrations(false)`。第二次初始化会返回错误，而不是替换任何已安装的引擎。
+
+### GitHub 提供方要求
+
+GitHub 的 REST 用户端点需要 `User-Agent`；社区提供方会通过 `OAuthProvider::userinfo_headers` 添加它，以及所需的任何媒体类型 `Accept` 值。Suprnova 会单独添加 bearer `Authorization` 标头，并拒绝提供方覆盖它的尝试。
+
+只有当用户将电子邮件公开时，GitHub 的 `/user` 响应才会包含电子邮件。已验证的主地址需要第二次 `/user/emails` 请求，而 `resolve_identity` 会刻意不执行 I/O，并接收一个 userinfo 响应。GitHub 提供方可以返回 `email: None` 并使用 Suprnova 的电子邮件补全仪式，或者将 `userinfo_endpoint` 指向一个主机适配器，由它把 `/user` 与已验证的主电子邮件结合起来。不要将未验证或仅仅公开的地址视为账户所有权。
 
 ## 绑定会话
 
@@ -217,9 +224,7 @@ cargo run -p suprnova-magnetar \
 
 - 默认启动：`MagnetarConfig`、`PasskeyConfig` 和 `init_magnetar`。
 - 门面：`Auth::oauth(provider)` 和 `Auth::magic_link()`。
-- OAuth 安装：
-  `suprnova::magnetar_integration::install_magnetar_oauth_engine` 和
-  `suprnova::magnetar_integration::engine` 中的配置类型。
+- OAuth 安装：`MagnetarConfig::oauth`、`ReqwestOAuthTransport` 和 `FrameworkAbuseLimiter`。
 - 迁移库：`suprnova-magnetar` crate 中的 `magnetar::migration`。
 - Bearer 认证：`BearerTokenMiddleware`。
 

@@ -1656,15 +1656,28 @@ where
                         .to_owned(),
                 })
             })?;
+            let mut headers = provider.userinfo_headers();
+            if headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            {
+                return Err(HostOAuthError::Protocol(
+                    OAuthProtocolError::ProviderConfiguration {
+                        provider: provider.name(),
+                        message: "userinfo_headers must not override Authorization".to_owned(),
+                    },
+                ));
+            }
+            headers.push((
+                "Authorization".to_owned(),
+                format!("Bearer {}", token.response.access_token.expose_secret()),
+            ));
             let response = self
                 .transport
                 .send(HttpRequest {
                     method: "GET".to_owned(),
                     url: endpoint,
-                    headers: vec![(
-                        "Authorization".to_owned(),
-                        format!("Bearer {}", token.response.access_token.expose_secret()),
-                    )],
+                    headers,
                     body: Vec::new(),
                 })
                 .await
