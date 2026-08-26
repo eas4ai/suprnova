@@ -48,8 +48,20 @@ pub enum RustType {
     Field(Box<RustType>),
     /// `Prop<T>` - deferred/lazy prop; optional, never null
     Prop(Box<RustType>),
+    /// `serde_json::Value` - an arbitrary JSON document, emitted as the
+    /// recursive `JsonValue` alias rather than degraded to `unknown`.
+    Json,
     Custom(String),
 }
+
+/// The TypeScript alias [`RustType::Json`] renders as, declared once at
+/// the top of the generated file and only when something references it.
+///
+/// A JSON document has a precise shape in TypeScript, just a recursive
+/// one, and TypeScript can only express recursion through a named type -
+/// hence an alias rather than an inline union at each use site.
+const JSON_VALUE_ALIAS: &str = "export type JsonValue = string | number | boolean | null | JsonValue[] \
+| { [key: string]: JsonValue };\n\n";
 
 /// Visitor that collects structs with #[derive(InertiaProps)] or #[derive(Data)]
 /// into `structs`, and every other named-field struct into `plain_structs` so
@@ -122,6 +134,18 @@ impl InertiaPropsVisitor {
             Type::Path(type_path) => {
                 let segment = type_path.path.segments.last().unwrap();
                 let ident = segment.ident.to_string();
+
+                // `serde_json::Value` names itself unambiguously, so it
+                // resolves here. A *bare* `Value` cannot: the project may
+                // define a struct by that name, and only the whole-crate
+                // scan knows. `resolve_bare_json` settles that one after
+                // `resolve_reachable`, with the project's struct winning.
+                if ident == "Value"
+                    && type_path.path.segments.len() == 2
+                    && type_path.path.segments[0].ident == "serde_json"
+                {
+                    return RustType::Json;
+                }
 
                 match ident.as_str() {
                     "String" | "str" => RustType::String,
@@ -350,7 +374,72 @@ fn resolve_reachable(
         }
     }
 
+    resolve_bare_json(&mut derived);
     derived
+}
+
+/// Turn a bare `Value` that nothing in the project defines into
+/// [`RustType::Json`].
+///
+/// `use serde_json::Value;` is the common spelling, and by the time a
+/// field's type reaches the generator the import is gone - all that is
+/// left is the bare ident. Treating it as JSON has to happen after the
+/// whole-crate scan, because a project is entitled to its own `Value`
+/// struct (or a generic parameter of that name), and that has to win.
+/// Before this, the scaffold's own `Option<serde_json::Value>` degraded to
+/// `unknown` and warned every fresh project twice per regeneration, with
+/// advice ("mirror it as a local struct") that is wrong for a JSON value.
+fn resolve_bare_json(structs: &mut [InertiaPropsStruct]) {
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
+    if known.contains("Value") {
+        return;
+    }
+
+    for s in structs.iter_mut() {
+        let generics = &s.type_params;
+        if generics.iter().any(|g| g == "Value") {
+            continue;
+        }
+        for f in &mut s.fields {
+            rewrite_bare_json(&mut f.ty);
+        }
+    }
+}
+
+/// Rewrite every `Custom("Value")` nested anywhere inside a type.
+fn rewrite_bare_json(ty: &mut RustType) {
+    match ty {
+        RustType::Custom(name) if name == "Value" => *ty = RustType::Json,
+        RustType::Option(inner)
+        | RustType::Vec(inner)
+        | RustType::Field(inner)
+        | RustType::Prop(inner) => rewrite_bare_json(inner),
+        RustType::HashMap(key, val) => {
+            rewrite_bare_json(key);
+            rewrite_bare_json(val);
+        }
+        _ => {}
+    }
+}
+
+/// Whether any emitted struct references [`RustType::Json`], and so needs
+/// the `JsonValue` alias declared.
+fn references_json(structs: &[InertiaPropsStruct]) -> bool {
+    fn contains_json(ty: &RustType) -> bool {
+        match ty {
+            RustType::Json => true,
+            RustType::Option(inner)
+            | RustType::Vec(inner)
+            | RustType::Field(inner)
+            | RustType::Prop(inner) => contains_json(inner),
+            RustType::HashMap(key, val) => contains_json(key) || contains_json(val),
+            _ => false,
+        }
+    }
+
+    structs
+        .iter()
+        .any(|s| s.fields.iter().any(|f| contains_json(&f.ty)))
 }
 
 /// Convert a RustType to a TypeScript type string.
@@ -376,6 +465,7 @@ fn rust_type_to_ts(ty: &RustType, known: &HashSet<String>, generics: &[String]) 
         ),
         RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
         RustType::Prop(inner) => rust_type_to_ts(inner, known, generics),
+        RustType::Json => "JsonValue".to_string(),
         RustType::Custom(name) => {
             if is_resolved_custom(name, known, generics) {
                 name.clone()
@@ -517,17 +607,24 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
 /// A field whose type references something the generator can't emit - not an
 /// InertiaProps/Data struct, not a generic parameter. Reported as a warning; the
 /// field itself is emitted as `unknown` (see `rust_type_to_ts`).
-struct UnresolvedRef {
-    struct_name: String,
-    field_name: String,
-    type_name: String,
+pub struct UnresolvedRef {
+    /// The generated struct carrying the field.
+    pub struct_name: String,
+    /// The field whose type could not be resolved.
+    pub field_name: String,
+    /// The unresolvable type name, as written in the Rust source.
+    pub type_name: String,
 }
 
 /// Walk every generated struct's fields and collect references to custom types
 /// that aren't generated (and aren't generic parameters). Uses the same
 /// `is_resolved_custom` predicate as emission, so the diagnostic and the emitted
 /// `unknown` can never disagree.
-fn collect_unresolved_refs(structs: &[InertiaPropsStruct]) -> Vec<UnresolvedRef> {
+///
+/// `pub` so the template-drift suite can assert the scaffold's own
+/// controllers resolve cleanly without going through the printing
+/// wrapper below.
+pub fn collect_unresolved_refs(structs: &[InertiaPropsStruct]) -> Vec<UnresolvedRef> {
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
     let mut refs = Vec::new();
     for s in structs {
@@ -651,6 +748,9 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     let mut output = String::new();
     output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
+    if references_json(structs) {
+        output.push_str(JSON_VALUE_ALIAS);
+    }
 
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
@@ -698,6 +798,9 @@ pub fn generate_types_string(input: ScanInput) -> String {
     let sorted = topological_sort(&structs);
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
     let mut output = String::new();
+    if references_json(&structs) {
+        output.push_str(JSON_VALUE_ALIAS);
+    }
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
     }
@@ -1305,6 +1408,104 @@ fn start_watcher(
                 return Err(format!("Watch error: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod json_value_tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<InertiaPropsStruct> {
+        let syntax = syn::parse_file(src).expect("valid Rust");
+        let mut visitor = InertiaPropsVisitor::new();
+        visitor.visit_file(&syntax);
+        resolve_reachable(visitor.structs, visitor.plain_structs)
+    }
+
+    fn unresolved(structs: &[InertiaPropsStruct]) -> Vec<String> {
+        collect_unresolved_refs(structs)
+            .into_iter()
+            .map(|r| r.type_name)
+            .collect()
+    }
+
+    const JSON_ALIAS: &str = "export type JsonValue = string | number | boolean | null \
+                              | JsonValue[] | { [key: string]: JsonValue };";
+
+    #[test]
+    fn an_optional_serde_json_value_emits_the_alias_and_warns_about_nothing() {
+        // The scaffold's own `LoginProps`. Advising the user to "mirror it
+        // as a local struct" is wrong for a JSON value, and there was
+        // nothing wrong to advise about.
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct LoginProps {\n    \
+             pub errors: Option<serde_json::Value>,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains(JSON_ALIAS), "alias missing from:\n{ts}");
+        assert!(
+            ts.contains("errors: JsonValue | null;"),
+            "Option must render the same way it always has:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn a_bare_value_field_is_json_too() {
+        let structs = parse(
+            "use serde_json::Value;\n#[derive(InertiaProps)]\npub struct P {\n    \
+             pub payload: Value,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        assert!(generate_typescript(&structs).contains("payload: JsonValue;"));
+    }
+
+    #[test]
+    fn a_project_defined_value_struct_still_wins() {
+        // A project is allowed to own the name. Its own struct resolves
+        // first, so `Value` keeps emitting as `Value`.
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct P {\n    pub v: Value,\n}\n\
+             pub struct Value {\n    pub inner: String,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains("v: Value;"), "{ts}");
+        assert!(ts.contains("export interface Value {"), "{ts}");
+        assert!(!ts.contains("JsonValue"), "{ts}");
+    }
+
+    #[test]
+    fn the_alias_is_declared_once_however_many_structs_use_it() {
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct A {\n    pub a: serde_json::Value,\n}\n\
+             #[derive(InertiaProps)]\npub struct B {\n    pub b: serde_json::Value,\n}\n",
+        );
+        let ts = generate_typescript(&structs);
+        assert_eq!(
+            ts.matches("export type JsonValue").count(),
+            1,
+            "the alias must be declared exactly once:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn the_alias_is_absent_when_nothing_references_it() {
+        let structs = parse("#[derive(InertiaProps)]\npub struct A {\n    pub a: String,\n}\n");
+        assert!(!generate_typescript(&structs).contains("JsonValue"));
+    }
+
+    #[test]
+    fn a_generic_parameter_named_value_is_not_json() {
+        // `Value` here is the struct's own type parameter, not a JSON
+        // document. Rewriting it would emit an alias for a generic.
+        let structs =
+            parse("#[derive(InertiaProps)]\npub struct P<Value> {\n    pub v: Value,\n}\n");
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains("v: Value;"), "{ts}");
+        assert!(!ts.contains("JsonValue"), "{ts}");
     }
 }
 

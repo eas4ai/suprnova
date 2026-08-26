@@ -113,6 +113,7 @@ equivalents.
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | The props generator emits `Array<T>`; the routes generator emits `T[]` for form-request fields |
 | `HashMap<K, V>`, `BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | A recursive alias the generator declares once at the top of the file, and only when something references it. A bare `Value` maps here too, unless the project defines its own `Value` struct - that one wins |
 | `Field<T>` (from `#[derive(Data)]`) | `field?: T \| null` | Field is optional on the wire |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Lazy props omit the `null` half |
 | Anything else | bare identifier | See "Custom types" below |

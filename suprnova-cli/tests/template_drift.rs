@@ -1460,3 +1460,45 @@ fn every_frontend_vite_config_gives_the_ssr_build_its_own_outdir() {
         );
     }
 }
+
+/// A fresh scaffold must generate its TypeScript types without a single
+/// "isn't a struct this project defines" warning.
+///
+/// `LoginProps`/`RegisterProps` carry `Option<serde_json::Value>`, which the
+/// generator degraded to `unknown` and warned about twice on every
+/// regeneration - advising the user to "mirror it as a local struct", which
+/// is not what you do with a JSON document. Rendering the controllers the
+/// scaffolder actually writes is the only way to catch that from here.
+#[test]
+fn scaffolded_controllers_generate_types_without_unresolved_props() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let controllers = dir.path().join("src/controllers");
+    fs::create_dir_all(&controllers).expect("create src/controllers");
+
+    for (name, body) in [
+        ("home.rs", suprnova_cli::templates::home_controller()),
+        ("auth.rs", suprnova_cli::templates::auth_controller()),
+        (
+            "dashboard.rs",
+            suprnova_cli::templates::dashboard_controller(),
+        ),
+    ] {
+        fs::write(controllers.join(name), body).unwrap_or_else(|e| panic!("write {name}: {e}"));
+    }
+
+    let structs = suprnova_cli::commands::generate_types::scan_inertia_props(dir.path());
+    assert!(
+        !structs.is_empty(),
+        "the scaffolded controllers do define InertiaProps structs"
+    );
+
+    let unresolved: Vec<String> =
+        suprnova_cli::commands::generate_types::collect_unresolved_refs(&structs)
+            .into_iter()
+            .map(|r| format!("{}.{}: {}", r.struct_name, r.field_name, r.type_name))
+            .collect();
+    assert!(
+        unresolved.is_empty(),
+        "a fresh scaffold must not warn about any prop type: {unresolved:?}"
+    );
+}
