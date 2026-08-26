@@ -678,7 +678,7 @@ activez la feature Cargo `broadcasting-fanout` et substituez
 `Cargo.toml` :
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4", features = ["broadcasting-fanout"] }
 ```
 
 `src/bootstrap.rs` :

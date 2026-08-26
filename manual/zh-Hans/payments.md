@@ -15,8 +15,8 @@ Laravel 在核心文档里把 Cashier 作为一个第一方的 Stripe 集成来�
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4" }
 ```
 
 在启动时注册这个提供商和 webhook 路由器。这个 webhook 路由器就是一个普通的 `Router`，您把它组合进自己的 `routes::register()` 里：
@@ -99,7 +99,7 @@ pub async fn start_checkout(
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4" }
 ```
 
 必需的环境变量：
@@ -130,7 +130,7 @@ Stripe 实现了每一个 trait，包括可选的 `Payment`（通过 PaymentInte
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4" }
 ```
 
 必需的环境变量：
