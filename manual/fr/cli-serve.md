@@ -143,8 +143,31 @@ Quand vous exécutez `suprnova serve`, le CLI :
    versions à votre place.
 6. Exécute `npm install` dans `frontend/` si `node_modules` n'existe pas encore.
    Ignoré sous `--backend-only`, et quand le projet n'a pas de frontend.
-7. Lance `cargo watch -x 'run --bin <package-name>'` pour le backend.
-   `cargo-watch` réexécute le binaire à chaque changement d'un fichier `.rs`.
+7. Lance `cargo watch` pour le backend, restreint par `-w` aux chemins à
+   partir desquels le serveur est réellement construit : `src/`, `cmd/`,
+   `Cargo.toml`, `Cargo.lock`, `.env` et `lang/`. C'est dans `cmd/` que le
+   scaffold full-stack place le `main.rs` du binaire serveur ; le scaffold
+   `--api` le place dans `src/` et n'a pas de `cmd/`. Chaque chemin n'est
+   passé que s'il existe, parce que cargo-watch refuse de démarrer sur un
+   chemin `-w` inexistant - un projet qui n'a pas encore été construit n'a
+   pas de `Cargo.lock`, et celui-ci est pris en compte au `serve` suivant.
+
+   `--no-vcs-ignores` les accompagne. cargo-watch applique votre
+   `.gitignore` aux racines `-w` nommées explicitement, et pas seulement à
+   son propre parcours du projet, et le scaffold place `.env` dans le
+   `.gitignore` - sans ce flag, `-w .env` ne surveille donc rien du tout.
+   Il ne peut pas élargir ce qui redémarre le backend, parce que `-w` a
+   déjà restreint cela aux six chemins ci-dessus, et les seules choses
+   ignorées par git à l'intérieur sont `.env` et (avec `--api`)
+   `Cargo.lock`, toutes deux surveillées à dessein. `target/`,
+   `node_modules` et le reste se trouvent de toute façon hors de chaque
+   racine surveillée.
+
+   Sur un projet full-stack scaffoldé, l'invocation complète est
+   `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
+   -w .env -w lang -x 'run --bin <package-name>'`. Les modifications du
+   frontend et les `frontend/src/types/*.ts` générés sont hors de cette
+   portée : ils ne redémarrent donc jamais le backend.
 8. Lance `npm run dev` dans `frontend/` pour Vite, ce qui donne le HMR pour les
    composants Svelte/React/Vue et les classes Tailwind. Ignoré sous
    `--backend-only`, et quand le projet n'a pas de frontend.
@@ -155,13 +178,22 @@ Quand vous exécutez `suprnova serve`, le CLI :
    dans un autre terminal.
 10. Démarre un surveilleur de fichiers sur `src/` qui réexécute le générateur
     de types chaque fois qu'un fichier `.rs` change, une fois que la salve de
-    sauvegardes s'est tue pendant 500 ms. Ignoré quand le projet n'a pas de
-    frontend, comme la génération de types au démarrage à l'étape 4. Le
-    debounce se déclenche en fin de salve, si bien qu'une salve - `cargo fmt`,
-    formatage à la sauvegarde sur plusieurs fichiers, un changement de
-    branche - se fond en exactement une régénération qui s'exécute *après* la
-    dernière écriture, plutôt qu'une régénération qui se déclencherait dès le
-    premier fichier et manquerait le reste.
+    sauvegardes s'est tue pendant 500 ms. Seuls les vrais changements
+    comptent - une création, une écriture ou une suppression. Les lectures,
+    non, ce qui a son importance parce que le générateur lit à chaque
+    exécution tous les fichiers `.rs` de l'arbre qu'il surveille. Ignoré
+    quand le projet n'a pas de frontend, comme la génération de types au
+    démarrage à l'étape 4. Le debounce se déclenche en fin de salve, si
+    bien qu'une salve - `cargo fmt`, formatage à la sauvegarde sur
+    plusieurs fichiers, un changement de branche - se fond en exactement
+    une régénération qui s'exécute *après* la dernière écriture, plutôt
+    qu'une régénération qui se déclencherait dès le premier fichier et
+    manquerait le reste. Une régénération n'écrit le fichier que lorsque
+    le TypeScript émis diffère de ce qui s'y trouve déjà, et le
+    surveilleur ne signale que ce qu'il a écrit : une modification qui ne
+    change la forme d'aucune prop n'affiche rien et n'émet aucun
+    événement `types_regenerated`. Un silence après une sauvegarde
+    signifie que votre modification n'a pas changé les types générés.
 11. Redirige le stdout/stderr de chaque processus enfant vers votre terminal
     avec un préfixe `[name]` (`[backend]`, `[frontend]`, ou le nom configuré du
     processus), éventuellement horodaté avec `--timestamps` - ou, avec
@@ -216,13 +248,20 @@ correspondante dans [Parité](parity.md#what-we-won-t-ship-and-why).
 
 ## Rechargement à chaud
 
-**Backend.** `cargo watch -x 'run --bin <package>'` est la boucle.
-
-Elle recompile et redémarre le serveur à chaque changement `.rs` dans
-le projet. Les recompilations à froid après avoir touché une crate
-lourde peuvent prendre plusieurs secondes ; les changements
-incrémentaux dans un seul fichier sont généralement inférieurs à la
-seconde.
+**Backend.** `cargo watch` est la boucle, restreinte aux chemins à
+partir desquels le serveur est construit. Elle recompile et redémarre
+sur un changement sous `src/` ou `cmd/`, dans `Cargo.toml`,
+`Cargo.lock` ou `.env`, ou sous `lang/` - `.env` n'est lu qu'une fois
+par `Config::init` au démarrage, et les catalogues Fluent qu'une fois
+à l'amorçage, si bien qu'un changement de l'un ou de l'autre ne prend
+effet qu'au redémarrage. `.env` est surveillé grâce à
+`--no-vcs-ignores`, sans lequel votre `.gitignore` le masquerait au
+surveilleur. Sauvegarder un composant, ou régénérer
+`frontend/src/types/inertia-props.ts`, se situe hors de cette portée
+et laisse le backend en marche. Les recompilations à froid après avoir
+touché une crate lourde peuvent prendre plusieurs secondes ; les
+changements incrémentaux dans un seul fichier sont généralement
+inférieurs à la seconde.
 
 **Frontend.** Le HMR de Vite injecte les changements de composants
 sur place sans rechargement complet, en préservant l'état des
@@ -233,7 +272,12 @@ surveilleur Tailwind v4.
 surveilleur de types réexécute le générateur. Si de nouvelles structs
 `#[derive(InertiaProps)]` apparaissent (ou que des existantes changent
 de forme), le `frontend/src/types/inertia-props.ts` régénéré déclenche
-le HMR de Vite pour le composant qui les importe.
+le HMR de Vite pour le composant qui les importe. Quand le TypeScript
+émis est identique octet pour octet à ce qui se trouve déjà sur le
+disque, le fichier est laissé intact et le surveilleur ne dit rien :
+une régénération qui n'a rien changé n'est donc pas un changement
+auquel quoi que ce soit en aval doive réagir - ni Vite, ni le
+surveilleur du backend, ni ce qui lit `--json`.
 
 ## Processus de dev supplémentaires
 
@@ -291,7 +335,7 @@ champ `type` :
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | Un processus en crash sera relancé après `delay_ms` (voir la séquence de backoff ci-dessus). |
 | `restart_succeeded` | `ts`, `name`, `pid` | Une relance planifiée a réussi ; le processus tourne de nouveau sous un nouveau PID. |
 | `gave_up` | `ts`, `name`, `tries` | Le processus a crashé `tries` fois de suite (`--restart-tries`) et `serve` a cessé d'essayer. La session, et tous les autres processus, continuent de tourner. |
-| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` ou `"lang_keys"`), `count` | Le surveilleur de fichiers a régénéré un artefact TypeScript en réponse à un changement `.rs` / `.ftl`. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` ou `"lang_keys"`), `count` | Le surveilleur de fichiers a réécrit un artefact TypeScript après un changement `.rs` / `.ftl`. N'est émis que lorsque le fichier généré a réellement changé : une modification `.rs` qui laisse le TypeScript émis identique octet pour octet n'écrit rien et n'émet rien, si bien qu'un événement signifie toujours que le fichier sur le disque est désormais différent. `count` est le nombre de structs (ou d'ids de message) dans le fichier réécrit, pas le nombre de ceux qui ont changé. |
 | `shutdown` | `ts` | La session est en train de s'arrêter. Toujours la dernière ligne. |
 
 Par exemple, un crash Vite et sa relance ressemblent à ceci :

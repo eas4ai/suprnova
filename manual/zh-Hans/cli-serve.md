@@ -104,10 +104,14 @@ suprnova serve --skip-types
 4. 从它在 `src/` 里找到的任何 `#[derive(InertiaProps)]` 结构体重新生成 TypeScript 类型，写入 `frontend/src/types/inertia-props.ts`。在项目没有前端时会被跳过。
 5. 如果 `cargo-watch` 还不在 PATH 上，就通过 `cargo install --locked --version "^8.5" cargo-watch` 安装它（只做一次，带一条「Installing...」提示）。在 `--frontend-only` 下会被跳过。这个版本号之所以被限定，是因为 `serve` 驱动的是 `cargo watch -x`，它的含义在一次大版本跳跃之间并不保证不变；`--locked` 会构建 cargo-watch 发布时的那份依赖树，而不是在安装时重新解析它。一条会作为启动开发服务器的副作用去安装软件的命令，不该同时还替您挑版本。
 6. 如果 `node_modules` 还不存在，就在 `frontend/` 里运行 `npm install`。在 `--backend-only` 下，以及在项目没有前端时，会被跳过。
-7. 为后端 spawn 一个 `cargo watch -x 'run --bin <package-name>'`。每当一个 `.rs` 文件发生变化，`cargo-watch` 就会重新运行这个二进制文件。
+7. 为后端 spawn 一个 `cargo watch`，并用 `-w` 把范围收窄到构建这个服务器真正要用到的那些路径上：`src/`、`cmd/`、`Cargo.toml`、`Cargo.lock`、`.env` 和 `lang/`。`cmd/` 是全栈脚手架放服务器二进制文件那个 `main.rs` 的地方；`--api` 脚手架把它放在 `src/` 里，根本没有 `cmd/`。每一条路径只在它确实存在时才被传进去，因为对一条并不存在的 `-w` 路径，cargo-watch 会拒绝启动 - 一个还没有构建过的项目没有 `Cargo.lock`，它会在下一次 `serve` 时被带上。
+
+   `--no-vcs-ignores` 跟着它们一起传。cargo-watch 会把您的 `.gitignore` 施加到明确点名的 `-w` 根目录上，而不只是施加到它自己那次项目遍历上，而脚手架会把 `.env` 加进 gitignore - 所以不带这个标志，`-w .env` 就完全什么都监视不到。它不可能把重启后端的那个范围放宽，因为 `-w` 已经把那个范围收窄到上面这六条路径了，而这六条路径里面唯一被 gitignore 掉的东西就是 `.env`，以及（在 `--api` 上）`Cargo.lock`，这两个都是有意去监视的。`target/`、`node_modules` 以及其余那些，无论如何都落在每一个被监视的根目录之外。
+
+   在一个脚手架出来的全栈项目上，完整的调用是 `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock -w .env -w lang -x 'run --bin <package-name>'`。前端的编辑，以及生成出来的 `frontend/src/types/*.ts`，都在这个范围之外，所以它们绝不会重启后端。
 8. 为 Vite 在 `frontend/` 里 spawn 一个 `npm run dev`，这会给您 Svelte/React/Vue 组件和 Tailwind 类的 HMR。在 `--backend-only` 下，以及在项目没有前端时，会被跳过。
 9. spawn 项目 `Suprnova.toml` 中声明的每个额外进程（见下方[额外开发进程](#额外开发进程)），每个都有自己的 `[name]` 前缀 - 队列工作进程、日志 tailer，或任何您否则要在另一个终端中调度的东西。
-10. 在 `src/` 上启动一个文件监视器，每当一个 `.rs` 文件变化，并且这一连串保存已经安静了 500 毫秒之后，就重新运行这个类型生成器。在项目没有前端时会被跳过，和第 4 步里启动时的类型生成一样。这个防抖是后沿触发的，所以一连串的变更 - `cargo fmt`、跨多个文件的保存时格式化、一次分支切换 - 会合并成恰好一次再生成，在最后一次写入*之后*运行，而不是在第一个文件上就触发、错过剩下的文件。
+10. 在 `src/` 上启动一个文件监视器，每当一个 `.rs` 文件变化，并且这一连串保存已经安静了 500 毫秒之后，就重新运行这个类型生成器。只有真正的变更才算数 - 一次创建、一次写入或者一次删除。读取不算，而这一点很要紧，因为这个生成器每跑一趟都会读遍它正在监视的那棵目录树底下的每一个 `.rs` 文件。在项目没有前端时会被跳过，和第 4 步里启动时的类型生成一样。这个防抖是后沿触发的，所以一连串的变更 - `cargo fmt`、跨多个文件的保存时格式化、一次分支切换 - 会合并成恰好一次再生成，在最后一次写入*之后*运行，而不是在第一个文件上就触发、错过剩下的文件。一次再生成只在发出的 TypeScript 与已经在那里的不同时才写文件，而这个监视器只报告它确实写过的东西：一次没有改变任何 prop 形态的编辑，什么都不会打印，也不会发出 `types_regenerated` 事件。保存之后的沉默意味着，您这次编辑并没有改变生成出来的类型。
 11. 把每个子进程的 stdout/stderr 都转发到您的终端，带着 `[name]` 前缀（`[backend]`、`[frontend]`，或进程的配置名称），可选择用 `--timestamps` 加上时间戳 - 或者使用 `--json` 时改为 NDJSON 事件（见下方[JSON 输出](#json-输出)）。
 
 `Ctrl+C` 会通知这个管理器去设置它的关闭标志、杀掉每个子进程，然后退出。如果一个子进程自己退出了 - 一次 `cargo watch` 无法恢复的严重 Rust 编译错误、崩溃的 Vite 进程、失败的 `Suprnova.toml` 进程 - 它会在短暂退避后重新 spawn（200ms，每次连续崩溃翻倍，上限为 5s；持续运行 30s 的进程会重置该爬升），而不是拆掉会话。传递 `--no-restart` 可恢复旧行为：任一子进程退出会立即关闭整个会话。
@@ -122,11 +126,11 @@ Laravel 的 `dev` 命令也提供 `--tabs` 和 `--stream` 模式，两者都通�
 
 ## 热重载
 
-**后端。** `cargo watch -x 'run --bin <package>'` 就是这个循环。项目里每一次 `.rs` 变化，它都会重新编译并重启服务器。改动一个很重的 crate 之后的冷编译可能要花几秒钟；单个文件内的增量变化通常不到一秒。
+**后端。** `cargo watch` 就是这个循环，它的范围被收窄到构建这个服务器真正要用到的那些路径上。`src/` 或者 `cmd/` 底下的一次变化、对 `Cargo.toml`、`Cargo.lock` 或者 `.env` 的一次变化，或者 `lang/` 底下的一次变化，都会让它重新编译并重启 - `.env` 由 `Config::init` 在启动时读一次，Fluent 语料表在引导时读一次，所以对这两者中任何一个的改动，都只有在重启之后才生效。`.env` 是通过 `--no-vcs-ignores` 才被监视到的，没有这个标志，您的 `.gitignore` 会把它对这个监视器藏起来。保存一个组件，或者重新生成 `frontend/src/types/inertia-props.ts`，都在这个范围之外，会让后端继续跑着。改动一个很重的 crate 之后的冷编译可能要花几秒钟；单个文件内的增量变化通常不到一秒。
 
 **前端。** Vite 的 HMR 会就地注入组件变更，不需要整页重载，还会保留组件状态。Tailwind 类会通过 Tailwind v4 的监视器实时更新。
 
-**TypeScript 类型。** 每当一个 `.rs` 文件变化，类型监视器就会重新运行这个生成器。如果出现了新的 `#[derive(InertiaProps)]` 结构体（或者已有的结构体改变了形态），重新生成的 `frontend/src/types/inertia-props.ts` 就会为导入它们的组件触发 Vite 的 HMR。
+**TypeScript 类型。** 每当一个 `.rs` 文件变化，类型监视器就会重新运行这个生成器。如果出现了新的 `#[derive(InertiaProps)]` 结构体（或者已有的结构体改变了形态），重新生成的 `frontend/src/types/inertia-props.ts` 就会为导入它们的组件触发 Vite 的 HMR。当发出的 TypeScript 与磁盘上已经有的那份逐字节相同时，这个文件会被原封不动地留下，监视器也什么都不说，所以一次什么都没有改变的再生成，并不是一件下游任何东西需要去响应的变更 - Vite 不用，后端监视器不用，读 `--json` 的那个东西也不用。
 
 ## 额外开发进程
 
@@ -163,7 +167,7 @@ Laravel 会从 PHP 中注册额外 `dev` 进程 - `DevCommands::register($comman
 | `restart_scheduled` | `ts`、`name`、`delay_ms` | 崩溃进程会在 `delay_ms` 后重新 spawn（见上文退避计划）。 |
 | `restart_succeeded` | `ts`、`name`、`pid` | 计划的重新 spawn 成功；进程在新的 PID 下再次运行。 |
 | `gave_up` | `ts`、`name`、`tries` | 进程连续崩溃 `tries` 次（`--restart-tries`），`serve` 已停止重试它。会话及每个其他进程继续运行。 |
-| `types_regenerated` | `ts`、`artifact`（`"inertia_props"` 或 `"lang_keys"`）、`count` | 文件监视器响应 `.rs`/`.ftl` 变更，重新生成了 TypeScript 产物。 |
+| `types_regenerated` | `ts`、`artifact`（`"inertia_props"` 或 `"lang_keys"`）、`count` | 文件监视器在一次 `.rs`/`.ftl` 变更之后重写了一个 TypeScript 产物。只有在生成出来的那个文件确实变了的时候才会触发：一次让发出的 TypeScript 逐字节保持相同的 `.rs` 编辑，什么都不会写，也什么都不会发出，所以一个事件总是意味着磁盘上那个文件现在不一样了。`count` 是被重写的那个文件里结构体（或者消息 id）的数量，而不是其中发生了变化的数量。 |
 | `shutdown` | `ts` | 会话正在关闭。始终是最后一行。 |
 
 例如，一次 Vite 崩溃及其重新 spawn 如下：

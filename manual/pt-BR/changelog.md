@@ -5,6 +5,149 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 1.3.5 - 2026-08-26
+
+### Alterado
+
+- **Toda seção do changelog é legível nas seis traduções do manual.** Os
+  manuais em de, es, fr, ja, pt-BR e zh-Hans traziam as seções de 1.3.0 a
+  1.3.2 em inglês, atrás de uma nota do tradutor, e seções mais antigas
+  com linhas soltas em inglês; toda seção de 1.3.5 até 0.1.0 agora está
+  traduzida, e as notas sumiram.
+
+### Corrigido
+
+- **Discos de sistema de arquivos local publicam todo objeto em um único
+  passo.** O `Storage::register_fs` e o `register_fs_with` agora preparam
+  `disk.write(...)`, `disk.writer(...)` e `disk.copy(...)` como um arquivo
+  temporário em `<root>/.suprnova-atomic/` e o publicam no alvo com um
+  único `rename(2)`, então nenhum deles jamais é observável com um tamanho
+  parcial. Antes disso, o driver abria o alvo com `create + truncate` e
+  transmitia para dentro dele no lugar: um leitor concorrente recebia um
+  objeto vazio ou escrito pela metade durante toda a duração da escrita, e
+  um crash no meio da escrita deixava um objeto truncado no caminho ativo.
+  O `abort()` em um writer agora descarta o arquivo preparado em vez de
+  falhar com `Unsupported`.
+- **`write_with(..).if_not_exists(true)` é uma criação exclusiva de
+  verdade em um disco local.** Ela é publicada com `link(2)`, que falha
+  atomicamente no kernel quando o alvo existe, então exatamente um entre
+  qualquer número de chamadores concorrentes tem sucesso e todos os outros
+  recebem `ConditionNotMatch` sem ter escrito nada. Uma escrita preparada
+  publicada por um rename simples teria degradado a condição para uma
+  checagem seguida de uma sobrescrita, descartando silenciosamente todos
+  os writers menos o último - que é o oposto do motivo pelo qual se
+  recorre a essa primitiva.
+- **Um `append` que cria o objeto continua sendo um append.** Appends são
+  a única operação feita no lugar em um disco local, e agora isso vale
+  também para o primeiro deles, então dois writers dando append no mesmo
+  objeto ausente aterrissam os dois, em vez de um deles preparar a própria
+  cópia e sobrescrever o outro.
+
+- **O `suprnova serve` não recompila mais um projeto em que ninguém tocou,
+  e o `suprnova generate-types --watch` também não.** Os dois monitores
+  classificavam um evento de sistema de arquivos apenas pelo caminho, e o
+  gerador lê todo arquivo `.rs` dentro da mesma árvore `src/` que eles
+  monitoram - então, no Linux, onde o kernel reporta essas leituras, cada
+  regeneração agendava a seguinte. Um projeto recém-criado com scaffold
+  regenerava seus tipos e reiniciava seu backend a cada meio segundo, para
+  sempre, sem uma única edição de código-fonte. Agora só contam eventos
+  que significam que os bytes em disco realmente mudaram. O
+  `generate-types --watch` também não tinha debounce nenhum, então agia no
+  primeiro arquivo de uma rajada em vez de no último; ele agora
+  compartilha a borda de descida de 500 ms do `serve`, e os dois monitores
+  compartilham uma implementação só, para que a próxima correção não possa
+  chegar em apenas um deles. O gerador compara antes de escrever, então
+  uma regeneração cuja saída é byte a byte idêntica deixa o arquivo, e o
+  mtime dele, em paz.
+
+- **O monitor do backend está delimitado aos caminhos a partir dos quais o
+  servidor é construído.** O `cargo watch` rodava sem nenhum `-w`, então
+  monitorava o projeto inteiro fora do gitignore: salvar um componente
+  Svelte, ou regenerar `frontend/src/types/inertia-props.ts`, recompilava
+  o framework e reiniciava o servidor. Agora ele monitora `src/`, `cmd/`,
+  `Cargo.toml`, `Cargo.lock`, `.env` e `lang/` - as entradas da build mais
+  as duas árvores lidas uma única vez no boot - cada um incluído somente
+  quando existe, já que o cargo-watch recusa um caminho `-w` que não
+  exista. É em `cmd/` que o scaffold full-stack mantém o `main.rs` do
+  binário do servidor. A invocação também passa `--no-vcs-ignores`, porque
+  o cargo-watch aplica o `.gitignore` a raízes `-w` nomeadas
+  explicitamente e o scaffold coloca `.env` no gitignore, o que deixaria
+  `-w .env` monitorando nada; o `-w` já estreitou a superfície, então a
+  flag não tem como alargá-la. Edições no frontend e arquivos `.ts`
+  gerados não reiniciam mais o backend.
+
+- **`serde_json::Value` é gerado como `JsonValue` em vez de `unknown`.**
+  Ele degradava para `unknown` e avisava que "não é um struct que este
+  projeto define", um conselho errado para um documento JSON - e as
+  próprias páginas de login e de cadastro do scaffold tropeçavam nisso
+  duas vezes a cada regeneração, então todo projeto novo já vinha de
+  fábrica emitindo aviso. Agora ele emite um alias recursivo `JsonValue`,
+  declarado uma única vez no topo do arquivo gerado e só quando algo o
+  referencia. Um `Value` puro também mapeia para lá, a menos que o projeto
+  defina um struct `Value` próprio.
+
+- **Nem o `generate-types` nem o `serve` reportam como gerado um arquivo
+  que não escreveram.** Como uma passagem agora só escreve quando o
+  conteúdo emitido difere, `Generated <path>` era uma afirmação sobre o
+  sistema de arquivos que era falsa em toda reexecução de um projeto
+  inalterado. O `generate-types` diz `<path> is up to date` em vez disso,
+  tanto na execução única quanto no `--watch`, e a passagem de
+  inicialização do `serve` diz `N type(s) up to date → <path>`, mantendo a
+  contagem. O monitor de arquivos do `serve` agora fica calado em uma
+  regeneração que não escreveu nada, tanto em texto quanto sob `--json`:
+  um evento `types_regenerated` significa que o arquivo gerado em disco
+  está diferente agora, então silêncio depois de um salvamento diz a você
+  que sua edição não mudou nenhuma forma de prop.
+
+### Atualizando
+
+- **`.suprnova-atomic` é reservado na raiz de todo disco local.** O
+  diretório de preparo tem que viver dentro da raiz - um irmão da raiz
+  pode estar em um sistema de arquivos diferente quando a raiz é um ponto
+  de montagem, e todo rename falharia com `EXDEV` -, então o nome é
+  reservado em vez de meramente convencional. Qualquer caminho cujo
+  primeiro componente seja `.suprnova-atomic` agora é recusado com um erro
+  de permissão (leitura, escrita, exclusão, stat e listagem igualmente),
+  assim como qualquer caminho que resolva para dentro do diretório por um
+  symlink, e a entrada é filtrada para fora de `files`, `directories`,
+  `all_files` e `all_directories`. Se a raiz de um disco seu já contiver
+  uma entrada `.suprnova-atomic` própria, ela não é mais alcançável
+  através daquele disco: mova-a para outro lugar antes de atualizar. Um
+  arquivo comum com esse nome é recusado já no registro, com uma mensagem
+  dizendo isso, em vez de falhar mais tarde dentro do driver. O nome é
+  exportado como `suprnova::ATOMIC_STAGING_DIR` para que ferramentas de
+  backup e de sincronização possam deixá-lo de fora.
+- **Publicar por rename substitui o inode do alvo.** Reescrever um objeto
+  em um disco local não preserva mais o modo, o dono nem os hard links
+  dele, e um leitor que segura um descritor aberto continua com o conteúdo
+  antigo em vez de ver os bytes novos. Esse é o custo padrão da publicação
+  atômica, mas é uma mudança de comportamento se você contava com qualquer
+  um dos dois.
+- **Uma escrita condicional precisa de um sistema de arquivos com hard
+  links.** O `if_not_exists` é publicado com `link(2)`, que não é
+  suportado em FAT, exFAT e alguns sistemas de arquivos de rede. Ali ele
+  falha de vez, em vez de cair para uma checagem seguida de uma
+  sobrescrita, porque um fallback te entregaria uma garantia de
+  exclusividade que não se sustenta. Nada mais no disco é afetado.
+- **Um primeiro `append` que falha deixa um objeto vazio.** Um append é a
+  única operação que não é publicada em um único passo, então o objeto é
+  criado antes de os bytes chegarem; um primeiro append que falha ou é
+  abortado o deixa para trás, exatamente como um append sobre um objeto
+  existente sempre deixou.
+- **Um symlink quebrado na raiz do disco é recusado, não sobrescrito.** Um
+  caminho cujo alvo do symlink não existe não pode mais ser escrito, nem
+  receber append, nem ser copiado por cima, nem ser movido por cima, nem
+  ser excluído através do disco. O `1.3.4` substituía um link desses por
+  um arquivo comum; a guarda não tem como provar para onde um link
+  irresolvível leva, e criar através de um cria o alvo dele em qualquer
+  lugar do host, então agora ela recusa. Remova o link fora do disco se
+  você realmente queria escrever ali.
+- **Nada varre o diretório de preparo.** Ele guarda arquivos temporários
+  em voo mais o que um processo que morreu no meio de uma publicação
+  deixou para trás, então um host em crash loop o faz crescer sem limite.
+  Esvaziá-lo enquanto nada estiver escrevendo no disco é seguro; deixá-lo
+  de fora dos backups é recomendado.
+
 ## 1.3.4 - 2026-08-25
 
 ### Adicionado
@@ -2469,7 +2612,7 @@ Duas adições que só pedem algo de você se você optar por entrar:
   de escrita era segurado ao longo de dois round trips de rede, e o
   `RwLock` justo do `tokio` fazia um índice frio travar todo índice
   quente.
-- **O type watcher descartava rajadas (P2-13).** O debounce de borda
+- **O monitor de tipos descartava rajadas (P2-13).** O debounce de borda
   de subida regenerava no primeiro arquivo de uma rajada e descartava
   o resto sem uma execução final, então o último save nunca fazia
   efeito.
@@ -2609,7 +2752,7 @@ release mira nisso.
 - **`generate-types` resolve structs de prop aninhados sem derives.** O
   gerador da 0.7.1 degradava para `unknown` todo campo de prop cujo
   tipo não derivasse `InertiaProps`/`Data` - então rodar de novo o
-  gerador (ou o watcher do `suprnova serve`) sobre um projeto com um
+  gerador (ou o monitor do `suprnova serve`) sobre um projeto com um
   arquivo de types commitado substituía interfaces reais como
   `Array<AdminArticleRow>` por `unknown` e quebrava a checagem de
   tipos em todo o app. Structs simples definidos em qualquer lugar em

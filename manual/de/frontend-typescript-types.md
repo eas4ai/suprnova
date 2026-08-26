@@ -36,10 +36,25 @@ suprnova generate-types --output frontend/src/types/props.ts
 
 Der Pfad der Routen-Datei ist fix auf `frontend/src/types/routes.ts`
 und der der Message-Key-Datei auf `frontend/src/types/lang-keys.ts`;
-nur der Pfad der Props-Datei ist konfigurierbar. Der Watcher pollt
-`src/` und regeneriert die Props-Datei bei jeder `.rs`-Änderung; hat
-das Projekt ein `lang/`-Verzeichnis, beobachtet er auch diesen Baum
-und regeneriert `lang-keys.ts` bei jeder `.ftl`-Änderung.
+nur der Pfad der Props-Datei ist konfigurierbar. Der Watcher
+beobachtet `src/` und regeneriert die Props-Datei, wenn eine
+`.rs`-Datei angelegt, geschrieben oder gelöscht wird; hat das Projekt
+ein `lang/`-Verzeichnis, beobachtet er auch diesen Baum und
+regeneriert `lang-keys.ts` bei denselben Arten von Änderung an einer
+`.ftl`-Datei. Lesezugriffe zählen nicht - der Generator liest bei
+jedem Durchlauf jede `.rs`-Datei unter `src/`, und würde er das als
+Änderung werten, regenerierte der Watcher endlos weiter. Eine Folge
+von Speicherungen wird zu einem einzigen Durchlauf 500 ms nach dem
+letzten Schreibvorgang zusammengefasst, sodass ein `cargo fmt` oder
+ein Branch-Wechsel einmal regeneriert, und zwar aus dem fertigen Baum,
+statt einmal pro Datei aus einem halb geschriebenen.
+
+Jeder Durchlauf schreibt eine Datei nur dann, wenn sich der ausgegebene
+Inhalt von dem unterscheidet, was schon da ist. Eine Regenerierung, die
+nichts geändert hat, meldet `<path> is up to date` und lässt die Datei
+samt Zeitstempel unangetastet - und genau das hält `suprnova serve`
+davon ab, Ihr Backend wegen einer Datei neu zu starten, die es gar
+nicht geschrieben hat.
 
 ## Seiten-Props
 
@@ -117,6 +132,7 @@ Vue-Entsprechungen.
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | Der Props-Generator gibt `Array<T>` aus; der Routen-Generator gibt `T[]` für Form-Request-Felder aus |
 | `HashMap<K, V>`, `BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | Ein rekursiver Alias, den der Generator einmal am Anfang der Datei deklariert, und nur dann, wenn etwas ihn referenziert. Ein bloßes `Value` wird ebenfalls hierher abgebildet, außer das Projekt definiert eine eigene `Value`-Struktur - die gewinnt |
 | `Field<T>` (von `#[derive(Data)]`) | `field?: T \| null` | Field ist auf der Wire-Ebene optional |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Lazy Props lassen die `null`-Hälfte weg |
 | Alles andere | nackter Bezeichner | Siehe „Benutzerdefinierte Typen“ unten |

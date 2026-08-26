@@ -36,10 +36,23 @@ suprnova generate-types --output frontend/src/types/props.ts
 La ruta del archivo de rutas queda fija en
 `frontend/src/types/routes.ts` y la del archivo de claves de mensaje en
 `frontend/src/types/lang-keys.ts`; solo la ruta del archivo de props es
-configurable. El watcher sondea `src/` y regenera el archivo de props
-ante cualquier cambio de `.rs`; cuando el proyecto tiene un directorio
-`lang/`, también vigila ese árbol y regenera `lang-keys.ts` ante
-cualquier cambio de `.ftl`.
+configurable. El monitor vigila `src/` y regenera el archivo de props
+cuando un archivo `.rs` se crea, se escribe o se borra; cuando el
+proyecto tiene un directorio `lang/`, vigila también ese árbol y
+regenera `lang-keys.ts` ante los mismos tipos de cambio en un archivo
+`.ftl`. Las lecturas no cuentan - el generador lee todos los archivos
+`.rs` bajo `src/` en cada ejecución, y tratar eso como un cambio haría
+que el monitor regenerara para siempre. Una ráfaga de guardados se
+agrupa en una única ejecución 500 ms después de la última escritura, así
+que un `cargo fmt` o un cambio de rama regenera una sola vez, a partir
+del árbol terminado, en lugar de una vez por archivo a partir de uno a
+medio escribir.
+
+Cada ejecución escribe un archivo solo cuando el contenido emitido
+difiere de lo que ya hay ahí. Una regeneración que no cambió nada
+informa `<path> is up to date` y deja el archivo, y su marca de tiempo,
+intactos - que es lo que impide que `suprnova serve` reinicie tu backend
+por un archivo que decidió no escribir.
 
 ## Props de página
 
@@ -116,6 +129,7 @@ equivalentes en React y Vue.
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | El generador de props emite `Array<T>`; el generador de rutas emite `T[]` para los campos de solicitud de formulario |
 | `HashMap<K, V>`, `BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | Un alias recursivo que el generador declara una sola vez al principio del archivo, y solo cuando algo lo referencia. Un `Value` a secas también se mapea aquí, salvo que el proyecto defina su propio struct `Value` - ese gana |
 | `Field<T>` (de `#[derive(Data)]`) | `field?: T \| null` | El campo es opcional en la red |
 | `Prop<T>` (perezoso / diferido) | `field?: T` | Los props perezosos omiten la mitad `null` |
 | Cualquier otra cosa | identificador simple | Consulta "Tipos personalizados" más abajo |

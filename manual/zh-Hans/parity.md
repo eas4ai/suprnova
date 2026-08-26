@@ -92,7 +92,7 @@
 | 上下文 | `Context::put` / `Context::get` / `ContextStore` + 自动注入到队列 / 邮件 / 事件里 | 已实现 | [上下文](context.md) |
 | 契约 | 所有公开接缝都是 trait | 已实现 | 参见上面“架构 / 契约”那一行 |
 | 事件 | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、排队的监听器、订阅者 | 已实现 | [事件](events.md) |
-| 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。`Storage::register_read_through` 把两个磁盘组合成一个读穿透磁盘，它会把命中后备磁盘的对象提升到主磁盘上，另有 `copy: false` 用来跳过提升，以及跨越后备磁盘的 `copy` / `rename`。[文件存储](filesystem.md) |
+| 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。在本地磁盘上，`put`/`write`、流式写入器和 `copy` 全都先暂存在 `<root>/.suprnova-atomic/` 底下，再一步发布出去；而一次条件写入是用 `link(2)` 发布的，所以它仍然是一次真正的独占创建；`append` 是唯一一个原地进行的操作。Laravel 的本地驱动程序是直写目标的，在那里能观察到写了一半的长度，而一次崩溃会把活着的那个对象截断。`Storage::register_read_through` 把两个磁盘组合成一个读穿透磁盘，它会把命中后备磁盘的对象提升到主磁盘上，另有 `copy: false` 用来跳过提升，以及跨越后备磁盘的 `copy` / `rename`。[文件存储](filesystem.md) |
 | 辅助函数 | 对应物都在各自的所属模块里（没有厨房水槽式的 `helpers.md`） | 路径不同 | 比如 URL 辅助函数在 [urls.md](urls.md) 里，字符串辅助函数在 `std`/`heck` 里，数组辅助函数在 `std::collections` 里 - Rust 是用 crate 而不是一个全局命名空间来做这件事的 |
 | HTTP 客户端 | `Http::get/post/...` 构建器 + 供测试用的 `Http::fake(...)` | 已实现 | 自动记录请求；`assert_sent` / `assert_not_sent`；`.retry_when(predicate)` 以 `RetryContext` 收窄内置重试策略。[HTTP 客户端](http-client.md) |
 | 图像（`Illuminate\Image`） | `Image::from_bytes/from_path/from_disk/from_upload/from_stream` + 同样的一套操作与终结方法表面 | 已实现 | 住在 `suprnova::media` 里。像 Laravel 的 `gd`/`imagick` 那样有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认，纯 Rust）或者 `magick`。读写 PNG、JPEG、WebP、GIF、BMP；AVIF 输出推迟到那个自研 AV1 编码器发布之后。解码限制会对着文件头做检查。[图像](images.md) |

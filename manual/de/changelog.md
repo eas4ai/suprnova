@@ -5,6 +5,166 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 1.3.5 - 2026-08-26
+
+### Geändert
+
+- **Jeder Changelog-Abschnitt ist in allen sechs Handbuch-Übersetzungen
+  lesbar.** Die Handbücher für de, es, fr, ja, pt-BR und zh-Hans trugen
+  die Abschnitte 1.3.0 bis 1.3.2 hinter einem Übersetzerhinweis auf
+  Englisch, und ältere Abschnitte enthielten vereinzelte englische
+  Zeilen; jeder Abschnitt von 1.3.5 zurück bis 0.1.0 ist jetzt übersetzt,
+  und die Hinweise sind weg.
+
+### Behoben
+
+- **Disks im lokalen Dateisystem machen jedes Objekt in einem Schritt
+  sichtbar.** `Storage::register_fs` und `register_fs_with` lagern
+  `disk.write(...)`, `disk.writer(...)` und `disk.copy(...)` jetzt als
+  temporäre Datei unter `<root>/.suprnova-atomic/` zwischen und machen
+  sie mit einem einzigen `rename(2)` auf dem Ziel sichtbar, keine davon
+  ist also je bei einer unvollständigen Länge beobachtbar. Vorher öffnete
+  der Treiber das Ziel mit `create + truncate` und streamte an Ort und
+  Stelle hinein: Ein gleichzeitig lesender Prozess bekam für die gesamte
+  Dauer des Schreibvorgangs ein leeres oder halb geschriebenes Objekt,
+  und ein Absturz mitten im Schreiben ließ ein abgeschnittenes Objekt an
+  Ort und Stelle zurück. `abort()` auf einem Writer verwirft jetzt die
+  zwischengelagerte Datei, statt mit `Unsupported` fehlzuschlagen.
+- **`write_with(..).if_not_exists(true)` ist auf einer lokalen Disk ein
+  echtes exklusives Anlegen.** Es wird mit `link(2)` sichtbar gemacht,
+  das im Kernel atomar fehlschlägt, wenn das Ziel existiert, sodass von
+  beliebig vielen konkurrierenden Aufrufern genau einer Erfolg hat und
+  jeder andere `ConditionNotMatch` bekommt, ohne etwas geschrieben zu
+  haben. Ein zwischengelagerter Schreibvorgang, der per einfachem Rename
+  sichtbar gemacht würde, hätte die Bedingung zu einer Prüfung mit
+  anschließendem Überschreiben abgeschwächt und dabei alle bis auf den
+  letzten Writer stillschweigend verworfen - das Gegenteil dessen, wofür
+  man zu diesem Primitiv greift.
+- **Ein `append`, das das Objekt anlegt, ist immer noch ein `append`.**
+  Anhängen ist auf einer lokalen Disk die einzige Operation, die an Ort
+  und Stelle arbeitet, und das gilt jetzt auch für das erste, sodass zwei
+  Writer, die an dasselbe fehlende Objekt anhängen, beide ankommen, statt
+  dass einer seine eigene Kopie zwischenlagert und den anderen
+  überschreibt.
+
+- **`suprnova serve` baut ein Projekt, das niemand angefasst hat, nicht
+  mehr neu, und `suprnova generate-types --watch` auch nicht.** Beide
+  Watcher stuften ein Dateisystem-Ereignis allein nach seinem Pfad ein,
+  und der Generator liest jede `.rs`-Datei unter demselben `src/`-Baum,
+  den sie beobachten - unter Linux, wo der Kernel diese Lesezugriffe
+  meldet, plante also jede Regenerierung die nächste ein. Ein frisch
+  gescaffoldetes Projekt regenerierte seine Typen und startete sein
+  Backend alle halbe Sekunde neu, endlos, ohne eine einzige
+  Quelltextänderung. Jetzt zählen nur noch Ereignisse, die bedeuten, dass
+  sich die Bytes auf der Platte tatsächlich geändert haben.
+  `generate-types --watch` hatte außerdem gar keinen Debounce und
+  reagierte daher auf die erste Datei eines Schwalls statt auf die
+  letzte; es teilt sich jetzt die 500 ms von `serve` am Ende der
+  Ruhephase, und beide Watcher teilen sich eine Implementierung, damit
+  die nächste Korrektur nicht nur in einem von beiden landen kann. Der
+  Generator vergleicht, bevor er schreibt; eine Regenerierung, deren
+  Ausgabe Byte für Byte gleich ist, lässt die Datei und ihre mtime also
+  in Ruhe.
+
+- **Der Backend-Watcher ist auf die Pfade eingegrenzt, aus denen der
+  Server gebaut wird.** `cargo watch` lief ohne `-w` und beobachtete
+  damit das ganze nicht per `.gitignore` ausgeschlossene Projekt: Eine
+  Svelte-Komponente zu speichern oder
+  `frontend/src/types/inertia-props.ts` zu regenerieren baute das
+  Framework neu und startete den Server neu. Jetzt beobachtet es `src/`,
+  `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env` und `lang/` - die
+  Build-Eingaben plus die beiden Bäume, die beim Boot einmal gelesen
+  werden - jeweils nur dann, wenn es sie gibt, denn cargo-watch
+  verweigert einen `-w`-Pfad, den es nicht gibt. In `cmd/` hält das
+  Full-Stack-Scaffold die `main.rs` der Server-Binary. Der Aufruf
+  übergibt außerdem `--no-vcs-ignores`, weil cargo-watch `.gitignore` auf
+  ausdrücklich benannte `-w`-Wurzeln anwendet und das Scaffold `.env`
+  ausschließt, was sonst `-w .env` auf nichts beobachten ließe; `-w` hat
+  die Oberfläche bereits verengt, das Flag kann sie also nicht erweitern.
+  Frontend-Änderungen und generierte `.ts`-Dateien starten das Backend
+  nicht mehr neu.
+
+- **`serde_json::Value` wird als `JsonValue` generiert statt als
+  `unknown`.** Früher fiel es auf `unknown` zurück und warnte, es sei
+  „keine Struktur, die dieses Projekt definiert“ - ein Rat, der für ein
+  JSON-Dokument falsch ist, und die Login- und Registrierungsseiten des
+  Scaffolds selbst lösten das bei jeder Regenerierung zweimal aus, sodass
+  jedes frische Projekt von Anfang an warnte. Jetzt gibt es einen
+  rekursiven `JsonValue`-Alias aus, einmal am Anfang der generierten
+  Datei deklariert und nur dann, wenn etwas ihn referenziert. Ein bloßes
+  `Value` wird ebenfalls dorthin abgebildet, außer das Projekt definiert
+  eine eigene `Value`-Struktur.
+
+- **Weder `generate-types` noch `serve` meldet eine Datei als generiert,
+  die es gar nicht geschrieben hat.** Weil ein Durchlauf jetzt nur noch
+  schreibt, wenn sich der ausgegebene Inhalt unterscheidet, war
+  `Generated <path>` eine Aussage über das Dateisystem, die bei jedem
+  erneuten Lauf eines unveränderten Projekts falsch war. `generate-types`
+  sagt stattdessen `<path> is up to date`, im Einmal-Lauf wie unter
+  `--watch`, und der Startdurchlauf von `serve` sagt
+  `N type(s) up to date → <path>` und behält die Zählung bei. Der
+  Dateiwächter von `serve` schweigt jetzt bei einer Regenerierung, die
+  nichts geschrieben hat, im Text wie unter `--json`: Ein
+  `types_regenerated`-Ereignis heißt, dass die generierte Datei auf der
+  Platte jetzt anders ist, Schweigen nach einer Speicherung sagt Ihnen
+  also, dass Ihre Änderung keine Prop-Form verändert hat.
+
+### Upgrade
+
+- **`.suprnova-atomic` ist im Wurzelverzeichnis jeder lokalen Disk
+  reserviert.** Das Zwischenverzeichnis muss innerhalb des
+  Wurzelverzeichnisses liegen - ein Verzeichnis neben der Wurzel kann auf
+  einem anderen Dateisystem liegen, wenn die Wurzel ein Mountpunkt ist,
+  und jedes Rename würde mit `EXDEV` fehlschlagen -, deshalb ist der Name
+  reserviert und nicht bloß üblich. Jeder Pfad, dessen erste Komponente
+  `.suprnova-atomic` ist, wird jetzt mit einem Berechtigungsfehler
+  abgelehnt (Lesen, Schreiben, Löschen, Stat und Auflisten
+  gleichermaßen), ebenso jeder Pfad, der sich über einen Symlink in das
+  Verzeichnis hinein auflöst, und der Eintrag wird aus `files`,
+  `directories`, `all_files` und `all_directories` herausgefiltert.
+  Enthält ein Disk-Wurzelverzeichnis bereits einen eigenen
+  `.suprnova-atomic`-Eintrag, ist er über diese Disk nicht mehr
+  erreichbar: Schieben Sie ihn vor dem Upgrade beiseite. Eine reguläre
+  Datei dieses Namens wird bei der Registrierung mit einer entsprechenden
+  Meldung abgelehnt, statt später im Treiber fehlzuschlagen. Der Name
+  wird als `suprnova::ATOMIC_STAGING_DIR` exportiert, damit Backup- und
+  Sync-Werkzeuge ihn ausschließen können.
+- **Weil per Rename sichtbar gemacht wird, wechselt die Inode des
+  Ziels.** Ein Objekt auf einer lokalen Disk neu zu schreiben erhält
+  seinen Modus, seinen Eigentümer und seine Hardlinks nicht mehr, und ein
+  Leser, der einen offenen Deskriptor hält, behält den alten Inhalt,
+  statt die neuen Bytes zu sehen. Das ist der übliche Preis für atomares
+  Sichtbarmachen, aber es ist eine Verhaltensänderung, falls Sie sich auf
+  eines von beidem verlassen haben.
+- **Ein bedingter Schreibvorgang braucht ein Dateisystem mit Hardlinks.**
+  `if_not_exists` wird mit `link(2)` sichtbar gemacht, das auf FAT, exFAT
+  und manchen Netzwerkdateisystemen nicht unterstützt wird. Dort schlägt
+  es rundheraus fehl, statt auf eine Prüfung mit anschließendem
+  Überschreiben zurückzufallen, denn ein solcher Rückfall gäbe Ihnen eine
+  Exklusivitätsgarantie in die Hand, die nicht hält. Sonst ist auf der
+  Disk nichts betroffen.
+- **Ein erstes `append`, das fehlschlägt, hinterlässt ein leeres
+  Objekt.** Anhängen ist die einzige Operation, die nicht in einem
+  einzigen Schritt sichtbar gemacht wird, das Objekt wird also angelegt,
+  bevor die Bytes ankommen; ein fehlgeschlagenes oder abgebrochenes
+  erstes `append` lässt es zurück - genau wie ein `append` auf ein
+  bestehendes Objekt es immer schon getan hat.
+- **Ein toter Symlink im Disk-Wurzelverzeichnis wird abgelehnt, nicht
+  überschrieben.** Ein Pfad, dessen Symlink-Ziel nicht existiert, kann
+  über die Disk nicht mehr geschrieben, angehängt, als Kopier- oder
+  Verschiebeziel benutzt oder gelöscht werden. `1.3.4` ersetzte einen
+  solchen Link durch eine reguläre Datei; der Schutz kann nicht beweisen,
+  wohin ein nicht auflösbarer Link führt, und durch einen solchen
+  hindurch anzulegen legt das Ziel des Links irgendwo auf dem Host an,
+  deshalb lehnt er jetzt ab. Entfernen Sie den Link außerhalb der Disk,
+  wenn Sie dort schreiben wollten.
+- **Nichts räumt das Zwischenverzeichnis auf.** Es enthält die temporären
+  Dateien laufender Schreibvorgänge und alles, was ein mitten im Vorgang
+  gestorbener Prozess hinterlassen hat, ein Host in einer Absturzschleife
+  lässt es also unbegrenzt wachsen. Es zu leeren, während nichts auf die
+  Disk schreibt, ist gefahrlos; es von Backups auszunehmen, ist
+  empfohlen.
+
 ## 1.3.4 - 2026-08-25
 
 ### Hinzugefügt

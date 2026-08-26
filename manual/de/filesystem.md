@@ -106,6 +106,75 @@ S3 ist bewusst *nicht* gegatet - sein Signierer hing nie von `rsa` ab, es
 zu gaten würde also das meistgenutzte Cloud-Backend kaputtmachen und nichts
 entfernen.
 
+### Atomare lokale Schreibvorgänge
+
+Auf einer lokalen Disk macht jede Operation, die Bytes an einem Pfad
+sichtbar macht, sie in einem einzigen Schritt sichtbar. `disk.write(...)`,
+`disk.writer(...)` und `disk.copy(...)` landen zuerst in
+`<root>/.suprnova-atomic/`, werden dort geflusht und synchronisiert und
+dann auf das Ziel umbenannt; `disk.rename(...)` ist ohnehin schon ein
+einziger Schritt. Ein gleichzeitig lesender Prozess sieht deshalb entweder
+das vorherige Objekt oder das fertige neue und nie eine unvollständige
+Länge, und ein Prozess, der mitten im Schreiben stirbt, lässt das Ziel
+unberührt, statt es an Ort und Stelle abgeschnitten zu hinterlassen.
+
+`append` ist die einzige Operation, die an Ort und Stelle arbeitet, denn
+ein zwischengelagertes `append` müsste zuerst das ganze Objekt kopieren.
+Das gilt für das `append`, das das Objekt *anlegt*, genauso wie für jedes
+weitere danach, sodass zwei Writer, die an dasselbe neue Objekt anhängen,
+beide ankommen. An Ort und Stelle zu arbeiten ist zugleich der Preis eines
+`append`: Eines, das fehlschlägt oder abgebrochen wird, lässt das Objekt
+zurück, leer oder zu kurz - genau wie ein `append` auf ein bestehendes
+Objekt es immer schon getan hat.
+
+Ein bedingter Schreibvorgang wird mit `link(2)` sichtbar gemacht statt per
+Umbenennen, und bleibt damit ein echtes exklusives Anlegen statt einer
+Prüfung mit anschließendem Überschreiben:
+
+```rust,ignore
+// Genau einer von beliebig vielen konkurrierenden Aufrufern bekommt hier
+// Ok. Jeder andere bekommt einen `ErrorKind::ConditionNotMatch`-Fehler und
+// schreibt nichts.
+disk.write_with("locks/import.json", body).if_not_exists(true).await?;
+```
+
+Dieses Sichtbarmachen braucht ein Dateisystem mit Hardlinks. Auf FAT,
+exFAT und manchen Netzwerkdateisystemen wird `link(2)` nicht unterstützt,
+und ein bedingter Schreibvorgang schlägt dort fehl, statt stillschweigend
+auf eine Prüfung mit anschließendem Überschreiben zurückzufallen - was
+Ihnen eine Exklusivitätsgarantie in die Hand gäbe, die nicht hält. Jede
+andere Operation bleibt davon unberührt.
+
+Weil das Objekt per Umbenennen sichtbar gemacht wird, wechselt seine Inode.
+Ein erneutes Schreiben erhält deshalb weder Modus noch Eigentümer noch die
+Hardlinks der vorherigen Datei, und ein Leser, der einen offenen Deskriptor
+hält, liest weiter den alten Inhalt, statt die neuen Bytes zu sehen. Das
+ist der übliche Preis für atomares Sichtbarmachen, aber es ist eine
+Änderung, falls Sie sich auf eines von beidem verlassen haben.
+
+Ein Pfad, der die Disk über einen Symlink erreicht, den der Schutz nicht
+auflösen kann - einen toten, dessen Ziel nicht existiert -, wird abgelehnt,
+statt als freier Name zum Anlegen behandelt zu werden. Durch einen solchen
+Link hindurch anzulegen würde das Ziel des Links anlegen, irgendwo auf dem
+Host; der Schutz kann einen harmlosen toten Link also nicht von einem
+Ausbruch unterscheiden und lehnt beide ab.
+
+Der Name `.suprnova-atomic` ist im Wurzelverzeichnis jeder lokalen Disk
+reserviert. Jeder Pfad, dessen erste Komponente dieser Name ist, wird mit
+einem Berechtigungsfehler abgelehnt, und ebenso jeder Pfad, der sich über
+einen Symlink in das Verzeichnis hinein *auflöst*; Sie können also weder
+die zwischengelagerte Datei eines anderen Writers lesen noch in das
+Verzeichnis schreiben noch es löschen. Der Eintrag wird aus `files`,
+`directories`, `all_files` und `all_directories` herausgefiltert und
+taucht so nie als Objekt auf. Der Name wird als
+`suprnova::ATOMIC_STAGING_DIR` exportiert, weil Backup- und Sync-Werkzeuge
+ihn brauchen: Schließen Sie das Verzeichnis so aus, wie Sie ein
+Sperrverzeichnis ausschließen würden. Es enthält die temporären Dateien
+laufender Schreibvorgänge und alles, was ein mitten im Vorgang gestorbener
+Prozess hinterlassen hat, und nichts räumt das weg - ein Host in einer
+Absturzschleife lässt es also wachsen, bis jemand es leert, was gefahrlos
+möglich ist, solange nicht geschrieben wird.
+
 ### Schutz vor Path Traversal
 
 Disks auf dem lokalen Dateisystem bekommen einen `PathGuardLayer`, der vor
@@ -465,10 +534,11 @@ Transfer angelegtes Ziel gelöscht, bevor der Fehler Sie erreicht, ein
 fehlgeschlagener Transfer ist also nicht als abgeschnittenes Objekt
 beobachtbar. Ein Ziel, das schon da war, bleibt unangetastet - eine
 fehlgeschlagene Kopie darf nicht dasjenige sein, was ein Objekt zerstört,
-das sie nie geschrieben hat. Auf einer primären Disk im lokalen Dateisystem
-ist diese Garantie schwächer, als sie aussieht: Der Treiber öffnet das Ziel
-selbst und kürzt es, ein bereits vorhandenes lokales Ziel ist also schon
-weg, bevor ein Transfer überhaupt fehlschlagen kann.
+das sie nie geschrieben hat. Eine primäre Disk im lokalen Dateisystem hält
+das ebenfalls ein, denn sie lagert den Transfer unter `.suprnova-atomic/`
+zwischen und benennt erst bei Erfolg um; den Writer abzubrechen entfernt die
+zwischengelagerte Datei, ein fehlgeschlagener Transfer hinterlässt also
+weder ein unvollständiges Ziel noch eine übrig gebliebene temporäre Datei.
 
 ### Versionierte und bedingte Lesezugriffe
 

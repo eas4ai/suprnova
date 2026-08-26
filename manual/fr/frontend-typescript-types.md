@@ -36,10 +36,23 @@ suprnova generate-types --output frontend/src/types/props.ts
 Le chemin du fichier de routes est fixé à
 `frontend/src/types/routes.ts` et celui du fichier de clés de message à
 `frontend/src/types/lang-keys.ts` ; seul le chemin du fichier de props
-est configurable. Le watcher sonde `src/` et régénère le fichier de
-props à chaque changement `.rs` ; quand le projet a un répertoire
-`lang/`, il surveille aussi cet arbre et régénère `lang-keys.ts` à
-chaque changement `.ftl`.
+est configurable. Le surveilleur observe `src/` et régénère le fichier
+de props quand un fichier `.rs` est créé, écrit ou supprimé ; quand le
+projet a un répertoire `lang/`, il surveille aussi cet arbre et régénère
+`lang-keys.ts` pour les mêmes sortes de changements sur un fichier
+`.ftl`. Les lectures ne comptent pas - le générateur lit à chaque
+exécution tous les fichiers `.rs` de `src/`, et les traiter comme un
+changement ferait régénérer le surveilleur à l'infini. Une salve de
+sauvegardes se fond en une seule exécution, 500 ms après la dernière
+écriture, si bien qu'un `cargo fmt` ou un changement de branche
+régénère une fois, à partir de l'arbre terminé, plutôt qu'une fois par
+fichier à partir d'un arbre à moitié écrit.
+
+Chaque exécution n'écrit un fichier que lorsque le contenu émis diffère
+de ce qui s'y trouve déjà. Une régénération qui n'a rien changé signale
+`<path> is up to date` et laisse le fichier, ainsi que son horodatage,
+intacts - c'est ce qui empêche `suprnova serve` de redémarrer votre
+backend pour un fichier qu'il a décidé de ne pas écrire.
 
 ## Props de page
 
@@ -116,6 +129,7 @@ et Vue.
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | Le générateur de props émet `Array<T>` ; le générateur de routes émet `T[]` pour les champs de requête de formulaire |
 | `HashMap<K, V>`, `BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | Un alias récursif que le générateur déclare une seule fois en haut du fichier, et seulement quand quelque chose le référence. Un `Value` nu correspond ici aussi, sauf si le projet définit sa propre struct `Value` - c'est elle qui l'emporte |
 | `Field<T>` (depuis `#[derive(Data)]`) | `field?: T \| null` | Le champ est facultatif sur le réseau |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Les props lazy omettent la moitié `null` |
 | Tout le reste | identifiant nu | Voir « Types personnalisés » plus bas |

@@ -104,6 +104,70 @@ O S3 deliberadamente *não* é condicionado - seu signer nunca dependeu
 de `rsa`, então condicioná-lo quebraria o backend de nuvem mais usado e
 não removeria nada.
 
+### Escritas locais atômicas
+
+Em um disco local, toda operação que publica bytes em um caminho os
+publica em um único passo. `disk.write(...)`, `disk.writer(...)` e
+`disk.copy(...)` aterrissam primeiro em `<root>/.suprnova-atomic/`, recebem
+flush e sync ali, e só então são renomeados para o alvo;
+`disk.rename(...)` já é um único passo. Um leitor concorrente, portanto,
+vê ou o objeto anterior ou o novo já pronto, e nunca um tamanho parcial, e
+um processo que morre no meio de uma escrita deixa o alvo intacto em vez
+de truncado no caminho ativo.
+
+O `append` é a única operação feita no lugar, porque preparar um append
+significaria copiar o objeto inteiro antes. Isso vale para o append que
+*cria* o objeto tanto quanto para todo append depois dele, então dois
+writers dando append no mesmo objeto novo aterrissam os dois. Ser feito no
+lugar é também o que um append custa a você: um append que falha ou é
+abortado deixa o objeto para trás, vazio ou curto, exatamente como um
+append sobre um objeto existente sempre deixou.
+
+Uma escrita condicional é publicada com `link(2)` em vez de um rename, o
+que a mantém sendo uma criação exclusiva de verdade em vez de uma
+checagem seguida de uma sobrescrita:
+
+```rust,ignore
+// Exatamente um entre qualquer número de chamadores concorrentes recebe
+// Ok aqui. Todos os outros recebem um erro `ErrorKind::ConditionNotMatch`
+// e não escrevem nada.
+disk.write_with("locks/import.json", body).if_not_exists(true).await?;
+```
+
+Essa publicação precisa de um sistema de arquivos com hard links. Em FAT,
+exFAT e alguns sistemas de arquivos de rede o `link(2)` não é suportado, e
+uma escrita condicional falha ali em vez de degradar silenciosamente para
+uma checagem seguida de uma sobrescrita - o que te entregaria uma garantia
+de exclusividade que não se sustenta. Toda outra operação fica inalterada.
+
+Publicar por rename substitui o inode do objeto. Uma reescrita, portanto,
+não preserva o modo, o dono nem os hard links do arquivo anterior, e um
+leitor que segura um descritor aberto continua lendo o conteúdo antigo em
+vez de ver os bytes novos. Esse é o custo de sempre da publicação
+atômica, mas é uma mudança se você contava com qualquer um dos dois.
+
+Um caminho que chega ao disco por um symlink que a guarda não consegue
+resolver - um symlink quebrado, cujo alvo não existe - é recusado, em vez
+de tratado como um nome livre para criar. Criar através de um link desses
+criaria o alvo do link, em qualquer lugar do host, então a guarda não tem
+como distinguir um symlink quebrado inofensivo de um escape e recusa os
+dois.
+
+O nome `.suprnova-atomic` é reservado na raiz de todo disco local.
+Qualquer caminho cujo primeiro componente seja esse nome é recusado com um
+erro de permissão, e o mesmo vale para qualquer caminho que *resolva* para
+dentro do diretório por um symlink, então você não consegue ler o arquivo
+de preparo de outro writer, escrever dentro do diretório nem excluí-lo. A
+entrada é filtrada para fora de `files`, `directories`, `all_files` e
+`all_directories`, então ela nunca aparece como um objeto. O nome é
+exportado como `suprnova::ATOMIC_STAGING_DIR` porque ferramentas de backup
+e de sincronização precisam dele: deixe o diretório de fora do mesmo jeito
+que você deixaria de fora um diretório de lock. Ele guarda arquivos
+temporários em voo mais o que um processo que morreu no meio de uma
+publicação deixou para trás, e nada varre esses restos, então um host em
+crash loop vai fazê-lo crescer até alguém esvaziá-lo - o que é seguro
+fazer enquanto nada está escrevendo.
+
 ### Guarda de path traversal
 
 Discos de sistema de arquivos local têm um `PathGuardLayer` aplicado
@@ -442,10 +506,12 @@ Se o stream falhar no meio, o writer é abortado e um destino que a
 transferência criou é excluído antes de o erro chegar até você, então uma
 transferência que falhou não é observável como um objeto truncado. Um
 destino que já estava lá é deixado em paz - uma cópia que falha não pode
-ser a coisa que destrói um objeto que ela nunca escreveu. Em um primário
-de sistema de arquivos local essa garantia é mais fraca do que parece: o
-driver abre o alvo ele mesmo e o trunca, então um destino local
-preexistente já se foi na hora em que uma transferência pode falhar.
+ser a coisa que destrói um objeto que ela nunca escreveu. Um primário de
+sistema de arquivos local também honra isso, porque ele prepara a
+transferência em `.suprnova-atomic/` e só renomeia em caso de sucesso;
+abortar o writer remove o arquivo preparado, então uma transferência que
+falhou não deixa nem um destino parcial nem um arquivo temporário
+sobrando.
 
 ### Leituras versionadas e condicionais
 

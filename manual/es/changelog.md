@@ -6,6 +6,158 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## 1.3.5 - 2026-08-26
+
+### Cambiado
+
+- **Todas las secciones del changelog se leen en las seis traducciones
+  del manual.** Los manuales de de, es, fr, ja, pt-BR y zh-Hans llevaban
+  las secciones de la 1.3.0 a la 1.3.2 en inglés detrás de una nota del
+  traductor, y secciones más antiguas con líneas sueltas en inglés;
+  todas las secciones, desde la 1.3.5 hasta la 0.1.0, están ya
+  traducidas, y las notas han desaparecido.
+
+### Corregido
+
+- **Los discos de sistema de archivos local publican cada objeto en un
+  solo paso.** `Storage::register_fs` y `register_fs_with` ahora
+  preparan `disk.write(...)`, `disk.writer(...)` y `disk.copy(...)` como
+  un archivo temporal bajo `<root>/.suprnova-atomic/` y lo publican
+  sobre el destino con un único `rename(2)`, así que ninguno de ellos es
+  nunca observable con una longitud parcial. Antes de esto, el driver
+  abría el destino con `create + truncate` y transmitía en streaming
+  dentro de él, en el sitio: un lector concurrente obtenía un objeto
+  vacío o a medio escribir durante toda la escritura, y una caída a
+  mitad de escritura dejaba un objeto truncado en la ruta activa.
+  `abort()` sobre un writer ahora descarta el archivo preparado en lugar
+  de fallar con `Unsupported`.
+- **`write_with(..).if_not_exists(true)` es una creación exclusiva de
+  verdad en un disco local.** Se publica con `link(2)`, que falla de
+  forma atómica en el kernel cuando el destino existe, así que
+  exactamente uno de cualquier número de llamadores en carrera tiene
+  éxito y todos los demás obtienen `ConditionNotMatch` sin haber escrito
+  nada. Una escritura preparada y publicada con un rename normal habría
+  degradado la condición a una comprobación seguida de una
+  sobrescritura, descartando en silencio a todos los escritores salvo el
+  último - que es justo lo contrario de aquello para lo que se recurre a
+  esta primitiva.
+- **Un `append` que crea el objeto sigue siendo un append.** Los appends
+  son la única operación en el sitio en un disco local, y eso vale ahora
+  también para el primero, así que dos escritores que añaden al mismo
+  objeto inexistente aterrizan ambos en lugar de que uno prepare su
+  propia copia y sobrescriba al otro.
+
+- **`suprnova serve` ya no reconstruye un proyecto que nadie ha tocado,
+  y `suprnova generate-types --watch` tampoco.** Ambos monitores
+  clasificaban un evento del sistema de archivos solo por su ruta, y el
+  generador lee todos los archivos `.rs` bajo el mismo árbol `src/` que
+  ellos vigilan - así que en Linux, donde el kernel informa de esas
+  lecturas, cada regeneración programaba la siguiente. Un proyecto
+  recién creado con andamiaje regeneraba sus tipos y reiniciaba su
+  backend cada medio segundo, indefinidamente, sin una sola edición del
+  código fuente. Ahora solo cuentan los eventos que significan que los
+  bytes en disco han cambiado de verdad. `generate-types --watch`
+  tampoco tenía antirrebote alguno, así que actuaba sobre el primer
+  archivo de una ráfaga en lugar de sobre el último; ahora comparte el
+  flanco descendente de 500 ms de `serve`, y ambos monitores comparten
+  una sola implementación para que la próxima corrección no pueda
+  aterrizar solo en uno de ellos. El generador compara antes de
+  escribir, así que una regeneración cuya salida es idéntica byte a byte
+  deja el archivo, y su mtime, en paz.
+
+- **El monitor del backend está acotado a las rutas a partir de las
+  cuales se construye el servidor.** `cargo watch` se ejecutaba sin
+  `-w`, así que vigilaba todo el proyecto no ignorado por git: guardar
+  un componente de Svelte, o regenerar
+  `frontend/src/types/inertia-props.ts`, reconstruía el framework y
+  reiniciaba el servidor. Ahora vigila `src/`, `cmd/`, `Cargo.toml`,
+  `Cargo.lock`, `.env` y `lang/` - las entradas de la compilación más
+  los dos árboles que se leen una vez al arrancar -, cada uno incluido
+  solo cuando existe, ya que cargo-watch rechaza una ruta `-w` que no
+  exista. `cmd/` es donde el andamiaje full-stack guarda el `main.rs`
+  del binario del servidor. La invocación pasa además
+  `--no-vcs-ignores`, porque cargo-watch aplica `.gitignore` a las
+  raíces `-w` nombradas explícitamente y el andamiaje ignora `.env`, lo
+  que de otro modo dejaría `-w .env` sin vigilar nada; `-w` ya ha
+  estrechado la superficie, así que el flag no puede ampliarla. Las
+  ediciones del frontend y los archivos `.ts` generados ya no reinician
+  el backend.
+
+- **`serde_json::Value` se genera como `JsonValue` en lugar de
+  `unknown`.** Antes degradaba a `unknown` y advertía que "isn't a
+  struct this project defines", un consejo que es erróneo para un
+  documento JSON - y las propias páginas de login y de registro del
+  andamiaje lo disparaban dos veces en cada regeneración, así que todo
+  proyecto nuevo advertía desde el primer momento. Ahora emite un alias
+  recursivo `JsonValue`, declarado una sola vez al principio del archivo
+  generado y solo cuando algo lo referencia. Un `Value` a secas también
+  se mapea ahí, salvo que el proyecto defina un struct `Value` propio.
+
+- **Ni `generate-types` ni `serve` informan como generado de un archivo
+  que no escribieron.** Como una pasada ahora solo escribe cuando el
+  contenido emitido difiere, `Generated <path>` era una afirmación sobre
+  el sistema de archivos que resultaba falsa en cada nueva ejecución
+  sobre un proyecto sin cambios. `generate-types` dice
+  `<path> is up to date` en su lugar, tanto en la ejecución de una sola
+  vez como con `--watch`, y la pasada de arranque de `serve` dice
+  `N type(s) up to date → <path>`, conservando el recuento. El monitor
+  de archivos de `serve` ahora permanece en silencio ante una
+  regeneración que no escribió nada, tanto en texto como bajo `--json`:
+  un evento `types_regenerated` significa que el archivo generado en
+  disco es ahora distinto, así que el silencio tras un guardado te dice
+  que tu edición no cambió ninguna forma de prop.
+
+### Actualización
+
+- **`.suprnova-atomic` está reservado en la raíz de todo disco local.**
+  El directorio de preparación tiene que vivir dentro de la raíz - un
+  hermano de la raíz puede estar en otro sistema de archivos cuando la
+  raíz es un punto de montaje, y todo rename fallaría con `EXDEV` -, así
+  que el nombre está reservado en lugar de ser una mera convención. Toda
+  ruta cuyo primer componente sea `.suprnova-atomic` se rechaza ahora
+  con un error de permisos (lectura, escritura, borrado, stat y listado
+  por igual), igual que toda ruta que se resuelva dentro del directorio
+  a través de un symlink, y la entrada se filtra fuera de `files`,
+  `directories`, `all_files` y `all_directories`. Si la raíz de un disco
+  ya contiene una entrada `.suprnova-atomic` tuya, deja de ser
+  alcanzable a través de ese disco: apártala antes de actualizar. Un
+  archivo regular con ese nombre se rechaza en el registro con un
+  mensaje que lo dice, en lugar de fallar más tarde dentro del driver.
+  El nombre se exporta como `suprnova::ATOMIC_STAGING_DIR` para que las
+  herramientas de copia de seguridad y de sincronización puedan
+  excluirlo.
+- **Publicar mediante rename reemplaza el inodo del destino.**
+  Reescribir un objeto en un disco local ya no preserva su modo, su
+  propietario ni sus enlaces duros, y un lector que mantiene un
+  descriptor abierto conserva el contenido antiguo en lugar de ver los
+  bytes nuevos. Ese es el coste estándar de la publicación atómica, pero
+  es un cambio de comportamiento si dependías de cualquiera de las dos
+  cosas.
+- **Una escritura condicional necesita un sistema de archivos con
+  enlaces duros.** `if_not_exists` se publica con `link(2)`, que no está
+  soportado en FAT, exFAT ni en algunos sistemas de archivos de red. Ahí
+  falla de plano en lugar de recaer en una comprobación seguida de una
+  sobrescritura, porque esa alternativa te entregaría una garantía de
+  exclusividad que no se sostiene. Nada más en el disco se ve afectado.
+- **Un primer `append` que falla deja un objeto vacío.** Un append es la
+  única operación que no se publica en un solo paso, así que el objeto
+  se crea antes de que aterricen los bytes; un primer append fallido o
+  abortado lo deja atrás, exactamente igual que siempre ha ocurrido con
+  un append sobre un objeto existente.
+- **Un symlink roto en la raíz del disco se rechaza, no se
+  sobrescribe.** Una ruta cuyo destino de symlink no existe ya no se
+  puede escribir, ni ampliar con append, ni copiar encima, ni mover
+  encima, ni borrar a través del disco. `1.3.4` reemplazaba ese enlace
+  por un archivo regular; la salvaguarda no puede demostrar adónde lleva
+  un enlace irresoluble, y crear a través de él crea el destino del
+  enlace en cualquier punto del host, así que ahora lo rechaza. Elimina
+  el enlace fuera del disco si tu intención era escribir ahí.
+- **Nada barre el directorio de preparación.** Contiene archivos
+  temporales en vuelo más lo que haya dejado atrás un proceso que murió
+  a mitad de una publicación, así que un host en un bucle de caídas lo
+  hace crecer sin límite. Vaciarlo mientras nada escribe en el disco es
+  seguro; se recomienda excluirlo de las copias de seguridad.
+
 ## 1.3.4 - 2026-08-25
 
 ### Añadido
@@ -1778,7 +1930,6 @@ recientes primero.
 
 ### Cambiado
 
-
 - **La línea base de paridad pasa a Laravel 13.25.0.** Las notas de
   lanzamiento de 13.23.0, 13.24.0 y 13.25.0 se rastrearon punto por
   punto hasta la propia superficie del framework. Todo lo que llegó a
@@ -2642,7 +2793,7 @@ Dos adiciones que necesitan algo de ti solo si optas por ellas:
   bloqueo de escritura se sostenía a través de dos viajes de ida y
   vuelta por red, y el `RwLock` justo de tokio hacía que un índice
   frío estancara a todos los índices calientes.
-- **El watcher de tipos descartaba ráfagas (P2-13).** El antirrebote
+- **El monitor de tipos descartaba ráfagas (P2-13).** El antirrebote
   de flanco ascendente regeneraba en el primer archivo de una ráfaga y
   perdía el resto sin una ejecución final, así que el último guardado
   nunca surtía efecto.
@@ -2790,7 +2941,7 @@ tests de este lanzamiento apunta a eso.
 - **`generate-types` resuelve structs de prop anidados sin derives.**
   El generador de 0.7.1 degradaba a `unknown` cualquier campo de prop
   cuyo tipo no derivara `InertiaProps`/`Data` - así que volver a
-  ejecutar el generador (o el watcher de `suprnova serve`) sobre un
+  ejecutar el generador (o el monitor de `suprnova serve`) sobre un
   proyecto con un archivo de tipos versionado reemplazaba interfaces
   reales como `Array<AdminArticleRow>` por `unknown` y rompía el
   chequeo de tipos en toda la app. Los structs planos definidos en

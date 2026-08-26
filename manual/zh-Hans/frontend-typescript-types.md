@@ -27,7 +27,9 @@ suprnova generate-types --watch
 suprnova generate-types --output frontend/src/types/props.ts
 ```
 
-路由文件的路径固定在 `frontend/src/types/routes.ts`，消息键文件固定在 `frontend/src/types/lang-keys.ts`；只有 props 文件的路径是可配置的。这个监听器会轮询 `src/`，在任何 `.rs` 变更上重新生成 props 文件；当项目里有一个 `lang/` 目录时，它也会监视那棵目录树，在任何 `.ftl` 变更上重新生成 `lang-keys.ts`。
+路由文件的路径固定在 `frontend/src/types/routes.ts`，消息键文件固定在 `frontend/src/types/lang-keys.ts`；只有 props 文件的路径是可配置的。这个监视器会监视 `src/`，在某个 `.rs` 文件被创建、被写入或者被删除时重新生成 props 文件；当项目里有一个 `lang/` 目录时，它也会监视那棵目录树，在某个 `.ftl` 文件发生同样这几类变更时重新生成 `lang-keys.ts`。读取不算数 - 这个生成器每跑一趟都会读遍 `src/` 底下的每一个 `.rs` 文件，要是把这也当成一次变更，这个监视器就会永远重新生成下去。一阵密集的保存会合并成一次运行，在最后一次写入之后 500 毫秒才跑，所以一次 `cargo fmt` 或者一次分支切换只会重新生成一次，而且是照着改完之后的目录树生成的，而不是每个文件生成一次、还是照着一棵改到一半的目录树。
+
+每一趟只在发出的内容与已经在那里的内容不同时才写文件。一次什么都没有改变的重新生成会报告 `<path> is up to date`，并且原封不动地留下这个文件以及它的时间戳 - 正是这一点，让 `suprnova serve` 不会因为一个它决定不写的文件而重启您的后端。
 
 ## 页面 props
 
@@ -100,6 +102,7 @@ export interface HomeProps {
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | props 生成器发出的是 `Array<T>`；routes 生成器对表单请求字段发出的是 `T[]` |
 | `HashMap<K, V>`、`BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | 一个递归的别名，生成器只在文件顶部声明它一次，而且只在确实有东西引用它的时候才声明。裸写的 `Value` 也映射到这里，除非项目自己定义了一个 `Value` 结构体 - 那种情况下以项目自己的为准 |
 | `Field<T>`（来自 `#[derive(Data)]`） | `field?: T \| null` | Field 在传输中是可选的 |
 | `Prop<T>`（lazy / deferred） | `field?: T` | Lazy props 省去了 `null` 那一半 |
 | 其它任何东西 | 裸标识符 | 见下面的“自定义类型” |

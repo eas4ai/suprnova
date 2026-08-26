@@ -148,9 +148,33 @@ Wenn Sie `suprnova serve` ausführen, macht die CLI Folgendes:
 6. Führt `npm install` in `frontend/` aus, falls `node_modules` noch
    nicht existiert. Wird unter `--backend-only` übersprungen und
    ebenso, wenn das Projekt kein Frontend hat.
-7. Startet `cargo watch -x 'run --bin <package-name>'` für das
-   Backend. `cargo-watch` führt die Binary bei jeder Änderung einer
-   `.rs`-Datei erneut aus.
+7. Startet `cargo watch` für das Backend, per `-w` auf genau die
+   Pfade eingegrenzt, aus denen der Server tatsächlich gebaut wird:
+   `src/`, `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env` und `lang/`. In
+   `cmd/` legt das Full-Stack-Scaffold die `main.rs` der Server-Binary
+   ab; das `--api`-Scaffold legt sie in `src/` und hat gar kein
+   `cmd/`. Jeder Pfad wird nur dann übergeben, wenn er existiert, denn
+   cargo-watch verweigert den Start bei einem `-w`-Pfad, den es nicht
+   gibt - ein noch nicht gebautes Projekt hat keine `Cargo.lock`, und
+   die wird beim nächsten `serve` mit aufgenommen.
+
+   `--no-vcs-ignores` gehört dazu. cargo-watch wendet Ihre
+   `.gitignore` auch auf ausdrücklich benannte `-w`-Wurzeln an, nicht
+   nur auf seinen eigenen Projektdurchlauf, und das Scaffold trägt
+   `.env` in die `.gitignore` ein - ohne dieses Flag beobachtet
+   `-w .env` also überhaupt nichts. Das Flag kann nicht erweitern, was
+   das Backend neu startet, denn `-w` hat das bereits auf die sechs
+   Pfade oben eingegrenzt, und per `.gitignore` ausgeschlossen sind
+   darin nur `.env` und (bei `--api`) `Cargo.lock` - beide werden
+   absichtlich beobachtet. `target/`, `node_modules` und
+   der Rest liegen ohnehin außerhalb jeder beobachteten Wurzel.
+
+   In einem gescaffoldeten Full-Stack-Projekt lautet der vollständige
+   Aufruf `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml
+   -w Cargo.lock -w .env -w lang -x 'run --bin <package-name>'`.
+   Frontend-Änderungen und die generierten
+   `frontend/src/types/*.ts`-Dateien liegen außerhalb dieses Bereichs
+   und starten das Backend deshalb nie neu.
 8. Startet `npm run dev` in `frontend/` für Vite, was Ihnen HMR für
    Svelte-/React-/Vue-Komponenten und Tailwind-Klassen gibt. Wird
    unter `--backend-only` übersprungen und ebenso, wenn das Projekt
@@ -163,13 +187,23 @@ Wenn Sie `suprnova serve` ausführen, macht die CLI Folgendes:
    würden.
 10. Startet einen Dateiwächter auf `src/`, der den Typgenerator nach
     jeder Änderung einer `.rs`-Datei erneut ausführt, sobald die Folge
-    von Speicherungen 500 ms lang ruhig war. Wird übersprungen, wenn
+    von Speicherungen 500 ms lang ruhig war. Nur echte Änderungen
+    zählen - ein Anlegen, ein Schreiben oder ein Löschen. Lesezugriffe
+    nicht, und das ist wichtig, weil der Generator bei jedem Durchlauf
+    jede `.rs`-Datei unter dem Baum liest, den er beobachtet.
+    Wird übersprungen, wenn
     das Projekt kein Frontend hat, genau wie die Typgenerierung beim
     Start in Schritt 4. Der Debounce erfolgt am Ende der Ruhephase;
     eine Folge - `cargo fmt`, Format-on-save über mehrere Dateien
     hinweg, ein Branch-Wechsel - wird so zu genau einer Regenerierung
     zusammengefasst, die *nach* dem letzten Schreibvorgang läuft, statt
     bei der ersten Datei auszulösen und den Rest zu verpassen.
+    Eine Regenerierung schreibt die Datei nur dann, wenn sich das
+    ausgegebene TypeScript von dem unterscheidet, was schon da ist, und
+    der Wächter meldet nur, was er geschrieben hat: Eine Änderung, die
+    keine Prop-Form verändert, gibt nichts aus und löst kein
+    `types_regenerated`-Ereignis aus. Schweigen nach einer Speicherung
+    heißt, dass Ihre Änderung die generierten Typen nicht verändert hat.
 11. Leitet stdout/stderr jedes Kindprozesses mit einem `[name]`-Präfix
     (`[backend]`, `[frontend]` oder dem konfigurierten Prozessnamen) an
     Ihr Terminal weiter, optional mit Zeitstempel über `--timestamps` -
@@ -228,12 +262,20 @@ Zeile in [Parität](parity.md#what-we-won-t-ship-and-why).
 
 ## Hot Reload
 
-**Backend.** `cargo watch -x 'run --bin <package>'` ist die
-Schleife: Jede `.rs`-Änderung im Projekt löst eine Neukompilierung
-und einen Neustart des Servers aus. Kalte Neukompilierungen nach dem
-Anfassen einer schweren Crate können mehrere Sekunden dauern;
-inkrementelle Änderungen in einer einzelnen Datei liegen meist unter
-einer Sekunde.
+**Backend.** `cargo watch` ist die Schleife, eingegrenzt auf die
+Pfade, aus denen der Server gebaut wird. Es kompiliert neu und startet
+neu bei einer Änderung unter `src/` oder `cmd/`, an `Cargo.toml`,
+`Cargo.lock` oder `.env` oder unter `lang/` - `.env` wird beim Boot
+einmal von `Config::init` gelesen und die Fluent-Kataloge einmal beim
+Bootstrap, eine Änderung an einem von beiden greift also erst nach
+einem Neustart. `.env` wird über `--no-vcs-ignores` beobachtet; ohne
+das Flag würde Ihre `.gitignore` es vor dem Watcher verbergen. Eine
+Komponente zu speichern oder
+`frontend/src/types/inertia-props.ts` zu regenerieren liegt außerhalb
+dieses Bereichs und lässt das Backend laufen. Kalte
+Neukompilierungen nach dem Anfassen einer schweren Crate können
+mehrere Sekunden dauern; inkrementelle Änderungen in einer einzelnen
+Datei liegen meist unter einer Sekunde.
 
 **Frontend.** Vites HMR hot-module-replaced Komponentenänderungen
 direkt an Ort und Stelle, ohne vollständiges Neuladen, und bewahrt
@@ -245,7 +287,12 @@ Typ-Watcher den Generator erneut aus. Erscheinen neue
 `#[derive(InertiaProps)]`-Strukturen (oder ändert eine bestehende
 ihre Form), löst das regenerierte
 `frontend/src/types/inertia-props.ts` Vites HMR für die Komponente
-aus, die es importiert.
+aus, die es importiert. Ist das ausgegebene TypeScript Byte für Byte
+identisch mit dem, was schon auf der Platte liegt, bleibt die Datei
+unangetastet und der Watcher sagt nichts - eine Regenerierung, die
+nichts geändert hat, ist so auch keine Änderung, auf die irgendetwas
+weiter unten reagieren müsste: weder Vite noch der Backend-Watcher
+noch das, was `--json` mitliest.
 
 ## Zusätzliche Entwicklungsprozesse
 
@@ -282,7 +329,7 @@ Laravel registriert zusätzliche `dev`-Prozesse aus PHP heraus - `DevCommands::r
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | Ein abgestürzter Prozess wird nach `delay_ms` neu gestartet (siehe den Backoff-Zeitplan oben). |
 | `restart_succeeded` | `ts`, `name`, `pid` | Ein geplanter Neustart war erfolgreich; der Prozess läuft wieder unter einer neuen PID. |
 | `gave_up` | `ts`, `name`, `tries` | Der Prozess ist `tries` Mal hintereinander abgestürzt (`--restart-tries`) und `serve` versucht keinen Neustart mehr. Die Sitzung und alle anderen Prozesse laufen weiter. |
-| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` oder `"lang_keys"`), `count` | Der Dateiwächter hat als Reaktion auf eine Änderung von `.rs`/`.ftl` ein TypeScript-Artefakt regeneriert. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` oder `"lang_keys"`), `count` | Der Dateiwächter hat nach einer Änderung von `.rs`/`.ftl` ein TypeScript-Artefakt neu geschrieben. Wird nur ausgelöst, wenn sich die generierte Datei tatsächlich geändert hat: Eine `.rs`-Änderung, die das ausgegebene TypeScript Byte für Byte gleich lässt, schreibt nichts und gibt nichts aus, ein Ereignis heißt also immer, dass die Datei auf der Platte jetzt anders ist. `count` ist die Anzahl der Strukturen (oder Message-Ids) in der neu geschriebenen Datei, nicht die Anzahl derer, die sich geändert haben. |
 | `shutdown` | `ts` | Die Sitzung wird heruntergefahren. Immer die letzte Zeile. |
 
 Beispielsweise sehen ein Vite-Absturz und sein Neustart so aus:

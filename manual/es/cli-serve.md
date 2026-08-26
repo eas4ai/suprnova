@@ -145,9 +145,30 @@ Cuando ejecutas `suprnova serve`, la CLI:
 6. Ejecuta `npm install` en `frontend/` si `node_modules` todavía no
    existe. Se omite bajo `--backend-only`, y cuando el proyecto no tiene
    frontend.
-7. Lanza `cargo watch -x 'run --bin <package-name>'` para el backend.
-   `cargo-watch` vuelve a ejecutar el binario cada vez que cambia un
-   archivo `.rs`.
+7. Lanza `cargo watch` para el backend, acotado con `-w` a las rutas a
+   partir de las cuales se construye realmente el servidor: `src/`,
+   `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env` y `lang/`. `cmd/` es donde
+   el andamiaje full-stack pone el `main.rs` del binario del servidor; el
+   andamiaje `--api` lo pone en `src/` y no tiene `cmd/`. Cada ruta se
+   pasa solo cuando existe, porque cargo-watch se niega a arrancar con
+   una ruta `-w` que no exista - un proyecto que todavía no se ha
+   construido no tiene `Cargo.lock`, y se recoge en el siguiente `serve`.
+
+   `--no-vcs-ignores` va con ellas. cargo-watch aplica tu `.gitignore` a
+   las raíces `-w` nombradas explícitamente, no solo a su propio
+   recorrido del proyecto, y el andamiaje pone `.env` en el gitignore -
+   así que sin ese flag `-w .env` no vigila absolutamente nada. No puede
+   ampliar lo que reinicia el backend, porque `-w` ya lo ha estrechado a
+   las seis rutas de arriba, y las únicas cosas que están en el
+   gitignore dentro de ellas son `.env` y (con `--api`) `Cargo.lock`,
+   ambas vigiladas a propósito. `target/`, `node_modules` y el resto
+   quedan fuera de toda raíz vigilada de cualquier modo.
+
+   En un proyecto full-stack con andamiaje, la invocación completa es
+   `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
+   -w .env -w lang -x 'run --bin <package-name>'`. Las ediciones del
+   frontend y los `frontend/src/types/*.ts` generados quedan fuera de ese
+   ámbito, así que nunca reinician el backend.
 8. Lanza `npm run dev` en `frontend/` para Vite, lo que te da HMR
    para los componentes de Svelte/React/Vue y las clases de Tailwind.
    Se omite bajo `--backend-only`, y cuando el proyecto no tiene
@@ -160,6 +181,9 @@ Cuando ejecutas `suprnova serve`, la CLI:
 10. Inicia un monitor de archivos sobre `src/` que vuelve a ejecutar el
     generador de tipos cada vez que cambia un archivo `.rs`, una vez
     que la ráfaga de guardados ha estado en silencio durante 500 ms.
+    Solo cuentan los cambios reales - una creación, una escritura o un
+    borrado. Las lecturas no, lo que importa porque el generador lee
+    todos los archivos `.rs` bajo el árbol que vigila en cada ejecución.
     Se omite cuando el proyecto no tiene frontend, igual que la
     generación de tipos del arranque del paso 4. El antirrebote espera
     hasta el final de la ráfaga, así que una ráfaga -
@@ -167,6 +191,11 @@ Cuando ejecutas `suprnova serve`, la CLI:
     se agrupa en una única regeneración que se ejecuta *después* de la
     última escritura, en lugar de una que se dispara con el primer archivo
     y se pierde el resto.
+    Una regeneración escribe el archivo solo cuando el TypeScript emitido
+    difiere de lo que ya hay ahí, y el monitor informa solo de lo que
+    escribió: una edición que no cambia ninguna forma de prop no imprime
+    nada y no emite ningún evento `types_regenerated`. El silencio tras
+    un guardado significa que tu edición no cambió los tipos generados.
 11. Reenvía el stdout/stderr de cada hijo a tu terminal con un prefijo
     `[name]` (`[backend]`, `[frontend]` o el nombre configurado del proceso),
     opcionalmente con marcas de tiempo mediante `--timestamps` - o, con
@@ -217,11 +246,18 @@ problema que esta página ya resuelve. Consulta la fila correspondiente en
 
 ## Recarga en caliente
 
-**Backend.** `cargo watch -x 'run --bin <package>'` es el bucle.
-Reconstruye y reinicia el servidor ante cada cambio `.rs` en el proyecto.
-Las reconstrucciones en frío después de tocar un crate pesado pueden tardar
-varios segundos; los cambios incrementales en un solo archivo suelen tardar
-menos de un segundo.
+**Backend.** `cargo watch` es el bucle, acotado a las rutas a partir de
+las cuales se construye el servidor. Reconstruye y reinicia ante un cambio
+bajo `src/` o `cmd/`, en `Cargo.toml`, `Cargo.lock` o `.env`, o bajo
+`lang/` - `Config::init` lee `.env` una sola vez en el arranque, y los
+catálogos de Fluent se leen una sola vez en el bootstrap, así que un cambio
+en cualquiera de los dos solo surte efecto al reiniciar. `.env` se vigila
+mediante `--no-vcs-ignores`, sin el cual tu `.gitignore` lo ocultaría al
+monitor. Guardar un componente, o regenerar
+`frontend/src/types/inertia-props.ts`, queda fuera de ese ámbito y deja el
+backend en marcha. Las reconstrucciones en frío después de tocar un crate
+pesado pueden tardar varios segundos; los cambios incrementales en un solo
+archivo suelen tardar menos de un segundo.
 
 **Frontend.** El HMR de Vite inyecta los cambios de componentes en el mismo
 lugar sin una recarga completa, preservando el estado del componente. Las
@@ -231,7 +267,11 @@ clases de Tailwind se actualizan en vivo a través del monitor de Tailwind v4.
 tipos vuelve a ejecutar el generador. Si aparecen nuevas estructuras
 `#[derive(InertiaProps)]` (o las existentes cambian de forma), el
 `frontend/src/types/inertia-props.ts` regenerado dispara el HMR de Vite para
-el componente que las importa.
+el componente que las importa. Cuando el TypeScript emitido es idéntico byte
+a byte a lo que ya hay en disco, el archivo se deja intacto y el monitor no
+dice nada, así que una regeneración que no cambió nada no es un cambio al
+que nada aguas abajo tenga que reaccionar - ni Vite, ni el monitor del
+backend, ni lo que sea que esté leyendo `--json`.
 
 ## Procesos de desarrollo adicionales
 
@@ -260,6 +300,7 @@ declaración (o puedes elegir uno de los ocho colores `console`:
 black, red, green, yellow, blue, magenta, cyan, white). Los nombres deben
 ser únicos. `Suprnova.toml` es opcional; un proyecto sin él funciona
 exactamente como antes.
+
 ### Por qué Suprnova diverge
 
 Laravel registra procesos `dev` adicionales desde PHP -
@@ -287,7 +328,7 @@ otro consumidor JSON orientado a líneas. Cada línea tiene un campo `type`:
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | Un proceso caído se volverá a iniciar después de `delay_ms` (consulta el esquema de espera anterior). |
 | `restart_succeeded` | `ts`, `name`, `pid` | La recreación programada tuvo éxito; el proceso vuelve a ejecutarse con un PID nuevo. |
 | `gave_up` | `ts`, `name`, `tries` | El proceso se cayó `tries` veces consecutivas (`--restart-tries`) y `serve` dejó de reintentarlo. La sesión y los demás procesos siguen ejecutándose. |
-| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` o `"lang_keys"`), `count` | El monitor de archivos regeneró un artefacto TypeScript en respuesta a un cambio `.rs`/`.ftl`. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` o `"lang_keys"`), `count` | El monitor de archivos reescribió un artefacto TypeScript tras un cambio `.rs`/`.ftl`. Se dispara solo cuando el archivo generado cambió de verdad: una edición `.rs` que deja el TypeScript emitido idéntico byte a byte no escribe nada y no emite nada, así que un evento significa siempre que el archivo en disco es ahora distinto. `count` es el número de structs (o de ids de mensaje) del archivo reescrito, no el número de los que cambiaron. |
 | `shutdown` | `ts` | La sesión se está apagando. Siempre es la última línea. |
 
 Por ejemplo, un fallo de Vite y su recreación se ven así:

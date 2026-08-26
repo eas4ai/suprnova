@@ -107,6 +107,74 @@ S3 n'est délibérément *pas* conditionné - son signataire n'a jamais
 dépendu de `rsa`, donc le conditionner casserait le backend cloud le
 plus utilisé sans rien retirer.
 
+### Écritures atomiques locales
+
+Sur un disque local, toute opération qui publie des octets sur un chemin
+les publie en une seule étape. `disk.write(...)`, `disk.writer(...)` et
+`disk.copy(...)` écrivent d'abord dans `<root>/.suprnova-atomic/`, y
+vident et synchronisent leurs octets, puis renomment le fichier sur la
+cible ; `disk.rename(...)` est déjà une étape unique. Un lecteur
+concurrent voit donc soit l'objet précédent, soit le nouvel objet
+terminé, jamais une longueur partielle, et un processus qui meurt en
+pleine écriture laisse la cible intacte plutôt que tronquée sur le
+chemin en service.
+
+`append` est la seule opération sur place, parce que préparer un ajout
+imposerait de copier d'abord l'objet entier. Cela vaut pour l'ajout qui
+*crée* l'objet autant que pour chacun des ajouts suivants, si bien que
+deux writers qui ajoutent au même objet encore inexistant aboutissent
+tous les deux. Ce fonctionnement sur place est aussi ce qu'un ajout vous
+coûte : un ajout qui échoue ou qui est abandonné laisse l'objet derrière
+lui, vide ou incomplet, exactement comme un ajout sur un objet existant
+l'a toujours fait.
+
+Une écriture conditionnelle est publiée avec `link(2)` plutôt qu'avec un
+renommage, ce qui en fait une vraie création exclusive et non une
+vérification suivie d'un écrasement :
+
+```rust,ignore
+// Un seul appelant parmi tous ceux en concurrence obtient Ok ici. Chacun des
+// autres obtient une erreur `ErrorKind::ConditionNotMatch` et n'écrit rien.
+disk.write_with("locks/import.json", body).if_not_exists(true).await?;
+```
+
+Cette publication exige un système de fichiers doté de liens physiques.
+Sur FAT, exFAT et certains systèmes de fichiers réseau, `link(2)` n'est
+pas pris en charge, et une écriture conditionnelle y échoue plutôt que
+de se dégrader silencieusement en une vérification suivie d'un
+écrasement - ce qui vous donnerait une garantie d'exclusivité qui ne
+tient pas. Aucune autre opération n'est affectée.
+
+Publier par renommage remplace l'inode de l'objet. Une réécriture ne
+préserve donc ni le mode, ni le propriétaire, ni les liens physiques du
+fichier précédent, et un lecteur qui détient un descripteur ouvert
+continue de lire l'ancien contenu au lieu de voir les nouveaux octets.
+C'est le compromis habituel de la publication atomique, mais c'est un
+changement si vous comptiez sur l'un ou l'autre.
+
+Un chemin qui atteint le disque à travers un lien symbolique que le
+garde-fou ne peut pas résoudre - un lien orphelin, dont la cible
+n'existe pas - est rejeté plutôt que traité comme un nom libre à créer.
+Créer à travers un tel lien créerait la cible du lien, n'importe où sur
+l'hôte : le garde-fou ne peut donc pas distinguer un lien orphelin
+inoffensif d'une évasion, et refuse les deux.
+
+Le nom `.suprnova-atomic` est réservé à la racine de chaque disque
+local. Tout chemin dont le premier composant porte ce nom est rejeté par
+une erreur de permission, et il en va de même pour tout chemin qui
+*se résout* dans ce répertoire à travers un lien symbolique : vous ne
+pouvez donc ni lire le fichier de préparation d'un autre writer, ni
+écrire dans le répertoire, ni le supprimer. L'entrée est filtrée de
+`files`, `directories`, `all_files` et `all_directories`, si bien
+qu'elle n'apparaît jamais comme un objet. Le nom est exporté sous
+`suprnova::ATOMIC_STAGING_DIR` parce que les outils de sauvegarde et de
+synchronisation en ont besoin : excluez ce répertoire comme vous
+excluriez un répertoire de verrous. Il contient les fichiers temporaires
+en cours ainsi que ce qu'un processus mort en pleine publication a
+laissé derrière lui, et rien ne les purge : un hôte en boucle de
+plantage le fera donc grossir jusqu'à ce que quelqu'un le vide - ce que
+l'on peut faire sans risque tant que rien n'écrit.
+
 ### Garde-fou contre la traversée de chemin
 
 Les disques de système de fichiers local reçoivent une
@@ -467,11 +535,12 @@ destination créée par le transfert est supprimée avant que l'erreur ne
 vous parvienne : un transfert échoué n'est donc pas observable sous
 forme d'objet tronqué. Une destination qui était déjà là est laissée
 intacte - une copie échouée ne doit pas être ce qui détruit un objet
-qu'elle n'a jamais écrit. Sur un primaire de type système de fichiers
-local, cette garantie est plus faible qu'il n'y paraît : le driver
-ouvre la cible lui-même et la tronque, si bien qu'une destination
-locale préexistante a déjà disparu au moment où un transfert peut
-échouer.
+qu'elle n'a jamais écrit. Un primaire de type système de fichiers
+local respecte cela lui aussi, parce qu'il prépare le transfert sous
+`.suprnova-atomic/` et ne renomme qu'en cas de succès ; avorter le
+writer supprime le fichier de préparation, si bien qu'un transfert
+échoué ne laisse ni destination partielle ni fichier temporaire
+résiduel.
 
 ### Lectures versionnées et conditionnelles
 

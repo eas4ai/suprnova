@@ -6,6 +6,154 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
+## 1.3.5 - 2026-08-26
+
+### Modifié
+
+- **Chaque section du journal des modifications se lit dans les six
+  traductions du manuel.** Les manuels de, es, fr, ja, pt-BR et zh-Hans
+  portaient les sections 1.3.0 à 1.3.2 en anglais derrière une note du
+  traducteur, et des sections plus anciennes avec des lignes restées en
+  anglais ; chaque section, de 1.3.5 jusqu'à 0.1.0, est désormais traduite,
+  et les notes ont disparu.
+
+### Corrigé
+
+- **Les disques de système de fichiers local publient chaque objet en une
+  seule étape.** `Storage::register_fs` et `register_fs_with` préparent
+  désormais `disk.write(...)`, `disk.writer(...)` et `disk.copy(...)` sous
+  forme de fichier temporaire dans `<root>/.suprnova-atomic/`, puis le
+  publient sur la cible avec un unique `rename(2)` : aucun d'eux n'est donc
+  jamais observable à une longueur partielle. Auparavant, le driver ouvrait
+  la cible avec `create + truncate` et y écrivait en flux sur place - un
+  lecteur concurrent obtenait un objet vide ou à moitié écrit pendant toute
+  la durée de l'écriture, et un plantage en pleine écriture laissait un
+  objet tronqué sur le chemin en service. `abort()` sur un writer supprime
+  maintenant le fichier de préparation au lieu d'échouer avec `Unsupported`.
+- **`write_with(..).if_not_exists(true)` est une vraie création exclusive
+  sur un disque local.** Elle est publiée avec `link(2)`, qui échoue
+  atomiquement dans le noyau quand la cible existe : un seul appelant, parmi
+  un nombre quelconque d'appelants en concurrence, réussit donc, et tous les
+  autres obtiennent `ConditionNotMatch` sans rien avoir écrit. Une écriture
+  préparée puis publiée par un simple renommage aurait dégradé la condition
+  en une vérification suivie d'un écrasement, écartant en silence tous les
+  writers sauf le dernier - c'est-à-dire l'inverse de ce pour quoi on
+  emploie cette primitive.
+- **Un `append` qui crée l'objet reste un `append`.** Les ajouts sont la
+  seule opération sur place sur un disque local, et cela vaut désormais
+  aussi pour le premier d'entre eux : deux writers qui ajoutent au même
+  objet encore inexistant aboutissent donc tous les deux, au lieu que l'un
+  prépare sa propre copie et écrase l'autre.
+
+- **`suprnova serve` ne recompile plus un projet auquel personne n'a
+  touché, et `suprnova generate-types --watch` non plus.** Les deux
+  surveilleurs classaient un événement du système de fichiers d'après son
+  seul chemin, et le générateur lit tous les fichiers `.rs` du même arbre
+  `src/` qu'ils surveillent - si bien que sous Linux, où le noyau signale
+  ces lectures, chaque régénération programmait la suivante. Un projet
+  fraîchement scaffoldé régénérait ses types et redémarrait son backend
+  toutes les demi-secondes, indéfiniment, sans la moindre modification de
+  source. Seuls comptent désormais les événements qui signifient que les
+  octets sur le disque ont réellement changé. `generate-types --watch`
+  n'avait par ailleurs aucun debounce, si bien qu'il agissait sur le premier
+  fichier d'une salve plutôt que sur le dernier ; il adopte maintenant le
+  même déclenchement en fin de salve à 500 ms que `serve`, et les deux
+  surveilleurs partagent une seule implémentation, pour que le prochain
+  correctif ne puisse pas s'appliquer à un seul des deux. Le générateur
+  compare avant d'écrire : une régénération dont la sortie est identique
+  octet pour octet laisse donc le fichier, et son mtime, intacts.
+
+- **Le surveilleur du backend est restreint aux chemins à partir desquels le
+  serveur est construit.** `cargo watch` s'exécutait sans aucun `-w` : il
+  surveillait donc tout le projet non ignoré par git, et sauvegarder un
+  composant Svelte, ou régénérer `frontend/src/types/inertia-props.ts`,
+  recompilait le framework et redémarrait le serveur. Il surveille désormais
+  `src/`, `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env` et `lang/` - les
+  entrées de la compilation, plus les deux arbres lus une seule fois au
+  démarrage - chacun n'étant inclus que s'il existe, puisque cargo-watch
+  refuse un chemin `-w` inexistant. C'est dans `cmd/` que le scaffold
+  full-stack garde le `main.rs` du binaire serveur. L'invocation passe aussi
+  `--no-vcs-ignores`, parce que cargo-watch applique le `.gitignore` aux
+  racines `-w` nommées explicitement et que le scaffold ignore `.env`, ce
+  qui laisserait sinon `-w .env` ne rien surveiller ; `-w` a déjà restreint
+  la surface, si bien que le flag ne peut pas l'élargir. Les modifications
+  du frontend et les fichiers `.ts` générés ne redémarrent plus le backend.
+
+- **`serde_json::Value` se génère en `JsonValue` plutôt qu'en `unknown`.**
+  Il se dégradait auparavant en `unknown`, avec un avertissement disant
+  qu'il « isn't a struct this project defines », un conseil qui est faux
+  pour un document JSON - et les pages de connexion et d'inscription du
+  scaffold lui-même le déclenchaient deux fois à chaque régénération, si
+  bien que chaque nouveau projet émettait cet avertissement dès
+  l'installation. Il émet désormais un alias récursif `JsonValue`, déclaré
+  une seule fois en haut du fichier généré et seulement quand quelque chose
+  le référence. Un `Value` nu correspond lui aussi à cet alias, sauf si le
+  projet définit sa propre struct `Value`.
+
+- **Ni `generate-types` ni `serve` ne signalent comme généré un fichier
+  qu'ils n'ont pas écrit.** Comme une passe n'écrit désormais que lorsque le
+  contenu émis diffère, `Generated <path>` était une affirmation sur le
+  système de fichiers qui était fausse à chaque réexécution sur un projet
+  inchangé. `generate-types` dit `<path> is up to date` à la place, en mode
+  ponctuel comme avec `--watch`, et la passe de démarrage de `serve` dit
+  `N type(s) up to date → <path>`, en conservant le compte. Le surveilleur
+  de fichiers de `serve` reste maintenant silencieux sur une régénération
+  qui n'a rien écrit, en texte comme sous `--json` : un événement
+  `types_regenerated` signifie que le fichier généré sur le disque est
+  désormais différent, si bien qu'un silence après une sauvegarde vous dit
+  que votre modification n'a changé la forme d'aucune prop.
+
+### Mise à niveau
+
+- **`.suprnova-atomic` est réservé à la racine de chaque disque local.** Le
+  répertoire de préparation doit se trouver à l'intérieur de la racine - un
+  répertoire frère de la racine peut être sur un autre système de fichiers
+  quand la racine est un point de montage, et chaque renommage échouerait
+  alors avec `EXDEV` - si bien que le nom est réservé plutôt que simplement
+  conventionnel. Tout chemin dont le premier composant est
+  `.suprnova-atomic` est désormais rejeté par une erreur de permission
+  (lecture, écriture, suppression, stat et listage sans distinction), tout
+  comme tout chemin qui se résout dans ce répertoire à travers un lien
+  symbolique, et l'entrée est filtrée de `files`, `directories`,
+  `all_files` et `all_directories`. Si la racine d'un disque contient déjà
+  une entrée `.suprnova-atomic` qui vous appartient, elle n'est plus
+  atteignable à travers ce disque : déplacez-la avant la mise à niveau. Un
+  fichier ordinaire portant ce nom est refusé à l'enregistrement avec un
+  message qui le dit, plutôt que d'échouer plus tard à l'intérieur du
+  driver. Le nom est exporté sous `suprnova::ATOMIC_STAGING_DIR` pour que
+  les outils de sauvegarde et de synchronisation puissent l'exclure.
+- **Publier par renommage remplace l'inode de la cible.** Réécrire un objet
+  sur un disque local ne préserve plus son mode, son propriétaire ni ses
+  liens physiques, et un lecteur qui détient un descripteur ouvert conserve
+  l'ancien contenu au lieu de voir les nouveaux octets. C'est le coût
+  habituel de la publication atomique, mais c'est un changement de
+  comportement si vous comptiez sur l'un ou l'autre.
+- **Une écriture conditionnelle exige un système de fichiers doté de liens
+  physiques.** `if_not_exists` est publié avec `link(2)`, qui n'est pas pris
+  en charge sur FAT, exFAT et certains systèmes de fichiers réseau.
+  L'écriture y échoue franchement plutôt que de se replier sur une
+  vérification suivie d'un écrasement, parce qu'un repli vous donnerait une
+  garantie d'exclusivité qui ne tient pas. Rien d'autre sur le disque n'est
+  affecté.
+- **Un premier `append` qui échoue laisse un objet vide.** Un ajout est la
+  seule opération qui n'est pas publiée en une seule étape : l'objet est
+  donc créé avant que les octets n'arrivent, et un premier ajout échoué ou
+  abandonné le laisse derrière lui, exactement comme un ajout sur un objet
+  existant l'a toujours fait.
+- **Un lien symbolique orphelin dans la racine du disque est refusé, pas
+  écrasé.** Un chemin dont la cible du lien symbolique n'existe pas ne peut
+  plus être écrit, complété par un ajout, recopié dessus, déplacé dessus ni
+  supprimé à travers le disque. `1.3.4` remplaçait un tel lien par un
+  fichier ordinaire ; le garde-fou ne peut pas prouver où mène un lien qu'il
+  n'arrive pas à résoudre, et créer à travers un tel lien crée la cible du
+  lien n'importe où sur l'hôte : il refuse donc désormais. Supprimez le lien
+  en dehors du disque si vous vouliez vraiment écrire là.
+- **Rien ne purge le répertoire de préparation.** Il contient les fichiers
+  temporaires en cours ainsi que ce qu'un processus mort en pleine
+  publication a laissé derrière lui : un hôte en boucle de plantage le fait
+  donc grossir sans limite. Le vider pendant que rien n'écrit sur le disque
+  est sans risque ; l'exclure des sauvegardes est recommandé.
+
 ## 1.3.4 - 2026-08-25
 
 ### Ajouté
