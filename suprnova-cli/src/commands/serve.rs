@@ -1249,10 +1249,12 @@ const BACKEND_WATCH_PATHS: [&str; 5] = ["src", "Cargo.toml", "Cargo.lock", ".env
 /// backend is actually built from is the entire fix; no `-i` ignore list
 /// is needed once the scope is right.
 ///
-/// A `-w` path that does not exist makes cargo-watch refuse to start, so
-/// each candidate is included only when it is present at spawn time. A
-/// project that grows a `lang/` directory later needs a `serve` restart to
-/// pick it up, the same watcher-registration-time gap the type watcher has.
+/// A `-w` path that does not exist makes cargo-watch refuse to start
+/// outright (`Path error: couldn't canonicalize ...`), so each candidate is
+/// included only when it is present at spawn time. That is not a rare case:
+/// a freshly scaffolded project has no `Cargo.lock` until its first build.
+/// A candidate that appears later is picked up by the next `serve`, the
+/// same watcher-registration-time gap the type watcher has with `lang/`.
 fn backend_watch_args(project: &Path, run_cmd: &str) -> Vec<String> {
     let mut args = vec!["watch".to_string()];
     for candidate in BACKEND_WATCH_PATHS {
@@ -1281,11 +1283,6 @@ impl WatchTrigger {
         rust: false,
         ftl: false,
     };
-
-    /// Whether this event asks for any regeneration at all.
-    fn any(&self) -> bool {
-        self.rust || self.ftl
-    }
 }
 
 /// Classify one `notify` event into what it should regenerate.
@@ -1840,8 +1837,9 @@ mod watch_trigger_tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) => assert!(
-                    !watch_trigger(&event).any(),
+                Ok(event) => assert_eq!(
+                    watch_trigger(&event),
+                    WatchTrigger::NONE,
                     "reading a watched file must not schedule a regeneration, got {:?}",
                     event.kind
                 ),
