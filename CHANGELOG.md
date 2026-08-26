@@ -8,6 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Storage::register_read_through` composes two disks into a read-through disk.** Reads and metadata resolve against the primary first and fall back to the second disk; anything found on the fallback is written through to the primary, so a store migration completes under real traffic. Writes and listings stay on the primary, and a delete removes the object from both disks. Set `throw_on_promotion_failure` when a failed promotion must surface instead of degrading to a fallback read. A promotion is published atomically, so no reader can see a half-written object, and it carries the fallback object's content type, cache control, content disposition, content encoding, and user metadata across. A versioned or conditional read is passed through with its condition intact and served without being promoted.
 - **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
   keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -
   the lever for retiring a pool, absorbing a backlog, or moving work off a pool you

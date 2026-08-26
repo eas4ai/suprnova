@@ -34,6 +34,7 @@
 
 mod disk;
 mod path_guard;
+mod read_through;
 mod registry;
 pub mod streaming;
 
@@ -185,6 +186,58 @@ impl std::fmt::Debug for GcsConfig {
             .field("root", &self.root)
             .finish()
     }
+}
+
+/// Configuration for a read-through disk.
+///
+/// Both `primary` and `fallback` name disks that are already registered.
+/// Registration resolves them once, so a later `Storage::forget` on either
+/// name leaves this disk working against the operators it captured - disks are
+/// meant to be registered once at boot, and the alternative would be a disk
+/// that starts failing halfway through a request.
+///
+/// # How a promotion is published
+///
+/// A promotion is published so that no reader can observe it half-written,
+/// because the object it writes is exactly the one another cold reader routes
+/// by existence. Where the primary advertises a `rename` - the local
+/// filesystem, which creates the target file and then fills it in place - the
+/// bytes are staged at a unique sibling path and renamed into place. Where it
+/// does not (in-memory, S3, Azure Blob, GCS), a write is already a single
+/// indivisible publish and the promotion writes the target directly,
+/// conditional on the object not already existing. A backend offering neither
+/// guarantee would leave that window open; no driver Suprnova ships is one.
+///
+/// That condition is what a staged promotion gives up. Its path is unique, so
+/// a no-clobber condition on it would be vacuous, and the target is published
+/// by a rename that overwrites: a write landing on the primary between the
+/// promotion's last existence check and its rename is overwritten by the
+/// promoted copy. On a primary without a rename the condition holds and there
+/// is no such window.
+///
+/// # Versioned and conditional reads
+///
+/// A read carrying a version or an `If-Match` / `If-None-Match` /
+/// `If-Modified-Since` / `If-Unmodified-Since` condition is replayed onto the
+/// fallback with that condition intact, and is served but never promoted:
+/// writing an old version or a validator-matched body to the primary would
+/// publish it as the live object.
+#[derive(Clone, Debug, Default)]
+pub struct ReadThroughConfig {
+    /// Name of the disk that answers writes and listings, and that promoted
+    /// objects are written to. Required.
+    pub primary: String,
+    /// Name of the disk consulted when the primary does not hold an object.
+    /// Must differ from `primary`. Required.
+    pub fallback: String,
+    /// Whether a failed promotion fails the read.
+    ///
+    /// Defaults to `false`, which is the safer production posture: the caller
+    /// still receives the fallback's bytes and the failure is logged, so an
+    /// unwritable primary degrades throughput instead of returning errors. Set
+    /// it to `true` when a silent loss of promotion would hide a real fault -
+    /// a migration you are trying to complete, for instance.
+    pub throw_on_promotion_failure: bool,
 }
 
 /// Default resilience layer applied by the cloud convenience constructors
@@ -552,6 +605,112 @@ impl Storage {
             .map_err(|e| FrameworkError::internal(format!("opendal gcs init: {e}")))?;
         let layered = layer_fn(raw);
         registry::register(name, layered);
+        Ok(())
+    }
+
+    /// Register a read-through disk over two already-registered disks.
+    ///
+    /// Reads and metadata resolve against `primary` first and fall back to
+    /// `fallback`; anything found on the fallback is written through to the
+    /// primary, so the working set migrates under real traffic. Writes and
+    /// listings are primary-only, and a delete removes the object from both.
+    ///
+    /// Equivalent to [`Storage::register_read_through_with`] with an identity
+    /// closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(FrameworkError::Internal)` when `primary` or `fallback` is
+    /// empty, when they name the same disk, when either names `name` itself,
+    /// or when either disk is not registered.
+    ///
+    /// # Testing
+    ///
+    /// The disk registry is process-global. Tests that call any `register_*`
+    /// method directly race on this shared state when run in parallel - wrap
+    /// them in a `Storage::fake` guard, which serializes fake-using tests
+    /// process-wide and wipes the registry on drop.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{ReadThroughConfig, Storage};
+    ///
+    /// # fn ex() -> Result<(), suprnova::FrameworkError> {
+    /// Storage::register_memory("new-store");
+    /// Storage::register_fs("legacy-store", "./storage/legacy")?;
+    /// Storage::register_read_through(
+    ///     "assets",
+    ///     ReadThroughConfig {
+    ///         primary: "new-store".into(),
+    ///         fallback: "legacy-store".into(),
+    ///         ..Default::default()
+    ///     },
+    /// )?;
+    /// # Ok(()) }
+    /// ```
+    pub fn register_read_through(
+        name: impl Into<String>,
+        config: ReadThroughConfig,
+    ) -> Result<(), FrameworkError> {
+        Self::register_read_through_with(name, config, |op| op)
+    }
+
+    /// Register a read-through disk with a custom layer stack applied to the
+    /// composed [`Operator`] before it lands in the registry.
+    ///
+    /// The closure wraps the read-through behaviour, so a `RetryLayer` added
+    /// here retries the composite operation - including the fallback lookup -
+    /// rather than only the primary. See [`Storage::register_fs_with`] for the
+    /// full list of available layers.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Storage::register_read_through`].
+    pub fn register_read_through_with(
+        name: impl Into<String>,
+        config: ReadThroughConfig,
+        layer_fn: impl FnOnce(Operator) -> Operator,
+    ) -> Result<(), FrameworkError> {
+        let name = name.into();
+        let primary_name = config.primary.trim();
+        let fallback_name = config.fallback.trim();
+
+        if primary_name.is_empty() {
+            return Err(FrameworkError::internal(
+                "read-through disk config requires a non-empty `primary` disk name",
+            ));
+        }
+        if fallback_name.is_empty() {
+            return Err(FrameworkError::internal(
+                "read-through disk config requires a non-empty `fallback` disk name",
+            ));
+        }
+        if primary_name == fallback_name {
+            return Err(FrameworkError::internal(format!(
+                "read-through disk '{name}' requires distinct `primary` and `fallback` disks; both name '{primary_name}'"
+            )));
+        }
+        if primary_name == name || fallback_name == name {
+            return Err(FrameworkError::internal(format!(
+                "read-through disk '{name}' cannot reference itself as its `primary` or `fallback`"
+            )));
+        }
+
+        let primary = registry::get(primary_name)?;
+        let fallback = registry::get(fallback_name)?;
+
+        // The layer captures a clone of the *un-layered* primary so the
+        // promotion write and the existence probes can use the high-level
+        // operator API. It is the same backend as the stack the layer wraps,
+        // so there is no second disk and no way to recurse.
+        let composed = primary.clone().layer(read_through::ReadThroughLayer {
+            primary,
+            fallback,
+            throw_on_promotion_failure: config.throw_on_promotion_failure,
+        });
+
+        registry::register(name, layer_fn(composed));
         Ok(())
     }
 
