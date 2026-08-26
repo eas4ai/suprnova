@@ -1,24 +1,24 @@
 <script lang="ts">
+  import { t } from '../lib/lang.svelte'
+
   // These props come from the framework, not from one of your handlers:
   // `InertiaConfig::error_page` in `src/bootstrap.rs` routes every
   // framework error response (403, 404, 429, 500, ...) to this page.
   // That is why they are declared here rather than imported from
   // `types/inertia-props.ts`, which `suprnova generate-types` rewrites
   // from your `#[derive(InertiaProps)]` structs.
+  //
+  // `message` is the server's, so it arrives already localized only if
+  // your handlers translate it; the chrome below uses `t()` like every
+  // other page. That works because `src/bootstrap.rs` registers
+  // `LocaleMiddleware` ahead of `Inertia::install` - keep it that way, or
+  // this page renders in the default locale.
   interface ErrorProps {
     status: number
     message: string
     request_id?: string
   }
 
-  // The two chrome strings below are deliberately not routed through
-  // `t()` the way every other page's are. This page renders from the
-  // error-page middleware, which `Inertia::install` registers ahead of
-  // `LocaleMiddleware` in `src/bootstrap.rs` - so by the time it renders,
-  // the request's locale scope has already exited and the `lang` share
-  // names the app's default catalog, not the visitor's. `t()` here would
-  // look localized while serving the fallback. Move the call inside the
-  // locale middleware first if you want this page translated.
   let { status, message, request_id }: ErrorProps = $props()
 </script>
 
@@ -30,12 +30,12 @@
     <p class="text-lg text-gray-700">{message}</p>
     {#if request_id}
       <p class="text-sm text-gray-500">
-        Reference:
+        {t('error-reference')}
         <code class="bg-gray-100 px-1 rounded">{request_id}</code>
       </p>
     {/if}
     <p>
-      <a href="/" class="text-indigo-600 hover:text-indigo-500">Go home</a>
+      <a href="/" class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</a>
     </p>
   </div>
 </div>

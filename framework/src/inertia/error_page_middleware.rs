@@ -104,7 +104,8 @@ impl Middleware for InertiaErrorPageMiddleware {
         };
 
         // The replaced response's headers come along except the ones
-        // that only described the body being replaced - see
+        // that only described the body being replaced, or how it could be
+        // stored - see
         // `header_survives_rewrite` for the rule and why it is phrased as
         // a drop list. This is what keeps `Retry-After` on a `429` and
         // `WWW-Authenticate` on a `401` true after the body becomes a
@@ -124,7 +125,14 @@ impl Middleware for InertiaErrorPageMiddleware {
         }
 
         match page.resolve(&captured).await {
-            Ok(rendered) => restore(rendered.status(status).with_headers(carried)),
+            Ok(rendered) => restore(
+                rendered
+                    .status(status)
+                    .with_headers(carried)
+                    // Last, and unconditional: the page is per-viewer
+                    // where the body it replaced was not.
+                    .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL),
+            ),
             Err(e) => {
                 // The error page failing is not a reason to lose the
                 // error. Returning the original response means the user
@@ -305,13 +313,26 @@ fn decide(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
     })
 }
 
+/// `Cache-Control` the error page always sets for itself, replacing
+/// whatever the response it stands in for carried.
+///
+/// The body being replaced said nothing about any particular viewer - the
+/// framework's JSON envelope, or a fixed `404 Not Found`. The page that
+/// replaces it carries the app's shared props: `auth.user`, flash, the
+/// locale share. That is per-viewer content, and it must never be stored
+/// by a shared cache and handed to somebody else, whatever the original
+/// response permitted. Symfony and Laravel default a session-bearing
+/// response to exactly this pair, and so does this.
+const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
+
 /// Whether a header on the replaced response carries over onto the page.
 ///
 /// One rule, stated as what is **dropped** rather than what is kept, so a
 /// header nobody here thought of survives instead of silently
-/// disappearing. A field is dropped only when it describes the
-/// representation being replaced - or how that representation was framed
-/// on the wire - or when the page response is the authority on it:
+/// disappearing. A field is dropped in exactly three cases.
+///
+/// **It described the representation being replaced, or how that
+/// representation was framed on the wire.**
 ///
 /// - **Every `Content-*` field.** `Content-Length: 94` on a four-kilobyte
 ///   HTML shell is a framing bug, `Content-Type: application/json` on a
@@ -322,21 +343,30 @@ fn decide(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
 ///   the safe direction for metadata that describes bytes we threw away.
 /// - **`Transfer-Encoding`**, the framing counterpart of
 ///   `Content-Length`, which shares none of that prefix.
-/// - **`X-Inertia`.** Whether a response is an Inertia response is the
-///   page response's own claim to make. Unreachable in practice - a
-///   response already carrying it never reaches the rewrite, see
-///   [`decide`] - and stated anyway so the rewrite cannot inherit a
-///   contradictory claim.
+///
+/// **It described how the replaced representation could be stored or
+/// revalidated.** `Cache-Control`, `Expires`, `Age`, `ETag`,
+/// `Last-Modified`. The page is per-viewer where the body it replaced was
+/// not, so inheriting the old response's storage permission is how one
+/// viewer's `auth.user` ends up served to another out of a shared cache,
+/// and inheriting its validators is how a cache revalidates the page
+/// against an entity that no longer exists. The page sets its own
+/// [`ERROR_PAGE_CACHE_CONTROL`] instead of carrying one.
+///
+/// **The page response is the authority on it.** `X-Inertia`.
+/// Unreachable in practice - a response already carrying it never reaches
+/// the rewrite, see [`decide`] - and stated anyway so the rewrite cannot
+/// inherit a contradictory claim.
 ///
 /// `Content-Security-Policy` and `Content-Security-Policy-Report-Only`
-/// are the one carve-out from the prefix. They are response policy, not
-/// representation metadata - the shared prefix is a historical accident -
+/// are the one carve-out from the `Content-` prefix. They share it and
+/// are not representation metadata at all - they are response policy -
 /// and dropping a CSP from an error page would be a security regression.
 ///
 /// Everything else describes the request, the connection, or what the
 /// client should do next: `Retry-After` on a `429`, `WWW-Authenticate` on
-/// a `401`, `Cache-Control`, `Vary`, `Set-Cookie`, `X-Request-Id`. None of
-/// that stopped being true because the body changed.
+/// a `401`, `Vary`, `Set-Cookie`, `X-Request-Id`. None of that stopped
+/// being true because the body changed.
 fn header_survives_rewrite(name: &str) -> bool {
     const CONTENT: &[u8] = b"Content-";
     let bytes = name.as_bytes();
@@ -344,8 +374,12 @@ fn header_survives_rewrite(name: &str) -> bool {
         bytes.len() >= CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT);
     let security_policy = name.eq_ignore_ascii_case("Content-Security-Policy")
         || name.eq_ignore_ascii_case("Content-Security-Policy-Report-Only");
+    let storage_metadata = ["Cache-Control", "Expires", "Age", "ETag", "Last-Modified"]
+        .iter()
+        .any(|field| name.eq_ignore_ascii_case(field));
 
     !((content_prefixed && !security_policy)
+        || storage_metadata
         || name.eq_ignore_ascii_case("Transfer-Encoding")
         || name.eq_ignore_ascii_case("X-Inertia"))
 }
@@ -696,7 +730,6 @@ mod tests {
         for kept in [
             "Retry-After",
             "WWW-Authenticate",
-            "Cache-Control",
             "Vary",
             "Set-Cookie",
             "X-Request-Id",
@@ -710,6 +743,31 @@ mod tests {
                 "{kept} says nothing about the body and must carry over"
             );
         }
+    }
+
+    #[test]
+    fn nothing_that_let_the_old_body_be_stored_or_revalidated_carries_over() {
+        // The body being replaced was the same for everyone. The page is
+        // not - it carries `auth.user`, flash, the locale share. Letting
+        // it inherit the old response's storage permission is how one
+        // viewer's page is served to another out of a shared cache, and
+        // letting it inherit the old validators is how a cache
+        // revalidates the page against an entity that no longer exists.
+        for dropped in [
+            "Cache-Control",
+            "cache-control",
+            "Expires",
+            "Age",
+            "ETag",
+            "Last-Modified",
+        ] {
+            assert!(
+                !header_survives_rewrite(dropped),
+                "{dropped} governed the storage of a body that no longer exists"
+            );
+        }
+        // The page names its own policy rather than carrying one.
+        assert_eq!(ERROR_PAGE_CACHE_CONTROL, "no-cache, private");
     }
 
     #[test]

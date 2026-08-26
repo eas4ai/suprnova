@@ -1338,12 +1338,20 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
 
         // Ordering is load-bearing, not cosmetic, and the scaffold has to
         // match the dogfood app's chain (`app/src/bootstrap.rs`): session,
-        // then the Inertia trio, then locale. The version middleware
+        // then locale, then the Inertia layer. The version middleware
         // re-flashes the session before bouncing a stale client, which it can
         // only do inside a session scope, so registering it ahead of
-        // SessionMiddleware would make the 409 eat the flash. Registering it
-        // after LocaleMiddleware instead would bury the trio deeper in the
-        // chain than the layer it is meant to wrap.
+        // SessionMiddleware would make the 409 eat the flash.
+        //
+        // Locale moved ahead of the Inertia layer in 1.3.6, when
+        // `error_page` gave that layer a middleware that renders a page on
+        // the way OUT - after everything registered inside it has returned
+        // and popped its scope. With locale inside, every error page
+        // rendered in the default locale. See
+        // `locale_detection_is_registered_outside_the_inertia_layer` below,
+        // and the `locale` module in
+        // `framework/tests/inertia_error_page.rs` for the behaviour in both
+        // directions.
         let session_at = bootstrap
             .find("SessionMiddleware::new")
             .expect("the scaffold registers SessionMiddleware");
@@ -1358,10 +1366,15 @@ fn every_frontend_scaffold_installs_the_inertia_middlewares() {
              needs a session scope to do it"
         );
         assert!(
-            inertia_at < locale_at,
-            "the {frontend} scaffold installs Inertia after LocaleMiddleware; \
-             the trio belongs immediately after SessionMiddleware, the same \
-             place app/src/bootstrap.rs puts it"
+            session_at < locale_at,
+            "the {frontend} scaffold registers LocaleMiddleware before \
+             SessionMiddleware; locale detection reads the session first"
+        );
+        assert!(
+            locale_at < inertia_at,
+            "the {frontend} scaffold installs Inertia before LocaleMiddleware; \
+             the error-page middleware renders after the locale scope is popped, \
+             so every error page would come back in the default locale"
         );
     }
 }
@@ -1543,6 +1556,11 @@ fn every_frontend_ships_the_error_page_the_backend_enables() {
             );
         }
         assert!(
+            body.contains("t('error-reference')") && body.contains("t('error-go-home')"),
+            "{frontend}'s Error page must route its chrome through the starter's \
+             t() helper like every other page; got:\n{body}"
+        );
+        assert!(
             !body.contains("from '../types/inertia-props'"),
             "{frontend}'s Error page must declare its own props: \
              `suprnova generate-types` rewrites types/inertia-props.ts from the \
@@ -1572,6 +1590,83 @@ fn scaffolding_writes_the_error_page_for_every_frontend() {
             page.is_file(),
             "{frontend:?} must scaffold {}",
             page.display()
+        );
+    }
+}
+
+/// The scaffold must register `LocaleMiddleware` before `Inertia::install`,
+/// and the dogfood app must agree with it.
+///
+/// An error page is built by a middleware on the way *out*, after every
+/// middleware registered inside it has returned and popped whatever
+/// request scope it opened. Registered the other way round, the locale
+/// scope is gone by the time the page renders and every error page - and
+/// only error pages - comes back in the app's default locale instead of
+/// the visitor's. That is invisible in every other test, because every
+/// other page renders from a handler, deep inside the chain where the
+/// scope is still live. The behaviour behind this is pinned in both
+/// directions by `framework/tests/inertia_error_page.rs`'s `locale`
+/// module.
+#[test]
+fn locale_detection_is_registered_outside_the_inertia_layer() {
+    for (what, source) in [
+        (
+            "the scaffolded bootstrap",
+            read("src/templates/files/backend/bootstrap.rs.tpl"),
+        ),
+        ("the dogfood app", read_from_repo("app/src/bootstrap.rs")),
+    ] {
+        let locale = source
+            .find("global_middleware!(\n        LocaleMiddleware::from_env()")
+            .or_else(|| source.find("LocaleMiddleware::from_env()"))
+            .unwrap_or_else(|| panic!("{what} must register LocaleMiddleware:\n{source}"));
+        let install = source
+            .find("Inertia::install(")
+            .unwrap_or_else(|| panic!("{what} must call Inertia::install:\n{source}"));
+        assert!(
+            locale < install,
+            "{what} registers LocaleMiddleware after Inertia::install, so the \
+             error-page middleware renders once the locale scope has been popped \
+             and every error page comes back in the default locale"
+        );
+
+        // Session still has to be outside locale: the detection chain
+        // reads the session first.
+        let session = source
+            .find("SessionMiddleware::")
+            .unwrap_or_else(|| panic!("{what} must register SessionMiddleware:\n{source}"));
+        assert!(
+            session < locale,
+            "{what} must keep SessionMiddleware outside LocaleMiddleware - the \
+             detection chain reads the session before the cookie and the header"
+        );
+    }
+}
+
+/// The starter `lang-keys.ts` must be byte-for-byte what
+/// `generate-types` would emit from the starter catalog.
+///
+/// It ships pre-generated so `t(key)` type-checks before a user has ever
+/// run the generator, which only works while the two agree - otherwise a
+/// fresh project's first `suprnova generate-types` silently rewrites a
+/// file the user never edited, and any key the union is missing is a
+/// compile error in a page the scaffold itself wrote.
+#[test]
+fn the_starter_lang_keys_match_the_starter_catalog() {
+    use suprnova_cli::commands::generate_types::{extract_message_ids, render_lang_keys};
+
+    let ids = extract_message_ids(suprnova_cli::templates::lang_app_ftl());
+    let expected_union = render_lang_keys(&ids);
+    let shipped = suprnova_cli::templates::lang_keys_starter();
+
+    assert!(
+        shipped.ends_with(&expected_union),
+        "lang-keys.ts.tpl has drifted from lang/en/app.ftl.tpl.\nexpected union:\n{expected_union}\nshipped:\n{shipped}"
+    );
+    for id in ["error-go-home", "error-reference", "welcome"] {
+        assert!(
+            ids.iter().any(|found| found == id),
+            "the starter catalog must define `{id}`; got {ids:?}"
         );
     }
 }

@@ -175,8 +175,20 @@ fn router() -> Router {
             let resp: Response = Err(HttpResponse::json(json!({ "message": "Unauthenticated." }))
                 .status(401)
                 .header("WWW-Authenticate", "Bearer realm=\"app\"")
-                .header("Cache-Control", "no-store")
                 .header("Set-Cookie", "flash=cleared; Path=/"));
+            resp
+        })
+        // An error response somebody made publicly cacheable, with the
+        // validators to match. The page that replaces it carries shared
+        // props, so it must inherit none of that.
+        .get("/cached-error", |_req| async {
+            let resp: Response = Err(HttpResponse::json(json!({ "message": "Gone for good." }))
+                .status(410)
+                .header("Cache-Control", "public, s-maxage=600")
+                .header("ETag", "\"v1\"")
+                .header("Last-Modified", "Wed, 26 Aug 2026 10:00:00 GMT")
+                .header("Expires", "Thu, 27 Aug 2026 10:00:00 GMT")
+                .header("Age", "42"));
             resp
         })
         // A rate-limited request. `Retry-After` is the only thing that
@@ -681,10 +693,6 @@ async fn a_401_keeps_its_challenge_and_the_rest_of_its_headers() {
         "a 401 without its challenge is not a 401; got {headers:?}"
     );
     assert_eq!(
-        headers.get("cache-control").map(String::as_str),
-        Some("no-store")
-    );
-    assert_eq!(
         headers.get("set-cookie").map(String::as_str),
         Some("flash=cleared; Path=/")
     );
@@ -694,4 +702,146 @@ async fn a_401_keeps_its_challenge_and_the_rest_of_its_headers() {
         "the page object is JSON, so Content-Type is the page's own, not the error body's"
     );
     assert_content_length_matches_body(&headers, &body);
+}
+
+#[tokio::test]
+async fn the_page_never_inherits_permission_to_be_cached() {
+    let addr = spawn_server(router(), stack(), 2).await;
+
+    let (status, headers, body) = request(addr, "GET", "/cached-error", &inertia_visit()).await;
+
+    assert_eq!(status, 410);
+    assert_eq!(
+        page_object(&body)["component"],
+        ERROR_PAGE,
+        "the response really was rewritten; got {body}"
+    );
+    assert_eq!(
+        headers.get("cache-control").map(String::as_str),
+        Some("no-cache, private"),
+        "the page carries shared props, so a shared cache must never store it \
+         and hand it to someone else; got {headers:?}"
+    );
+    for validator in ["etag", "last-modified", "expires", "age"] {
+        assert!(
+            !headers.contains_key(validator),
+            "{validator} described the body that was replaced; got {headers:?}"
+        );
+    }
+    assert_content_length_matches_body(&headers, &body);
+}
+
+// ---------------------------------------------------------------------
+// The error page renders inside the visitor's locale
+// ---------------------------------------------------------------------
+
+/// The error page is built by a middleware on the way *out*, after every
+/// middleware registered inside it has returned and popped whatever
+/// request scope it opened. So anything the page's shared props read has
+/// to be scoped from outside the Inertia layer. `LocaleMiddleware` is the
+/// case that bites: registered inside, every error page - and only error
+/// pages - renders in the app's default locale instead of the visitor's.
+///
+/// The scaffolded `bootstrap.rs` registers locale ahead of
+/// `Inertia::install` for exactly this reason, and
+/// `suprnova-cli/tests/template_drift.rs` pins that. These two tests pin
+/// the behaviour behind it, in both directions, so the rule cannot be
+/// undone by accident without something failing.
+#[cfg(feature = "localization")]
+mod locale {
+    use super::*;
+
+    use suprnova::{
+        Detect, FluentTranslator, LocaleMiddleware, LocaleShare, LocalizationConfig, Translator,
+    };
+
+    fn localization_config() -> LocalizationConfig {
+        LocalizationConfig {
+            default_locale: suprnova::Locale::parse("en").unwrap(),
+            fallback_locale: suprnova::Locale::parse("en").unwrap(),
+            use_isolating: false,
+            detection: vec![Detect::Session, Detect::Cookie, Detect::Header],
+            session_key: "locale".into(),
+            cookie_name: "locale".into(),
+            parents: Default::default(),
+        }
+    }
+
+    /// Bind an `en` + `es` catalog as the container's translator, and
+    /// register the `lang` shared prop the same way a scaffolded app
+    /// does. The returned `TempDir` must outlive the request:
+    /// `LocaleMiddleware` calls `reload_if_stale()` on every request
+    /// outside production, and a deleted directory would empty the
+    /// bound translator's catalogs mid-test.
+    fn bind_translator_and_share() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for (locale, ftl) in [("en", "greet = Hello\n"), ("es", "greet = Hola\n")] {
+            let dir = tmp.path().join(locale);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("app.ftl"), ftl).unwrap();
+        }
+        let translator = FluentTranslator::from_dir(tmp.path(), &localization_config()).unwrap();
+        suprnova::container::App::bind::<dyn Translator>(Arc::new(translator));
+        suprnova::App::register_inertia_shared(Arc::new(LocaleShare));
+        tmp
+    }
+
+    /// An Inertia visit that asks for Spanish and is denied.
+    fn spanish_inertia_visit() -> Vec<(&'static str, &'static str)> {
+        let mut headers = inertia_visit();
+        headers.push(("Accept-Language", "es"));
+        headers
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_error_page_renders_in_the_visitors_locale() {
+        let _db = seed_member().await;
+        let _catalogs = bind_translator_and_share();
+        // Locale OUTSIDE the Inertia layer - the order the scaffold uses.
+        let registry = stack().prepend(LocaleMiddleware::new(localization_config()));
+        let addr = spawn_server(router(), registry, 2).await;
+
+        let (status, _headers, body) =
+            request(addr, "GET", "/admin/articles", &spanish_inertia_visit()).await;
+
+        assert_eq!(status, 403);
+        let page = page_object(&body);
+        assert_eq!(page["component"], ERROR_PAGE);
+        assert_eq!(
+            page["props"]["lang"]["locale"], "es",
+            "the error page must render in the locale the visitor asked for; got {body}"
+        );
+        assert!(
+            page["props"]["lang"]["catalog"]["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("/es.ftl")),
+            "and it must point the client at that locale's catalog; got {body}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn locale_registered_inside_the_inertia_layer_loses_the_visitors_locale() {
+        let _db = seed_member().await;
+        let _catalogs = bind_translator_and_share();
+        // Locale INSIDE the Inertia layer - `append` puts it innermost.
+        // This is the order a scaffolded app had before 1.3.6, recorded
+        // here so the reason for the ordering rule is a tested fact
+        // rather than a claim in a comment.
+        let registry = stack().append(LocaleMiddleware::new(localization_config()));
+        let addr = spawn_server(router(), registry, 2).await;
+
+        let (status, _headers, body) =
+            request(addr, "GET", "/admin/articles", &spanish_inertia_visit()).await;
+
+        assert_eq!(status, 403);
+        let page = page_object(&body);
+        assert_eq!(
+            page["props"]["lang"]["locale"], "en",
+            "the locale scope is popped before the error page renders, so it \
+             falls back to the default - this is the trap the ordering rule \
+             exists to avoid; got {body}"
+        );
+    }
 }

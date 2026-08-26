@@ -917,9 +917,13 @@ pub fn register_http_stack() {
 
     Inertia::install(&cfg)
         .expect("Inertia install failed (production needs a built frontend manifest)");
-    // …global middleware, in the order you want it to run
+    // …the rest of your global middleware, in the order you want it to run
 }
 ```
+
+Anything the Inertia layer depends on - `SessionMiddleware` - and
+anything an error page needs to read - `LocaleMiddleware` - goes *above*
+this call. See [the ordering rules below](#bootstrap-inertia-install).
 
 ```rust
 // cmd/main.rs
@@ -981,6 +985,17 @@ flash data. The version middleware re-flashes the session before bouncing
 the client, so a flashed error survives the follow-up full-page GET; it
 can only do that inside a session scope.
 
+Register [`LocaleMiddleware`](localization.md) **ahead of it too**, if you
+use an [error page](#error-pages). A middleware's post-`next` code runs
+after everything inside it has already returned, so the error-page
+middleware renders once any scope opened inside it has been popped -
+which for the locale middleware means the page would get the app's
+default locale instead of the visitor's. The Inertia layer reads nothing
+from localization, so putting locale outside it costs nothing. The
+scaffolded `bootstrap.rs` already does this. The same reasoning applies
+to any middleware of yours whose request scope the error page needs to
+read.
+
 Skip the call only if you genuinely don't want one of these middlewares
 (rare; all four close real failure modes - cache poisoning across the two
 representations of a URL, silent stale-bundle, form-replay-on-redirect,
@@ -1027,6 +1042,15 @@ pub fn register_http_stack() {
 **The three starters ship one and set `.error_page("Error")` already** -
 a new project is covered without doing anything.
 
+One ordering rule comes with it: **register `LocaleMiddleware` before
+`Inertia::install`**, or error pages render in the app's default locale
+rather than the visitor's. The error page is built on the way out, after
+every middleware registered inside the Inertia layer has returned and
+popped whatever scope it opened. The scaffolded `bootstrap.rs` gets this
+right; if you wrote your own, check it. The same holds for any
+request-scoped middleware of your own that the error page's shared props
+read.
+
 ### What the page receives
 
 | Prop | Type | Always present | What it is |
@@ -1059,28 +1083,30 @@ props come from the framework.
 ### What survives the swap
 
 The status code is kept, and so is every header the original response
-set, **except** the ones that only described the body being replaced:
-every `Content-*` field (`Content-Length` on a page four times the size
-of the JSON it replaced is a framing bug) and `Transfer-Encoding`.
+set, **except** two groups.
+
+**What described the body being replaced.** Every `Content-*` field
+(`Content-Length` on a page four times the size of the JSON it replaced
+is a framing bug) and `Transfer-Encoding`.
 `Content-Security-Policy` is carved out of that rule by name - it shares
 the prefix by historical accident and is response policy, not
 representation metadata.
 
-So `Retry-After` on a `429` still tells the client when to come back,
-`WWW-Authenticate` on a `401` still carries the challenge, and
-`Cache-Control`, `Vary`, `Set-Cookie`, and your request-id header all
+**What governed how that body could be stored.** `Cache-Control`,
+`Expires`, `Age`, `ETag`, `Last-Modified`. The page carries your shared
+props - `auth.user`, flash, the locale share - where the error body it
+replaced was the same for everyone, so it must never inherit permission
+to be stored by a shared cache and handed to a different visitor, nor
+validators that belong to an entity it is not. The page sets
+`Cache-Control: no-cache, private` for itself instead, the same default
+Laravel gives a session-bearing response.
+
+Everything else carries: `Retry-After` on a `429` still tells the client
+when to come back, `WWW-Authenticate` on a `401` still carries the
+challenge, and `Vary`, `Set-Cookie`, and your request-id header all
 arrive intact. The rule is stated as what gets dropped rather than what
 gets kept, so a header the framework has never heard of survives instead
 of silently disappearing.
-
-One consequence to know about: the page that replaces the body is
-user-specific - it carries your shared props, `auth.user` and flash
-included - while the error body it replaced was not. `Cache-Control` is
-not representation metadata, so it carries over; if your app or a CDN
-shim marked an error response `Cache-Control: public`, that response is
-now publicly cacheable **with per-user content in it**. Nothing in the
-framework sets a cacheable `Cache-Control` on an error, so this needs a
-deliberate act on your side - but if you made one, revisit it.
 
 Both audiences are covered. An Inertia XHR visit gets the JSON page
 object with `X-Inertia: true`; a hard navigation - someone pasting
