@@ -134,8 +134,8 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   zurückgibt - oder ein `before`/`after`-Hook, der sich für `false`
   entschieden hat) und eine Auswertung, über die überhaupt nichts anderes
   entschieden hat (eine undefinierte Fähigkeit, zu der auch kein Hook eine
-  Meinung hatte). All das fiel früher auf ein bloßes `Response::deny()` (ein
-  403) zusammen; jetzt taucht es als die `Response` auf, die der Standard
+  Meinung hatte). All das fiel früher auf ein bloßes `Response::deny()` (ein 403)
+  zusammen; jetzt taucht es als die `Response` auf, die der Standard
   trägt, zum Beispiel `Response::deny_as_not_found()` für ein 404, das die
   Existenz einer Ressource anwendungsweit verbirgt statt Gate für Gate. Der
   Standard gilt nur für ein bloßes `false` - ein mit `define_with` /
