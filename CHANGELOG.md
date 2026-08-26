@@ -8,6 +8,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Read-through disks take a `copy` flag and resolve `copy` / `rename` across the fallback.** Set `copy: false` on `ReadThroughConfig` to serve fallback hits without writing them through, which turns the disk into a transparent overlay and narrows each fetch to the range you asked for. `copy` and `rename` now stream a source that lives only on the fallback across to the primary destination; a `rename` also deletes the fallback source, so a later read cannot resurrect the moved object. Conditions carry across that streaming path: `if_not_exists` still refuses an existing destination, a copy's source version selects which object the fallback hands over, and a copy's `if_match` is refused with `Unsupported` rather than silently dropped. A transfer that fails partway removes only a destination it created, so it cannot destroy an object that was already there.
 - **Debounced jobs and debounced queued listeners.** `Job::debounce_for()` collapses
   a burst of dispatches into one run, one window after the most recent one, carrying
   the newest payload. It is the mirror of `push_unique`, which keeps the first

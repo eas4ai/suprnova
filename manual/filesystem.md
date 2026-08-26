@@ -274,11 +274,12 @@ it and every `DiskExt` convenience works unchanged.
 
 | Operation | Disk |
 |---|---|
-| `read` | Primary if it holds the object, otherwise the fallback - and the fallback hit is promoted |
+| `read` | Primary if it holds the object, otherwise the fallback - and, unless `copy` is `false`, the fallback hit is promoted |
 | `exists`, `size`, `last_modified`, `mime_type`, `stat` | Primary if it holds the object, otherwise the fallback |
 | `write`, `make_directory` | Primary only |
 | `files`, `directories`, `list` | Primary only - fallback entries are invisible to a listing |
 | `delete` | Both, fallback first |
+| `copy`, `rename` / `move_to` | Primary if it holds the source, otherwise streamed across from the fallback; a `rename` also deletes the fallback source |
 | `temporary_url` | Primary if it holds the object, otherwise the fallback |
 | `temporary_upload_url` | Primary only - an upload has to land where writes land |
 
@@ -308,6 +309,7 @@ Storage::register_read_through(
         primary: "new-store".into(),
         fallback: "legacy-store".into(),
         throw_on_promotion_failure: true,
+        ..Default::default()
     },
 )?;
 ```
@@ -316,6 +318,104 @@ Registration rejects a configuration that cannot work: an empty `primary` or
 `fallback`, a pair that names the same disk twice, a disk that names itself,
 or a name that is not registered. Each returns a `FrameworkError` naming the
 problem, and no disk is registered.
+
+### Reading without promoting
+
+Set `copy: false` to serve fallback hits without writing them through:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "cache-store".into(),
+        fallback: "origin-store".into(),
+        copy: false,
+        ..Default::default()
+    },
+)?;
+```
+
+The disk then reads like a transparent overlay: the primary answers what it
+holds, the fallback answers everything else, and nothing moves between them.
+Use it when the primary is a small cache you do not want a one-off read to
+fill, or when the fallback is authoritative and the primary only ever holds
+objects you put there deliberately.
+
+The flag governs read-time promotion and nothing else. Writes, deletes,
+metadata, listings, and the destinations of `copy` and `rename` all behave
+exactly as they do with promotion on - so a `copy: false` disk still lands a
+copied or moved object on the primary. Because nothing is written back, a
+read with `copy: false` fetches only the range you asked for rather than the
+whole object.
+
+### Copying and moving across the fallback
+
+`copy` and `rename` resolve the source against the primary first. When only
+the fallback holds it, the object is streamed across in 64 KiB chunks and the
+destination lands on the primary:
+
+```rust,ignore
+let assets = Storage::disk("assets")?;
+
+// `logo.png` lives only on `legacy-store`. The copy streams it across and
+// writes `branding/logo.png` to `new-store`; the legacy object stays put.
+assets.copy("logo.png", "branding/logo.png").await?;
+
+// A move does the same and then deletes the legacy source.
+assets.rename("logo.png", "branding/logo.png").await?;
+```
+
+A move deletes the fallback source on both paths - whether the primary held
+the source or not. Without that, the next read would promote the fallback
+copy back and undo the move.
+
+The two paths differ in when they delete it, and the difference is what a
+failed move leaves behind:
+
+- The primary held the source. The fallback copy goes first, before the
+  rename. While the primary holds the path, the fallback's copy is unreachable
+  through this disk, so removing it first changes nothing you can observe - and
+  if the delete fails, nothing has moved yet. Retry the move. If instead the
+  delete succeeded and the rename then failed, the fallback holds nothing for
+  that path, the destination is unwritten, and the primary still holds the
+  source - so a retry takes this same path and renames again. The failure costs
+  the cold copy and nothing else.
+- Only the fallback held it. The delete can only come after the destination is
+  in place, so a move that fails on the delete leaves the destination written
+  and the source still on the fallback. Retry the move; the source is now on
+  the primary, so the retry takes the first path.
+
+Either way a failed move is safe to retry, and the destination you end up with
+is the object the move started from.
+
+Conditions travel with the operation on the streaming path too. `if_not_exists`
+becomes a conditional write, so a guarded copy or move still refuses an
+existing destination rather than clobbering it, and a copy that names a source
+version gets that version out of the fallback. A copy's `if_match` is the one
+exception: it is a condition the backend applies inside its own copy, which is
+the call this path cannot make, so it is refused with an `Unsupported` error
+naming the condition rather than quietly ignored.
+
+That makes conditions the one place where which disk holds the source shows
+through. A local directory advertises `copy` and `rename` but neither of their
+conditional forms, so `copy_with(a, b).if_not_exists(true)` succeeds when only
+the fallback holds `a` (it becomes a conditional write) and is refused with
+`Unsupported` when the primary holds it. Check the condition you need against
+the primary driver rather than assuming it holds for every object on the disk.
+
+A move the primary would refuse is refused before anything is deleted. A
+primary with no `rename` at all, a guarded move onto a primary with no
+conditional `rename`, and a guarded move onto a destination that already exists
+all fail with the fallback source still in place - a move that never happens
+must not cost you the cold copy.
+
+If the stream fails partway, the writer is aborted and a destination the
+transfer created is deleted before the error reaches you, so a failed transfer
+is not observable as a truncated object. A destination that was already there
+is left alone - a failed copy must not be the thing that destroys an object it
+never wrote. On a local-filesystem primary that guarantee is weaker than it
+looks: the driver opens the target itself and truncates it, so a pre-existing
+local destination is already gone by the time a transfer can fail.
 
 ### Versioned and conditional reads
 
@@ -365,15 +465,39 @@ condition holds and no such window exists.
 
 The staging object is a real entry on the primary while it lasts, so a listing
 taken mid-promotion can show a `.suprnova-promote-<id>.tmp` sibling. A read
-that completes, fails, or gives up removes its own sibling, but nothing sweeps
-one left by a process that crashed or a read future that was cancelled
-mid-promotion: those have to be removed by hand.
+that completes, fails, or gives up tries to remove its own sibling, and logs a
+warning if that delete fails rather than failing the read. Nothing sweeps a
+sibling left by a failed delete, a process that crashed, or a read future
+cancelled mid-promotion: those have to be removed by hand.
 
 A read that resolves from the fallback holds the object in memory until the
 promotion write completes, because promotion needs the whole object. That
 suits the tiering case a read-through disk is for. For very large cold
 objects, read the fallback disk directly or use
 [`copy_between_disks`](#cross-disk-streaming-copy) instead.
+
+Laravel hands back the fallback's own stream when `copy` is `false` and
+buffers through `php://temp` when it is `true`. Suprnova instead narrows the
+fallback fetch to the requested range when `copy` is `false`, and buffers only
+on the promoting path where the whole object is needed anyway.
+
+Laravel's cross-fallback `copy` and `move` also buffer the source through
+`php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
+fallback is where the large, rarely-touched objects live, and deletes a
+half-written destination before returning the error. Two more differences
+follow from OpenDAL. Deleting a path that is not there counts as success, so a
+move clears the fallback source without first checking that it exists. And
+OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
+equivalent for, so Suprnova has to decide what each one means when the source
+is only on the fallback: `if_not_exists` and a copy's source version are
+honoured, and a copy's `if_match` is refused rather than dropped.
+
+Laravel deletes the fallback source after the move on both paths. Suprnova
+deletes it first when the primary holds the source, because the two orders
+differ under a retry: the source is unreachable through the disk either way,
+but deleting last means a move that lost its delete to a transient fault comes
+back as a move whose source is now fallback-only, and streams the fallback's
+stale copy over the destination the first attempt already wrote correctly.
 
 ## Registry hygiene
 
