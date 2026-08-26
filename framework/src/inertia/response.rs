@@ -2085,14 +2085,27 @@ fn build_html_response(
         )
     };
 
+    // A page that renders its own `<title>` through Inertia's `Head`
+    // component sends it back in the SSR head, which is injected verbatim
+    // below. Emitting the default as well leaves the document with two
+    // `<title>` elements and the generic one first - and first is the one
+    // browsers, crawlers and the pre-hydration tab read, so the page's
+    // real title would never be seen. The page's own head wins, which is
+    // exactly what `default_title` documents itself as: a default.
+    let title_line = if contains_title_element(&ssr_head) {
+        String::new()
+    } else {
+        format!("<title>{title_html}</title>\n")
+    };
+
     let html = format!(
         "<!DOCTYPE html>\n\
-         <html lang=\"en\">\n\
+         <html lang=\"{lang}\">\n\
          <head>\n\
          <meta charset=\"UTF-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\
          <meta name=\"csrf-token\" content=\"{csrf}\">\n\
-         <title>{title}</title>\n\
+         {title_line}\
          {ssr_head}\
          {head}\
          </head>\n\
@@ -2100,14 +2113,60 @@ fn build_html_response(
          {mount_block}\n\
          </body>\n\
          </html>",
+        lang = escape_html_attr(&document_language()),
         csrf = csrf_attr,
-        title = title_html,
+        title_line = title_line,
         ssr_head = ssr_head,
         head = head_extras,
         mount_block = mount_block,
     );
 
     HttpResponse::html(html).header("Vary", "X-Inertia")
+}
+
+/// Whether an SSR head fragment already carries a `<title>` element.
+///
+/// A substring test rather than a parse, deliberately: the head is
+/// injected into the document verbatim either way, and the only decision
+/// it feeds is whether the framework adds its own default title on top.
+/// The opening tag has to be followed by `>` or whitespace so a custom
+/// element - `<title-bar>` - is not mistaken for a title and does not
+/// leave the document with none.
+fn contains_title_element(head: &str) -> bool {
+    const TAG: &str = "<title";
+    let lower = head.to_ascii_lowercase();
+    lower.match_indices(TAG).any(|(at, _)| {
+        lower[at + TAG.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c.is_whitespace())
+    })
+}
+
+/// The BCP 47 language the document shell declares in `<html lang>`.
+///
+/// Screen readers pick their voice from this attribute and search engines
+/// take it as the page's language signal, so a document serving Japanese
+/// prose while declaring English is wrong in a way no amount of correct
+/// translation fixes. It follows the locale in effect for the request -
+/// the task-local scope [`LocaleMiddleware`](crate::LocaleMiddleware)
+/// opens, then a process-global override, then the configured default -
+/// which is what makes the value right for an error page rendered on the
+/// way out as much as for a handler's page.
+///
+/// The value keeps the casing [`Locale`](crate::Locale) renders
+/// (`pt-BR`, `zh-Hans`) rather than being lowercased: `:lang()` selectors
+/// and font stacks are written in that form.
+#[cfg(feature = "localization")]
+fn document_language() -> String {
+    crate::localization::Lang::locale().as_str()
+}
+
+/// Without the `localization` feature there is no per-request locale to
+/// follow, so the shell keeps the `en` it has always declared.
+#[cfg(not(feature = "localization"))]
+fn document_language() -> String {
+    "en".to_string()
 }
 
 fn render_dev_head(config: &InertiaConfig) -> String {
