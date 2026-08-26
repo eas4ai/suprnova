@@ -518,6 +518,11 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Appended the reviewed Task 7 measurements in a separate commit
+  after their producing code and policy decision became immutable at
+  `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`. The checker verifies strict source
+  ancestry, the decision marker in that source commit, and every valid prior
+  history prefix; it cannot self-approve a candidate or rewrite provenance.
 - 2026-08-26 -- Corrected reviewed-baseline provenance to require a strictly
   prior immutable source commit and decision record before a later append. A
   candidate hash change alone is not drift; exact stored hashes authenticate

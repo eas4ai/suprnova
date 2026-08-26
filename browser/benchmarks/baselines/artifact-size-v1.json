@@ -24,6 +24,28 @@
           "brotliBytes": 14155
         }
       }
+    },
+    {
+      "review": {
+        "decision": "iteration-004-task-7-membership-budget-policy",
+        "rationale": "Lifecycle-aware committed-morph reconciliation, event-driven offline and hidden storm prevention, public freshness semantics, and exact membership-proof deferral are explicitly reviewed correctness growth.",
+        "recordedAt": "2026-08-26T10:56:00-04:00",
+        "sourceCommit": "57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61",
+        "sourceDecision": "iteration-004-task-7-membership-budget-policy",
+        "sourceDecisionPath": "docs/specs/suprnova-live/19-developer-tooling-and-testing.md"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 18713,
+          "sha256": "e030eb202f90312d002b2531dae8f42d12621910f800ff4ae29389f0dc9064ca"
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 16459,
+          "sha256": "23effe66a533065544c19bef1c88819466ba2f514e28b0271dc14c1494e82b5e"
+        }
+      }
     }
   ]
 }

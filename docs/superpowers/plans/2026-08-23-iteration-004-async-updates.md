@@ -792,7 +792,10 @@
   strictly prior immutable commit, then append exact measurements in a separate
   commit. Historical hashes authenticate reviewed artifacts; candidate hash
   changes alone pass, while size growth above 15 percent reports only
-  `unreviewed_regression` pending explicit review.
+  `unreviewed_regression` pending explicit review. Task 7's resulting reviewed
+  measurements are 18,713 Brotli bytes for ESM and 16,459 for classic, with
+  provenance rooted in source commit
+  `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`.
 - [x] Retain the latest committed-morph freshness intent while initial or
   reconnect membership is pending, but apply no pending authorization or poll
   timer. Exact staged SSE/WebSocket acknowledgment applies only the newest

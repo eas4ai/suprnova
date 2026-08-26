@@ -445,17 +445,20 @@ enforces 20 KiB for each upload variant. Async variants compare against
 an append-only reviewed history, deterministic build/compression method, and
 exact role hashes and measurements. Its immutable Task 6 anchor retains source
 commit `499eda2287f17d6a46c9b8c306df5791b1f671d8`, decision, rationale,
-16,356-byte ESM, and 14,155-byte classic measurements. Task 6 remains the active
-entry until a later reviewed baseline can reference a strictly prior immutable
-commit containing both its policy decision and the code that produced its
-measured artifacts. A candidate hash need not equal the historical hash: stored
-hashes authenticate past reviewed artifacts, while current deterministic bytes
-are measured as a candidate. More than 15 percent growth from the newest
-reviewed entry fails only as `unreviewed_regression`; it is a review trigger,
-not an absolute product limit. Intentional growth, including a substantially
-larger feature or dependency such as Three.js, may be correct after explicit
-review. A candidate cannot supply, overwrite, delete, collapse, or silently
-self-baseline the reviewed history. The binding browser benchmark independently
+16,356-byte ESM, and 14,155-byte classic measurements. The Task 7 entry references
+strictly prior source commit `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61`
+and its recorded policy decision, with 18,713-byte ESM SHA-256
+`e030eb202f90312d002b2531dae8f42d12621910f800ff4ae29389f0dc9064ca`
+and 16,459-byte classic SHA-256
+`23effe66a533065544c19bef1c88819466ba2f514e28b0271dc14c1494e82b5e`.
+A candidate hash need not equal the historical hash: stored hashes authenticate
+past reviewed artifacts, while current deterministic bytes are measured as a
+candidate. More than 15 percent growth from the newest reviewed entry fails only
+as `unreviewed_regression`; it is a review trigger, not an absolute product
+limit. Intentional growth, including a substantially larger feature or
+dependency such as Three.js, may be correct after explicit review. A candidate
+cannot supply, overwrite, delete, collapse, or silently self-baseline the
+reviewed history. The binding browser benchmark independently
 compares a separately recorded current core candidate with its prior performance
 baseline and refuses a self-comparison path. Runtime workloads enforce the
 formula, count, and latency caps in the overview and the existing 15-percent
@@ -480,6 +483,13 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Appended the Task 7 reviewed artifact baseline only after source
+  commit `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61` made the producing code and
+  `iteration-004-task-7-membership-budget-policy` decision immutable. Exact
+  deterministic measurements are 18,713 Brotli bytes for ESM and 16,459 for
+  classic, bound to their recorded SHA-256 values. Repository-history checks
+  require that strict ancestry and decision source, retain Task 6 as an exact
+  prefix, and reject later overwrite, deletion, collapse, or automatic update.
 - 2026-08-26 -- Decision ID: iteration-004-task-7-membership-budget-policy.
   Confirmed that async artifacts
   have no absolute total-size cap; intentional growth, even large growth from a

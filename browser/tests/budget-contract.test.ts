@@ -88,6 +88,29 @@ const ARTIFACT_BASELINE = Object.freeze({
         }),
       }),
     }),
+    Object.freeze({
+      review: Object.freeze({
+        decision: "iteration-004-task-7-membership-budget-policy",
+        rationale:
+          "Lifecycle-aware committed-morph reconciliation, event-driven offline and hidden storm prevention, public freshness semantics, and exact membership-proof deferral are explicitly reviewed correctness growth.",
+        recordedAt: "2026-08-26T10:56:00-04:00",
+        sourceCommit: "57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61",
+        sourceDecision: "iteration-004-task-7-membership-budget-policy",
+        sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
+      }),
+      roles: Object.freeze({
+        "async-classic": Object.freeze({
+          artifact: "suprnova-live.async.classic.js",
+          brotliBytes: 16_459,
+          sha256: "23effe66a533065544c19bef1c88819466ba2f514e28b0271dc14c1494e82b5e",
+        }),
+        "async-esm": Object.freeze({
+          artifact: "suprnova-live.async.esm.js",
+          brotliBytes: 18_713,
+          sha256: "e030eb202f90312d002b2531dae8f42d12621910f800ff4ae29389f0dc9064ca",
+        }),
+      }),
+    }),
   ]),
   schemaVersion: 2 as const,
 }) satisfies ArtifactSizeBaseline;
@@ -100,28 +123,10 @@ function baselineEntry(index: number): (typeof ARTIFACT_BASELINE.history)[number
 
 const TASK6_ARTIFACT_BASELINE = baselineEntry(0);
 const CURRENT_ARTIFACT_BASELINE = baselineEntry(ARTIFACT_BASELINE.history.length - 1);
-const REVIEWED_ARTIFACT_BASELINE = Object.freeze({
-  review: Object.freeze({
-    decision: "iteration-004-task-7-membership-budget-policy",
-    rationale:
-      "Reviewed correctness growth is recorded only after its prior immutable decision commit exists.",
-    recordedAt: "2026-08-26T11:00:00-04:00",
-    sourceCommit: "a".repeat(40),
-    sourceDecision: "iteration-004-task-7-membership-budget-policy",
-    sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
-  }),
-  roles: Object.freeze({
-    "async-classic": Object.freeze({
-      artifact: "suprnova-live.async.classic.js",
-      brotliBytes: 16_420,
-      sha256: "b".repeat(64),
-    }),
-    "async-esm": Object.freeze({
-      artifact: "suprnova-live.async.esm.js",
-      brotliBytes: 18_638,
-      sha256: "c".repeat(64),
-    }),
-  }),
+const REVIEWED_ARTIFACT_BASELINE = baselineEntry(1);
+const TASK6_ONLY_ARTIFACT_BASELINE = Object.freeze({
+  ...ARTIFACT_BASELINE,
+  history: Object.freeze([TASK6_ARTIFACT_BASELINE]),
 });
 
 async function evaluator(): Promise<
@@ -308,7 +313,7 @@ describe("role-aware production artifact budgets", () => {
       await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
       await writeFile(
         join(repository, baselineRelative),
-        `${JSON.stringify(ARTIFACT_BASELINE, null, 2)}\n`,
+        `${JSON.stringify(TASK6_ONLY_ARTIFACT_BASELINE, null, 2)}\n`,
       );
       await writeFile(
         join(repository, decisionRelative),
@@ -361,7 +366,7 @@ describe("role-aware production artifact budgets", () => {
         ),
       ).toThrow("artifact_size_baseline_provenance_invalid");
       expect(() =>
-        loaded.validateArtifactSizeBaselineProvenance(ARTIFACT_BASELINE, repository),
+        loaded.validateArtifactSizeBaselineProvenance(TASK6_ONLY_ARTIFACT_BASELINE, repository),
       ).toThrow("artifact_size_baseline_provenance_invalid");
     } finally {
       await rm(repository, { force: true, recursive: true });
