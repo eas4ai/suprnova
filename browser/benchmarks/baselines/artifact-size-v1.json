@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "maximumUnreviewedIncreaseBasisPoints": 1500,
+  "methodology": {
+    "buildCommand": "npm run build",
+    "compression": "brotli-quality-11",
+    "deterministic": true
+  },
+  "review": {
+    "decision": "iteration-004-task-6",
+    "rationale": "Last reviewed complete Task 6 deterministic production artifacts before polling implementation.",
+    "recordedAt": "2026-08-26T06:27:18-04:00",
+    "sourceCommit": "499eda2287f17d6a46c9b8c306df5791b1f671d8"
+  },
+  "roles": {
+    "async-esm": {
+      "artifact": "suprnova-live.async.esm.js",
+      "brotliBytes": 16356
+    },
+    "async-classic": {
+      "artifact": "suprnova-live.async.classic.js",
+      "brotliBytes": 14155
+    }
+  }
+}

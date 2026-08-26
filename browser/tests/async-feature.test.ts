@@ -49,6 +49,12 @@ function authorization(
       }),
     ]),
     expiresAt: 20_000,
+    fallbackPoll: Object.freeze({
+      initial: "wait" as const,
+      intervalMs: 30_000,
+      jitterRatio: 0.2,
+      visibility: "visible" as const,
+    }),
     heartbeatTimeoutMs: 5_000,
     presentationSignals: Object.freeze([
       Object.freeze({ name: "completion_percent", schema: "u64" as const }),
@@ -145,6 +151,65 @@ function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegist
 }
 
 describe("async feature lifecycle", () => {
+  it("starts descriptor-default hybrid polling only after continuity is lost", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: { authorize: () => authorization(0n) },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-hybrid-poll",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      false,
+    );
+    sources[0]?.emit(envelope(3n, { kind: "heartbeat" }));
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      true,
+    );
+    timers.fire(33_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledWith("poll");
+    owner.dispose();
+  });
+
   it("does not report physical continuity for a duplicate while the logical stream is connecting", async () => {
     const sources: FakeSource[] = [];
     const continuityProved = vi.fn();

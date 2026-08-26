@@ -91,11 +91,19 @@ export interface AuthorizedLogicalSubscription {
   readonly document: DocumentTransportKey;
   readonly events: readonly AsyncRegisteredEventContract[];
   readonly expiresAt: number;
+  readonly fallbackPoll: PollFallbackPolicy;
   readonly heartbeatTimeoutMs: number;
   readonly presentationSignals: readonly AsyncPresentationSignalContract[];
   readonly reconnect: AsyncReconnectPolicy;
   readonly stream: string;
   readonly subscriptionId: string;
+}
+
+export interface PollFallbackPolicy {
+  readonly intervalMs: number;
+  readonly jitterRatio: number;
+  readonly initial: "wait" | "immediate";
+  readonly visibility: "visible" | "always";
 }
 
 export type AsyncReceiveDisposition =

@@ -207,6 +207,12 @@ iteration must do that explicitly.
 - Architecture performance budget v1 in `00-overview.md` is release-blocking.
   Budget revision and implementation optimization are separate changes unless
   the developer explicitly approves them together.
+- An artifact with no absolute transfer ceiling still has mechanical drift
+  control. Its reviewed artifact-size baseline uses a closed version-controlled
+  schema with source commit, decision, rationale, and deterministic measurement
+  method; the current candidate is never an implicit or automatically written
+  baseline. More than the approved drift threshold requires an explicit reviewed
+  baseline decision in the same coherent change.
 
 ### Testing strategy
 
@@ -487,7 +493,10 @@ npm run budget
 
 `build` must reproduce checked artifacts byte-for-byte from the lockfile and
 source. `budget` measures the production artifacts and architecture performance
-fixtures; it is not a source-file-size approximation.
+fixtures; it is not a source-file-size approximation. Roles may enforce an
+approved absolute ceiling or reviewed-baseline drift policy, but a contributor
+may not invent a byte cliff or self-baseline a candidate merely to make the gate
+pass.
 
 ### Provider and browser matrix checks
 
@@ -500,11 +509,17 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Removed the async artifacts' arbitrary 16 KiB total-size
+  ceiling. Exact ESM/classic Brotli measurement remains mandatory; a separate
+  closed-provenance Task 6 baseline gates only unreviewed growth greater than 15
+  percent, and no command automatically writes or derives that baseline from the
+  current candidate.
 - 2026-08-26 -- Ordinary clean-checkout browser budgets always reproduce and
-  hash the production artifacts and enforce deterministic size ceilings without
-  requiring ignored local benchmark evidence. Explicit binding mode and release
-  mode require a fresh artifact-matched candidate with at least three
-  independent runs and compare it only with the prior approved baseline.
+  hash the production artifacts and enforce each role's approved absolute or
+  reviewed-drift policy without requiring ignored local benchmark evidence.
+  Explicit binding mode and release mode require a fresh artifact-matched
+  candidate with at least three independent runs and compare it only with the
+  prior approved performance baseline.
 - 2026-08-25 -- Separated the approved binding browser benchmark from ignored
   candidate measurements. In explicit binding or release mode, the current
   production artifact is measured into a distinct candidate file and compared

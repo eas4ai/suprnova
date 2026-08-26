@@ -415,6 +415,7 @@ fn version_four_protocols_and_promoted_directives_are_consistent() {
         .iter()
         .find(|directive| directive["name"] == "poll")
         .expect("poll directive exists");
+    assert_eq!(poll["value"], "empty");
     assert_eq!(
         poll["modifier_conflicts"],
         serde_json::json!([["visible", "always"], ["5s", "15s", "30s", "60s"]])
@@ -426,6 +427,19 @@ fn version_four_protocols_and_promoted_directives_are_consistent() {
     assert_eq!(
         stream["modifier_conflicts"],
         serde_json::json!([["push-only", "hybrid"]])
+    );
+    assert_eq!(
+        grammar["freshness_combinations"],
+        serde_json::json!([
+            {"poll": false, "stream": "absent", "result": "none"},
+            {"poll": true, "stream": "absent", "result": "poll_only"},
+            {"poll": false, "stream": "default", "result": "hybrid_descriptor"},
+            {"poll": true, "stream": "default", "result": "hybrid_poll_override"},
+            {"poll": false, "stream": "hybrid", "result": "hybrid_descriptor"},
+            {"poll": true, "stream": "hybrid", "result": "hybrid_poll_override"},
+            {"poll": false, "stream": "push-only", "result": "push_only"},
+            {"poll": true, "stream": "push-only", "result": "directive_conflict"}
+        ])
     );
 }
 

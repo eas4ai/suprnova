@@ -25,7 +25,9 @@ export type {
   AuthorizedLogicalSubscription,
   DocumentTransportKey,
   StreamPosition,
+  PollFallbackPolicy,
 } from "./async-updates/types.js";
+export type { PollEnvironment, PollPolicy, PollStatus } from "./async-updates/poll.js";
 export const asyncRegistration = registerRuntimeFeature(globalThis, asyncFeature);
 
 export default asyncFeature;

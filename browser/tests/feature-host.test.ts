@@ -591,7 +591,8 @@ describe("one driver claim and optional owner per island", () => {
     const record = new IslandRecord(element, Object.create(null) as IslandMetadata, 2, 1);
 
     expect(record.enqueueFreshRender("poll")).toBe("queued");
-    expect(record.enqueueFreshRender("stream")).toBe("coalesced");
+    expect(record.enqueueFreshRender("stream")).toBe("queued");
+    expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 0, queued: 1 });
     record.dispose();
     expect(record.enqueueFreshRender("poll")).toBe("retired");
   });

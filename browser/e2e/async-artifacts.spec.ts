@@ -80,6 +80,12 @@ async function installAsyncHarness(page: Page, delayInitialAuthority = false): P
         }),
         events: Object.freeze([]),
         expiresAt: 20_000,
+        fallbackPoll: Object.freeze({
+          initial: "wait",
+          intervalMs: 30_000,
+          jitterRatio: 0.2,
+          visibility: "visible",
+        }),
         heartbeatTimeoutMs: 5_000,
         presentationSignals: Object.freeze([Object.freeze({ name: "open", schema: "boolean" })]),
         reconnect: Object.freeze({

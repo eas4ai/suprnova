@@ -10,6 +10,7 @@ import { buildRuntimeAssets } from "./build.mjs";
 
 const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v1.json");
+const artifactSizeBaselinePath = resolve(browserRoot, "benchmarks/baselines/artifact-size-v1.json");
 const candidatePath = resolve(
   process.env["SUPRNOVA_LIVE_BROWSER_BUDGET_CANDIDATE"] ??
     resolve(browserRoot, "benchmarks/local/latest.json"),
@@ -22,11 +23,68 @@ const ROLE_CEILINGS = new Map([
   ["stimulus-classic", 8 * 1024],
   ["uploads-esm", 20 * 1024],
   ["uploads-classic", 20 * 1024],
-  ["async-esm", 16 * 1024],
-  ["async-classic", 16 * 1024],
+  ["async-esm", null],
+  ["async-classic", null],
+]);
+const ASYNC_ARTIFACTS = new Map([
+  ["async-esm", "suprnova-live.async.esm.js"],
+  ["async-classic", "suprnova-live.async.classic.js"],
 ]);
 
-export function evaluateArtifactBudgets(assets) {
+function exactKeys(value, expected) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+export function validateArtifactSizeBaseline(value) {
+  try {
+    if (
+      !exactKeys(value, [
+        "maximumUnreviewedIncreaseBasisPoints",
+        "methodology",
+        "review",
+        "roles",
+        "schemaVersion",
+      ]) ||
+      value.schemaVersion !== 1 ||
+      value.maximumUnreviewedIncreaseBasisPoints !== 1_500 ||
+      !exactKeys(value.methodology, ["buildCommand", "compression", "deterministic"]) ||
+      value.methodology.buildCommand !== "npm run build" ||
+      value.methodology.compression !== "brotli-quality-11" ||
+      value.methodology.deterministic !== true ||
+      !exactKeys(value.review, ["decision", "rationale", "recordedAt", "sourceCommit"]) ||
+      !/^[a-z0-9][a-z0-9._-]{2,127}$/u.test(value.review.decision) ||
+      typeof value.review.rationale !== "string" ||
+      value.review.rationale.length < 20 ||
+      !Number.isFinite(Date.parse(value.review.recordedAt)) ||
+      !/^[0-9a-f]{40}$/u.test(value.review.sourceCommit) ||
+      !exactKeys(value.roles, ["async-classic", "async-esm"])
+    ) {
+      throw new Error("artifact_size_baseline_invalid");
+    }
+    for (const [role, artifact] of ASYNC_ARTIFACTS) {
+      const record = value.roles[role];
+      if (
+        !exactKeys(record, ["artifact", "brotliBytes"]) ||
+        record.artifact !== artifact ||
+        !Number.isSafeInteger(record.brotliBytes) ||
+        record.brotliBytes <= 0
+      ) {
+        throw new Error("artifact_size_baseline_invalid");
+      }
+    }
+    return Object.freeze(value);
+  } catch {
+    throw new Error("artifact_size_baseline_invalid");
+  }
+}
+
+export function evaluateArtifactBudgets(assets, baselineValue) {
+  if (baselineValue === null || baselineValue === undefined) {
+    throw new Error("artifact_size_baseline_missing");
+  }
+  const baseline = validateArtifactSizeBaseline(baselineValue);
   const byRole = new Map();
   const duplicateRoles = new Set();
   const unknownRoles = new Set();
@@ -57,13 +115,33 @@ export function evaluateArtifactBudgets(assets) {
   for (const [role, ceiling] of ROLE_CEILINGS) {
     const asset = byRole.get(role);
     const bytes = asset?.brotliBytes;
+    const reviewed = ASYNC_ARTIFACTS.has(role) ? baseline.roles[role] : undefined;
+    const increase =
+      reviewed === undefined || !Number.isSafeInteger(bytes) || bytes <= reviewed.brotliBytes
+        ? 0
+        : ((bytes - reviewed.brotliBytes) / reviewed.brotliBytes) * 100;
+    const baselineDetails =
+      reviewed === undefined
+        ? ""
+        : ` baseline=${String(reviewed.brotliBytes)} unreviewed_increase=${increase.toFixed(2)}% threshold=15%`;
     lines.push(
-      `artifact_budget role=${role} bytes=${bytes === undefined ? "missing" : String(bytes)} ceiling=${String(ceiling ?? "none")}`,
+      `artifact_budget role=${role} bytes=${bytes === undefined ? "missing" : String(bytes)} ceiling=${String(ceiling ?? "none")}${baselineDetails}`,
     );
     if (!Number.isSafeInteger(bytes) || bytes < 0) {
       if (asset !== undefined) issues.push(`artifact_budget:bytes:${role}`);
     } else if (ceiling !== null && bytes > ceiling) {
       issues.push(`artifact_budget:${role}:+${String(bytes - ceiling)}`);
+    } else if (
+      reviewed !== undefined &&
+      bytes * 10_000 >
+        reviewed.brotliBytes * (10_000 + baseline.maximumUnreviewedIncreaseBasisPoints)
+    ) {
+      issues.push(
+        `artifact_budget:${role}:unreviewed_regression:+${String(bytes - reviewed.brotliBytes)}`,
+      );
+    }
+    if (asset !== undefined && reviewed !== undefined && asset.file !== reviewed.artifact) {
+      issues.push(`artifact_budget:baseline_artifact:${role}`);
     }
   }
   return Object.freeze({ lines: Object.freeze(lines), issues: Object.freeze(issues) });
@@ -146,6 +224,9 @@ async function checkBudgets(release, binding) {
   }
 
   await buildRuntimeAssets();
+  const artifactSizeBaseline = validateArtifactSizeBaseline(
+    await boundedBenchmarkJson(artifactSizeBaselinePath, false),
+  );
   const manifest = JSON.parse(
     await readFile(resolve(browserRoot, "dist/suprnova-live.assets.json"), "utf8"),
   );
@@ -161,7 +242,7 @@ async function checkBudgets(release, binding) {
       }).byteLength,
     });
   }
-  const artifactBudgets = evaluateArtifactBudgets(measured);
+  const artifactBudgets = evaluateArtifactBudgets(measured, artifactSizeBaseline);
   process.stdout.write(`${artifactBudgets.lines.join("\n")}\n`);
   if (artifactBudgets.issues.length > 0) {
     throw new Error(`artifact_budget_failed:${artifactBudgets.issues.join(",")}`);

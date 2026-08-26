@@ -717,7 +717,7 @@
 
 **Files:** `browser/src/async-updates/poll.ts`, poll/continuity tests, directive fixtures
 
-- [ ] Add failing controlled-clock tests for interval bounds, jitter, initial/immediate, visibility, offline, overlap, stale status, cancel/retire, failure backoff, empty directive value enforcement, poll-only completeness, push-only degradation, descriptor-default hybrid fallback, legal poll override, directive conflict, and hybrid activation after continuity loss:
+- [x] Add failing controlled-clock tests for interval bounds, jitter, initial/immediate, visibility, offline, overlap, stale status, cancel/retire, failure backoff, empty directive value enforcement, poll-only completeness, push-only degradation, descriptor-default hybrid fallback, legal poll override, directive conflict, and hybrid activation after continuity loss:
 
   ```ts
   it("hybrid pauses polling only while continuity is proved", () => {
@@ -731,8 +731,8 @@
   });
   ```
 
-- [ ] Run poll/continuity tests; record failure because polling policies are absent.
-- [ ] Implement explicit policies:
+- [x] Run poll/continuity tests; record failure because polling policies are absent.
+- [x] Implement explicit policies:
 
   ```ts
   export interface PollPolicy {
@@ -761,8 +761,8 @@
   full jitter and no synchronized catch-up burst. Push-only exposes degraded
   state; it never silently starts polling.
 
-- [ ] Run poll, scheduler, connectivity, visibility, bfcache, and 100-subscription storm tests.
-- [ ] Commit: `feat(browser): add complete polling and hybrid fallback`.
+- [x] Run poll, scheduler, connectivity, visibility, bfcache, and 100-subscription storm tests.
+- [x] Commit: `feat(browser): add complete polling and hybrid fallback`.
 
 ## Task 8: Dispatch only registered refresh, browser events, and presentation signals
 
@@ -910,13 +910,13 @@
 
 - [x] Initial connect and reconnect cannot claim current without descriptor baseline plus a complete validated replay transcript or authoritative host refresh.
 - [x] Stream credentials are secret and separate from signed descriptors.
-- [ ] Poll-only is complete; push-only reports degradation; hybrid fallback is continuity-aware and jittered.
-- [ ] `live:poll` carries no action value; the signed descriptor supplies hybrid fallback and a legal poll directive only overrides its interval policy.
+- [x] Poll-only is complete; push-only reports degradation; hybrid fallback is continuity-aware and jittered.
+- [x] `live:poll` carries no action value; the signed descriptor supplies hybrid fallback and a legal poll directive only overrides its interval policy.
 - [ ] Push has exactly three productive effects: registered refresh, registered browser event, or declared presentation signal.
 - [x] Browser-event dispatch crosses the typed core feature port and is validated there; no optional artifact receives a generic authority-writing seam.
-- [ ] Refresh uses the existing scheduler and protocol v2 response machine; no streamed HTML or second snapshot protocol exists.
+- [x] Refresh uses the existing scheduler and protocol v2 response machine; no streamed HTML or second snapshot protocol exists.
 - [ ] WebSocket upgrade rejects missing or unapproved origins before credentials; approved cross-origin use requires an explicit allowlist and separate non-cookie credential.
-- [ ] Async policy wraps the shared bounded-resource foundation rather than implementing a second queue, owner, permit pool, or cancellation model.
+- [x] Async policy wraps the shared bounded-resource foundation rather than implementing a second queue, owner, permit pool, or cancellation model.
 - [ ] One document transport multiplexes compatible logical subscriptions; E100/1K uses one physical connection, R100 performs one reconnect handshake, and a separate multi-document test proves the eight-per-origin handshake bound.
-- [ ] Persisted pagehide always closes transports and timers; persisted pageshow reauthorizes and reestablishes continuity without duplicate resources.
+- [x] Persisted pagehide always closes transports and timers; persisted pageshow reauthorizes and reestablishes continuity without duplicate resources.
 - [ ] Buffers, fanout, handshakes, timers, connections, payloads, replay, and retained bytes have hard tested bounds.

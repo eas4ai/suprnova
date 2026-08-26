@@ -45,6 +45,12 @@ function authorization(transport: "sse" | "websocket"): AuthorizedLogicalSubscri
     }),
     events: Object.freeze([]),
     expiresAt: 20_000,
+    fallbackPoll: Object.freeze({
+      initial: "wait" as const,
+      intervalMs: 30_000,
+      jitterRatio: 0.2,
+      visibility: "visible" as const,
+    }),
     heartbeatTimeoutMs: 5_000,
     presentationSignals: Object.freeze([]),
     reconnect: Object.freeze({

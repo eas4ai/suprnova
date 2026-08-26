@@ -56,6 +56,16 @@
   "transition_modifiers": ["enter", "leave", "both", "reduced-motion"],
   "navigation_modifiers": ["replace", "transition", "hover", "visible", "eager"],
   "reserved": [],
+  "freshness_combinations": [
+    {"poll":false,"stream":"absent","result":"none"},
+    {"poll":true,"stream":"absent","result":"poll_only"},
+    {"poll":false,"stream":"default","result":"hybrid_descriptor"},
+    {"poll":true,"stream":"default","result":"hybrid_poll_override"},
+    {"poll":false,"stream":"hybrid","result":"hybrid_descriptor"},
+    {"poll":true,"stream":"hybrid","result":"hybrid_poll_override"},
+    {"poll":false,"stream":"push-only","result":"push_only"},
+    {"poll":true,"stream":"push-only","result":"directive_conflict"}
+  ],
   "directives": [
     {"name":"click","owner":"element","value":"action","modifiers":["prevent","stop","once","self","trusted","capture"],"roles":[],"conflicts":[],"phase":"schedule","fallback":"native","capability":null},
     {"name":"submit","owner":"element","value":"action","modifiers":["prevent","stop","once","self","trusted","capture"],"roles":[],"conflicts":[],"phase":"schedule","fallback":"native","capability":null},
@@ -100,7 +110,7 @@
     {"name":"prefetch","owner":"element","value":"empty","modifiers":"navigation","roles":[],"conflicts":[],"phase":"navigation","fallback":"native","capability":null},
     {"name":"upload","owner":"element","value":"field","modifiers":[],"roles":["cancel","retry","remove"],"conflicts":["model"],"phase":"schedule","fallback":"native","capability":"uploads@1"},
     {"name":"progress","owner":"element","value":"literal","modifiers":[],"roles":[],"conflicts":[],"phase":"feedback","fallback":"inert","capability":"uploads@1"},
-    {"name":"poll","owner":"island","value":"action","modifiers":["immediate","visible","always","5s","15s","30s","60s"],"modifier_conflicts":[["visible","always"],["5s","15s","30s","60s"]],"roles":[],"conflicts":[],"phase":"schedule","fallback":"inert","capability":"async@1"},
+    {"name":"poll","owner":"island","value":"empty","modifiers":["immediate","visible","always","5s","15s","30s","60s"],"modifier_conflicts":[["visible","always"],["5s","15s","30s","60s"]],"roles":[],"conflicts":[],"phase":"schedule","fallback":"inert","capability":"async@1"},
     {"name":"stream","owner":"island","value":"identifier","modifiers":["push-only","hybrid"],"modifier_conflicts":[["push-only","hybrid"]],"roles":[],"conflicts":[],"phase":"schedule","fallback":"inert","capability":"async@1"}
   ]
 }

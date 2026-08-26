@@ -57,6 +57,16 @@ const MODIFIER_GROUPS = [
   "navigation",
 ];
 const MAX_MODIFIER_SEGMENTS = 3;
+const FRESHNESS_COMBINATIONS = [
+  [false, "absent", "none"],
+  [true, "absent", "poll_only"],
+  [false, "default", "hybrid_descriptor"],
+  [true, "default", "hybrid_poll_override"],
+  [false, "hybrid", "hybrid_descriptor"],
+  [true, "hybrid", "hybrid_poll_override"],
+  [false, "push-only", "push_only"],
+  [true, "push-only", "directive_conflict"],
+];
 const VALUE_GRAMMAR = {
   token: {
     maximum_bytes: 64,
@@ -210,6 +220,30 @@ function validateModifierGroups(grammar) {
   }
 }
 
+export function loadFreshnessCombinations(grammar) {
+  const entries = grammar["freshness_combinations"];
+  if (!Array.isArray(entries) || entries.length !== FRESHNESS_COMBINATIONS.length) {
+    throw new TypeError("invalid_freshness_combinations");
+  }
+  const combinations = entries.map((entry, index) => {
+    const combination = object(entry, `freshness_combination_${String(index)}`);
+    exactFields(
+      combination,
+      ["poll", "stream", "result"],
+      `freshness_combination_${String(index)}`,
+    );
+    return [
+      combination["poll"],
+      string(combination["stream"], "freshness_stream"),
+      string(combination["result"], "freshness_result"),
+    ];
+  });
+  if (JSON.stringify(combinations) !== JSON.stringify(FRESHNESS_COMBINATIONS)) {
+    throw new TypeError("invalid_freshness_combinations");
+  }
+  return combinations;
+}
+
 function variant(value) {
   return value
     .split("_")
@@ -287,6 +321,7 @@ export function loadContracts(grammar) {
     "transition_modifiers",
     "navigation_modifiers",
     "reserved",
+    "freshness_combinations",
     "directives",
   ];
   exactFields(grammar, grammarFields, "grammar");
@@ -295,6 +330,7 @@ export function loadContracts(grammar) {
   }
   validateSyntax(grammar, 2);
   validateModifierGroups(grammar);
+  loadFreshnessCombinations(grammar);
   const reserved = boundedUniqueStrings(
     grammar["reserved"],
     "reserved_directives",
@@ -518,6 +554,7 @@ function renderRust(grammar, manifest, contracts) {
   const valueKinds = strings(syntax["value_kinds"], "value_kinds");
   const fallbacks = strings(syntax["fallbacks"], "fallbacks");
   const reserved = strings(grammar["reserved"], "reserved");
+  const freshnessCombinations = loadFreshnessCombinations(grammar);
   const valueVariants = valueKinds
     .map((value) => `    ${variant(value)},`)
     .join("\n");
@@ -625,6 +662,26 @@ pub struct DirectiveContract {
     pub capability: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "generated cross-language freshness contract is consumed by browser conformance"
+)]
+pub struct FreshnessCombination {
+    pub poll: bool,
+    pub stream: &'static str,
+    pub result: &'static str,
+}
+
+#[rustfmt::skip]
+#[allow(
+    dead_code,
+    reason = "generated cross-language freshness contract is consumed by browser conformance"
+)]
+pub const FRESHNESS_COMBINATIONS: &[FreshnessCombination] = &[
+${freshnessCombinations.map(([poll, stream, result]) => `    FreshnessCombination { poll: ${String(poll)}, stream: ${JSON.stringify(stream)}, result: ${JSON.stringify(result)} },`).join("\n")}
+];
+
 #[rustfmt::skip]
 pub const DIRECTIVE_CONTRACTS: &[DirectiveContract] = &[
 ${descriptors}
@@ -674,6 +731,7 @@ function renderTypeScript(grammar, manifest, contracts) {
   const valueKinds = strings(syntax["value_kinds"], "value_kinds");
   const fallbacks = strings(syntax["fallbacks"], "fallbacks");
   const reserved = strings(grammar["reserved"], "reserved");
+  const freshnessCombinations = loadFreshnessCombinations(grammar);
   const { core, features, coreReservedNames } =
     partitionRuntimeContracts(contracts);
   const coreReserved = [...reserved, ...coreReservedNames];
@@ -742,6 +800,14 @@ export type DirectiveValue = ${valueKinds.map((value) => JSON.stringify(value)).
 export type DirectivePhase = ${DIRECTIVE_PHASES.map((value) => JSON.stringify(value)).join(" | ")};
 export type DirectiveFallback = ${fallbacks.map((value) => JSON.stringify(value)).join(" | ")};
 export type DirectiveCapability = ${CAPABILITIES.map((value) => JSON.stringify(value)).join(" | ")};
+export type FreshnessStreamMode = "absent" | "default" | "hybrid" | "push-only";
+export type FreshnessCombinationResult =
+  | "none"
+  | "poll_only"
+  | "hybrid_descriptor"
+  | "hybrid_poll_override"
+  | "push_only"
+  | "directive_conflict";
 
 export interface DirectiveContract {
   readonly name: string;
@@ -872,6 +938,21 @@ ${featureRuntime.descriptors}
 
 export function featureDirectiveContract(name: string): FeatureDirectiveContract | undefined {
   return FEATURE_DIRECTIVE_CONTRACTS.find((contract) => contract[0] === name);
+}
+
+// One generated authority for the legal poll/stream freshness combinations.
+// prettier-ignore
+const FRESHNESS_COMBINATIONS = [
+${freshnessCombinations.map(([poll, stream, result]) => `  [${String(poll)}, ${JSON.stringify(stream)}, ${JSON.stringify(result)}],`).join("\n")}
+] as const satisfies readonly (readonly [boolean, FreshnessStreamMode, FreshnessCombinationResult])[];
+
+export function freshnessCombination(
+  poll: boolean,
+  stream: FreshnessStreamMode,
+): FreshnessCombinationResult | undefined {
+  return FRESHNESS_COMBINATIONS.find(
+    (combination) => combination[0] === poll && combination[1] === stream,
+  )?.[2];
 }
 `;
 }

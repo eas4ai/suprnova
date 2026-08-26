@@ -17,6 +17,25 @@ type ArtifactBudgetEvaluation = Readonly<{
   issues: readonly string[];
 }>;
 
+type ArtifactSizeBaseline = Readonly<{
+  schemaVersion: 1;
+  maximumUnreviewedIncreaseBasisPoints: 1500;
+  methodology: Readonly<{
+    buildCommand: "npm run build";
+    compression: "brotli-quality-11";
+    deterministic: true;
+  }>;
+  review: Readonly<{
+    decision: string;
+    rationale: string;
+    recordedAt: string;
+    sourceCommit: string;
+  }>;
+  roles: Readonly<
+    Record<"async-esm" | "async-classic", Readonly<{ artifact: string; brotliBytes: number }>>
+  >;
+}>;
+
 const EXPECTED = Object.freeze([
   ["core-esm", null],
   ["core-classic", null],
@@ -24,47 +43,148 @@ const EXPECTED = Object.freeze([
   ["stimulus-classic", 8 * 1024],
   ["uploads-esm", 20 * 1024],
   ["uploads-classic", 20 * 1024],
-  ["async-esm", 16 * 1024],
-  ["async-classic", 16 * 1024],
+  ["async-esm", null],
+  ["async-classic", null],
 ] as const);
 
+const ARTIFACT_BASELINE = Object.freeze({
+  maximumUnreviewedIncreaseBasisPoints: 1500 as const,
+  methodology: Object.freeze({
+    buildCommand: "npm run build" as const,
+    compression: "brotli-quality-11" as const,
+    deterministic: true as const,
+  }),
+  review: Object.freeze({
+    decision: "iteration-004-task-6",
+    rationale: "Last reviewed complete Task 6 production artifacts.",
+    recordedAt: "2026-08-26T06:27:18-04:00",
+    sourceCommit: "499eda2287f17d6a46c9b8c306df5791b1f671d8",
+  }),
+  roles: Object.freeze({
+    "async-classic": Object.freeze({
+      artifact: "suprnova-live.async.classic.js",
+      brotliBytes: 14_155,
+    }),
+    "async-esm": Object.freeze({
+      artifact: "suprnova-live.async.esm.js",
+      brotliBytes: 16_356,
+    }),
+  }),
+  schemaVersion: 1 as const,
+}) satisfies ArtifactSizeBaseline;
+
 async function evaluator(): Promise<
-  (assets: readonly ArtifactBudgetInput[]) => ArtifactBudgetEvaluation
+  Readonly<{
+    evaluate: (
+      assets: readonly ArtifactBudgetInput[],
+      baseline: ArtifactSizeBaseline | null,
+    ) => ArtifactBudgetEvaluation;
+    validate: (value: unknown) => ArtifactSizeBaseline;
+  }>
 > {
   const moduleUrl = new URL("../scripts/check-budget.mjs", import.meta.url);
   const loaded = (await import(moduleUrl.href)) as {
     readonly evaluateArtifactBudgets: (
       assets: readonly ArtifactBudgetInput[],
+      baseline: ArtifactSizeBaseline | null,
     ) => ArtifactBudgetEvaluation;
+    readonly validateArtifactSizeBaseline: (value: unknown) => ArtifactSizeBaseline;
   };
-  return loaded.evaluateArtifactBudgets;
+  return Object.freeze({
+    evaluate: loaded.evaluateArtifactBudgets,
+    validate: loaded.validateArtifactSizeBaseline,
+  });
 }
 
 function validArtifacts(): ArtifactBudgetInput[] {
   return EXPECTED.map(([role, ceiling]) => ({
     role,
-    file: `${role}.js`,
+    file:
+      role === "async-esm"
+        ? "suprnova-live.async.esm.js"
+        : role === "async-classic"
+          ? "suprnova-live.async.classic.js"
+          : `${role}.js`,
     compatibleCore: ">=0.1.0 <0.2.0",
-    brotliBytes: ceiling ?? 128 * 1024,
+    brotliBytes:
+      role === "async-esm" ? 17_987 : role === "async-classic" ? 15_773 : (ceiling ?? 128 * 1024),
   }));
 }
 
 describe("role-aware production artifact budgets", () => {
-  it("reports measurement-only core roles and each optional artifact ceiling", async () => {
-    const evaluate = await evaluator();
-    const result = evaluate(validArtifacts());
+  it("reports exact async sizes without inventing a total download ceiling", async () => {
+    const { evaluate } = await evaluator();
+    const result = evaluate(validArtifacts(), ARTIFACT_BASELINE);
 
     expect(result.issues).toEqual([]);
-    expect(result.lines).toEqual(
-      EXPECTED.map(
-        ([role, ceiling]) =>
-          `artifact_budget role=${role} bytes=${String(ceiling ?? 128 * 1024)} ceiling=${String(ceiling ?? "none")}`,
-      ),
+    expect(result.lines).toContain(
+      "artifact_budget role=async-esm bytes=17987 ceiling=none baseline=16356 unreviewed_increase=9.97% threshold=15%",
+    );
+    expect(result.lines).toContain(
+      "artifact_budget role=async-classic bytes=15773 ceiling=none baseline=14155 unreviewed_increase=11.43% threshold=15%",
+    );
+    const formerlyArbitrary = validArtifacts();
+    const asyncEsm = formerlyArbitrary.find(({ role }) => role === "async-esm");
+    if (asyncEsm === undefined) throw new Error("async_esm_fixture_missing");
+    formerlyArbitrary[formerlyArbitrary.indexOf(asyncEsm)] = {
+      ...asyncEsm,
+      brotliBytes: 16_385,
+    };
+    expect(evaluate(formerlyArbitrary, ARTIFACT_BASELINE).issues).toEqual([]);
+  });
+
+  it("fails only unreviewed async drift above fifteen percent", async () => {
+    const { evaluate } = await evaluator();
+    const artifacts = validArtifacts();
+    const asyncEsm = artifacts.find(({ role }) => role === "async-esm");
+    if (asyncEsm === undefined) throw new Error("async_esm_fixture_missing");
+    artifacts[artifacts.indexOf(asyncEsm)] = { ...asyncEsm, brotliBytes: 18_810 };
+
+    expect(evaluate(artifacts, ARTIFACT_BASELINE).issues).toContain(
+      "artifact_budget:async-esm:unreviewed_regression:+2454",
     );
   });
 
+  it("requires a separate reviewed baseline with closed provenance", async () => {
+    const { evaluate, validate } = await evaluator();
+    expect(() => evaluate(validArtifacts(), null)).toThrow("artifact_size_baseline_missing");
+    expect(() => validate({ ...ARTIFACT_BASELINE, review: {} })).toThrow(
+      "artifact_size_baseline_invalid",
+    );
+    expect(() =>
+      validate({
+        ...ARTIFACT_BASELINE,
+        review: { ...ARTIFACT_BASELINE.review, decision: "" },
+      }),
+    ).toThrow("artifact_size_baseline_invalid");
+    const candidateSizedRoles = Object.freeze({
+      "async-classic": Object.freeze({
+        artifact: "suprnova-live.async.classic.js",
+        brotliBytes: 15_773,
+      }),
+      "async-esm": Object.freeze({
+        artifact: "suprnova-live.async.esm.js",
+        brotliBytes: 17_987,
+      }),
+    });
+    expect(() =>
+      validate({
+        ...ARTIFACT_BASELINE,
+        review: undefined,
+        roles: candidateSizedRoles,
+      }),
+    ).toThrow("artifact_size_baseline_invalid");
+    expect(() =>
+      validate({
+        ...ARTIFACT_BASELINE,
+        roles: candidateSizedRoles,
+        silentlySelfBaselined: true,
+      }),
+    ).toThrow("artifact_size_baseline_invalid");
+  });
+
   it("reports duplicate, missing, incompatible, and over-budget roles together", async () => {
-    const evaluate = await evaluator();
+    const { evaluate } = await evaluator();
     const artifacts = validArtifacts();
     const duplicate = artifacts[0];
     if (duplicate === undefined) throw new Error("duplicate_fixture_missing");
@@ -81,7 +201,7 @@ describe("role-aware production artifact budgets", () => {
       brotliBytes: 20 * 1024 + 7,
     };
 
-    const result = evaluate(artifacts);
+    const result = evaluate(artifacts, ARTIFACT_BASELINE);
 
     expect(result.issues).toEqual([
       "artifact_budget:duplicate:core-esm",

@@ -607,7 +607,7 @@ mod tests {
     fn promoted_scalar_values_share_one_bounded_lexical_grammar() {
         let oversized = "9".repeat(65);
         let invalid = ["-", "123abc", "Refresh", oversized.as_str()];
-        for name in ["upload", "progress", "poll", "stream"] {
+        for name in ["upload", "progress", "stream"] {
             let contract = directive_contract(name).expect("promoted directive contract");
             for value in &invalid {
                 assert!(
@@ -617,6 +617,10 @@ mod tests {
             }
             assert!(valid_contract_value(contract, "registered_name"));
         }
+
+        let poll = directive_contract("poll").expect("poll contract");
+        assert!(valid_contract_value(poll, ""));
+        assert!(!valid_contract_value(poll, "registered_name"));
 
         let progress = directive_contract("progress").expect("progress contract");
         for value in ["0", "-1", "9007199254740991"] {

@@ -7,6 +7,14 @@ export type DirectiveValue =
 export type DirectivePhase = "local" | "schedule" | "feedback" | "morph" | "navigation";
 export type DirectiveFallback = "inert" | "native" | "retain_dom";
 export type DirectiveCapability = "uploads@1" | "async@1";
+export type FreshnessStreamMode = "absent" | "default" | "hybrid" | "push-only";
+export type FreshnessCombinationResult =
+  | "none"
+  | "poll_only"
+  | "hybrid_descriptor"
+  | "hybrid_poll_override"
+  | "push_only"
+  | "directive_conflict";
 
 export interface DirectiveContract {
   readonly name: string;
@@ -41,7 +49,7 @@ export type FeatureDirectiveContract = readonly [
 ];
 
 export const DIRECTIVE_FIXTURE_MANIFEST_SHA256 =
-  "278dcbcee7f05148e0cc6defc015f891f06477f04a2c40f4d236f63ea168b4c2";
+  "1ae7715b917f27ffe6930b9d960b16711dd8a20ef9c67d858cc766cd5c38274b";
 
 const DIRECTIVE_VALUE_TOKEN_MAXIMUM_BYTES = 64;
 const DIRECTIVE_VALUE_INTEGER_MAXIMUM_ABSOLUTE = "9007199254740991";
@@ -654,7 +662,7 @@ export const DIRECTIVE_CONTRACTS = [
   {
     name: "poll",
     owner: "island",
-    value: "action",
+    value: "empty",
     modifiers: ["immediate", "visible", "always", "5s", "15s", "30s", "60s"],
     roles: [],
     conflicts: [],
@@ -808,10 +816,32 @@ const F4 = ["push-only", "hybrid"] as const;
 const FEATURE_DIRECTIVE_CONTRACTS = [
   ["upload", 3, F0, F1, F2, [], 1, "uploads@1"],
   ["progress", 2, F0, F0, F0, [], 0, "uploads@1"],
-  ["poll", 4, F3, F0, F0, [["visible", "always"], ["5s", "15s", "30s", "60s"]], 0, "async@1"],
+  ["poll", 0, F3, F0, F0, [["visible", "always"], ["5s", "15s", "30s", "60s"]], 0, "async@1"],
   ["stream", 1, F4, F0, F0, [["push-only", "hybrid"]], 0, "async@1"],
 ] as const satisfies readonly FeatureDirectiveContract[];
 
 export function featureDirectiveContract(name: string): FeatureDirectiveContract | undefined {
   return FEATURE_DIRECTIVE_CONTRACTS.find((contract) => contract[0] === name);
+}
+
+// One generated authority for the legal poll/stream freshness combinations.
+// prettier-ignore
+const FRESHNESS_COMBINATIONS = [
+  [false, "absent", "none"],
+  [true, "absent", "poll_only"],
+  [false, "default", "hybrid_descriptor"],
+  [true, "default", "hybrid_poll_override"],
+  [false, "hybrid", "hybrid_descriptor"],
+  [true, "hybrid", "hybrid_poll_override"],
+  [false, "push-only", "push_only"],
+  [true, "push-only", "directive_conflict"],
+] as const satisfies readonly (readonly [boolean, FreshnessStreamMode, FreshnessCombinationResult])[];
+
+export function freshnessCombination(
+  poll: boolean,
+  stream: FreshnessStreamMode,
+): FreshnessCombinationResult | undefined {
+  return FRESHNESS_COMBINATIONS.find(
+    (combination) => combination[0] === poll && combination[1] === stream,
+  )?.[2];
 }

@@ -1,0 +1,427 @@
+import { describe, expect, it, vi } from "vitest";
+
+import type { JsonValue } from "../src/canonical.js";
+import {
+  PollTimer,
+  resolvePollPolicy,
+  type PollEnvironment,
+  type PollPolicy,
+} from "../src/async-updates/poll.js";
+import { parseFeatureDirective } from "../src/features/directive-parser.js";
+import { IslandRecord } from "../src/islands/record.js";
+import { AsyncDocumentOwner } from "../src/async-updates/feature.js";
+import type { AsyncRandomness, AsyncTimerPort } from "../src/async-updates/types.js";
+import type {
+  RuntimeFeatureDirectiveOwnership,
+  RuntimeFeatureIslandPort,
+} from "../src/features/contract.js";
+
+class ControlledClock implements AsyncTimerPort {
+  readonly pending = new Map<number, Readonly<{ callback: VoidFunction; due: number }>>();
+  #next = 0;
+  #now = 0;
+
+  clearTimeout(handle: number): void {
+    this.pending.delete(handle);
+  }
+
+  timeout(callback: VoidFunction, milliseconds: number): number {
+    this.#next += 1;
+    this.pending.set(this.#next, Object.freeze({ callback, due: this.#now + milliseconds }));
+    return this.#next;
+  }
+
+  advance(milliseconds: number): void {
+    const target = this.#now + milliseconds;
+    for (;;) {
+      const next = [...this.pending]
+        .filter(([, timer]) => timer.due <= target)
+        .sort((left, right) => left[1].due - right[1].due || left[0] - right[0])[0];
+      if (next === undefined) break;
+      this.pending.delete(next[0]);
+      this.#now = next[1].due;
+      next[1].callback();
+    }
+    this.#now = target;
+  }
+
+  advanceToNextTimer(): void {
+    const due = Math.min(...[...this.pending.values()].map((timer) => timer.due));
+    if (!Number.isFinite(due)) throw new Error("timer_not_found");
+    this.advance(due - this.#now);
+  }
+
+  delays(): number[] {
+    return [...this.pending.values()].map(({ due }) => due - this.#now);
+  }
+}
+
+class Environment implements PollEnvironment {
+  readonly #listeners = new Set<VoidFunction>();
+  #online = true;
+  #visible = true;
+
+  isOnline(): boolean {
+    return this.#online;
+  }
+
+  isVisible(): boolean {
+    return this.#visible;
+  }
+
+  subscribe(listener: VoidFunction): VoidFunction {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  online(value: boolean): void {
+    this.#online = value;
+    for (const listener of this.#listeners) listener();
+  }
+
+  visible(value: boolean): void {
+    this.#visible = value;
+    for (const listener of this.#listeners) listener();
+  }
+
+  listenerCount(): number {
+    return this.#listeners.size;
+  }
+}
+
+function policy(overrides: Partial<PollPolicy> = {}): PollPolicy {
+  return Object.freeze({
+    initial: "wait",
+    intervalMs: 10_000,
+    jitterRatio: 0,
+    mode: "poll_only",
+    visibility: "visible",
+    ...overrides,
+  });
+}
+
+function fixture(
+  currentPolicy: PollPolicy = policy(),
+  random = 0,
+  enqueueFreshRender: (reason: "poll") => "queued" | "coalesced" | "retired" = vi.fn(
+    () => "queued" as const,
+  ),
+) {
+  const clock = new ControlledClock();
+  const environment = new Environment();
+  const randomness: AsyncRandomness = { number: () => random };
+  const timer = new PollTimer({
+    enqueueFreshRender,
+    environment,
+    policy: currentPolicy,
+    randomness,
+    timers: clock,
+  });
+  return { clock, enqueueFreshRender, environment, timer };
+}
+
+describe("poll policy resolution", () => {
+  const fallback = Object.freeze({
+    initial: "wait" as const,
+    intervalMs: 30_000,
+    jitterRatio: 0.2,
+    visibility: "visible" as const,
+  });
+
+  it("enforces an empty live:poll value from the generated directive contract", () => {
+    expect(parseFeatureDirective("live:poll.visible.30s", "")).toMatchObject({
+      name: "poll",
+      ok: true,
+      value: "",
+    });
+    expect(parseFeatureDirective("live:poll.visible.30s", "refresh")).toEqual({
+      code: "invalid_value",
+      fallback: "inert",
+      ok: false,
+    });
+  });
+
+  it("consumes every generated freshness combination without handwritten mode rules", () => {
+    expect(resolvePollPolicy(null, null, null)).toBeNull();
+    expect(resolvePollPolicy([], null, null)).toMatchObject({
+      intervalMs: 30_000,
+      mode: "poll_only",
+    });
+    expect(resolvePollPolicy(null, [], fallback)).toEqual({ ...fallback, mode: "hybrid" });
+    expect(resolvePollPolicy(null, ["hybrid"], fallback)).toEqual({
+      ...fallback,
+      mode: "hybrid",
+    });
+    expect(resolvePollPolicy(["15s", "immediate", "always"], [], fallback)).toEqual({
+      initial: "immediate",
+      intervalMs: 15_000,
+      jitterRatio: 0.2,
+      mode: "hybrid",
+      visibility: "always",
+    });
+    expect(resolvePollPolicy(null, ["push-only"], fallback)).toEqual({
+      ...fallback,
+      mode: "push_only",
+    });
+    expect(() => resolvePollPolicy([], ["push-only"], fallback)).toThrow("directive_conflict");
+  });
+
+  it("rejects missing or malformed signed hybrid fallback policy", () => {
+    expect(() => resolvePollPolicy(null, [], null)).toThrow("poll_policy_invalid");
+    expect(() => resolvePollPolicy(null, [], { ...fallback, intervalMs: 999 })).toThrow(
+      "poll_policy_invalid",
+    );
+    expect(() => resolvePollPolicy(null, [], { ...fallback, intervalMs: 300_001 })).toThrow(
+      "poll_policy_invalid",
+    );
+    expect(() => resolvePollPolicy(null, [], { ...fallback, jitterRatio: 1.01 })).toThrow(
+      "poll_policy_invalid",
+    );
+  });
+});
+
+describe("controlled polling timer", () => {
+  it("honors wait and immediate initial behavior and only enqueues a poll fresh render", () => {
+    const waiting = fixture();
+    waiting.timer.start();
+    expect(waiting.enqueueFreshRender).not.toHaveBeenCalled();
+    waiting.clock.advance(10_000);
+    expect(waiting.enqueueFreshRender).toHaveBeenCalledWith("poll");
+
+    const immediate = fixture(policy({ initial: "immediate" }));
+    immediate.timer.start();
+    expect(immediate.enqueueFreshRender).toHaveBeenCalledOnce();
+    expect(immediate.enqueueFreshRender).toHaveBeenCalledWith("poll");
+  });
+
+  it("uses bounded positive jitter and rejects invalid randomness", () => {
+    const jittered = fixture(policy({ intervalMs: 1_000, jitterRatio: 0.5 }), 0.5);
+    jittered.timer.start();
+    expect(jittered.clock.delays()).toEqual([1_250]);
+
+    const invalid = fixture(policy(), 1);
+    expect(() => {
+      invalid.timer.start();
+    }).toThrow("async_randomness_invalid");
+  });
+
+  it("marks hidden or offline work stale and resumes without a catch-up burst", () => {
+    const current = fixture();
+    current.environment.visible(false);
+    current.timer.start();
+    current.clock.advanceToNextTimer();
+    expect(current.timer.status()).toBe("stale");
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+
+    current.environment.visible(true);
+    current.environment.online(false);
+    current.clock.advanceToNextTimer();
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+
+    current.environment.online(true);
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+    expect(current.clock.pending.size).toBe(1);
+    current.clock.advanceToNextTimer();
+    expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+  });
+
+  it("continues while hidden only under the always policy", () => {
+    const current = fixture(policy({ visibility: "always" }));
+    current.environment.visible(false);
+    current.timer.start();
+    current.clock.advance(10_000);
+    expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+  });
+
+  it("backs off bounded failures with positive full jitter", () => {
+    const enqueue = vi
+      .fn<(_: "poll") => "queued">()
+      .mockImplementationOnce(() => {
+        throw new Error("network_failed");
+      })
+      .mockReturnValue("queued");
+    const current = fixture(policy({ intervalMs: 1_000 }), 0.5, enqueue);
+    current.timer.start();
+    current.clock.advance(1_000);
+    expect(current.timer.status()).toBe("stale");
+    expect(current.clock.delays()).toEqual([1_000]);
+    current.clock.advance(1_000);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(current.clock.delays()).toEqual([1_000]);
+  });
+
+  it("caps repeated failure backoff and retires when the island scheduler is gone", () => {
+    const failing = fixture(
+      policy({ intervalMs: 300_000 }),
+      0.999,
+      vi.fn(() => {
+        throw new Error("network_failed");
+      }),
+    );
+    failing.timer.start();
+    failing.clock.advance(300_000);
+    expect(failing.clock.delays()[0]).toBeLessThanOrEqual(300_000);
+
+    const retired = fixture(
+      policy({ intervalMs: 1_000 }),
+      0,
+      vi.fn(() => "retired" as const),
+    );
+    retired.timer.start();
+    retired.clock.advance(1_000);
+    expect(retired.timer.status()).toBe("closed");
+    expect(retired.clock.pending.size).toBe(0);
+    expect(retired.environment.listenerCount()).toBe(0);
+  });
+
+  it("hybrid pauses only while continuity is proved and activates on loss", () => {
+    const current = fixture(policy({ mode: "hybrid" }));
+    current.timer.start();
+    current.timer.continuity("current");
+    current.clock.advance(60_000);
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+    expect(current.timer.status()).toBe("current");
+
+    current.timer.continuity("degraded");
+    expect(current.timer.status()).toBe("stale");
+    current.clock.advanceToNextTimer();
+    expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+  });
+
+  it("push-only exposes degradation but never invents a fallback timer", () => {
+    const current = fixture(policy({ mode: "push_only" }));
+    current.timer.start();
+    current.timer.continuity("degraded");
+    current.clock.advance(300_000);
+    expect(current.timer.status()).toBe("stale");
+    expect(current.clock.pending.size).toBe(0);
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+  });
+
+  it("suspends for bfcache, resumes once, and retires timers and listeners once", () => {
+    const current = fixture();
+    current.timer.start();
+    expect(current.environment.listenerCount()).toBe(1);
+    current.timer.suspend();
+    current.clock.advance(60_000);
+    expect(current.timer.status()).toBe("suspended");
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+
+    current.timer.resume();
+    current.timer.resume();
+    expect(current.clock.pending.size).toBe(1);
+    current.timer.dispose();
+    current.timer.dispose();
+    expect(current.timer.status()).toBe("closed");
+    expect(current.clock.pending.size).toBe(0);
+    expect(current.environment.listenerCount()).toBe(0);
+  });
+
+  it("spreads a 100-subscription recovery cohort without synchronized polling", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const timers = Array.from(
+      { length: 100 },
+      (_, index) =>
+        new PollTimer({
+          enqueueFreshRender: vi.fn(() => "queued" as const),
+          environment,
+          policy: policy({ intervalMs: 5_000, jitterRatio: 0.2, mode: "hybrid" }),
+          randomness: { number: () => (index + 0.5) / 100 },
+          timers: clock,
+        }),
+    );
+    for (const timer of timers) {
+      timer.start();
+      timer.continuity("current");
+      timer.continuity("degraded");
+    }
+
+    const due = [...clock.pending.values()].map(({ due }) => due);
+    expect(due).toHaveLength(100);
+    expect(new Set(due).size).toBe(100);
+    for (const timer of timers) timer.dispose();
+  });
+});
+
+describe("fresh-render overlap remains owned by the island scheduler", () => {
+  it("retains at most one in-flight plus one queued refresh and coalesces later ticks", () => {
+    const element = { setAttribute: vi.fn() } as unknown as Element;
+    const record = new IslandRecord(
+      element,
+      Object.freeze({
+        component: "fixture.poll",
+        documentKey: "document-poll",
+        instanceId: "a".repeat(22),
+        lazyComplete: true,
+        protocolMinimum: 1,
+        revision: 0n,
+        runtimeContract: 1,
+        slot: "poll-slot",
+        snapshot: Object.freeze({}),
+        snapshotForm: "instance",
+      }),
+    );
+
+    expect(record.enqueueFreshRender("poll")).toBe("queued");
+    const first = record.scheduler.ready()[0];
+    if (first === undefined) throw new Error("missing_refresh_ticket");
+    expect(record.scheduler.start(first)).toBe("accepted");
+    expect(record.enqueueFreshRender("poll")).toBe("queued");
+    expect(record.enqueueFreshRender("poll")).toBe("queued");
+    expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 1, queued: 1 });
+  });
+});
+
+describe("poll-only feature integration", () => {
+  it("is complete without stream authority or a transport adapter", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const root = Object.freeze({}) as Element;
+    const refresh = vi.fn(() => "queued" as const);
+    const directive = Object.freeze({
+      attributeName: "live:poll.5s",
+      directive: Object.freeze({
+        capability: "async@1" as const,
+        modifiers: Object.freeze(["5s"]),
+        name: "poll",
+        ok: true as const,
+        role: null,
+        value: "",
+      }),
+      element: root,
+    }) satisfies RuntimeFeatureDirectiveOwnership;
+    const port = {
+      authorizeRegisteredEvents: vi.fn(),
+      dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.poll",
+        documentKey: "document-poll-only",
+        slot: "poll-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: vi.fn(() => "accepted" as const),
+      queryDirectiveOwnership: () => [directive],
+      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    } satisfies RuntimeFeatureIslandPort;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        clock: { now: () => 0 },
+        pollEnvironment: environment,
+        randomness: { number: () => 0 },
+        timers: clock,
+      },
+    );
+
+    const controller = owner.connectIsland(port);
+    clock.advance(5_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    controller.dispose();
+    clock.advance(60_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    owner.dispose();
+  });
+});

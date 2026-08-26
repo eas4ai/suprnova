@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-08-26
 
 ## Scope
 
@@ -439,13 +439,17 @@ baseline is not qualification evidence.
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
 queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
-bytes for each core variant without an unsupported absolute ceiling, enforces 20
-KiB for each upload variant and 16 KiB for each async variant. The artifact gate
-reports whether the binding baseline describes the current or a prior artifact;
-the browser benchmark gate compares a separately recorded current candidate to
-that baseline and refuses a self-comparison path. Runtime workloads enforce the
+bytes for each core and async variant without unsupported absolute ceilings and
+enforces 20 KiB for each upload variant. Async variants compare against
+`browser/benchmarks/baselines/artifact-size-v1.json`: its closed schema records
+the Task 6 source commit, decision, rationale, deterministic build/compression
+method, and 16,356-byte ESM plus 14,155-byte classic measurements. More than 15
+percent unreviewed growth fails; a candidate cannot supply, overwrite, or silently
+self-baseline the reviewed file. The binding browser benchmark independently
+compares a separately recorded current core candidate with its prior performance
+baseline and refuses a self-comparison path. Runtime workloads enforce the
 formula, count, and latency caps in the overview and the existing 15-percent
-regression policy.
+performance-regression policy.
 Reduced deterministic budget cases run on every ordinary gate; the full-scale
 workloads run under explicit release qualification on pinned `S1`/`B1`. A larger
 application upload limit may increase stored file bytes but may not authorize
@@ -466,6 +470,12 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Replaced the async artifacts' arbitrary 16 KiB total-size cliff
+  with deterministic exact-byte reporting and a closed-provenance Task 6 size
+  baseline. The ordinary gate admits Task 7's 17,987-byte ESM and 15,773-byte
+  classic artifacts because their 9.97- and 11.43-percent growth remains within
+  the reviewed 15-percent drift threshold. Missing, malformed, self-derived, or
+  greater-than-threshold baselines fail rather than silently rebaseline.
 - 2026-08-25 -- Restored the prior approved browser benchmark as binding
   provenance and prohibited self-baselining. Current artifacts write only an
   ignored candidate result; the binding gate compares candidate versus prior,

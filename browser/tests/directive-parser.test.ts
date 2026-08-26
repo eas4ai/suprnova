@@ -62,13 +62,18 @@ describe("iteration 004 directive parser", () => {
       role: null,
       capability: "uploads@1",
     });
-    expect(parseFeatureDirective("live:poll.visible.30s", "refresh")).toEqual({
+    expect(parseFeatureDirective("live:poll.visible.30s", "")).toEqual({
       ok: true,
       name: "poll",
-      value: "refresh",
+      value: "",
       role: null,
       modifiers: ["visible", "30s"],
       capability: "async@1",
+    });
+    expect(parseFeatureDirective("live:poll.visible.30s", "refresh")).toEqual({
+      code: "invalid_value",
+      fallback: "inert",
+      ok: false,
     });
     expect(parseFeatureDirective("live:stream.push-only", "orders")).toMatchObject({
       ok: true,
@@ -154,9 +159,10 @@ describe("iteration 004 directive parser", () => {
       }
     }
 
-    for (const name of ["upload", "progress", "poll", "stream"] as const) {
+    for (const name of ["upload", "progress", "stream"] as const) {
       expect(parseFeatureDirective(`live:${name}`, "registered_name")).toMatchObject({ ok: true });
     }
+    expect(parseFeatureDirective("live:poll", "")).toMatchObject({ ok: true });
     for (const value of ["0", "-1", "9007199254740991"] as const) {
       expect(parseFeatureDirective("live:progress", value)).toMatchObject({ ok: true });
     }

@@ -5,7 +5,7 @@
 
 /// Reviewed v4 fixture-manifest identity used to generate this contract.
 pub const DIRECTIVE_FIXTURE_MANIFEST_SHA256: &str =
-    "278dcbcee7f05148e0cc6defc015f891f06477f04a2c40f4d236f63ea168b4c2";
+    "1ae7715b917f27ffe6930b9d960b16711dd8a20ef9c67d858cc766cd5c38274b";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectiveOwner {
@@ -102,6 +102,33 @@ pub struct DirectiveContract {
     pub capability: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "generated cross-language freshness contract is consumed by browser conformance"
+)]
+pub struct FreshnessCombination {
+    pub poll: bool,
+    pub stream: &'static str,
+    pub result: &'static str,
+}
+
+#[rustfmt::skip]
+#[allow(
+    dead_code,
+    reason = "generated cross-language freshness contract is consumed by browser conformance"
+)]
+pub const FRESHNESS_COMBINATIONS: &[FreshnessCombination] = &[
+    FreshnessCombination { poll: false, stream: "absent", result: "none" },
+    FreshnessCombination { poll: true, stream: "absent", result: "poll_only" },
+    FreshnessCombination { poll: false, stream: "default", result: "hybrid_descriptor" },
+    FreshnessCombination { poll: true, stream: "default", result: "hybrid_poll_override" },
+    FreshnessCombination { poll: false, stream: "hybrid", result: "hybrid_descriptor" },
+    FreshnessCombination { poll: true, stream: "hybrid", result: "hybrid_poll_override" },
+    FreshnessCombination { poll: false, stream: "push-only", result: "push_only" },
+    FreshnessCombination { poll: true, stream: "push-only", result: "directive_conflict" },
+];
+
 #[rustfmt::skip]
 pub const DIRECTIVE_CONTRACTS: &[DirectiveContract] = &[
     DirectiveContract { name: "click", owner: DirectiveOwner::Element, value: DirectiveValue::Action, modifiers: &["prevent", "stop", "once", "self", "trusted", "capture"], modifier_conflicts: &[], roles: &[], conflicts: &[], phase: DirectivePhase::Schedule, fallback: DirectiveFallback::Native, capability: None },
@@ -147,7 +174,7 @@ pub const DIRECTIVE_CONTRACTS: &[DirectiveContract] = &[
     DirectiveContract { name: "prefetch", owner: DirectiveOwner::Element, value: DirectiveValue::Empty, modifiers: &["replace", "transition", "hover", "visible", "eager"], modifier_conflicts: &[], roles: &[], conflicts: &[], phase: DirectivePhase::Navigation, fallback: DirectiveFallback::Native, capability: None },
     DirectiveContract { name: "upload", owner: DirectiveOwner::Element, value: DirectiveValue::Field, modifiers: &[], modifier_conflicts: &[], roles: &["cancel", "retry", "remove"], conflicts: &["model"], phase: DirectivePhase::Schedule, fallback: DirectiveFallback::Native, capability: Some("uploads@1") },
     DirectiveContract { name: "progress", owner: DirectiveOwner::Element, value: DirectiveValue::Literal, modifiers: &[], modifier_conflicts: &[], roles: &[], conflicts: &[], phase: DirectivePhase::Feedback, fallback: DirectiveFallback::Inert, capability: Some("uploads@1") },
-    DirectiveContract { name: "poll", owner: DirectiveOwner::Island, value: DirectiveValue::Action, modifiers: &["immediate", "visible", "always", "5s", "15s", "30s", "60s"], modifier_conflicts: &[&["visible", "always"], &["5s", "15s", "30s", "60s"]], roles: &[], conflicts: &[], phase: DirectivePhase::Schedule, fallback: DirectiveFallback::Inert, capability: Some("async@1") },
+    DirectiveContract { name: "poll", owner: DirectiveOwner::Island, value: DirectiveValue::Empty, modifiers: &["immediate", "visible", "always", "5s", "15s", "30s", "60s"], modifier_conflicts: &[&["visible", "always"], &["5s", "15s", "30s", "60s"]], roles: &[], conflicts: &[], phase: DirectivePhase::Schedule, fallback: DirectiveFallback::Inert, capability: Some("async@1") },
     DirectiveContract { name: "stream", owner: DirectiveOwner::Island, value: DirectiveValue::Identifier, modifiers: &["push-only", "hybrid"], modifier_conflicts: &[&["push-only", "hybrid"]], roles: &[], conflicts: &[], phase: DirectivePhase::Schedule, fallback: DirectiveFallback::Inert, capability: Some("async@1") },
 ];
 

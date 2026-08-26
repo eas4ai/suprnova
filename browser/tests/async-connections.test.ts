@@ -28,6 +28,12 @@ function authorized(index: number, authorizationScope = "shared"): AuthorizedLog
     }),
     events: Object.freeze([]),
     expiresAt: 10_000,
+    fallbackPoll: Object.freeze({
+      initial: "wait" as const,
+      intervalMs: 30_000,
+      jitterRatio: 0.2,
+      visibility: "visible" as const,
+    }),
     heartbeatTimeoutMs: 30_000,
     presentationSignals: Object.freeze([]),
     reconnect: Object.freeze({

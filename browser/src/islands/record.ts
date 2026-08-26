@@ -8,7 +8,7 @@ import type { FreshRenderDisposition, FreshRenderReason } from "../features/host
 const MAX_DISPOSERS = 64;
 const FEATURE_REFRESH_POLICY = Object.freeze({
   key: "feature-fresh-render",
-  kind: "drop_duplicate",
+  kind: "replace_pending",
 } as const);
 
 export class IslandRecord {

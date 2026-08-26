@@ -204,6 +204,33 @@ test("schema 2 carries closed modifier-conflict groups", () => {
   );
 });
 
+test("schema 2 carries one closed generated freshness-combination table", () => {
+  assert.deepEqual(
+    fixture.freshness_combinations.map(
+      ({ poll, stream, result }) => [poll, stream, result],
+    ),
+    [
+      [false, "absent", "none"],
+      [true, "absent", "poll_only"],
+      [false, "default", "hybrid_descriptor"],
+      [true, "default", "hybrid_poll_override"],
+      [false, "hybrid", "hybrid_descriptor"],
+      [true, "hybrid", "hybrid_poll_override"],
+      [false, "push-only", "push_only"],
+      [true, "push-only", "directive_conflict"],
+    ],
+  );
+  assert.throws(
+    () =>
+      loadContracts(
+        changed((grammar) => {
+          grammar.freshness_combinations.pop();
+        }),
+      ),
+    /invalid_freshness_combinations/,
+  );
+});
+
 test("v4 evolution preserves every v3 contract and promotes only four reviewed names", () => {
   const contracts = loadContracts(fixture);
   assert.doesNotThrow(() =>
@@ -307,4 +334,5 @@ test("generated TypeScript exposes separate core and feature runtime lookups", a
   assert.match(source, /export type FeatureDirectiveContract = readonly \[/u);
   assert.match(source, /export const CORE_RESERVED_DIRECTIVES =/u);
   assert.match(source, /export function featureDirectiveContract\(/u);
+  assert.match(source, /export function freshnessCombination\(/u);
 });

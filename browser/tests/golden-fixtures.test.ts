@@ -445,6 +445,7 @@ describe("shared versioned Live fixtures", () => {
     expect(progress).toMatchObject({ value: "literal" });
     const poll = directives.find((candidate) => candidate["name"] === "poll");
     expect(poll).toMatchObject({
+      value: "empty",
       modifier_conflicts: [
         ["visible", "always"],
         ["5s", "15s", "30s", "60s"],
@@ -452,6 +453,16 @@ describe("shared versioned Live fixtures", () => {
     });
     const stream = directives.find((candidate) => candidate["name"] === "stream");
     expect(stream).toMatchObject({ modifier_conflicts: [["push-only", "hybrid"]] });
+    expect(grammar["freshness_combinations"]).toEqual([
+      { poll: false, result: "none", stream: "absent" },
+      { poll: true, result: "poll_only", stream: "absent" },
+      { poll: false, result: "hybrid_descriptor", stream: "default" },
+      { poll: true, result: "hybrid_poll_override", stream: "default" },
+      { poll: false, result: "hybrid_descriptor", stream: "hybrid" },
+      { poll: true, result: "hybrid_poll_override", stream: "hybrid" },
+      { poll: false, result: "push_only", stream: "push-only" },
+      { poll: true, result: "directive_conflict", stream: "push-only" },
+    ]);
   });
 
   it("loads every reviewed version through one catalog and verifies each manifest", async () => {

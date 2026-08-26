@@ -178,7 +178,7 @@ fn iteration_four_directive_roles_and_modifiers_are_statically_proved() {
     let catalog = TemplateCatalog::new(vec![
         (
             view(ROOT_VIEW),
-            r#"<section live:stream.hybrid="orders" live:poll.visible.30s="refresh">
+            r#"<section live:stream.hybrid="orders" live:poll.visible.30s>
                 <input type="file" live:upload="avatar">
                 <button live:upload.cancel="avatar">Cancel</button>
                 <button live:upload.retry="avatar">Retry</button>

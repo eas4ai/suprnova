@@ -212,6 +212,19 @@ separate upload and asynchronous artifact pairs so other Live pages do not pay
 their transfer cost.
 _Avoid_: plugin URL from HTML, second runtime, application bundle requirement, arbitrary module
 
+**Reviewed artifact-size baseline**:
+A version-controlled record of exact deterministic production-artifact bytes,
+measurement method, source commit, decision, and rationale used only to detect
+unreviewed size drift where no absolute transfer ceiling exists. It is separate
+from the candidate it evaluates and changes only through an explicit review.
+_Avoid_: current build as its own baseline, automatic rebaseline, arbitrary byte cap, download limit
+
+**Unreviewed artifact drift**:
+Production-artifact growth beyond the reviewed baseline's approved percentage
+without a version-controlled decision and rationale. It is a change-review gate,
+not a claim that the resulting total download is intrinsically too large.
+_Avoid_: absolute size failure, network impossibility, silent rebaseline, byte golf mandate
+
 **Live directive**:
 A namespaced declarative `live:` HTML attribute whose registered name, value,
 target, and modifiers are interpreted consistently by the view checker and Live

@@ -587,6 +587,20 @@ export interface AsyncTimerPort {
   timeout(callback: () => void, milliseconds: number): number;
 }
 export interface StreamPosition { readonly epoch: bigint; readonly sequence: bigint; }
+export interface PollFallbackPolicy {
+  readonly intervalMs: number;
+  readonly jitterRatio: number;
+  readonly initial: "wait" | "immediate";
+  readonly visibility: "visible" | "always";
+}
+export interface PollPolicy extends PollFallbackPolicy {
+  readonly mode: "poll_only" | "push_only" | "hybrid";
+}
+export interface PollEnvironment {
+  isOnline(): boolean;
+  isVisible(): boolean;
+  subscribe(listener: () => void): () => void;
+}
 export interface AsyncRegisteredEventContract {
   readonly cycle:
     | Readonly<{ kind: "forbid_repeated_island" }>
@@ -613,6 +627,7 @@ export interface AuthorizedLogicalSubscription {
   }>;
   readonly events: readonly AsyncRegisteredEventContract[];
   readonly expiresAt: number;
+  readonly fallbackPoll: PollFallbackPolicy;
   readonly heartbeatTimeoutMs: number;
   readonly presentationSignals: readonly Readonly<{
     name: string;
@@ -704,12 +719,13 @@ export class OriginHandshakeScheduler {
   active(origin: string): number;
 }
 export interface AsyncFeatureOptions {
-  readonly authority: AsyncAuthorityPort;
+  readonly authority?: AsyncAuthorityPort;
   readonly clock: AsyncClock;
   readonly handshakeScheduler?: OriginHandshakeScheduler;
+  readonly pollEnvironment?: PollEnvironment;
   readonly randomness: AsyncRandomness;
   readonly timers: AsyncTimerPort;
-  readonly transports: AsyncTransportPorts;
+  readonly transports?: AsyncTransportPorts;
 }
 export interface BrowserAsyncTransportOptions {
   readonly eventSource: (url: string, init: Readonly<{ withCredentials: true }>) => { close(): void };
