@@ -159,7 +159,15 @@ describe("deterministic production assets", () => {
       ),
     ) as Readonly<{
       history: readonly Readonly<{
-        roles: Readonly<Record<"async-esm" | "async-classic", Readonly<{ brotliBytes: number }>>>;
+        review: Readonly<{
+          decision: string;
+          sourceCommit: string;
+          sourceDecision?: string;
+          sourceDecisionPath?: string;
+        }>;
+        roles: Readonly<
+          Record<"async-esm" | "async-classic", Readonly<{ brotliBytes: number; sha256?: string }>>
+        >;
       }>[];
     }>;
     const measured = await Promise.all(
@@ -200,9 +208,22 @@ describe("deterministic production assets", () => {
     expect(result.lines).toContain(
       `artifact_budget role=async-classic bytes=${String(classic)} ceiling=none baseline=${String(classicBaseline)} unreviewed_increase=${classicIncrease.toFixed(2)}% threshold=15%`,
     );
+    expect(current.review).toMatchObject({
+      decision: "iteration-004-task-7-membership-budget-policy",
+      sourceCommit: "57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61",
+      sourceDecision: "iteration-004-task-7-membership-budget-policy",
+      sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
+    });
+    for (const role of ["async-esm", "async-classic"] as const) {
+      expect(current.roles[role].sha256).toBe(
+        measured.find((asset) => asset.role === role)?.sha256,
+      );
+    }
     expect(specification).toContain(
-      `The ordinary gate admits Task 7's ${esm.toLocaleString("en-US")}-byte ESM and ${classic.toLocaleString("en-US")}-byte`,
+      `strictly prior source commit \`57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61\``,
     );
+    expect(specification).toContain(`${esm.toLocaleString("en-US")}-byte ESM SHA-256`);
+    expect(specification).toContain(`${classic.toLocaleString("en-US")}-byte classic SHA-256`);
   });
 
   it("exposes equivalent ESM and non-replaceable classic facades from one singleton core", async () => {
