@@ -966,6 +966,10 @@ pub struct PendingBatch {
     /// Per-batch behavior switches (callbacks, fail policy).
     pub options: BatchOptions,
     envelopes: Vec<Envelope>,
+    /// Jobs added to this batch that declare a debounce window. Collected at
+    /// `add` time because `add` returns `Self` and cannot fail; surfaced by
+    /// [`PendingBatch::dispatch`] before anything is stored.
+    debounce_rejected: Vec<String>,
 }
 
 impl Default for PendingBatch {
@@ -981,6 +985,7 @@ impl PendingBatch {
             name: String::new(),
             options: BatchOptions::default(),
             envelopes: Vec::new(),
+            debounce_rejected: Vec::new(),
         }
     }
 
@@ -994,6 +999,13 @@ impl PendingBatch {
     /// gets stamped before dispatch.
     #[allow(clippy::should_implement_trait)]
     pub fn add<J: Job>(mut self, job: J) -> Self {
+        // A superseded batch job is dropped without ever settling, so the
+        // batch's pending count never reaches zero and its callbacks never
+        // fire. Reject at dispatch rather than let that happen quietly.
+        if J::debounce_for().is_some() {
+            self.debounce_rejected.push(J::job_name().to_string());
+            return self;
+        }
         let now = Utc::now();
         let mut env = match crate::queue::build_envelope::<J>(&job, now) {
             Ok(e) => e,
@@ -1074,6 +1086,14 @@ impl PendingBatch {
     ///
     /// [`SkipIfBatchCancelled`]: crate::queue::SkipIfBatchCancelled
     pub async fn dispatch(self) -> Result<String, FrameworkError> {
+        if !self.debounce_rejected.is_empty() {
+            return Err(FrameworkError::internal(format!(
+                "these jobs declare debounce_for() and cannot be batched: {}. A \
+                 superseded job is dropped without settling, which would leave the \
+                 batch's pending count above zero and its callbacks unfired",
+                self.debounce_rejected.join(", ")
+            )));
+        }
         ensure_default_repository();
         let repo = current_repository()
             .ok_or_else(|| FrameworkError::internal("batch repository not initialized"))?;

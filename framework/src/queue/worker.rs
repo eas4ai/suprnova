@@ -209,6 +209,65 @@ async fn release_unique_lock_if_held(env: &Envelope) {
     }
 }
 
+/// Whether this envelope was superseded by a newer dispatch of the same
+/// debounce window.
+///
+/// Fails **open** at every uncertainty: an envelope with no token was not
+/// debounced, a window whose key is gone (evicted, expired) is not evidence
+/// that somebody else owns it, and a cache error is not evidence of anything.
+/// Only a token that is present and different means "a newer dispatch owns this
+/// window", which is the one case where dropping the job is correct. Getting
+/// this backwards would silently discard work.
+async fn envelope_was_superseded(env: &Envelope) -> bool {
+    let Some(owner) = env
+        .debounce_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+    else {
+        return false;
+    };
+    let key = crate::queue::debounce_key(&env.job_name, env.debounce_id.as_deref());
+    match crate::queue::debounce::current_owner(&key).await {
+        Ok(Some(current)) => current != owner,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                job = %env.job_name,
+                id = %env.id,
+                error = %e,
+                "debounce owner lookup failed; running the job rather than dropping it"
+            );
+            false
+        }
+    }
+}
+
+/// Start a fresh max-wait window for an envelope that is about to actually run.
+///
+/// A no-op for a non-debounced envelope. See
+/// [`release_max_wait`](crate::queue::debounce::release_max_wait) for why the
+/// reset belongs at the start of every run and not only when max wait fired.
+async fn reset_debounce_max_wait(env: &Envelope) {
+    if env
+        .debounce_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let key = crate::queue::debounce_key(&env.job_name, env.debounce_id.as_deref());
+    if let Err(e) = crate::queue::debounce::release_max_wait(&key).await {
+        tracing::warn!(
+            job = %env.job_name,
+            id = %env.id,
+            error = %e,
+            "could not reset the debounce max-wait window; the next burst may measure \
+             its maximum wait from this one's first dispatch"
+        );
+    }
+}
+
 /// Run the middleware pipeline ending in the raw dispatcher. Returns the
 /// terminal [`JobOutcome`] OR a handler error (which the worker translates
 /// into retry / dead-letter).
@@ -240,6 +299,14 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
             if unique_until_processing {
                 release_unique_lock_if_held(&env).await;
             }
+            // Laravel #61281: start a fresh max-wait window at the start of
+            // every actual run, not only when max wait fired. Without this a
+            // job that reached the worker by the ordinary debounce path leaves
+            // the previous burst's `first_dispatched_at` behind, and the NEXT
+            // burst measures its maximum wait from a first dispatch that was
+            // never its own - so its very first dispatch can look overdue and
+            // fire with no delay at all.
+            reset_debounce_max_wait(&env).await;
             let payload = env.payload.clone();
             dispatch_by_name(&env.job_name, payload).await?;
             Ok(JobOutcome::Completed)
@@ -671,6 +738,33 @@ pub async fn run_worker(
             job: identity_pre.clone(),
         })
         .await;
+
+        // Laravel checks this in `CallQueuedHandler::call`, after the worker
+        // has fired `JobProcessing` and before the middleware pipeline - so a
+        // superseded job runs no middleware at all. Same order here. This is a
+        // settlement, not a failure: ack, report, move on.
+        if envelope_was_superseded(&env).await {
+            let _ = EventFacade::dispatch(queue_events::JobDebounced {
+                job: identity_pre.clone(),
+            })
+            .await;
+            if let Err(e) = driver.ack(&res.token).await {
+                settlement_failure(&*driver, &env, "ack", "debounced", &e);
+            }
+            tracing::debug!(
+                job = %env.job_name,
+                id = %env.id,
+                "queue job superseded by a newer debounced dispatch"
+            );
+            processed += 1;
+            if let Some(max) = cfg.max_jobs
+                && processed >= max
+            {
+                exit_with("max_jobs reached", processed, &connection);
+                break ExitReason::MaxJobs;
+            }
+            continue;
+        }
 
         let timeout_opt = env.timeout_secs.map(Duration::from_secs);
         let env_for_dispatch = env.clone();
@@ -1358,6 +1452,10 @@ fn settlement_failure(
             "queue ack failed for timed-out dead-lettered job; \
              reservation may stay until visibility expiry"
         }
+        ("ack", "debounced") => {
+            "queue ack failed for a superseded debounced job; \
+             reservation may stay until visibility expiry"
+        }
         ("ack", "deleted") => {
             "queue ack failed for middleware-dropped job; \
              reservation may stay until visibility expiry"
@@ -1796,6 +1894,8 @@ mod tests {
             fail_on_timeout: false,
             idempotency_key: None,
             unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }

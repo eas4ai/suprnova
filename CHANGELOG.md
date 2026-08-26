@@ -8,6 +8,27 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Debounced jobs and debounced queued listeners.** `Job::debounce_for()` collapses
+  a burst of dispatches into one run, one window after the most recent one, carrying
+  the newest payload. It is the mirror of `push_unique`, which keeps the first
+  dispatch and suppresses the rest. `Job::max_debounce_wait()` stops a continuous
+  burst from deferring the work forever, and `Job::debounce_id(&self)` scopes the
+  window per entity so twenty updates to one order collapse without touching
+  another order's. `Queue::push_debounced(job, DebounceOptions)` sets the window at
+  the call site, and `DebouncedListener::new(window, build).keyed_by(...)` debounces
+  an event listener with the key derived from the event - a plain `QueuedListener`
+  already honors a window the job itself declares. Every dispatch is still enqueued;
+  the collapse is settled at the worker, which acknowledges a superseded envelope
+  and emits `JobDebounced`. Debouncing fails open: an expired or evicted window runs
+  the job rather than dropping it. Each actual run starts a fresh maximum-wait
+  window, so a burst always measures its maximum wait from its own first dispatch
+  rather than inheriting the previous burst's. A job cannot declare both
+  `debounce_for` and `unique_id`, and chains and batches refuse a debounced job -
+  a superseded link would strand the rest of its chain, and a superseded batch job
+  would leave the batch's pending count above zero forever. The envelope carries two
+  additive fields for this and stays byte-identical on the wire for every
+  non-debounced push.
+
 - **`Storage::register_read_through` composes two disks into a read-through disk.** Reads and metadata resolve against the primary first and fall back to the second disk; anything found on the fallback is written through to the primary, so a store migration completes under real traffic. Writes and listings stay on the primary, and a delete removes the object from both disks. Set `throw_on_promotion_failure` when a failed promotion must surface instead of degrading to a fallback read. A promotion is published atomically, so no reader can see a half-written object, and it carries the fallback object's content type, cache control, content disposition, content encoding, and user metadata across. A versioned or conditional read is passed through with its condition intact and served without being promoted.
 - **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
   keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -

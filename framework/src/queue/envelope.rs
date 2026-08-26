@@ -127,6 +127,28 @@ pub struct Envelope {
     /// the same promise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_lock_owner: Option<String>,
+    /// Debounce key suffix stamped at push time from
+    /// [`Job::debounce_id`](crate::queue::Job::debounce_id) or from a
+    /// [`DebounceOptions`](crate::queue::DebounceOptions) id. `None` means the
+    /// job debounces as a whole rather than per entity.
+    ///
+    /// Carried on the wire so the worker can recompose the cache key without
+    /// deserializing the payload to ask the job - the same reasoning
+    /// `idempotency_key` above uses. Additive under `#[serde(default)]`, and
+    /// `skip_serializing_if` keeps a non-debounced push byte-identical on the
+    /// wire, so [`CURRENT_SCHEMA_VERSION`] stays at 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_id: Option<String>,
+    /// Token proving this dispatch owned the debounce window when it was
+    /// pushed. `None` for a non-debounced push.
+    ///
+    /// The worker compares it against the token currently in the cache: a
+    /// mismatch means a newer dispatch superseded this envelope, which is then
+    /// dropped rather than run. A missing token in the cache fails **open** -
+    /// the job runs - because an evicted or expired key must never be read as
+    /// "somebody else owns this".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_owner: Option<String>,
     /// Owning batch id when this envelope was dispatched as part of a
     /// [`PendingBatch`](crate::queue::batch::PendingBatch). `None` for
     /// non-batched jobs.

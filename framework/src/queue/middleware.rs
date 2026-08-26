@@ -488,6 +488,8 @@ mod tests {
             fail_on_timeout: false,
             idempotency_key: None,
             unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }
@@ -773,6 +775,8 @@ mod release_failure_tests {
             fail_on_timeout: false,
             idempotency_key: None,
             unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }

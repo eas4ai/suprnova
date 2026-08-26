@@ -86,6 +86,110 @@ where
     }
 }
 
+/// Derives a debounce id from the event, so a per-entity window is a decision
+/// the listener registration makes rather than a property of the job.
+type DebounceKeyFn<E> = Arc<dyn Fn(&E) -> String + Send + Sync>;
+
+/// A [`Listener`] that turns event `E` into durable job `J` and enqueues it
+/// with a debounce window, so a burst of events becomes one run.
+///
+/// Reach for this when the window is a property of the **registration** rather
+/// than of the job - a job that is debounced everywhere it is dispatched should
+/// declare [`Job::debounce_for`](crate::queue::Job::debounce_for) instead, and
+/// a plain [`QueuedListener`] will honor it. This is the shape Laravel's
+/// `#[DebounceFor]` attribute on a listener expresses, with the debounce id
+/// derived from the event rather than from the job.
+///
+/// ```rust,no_run
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use suprnova::events::{Event, EventFacade, DebouncedListener};
+/// # use suprnova::queue::Job;
+/// # use suprnova::FrameworkError;
+/// # #[derive(Debug, Clone)]
+/// # struct OrderUpdated { order_id: u32 }
+/// # impl Event for OrderUpdated { fn event_name() -> &'static str { "OrderUpdated" } }
+/// # #[derive(serde::Serialize, serde::Deserialize)]
+/// # struct ReindexOrder { order_id: u32 }
+/// # #[suprnova::async_trait]
+/// # impl Job for ReindexOrder {
+/// #     fn job_name() -> &'static str { "ReindexOrder" }
+/// #     async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+/// # }
+/// # async fn ex() {
+/// EventFacade::listen::<OrderUpdated, _>(Arc::new(
+///     DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+///         Duration::from_secs(30),
+///         |e| ReindexOrder { order_id: e.order_id },
+///     )
+///     .max_wait(Duration::from_secs(300))
+///     .keyed_by(|e| e.order_id.to_string()),
+/// ))
+/// .await;
+/// # }
+/// ```
+pub struct DebouncedListener<E, J> {
+    build: Arc<dyn Fn(&E) -> J + Send + Sync>,
+    key: Option<DebounceKeyFn<E>>,
+    window: std::time::Duration,
+    max_wait: Option<std::time::Duration>,
+    _marker: PhantomData<fn() -> (E, J)>,
+}
+
+impl<E, J> DebouncedListener<E, J>
+where
+    E: EventTrait,
+    J: Job,
+{
+    /// Build a listener that maps each `E` to a `J` and enqueues it, collapsing
+    /// a burst into one run `window` after the most recent event.
+    pub fn new(
+        window: std::time::Duration,
+        build: impl Fn(&E) -> J + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            build: Arc::new(build),
+            key: None,
+            window,
+            max_wait: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Bound how long a continuous burst may defer the run.
+    pub fn max_wait(mut self, max_wait: std::time::Duration) -> Self {
+        self.max_wait = Some(max_wait);
+        self
+    }
+
+    /// Derive the debounce id from the event, so bursts for different entities
+    /// collapse independently. Without this, every event of type `E` shares one
+    /// window.
+    pub fn keyed_by(mut self, key: impl Fn(&E) -> String + Send + Sync + 'static) -> Self {
+        self.key = Some(Arc::new(key));
+        self
+    }
+}
+
+#[async_trait]
+impl<E, J> Listener<E> for DebouncedListener<E, J>
+where
+    E: EventTrait,
+    J: Job,
+{
+    async fn handle(&self, event: &E) -> Result<(), FrameworkError> {
+        let job = (self.build)(event);
+        let mut options = crate::queue::DebounceOptions::new(self.window);
+        if let Some(max_wait) = self.max_wait {
+            options = options.max_wait(max_wait);
+        }
+        if let Some(key) = self.key.as_ref() {
+            options = options.id(key(event));
+        }
+        Queue::push_debounced(job, options).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

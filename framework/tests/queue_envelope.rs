@@ -27,6 +27,8 @@ fn envelope_round_trips_through_json() {
         fail_on_timeout: false,
         idempotency_key: None,
         unique_lock_owner: None,
+        debounce_id: None,
+        debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };
@@ -101,6 +103,8 @@ fn envelope_wire_format_is_frozen() {
         fail_on_timeout: false,
         idempotency_key: None,
         unique_lock_owner: None,
+        debounce_id: None,
+        debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };

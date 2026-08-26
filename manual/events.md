@@ -219,6 +219,34 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 The `QueuedListener` only needs the event to be a regular synchronous
 event - the durability lives in the queue, not the dispatcher.
 
+### Debouncing a queued listener
+
+A `QueuedListener` funnels through `Queue::push`, so a listener is debounced
+the moment its **job** declares `Job::debounce_for` - nothing extra to wire, and
+`Job::debounce_id` gives you a window per entity.
+
+When the window belongs to the registration rather than to the job, use
+`DebouncedListener` and derive the key from the event:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+Four `OrderUpdated` events for order 55 enqueue four jobs and run one. See
+[Queues](queues.md) for the full contract.
+
 ## Draining on shutdown
 
 Queued in-process listeners spawn into a `JoinSet` tracked by the

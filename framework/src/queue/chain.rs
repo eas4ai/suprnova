@@ -149,6 +149,8 @@ impl ChainLink {
             fail_on_timeout: self.fail_on_timeout,
             idempotency_key: None,
             unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }
@@ -167,6 +169,7 @@ pub fn next_link_id(predecessor: uuid::Uuid) -> uuid::Uuid {
 
 /// Builder used by [`Queue::chain`](crate::queue::Queue::chain). Mirrors
 /// Laravel's `Bus::chain([...])->dispatch()`.
+#[derive(Debug)]
 pub struct PendingChain {
     links: Vec<ChainLink>,
 }
@@ -186,6 +189,16 @@ impl PendingChain {
     /// Append a typed job to the chain.
     #[allow(clippy::should_implement_trait)]
     pub fn add<J: Job>(mut self, job: J) -> Result<Self, FrameworkError> {
+        // A debounced link that a newer dispatch supersedes is dropped, and a
+        // dropped link strands every link behind it. Refuse rather than let the
+        // job's own `debounce_for` silently do nothing.
+        if J::debounce_for().is_some() {
+            return Err(FrameworkError::internal(format!(
+                "job `{}` declares debounce_for() and cannot be chained: a superseded \
+                 link is dropped, which would strand the rest of the chain",
+                J::job_name()
+            )));
+        }
         self.links.push(ChainLink::from_job(job)?);
         Ok(self)
     }
