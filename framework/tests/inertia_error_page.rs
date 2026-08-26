@@ -622,6 +622,141 @@ async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
 }
 
 // ---------------------------------------------------------------------
+// The app chooses where the middleware sits
+// ---------------------------------------------------------------------
+
+/// Stands in for `CsrfMiddleware` registered *above* `Inertia::install` -
+/// same status, same body (`framework/src/csrf/middleware.rs`
+/// `reject_with_419`). The point is that it answers without calling
+/// `next`, so nothing registered inside it ever sees the response.
+struct RejectsLikeCsrf;
+
+#[async_trait::async_trait]
+impl Middleware for RejectsLikeCsrf {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(HttpResponse::json(json!({ "message": "CSRF token mismatch." })).status(419))
+    }
+}
+
+/// The chain an app builds when its CSRF middleware sits outside the
+/// Inertia layer: session, then the error page, then CSRF, then whatever
+/// `Inertia::install` registered.
+///
+/// The Inertia layer at the bottom still carries an error-page middleware
+/// of its own, because `install` put one there before this file's first
+/// test ran. In a real app `install` sees the app's registration and skips
+/// its own; here the inner one is simply never reached, since the 419 is
+/// answered above it.
+fn app_placed_stack() -> MiddlewareRegistry {
+    stack()
+        .prepend(RejectsLikeCsrf)
+        .prepend(suprnova::InertiaErrorPageMiddleware::new(ERROR_PAGE))
+        .prepend(SeededSessionScope(
+            suprnova::session::new_session_slot_for_test(),
+        ))
+}
+
+#[tokio::test]
+async fn an_app_placed_error_page_covers_a_419_answered_before_the_inertia_layer() {
+    let addr = spawn_server(router(), app_placed_stack(), 2).await;
+
+    let (status, headers, body) = request(
+        addr,
+        "POST",
+        "/register",
+        &[
+            ("X-Inertia", "true"),
+            ("X-Inertia-Version", ASSET_VERSION),
+            ("Accept", "text/html, application/xhtml+xml"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, 419, "the lapsed session keeps its status");
+    assert_eq!(
+        headers.get("x-inertia").map(String::as_str),
+        Some("true"),
+        "without this the client shows the crash modal this feature exists to \
+         remove; got {headers:?}"
+    );
+    let page = page_object(&body);
+    assert_eq!(page["component"], ERROR_PAGE);
+    assert_eq!(page["props"]["status"], 419);
+    assert_eq!(page["props"]["message"], "CSRF token mismatch.");
+}
+
+#[tokio::test]
+async fn the_same_419_renders_the_html_shell_for_a_browser_navigation() {
+    let addr = spawn_server(router(), app_placed_stack(), 2).await;
+
+    let (status, headers, body) = request(addr, "POST", "/register", &browser_navigation()).await;
+
+    assert_eq!(status, 419);
+    assert!(
+        headers
+            .get("content-type")
+            .is_some_and(|c| c.starts_with("text/html")),
+        "got {headers:?}"
+    );
+    assert_eq!(embedded_page_object(&body)["component"], ERROR_PAGE);
+    assert_eq!(embedded_page_object(&body)["props"]["status"], 419);
+}
+
+#[tokio::test]
+async fn an_api_client_still_gets_the_419_json_untouched() {
+    let addr = spawn_server(router(), app_placed_stack(), 2).await;
+
+    let (status, headers, body) =
+        request(addr, "POST", "/register", &[("Accept", "application/json")]).await;
+
+    assert_eq!(status, 419);
+    assert!(
+        !headers.contains_key("x-inertia"),
+        "an API client never asked for a page; got {headers:?}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
+    assert_eq!(parsed["message"], "CSRF token mismatch.");
+    assert!(
+        parsed.get("component").is_none(),
+        "the body is the middleware's own, not a page object; got {body}"
+    );
+}
+
+/// The boundary, in the other direction: with only the default placement,
+/// a middleware registered *outside* `Inertia::install` answers before the
+/// error-page middleware exists in the chain, and its JSON reaches the
+/// client exactly as it did before. This is the whole reason the explicit
+/// registration above is worth having.
+#[tokio::test]
+async fn with_the_default_placement_the_same_419_is_still_raw_json() {
+    let registry = stack().prepend(RejectsLikeCsrf).prepend(SeededSessionScope(
+        suprnova::session::new_session_slot_for_test(),
+    ));
+    let addr = spawn_server(router(), registry, 2).await;
+
+    let (status, headers, body) = request(
+        addr,
+        "POST",
+        "/register",
+        &[
+            ("X-Inertia", "true"),
+            ("X-Inertia-Version", ASSET_VERSION),
+            ("Accept", "text/html, application/xhtml+xml"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, 419);
+    assert!(
+        !headers.contains_key("x-inertia"),
+        "a middleware that answers before the Inertia layer is reached hands \
+         its response to nothing inside it; got {headers:?}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
+    assert_eq!(parsed["message"], "CSRF token mismatch.");
+}
+
+// ---------------------------------------------------------------------
 // Headers survive the body swap
 // ---------------------------------------------------------------------
 
@@ -775,7 +910,11 @@ mod locale {
     /// bound translator's catalogs mid-test.
     fn bind_translator_and_share() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        for (locale, ftl) in [("en", "greet = Hello\n"), ("es", "greet = Hola\n")] {
+        for (locale, ftl) in [
+            ("en", "greet = Hello\n"),
+            ("es", "greet = Hola\n"),
+            ("ja", "greet = Konnichiwa\n"),
+        ] {
             let dir = tmp.path().join(locale);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("app.ftl"), ftl).unwrap();
@@ -842,6 +981,37 @@ mod locale {
             "the locale scope is popped before the error page renders, so it \
              falls back to the default - this is the trap the ordering rule \
              exists to avoid; got {body}"
+        );
+    }
+
+    /// The props are only half of it: the document the browser parses has
+    /// to declare the same language. A screen reader picks its voice from
+    /// `<html lang>` and a search engine reads it as the page's language
+    /// signal, so Japanese prose in a document declaring English is wrong
+    /// however good the translation is. suprnova.app carried a middleware
+    /// that spliced the finished HTML to fix this; the shell now follows
+    /// the locale on its own.
+    #[tokio::test]
+    #[serial]
+    async fn the_error_pages_html_shell_declares_the_visitors_language() {
+        let _db = seed_member().await;
+        let _catalogs = bind_translator_and_share();
+        let registry = stack().prepend(LocaleMiddleware::new(localization_config()));
+        let addr = spawn_server(router(), registry, 2).await;
+
+        let mut headers = browser_navigation();
+        headers.push(("Accept-Language", "ja"));
+        let (status, _headers, body) = request(addr, "GET", "/admin/articles", &headers).await;
+
+        assert_eq!(status, 403);
+        assert!(
+            body.contains("<html lang=\"ja\">"),
+            "the error page's shell must declare the visitor's language; got:\n{body}"
+        );
+        assert_eq!(
+            embedded_page_object(&body)["props"]["lang"]["locale"],
+            "ja",
+            "and the props must agree with the attribute; got:\n{body}"
         );
     }
 }
