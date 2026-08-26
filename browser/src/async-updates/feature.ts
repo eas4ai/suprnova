@@ -404,7 +404,10 @@ class AsyncIslandController implements FeatureIslandController {
       envelope: (encoded) => {
         try {
           const disposition = subscription.receive(encoded);
-          if (disposition === "applied" || disposition === "duplicate") {
+          if (
+            (disposition === "applied" || disposition === "duplicate") &&
+            subscription.state() === "current"
+          ) {
             this.#handle?.continuityProved();
           }
           this.#armHeartbeat(this.#heartbeatTimeout());

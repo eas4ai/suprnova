@@ -6,10 +6,11 @@ import {
   AsyncDocumentOwner,
   type AsyncAuthorizationRequest,
 } from "../src/async-updates/feature.js";
-import type {
-  AsyncTransportPorts,
-  DocumentTransportConnectRequest,
-  EventSourcePort,
+import {
+  DocumentConnectionPool,
+  type AsyncTransportPorts,
+  type DocumentTransportConnectRequest,
+  type EventSourcePort,
 } from "../src/async-updates/connections.js";
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
 import type {
@@ -130,6 +131,79 @@ function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegist
 }
 
 describe("async feature lifecycle", () => {
+  it("does not report physical continuity for a duplicate while the logical stream is connecting", async () => {
+    const sources: FakeSource[] = [];
+    const continuityProved = vi.fn();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- captured before the temporary prototype spy and invoked with an explicit pool receiver
+    const originalSubscribe = DocumentConnectionPool.prototype.subscribe;
+    const subscribe = vi
+      .spyOn(DocumentConnectionPool.prototype, "subscribe")
+      .mockImplementation(function (this: DocumentConnectionPool, authorized, sink) {
+        const handle = originalSubscribe.call(this, authorized, sink);
+        return Object.freeze({
+          close: () => {
+            handle.close();
+          },
+          continuityProved: () => {
+            continuityProved();
+            handle.continuityProved();
+          },
+          heartbeatLost: () => {
+            handle.heartbeatLost();
+          },
+        });
+      });
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: { authorize: () => authorization(0n) },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: new FakeTimers().port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    try {
+      owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: root,
+        enqueueFreshRender: () => "queued",
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: "document-duplicate",
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: () => "accepted",
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      sources[0]?.open();
+
+      sources[0]?.emit(envelope(0n, { kind: "heartbeat" }));
+      expect(continuityProved).not.toHaveBeenCalled();
+
+      sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
+      expect(continuityProved).toHaveBeenCalledOnce();
+    } finally {
+      owner.dispose();
+      subscribe.mockRestore();
+    }
+  });
+
   it("applies a complete initial replay from the signed baseline before transport delivery", async () => {
     const sources: FakeSource[] = [];
     const refresh = vi.fn(() => "queued" as const);

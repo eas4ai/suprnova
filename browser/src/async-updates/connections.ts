@@ -154,17 +154,36 @@ function decodeSseRecord(bytes: Uint8Array): string | null {
   return data;
 }
 
-const MAX_PENDING_MEMBERSHIP_CONTROLS = 64;
+const MAX_ACTIVE_SSE_MEMBERSHIP_CONTROLS = 8;
+const MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS = MAX_LOGICAL_SUBSCRIPTIONS * 2;
 
 interface PendingMembershipControl {
   abort: AbortController | null;
+  readonly completion: MembershipControlCompletion;
   settled: boolean;
   timer: number | null;
+}
+
+interface QueuedMembershipControl {
+  readonly operation: "subscribe" | "unsubscribe";
+  readonly subscription: AuthorizedLogicalSubscription;
+}
+
+interface MembershipControlCompletion {
+  settle: ((successful: boolean) => void) | null;
+}
+
+function completeMembershipControl(
+  completion: MembershipControlCompletion,
+  successful: boolean,
+): void {
+  completion.settle?.(successful);
 }
 
 class SseMembershipControls {
   readonly #membership: BrowserAsyncTransportOptions["sseMembership"];
   readonly #pending = new Set<PendingMembershipControl>();
+  readonly #queue: QueuedMembershipControl[] = [];
   readonly #request: DocumentTransportConnectRequest;
   readonly #timeoutMs: number;
   readonly #timers: AsyncTimerPort;
@@ -187,56 +206,88 @@ class SseMembershipControls {
     subscription: AuthorizedLogicalSubscription,
   ): void {
     if (this.#closed) return;
-    if (this.#pending.size >= MAX_PENDING_MEMBERSHIP_CONTROLS) {
+    if (this.#pending.size + this.#queue.length >= MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS) {
       this.#request.failed("authorization_lost");
       return;
     }
-    const control: PendingMembershipControl = {
-      abort: new AbortController(),
-      settled: false,
-      timer: null,
-    };
-    this.#pending.add(control);
-    control.timer = this.#timers.timeout(() => {
-      control.abort?.abort();
-      this.#settle(control, false);
-    }, this.#timeoutMs);
-    let pending: Promise<void> | void;
-    try {
-      const abort = control.abort;
-      if (abort === null) return;
-      pending = this.#membership(operation, subscription, this.#request.key, abort.signal);
-    } catch {
-      this.#settle(control, false);
-      return;
-    }
-    void Promise.resolve(pending).then(
-      () => {
-        this.#settle(control, true);
-      },
-      () => {
-        this.#settle(control, false);
-      },
-    );
+    this.#queue.push({ operation, subscription });
+    this.#pump();
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#queue.splice(0);
     for (const control of [...this.#pending]) {
       control.abort?.abort();
       this.#settle(control, true);
     }
   }
 
+  #start(request: QueuedMembershipControl): void {
+    const completion: MembershipControlCompletion = { settle: null };
+    const control: PendingMembershipControl = {
+      abort: new AbortController(),
+      completion,
+      settled: false,
+      timer: null,
+    };
+    completion.settle = (successful) => {
+      this.#settle(control, successful);
+    };
+    this.#pending.add(control);
+    control.timer = this.#timers.timeout(() => {
+      control.abort?.abort();
+      completeMembershipControl(completion, false);
+    }, this.#timeoutMs);
+    let pending: Promise<void> | void;
+    try {
+      const abort = control.abort;
+      if (abort === null) return;
+      pending = this.#membership(
+        request.operation,
+        request.subscription,
+        this.#request.key,
+        abort.signal,
+      );
+    } catch {
+      completeMembershipControl(completion, false);
+      return;
+    }
+    void Promise.resolve(pending).then(
+      () => {
+        completeMembershipControl(completion, true);
+      },
+      () => {
+        completeMembershipControl(completion, false);
+      },
+    );
+  }
+
+  #pump(): void {
+    while (
+      !this.#closed &&
+      this.#pending.size < MAX_ACTIVE_SSE_MEMBERSHIP_CONTROLS &&
+      this.#queue.length !== 0
+    ) {
+      const request = this.#queue.shift();
+      if (request !== undefined) this.#start(request);
+    }
+  }
+
   #settle(control: PendingMembershipControl, successful: boolean): void {
     if (control.settled) return;
     control.settled = true;
+    control.completion.settle = null;
     if (control.timer !== null) this.#timers.clearTimeout(control.timer);
     control.timer = null;
     control.abort = null;
     this.#pending.delete(control);
-    if (!successful && !this.#closed) this.#request.failed("authorization_lost");
+    if (!successful && !this.#closed) {
+      this.#request.failed("authorization_lost");
+      return;
+    }
+    this.#pump();
   }
 }
 
@@ -589,6 +640,7 @@ interface LogicalMembership {
   active: boolean;
   generation: number;
   provedTransportGeneration: number;
+  recoveryRequestGeneration: number;
 }
 
 interface PhysicalGroup {
@@ -596,6 +648,9 @@ interface PhysicalGroup {
   readonly key: DocumentTransportKey;
   readonly keyValue: string;
   readonly memberships: Map<string, LogicalMembership>;
+  readonly recovering: Map<string, LogicalMembership>;
+  recoveryActive: boolean;
+  recoveryGeneration: number;
   policy: AsyncReconnectPolicy;
   generation: number;
   port: DocumentTransportPort | null;
@@ -603,12 +658,13 @@ interface PhysicalGroup {
   releaseHandshake: VoidFunction | null;
   reconnectAttempt: number;
   reconnectTimer: number | null;
-  state: "idle" | "connecting" | "open" | "closed";
+  state: "idle" | "backoff" | "restoring" | "connecting" | "open" | "closed";
 }
 
 interface ReauthorizationRequest {
   abort: AbortController | null;
   active: boolean;
+  readonly completion: ReauthorizationCompletion;
   generation: number;
   membership: LogicalMembership | null;
   membershipGeneration: number;
@@ -616,6 +672,17 @@ interface ReauthorizationRequest {
   resolve(value: AuthorizedLogicalSubscription | null): void;
   settled: boolean;
   timer: number | null;
+}
+
+interface ReauthorizationCompletion {
+  settle: ((current: AuthorizedLogicalSubscription | null) => void) | null;
+}
+
+function completeReauthorization(
+  completion: ReauthorizationCompletion,
+  current: AuthorizedLogicalSubscription | null,
+): void {
+  completion.settle?.(current);
 }
 
 function normalizedKey(key: DocumentTransportKey): DocumentTransportKey {
@@ -757,11 +824,12 @@ export class DocumentConnectionPool {
       generation: 0,
       group: null,
       provedTransportGeneration: -1,
+      recoveryRequestGeneration: -1,
       sink,
     };
     this.#memberships.set(authorization.subscriptionId, membership);
     try {
-      if (this.#state === "active") this.#attach(membership);
+      if (this.#transportAvailable()) this.#attach(membership);
     } catch (error: unknown) {
       membership.active = false;
       membership.generation += 1;
@@ -777,6 +845,7 @@ export class DocumentConnectionPool {
         if (!membership.active || group?.state !== "open") return;
         membership.provedTransportGeneration = group.generation;
         if (
+          !group.recoveryActive &&
           [...group.memberships.values()].every(
             (candidate) => candidate.provedTransportGeneration === group.generation,
           )
@@ -823,28 +892,23 @@ export class DocumentConnectionPool {
     const generation = ++this.#generation;
     this.#state = "resuming";
     const memberships = [...this.#memberships.values()].filter(({ active }) => active);
-    const resolved = await Promise.all(
-      memberships.map(async (membership) =>
-        Object.freeze({
-          current: await this.#requestReauthorization(membership, generation),
-          membership,
-        }),
-      ),
+    await Promise.all(
+      memberships.map(async (membership) => {
+        const current = await this.#requestReauthorization(membership, generation);
+        if (!this.#resumeCurrent(generation)) return;
+        if (current === null || !this.#acceptReauthorization(membership, current)) {
+          if (membership.active) this.#safeState(membership, "degraded");
+          return;
+        }
+        membership.authorization = current;
+        try {
+          this.#attach(membership);
+        } catch {
+          this.#safeState(membership, "degraded");
+        }
+      }),
     );
-    if (!this.#resumeCurrent(generation)) return;
-    this.#state = "active";
-    for (const { current, membership } of resolved) {
-      if (current === null || !this.#acceptReauthorization(membership, current)) {
-        if (membership.active) this.#safeState(membership, "degraded");
-        continue;
-      }
-      membership.authorization = current;
-      try {
-        this.#attach(membership);
-      } catch {
-        this.#safeState(membership, "degraded");
-      }
-    }
+    if (this.#resumeCurrent(generation)) this.#state = "active";
   }
 
   dispose(): void {
@@ -880,6 +944,9 @@ export class DocumentConnectionPool {
         memberships: new Map(),
         policy: aggregatePolicy([membership.authorization]),
         port: null,
+        recovering: new Map(),
+        recoveryActive: false,
+        recoveryGeneration: 0,
         reconnectAttempt: 0,
         reconnectTimer: null,
         releaseHandshake: null,
@@ -887,17 +954,39 @@ export class DocumentConnectionPool {
       };
       this.#groups.set(encodedKey, group);
     } else {
+      const readySubscriptions = [...group.memberships.values()].map(
+        ({ authorization }) => authorization,
+      );
       const subscriptions = [
-        ...[...group.memberships.values()].map(({ authorization }) => authorization),
+        ...readySubscriptions,
+        ...[...group.recovering.values()].map(({ authorization }) => authorization),
         membership.authorization,
       ];
       try {
-        group.authorization = commonAuthorization(subscriptions);
+        if (group.recoveryActive && readySubscriptions.length === 0) {
+          if (!sameAuthorization(group.authorization, membership.authorization.authorization)) {
+            throw new Error("async_transport_authority_conflict");
+          }
+        } else {
+          group.authorization = commonAuthorization([
+            ...readySubscriptions,
+            membership.authorization,
+          ]);
+        }
         group.policy = aggregatePolicy(subscriptions);
       } catch (error: unknown) {
         this.#retireConflictedGroup(group);
         throw error;
       }
+    }
+    if (group.recoveryActive) {
+      group.recovering.set(membership.authorization.subscriptionId, membership);
+      membership.group = group;
+      this.#safeState(membership, "connecting");
+      if (group.state !== "backoff") {
+        this.#restoreMembership(group, membership, group.recoveryGeneration);
+      }
+      return;
     }
     group.memberships.set(membership.authorization.subscriptionId, membership);
     membership.group = group;
@@ -905,12 +994,18 @@ export class DocumentConnectionPool {
     if (group.state === "open") {
       this.#safeSubscribe(group.port, membership.authorization);
     } else if (group.state === "idle") {
-      this.#connect(group);
+      this.#connect(group, "idle");
     }
   }
 
-  #connect(group: PhysicalGroup): void {
-    if (this.#state !== "active" || group.state !== "idle" || group.memberships.size === 0) return;
+  #connect(group: PhysicalGroup, expectedState: "idle" | "restoring"): void {
+    if (
+      !this.#transportAvailable() ||
+      group.state !== expectedState ||
+      group.memberships.size === 0
+    ) {
+      return;
+    }
     group.state = "connecting";
     group.generation += 1;
     const generation = group.generation;
@@ -989,8 +1084,16 @@ export class DocumentConnectionPool {
       // A failed adapter cannot keep document ownership alive.
     }
     group.port = null;
-    group.state = "idle";
+    group.state = "backoff";
+    group.recoveryActive = true;
+    group.recoveryGeneration += 1;
     for (const membership of group.memberships.values()) {
+      membership.recoveryRequestGeneration = -1;
+      group.recovering.set(membership.authorization.subscriptionId, membership);
+    }
+    group.memberships.clear();
+    for (const membership of group.recovering.values()) {
+      membership.recoveryRequestGeneration = -1;
       this.#safeState(
         membership,
         reason === "authorization_lost" || reason === "protocol_invalid"
@@ -999,7 +1102,7 @@ export class DocumentConnectionPool {
       );
     }
     if (
-      this.#state !== "active" ||
+      !this.#transportAvailable() ||
       reason === "authorization_lost" ||
       reason === "protocol_invalid"
     ) {
@@ -1008,7 +1111,7 @@ export class DocumentConnectionPool {
       }
       return;
     }
-    if (group.memberships.size === 0) return;
+    if (group.recovering.size === 0) return;
     group.reconnectAttempt += 1;
     if (group.reconnectAttempt > group.policy.maximumAttempts) {
       this.#retireConflictedGroup(group);
@@ -1020,8 +1123,12 @@ export class DocumentConnectionPool {
     const delay = Math.floor(validRandom(this.#randomness.number()) * (ceiling + 1));
     group.reconnectTimer = this.#timers.timeout(() => {
       group.reconnectTimer = null;
-      if (this.#state === "active" && group.state === "idle") {
-        void this.#restoreGroup(group, generation);
+      if (this.#transportAvailable() && group.state === "backoff") {
+        group.state = "restoring";
+        const recoveryGeneration = group.recoveryGeneration;
+        for (const membership of group.recovering.values()) {
+          this.#restoreMembership(group, membership, recoveryGeneration);
+        }
       }
     }, delay);
   }
@@ -1035,16 +1142,19 @@ export class DocumentConnectionPool {
     membership.group = null;
     this.#safeState(membership, "closed");
     if (group === null) return;
-    group.memberships.delete(membership.authorization.subscriptionId);
+    const subscriptionId = membership.authorization.subscriptionId;
+    const wasReady = group.memberships.delete(subscriptionId);
+    group.recovering.delete(subscriptionId);
+    if (group.recovering.size === 0) group.recoveryActive = false;
     if (group.memberships.size !== 0) this.#refreshGroupAuthority(group);
-    if (group.state === "open") {
+    if (group.state === "open" && wasReady) {
       try {
-        group.port?.unsubscribe(membership.authorization.subscriptionId);
+        group.port?.unsubscribe(subscriptionId);
       } catch {
         // Logical removal remains final even when adapter cleanup fails.
       }
     }
-    if (group.memberships.size !== 0) return;
+    if (group.memberships.size !== 0 || group.recovering.size !== 0) return;
     this.#closeGroup(group, "subscription_empty");
     this.#groups.delete(group.keyValue);
   }
@@ -1067,44 +1177,85 @@ export class DocumentConnectionPool {
     group.state = "closed";
   }
 
-  async #restoreGroup(group: PhysicalGroup, generation: number): Promise<void> {
-    if (!this.#groupCurrent(group, generation, "idle")) return;
-    const memberships = [...group.memberships.values()].filter(({ active }) => active);
-    const resolved = await Promise.all(
-      memberships.map(async (membership) =>
-        Object.freeze({
-          current: await this.#requestReauthorization(membership, this.#generation),
-          membership,
-        }),
-      ),
-    );
-    if (!this.#groupCurrent(group, generation, "idle")) return;
-    for (const { current, membership } of resolved) {
+  #restoreMembership(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    recoveryGeneration: number,
+  ): void {
+    if (
+      !this.#transportAvailable() ||
+      !group.recoveryActive ||
+      group.recoveryGeneration !== recoveryGeneration ||
+      group.recovering.get(membership.authorization.subscriptionId) !== membership ||
+      membership.recoveryRequestGeneration === recoveryGeneration
+    ) {
+      return;
+    }
+    membership.recoveryRequestGeneration = recoveryGeneration;
+    const poolGeneration = this.#generation;
+    void this.#requestReauthorization(membership, poolGeneration).then((current) => {
+      if (!this.#recoveryCurrent(group, membership, recoveryGeneration)) return;
       if (
         current === null ||
-        membership.group !== group ||
         !this.#acceptReauthorization(membership, current) ||
         !sameKey(current.document, group.key)
       ) {
-        group.memberships.delete(membership.authorization.subscriptionId);
+        group.recovering.delete(membership.authorization.subscriptionId);
         membership.group = null;
         if (membership.active) this.#safeState(membership, "degraded");
-        continue;
+        this.#finishRecovery(group);
+        return;
       }
+      const subscriptions = [
+        ...[...group.memberships.values()].map(({ authorization }) => authorization),
+        current,
+      ];
+      let authorization: AsyncTransportAuthorization;
+      let policy: AsyncReconnectPolicy;
+      try {
+        authorization = commonAuthorization(subscriptions);
+        policy = aggregatePolicy(subscriptions);
+      } catch {
+        this.#retireConflictedGroup(group);
+        return;
+      }
+      group.recovering.delete(membership.authorization.subscriptionId);
       membership.authorization = current;
-    }
-    if (group.memberships.size === 0) {
-      this.#closeGroup(group, "subscription_empty");
-      this.#groups.delete(group.keyValue);
-      return;
-    }
-    try {
-      this.#refreshGroupAuthority(group);
-    } catch {
-      this.#retireConflictedGroup(group);
-      return;
-    }
-    this.#connect(group);
+      membership.provedTransportGeneration = -1;
+      group.memberships.set(current.subscriptionId, membership);
+      group.authorization = authorization;
+      group.policy = policy;
+      this.#safeState(membership, "connecting");
+      if (group.state === "restoring") this.#connect(group, "restoring");
+      else if (group.state === "open") this.#safeSubscribe(group.port, current);
+      this.#finishRecovery(group);
+    });
+  }
+
+  #recoveryCurrent(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    recoveryGeneration: number,
+  ): boolean {
+    return (
+      this.#transportAvailable() &&
+      this.#groups.get(group.keyValue) === group &&
+      group.recoveryActive &&
+      group.recoveryGeneration === recoveryGeneration &&
+      group.state !== "backoff" &&
+      group.state !== "closed" &&
+      membership.active &&
+      membership.group === group &&
+      group.recovering.get(membership.authorization.subscriptionId) === membership
+    );
+  }
+
+  #finishRecovery(group: PhysicalGroup): void {
+    if (group.recovering.size !== 0) return;
+    group.recoveryActive = false;
+    if (group.memberships.size !== 0) return;
+    this.#closeGroup(group, "subscription_empty");
+    this.#groups.delete(group.keyValue);
   }
 
   #acceptReauthorization(
@@ -1123,9 +1274,11 @@ export class DocumentConnectionPool {
     generation: number,
   ): Promise<AuthorizedLogicalSubscription | null> {
     return new Promise((resolve) => {
+      const completion: ReauthorizationCompletion = { settle: null };
       const request: ReauthorizationRequest = {
         abort: null,
         active: false,
+        completion,
         generation,
         membership,
         membershipGeneration: ++membership.generation,
@@ -1133,6 +1286,18 @@ export class DocumentConnectionPool {
         resolve,
         settled: false,
         timer: null,
+      };
+      completion.settle = (current) => {
+        const activeMembership = request.membership;
+        this.#settleReauthorization(
+          request,
+          activeMembership !== null &&
+            activeMembership.active &&
+            activeMembership.generation === request.membershipGeneration &&
+            this.#generation === request.generation
+            ? current
+            : null,
+        );
       };
       this.#reauthorizationQueue.push(request);
       this.#pumpReauthorizations();
@@ -1172,21 +1337,13 @@ export class DocumentConnectionPool {
         this.#settleReauthorization(request, null);
         continue;
       }
+      const completion = request.completion;
       void Promise.resolve(pending).then(
         (current) => {
-          const activeMembership = request.membership;
-          this.#settleReauthorization(
-            request,
-            activeMembership !== null &&
-              activeMembership.active &&
-              activeMembership.generation === request.membershipGeneration &&
-              this.#generation === request.generation
-              ? current
-              : null,
-          );
+          completeReauthorization(completion, current);
         },
         () => {
-          this.#settleReauthorization(request, null);
+          completeReauthorization(completion, null);
         },
       );
     }
@@ -1198,6 +1355,7 @@ export class DocumentConnectionPool {
   ): void {
     if (request.settled) return;
     request.settled = true;
+    request.completion.settle = null;
     if (request.timer !== null) this.#timers.clearTimeout(request.timer);
     request.timer = null;
     request.abort = null;
@@ -1226,11 +1384,14 @@ export class DocumentConnectionPool {
   #retireConflictedGroup(group: PhysicalGroup): void {
     this.#closeGroup(group, "transport_replaced");
     this.#groups.delete(group.keyValue);
-    for (const membership of group.memberships.values()) {
+    const memberships = new Set([...group.memberships.values(), ...group.recovering.values()]);
+    for (const membership of memberships) {
       membership.group = null;
       this.#safeState(membership, "degraded");
     }
     group.memberships.clear();
+    group.recovering.clear();
+    group.recoveryActive = false;
   }
 
   #releaseHandshake(group: PhysicalGroup): void {
@@ -1241,11 +1402,15 @@ export class DocumentConnectionPool {
 
   #groupCurrent(group: PhysicalGroup, generation: number, state?: PhysicalGroup["state"]): boolean {
     return (
-      this.#state === "active" &&
+      this.#transportAvailable() &&
       this.#groups.get(group.keyValue) === group &&
       group.generation === generation &&
       (state === undefined || group.state === state)
     );
+  }
+
+  #transportAvailable(): boolean {
+    return this.#state === "active" || this.#state === "resuming";
   }
 
   #safeState(membership: LogicalMembership, state: SubscriptionState): void {

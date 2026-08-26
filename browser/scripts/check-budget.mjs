@@ -10,6 +10,7 @@ import { buildRuntimeAssets } from "./build.mjs";
 
 const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v1.json");
+const candidatePath = resolve(browserRoot, "benchmarks/local/latest.json");
 const COMPATIBLE_CORE = ">=0.1.0 <0.2.0";
 const ROLE_CEILINGS = new Map([
   ["core-esm", null],
@@ -63,6 +64,49 @@ export function evaluateArtifactBudgets(assets) {
     }
   }
   return Object.freeze({ lines: Object.freeze(lines), issues: Object.freeze(issues) });
+}
+
+export function evaluateBindingEvidence(
+  baseline,
+  candidate,
+  runtimeArtifact,
+  evaluate,
+  release = false,
+) {
+  if (candidate === null) throw new Error("browser_budget_candidate_missing");
+  if (Date.parse(candidate.recordedAt) <= Date.parse(baseline.recordedAt)) {
+    throw new Error("browser_budget_candidate_stale");
+  }
+  if (
+    candidate.artifact.sha256 !== runtimeArtifact.sha256 ||
+    candidate.artifact.brotliBytes !== runtimeArtifact.brotliBytes
+  ) {
+    throw new Error("browser_budget_candidate_artifact_mismatch");
+  }
+  if (candidate.methodology.independentRuns < 3) {
+    throw new Error("browser_budget_candidate_runs");
+  }
+  return evaluate(candidate, baseline, { release });
+}
+
+async function boundedBenchmarkJson(path, missingAllowed) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if (missingAllowed && error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw new Error("browser_budget_evidence_unreadable", { cause: error });
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1_048_576) {
+    throw new Error("browser_budget_evidence_unreadable");
+  }
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("browser_budget_evidence_invalid");
+  }
 }
 
 async function checkBudgets(release) {
@@ -125,14 +169,6 @@ async function checkBudgets(release) {
   const runtimeSha256 = createHash("sha256").update(runtime).digest("hex");
   const brotliBytes = runtimeAsset.brotliBytes;
 
-  const baselineMetadata = await lstat(baselinePath);
-  if (
-    !baselineMetadata.isFile() ||
-    baselineMetadata.isSymbolicLink() ||
-    baselineMetadata.size > 1_048_576
-  ) {
-    throw new Error("browser budget baseline invalid");
-  }
   const compiled = await build({
     absWorkingDir: browserRoot,
     bundle: true,
@@ -150,21 +186,30 @@ async function checkBudgets(release) {
     `data:text/javascript;base64,${Buffer.from(schemaOutput.contents).toString("base64")}`
   );
   const baseline = schema.validateBrowserBudgetResult(
-    JSON.parse(await readFile(baselinePath, "utf8")),
+    await boundedBenchmarkJson(baselinePath, false),
   );
-  const evaluation = schema.evaluateBrowserBudget(baseline, undefined, { release });
+  const candidateValue = await boundedBenchmarkJson(candidatePath, true);
+  const candidate =
+    candidateValue === null ? null : schema.validateBrowserBudgetResult(candidateValue);
+  const evaluation = evaluateBindingEvidence(
+    baseline,
+    candidate,
+    { brotliBytes, sha256: runtimeSha256 },
+    (candidate, baseline, options) => schema.evaluateBrowserBudget(candidate, baseline, options),
+    release,
+  );
   if (evaluation.status === "failed") {
     throw new Error(`browser budget failed: ${evaluation.codes.join(",")}`);
   }
   if (evaluation.status === "unqualified") {
     process.stdout.write(
-      `browser budget unqualified classification=${baseline.classification} codes=${evaluation.codes.join(",")}\n`,
+      `browser budget unqualified classification=${candidate.classification} codes=${evaluation.codes.join(",")}\n`,
     );
     process.exitCode = 2;
   }
 
   console.log(
-    `budget ok control_overhead=${controlOverhead} snapshot_overhead=${snapshotOverhead} core_brotli=${brotliBytes} browser_baseline=${baseline.classification} baseline_artifact=${baseline.artifact.sha256 === runtimeSha256 && baseline.artifact.brotliBytes === brotliBytes ? "current" : "prior"}`,
+    `budget ok control_overhead=${controlOverhead} snapshot_overhead=${snapshotOverhead} core_brotli=${brotliBytes} browser_candidate=${candidate.classification} baseline_artifact=prior`,
   );
 }
 

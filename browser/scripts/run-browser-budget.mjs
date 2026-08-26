@@ -37,7 +37,7 @@ export function argumentsFrom(argv) {
     idleMs: 30_000,
     output: DEFAULT_OUTPUT,
     release: false,
-    runs: 1,
+    runs: 3,
     samples: 30,
     warmups: 5,
   };

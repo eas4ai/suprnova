@@ -379,7 +379,7 @@ describe("browser SSE authorization adapters", () => {
     await expect(failed).resolves.toBe("protocol_invalid");
   });
 
-  it("bounds and cancels noncooperative SSE membership controls", () => {
+  it("bounds active noncooperative SSE controls and drops queued ownership on close", () => {
     const timers = new FakeTimers();
     const signals: AbortSignal[] = [];
     const failed = vi.fn();
@@ -401,8 +401,8 @@ describe("browser SSE authorization adapters", () => {
     for (let index = 0; index < 65; index += 1) {
       port.subscribe(authorized(index));
     }
-    expect(signals).toHaveLength(64);
-    expect(failed).toHaveBeenCalledWith("authorization_lost");
+    expect(signals).toHaveLength(8);
+    expect(failed).not.toHaveBeenCalled();
 
     port.close("page_suspended");
     expect(signals.every(({ aborted }) => aborted)).toBe(true);
