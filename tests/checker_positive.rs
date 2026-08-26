@@ -198,6 +198,77 @@ fn iteration_four_directive_roles_and_modifiers_are_statically_proved() {
     assert!(report.is_proved(), "{:?}", report.diagnostics());
 }
 
+#[test]
+fn every_legal_v4_freshness_combination_is_proved_by_the_real_checker() {
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(fixture_directory(FixtureVersion::V4).join("directive-grammar.json"))
+            .expect("directive fixture is readable"),
+    )
+    .expect("directive fixture is valid JSON");
+
+    for combination in fixture["freshness_combinations"]
+        .as_array()
+        .expect("freshness combinations are an array")
+    {
+        if combination["result"] == "directive_conflict" {
+            continue;
+        }
+        let source = freshness_source(combination);
+        let registry = registry();
+        let catalog = TemplateCatalog::new(vec![
+            (view(ROOT_VIEW), source.as_str()),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html"),
+            ),
+        ])
+        .expect("template catalog");
+        let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&root_name());
+
+        assert!(
+            report.is_proved(),
+            "combination {combination:?} was not proved: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
+fn freshness_combinations_are_isolated_per_nested_island_instance() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"<section live:component="tests.child" live:key="push" live:stream.push-only="orders"></section>
+               <section live:component="tests.child" live:key="poll" live:poll></section>"#,
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+}
+
+fn freshness_source(combination: &Value) -> String {
+    let poll = combination["poll"].as_bool().expect("poll flag");
+    let stream = combination["stream"].as_str().expect("stream mode");
+    let stream_attribute = match stream {
+        "absent" => "",
+        "default" => r#" live:stream="orders""#,
+        "hybrid" => r#" live:stream.hybrid="orders""#,
+        "push-only" => r#" live:stream.push-only="orders""#,
+        other => panic!("unexpected stream mode {other}"),
+    };
+    let poll_attribute = if poll { " live:poll" } else { "" };
+    format!("<section{stream_attribute}{poll_attribute}></section>")
+}
+
 fn fixture_strings(value: &Value) -> Vec<&str> {
     value
         .as_array()

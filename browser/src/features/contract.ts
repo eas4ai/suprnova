@@ -14,6 +14,7 @@ import {
   RUNTIME_FEATURE_DRIVER_CORE_RANGE,
   RUNTIME_FEATURE_DRIVER_FORMAT,
   type FreshRenderDisposition,
+  type FreshRenderCompletionObserver,
   type FreshRenderReason,
   type RegisteredBrowserEventCapability,
   type RegisteredBrowserEventDispatch,
@@ -28,6 +29,8 @@ import {
 } from "./host.js";
 
 export type {
+  FreshRenderCompletion,
+  FreshRenderCompletionObserver,
   FreshRenderDisposition,
   FreshRenderReason,
   RegisteredBrowserEventCapability,
@@ -67,7 +70,10 @@ export interface RuntimeFeatureIslandPort {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
-  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
+  enqueueFreshRender(
+    reason: FreshRenderReason,
+    completion?: FreshRenderCompletionObserver,
+  ): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
   proposeUploadHandle(
     field: string,
@@ -443,7 +449,13 @@ function defineFeature(
           event: RegisteredBrowserEventDispatch,
         ) => port.dispatchRegisteredEvent(capability, event),
         element: port.element,
-        enqueueFreshRender: (reason: FreshRenderReason) => port.enqueueFreshRender(reason),
+        enqueueFreshRender: (
+          reason: FreshRenderReason,
+          completion?: FreshRenderCompletionObserver,
+        ) =>
+          completion === undefined
+            ? port.enqueueFreshRender(reason)
+            : port.enqueueFreshRender(reason, completion),
         identity: port.identity,
         onDispose: (dispose: VoidFunction) => {
           own(disposers, dispose);

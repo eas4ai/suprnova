@@ -2,9 +2,11 @@
 
 mod checker_support;
 
+use serde_json::Value;
 use suprnova_live::checker::{
     CheckerLimits, DiagnosticCode, DiagnosticSeverity, TemplateCatalog, TemplateChecker,
 };
+use suprnova_live::conformance::{FixtureVersion, fixture_directory};
 
 use checker_support::{CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
 
@@ -164,7 +166,7 @@ fn iteration_004_roles_modifiers_and_conflicts_fail_closed() {
     for source in [
         r#"<button live:upload.stream="avatar">Unsupported role</button>"#,
         r#"<button live:upload.cancel.retry="avatar">Multiple roles</button>"#,
-        r#"<section live:poll.cancel="refresh"></section>"#,
+        r#"<section live:poll.cancel></section>"#,
         r#"<section live:stream.visible="orders"></section>"#,
         r#"<input live:upload="avatar" live:model.blur="query">"#,
     ] {
@@ -197,9 +199,9 @@ fn iteration_004_progress_rejects_endpoint_values() {
 fn iteration_004_modifier_groups_fail_closed() {
     for source in [
         r#"<section live:stream.push-only.hybrid="orders"></section>"#,
-        r#"<section live:poll.visible.always="refresh"></section>"#,
-        r#"<section live:poll.5s.30s="refresh"></section>"#,
-        r#"<section live:poll.visible.always.5s.30s="refresh"></section>"#,
+        r#"<section live:poll.visible.always></section>"#,
+        r#"<section live:poll.5s.30s></section>"#,
+        r#"<section live:poll.visible.always.5s.30s></section>"#,
     ] {
         let report = check(source);
         assert!(
@@ -211,6 +213,70 @@ fn iteration_004_modifier_groups_fail_closed() {
             report.diagnostics()
         );
     }
+}
+
+#[test]
+fn every_conflicting_v4_freshness_combination_is_rejected_by_the_real_checker() {
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(fixture_directory(FixtureVersion::V4).join("directive-grammar.json"))
+            .expect("directive fixture is readable"),
+    )
+    .expect("directive fixture is valid JSON");
+
+    for combination in fixture["freshness_combinations"]
+        .as_array()
+        .expect("freshness combinations are an array")
+    {
+        if combination["result"] != "directive_conflict" {
+            continue;
+        }
+        let poll = combination["poll"].as_bool().expect("poll flag");
+        let stream = combination["stream"].as_str().expect("stream mode");
+        let stream_attribute = match stream {
+            "absent" => "",
+            "default" => r#" live:stream="orders""#,
+            "hybrid" => r#" live:stream.hybrid="orders""#,
+            "push-only" => r#" live:stream.push-only="orders""#,
+            other => panic!("unexpected stream mode {other}"),
+        };
+        let poll_attribute = if poll { " live:poll" } else { "" };
+        let source = format!("<section{stream_attribute}{poll_attribute}></section>");
+        let registry = registry();
+        let catalog = TemplateCatalog::new(vec![
+            (view(ROOT_VIEW), source.as_str()),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html"),
+            ),
+        ])
+        .expect("template catalog");
+        let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&root_name());
+
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+            "combination {combination:?} was not rejected: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
+fn freshness_combinations_are_enforced_across_the_whole_island() {
+    let report =
+        check(r#"<section live:stream.push-only="orders"></section><section live:poll></section>"#);
+
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+        "cross-element island conflict was not rejected: {:?}",
+        report.diagnostics()
+    );
 }
 
 #[test]

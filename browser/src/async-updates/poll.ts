@@ -1,4 +1,4 @@
-import type { FreshRenderDisposition } from "../features/host.js";
+import type { FreshRenderCompletionObserver, FreshRenderDisposition } from "../features/host.js";
 import { freshnessCombination, type FreshnessStreamMode } from "../generated/directive-contract.js";
 import type { AsyncRandomness, AsyncTimerPort, PollFallbackPolicy } from "./types.js";
 
@@ -21,11 +21,15 @@ export interface PollEnvironment {
   subscribe(listener: VoidFunction): VoidFunction;
 }
 
-export type PollStatus = "polling" | "current" | "stale" | "suspended" | "closed";
+export type PollStatus = "current" | "degraded" | "polling" | "offline" | "suspended" | "closed";
 
 export interface PollTimerOptions {
-  readonly enqueueFreshRender: (reason: "poll") => FreshRenderDisposition;
+  readonly enqueueFreshRender: (
+    reason: "poll",
+    completion: FreshRenderCompletionObserver,
+  ) => FreshRenderDisposition;
   readonly environment: PollEnvironment;
+  readonly observe?: ((state: PollStatus) => void) | undefined;
   readonly policy: PollPolicy;
   readonly randomness: AsyncRandomness;
   readonly timers: AsyncTimerPort;
@@ -129,10 +133,14 @@ export class PollTimer {
   readonly #timers: AsyncTimerPort;
   #environmentDisposer: VoidFunction | null = null;
   #failures = 0;
+  #generation = 0;
   #handle: number | null = null;
+  readonly #observe: ((state: PollStatus) => void) | undefined;
+  #observedState: PollStatus | null = null;
   #policy: PollPolicy;
+  #requestPending = false;
   #started = false;
-  #state: PollStatus = "stale";
+  #state: PollStatus = "degraded";
   #suspended = false;
   #continuityCurrent = false;
 
@@ -140,6 +148,7 @@ export class PollTimer {
     if (!validPolicy(options.policy)) throw new Error("poll_policy_invalid");
     this.#enqueueFreshRender = options.enqueueFreshRender;
     this.#environment = options.environment;
+    this.#observe = options.observe;
     this.#policy = options.policy;
     this.#randomness = options.randomness;
     this.#timers = options.timers;
@@ -151,6 +160,7 @@ export class PollTimer {
     this.#environmentDisposer = this.#environment.subscribe(() => {
       this.#environmentChanged();
     });
+    this.#emitState();
     if (this.#policy.mode === "push_only") return;
     if (this.#policy.initial === "immediate" && this.#eligible()) this.#tick();
     else this.#arm(false);
@@ -165,10 +175,11 @@ export class PollTimer {
     this.#continuityCurrent = state === "current";
     if (this.#continuityCurrent) {
       this.#clear();
-      this.#state = "current";
+      this.#fenceRequest();
+      this.#setState("current");
       return;
     }
-    this.#state = "stale";
+    this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
     if (this.#policy.mode === "hybrid" && this.#started && !this.#suspended) this.#arm(false);
   }
 
@@ -177,6 +188,7 @@ export class PollTimer {
     if (this.#state === "closed") return;
     this.#policy = policy;
     this.#clear();
+    this.#fenceRequest();
     if (this.#started && !this.#suspended && this.#shouldPoll()) this.#arm(false);
   }
 
@@ -184,22 +196,26 @@ export class PollTimer {
     if (this.#state === "closed" || this.#suspended) return;
     this.#suspended = true;
     this.#clear();
-    this.#state = "suspended";
+    this.#fenceRequest();
+    this.#setState("suspended");
   }
 
   resume(): void {
     if (this.#state === "closed" || !this.#suspended) return;
     this.#suspended = false;
-    this.#state = this.#continuityCurrent ? "current" : "stale";
+    this.#setState(
+      this.#continuityCurrent ? "current" : this.#environment.isOnline() ? "degraded" : "offline",
+    );
     if (this.#shouldPoll()) this.#arm(false);
   }
 
   dispose(): void {
     if (this.#state === "closed") return;
     this.#clear();
+    this.#fenceRequest();
     this.#environmentDisposer?.();
     this.#environmentDisposer = null;
-    this.#state = "closed";
+    this.#setState("closed");
   }
 
   #environmentChanged(): void {
@@ -207,7 +223,9 @@ export class PollTimer {
       return;
     }
     this.#clear();
-    if (!this.#eligible()) this.#state = "stale";
+    if (!this.#environment.isOnline()) this.#setState("offline");
+    else if (!this.#eligible()) this.#setState("degraded");
+    else if (this.#state === "offline") this.#setState("degraded");
     this.#arm(!this.#eligible());
   }
 
@@ -251,7 +269,8 @@ export class PollTimer {
       this.#handle !== null ||
       !this.#shouldPoll() ||
       this.#state === "closed" ||
-      this.#suspended
+      this.#suspended ||
+      this.#requestPending
     ) {
       return;
     }
@@ -269,25 +288,81 @@ export class PollTimer {
   }
 
   #tick(): void {
-    if (!this.#shouldPoll() || this.#state === "closed" || this.#suspended) return;
+    if (
+      !this.#shouldPoll() ||
+      this.#state === "closed" ||
+      this.#suspended ||
+      this.#requestPending
+    ) {
+      return;
+    }
     if (!this.#eligible()) {
-      this.#state = "stale";
+      this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
       this.#arm(true);
       return;
     }
+    const generation = ++this.#generation;
+    this.#requestPending = true;
+    this.#setState("polling");
     try {
-      const disposition = this.#enqueueFreshRender("poll");
+      const disposition = this.#enqueueFreshRender("poll", (completion) => {
+        this.#complete(generation, completion);
+      });
       if (disposition === "retired") {
-        this.dispose();
+        this.#complete(generation, "retired");
         return;
       }
-      this.#failures = 0;
-      this.#state = this.#policy.mode === "poll_only" ? "polling" : "stale";
-      this.#arm(false);
     } catch {
+      if (!this.#requestCurrent(generation)) return;
+      this.#requestPending = false;
       this.#failures += 1;
-      this.#state = "stale";
+      this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
       this.#arm(true);
+    }
+  }
+
+  #complete(generation: number, completion: Parameters<FreshRenderCompletionObserver>[0]): void {
+    if (!this.#requestCurrent(generation) || this.#state === "closed") {
+      return;
+    }
+    this.#requestPending = false;
+    if (completion === "retired") {
+      this.dispose();
+      return;
+    }
+    if (completion === "succeeded") {
+      this.#failures = 0;
+      this.#setState("current");
+      this.#arm(false);
+      return;
+    }
+    this.#failures += 1;
+    this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
+    this.#arm(true);
+  }
+
+  #fenceRequest(): void {
+    this.#generation += 1;
+    this.#requestPending = false;
+  }
+
+  #requestCurrent(generation: number): boolean {
+    return this.#generation === generation && this.#requestPending;
+  }
+
+  #setState(state: PollStatus): void {
+    if (this.#state === state) return;
+    this.#state = state;
+    this.#emitState();
+  }
+
+  #emitState(): void {
+    if (this.#observedState === this.#state) return;
+    this.#observedState = this.#state;
+    try {
+      this.#observe?.(this.#state);
+    } catch {
+      // A semantic observer cannot affect freshness authority or scheduling.
     }
   }
 }

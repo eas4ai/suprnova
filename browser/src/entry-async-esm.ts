@@ -12,6 +12,8 @@ export type {
   AsyncAuthorizationRequest,
   AsyncAuthorizationResult,
   AsyncFeatureOptions,
+  AsyncFreshnessObservation,
+  AsyncFreshnessObserver,
 } from "./async-updates/feature.js";
 export type {
   AsyncTransportPorts,

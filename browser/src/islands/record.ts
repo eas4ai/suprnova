@@ -3,7 +3,12 @@ import { createFreshRenderIntent, type ServerIntent } from "../scheduler/intent.
 import { FIFO_POLICY } from "../scheduler/policy.js";
 import { IslandScheduler } from "../scheduler/scheduler.js";
 import type { SchedulerPolicy } from "../scheduler/types.js";
-import type { FreshRenderDisposition, FreshRenderReason } from "../features/host.js";
+import type {
+  FreshRenderCompletion,
+  FreshRenderCompletionObserver,
+  FreshRenderDisposition,
+  FreshRenderReason,
+} from "../features/host.js";
 
 const MAX_DISPOSERS = 64;
 const FEATURE_REFRESH_POLICY = Object.freeze({
@@ -81,9 +86,28 @@ export class IslandRecord {
     return accepted;
   }
 
-  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition {
-    if (this.#disposed) return "retired";
+  enqueueFreshRender(
+    reason: FreshRenderReason,
+    completion?: FreshRenderCompletionObserver,
+  ): FreshRenderDisposition {
+    if (this.#disposed) {
+      notifyFreshRenderCompletion(completion, "retired");
+      return "retired";
+    }
     const intent = createFreshRenderIntent(this, reason);
+    if (completion !== undefined) {
+      intent.onFinish((finish) => {
+        const result: FreshRenderCompletion =
+          finish === "accepted"
+            ? "succeeded"
+            : finish === "retired"
+              ? "retired"
+              : finish === "canceled"
+                ? "canceled"
+                : "failed";
+        notifyFreshRenderCompletion(completion, result);
+      });
+    }
     const result = this.scheduler.schedule(intent, FEATURE_REFRESH_POLICY);
     if (result.disposition !== "accepted") {
       return result.disposition === "retired" ? "retired" : "coalesced";
@@ -117,5 +141,17 @@ export class IslandRecord {
     }
     this.#disposers.length = 0;
     this.element.setAttribute(ISLAND_STATUS_ATTRIBUTE, "disconnected");
+  }
+}
+
+function notifyFreshRenderCompletion(
+  observer: FreshRenderCompletionObserver | undefined,
+  completion: FreshRenderCompletion,
+): void {
+  if (observer === undefined) return;
+  try {
+    observer(completion);
+  } catch {
+    // Completion presentation cannot rewrite scheduler authority.
   }
 }

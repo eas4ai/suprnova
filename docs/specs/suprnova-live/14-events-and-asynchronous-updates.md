@@ -129,6 +129,9 @@ Acceptance criteria:
 - Interval limits, jitter, visibility behavior, immediate/initial behavior, and
   fresh-render target are explicit. Polling never names or invokes a Live action.
 - Poll requests enter the island scheduler and never overlap unsafely by default.
+- Poll success and failure backoff follow actual fresh-render HTTP, protocol,
+  recovery, and application completion from that scheduler intent. Admission or
+  coalescing alone never resets failure state.
 - Polling stops when its scope is removed or unauthorized.
 - Server cache and conditional mechanisms may avoid unchanged render work.
 - An application can expose stale/freshness status when polling is material.
@@ -138,6 +141,14 @@ Acceptance criteria:
 - The signed subscription descriptor supplies the default hybrid fallback
   interval. A legal `live:poll` on the same island may override it; `push-only`
   conflicts with `live:poll`.
+- Exact membership acknowledgment and validated replay or authoritative-no-tail
+  proof establish continuity before an immediate hybrid timer can start. A
+  current initial membership therefore emits no speculative refresh; late or
+  replaced proofs remain generation-fenced.
+- One optional configured observer receives immutable island identity plus the
+  closed `current`, `degraded`, `polling`, `offline`, `suspended`, or `closed`
+  semantic freshness state only when it changes. It is presentation/accessibility
+  input, not mutable authority or an unbounded event subscription surface.
 
 UX flow:
 
@@ -475,6 +486,11 @@ Acceptance criteria:
   reconnecting, and closed; reconnection alone never changes degraded to
   current.
 - Duplicate connections and subscriptions are detected after browser restore.
+- If persisted-page restoration cannot reauthorize a previously committed
+  hybrid membership, the old native socket remains closed and the last committed
+  signed poll policy resumes once in degraded mode with normal jitter and no
+  catch-up burst. Push-only exposes degraded state without polling; poll-only
+  retains its independent lifecycle.
 - Connection state is accessible but not noisy for features where it is
   immaterial.
 - Global outages do not cause synchronized reconnect storms.
@@ -496,6 +512,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Hardened Task 7 around proof and completion truth: the generated
+  v4 freshness table is now enforced by the real island-level Rust checker;
+  replay/no-tail continuity is committed before an immediate hybrid timer;
+  polling backoff observes the existing scheduler intent's actual terminal
+  result; failed persisted-page reauthorization resumes the last committed
+  hybrid fallback without socket reuse; and one immutable bounded freshness
+  observer exposes semantic state without authority.
 - 2026-08-26 -- Moved each authorization execution deadline after admission to
   the shared document scheduler. Initial and committed-recovery sources now
   receive alternating admission when both are pending, total admitted work

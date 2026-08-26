@@ -44,6 +44,10 @@ export type { RuntimeCallContext, RuntimeCallRegistration } from "./extensions/c
 export type {
   FeatureDocumentController,
   FeatureIslandController,
+  FreshRenderCompletion,
+  FreshRenderCompletionObserver,
+  FreshRenderDisposition,
+  FreshRenderReason,
   RuntimeFeature,
   RuntimeFeatureDocumentContext,
   RuntimeFeatureIslandPort,

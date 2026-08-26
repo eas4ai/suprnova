@@ -146,11 +146,240 @@ function ownership(root: Element): RuntimeFeatureDirectiveOwnership {
   });
 }
 
+function immediateHybridOwnership(root: Element): readonly RuntimeFeatureDirectiveOwnership[] {
+  return Object.freeze([
+    ownership(root),
+    Object.freeze({
+      attributeName: "live:poll.immediate",
+      directive: Object.freeze({
+        capability: "async@1" as const,
+        modifiers: Object.freeze(["immediate"]),
+        name: "poll",
+        ok: true as const,
+        role: null,
+        value: "",
+      }),
+      element: root,
+    }),
+  ]);
+}
+
+function pushOnlyOwnership(root: Element): RuntimeFeatureDirectiveOwnership {
+  return Object.freeze({
+    attributeName: "live:stream.push-only",
+    directive: Object.freeze({
+      capability: "async@1" as const,
+      modifiers: Object.freeze(["push-only"]),
+      name: "stream",
+      ok: true as const,
+      role: null,
+      value: "orders",
+    }),
+    element: root,
+  });
+}
+
 function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]> {
   return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
 }
 
 describe("async feature lifecycle", () => {
+  it("proves exact no-tail continuity before an immediate hybrid timer can refresh", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () =>
+            Object.freeze({
+              replay: Object.freeze([]),
+              subscription: authorization(0n, {
+                fallbackPoll: Object.freeze({
+                  initial: "immediate" as const,
+                  intervalMs: 30_000,
+                  jitterRatio: 0.2,
+                  visibility: "visible" as const,
+                }),
+              }),
+            }),
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-immediate-no-tail",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => immediateHybridOwnership(root),
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(refresh).not.toHaveBeenCalled();
+    sources[0]?.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      false,
+    );
+    owner.dispose();
+  });
+
+  it("falls back from a failed pageshow reauthorization without reusing the old socket", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    let authorizations = 0;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () => {
+            authorizations += 1;
+            if (authorizations === 2) return Promise.reject(new Error("reauthorization_failed"));
+            return Object.freeze({ replay: Object.freeze([]), subscription: authorization(0n) });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-reauthorization-fallback",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    owner.suspend();
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+    await owner.resume();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(sources).toHaveLength(1);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(
+      [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 33_000),
+    ).toHaveLength(1);
+    timers.fire(33_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    owner.dispose();
+  });
+
+  it("observes push-only degradation publicly without creating fallback polling", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const refresh = vi.fn(() => "queued" as const);
+    const freshness: string[] = [];
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () =>
+            Object.freeze({ replay: Object.freeze([]), subscription: authorization(0n) }),
+        },
+        clock: { now: () => 100 },
+        observeFreshness: ({ state }) => freshness.push(state),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-push-only-freshness",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [pushOnlyOwnership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(freshness).toEqual(["current"]);
+    sources[0]?.emit(envelope(2n, { kind: "heartbeat" }));
+    expect(freshness).toEqual(["current", "degraded"]);
+    expect(refresh).not.toHaveBeenCalled();
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      false,
+    );
+    owner.dispose();
+    expect(freshness[freshness.length - 1]).toBe("closed");
+  });
+
   it("starts descriptor-default hybrid polling only after continuity is lost", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
@@ -206,7 +435,7 @@ describe("async feature lifecycle", () => {
     );
     timers.fire(33_000);
     expect(refresh).toHaveBeenCalledOnce();
-    expect(refresh).toHaveBeenCalledWith("poll");
+    expect(refresh).toHaveBeenCalledWith("poll", expect.any(Function));
     owner.dispose();
   });
 
@@ -1131,14 +1360,18 @@ describe("async feature lifecycle", () => {
       await resumed;
       await Promise.resolve();
       expect(signals[attempt]?.aborted).toBe(true);
-      expect(timers.pending.size).toBe(0);
+      expect(
+        [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 33_000),
+      ).toHaveLength(1);
     }
 
     expect(late).toHaveLength(3);
     late[0]?.(authorization(0n));
     for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
     expect(sources).toHaveLength(1);
-    expect(timers.pending.size).toBe(0);
+    expect(
+      [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 33_000),
+    ).toHaveLength(1);
     expect(diagnose).not.toHaveBeenCalled();
 
     owner.dispose();

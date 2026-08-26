@@ -1,7 +1,7 @@
 # Suprnova Live -- 11 Interaction Scheduling and Feedback
 
 Status: Normative design specification
-Last revised: 2026-08-23
+Last revised: 2026-08-26
 
 ## Scope
 
@@ -35,6 +35,11 @@ Acceptance criteria:
   same island scheduler and coalesce under their declared freshness policy.
   Upload byte transfer uses its bounded data-plane queue and schedules only
   authoritative Live state work through the island scheduler.
+- A fresh-render producer may attach one bounded completion observer to its
+  scheduler intent. That observer settles exactly once from the scheduler's
+  terminal application disposition (`succeeded`, `failed`, `canceled`, or
+  `retired`); queue admission is never reported as HTTP/protocol success and the
+  observer cannot mutate scheduler authority.
 
 UX flow:
 1. Application user triggers repeated actions -> the owning policy orders,
@@ -177,6 +182,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Bound poll failure policy to the existing scheduler intent's
+  actual terminal application disposition rather than queue admission. The
+  fresh-render port now carries one optional, isolated completion observer;
+  scheduler overlap remains one in-flight plus one queued refresh with no
+  second queue, transport, or timer owner.
 - 2026-08-23 -- Integrated Iteration 004 without creating competing action
   schedulers: poll and push refreshes enter the existing per-island queue,
   invalidation bursts coalesce under freshness policy, and upload byte transfer

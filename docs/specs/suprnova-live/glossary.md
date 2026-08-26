@@ -611,6 +611,19 @@ transcript. A reconnect without that proof remains degraded until authoritative
 host refresh establishes a new baseline that covers observed high-water.
 _Avoid_: socket connected, eventual freshness, best-effort ordering, last message wins
 
+**Fresh-render completion**:
+The existing island scheduler's exactly-once terminal result for an admitted
+fresh-render intent: `succeeded`, `failed`, `canceled`, or `retired`. It follows
+HTTP/protocol/application settlement and is not inferred from queue admission.
+_Avoid_: queued refresh, transport started, optimistic success, second completion queue
+
+**Freshness observation**:
+An immutable, presentation-only report of one island's semantic `current`,
+`degraded`, `polling`, `offline`, `suspended`, or `closed` state to the single
+configured application observer. It grants no scheduling, transport, component,
+or authorization authority and is not a DOM event bus.
+_Avoid_: mutable freshness control, connection authority, custom event stream, listener registry
+
 **Presentation-only stream update**:
 A registered typed asynchronous event that may change a declared local signal
 but cannot write component, revision, authorization, accepted-outcome, or domain

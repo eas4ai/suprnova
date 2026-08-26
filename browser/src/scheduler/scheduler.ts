@@ -51,8 +51,9 @@ function finishReason(disposition: IntentDisposition): IntentFinishReason {
       return "rejected";
     case "canceled":
     case "superseded":
-    case "retired":
       return "canceled";
+    case "retired":
+      return "retired";
     case "stale":
     case "out_of_order":
     case "incompatible":

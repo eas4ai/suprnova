@@ -100,12 +100,23 @@ function policy(overrides: Partial<PollPolicy> = {}): PollPolicy {
   });
 }
 
+type TestFreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
+type TestFreshRenderCallback = (completion: TestFreshRenderCompletion) => void;
+type TestFreshRenderEnqueue = (
+  reason: "poll",
+  completion: TestFreshRenderCallback,
+) => "queued" | "coalesced" | "retired";
+
 function fixture(
   currentPolicy: PollPolicy = policy(),
   random = 0,
-  enqueueFreshRender: (reason: "poll") => "queued" | "coalesced" | "retired" = vi.fn(
-    () => "queued" as const,
+  enqueueFreshRender: TestFreshRenderEnqueue = vi.fn<TestFreshRenderEnqueue>(
+    (_reason, completion) => {
+      completion("succeeded");
+      return "queued" as const;
+    },
   ),
+  observe: (state: string) => void = () => undefined,
 ) {
   const clock = new ControlledClock();
   const environment = new Environment();
@@ -116,6 +127,7 @@ function fixture(
     policy: currentPolicy,
     randomness,
     timers: clock,
+    observe,
   });
   return { clock, enqueueFreshRender, environment, timer };
 }
@@ -186,12 +198,12 @@ describe("controlled polling timer", () => {
     waiting.timer.start();
     expect(waiting.enqueueFreshRender).not.toHaveBeenCalled();
     waiting.clock.advance(10_000);
-    expect(waiting.enqueueFreshRender).toHaveBeenCalledWith("poll");
+    expect(waiting.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function));
 
     const immediate = fixture(policy({ initial: "immediate" }));
     immediate.timer.start();
     expect(immediate.enqueueFreshRender).toHaveBeenCalledOnce();
-    expect(immediate.enqueueFreshRender).toHaveBeenCalledWith("poll");
+    expect(immediate.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function));
   });
 
   it("uses bounded positive jitter and rejects invalid randomness", () => {
@@ -210,12 +222,13 @@ describe("controlled polling timer", () => {
     current.environment.visible(false);
     current.timer.start();
     current.clock.advanceToNextTimer();
-    expect(current.timer.status()).toBe("stale");
+    expect(current.timer.status()).toBe("degraded");
     expect(current.enqueueFreshRender).not.toHaveBeenCalled();
 
     current.environment.visible(true);
     current.environment.online(false);
     current.clock.advanceToNextTimer();
+    expect(current.timer.status()).toBe("offline");
     expect(current.enqueueFreshRender).not.toHaveBeenCalled();
 
     current.environment.online(true);
@@ -223,6 +236,24 @@ describe("controlled polling timer", () => {
     expect(current.clock.pending.size).toBe(1);
     current.clock.advanceToNextTimer();
     expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+  });
+
+  it("keeps offline presentation authoritative when an admitted refresh fails", () => {
+    const completions: TestFreshRenderCallback[] = [];
+    const enqueue = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completions.push(completion);
+      return "queued";
+    });
+    const current = fixture(policy({ initial: "immediate" }), 0, enqueue);
+
+    current.timer.start();
+    expect(current.timer.status()).toBe("polling");
+    current.environment.online(false);
+    expect(current.timer.status()).toBe("offline");
+    completions[0]?.("failed");
+
+    expect(current.timer.status()).toBe("offline");
+    expect(current.clock.pending.size).toBe(1);
   });
 
   it("continues while hidden only under the always policy", () => {
@@ -233,28 +264,55 @@ describe("controlled polling timer", () => {
     expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
   });
 
-  it("backs off bounded failures with positive full jitter", () => {
-    const enqueue = vi
-      .fn<(_: "poll") => "queued">()
-      .mockImplementationOnce(() => {
-        throw new Error("network_failed");
-      })
-      .mockReturnValue("queued");
+  it("backs off from actual failed completion and resets only after actual success", () => {
+    const completions: TestFreshRenderCallback[] = [];
+    const enqueue = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completions.push(completion);
+      return "queued";
+    });
     const current = fixture(policy({ intervalMs: 1_000 }), 0.5, enqueue);
     current.timer.start();
     current.clock.advance(1_000);
-    expect(current.timer.status()).toBe("stale");
+    expect(current.timer.status()).toBe("polling");
+    expect(current.clock.pending.size).toBe(0);
+    completions[0]?.("failed");
+    expect(current.timer.status()).toBe("degraded");
     expect(current.clock.delays()).toEqual([1_000]);
     current.clock.advance(1_000);
     expect(enqueue).toHaveBeenCalledTimes(2);
+    completions[1]?.("succeeded");
+    expect(current.timer.status()).toBe("current");
     expect(current.clock.delays()).toEqual([1_000]);
+  });
+
+  it("backs off canceled completion, ignores stale overlap, and closes on retired completion", () => {
+    const completions: TestFreshRenderCallback[] = [];
+    const enqueue = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completions.push(completion);
+      return "queued";
+    });
+    const current = fixture(policy({ initial: "immediate", intervalMs: 1_000 }), 0.5, enqueue);
+    current.timer.start();
+    expect(enqueue).toHaveBeenCalledOnce();
+
+    current.timer.suspend();
+    completions[0]?.("failed");
+    expect(current.timer.status()).toBe("suspended");
+    current.timer.resume();
+    current.clock.advanceToNextTimer();
+    completions[1]?.("canceled");
+    expect(current.timer.status()).toBe("degraded");
+    current.clock.advanceToNextTimer();
+    completions[2]?.("retired");
+    expect(current.timer.status()).toBe("closed");
+    expect(current.clock.pending.size).toBe(0);
   });
 
   it("caps repeated failure backoff and retires when the island scheduler is gone", () => {
     const failing = fixture(
       policy({ intervalMs: 300_000 }),
       0.999,
-      vi.fn(() => {
+      vi.fn<TestFreshRenderEnqueue>(() => {
         throw new Error("network_failed");
       }),
     );
@@ -265,7 +323,7 @@ describe("controlled polling timer", () => {
     const retired = fixture(
       policy({ intervalMs: 1_000 }),
       0,
-      vi.fn(() => "retired" as const),
+      vi.fn<TestFreshRenderEnqueue>(() => "retired" as const),
     );
     retired.timer.start();
     retired.clock.advance(1_000);
@@ -283,19 +341,26 @@ describe("controlled polling timer", () => {
     expect(current.timer.status()).toBe("current");
 
     current.timer.continuity("degraded");
-    expect(current.timer.status()).toBe("stale");
+    expect(current.timer.status()).toBe("degraded");
     current.clock.advanceToNextTimer();
     expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
   });
 
-  it("push-only exposes degradation but never invents a fallback timer", () => {
-    const current = fixture(policy({ mode: "push_only" }));
+  it("push-only exposes degradation through one bounded observer but never invents fallback", () => {
+    const states: string[] = [];
+    const current = fixture(policy({ mode: "push_only" }), 0, undefined, (state) => {
+      states.push(state);
+      if (state === "degraded") throw new Error("observer_isolated");
+    });
     current.timer.start();
     current.timer.continuity("degraded");
     current.clock.advance(300_000);
-    expect(current.timer.status()).toBe("stale");
+    expect(current.timer.status()).toBe("degraded");
     expect(current.clock.pending.size).toBe(0);
     expect(current.enqueueFreshRender).not.toHaveBeenCalled();
+    expect(states).toEqual(["degraded"]);
+    current.timer.dispose();
+    expect(states).toEqual(["degraded", "closed"]);
   });
 
   it("suspends for bfcache, resumes once, and retires timers and listeners once", () => {
@@ -324,7 +389,10 @@ describe("controlled polling timer", () => {
       { length: 100 },
       (_, index) =>
         new PollTimer({
-          enqueueFreshRender: vi.fn(() => "queued" as const),
+          enqueueFreshRender: vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+            completion("succeeded");
+            return "queued" as const;
+          }),
           environment,
           policy: policy({ intervalMs: 5_000, jitterRatio: 0.2, mode: "hybrid" }),
           randomness: { number: () => (index + 0.5) / 100 },
@@ -363,13 +431,41 @@ describe("fresh-render overlap remains owned by the island scheduler", () => {
       }),
     );
 
-    expect(record.enqueueFreshRender("poll")).toBe("queued");
+    const completions: TestFreshRenderCompletion[] = [];
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
     const first = record.scheduler.ready()[0];
     if (first === undefined) throw new Error("missing_refresh_ticket");
     expect(record.scheduler.start(first)).toBe("accepted");
-    expect(record.enqueueFreshRender("poll")).toBe("queued");
-    expect(record.enqueueFreshRender("poll")).toBe("queued");
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
     expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 1, queued: 1 });
+    expect(completions).toEqual(["canceled"]);
+
+    expect(record.scheduler.settleTransport(first)).toBe("accepted");
+    expect(record.scheduler.beginApplication(first)).toBe("accepted");
+    expect(record.scheduler.finish(first, "rejected")).toBe("rejected");
+    expect(completions).toEqual(["canceled", "failed"]);
+    const queued = record.scheduler.ready()[0];
+    if (queued === undefined) throw new Error("missing_queued_refresh_ticket");
+    expect(record.scheduler.start(queued)).toBe("accepted");
+    expect(record.scheduler.settleTransport(queued)).toBe("accepted");
+    expect(record.scheduler.beginApplication(queued)).toBe("accepted");
+    expect(record.scheduler.finish(queued, "accepted")).toBe("accepted");
+    expect(completions).toEqual(["canceled", "failed", "succeeded"]);
+
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
+    const canceled = record.scheduler.ready()[0];
+    if (canceled === undefined) throw new Error("missing_canceled_refresh_ticket");
+    expect(record.scheduler.start(canceled)).toBe("accepted");
+    expect(record.scheduler.cancel(canceled, { abortTransport: true })).toBe("canceled");
+    expect(completions).toEqual(["canceled", "failed", "succeeded", "canceled"]);
+
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
+    const retired = record.scheduler.ready()[0];
+    if (retired === undefined) throw new Error("missing_retired_refresh_ticket");
+    expect(record.scheduler.start(retired)).toBe("accepted");
+    record.scheduler.retire();
+    expect(completions).toEqual(["canceled", "failed", "succeeded", "canceled", "retired"]);
   });
 });
 
@@ -378,7 +474,16 @@ describe("poll-only feature integration", () => {
     const clock = new ControlledClock();
     const environment = new Environment();
     const root = Object.freeze({}) as Element;
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn((_reason, completion: TestFreshRenderCallback) => {
+      completion("succeeded");
+      return "queued" as const;
+    });
+    const freshness: Readonly<{
+      component: string;
+      documentKey: string;
+      slot: string;
+      state: string;
+    }>[] = [];
     const directive = Object.freeze({
       attributeName: "live:poll.5s",
       directive: Object.freeze({
@@ -413,15 +518,41 @@ describe("poll-only feature integration", () => {
         pollEnvironment: environment,
         randomness: { number: () => 0 },
         timers: clock,
+        observeFreshness(observation) {
+          expect(Object.isFrozen(observation)).toBe(true);
+          freshness.push(observation);
+        },
       },
     );
 
     const controller = owner.connectIsland(port);
     clock.advance(5_000);
     expect(refresh).toHaveBeenCalledOnce();
+    expect(freshness.map(({ state }) => state)).toEqual(["degraded", "polling", "current"]);
+    expect(freshness[freshness.length - 1]).toMatchObject({
+      component: "fixture.poll",
+      documentKey: "document-poll-only",
+      slot: "poll-slot",
+    });
     controller.dispose();
+    expect(freshness[freshness.length - 1]?.state).toBe("closed");
     clock.advance(60_000);
     expect(refresh).toHaveBeenCalledOnce();
     owner.dispose();
+  });
+
+  it("rejects a non-callable public freshness observer", () => {
+    expect(
+      () =>
+        new AsyncDocumentOwner(
+          { diagnose: vi.fn(), onDispose: vi.fn() },
+          {
+            clock: { now: () => 0 },
+            observeFreshness: "mutable" as never,
+            randomness: { number: () => 0 },
+            timers: new ControlledClock(),
+          },
+        ),
+    ).toThrow("async_feature_configuration_invalid");
   });
 });

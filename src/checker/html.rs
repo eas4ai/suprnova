@@ -17,7 +17,8 @@ use super::branch::{
 };
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
 use super::directive::{
-    DirectiveContext, MorphControlKind, morph_control_kind, validate_directive,
+    DirectiveContext, MorphControlKind, morph_control_kind, valid_freshness_combination,
+    validate_directive,
 };
 use super::limits::CheckerLimits;
 use super::template::TemplateCatalog;
@@ -53,6 +54,7 @@ pub(crate) fn check_html_branches(
 struct ElementFrame {
     tag: String,
     owner: ComponentName,
+    island_index: usize,
     morph_control: Option<MorphControlKind>,
 }
 
@@ -60,6 +62,12 @@ struct TeleportIntent {
     target: String,
     owner: ComponentName,
     line: u64,
+}
+
+struct IslandFreshness {
+    line: u64,
+    poll: bool,
+    stream: &'static str,
 }
 
 struct HtmlState<'checker, 'diagnostics> {
@@ -73,6 +81,7 @@ struct HtmlState<'checker, 'diagnostics> {
     keys: BTreeSet<String>,
     ids: BTreeMap<String, Vec<ComponentName>>,
     teleports: Vec<TeleportIntent>,
+    freshness: Vec<(ComponentName, IslandFreshness)>,
     tokens: usize,
     attributes: usize,
     loop_depth: usize,
@@ -88,6 +97,14 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
         limits: CheckerLimits,
         diagnostics: &'diagnostics mut DiagnosticCollector,
     ) -> Self {
+        let freshness = vec![(
+            root.identity().clone(),
+            IslandFreshness {
+                line: 1,
+                poll: false,
+                stream: "absent",
+            },
+        )];
         Self {
             registry,
             catalog,
@@ -99,6 +116,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
             keys: BTreeSet::new(),
             ids: BTreeMap::new(),
             teleports: Vec::new(),
+            freshness,
             tokens: 0,
             attributes: 0,
             loop_depth: 0,
@@ -162,10 +180,20 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
 
                 let prior_owner = self.current_owner_name();
                 let mut owner = prior_owner.clone();
+                let mut island_index = self.current_island_index();
                 if let Some((_, component)) =
                     attributes.iter().find(|(name, _)| name == "live:component")
                 {
                     owner = self.resolve_component(component, &attributes, line, &prior_owner);
+                    island_index = self.freshness.len();
+                    self.freshness.push((
+                        owner.clone(),
+                        IslandFreshness {
+                            line,
+                            poll: false,
+                            stream: "absent",
+                        },
+                    ));
                 }
                 if let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") {
                     self.ids.entry(id.clone()).or_default().push(owner.clone());
@@ -181,6 +209,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                         line,
                     });
                 }
+                self.observe_freshness(island_index, &attributes, line);
                 self.validate_keys(&attributes, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
@@ -226,6 +255,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                         self.stack.push(ElementFrame {
                             tag: tag_name.clone(),
                             owner,
+                            island_index,
                             morph_control: morph_control_kind(&attributes),
                         });
                     }
@@ -277,6 +307,10 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
         self.stack
             .last()
             .map_or_else(|| self.root.identity().clone(), |frame| frame.owner.clone())
+    }
+
+    fn current_island_index(&self) -> usize {
+        self.stack.last().map_or(0, |frame| frame.island_index)
     }
 
     fn resolve_component(
@@ -352,6 +386,46 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
         }
     }
 
+    fn observe_freshness(
+        &mut self,
+        island_index: usize,
+        attributes: &[(String, String)],
+        line: u64,
+    ) {
+        let Some((_, entry)) = self.freshness.get_mut(island_index) else {
+            return;
+        };
+        if attributes.iter().any(|(name, _)| {
+            name.strip_prefix("live:")
+                .is_some_and(|suffix| suffix.split('.').next() == Some("poll"))
+        }) {
+            entry.poll = true;
+            entry.line = line;
+        }
+        if let Some((name, _)) = attributes.iter().find(|(name, _)| {
+            name.strip_prefix("live:")
+                .is_some_and(|suffix| suffix.split('.').next() == Some("stream"))
+        }) {
+            let candidate = if name
+                .split('.')
+                .skip(1)
+                .any(|modifier| modifier == "push-only")
+            {
+                "push-only"
+            } else if name.split('.').skip(1).any(|modifier| modifier == "hybrid") {
+                "hybrid"
+            } else {
+                "default"
+            };
+            entry.stream = if entry.stream == "absent" {
+                candidate
+            } else {
+                "invalid"
+            };
+            entry.line = line;
+        }
+    }
+
     fn push_stack_error(&mut self, line: u64) {
         let owner = self.current_owner_name();
         self.push(
@@ -373,6 +447,16 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
         if !self.stack.is_empty() || self.loop_depth != 0 {
             self.push_stack_error(1);
             return;
+        }
+        for (owner, freshness) in std::mem::take(&mut self.freshness) {
+            if !valid_freshness_combination(freshness.poll, freshness.stream) {
+                self.push(
+                    DiagnosticCode::InvalidModifier,
+                    DiagnosticSeverity::Error,
+                    freshness.line,
+                    &owner,
+                );
+            }
         }
         for intent in std::mem::take(&mut self.teleports) {
             match self.ids.get(&intent.target) {

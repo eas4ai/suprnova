@@ -54,6 +54,7 @@ import { IslandRecord } from "./record.js";
 import { RegisteredEventAuthority } from "./registered-events.js";
 import {
   inspectRuntimeFeatureDriver,
+  type FreshRenderCompletionObserver,
   type FreshRenderReason,
   type InspectedRuntimeFeatureDriver,
   type RuntimeFeatureDiagnosticDetail,
@@ -903,10 +904,18 @@ export class DocumentRuntime {
         event: RegisteredBrowserEventDispatch,
       ) => this.#dispatchRegisteredEvent(capability, event),
       element: record.element,
-      enqueueFreshRender: (reason: FreshRenderReason) => {
+      enqueueFreshRender: (
+        reason: FreshRenderReason,
+        completion?: FreshRenderCompletionObserver,
+      ) => {
         const candidate: unknown = reason;
-        if (!current() || (candidate !== "poll" && candidate !== "stream")) return "retired";
-        return record.enqueueFreshRender(candidate);
+        if (!current() || (candidate !== "poll" && candidate !== "stream")) {
+          completion?.("retired");
+          return "retired";
+        }
+        return completion === undefined
+          ? record.enqueueFreshRender(candidate)
+          : record.enqueueFreshRender(candidate, completion);
       },
       identity: Object.freeze({
         component: record.metadata.component,

@@ -18,7 +18,13 @@ import {
   type ReauthorizedLogicalSubscription,
 } from "./connections.js";
 import { AsyncSubscription } from "./subscription.js";
-import { PollTimer, resolvePollPolicy, type PollEnvironment, type PollPolicy } from "./poll.js";
+import {
+  PollTimer,
+  resolvePollPolicy,
+  type PollEnvironment,
+  type PollPolicy,
+  type PollStatus,
+} from "./poll.js";
 import type {
   AsyncClock,
   AsyncDispatchPort,
@@ -244,11 +250,21 @@ export interface AsyncFeatureOptions {
   readonly authority?: AsyncAuthorityPort;
   readonly clock: AsyncClock;
   readonly handshakeScheduler?: OriginHandshakeScheduler;
+  readonly observeFreshness?: AsyncFreshnessObserver;
   readonly pollEnvironment?: PollEnvironment;
   readonly randomness: AsyncRandomness;
   readonly timers: AsyncTimerPort;
   readonly transports?: AsyncTransportPorts;
 }
+
+export interface AsyncFreshnessObservation {
+  readonly component: string;
+  readonly documentKey: string;
+  readonly slot: string;
+  readonly state: PollStatus;
+}
+
+export type AsyncFreshnessObserver = (observation: AsyncFreshnessObservation) => void;
 
 interface AsyncStreamFeatureOptions extends AsyncFeatureOptions {
   readonly authority: AsyncAuthorityPort;
@@ -313,6 +329,7 @@ function validOptions(options: AsyncFeatureOptions): boolean {
     return (
       (streamPortsAbsent || streamPortsPresent) &&
       typeof options.clock.now === "function" &&
+      (options.observeFreshness === undefined || typeof options.observeFreshness === "function") &&
       typeof pollEnvironment.isOnline === "function" &&
       typeof pollEnvironment.isVisible === "function" &&
       typeof pollEnvironment.subscribe === "function" &&
@@ -441,6 +458,7 @@ class AsyncIslandController implements FeatureIslandController {
   readonly #authority: AsyncAuthorityPort;
   readonly #clock: AsyncClock;
   readonly #context: RuntimeFeatureDocumentContext;
+  readonly #freshnessObserver: ((state: PollStatus) => void) | undefined;
   readonly #owner: AsyncDocumentOwner;
   readonly #pollEnvironment: PollEnvironment;
   readonly #pollModifiers: readonly string[] | null;
@@ -477,6 +495,7 @@ class AsyncIslandController implements FeatureIslandController {
     this.#authority = options.authority;
     this.#clock = options.clock;
     this.#context = context;
+    this.#freshnessObserver = freshnessObserver(options, port);
     this.#owner = owner;
     this.#pollEnvironment = options.pollEnvironment ?? browserPollEnvironment;
     this.#pollModifiers = pollModifiers;
@@ -550,20 +569,20 @@ class AsyncIslandController implements FeatureIslandController {
             this.#state = "active";
             this.#poll?.resume();
             this.#armHeartbeat(this.#heartbeatTimeout());
-          } else if (resume && this.#state === "resuming") this.#state = "suspended";
+          } else if (resume) this.#resumeCommittedFallback();
           return outcome;
         },
         discard: () => {
           if (settled) return;
           settled = true;
           current.discard();
-          if (resume && this.#state === "resuming") this.#state = "suspended";
+          if (resume) this.#resumeCommittedFallback();
         },
         proof: current.proof,
         subscription: current.subscription,
       });
     } catch (error: unknown) {
-      if (resume && this.#state === "resuming") this.#state = "suspended";
+      if (resume) this.#resumeCommittedFallback();
       throw error;
     }
   }
@@ -793,15 +812,15 @@ class AsyncIslandController implements FeatureIslandController {
           else if (!initial) subscription.reauthorize(authorization);
           this.#eventCapability = capability;
           this.#currentAuthorization = authorization;
-          this.#commitPollPolicy(authorization);
-          this.#owner.remember(this, authorization);
           installed = true;
           if (replay.length === 0) {
             if (proof !== null) subscription.proveAuthoritativeBaseline(authorization.baseline);
           } else {
             subscription.receiveReplay(replay);
           }
-          this.#poll?.continuity(subscription.state() === "current" ? "current" : "degraded");
+          const continuity = subscription.state() === "current" ? "current" : "degraded";
+          this.#owner.remember(this, authorization);
+          this.#commitPollPolicy(authorization, continuity);
           clearPending();
           return "committed";
         } catch {
@@ -878,7 +897,10 @@ class AsyncIslandController implements FeatureIslandController {
     );
   }
 
-  #commitPollPolicy(authorization: AuthorizedLogicalSubscription): void {
+  #commitPollPolicy(
+    authorization: AuthorizedLogicalSubscription,
+    continuity: "current" | "degraded",
+  ): void {
     const policy = resolvePollPolicy(
       this.#pollModifiers,
       this.#streamModifiers,
@@ -887,17 +909,28 @@ class AsyncIslandController implements FeatureIslandController {
     if (policy === null) return;
     if (this.#poll === null) {
       this.#poll = new PollTimer({
-        enqueueFreshRender: (reason) => this.#port.enqueueFreshRender(reason),
+        enqueueFreshRender: (reason, completion) =>
+          this.#port.enqueueFreshRender(reason, completion),
         environment: this.#pollEnvironment,
+        observe: this.#freshnessObserver,
         policy,
         randomness: this.#randomness,
         timers: this.#timers,
       });
-      this.#poll.start();
+      this.#poll.continuity(continuity);
       if (this.#state === "suspended" || this.#state === "resuming") this.#poll.suspend();
+      this.#poll.start();
     } else {
       this.#poll.updatePolicy(policy);
+      this.#poll.continuity(continuity);
     }
+  }
+
+  #resumeCommittedFallback(): void {
+    if (!this.#resuming() || this.#currentAuthorization === null) return;
+    this.#state = "active";
+    this.#poll?.continuity("degraded");
+    this.#poll?.resume();
   }
 }
 
@@ -914,8 +947,9 @@ class PollingIslandController implements FeatureIslandController {
   ) {
     this.#owner = owner;
     this.#timer = new PollTimer({
-      enqueueFreshRender: (reason) => port.enqueueFreshRender(reason),
+      enqueueFreshRender: (reason, completion) => port.enqueueFreshRender(reason, completion),
       environment: options.pollEnvironment ?? browserPollEnvironment,
+      observe: freshnessObserver(options, port),
       policy,
       randomness: options.randomness,
       timers: options.timers,
@@ -940,6 +974,18 @@ class PollingIslandController implements FeatureIslandController {
     this.#timer.dispose();
     this.#owner.retirePoll(this);
   }
+}
+
+function freshnessObserver(
+  options: AsyncFeatureOptions,
+  port: RuntimeFeatureIslandPort,
+): ((state: PollStatus) => void) | undefined {
+  const observer = options.observeFreshness;
+  if (observer === undefined) return undefined;
+  const { component, documentKey, slot } = port.identity;
+  return (state) => {
+    observer(Object.freeze({ component, documentKey, slot, state }));
+  };
 }
 
 export class AsyncDocumentOwner {

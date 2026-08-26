@@ -24,7 +24,9 @@ export type ServerOperation =
   | Readonly<{ kind: "lazy_complete" }>
   | Readonly<{ kind: "fresh_render" }>;
 
-export type IntentFinishReason = "accepted" | "terminal" | "canceled" | "exhausted" | "rejected";
+export type IntentFinishReason =
+  "accepted" | "terminal" | "canceled" | "retired" | "exhausted" | "rejected";
+export type IntentFinishObserver = (reason: IntentFinishReason) => void;
 
 const MAX_OPERATIONS_PER_INTENT = 32;
 const MAX_MODEL_PROPOSALS_PER_INTENT = 128;
@@ -65,8 +67,8 @@ export class ServerIntent {
   readonly modelEditSequences: Readonly<Record<string, bigint>>;
   readonly childParameters: Readonly<Record<string, JsonValue>> | undefined;
   #nonce: string | null;
-  #finished = false;
-  readonly #finishCallbacks: VoidFunction[] = [];
+  #finishReason: IntentFinishReason | null = null;
+  readonly #finishCallbacks: IntentFinishObserver[] = [];
 
   constructor(
     source: IntentSource,
@@ -132,10 +134,10 @@ export class ServerIntent {
     return this.#nonce;
   }
 
-  onFinish(callback: VoidFunction): void {
-    if (this.#finished) {
+  onFinish(callback: IntentFinishObserver): void {
+    if (this.#finishReason !== null) {
       try {
-        callback();
+        callback(this.#finishReason);
       } catch {
         // Completion observers cannot change the already-terminal intent.
       }
@@ -148,13 +150,12 @@ export class ServerIntent {
   }
 
   finish(reason: IntentFinishReason): void {
-    void reason;
-    if (this.#finished) return;
-    this.#finished = true;
+    if (this.#finishReason !== null) return;
+    this.#finishReason = reason;
     this.#nonce = null;
     for (const callback of this.#finishCallbacks.splice(0)) {
       try {
-        callback();
+        callback(reason);
       } catch {
         // One observer cannot prevent the remaining bounded cleanup callbacks.
       }

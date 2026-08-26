@@ -763,6 +763,25 @@
 
 - [x] Run poll, scheduler, connectivity, visibility, bfcache, and 100-subscription storm tests.
 - [x] Commit: `feat(browser): add complete polling and hybrid fallback`.
+- [x] Harden the generated contract and proof order: make the real island-level
+  Rust checker consume all eight generated freshness combinations, and apply an
+  exact acknowledged replay/no-tail proof before starting any immediate hybrid
+  timer.
+- [x] Drive bounded full-jitter poll backoff from the existing scheduler
+  fresh-render intent's actual terminal HTTP/protocol/application result, not
+  queue admission. Preserve one in-flight plus one queued refresh and add no
+  second scheduler, queue, transport, or timer owner.
+- [x] On failed or uncertain persisted-page successor reauthorization, keep the
+  old socket retired and resume the last committed hybrid fallback once in
+  degraded mode. Push-only remains degraded without fallback; late generations
+  remain inert.
+- [x] Expose one configured immutable semantic freshness observer with the
+  closed current/degraded/polling/offline/suspended/closed state set and no
+  mutable authority, DOM event bus, or unbounded listener registry.
+- [x] Run corrected Rust checker, controlled-clock poll, real scheduler,
+  connectivity, visibility, bfcache, 100-subscription storm, public declaration,
+  deterministic build, drift-budget, and full project gates.
+- [x] Commit: `fix(browser): harden polling continuity semantics`.
 
 ## Task 8: Dispatch only registered refresh, browser events, and presentation signals
 

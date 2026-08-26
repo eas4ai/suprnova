@@ -10,6 +10,8 @@ export type RuntimeFeatureDiagnosticDetail =
   "contract_mismatch" | "operation_rejected" | "resource_exhausted";
 export type FreshRenderReason = "poll" | "stream";
 export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
+export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
 export type RegisteredBrowserEventDisposition =
   "dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
 
@@ -46,7 +48,10 @@ export interface RuntimeFeatureDriverIslandPort {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
-  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
+  enqueueFreshRender(
+    reason: FreshRenderReason,
+    completion?: FreshRenderCompletionObserver,
+  ): FreshRenderDisposition;
   proposeUploadHandle(
     field: string,
     proposal: UploadHandleProposal,

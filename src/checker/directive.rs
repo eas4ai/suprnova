@@ -9,7 +9,8 @@ use crate::state::{BindingTiming, UrlBindingMode};
 use super::branch::DYNAMIC_MARKER;
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
 use super::generated_directive_contract::{
-    DirectiveContract, DirectiveValue, directive_contract, valid_directive_scalar_value,
+    DirectiveContract, DirectiveValue, FRESHNESS_COMBINATIONS, directive_contract,
+    valid_directive_scalar_value,
 };
 
 pub(crate) struct DirectiveContext<'checker, 'diagnostics> {
@@ -139,6 +140,13 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         "navigate" | "prefetch" => validate_navigation(context),
         _ => {}
     }
+}
+
+pub(crate) fn valid_freshness_combination(poll: bool, stream: &str) -> bool {
+    FRESHNESS_COMBINATIONS
+        .iter()
+        .find(|combination| combination.poll == poll && combination.stream == stream)
+        .is_some_and(|combination| combination.result != "directive_conflict")
 }
 
 fn validate_morph_control(

@@ -29,6 +29,7 @@ import {
   RUNTIME_FEATURE_DRIVER_FORMAT,
   inspectRuntimeFeatureDriver,
   type FreshRenderDisposition,
+  type FreshRenderCompletionObserver,
   type FreshRenderReason,
   type RuntimeFeatureDiagnosticDetail,
   type RuntimeFeatureDriver,
@@ -139,7 +140,12 @@ interface DriverIslandSource {
   >;
   readonly element: Element;
   readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
-  readonly enqueueFreshRender: Mock<(reason: FreshRenderReason) => FreshRenderDisposition>;
+  readonly enqueueFreshRender: Mock<
+    (
+      reason: FreshRenderReason,
+      completion?: FreshRenderCompletionObserver,
+    ) => FreshRenderDisposition
+  >;
   readonly proposeUploadHandle: Mock<
     (field: string, proposal: UploadHandleProposal) => UploadHandleProposalDisposition
   >;
@@ -295,11 +301,18 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
         return island.source.dispatchRegisteredEvent(capability, event);
       },
       element: island.source.element,
-      enqueueFreshRender: (reason: FreshRenderReason) => {
+      enqueueFreshRender: (
+        reason: FreshRenderReason,
+        completion?: FreshRenderCompletionObserver,
+      ) => {
         const candidate: unknown = reason;
-        return current() && (candidate === "poll" || candidate === "stream")
+        if (!current() || (candidate !== "poll" && candidate !== "stream")) {
+          completion?.("retired");
+          return "retired";
+        }
+        return completion === undefined
           ? island.source.enqueueFreshRender(candidate)
-          : "retired";
+          : island.source.enqueueFreshRender(candidate, completion);
       },
       identity: Object.freeze({ ...island.source.identity }),
       proposeUploadHandle: (field: string, proposal: UploadHandleProposal) => {
@@ -741,6 +754,9 @@ describe("one driver claim and optional owner per island", () => {
     }
     expect(Object.isFrozen(islandPort?.identity)).toBe(true);
     expect(islandPort?.enqueueFreshRender("poll")).toBe("queued");
+    const freshRenderCompletion = vi.fn<FreshRenderCompletionObserver>();
+    expect(islandPort?.enqueueFreshRender("poll", freshRenderCompletion)).toBe("queued");
+    expect(source.enqueueFreshRender).toHaveBeenLastCalledWith("poll", freshRenderCompletion);
     expect(islandPort?.proposeUploadHandle("avatar", "018f47c1-2af0-7cc4-a001-000000000001")).toBe(
       "accepted",
     );

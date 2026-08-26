@@ -144,6 +144,7 @@ describe("role-typed optional production artifacts", () => {
     const declarations = await readFile(join(outputDirectory, "index.d.ts"), "utf8");
     expect(declarations).toContain("export interface FeatureDocumentController");
     expect(declarations).toContain("export interface RuntimeFeatureIslandPort");
+    expect(declarations).toContain("export type FreshRenderCompletion");
     expect(declarations).toContain("export interface RuntimeConnectivity");
     expect(declarations).not.toContain("export type RuntimeFeatureName");
     expect(declarations).toContain("export const stimulusRegistration");
@@ -153,6 +154,7 @@ describe("role-typed optional production artifacts", () => {
     expect(declarations).not.toContain("export function createUploadsFeature");
     expect(declarations).toContain("export const asyncFeature: RuntimeFeature");
     expect(declarations).toContain("export function configureAsync");
+    expect(declarations).toContain("export interface AsyncFreshnessObservation");
     expect(declarations).toContain("export interface ClassicFeatureSurface");
   });
 
@@ -197,6 +199,8 @@ describe("role-typed optional production artifacts", () => {
         type EffectRunOutcome,
         type FeatureDocumentController,
         type FeatureIslandController,
+        type FreshRenderCompletion,
+        type FreshRenderCompletionObserver,
         type JsonValue,
         type NavigationPort,
         type PayloadSchema,
@@ -252,6 +256,8 @@ describe("role-typed optional production artifacts", () => {
         asyncRegistration,
         configureAsync,
         type AsyncFeatureOptions,
+        type AsyncFreshnessObservation,
+        type AsyncFreshnessObserver,
         type AsyncTransportPorts,
         type BrowserAsyncTransportOptions,
         type DocumentMembershipOutcome,
@@ -265,6 +271,10 @@ describe("role-typed optional production artifacts", () => {
       const upload: RuntimeFeature = uploads;
       const asynchronousFeature: RuntimeFeature = asynchronous;
       const asyncOptions = null as AsyncFeatureOptions | null;
+      const freshnessObservation = null as AsyncFreshnessObservation | null;
+      const freshnessObserver = null as AsyncFreshnessObserver | null;
+      const freshRenderCompletion = null as FreshRenderCompletion | null;
+      const freshRenderCompletionObserver = null as FreshRenderCompletionObserver | null;
       const customTransport: AsyncTransportPorts = {
         eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort {
           return {
@@ -318,6 +328,8 @@ describe("role-typed optional production artifacts", () => {
         EffectRunOutcome,
         FeatureDocumentController,
         FeatureIslandController,
+        FreshRenderCompletion,
+        FreshRenderCompletionObserver,
         JsonValue,
         NavigationPort,
         PayloadSchema,
@@ -373,6 +385,10 @@ describe("role-typed optional production artifacts", () => {
         upload,
         asynchronousFeature,
         asyncOptions,
+        freshnessObservation,
+        freshnessObserver,
+        freshRenderCompletion,
+        freshRenderCompletionObserver,
         customTransport,
         sseMembership,
         classicSurface,

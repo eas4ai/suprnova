@@ -187,8 +187,10 @@ type RuntimeFeatureDiagnosticDetail =
   | "contract_mismatch"
   | "operation_rejected"
   | "resource_exhausted";
-type FreshRenderReason = "poll" | "stream";
-type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type FreshRenderReason = "poll" | "stream";
+export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
+export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
 type RegisteredBrowserEventDisposition =
   | "dispatched"
   | "no_target"
@@ -273,7 +275,10 @@ export interface RuntimeFeatureIslandPort {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
-  enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
+  enqueueFreshRender(
+    reason: FreshRenderReason,
+    completion?: FreshRenderCompletionObserver,
+  ): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
   proposeUploadHandle(
     field: string,
@@ -601,6 +606,20 @@ export interface PollEnvironment {
   isVisible(): boolean;
   subscribe(listener: () => void): () => void;
 }
+export type PollStatus =
+  | "current"
+  | "degraded"
+  | "polling"
+  | "offline"
+  | "suspended"
+  | "closed";
+export interface AsyncFreshnessObservation {
+  readonly component: string;
+  readonly documentKey: string;
+  readonly slot: string;
+  readonly state: PollStatus;
+}
+export type AsyncFreshnessObserver = (observation: AsyncFreshnessObservation) => void;
 export interface AsyncRegisteredEventContract {
   readonly cycle:
     | Readonly<{ kind: "forbid_repeated_island" }>
@@ -722,6 +741,7 @@ export interface AsyncFeatureOptions {
   readonly authority?: AsyncAuthorityPort;
   readonly clock: AsyncClock;
   readonly handshakeScheduler?: OriginHandshakeScheduler;
+  readonly observeFreshness?: AsyncFreshnessObserver;
   readonly pollEnvironment?: PollEnvironment;
   readonly randomness: AsyncRandomness;
   readonly timers: AsyncTimerPort;

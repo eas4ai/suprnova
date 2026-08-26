@@ -103,10 +103,6 @@ pub struct DirectiveContract {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "generated cross-language freshness contract is consumed by browser conformance"
-)]
 pub struct FreshnessCombination {
     pub poll: bool,
     pub stream: &'static str,
@@ -114,10 +110,6 @@ pub struct FreshnessCombination {
 }
 
 #[rustfmt::skip]
-#[allow(
-    dead_code,
-    reason = "generated cross-language freshness contract is consumed by browser conformance"
-)]
 pub const FRESHNESS_COMBINATIONS: &[FreshnessCombination] = &[
     FreshnessCombination { poll: false, stream: "absent", result: "none" },
     FreshnessCombination { poll: true, stream: "absent", result: "poll_only" },
