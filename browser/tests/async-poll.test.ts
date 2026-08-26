@@ -234,12 +234,12 @@ describe("controlled polling timer", () => {
     waiting.timer.start();
     expect(waiting.enqueueFreshRender).not.toHaveBeenCalled();
     waiting.clock.advance(10_000);
-    expect(waiting.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function));
+    expect(waiting.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function), "poll");
 
     const immediate = fixture(policy({ initial: "immediate" }));
     immediate.timer.start();
     expect(immediate.enqueueFreshRender).toHaveBeenCalledOnce();
-    expect(immediate.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function));
+    expect(immediate.enqueueFreshRender).toHaveBeenCalledWith("poll", expect.any(Function), "poll");
   });
 
   it("uses bounded positive jitter and rejects invalid randomness", () => {

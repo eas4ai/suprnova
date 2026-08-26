@@ -2,6 +2,7 @@ import type {
   AsyncRuntimeIslandPort,
   FreshRenderCompletion,
   RegisteredBrowserEventCapability,
+  PartiallyDispatchedBrowserEvent,
 } from "../features/contract.js";
 import type { AsyncPayload, ValidatedAsyncEnvelope } from "./types.js";
 
@@ -18,6 +19,7 @@ export type AsyncDispatchDisposition =
   | "degraded:replay_unavailable"
   | "degraded:backpressure"
   | "degraded:stream_unavailable"
+  | PartiallyDispatchedBrowserEvent
   | "rejected";
 
 export interface AsyncEnvelopeDispatcher {
@@ -77,7 +79,7 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         if (!exactPayload(payload, ["kind", "name"]) || payload["name"] !== "refresh") {
           return unsupported();
         }
-        return this.#refresh(completion);
+        return this.#refresh(envelope.subscriptionId, completion);
       case "browser_event":
         if (
           !exactPayload(payload, ["event", "kind", "payload", "schema_version", "target"]) ||
@@ -141,9 +143,11 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         schemaVersion: event.schema_version,
         target: event.target,
       });
-      return disposition === "dispatched" || disposition === "partially_dispatched"
+      return disposition === "dispatched"
         ? "dispatched"
-        : "rejected";
+        : typeof disposition === "object"
+          ? disposition
+          : "rejected";
     } catch {
       return "rejected";
     }
@@ -158,7 +162,10 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
     }
   }
 
-  #refresh(completion?: (outcome: FreshRenderCompletion) => void): AsyncDispatchDisposition {
+  #refresh(
+    subscriptionId: string,
+    completion?: (outcome: FreshRenderCompletion) => void,
+  ): AsyncDispatchDisposition {
     let completed = false;
     const observe = (outcome: FreshRenderCompletion): void => {
       if (completed) return;
@@ -166,7 +173,7 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
       completion?.(outcome);
     };
     try {
-      const disposition = this.#island.enqueueFreshRender("stream", observe);
+      const disposition = this.#island.enqueueFreshRender("stream", observe, subscriptionId);
       return disposition === "queued" || disposition === "coalesced" ? disposition : "rejected";
     } catch {
       return "rejected";

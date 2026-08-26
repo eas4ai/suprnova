@@ -318,7 +318,12 @@ describe("core registered-event authority", () => {
         schemaVersion: 1,
         target: "self",
       }),
-    ).toBe("partially_dispatched");
+    ).toEqual({
+      delivered: 1,
+      kind: "partially_dispatched",
+      reason: "capability_rotated",
+      skipped: 1,
+    });
     expect(secondDispatch).not.toHaveBeenCalled();
   });
 
@@ -348,7 +353,12 @@ describe("core registered-event authority", () => {
         schemaVersion: 1,
         target: "self",
       }),
-    ).toBe("partially_dispatched");
+    ).toEqual({
+      delivered: 1,
+      kind: "partially_dispatched",
+      reason: "target_retired",
+      skipped: 1,
+    });
     expect(firstDispatch).toHaveBeenCalledOnce();
     expect(secondDispatch).not.toHaveBeenCalled();
   });

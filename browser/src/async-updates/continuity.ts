@@ -44,6 +44,11 @@ export class ContinuityMachine {
     }
   }
 
+  degradeAt(candidate: StreamPosition): void {
+    this.#recordHighWater(candidate);
+    this.degrade();
+  }
+
   close(): void {
     this.#state = "closed";
   }

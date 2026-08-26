@@ -453,7 +453,10 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       value.presentationSignals.length <= MAX_PRESENTATION_SIGNALS &&
       signalNames.size === value.presentationSignals.length &&
       value.presentationSignals.every(
-        ({ name, scope }) => OPERATION_NAME.test(name) && SIGNAL_SCOPE.test(scope),
+        ({ name, schema, scope }) =>
+          OPERATION_NAME.test(name) &&
+          SIGNAL_SCOPE.test(scope) &&
+          validPresentationSignalSchema(schema),
       ) &&
       Number.isSafeInteger(reconnect.maximumAttempts) &&
       reconnect.maximumAttempts >= 1 &&
@@ -469,6 +472,16 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
     valid = false;
   }
   if (!valid) throw new Error("async_authorization_invalid");
+}
+
+function validPresentationSignalSchema(value: unknown): boolean {
+  return (
+    value === "null" ||
+    value === "boolean" ||
+    value === "i64" ||
+    value === "u64" ||
+    value === "string"
+  );
 }
 
 class AsyncIslandController implements FeatureIslandController {
@@ -776,7 +789,7 @@ class AsyncIslandController implements FeatureIslandController {
           handle?.close();
           return;
         }
-        this.#handle?.continuityLost();
+        this.#handle?.presentationFailed();
         this.#poll?.continuity("degraded");
         report(this.#context, "operation_rejected");
       },
@@ -874,16 +887,17 @@ class AsyncIslandController implements FeatureIslandController {
           this.#eventCapability = capability;
           this.#currentAuthorization = authorization;
           installed = true;
+          let replayPending = false;
           if (replay.length === 0) {
             if (proof !== null) subscription.proveAuthoritativeBaseline(authorization.baseline);
           } else {
-            subscription.receiveReplay(replay);
+            replayPending = subscription.receiveReplay(replay) === "pending";
           }
           const continuity = subscription.state() === "current" ? "current" : "degraded";
           this.#owner.remember(this, authorization);
           this.#commitPollPolicy(pollPolicy, continuity);
           clearPending();
-          return "committed";
+          return replayPending ? "pending" : "committed";
         } catch {
           clearPending();
           subscription.authorizationUncertain();
@@ -978,8 +992,8 @@ class AsyncIslandController implements FeatureIslandController {
     }
     if (this.#poll === null) {
       this.#poll = new PollTimer({
-        enqueueFreshRender: (reason, completion) =>
-          this.#port.enqueueFreshRender(reason, completion),
+        enqueueFreshRender: (reason, completion, completionKey) =>
+          this.#port.enqueueFreshRender(reason, completion, completionKey),
         environment: this.#pollEnvironment,
         observe: this.#freshnessObserver,
         policy,
@@ -1033,7 +1047,8 @@ class PollingIslandController implements FeatureIslandController {
   ) {
     this.#owner = owner;
     this.#timer = new PollTimer({
-      enqueueFreshRender: (reason, completion) => port.enqueueFreshRender(reason, completion),
+      enqueueFreshRender: (reason, completion, completionKey) =>
+        port.enqueueFreshRender(reason, completion, completionKey),
       environment: options.pollEnvironment ?? browserPollEnvironment,
       observe: freshnessObserver(options, port),
       policy,

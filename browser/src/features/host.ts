@@ -9,11 +9,22 @@ export type RuntimeFeatureRegistrationOutcome =
 export type RuntimeFeatureDiagnosticDetail =
   "contract_mismatch" | "operation_rejected" | "resource_exhausted";
 export type FreshRenderReason = "poll" | "stream";
-export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type FreshRenderDisposition = "queued" | "coalesced" | "retired" | "exhausted";
 export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
 export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
+export interface PartiallyDispatchedBrowserEvent {
+  readonly delivered: number;
+  readonly kind: "partially_dispatched";
+  readonly reason: "capability_rotated" | "dispatch_failed" | "source_retired" | "target_retired";
+  readonly skipped: number;
+}
 export type RegisteredBrowserEventDisposition =
-  "dispatched" | "partially_dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
+  | "dispatched"
+  | "no_target"
+  | "fanout_exceeded"
+  | "rejected"
+  | "retired"
+  | PartiallyDispatchedBrowserEvent;
 
 declare const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
 
@@ -51,6 +62,7 @@ export interface RuntimeFeatureDriverIslandPort {
   enqueueFreshRender(
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,
+    completionKey?: string,
   ): FreshRenderDisposition;
   proposeUploadHandle(
     field: string,

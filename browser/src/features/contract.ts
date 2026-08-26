@@ -40,6 +40,7 @@ export type {
   RuntimeFeatureDiagnosticDetail,
   RuntimeFeatureRegistrationOutcome,
 } from "./host.js";
+export type { PartiallyDispatchedBrowserEvent } from "./host.js";
 
 export type RuntimeFeatureName = "uploads" | "async";
 
@@ -93,6 +94,7 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
   enqueueFreshRender(
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,
+    completionKey?: string,
   ): FreshRenderDisposition;
   writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
 }
@@ -538,10 +540,13 @@ function defineFeature(
               enqueueFreshRender: (
                 reason: FreshRenderReason,
                 completion?: FreshRenderCompletionObserver,
-              ) =>
-                completion === undefined
-                  ? port.enqueueFreshRender(reason)
-                  : port.enqueueFreshRender(reason, completion),
+                completionKey?: string,
+              ) => {
+                if (completion === undefined) return port.enqueueFreshRender(reason);
+                return completionKey === undefined
+                  ? port.enqueueFreshRender(reason, completion)
+                  : port.enqueueFreshRender(reason, completion, completionKey);
+              },
               writePresentationSignal: (scope: string, name: string, signalValue: JsonValue) =>
                 port.writePresentationSignal(scope, name, signalValue),
             });

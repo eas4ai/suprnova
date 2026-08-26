@@ -188,16 +188,26 @@ type RuntimeFeatureDiagnosticDetail =
   | "operation_rejected"
   | "resource_exhausted";
 export type FreshRenderReason = "poll" | "stream";
-export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+  export type FreshRenderDisposition = "queued" | "coalesced" | "retired" | "exhausted";
 export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
 export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
-type RegisteredBrowserEventDisposition =
-  | "dispatched"
-  | "partially_dispatched"
-  | "no_target"
-  | "fanout_exceeded"
-  | "rejected"
-  | "retired";
+  interface PartiallyDispatchedBrowserEvent {
+    readonly delivered: number;
+    readonly kind: "partially_dispatched";
+    readonly reason:
+      | "capability_rotated"
+      | "dispatch_failed"
+      | "source_retired"
+      | "target_retired";
+    readonly skipped: number;
+  }
+  type RegisteredBrowserEventDisposition =
+    | "dispatched"
+    | "no_target"
+    | "fanout_exceeded"
+    | "rejected"
+    | "retired"
+    | PartiallyDispatchedBrowserEvent;
 const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
 interface RegisteredBrowserEventCapability {
   readonly [REGISTERED_BROWSER_EVENT_CAPABILITY]: never;
@@ -286,8 +296,9 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
   enqueueFreshRender(
-    reason: FreshRenderReason,
-    completion?: FreshRenderCompletionObserver,
+      reason: FreshRenderReason,
+      completion?: FreshRenderCompletionObserver,
+      completionKey?: string,
   ): FreshRenderDisposition;
   writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
 }
@@ -661,7 +672,7 @@ export interface AuthorizedLogicalSubscription {
   readonly heartbeatTimeoutMs: number;
   readonly presentationSignals: readonly Readonly<{
     name: string;
-    schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+    schema: "null" | "boolean" | "i64" | "u64" | "string";
     scope: string;
   }>[];
   readonly reconnect: Readonly<{

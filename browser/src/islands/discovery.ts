@@ -885,7 +885,8 @@ export class DocumentRuntime {
       return;
     }
     this.#featureDriverClaims.add(record);
-    const current = (): boolean => this.#state === "running" && record.active();
+    const current = (): boolean =>
+      this.#state === "running" && record.active() && record.element.isConnected;
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
       authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) =>
         this.#registeredEvents.replace(record, registration, {
@@ -910,6 +911,7 @@ export class DocumentRuntime {
       enqueueFreshRender: (
         reason: FreshRenderReason,
         completion?: FreshRenderCompletionObserver,
+        completionKey?: string,
       ) => {
         const candidate: unknown = reason;
         if (!current() || (candidate !== "poll" && candidate !== "stream")) {
@@ -918,7 +920,7 @@ export class DocumentRuntime {
         }
         return completion === undefined
           ? record.enqueueFreshRender(candidate)
-          : record.enqueueFreshRender(candidate, completion);
+          : record.enqueueFreshRender(candidate, completion, completionKey);
       },
       identity: Object.freeze({
         component: record.metadata.component,
@@ -961,6 +963,7 @@ export class DocumentRuntime {
       });
     const currentIsland = (candidate: IslandRecord): boolean =>
       candidate.active() &&
+      candidate.element.isConnected &&
       this.#records.get(candidate.element) === candidate &&
       this.#ownership.ownerForNode(candidate.element) === candidate;
     if (target === "self") {

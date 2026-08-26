@@ -165,10 +165,7 @@ export class SignalRuntime {
     const entry = [...state.scopes].find(([, scope]) => scope.identity === scopeIdentity);
     if (
       entry === undefined ||
-      !record.active() ||
-      this.#ownership.ownerForNode(entry[0]) !== record ||
-      !containedBy(record.element, entry[0]) ||
-      this.#scopeByElement.get(entry[0]) !== entry[1] ||
+      !this.#currentAsyncScope(record, entry) ||
       !(
         input === null ||
         typeof input === "boolean" ||
@@ -178,8 +175,22 @@ export class SignalRuntime {
     ) {
       throw new Error("signal_async_scope_invalid");
     }
+    if (!this.#currentAsyncScope(record, entry)) {
+      throw new Error("signal_async_scope_invalid");
+    }
     entry[1].setDeclared(name, input);
     return entry[1].get(name);
+  }
+
+  #currentAsyncScope(record: IslandRecord, entry: readonly [Element, LocalSignalScope]): boolean {
+    return (
+      record.active() &&
+      record.element.isConnected &&
+      entry[0].isConnected &&
+      this.#ownership.ownerForNode(entry[0]) === record &&
+      containedBy(record.element, entry[0]) &&
+      this.#scopeByElement.get(entry[0]) === entry[1]
+    );
   }
 
   dispose(): void {

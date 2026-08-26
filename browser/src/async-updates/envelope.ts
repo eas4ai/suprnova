@@ -8,6 +8,7 @@ import {
 import type {
   AsyncPayload,
   AsyncPayloadSchema,
+  PresentationSignalSchema,
   AuthorizedLogicalSubscription,
   StreamPosition,
   ValidatedAsyncEnvelope,
@@ -101,6 +102,26 @@ function schemaMatches(schema: AsyncPayloadSchema, value: JsonValue): boolean {
   }
 }
 
+function presentationSignalSchemaMatches(
+  schema: PresentationSignalSchema,
+  value: JsonValue,
+): boolean {
+  switch (schema) {
+    case "null":
+      return value === null;
+    case "boolean":
+      return typeof value === "boolean";
+    case "string":
+      return typeof value === "string";
+    case "i64":
+      return typeof value === "number" && Number.isSafeInteger(value);
+    case "u64":
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    default:
+      return false;
+  }
+}
+
 function targetValid(target: string): boolean {
   return (
     target === "self" ||
@@ -168,7 +189,7 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
         contract === undefined ||
         !OPERATION_NAME.test(name) ||
         !SIGNAL_SCOPE.test(scope) ||
-        !schemaMatches(contract.schema, signalValue)
+        !presentationSignalSchemaMatches(contract.schema, signalValue)
       ) {
         fail("async_payload_unregistered");
       }

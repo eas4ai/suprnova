@@ -9,6 +9,7 @@ export interface StreamPosition {
 }
 
 export type AsyncPayloadSchema = "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+export type PresentationSignalSchema = "null" | "boolean" | "i64" | "u64" | "string";
 
 export type AsyncEventCycle =
   | Readonly<{ kind: "forbid_repeated_island" }>
@@ -28,7 +29,7 @@ export interface AsyncRegisteredEventContract {
 
 export interface AsyncPresentationSignalContract {
   readonly name: string;
-  readonly schema: AsyncPayloadSchema;
+  readonly schema: PresentationSignalSchema;
   readonly scope: string;
 }
 

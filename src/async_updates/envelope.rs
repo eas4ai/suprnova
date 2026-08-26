@@ -232,11 +232,26 @@ impl fmt::Debug for SubscriptionId {
 }
 
 /// Registered schema for one presentation-only local-signal update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentationSignalSchema {
+    /// The literal null value.
+    Null,
+    /// A boolean value.
+    Boolean,
+    /// A browser-safe signed integer.
+    I64,
+    /// A browser-safe unsigned integer.
+    U64,
+    /// A bounded string value.
+    String,
+}
+
+/// Registered schema for one presentation-only local-signal update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentationSignalContract {
     scope: SignalScopeIdentity,
     name: BrowserOperationName,
-    schema: BrowserPayloadSchema,
+    schema: PresentationSignalSchema,
 }
 
 impl PresentationSignalContract {
@@ -245,7 +260,7 @@ impl PresentationSignalContract {
     pub const fn new(
         scope: SignalScopeIdentity,
         name: BrowserOperationName,
-        schema: BrowserPayloadSchema,
+        schema: PresentationSignalSchema,
     ) -> Self {
         Self {
             scope,
@@ -268,7 +283,7 @@ impl PresentationSignalContract {
 
     /// Returns the declared JSON root schema.
     #[must_use]
-    pub const fn schema(&self) -> BrowserPayloadSchema {
+    pub const fn schema(&self) -> PresentationSignalSchema {
         self.schema
     }
 }
@@ -1212,7 +1227,7 @@ pub struct RegisteredPresentationSignal {
     scope: SignalScopeIdentity,
     name: BrowserOperationName,
     value: CanonicalValue,
-    schema: BrowserPayloadSchema,
+    schema: PresentationSignalSchema,
 }
 
 impl fmt::Debug for RegisteredPresentationSignal {
@@ -1267,7 +1282,7 @@ impl RegisteredPresentationSignal {
 
     /// Returns the current registered payload schema used for coalescing identity.
     #[must_use]
-    pub const fn schema(&self) -> BrowserPayloadSchema {
+    pub const fn schema(&self) -> PresentationSignalSchema {
         self.schema
     }
 }
@@ -1863,7 +1878,9 @@ fn validate_registered_signal(
     signal: &RegisteredPresentationSignal,
 ) -> Result<(), AsyncEnvelopeError> {
     let contract = registered_presentation_signal_contract(context, signal.scope(), signal.name())?;
-    if signal.schema() != contract.schema() || !schema_matches(contract.schema(), signal.value()) {
+    if signal.schema() != contract.schema()
+        || !presentation_signal_schema_matches(contract.schema(), signal.value())
+    {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
         ));
@@ -1934,7 +1951,7 @@ fn parse_presentation_signal(
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
     let value = take(&mut fields, "value")?;
     let contract = registered_presentation_signal_contract(context, &scope, &name)?;
-    if !schema_matches(contract.schema(), &value) {
+    if !presentation_signal_schema_matches(contract.schema(), &value) {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
         ));
@@ -1991,6 +2008,26 @@ fn schema_matches(schema: BrowserPayloadSchema, value: &CanonicalValue) -> bool 
             value.fract() == 0.0 && value >= 0.0 && value <= MAX_SAFE_INTEGER as f64
         }
         (BrowserPayloadSchema::F64, CanonicalValue::Number(_)) => true,
+        _ => false,
+    }
+}
+
+fn presentation_signal_schema_matches(
+    schema: PresentationSignalSchema,
+    value: &CanonicalValue,
+) -> bool {
+    match (schema, value) {
+        (PresentationSignalSchema::Null, CanonicalValue::Null) => true,
+        (PresentationSignalSchema::Boolean, CanonicalValue::Bool(_))
+        | (PresentationSignalSchema::String, CanonicalValue::String(_)) => true,
+        (PresentationSignalSchema::I64, CanonicalValue::Number(number)) => {
+            let value = number.get();
+            value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER as f64
+        }
+        (PresentationSignalSchema::U64, CanonicalValue::Number(number)) => {
+            let value = number.get();
+            value.fract() == 0.0 && value >= 0.0 && value <= MAX_SAFE_INTEGER as f64
+        }
         _ => false,
     }
 }

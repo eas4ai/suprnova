@@ -16,8 +16,8 @@ use super::envelope::{OwnedActiveAsyncMembershipGuard, canonical_async_payload_l
 use super::telemetry::AsyncTelemetry;
 use super::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeDispatchPort, AsyncPayload,
-    AsyncTelemetryCounter, AsyncTelemetrySnapshot, AuthorizationMemo, BrowserPayloadSchema,
-    DocumentAuthorizationScope, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
+    AsyncTelemetryCounter, AsyncTelemetrySnapshot, AuthorizationMemo, DocumentAuthorizationScope,
+    MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES, PresentationSignalSchema,
     ReplayDispatchError, ReplayDispatchOutcome, ResolvedAsyncDelivery, SequenceDisposition,
     SequenceError, SequenceMachine, StreamEpoch, StreamName, StreamPosition, SubscriptionBinding,
     SubscriptionId, encode_async_envelope,
@@ -154,7 +154,7 @@ enum CoalescingKey {
         stream: StreamName,
         epoch: StreamEpoch,
         signal: BrowserOperationName,
-        schema: BrowserPayloadSchema,
+        schema: PresentationSignalSchema,
     },
 }
 

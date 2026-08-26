@@ -147,6 +147,7 @@ interface DriverIslandSource {
     (
       reason: FreshRenderReason,
       completion?: FreshRenderCompletionObserver,
+      completionKey?: string,
     ) => FreshRenderDisposition
   >;
   readonly proposeUploadHandle: Mock<
@@ -307,15 +308,17 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
       enqueueFreshRender: (
         reason: FreshRenderReason,
         completion?: FreshRenderCompletionObserver,
+        completionKey?: string,
       ) => {
         const candidate: unknown = reason;
         if (!current() || (candidate !== "poll" && candidate !== "stream")) {
           completion?.("retired");
           return "retired";
         }
-        return completion === undefined
-          ? island.source.enqueueFreshRender(candidate)
-          : island.source.enqueueFreshRender(candidate, completion);
+        if (completion === undefined) return island.source.enqueueFreshRender(candidate);
+        return completionKey === undefined
+          ? island.source.enqueueFreshRender(candidate, completion)
+          : island.source.enqueueFreshRender(candidate, completion, completionKey);
       },
       identity: Object.freeze({ ...island.source.identity }),
       proposeUploadHandle: (field: string, proposal: UploadHandleProposal) => {
@@ -611,6 +614,29 @@ describe("one driver claim and optional owner per island", () => {
     expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 0, queued: 1 });
     record.dispose();
     expect(record.enqueueFreshRender("poll")).toBe("retired");
+  });
+
+  it("preserves bounded semantic completion ownership through the production async port", () => {
+    const runtime = new FeatureRuntime();
+    const asynchronous = feature("async");
+    const source = islandSource("async-completion-owner");
+    runtime.register(asynchronous.feature);
+    runtime.start();
+    runtime.connectIsland(source);
+    const port = asynchronous.islandPorts[0] as AsyncRuntimeIslandPort | undefined;
+    if (port === undefined) throw new Error("async port fixture missing");
+    const completion = vi.fn<FreshRenderCompletionObserver>();
+
+    for (let index = 0; index < 1_000; index += 1) {
+      expect(port.enqueueFreshRender("stream", completion, "subscription-orders")).toBe("queued");
+    }
+
+    expect(source.enqueueFreshRender).toHaveBeenCalledTimes(1_000);
+    expect(source.enqueueFreshRender).toHaveBeenLastCalledWith(
+      "stream",
+      completion,
+      "subscription-orders",
+    );
   });
 
   it("scans feature directives optional-side and excludes nested islands", () => {

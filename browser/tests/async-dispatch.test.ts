@@ -9,6 +9,7 @@ import type {
   AuthorizedLogicalSubscription,
 } from "../src/async-updates/types.js";
 import type {
+  FreshRenderDisposition,
   RegisteredBrowserEventCapability,
   AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
@@ -230,7 +231,11 @@ describe("closed asynchronous presentation dispatcher", () => {
       "degraded:backpressure",
     );
 
-    expect(calls.refresh).toHaveBeenCalledExactlyOnceWith("stream", expect.any(Function));
+    expect(calls.refresh).toHaveBeenCalledExactlyOnceWith(
+      "stream",
+      expect.any(Function),
+      SUBSCRIPTION_ID,
+    );
     expect(calls.event).toHaveBeenCalledExactlyOnceWith(capability, {
       event: "orders.updated",
       payload: { count: 1 },
@@ -347,6 +352,103 @@ describe("closed asynchronous presentation dispatcher", () => {
     expect(nested).toHaveBeenCalledExactlyOnceWith("rejected");
   });
 
+  it("rechecks source and target authority after the event factory runs", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let current = true;
+    const dispatch = vi.fn(() => true);
+    const capability = authority.replace(
+      owner,
+      Object.freeze({
+        descriptorBinding: "signed-binding-v1",
+        events: Object.freeze([eventContract()]),
+      }),
+      {
+        current: () => current,
+        event: () => {
+          current = false;
+          return Object.freeze({}) as unknown as Event;
+        },
+        targets: () =>
+          Object.freeze([
+            Object.freeze({
+              current: () => current,
+              dispatch,
+            }),
+          ]),
+      },
+    );
+
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: { count: 1 },
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("retired");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("reports an observable delivered prefix without committing the partial sequence", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let secondCurrent = true;
+    const first = vi.fn(() => {
+      secondCurrent = false;
+      return true;
+    });
+    const second = vi.fn(() => true);
+    const capability = authority.replace(
+      owner,
+      Object.freeze({
+        descriptorBinding: "signed-binding-v1",
+        events: Object.freeze([eventContract({ maximumFanout: 2 })]),
+      }),
+      {
+        current: () => true,
+        event: () => Object.freeze({}) as unknown as Event,
+        targets: () =>
+          Object.freeze([
+            Object.freeze({ current: () => true, dispatch: first }),
+            Object.freeze({ current: () => secondCurrent, dispatch: second }),
+          ]),
+      },
+    );
+    const { port } = fakePort({
+      dispatchRegisteredEvent: (candidate, event) => authority.dispatch(owner, candidate, event),
+    });
+    const lifecycle = vi.fn();
+    const subscription = new AsyncSubscription(
+      authorization({ events: Object.freeze([eventContract({ maximumFanout: 2 })]) }),
+      new AsyncDispatcher(port, () => capability),
+      { now: () => 1_000 },
+      undefined,
+      lifecycle,
+    );
+
+    expect(
+      subscription.receive(
+        encoded({
+          event: "orders.updated",
+          kind: "browser_event",
+          payload: { count: 1 },
+          schema_version: 1,
+          target: "self",
+        }),
+      ),
+    ).toBe("dispatch_failed");
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).not.toHaveBeenCalled();
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(lifecycle).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "dispatch_failed", reason: "presentation_partial" }),
+    );
+    expect(subscription.receive(encoded({ kind: "heartbeat" }, 42))).toBe("continuity_required");
+    expect(first).toHaveBeenCalledOnce();
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+  });
+
   it("rejects undeclared or retired signal writes before committing sequence state", () => {
     const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
     const { port } = fakePort({ writePresentationSignal: signal });
@@ -394,6 +496,49 @@ describe("closed asynchronous presentation dispatcher", () => {
     ).toBe("dispatch_failed");
     expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
     expect(subscription.state()).toBe("degraded");
+  });
+
+  it.each(["_root", "-root", ".root", ":root", "root/scope"])(
+    "rejects signal scope outside the shared grammar: %s",
+    (scope) => {
+      const subscription = new AsyncSubscription(
+        authorization(),
+        new AsyncDispatcher(fakePort().port, fakeCapability),
+        { now: () => 1_000 },
+      );
+      expect(() =>
+        subscription.receive(
+          encoded({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope,
+            value: 1,
+          }),
+        ),
+      ).toThrow("async_payload_unregistered");
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    },
+  );
+
+  it("rejects generic JSON and floating-point presentation-signal schemas", () => {
+    for (const schema of ["json", "f64"] as const) {
+      const hostile = authorization({
+        presentationSignals: Object.freeze([
+          Object.freeze({ name: "completion_percent", schema, scope: "root-scope" }),
+        ]) as never,
+      });
+      expect(() =>
+        decodeAsyncEnvelope(
+          encoded({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: schema === "json" ? { forged: true } : 1.5,
+          }),
+          hostile,
+        ),
+      ).toThrow("async_payload_unregistered");
+    }
   });
 
   it("binds a presentation update to the exact signed nested signal-scope identity", () => {
@@ -538,6 +683,151 @@ describe("closed asynchronous presentation dispatcher", () => {
     record.dispose();
   });
 
+  it("keeps coalesced refresh completion ownership bounded for one thousand admissions", () => {
+    const element = { setAttribute: vi.fn() } as unknown as Element;
+    const record = new IslandRecord(
+      element,
+      Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-orders-bounded-completion",
+        instanceId: "MDEyMzQ1Njc4OTo7PD0-Pw",
+        lazyComplete: false,
+        protocolMinimum: 2,
+        revision: 7n,
+        runtimeContract: 1,
+        slot: "orders-slot",
+        snapshot: Object.freeze({}),
+        snapshotForm: "instance" as const,
+      }),
+    );
+    const completion = vi.fn();
+
+    expect(record.enqueueFreshRender("stream", completion)).toBe("queued");
+    for (let index = 0; index < 1_000; index += 1) {
+      expect(record.enqueueFreshRender("stream", completion)).toBe("coalesced");
+    }
+
+    const queued = record.scheduler.ready()[0];
+    if (queued === undefined) throw new Error("missing bounded fresh-render ticket");
+    record.scheduler.start(queued);
+    record.scheduler.settleTransport(queued);
+    record.scheduler.beginApplication(queued);
+    record.scheduler.finish(queued, "accepted");
+    expect(completion).toHaveBeenCalledExactlyOnceWith("succeeded");
+    record.dispose();
+  });
+
+  it("fails an overflowing semantic completion owner truthfully without throwing", () => {
+    const element = { setAttribute: vi.fn() } as unknown as Element;
+    const record = new IslandRecord(
+      element,
+      Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-orders-bounded-owner-overflow",
+        instanceId: "MDEyMzQ1Njc4OTo7PD0-Pw",
+        lazyComplete: false,
+        protocolMinimum: 2,
+        revision: 7n,
+        runtimeContract: 1,
+        slot: "orders-slot",
+        snapshot: Object.freeze({}),
+        snapshotForm: "instance" as const,
+      }),
+    );
+    const accepted = Array.from({ length: 256 }, () => vi.fn());
+    for (const [index, completion] of accepted.entries()) {
+      expect(record.enqueueFreshRender("stream", completion, `subscription-${String(index)}`)).toBe(
+        index === 0 ? "queued" : "coalesced",
+      );
+    }
+    const overflow = vi.fn();
+    let disposition: FreshRenderDisposition | undefined;
+
+    expect(() => {
+      disposition = record.enqueueFreshRender("stream", overflow, "subscription-overflow");
+    }).not.toThrow();
+    expect(disposition).toBe("exhausted");
+    expect(overflow).toHaveBeenCalledExactlyOnceWith("failed");
+    for (const completion of accepted) expect(completion).not.toHaveBeenCalled();
+    record.dispose();
+  });
+
+  it("does not commit a partially delivered event sequence", () => {
+    const { port } = fakePort({
+      dispatchRegisteredEvent: () =>
+        Object.freeze({
+          delivered: 1,
+          kind: "partially_dispatched" as const,
+          reason: "target_retired" as const,
+          skipped: 1,
+        }),
+    });
+    const lifecycle = vi.fn();
+    const subscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(port, fakeCapability),
+      { now: () => 1_000 },
+      undefined,
+      lifecycle,
+    );
+
+    expect(
+      subscription.receive(
+        encoded({
+          event: "orders.updated",
+          kind: "browser_event",
+          payload: { count: 1 },
+          schema_version: 1,
+          target: "self",
+        }),
+      ),
+    ).toBe("dispatch_failed");
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(subscription.state()).toBe("degraded");
+    expect(lifecycle).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "dispatch_failed", reason: "presentation_partial" }),
+    );
+  });
+
+  it("waits for replay refresh terminals before committing the replay transcript", () => {
+    const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+    const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
+    const { port } = fakePort({
+      enqueueFreshRender: (_reason, observer) => {
+        if (observer !== undefined) completions.push(observer);
+        return "queued";
+      },
+      writePresentationSignal: signal,
+    });
+    const subscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(port, fakeCapability),
+      { now: () => 1_000 },
+    );
+
+    expect(
+      subscription.receiveReplay([
+        encoded({ kind: "refresh", name: "refresh" }, 41),
+        encoded(
+          {
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: 50,
+          },
+          42,
+        ),
+      ]),
+    ).toBe("pending");
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(signal).not.toHaveBeenCalled();
+
+    completions[0]?.("failed");
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(subscription.state()).toBe("degraded");
+    expect(signal).not.toHaveBeenCalled();
+  });
+
   it.each(["failed", "canceled", "retired"] as const)(
     "keeps a stream refresh pending until terminal %s completion and then degrades at the committed high-water mark",
     (completion) => {
@@ -557,12 +847,11 @@ describe("closed asynchronous presentation dispatcher", () => {
       expect(subscription.receive(encoded({ kind: "refresh", name: "refresh" }, 41))).toBe(
         "pending",
       );
-      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
-      expect(subscription.state()).toBe("current");
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
       const complete = completions[0];
       if (complete === undefined) throw new Error("missing stream refresh completion observer");
       complete(completion);
-      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
       expect(subscription.state()).toBe("degraded");
     },
   );

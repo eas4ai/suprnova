@@ -191,11 +191,13 @@ Acceptance criteria:
   registration, action, effect, call, HTML, snapshot, revision, and generic-write
   authority. Core snapshots one bounded current descriptor registration from own
   data properties before validation, mints the opaque capability, and rechecks the
-  exact island owner, current capability, and each guarded target's current
-  owner/scope immediately before every bounded DOM dispatch. Presentation-signal
-  authority binds the signed stable signal-scope identity, signal name, and
-  compatible type; no selector, raw DOM target, nearest-scope fallback, or island-
-  root default crosses the optional-feature boundary.
+  exact island owner, current capability, and each guarded target's connected
+  current owner/scope after event construction and immediately before every
+  bounded DOM dispatch. Presentation-signal authority binds the signed stable
+  alphanumeric-first signal-scope identity, signal name, and local-signal-only
+  null/boolean/string/safe-integer type; core rechecks the exact connected scope
+  element immediately before the write. No selector, raw DOM target, nearest-
+  scope fallback, or island-root default crosses the optional-feature boundary.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Upload cleanup metrics are limited to closed age, retained-volume, outcome,
   retry, and orphan buckets. They never carry upload handles, lease identities,

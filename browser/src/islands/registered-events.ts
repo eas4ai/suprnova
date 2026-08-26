@@ -5,6 +5,7 @@ import type {
   RegisteredBrowserEventDispatch,
   RegisteredBrowserEventDisposition,
   RegisteredBrowserEventRegistration,
+  PartiallyDispatchedBrowserEvent,
 } from "../features/host.js";
 
 const MAX_BINDING_BYTES = 1_024;
@@ -33,6 +34,14 @@ interface AuthorityRecord {
   readonly contracts: ReadonlyMap<string, AsyncRegisteredEventContract>;
   readonly owner: object;
   readonly resolver: RegisteredEventTargetResolver;
+}
+
+function partial(
+  delivered: number,
+  skipped: number,
+  reason: PartiallyDispatchedBrowserEvent["reason"],
+): PartiallyDispatchedBrowserEvent {
+  return Object.freeze({ delivered, kind: "partially_dispatched", reason, skipped });
 }
 
 function schemaMatches(schema: AsyncPayloadSchema, value: JsonValue): boolean {
@@ -316,25 +325,39 @@ export class RegisteredEventAuthority {
     let skipped = 0;
     try {
       for (const target of targets) {
+        let domEvent: Event;
+        try {
+          domEvent = authority.resolver.event(`suprnova:${contract.name}`, event.payload);
+        } catch {
+          return dispatched === 0
+            ? "rejected"
+            : partial(dispatched, targets.length - dispatched, "dispatch_failed");
+        }
         if (!authority.resolver.current())
-          return dispatched === 0 ? "retired" : "partially_dispatched";
+          return dispatched === 0
+            ? "retired"
+            : partial(dispatched, targets.length - dispatched, "source_retired");
         if (this.#current.get(authority.owner) !== token) {
-          return dispatched === 0 ? "rejected" : "partially_dispatched";
+          return dispatched === 0
+            ? "rejected"
+            : partial(dispatched, targets.length - dispatched, "capability_rotated");
         }
         if (!target.current()) {
           skipped += 1;
           continue;
         }
-        target.dispatch(authority.resolver.event(`suprnova:${contract.name}`, event.payload));
+        target.dispatch(domEvent);
         dispatched += 1;
       }
     } catch {
-      return dispatched === 0 ? "rejected" : "partially_dispatched";
+      return dispatched === 0
+        ? "rejected"
+        : partial(dispatched, targets.length - dispatched, "dispatch_failed");
     } finally {
       if (depth === 0) authority.activeDepth.delete(contract.name);
       else authority.activeDepth.set(contract.name, depth);
     }
     if (dispatched === 0) return "no_target";
-    return skipped === 0 ? "dispatched" : "partially_dispatched";
+    return skipped === 0 ? "dispatched" : partial(dispatched, skipped, "target_retired");
   }
 }

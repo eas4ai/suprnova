@@ -160,6 +160,24 @@ async function settle(): Promise<void> {
 }
 
 describe("reviewed reconnect authority", () => {
+  it("degrades only the failing logical membership in a shared transport group", () => {
+    const { pool, sources, timers } = harness();
+    const first = sink();
+    const second = sink();
+    const firstHandle = pool.subscribe(authorization(1), first);
+    const secondHandle = pool.subscribe(authorization(2), second);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+    secondHandle.continuityProved();
+
+    firstHandle.presentationFailed();
+
+    expect(first.state).toHaveBeenLastCalledWith("degraded");
+    expect(second.state).toHaveBeenLastCalledWith("current");
+    expect(sources).toHaveLength(1);
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).not.toContain(50);
+  });
+
   it("reauthorizes every ordinary reconnect before opening a replacement transport", async () => {
     const { pool, sources, timers } = harness();
     const rotated = authorization(1, { descriptorBinding: "rotated-binding" });

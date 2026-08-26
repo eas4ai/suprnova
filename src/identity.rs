@@ -161,11 +161,88 @@ text_identity!(
     BrowserOperationName,
     128
 );
-text_identity!(
-    /// Stable keyed DOM identity for one declared local-signal scope.
-    SignalScopeIdentity,
-    128
-);
+/// Stable keyed DOM identity for one declared local-signal scope.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct SignalScopeIdentity(String);
+
+impl SignalScopeIdentity {
+    /// Parses the browser-shared grammar: alphanumeric first, then bounded
+    /// alphanumeric, dot, underscore, colon, or hyphen bytes.
+    pub fn parse(value: &str) -> Result<Self, IdentityError> {
+        let mut bytes = value.bytes();
+        let valid = !value.is_empty()
+            && value.len() <= 128
+            && bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && bytes.all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+        if !valid {
+            return Err(IdentityError {
+                kind: IdentityErrorKind::InvalidSyntax,
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the validated scope identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SignalScopeIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<SignalScopeIdentity>")
+    }
+}
+
+#[cfg(test)]
+mod signal_scope_tests {
+    use proptest::prelude::*;
+
+    use super::SignalScopeIdentity;
+
+    #[test]
+    fn signal_scope_grammar_matches_the_browser_contract() {
+        for valid in ["a", "Root_1", "nested.panel:row-2", &"a".repeat(128)] {
+            assert!(
+                SignalScopeIdentity::parse(valid).is_ok(),
+                "valid scope {valid}"
+            );
+        }
+        for invalid in [
+            "",
+            "_root",
+            "-root",
+            ".root",
+            ":root",
+            "root/scope",
+            &"a".repeat(129),
+        ] {
+            assert!(
+                SignalScopeIdentity::parse(invalid).is_err(),
+                "invalid scope {invalid}"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn signal_scope_acceptance_is_exactly_the_shared_ascii_grammar(value in any::<String>()) {
+            let expected = !value.is_empty()
+                && value.len() <= 128
+                && value.as_bytes()[0].is_ascii_alphanumeric()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+                });
+            prop_assert_eq!(SignalScopeIdentity::parse(&value).is_ok(), expected);
+        }
+    }
+}
 
 fn parse_binary_identity(value: &str, min: usize, max: usize) -> Result<Vec<u8>, IdentityError> {
     let minimum_encoded_bytes = min.saturating_mul(8).div_ceil(6);

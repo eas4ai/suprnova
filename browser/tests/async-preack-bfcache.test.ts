@@ -119,6 +119,14 @@ async function settle(): Promise<void> {
   for (let turn = 0; turn < 32; turn += 1) await Promise.resolve();
 }
 
+function successfulFreshRender(
+  _reason: Parameters<AsyncRuntimeIslandPort["enqueueFreshRender"]>[0],
+  completion?: Parameters<AsyncRuntimeIslandPort["enqueueFreshRender"]>[1],
+): "queued" {
+  completion?.("succeeded");
+  return "queued";
+}
+
 function websocketAck(socket: { readonly sent: string[] }): string {
   const request = JSON.parse(socket.sent[0] ?? "null") as Record<string, unknown>;
   return canonicalize({
@@ -176,7 +184,7 @@ describe("pre-authentication bfcache continuity", () => {
         },
       });
       const requests: AsyncAuthorizationRequest[] = [];
-      const refresh = vi.fn(() => "queued" as const);
+      const refresh = vi.fn(successfulFreshRender);
       const authorizeEvents = vi.fn(eventCapability);
       const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
       let calls = 0;
@@ -499,7 +507,7 @@ describe("pre-authentication bfcache continuity", () => {
         },
       );
       const authorizeEvents = vi.fn(eventCapability);
-      const refresh = vi.fn(() => "queued" as const);
+      const refresh = vi.fn(successfulFreshRender);
       const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
       const root = Object.freeze({}) as Element;
       owner.connectIsland({

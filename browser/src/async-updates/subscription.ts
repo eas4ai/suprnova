@@ -1,12 +1,19 @@
 import { ContinuityMachine } from "./continuity.js";
 import type { AsyncEnvelopeDispatcher } from "./dispatch.js";
-import { decodeAsyncEnvelope, validExpiration } from "./envelope.js";
+import type { PartiallyDispatchedBrowserEvent } from "../features/contract.js";
+import {
+  comparePosition,
+  decodeAsyncEnvelope,
+  isExactSuccessor,
+  validExpiration,
+} from "./envelope.js";
 import type {
   AsyncClock,
   AsyncReceiveDisposition,
   AuthorizedLogicalSubscription,
   StreamPosition,
   SubscriptionState,
+  ValidatedAsyncEnvelope,
 } from "./types.js";
 import type { FreshRenderCompletion } from "../features/contract.js";
 
@@ -16,6 +23,22 @@ export interface ReplayOutcome {
   readonly applied: number;
   readonly through: StreamPosition;
 }
+
+type ReplayDisposition = ReplayOutcome | "pending";
+
+interface RefreshSegment {
+  count: number;
+  readonly first: StreamPosition;
+  readonly kind: "refresh";
+  last: StreamPosition;
+  envelope: ValidatedAsyncEnvelope;
+}
+
+type PendingPresentation =
+  | Readonly<{ envelope: ValidatedAsyncEnvelope; kind: "envelope" }>
+  | (RefreshSegment & Readonly<{ kind: "refresh" }>);
+
+const MAX_PENDING_PRESENTATIONS = 1_024;
 
 export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
 
@@ -31,6 +54,13 @@ export type AsyncSubscriptionLifecycleOutcome =
   | Readonly<{
       kind: "dispatch_failed";
       reason: "presentation_rejected" | "refresh_failed" | "refresh_canceled" | "refresh_retired";
+    }>
+  | Readonly<{
+      delivered: number;
+      detail: PartiallyDispatchedBrowserEvent["reason"];
+      kind: "dispatch_failed";
+      reason: "presentation_partial";
+      skipped: number;
     }>;
 
 export class AsyncSubscription {
@@ -40,6 +70,11 @@ export class AsyncSubscription {
   readonly #dispatch: AsyncEnvelopeDispatcher;
   readonly #refreshCompletion: ((completion: FreshRenderCompletion) => void) | undefined;
   readonly #lifecycle: ((outcome: AsyncSubscriptionLifecycleOutcome) => void) | undefined;
+  readonly #pending: PendingPresentation[] = [];
+  #activeRefresh: RefreshSegment | null = null;
+  #observedPosition: StreamPosition;
+  #pendingAdmissions = 0;
+  #replayActive = false;
 
   constructor(
     authorization: AuthorizedLogicalSubscription,
@@ -53,6 +88,7 @@ export class AsyncSubscription {
     }
     this.#authorization = authorization;
     this.#continuity = new ContinuityMachine(authorization.baseline);
+    this.#observedPosition = authorization.baseline;
     this.#dispatch = dispatch;
     this.#clock = clock;
     this.#refreshCompletion = refreshCompletion;
@@ -84,6 +120,7 @@ export class AsyncSubscription {
   }
 
   close(): void {
+    this.#clearPending();
     this.#continuity.close();
   }
 
@@ -100,6 +137,7 @@ export class AsyncSubscription {
       throw new Error("async_reauthorization_invalid");
     }
     this.#authorization = authorization;
+    this.#observedPosition = position;
     this.#continuity.transportLost();
     this.#continuity.connected();
   }
@@ -142,66 +180,201 @@ export class AsyncSubscription {
     if (!validExpiration(authorization.expiresAt)) throw new Error("async_subscription_invalid");
     this.#authorization = authorization;
     this.#continuity = new ContinuityMachine(authorization.baseline);
+    this.#observedPosition = authorization.baseline;
+    this.#clearPending();
     this.#continuity.connected();
   }
 
   receive(encoded: string): AsyncReceiveDisposition {
     this.#assertCurrentAuthority();
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
+    if (this.#activeRefresh !== null) return this.#enqueueWhileRefreshPending(envelope);
     const observation = this.#continuity.observe(envelope.position);
     if (observation !== "apply") return observation;
-    const terminal: { value: FreshRenderCompletion | null } = { value: null };
-    let committed = false;
-    const dispatchDisposition = this.#dispatch.dispatch(envelope, (completion) => {
-      if (!committed) {
-        terminal.value = completion;
-        return;
+    this.#observedPosition = envelope.position;
+    return this.#applyEnvelope(envelope);
+  }
+
+  #completeRefresh(completion: FreshRenderCompletion): void {
+    const active = this.#activeRefresh;
+    if (active === null) return;
+    this.#activeRefresh = null;
+    let notifyRecovery = completion !== "succeeded";
+    if (completion === "succeeded") {
+      this.#commitRange(active);
+      this.#drainPending();
+      notifyRecovery = this.#presentationSettled();
+    } else {
+      this.#failPresentation(
+        completion === "failed"
+          ? "refresh_failed"
+          : completion === "canceled"
+            ? "refresh_canceled"
+            : "refresh_retired",
+        active.last,
+      );
+    }
+    if (notifyRecovery) {
+      try {
+        this.#refreshCompletion?.(completion);
+      } catch {
+        // Presentation/recovery observation cannot rewrite continuity authority.
       }
-      this.#completeRefresh(completion);
-    });
-    if (dispatchDisposition === "rejected") {
-      this.#continuity.degrade();
-      this.#observeLifecycle(
-        Object.freeze({ kind: "dispatch_failed", reason: "presentation_rejected" }),
+    }
+  }
+
+  #applyEnvelope(envelope: ValidatedAsyncEnvelope): AsyncReceiveDisposition {
+    if (envelope.payload.kind === "refresh") {
+      this.#startRefresh({
+        count: 1,
+        envelope,
+        first: envelope.position,
+        kind: "refresh",
+        last: envelope.position,
+      });
+      return this.#activeRefresh === null && this.#continuity.state() === "degraded"
+        ? "dispatch_failed"
+        : "pending";
+    }
+    const disposition = this.#dispatch.dispatch(envelope);
+    if (disposition === "rejected" || typeof disposition === "object") {
+      this.#failPresentation(
+        typeof disposition === "object" ? "presentation_partial" : "presentation_rejected",
+        envelope.position,
+        typeof disposition === "object" ? disposition : undefined,
       );
       return "dispatch_failed";
     }
     this.#continuity.commit(envelope.position);
-    committed = true;
-    if (envelope.payload.kind === "refresh") {
-      if (terminal.value !== null) this.#completeRefresh(terminal.value);
-      return "pending";
-    }
     if (envelope.payload.kind === "complete") {
+      this.#clearPending();
       this.#continuity.close();
       this.#observeLifecycle(Object.freeze({ kind: "complete", reason: envelope.payload.reason }));
     } else if (envelope.payload.kind === "error") {
-      this.#continuity.degrade();
+      this.#continuity.degradeAt(envelope.position);
       this.#observeLifecycle(Object.freeze({ kind: "error", reason: envelope.payload.code }));
     }
     return "applied";
   }
 
-  #completeRefresh(completion: FreshRenderCompletion): void {
-    if (completion !== "succeeded") {
-      this.#continuity.degrade();
-      this.#observeLifecycle(
-        Object.freeze({
-          kind: "dispatch_failed",
-          reason:
-            completion === "failed"
-              ? "refresh_failed"
-              : completion === "canceled"
-                ? "refresh_canceled"
-                : "refresh_retired",
-        }),
-      );
+  #startRefresh(segment: RefreshSegment): void {
+    this.#activeRefresh = segment;
+    const synchronousTerminal: { value: FreshRenderCompletion | null } = { value: null };
+    let dispatching = true;
+    const disposition = this.#dispatch.dispatch(segment.envelope, (completion) => {
+      if (dispatching) synchronousTerminal.value = completion;
+      else this.#completeRefresh(completion);
+    });
+    dispatching = false;
+    if (disposition !== "queued" && disposition !== "coalesced") {
+      this.#activeRefresh = null;
+      this.#failPresentation("presentation_rejected", segment.last);
+      return;
     }
-    try {
-      this.#refreshCompletion?.(completion);
-    } catch {
-      // Presentation/recovery observation cannot rewrite continuity authority.
+    if (synchronousTerminal.value !== null) this.#completeRefresh(synchronousTerminal.value);
+  }
+
+  #enqueueWhileRefreshPending(envelope: ValidatedAsyncEnvelope): AsyncReceiveDisposition {
+    const ordering = comparePosition(envelope.position, this.#observedPosition);
+    if (ordering === 0) return "duplicate";
+    if (ordering < 0 || envelope.position.epoch < this.#observedPosition.epoch) return "stale";
+    if (!isExactSuccessor(this.#observedPosition, envelope.position)) {
+      this.#observedPosition = envelope.position;
+      this.#failPresentation("presentation_rejected", envelope.position);
+      return "gap";
     }
+    this.#observedPosition = envelope.position;
+    this.#pendingAdmissions += 1;
+    if (this.#pendingAdmissions > MAX_PENDING_PRESENTATIONS) {
+      this.#failPresentation("presentation_rejected", envelope.position);
+      return "dispatch_failed";
+    }
+    const tail = this.#pending[this.#pending.length - 1];
+    if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
+      tail.count += 1;
+      tail.envelope = envelope;
+      tail.last = envelope.position;
+    } else if (envelope.payload.kind === "refresh") {
+      this.#pending.push({
+        count: 1,
+        envelope,
+        first: envelope.position,
+        kind: "refresh",
+        last: envelope.position,
+      });
+    } else {
+      this.#pending.push(Object.freeze({ envelope, kind: "envelope" }));
+    }
+    return "pending";
+  }
+
+  #drainPending(): "complete" | "dispatch_failed" | "interrupted" | "pending" {
+    while (this.#pending.length !== 0 && this.#continuity.state() !== "closed") {
+      const next = this.#pending.shift();
+      if (next === undefined) break;
+      this.#pendingAdmissions -= next.kind === "refresh" ? next.count : 1;
+      if (next.kind === "refresh") {
+        this.#startRefresh(next);
+        return this.#activeRefresh === null
+          ? this.#continuity.state() === "degraded"
+            ? "dispatch_failed"
+            : "complete"
+          : "pending";
+      }
+      if (this.#applyEnvelope(next.envelope) !== "applied") return "dispatch_failed";
+      if (this.#continuity.state() === "degraded") {
+        this.#pending.length = 0;
+        this.#pendingAdmissions = 0;
+        this.#replayActive = false;
+        return "interrupted";
+      }
+    }
+    if (this.#replayActive) {
+      this.#replayActive = false;
+      this.#continuity.finishReplay();
+    }
+    return "complete";
+  }
+
+  #presentationSettled(): boolean {
+    return this.#activeRefresh === null && this.#pending.length === 0 && !this.#replayActive;
+  }
+
+  #commitRange(segment: RefreshSegment): void {
+    let position = segment.first;
+    for (let index = 0; index < segment.count; index += 1) {
+      this.#continuity.commit(position);
+      position = Object.freeze({ epoch: position.epoch, sequence: position.sequence + 1n });
+    }
+  }
+
+  #failPresentation(
+    reason: Extract<AsyncSubscriptionLifecycleOutcome, { kind: "dispatch_failed" }>["reason"],
+    candidate: StreamPosition,
+    partial?: PartiallyDispatchedBrowserEvent,
+  ): void {
+    const highWater =
+      comparePosition(this.#observedPosition, candidate) > 0 ? this.#observedPosition : candidate;
+    this.#continuity.degradeAt(highWater);
+    this.#clearPending();
+    this.#observeLifecycle(
+      reason === "presentation_partial" && partial !== undefined
+        ? Object.freeze({
+            delivered: partial.delivered,
+            detail: partial.reason,
+            kind: "dispatch_failed",
+            reason,
+            skipped: partial.skipped,
+          })
+        : (Object.freeze({ kind: "dispatch_failed", reason }) as AsyncSubscriptionLifecycleOutcome),
+    );
+  }
+
+  #clearPending(): void {
+    this.#activeRefresh = null;
+    this.#pending.length = 0;
+    this.#pendingAdmissions = 0;
+    this.#replayActive = false;
   }
 
   #observeLifecycle(outcome: AsyncSubscriptionLifecycleOutcome): void {
@@ -212,7 +385,7 @@ export class AsyncSubscription {
     }
   }
 
-  receiveReplay(encoded: readonly string[]): ReplayOutcome {
+  receiveReplay(encoded: readonly string[]): ReplayDisposition {
     this.#assertCurrentAuthority();
     if (encoded.length === 0 || encoded.length > 1_024) throw new Error("async_replay_invalid");
     let replayBytes = 0;
@@ -225,22 +398,40 @@ export class AsyncSubscription {
       throw new Error("async_replay_invalid");
     }
     this.#continuity.validateReplay(transcript.map(({ position }) => position));
-    let applied = 0;
+    if (this.#activeRefresh !== null || this.#pending.length !== 0) {
+      throw new Error("async_replay_pending");
+    }
+    this.#replayActive = true;
     for (const envelope of transcript) {
       this.#assertCurrentAuthority();
-      if (this.#dispatch.dispatch(envelope) === "rejected") {
-        this.#continuity.degrade();
-        throw new Error("async_replay_dispatch_failed");
-      }
-      this.#continuity.commit(envelope.position);
-      applied += 1;
-      if (envelope.payload.kind === "error") {
-        this.#continuity.degrade();
-        throw new Error("async_replay_interrupted");
+      this.#observedPosition = envelope.position;
+      this.#pendingAdmissions += 1;
+      const tail = this.#pending[this.#pending.length - 1];
+      if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
+        tail.count += 1;
+        tail.envelope = envelope;
+        tail.last = envelope.position;
+      } else if (envelope.payload.kind === "refresh") {
+        this.#pending.push({
+          count: 1,
+          envelope,
+          first: envelope.position,
+          kind: "refresh",
+          last: envelope.position,
+        });
+      } else {
+        this.#pending.push(Object.freeze({ envelope, kind: "envelope" }));
       }
     }
-    this.#continuity.finishReplay();
-    return Object.freeze({ applied, through: this.#continuity.position() });
+    const drain = this.#drainPending();
+    if (drain === "interrupted") {
+      throw new Error("async_replay_interrupted");
+    }
+    if (drain === "dispatch_failed") {
+      throw new Error("async_replay_dispatch_failed");
+    }
+    if (drain === "pending") return "pending";
+    return Object.freeze({ applied: transcript.length, through: this.#continuity.position() });
   }
 
   #preflightReplay(

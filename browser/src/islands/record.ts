@@ -11,6 +11,7 @@ import type {
 } from "../features/host.js";
 
 const MAX_DISPOSERS = 64;
+const MAX_FRESH_RENDER_COMPLETION_OWNERS = 256;
 const FEATURE_REFRESH_POLICY = Object.freeze({
   key: "feature-fresh-render",
   kind: "replace_pending",
@@ -18,7 +19,8 @@ const FEATURE_REFRESH_POLICY = Object.freeze({
 
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
-  readonly #freshRenders: { readonly intent: ServerIntent; ticket: SchedulerTicket | null }[] = [];
+  readonly #freshRenders: TrackedFreshRender[] = [];
+  readonly #freshRenderCompletionOwners = new Map<CompletionOwnerKey, FreshRenderCompletionOwner>();
   readonly scheduler: IslandScheduler;
   readonly element: Element;
   #metadata: IslandMetadata;
@@ -90,6 +92,7 @@ export class IslandRecord {
   enqueueFreshRender(
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,
+    completionKey?: string,
   ): FreshRenderDisposition {
     if (this.#disposed) {
       notifyFreshRenderCompletion(completion, "retired");
@@ -99,19 +102,27 @@ export class IslandRecord {
       ({ ticket }) => ticket !== null && this.scheduler.phase(ticket) === "pending",
     );
     if (pending !== undefined) {
-      observeFreshRenderCompletion(pending.intent, completion);
+      if (!this.#ownFreshRenderCompletion(pending, completion, completionKey)) return "exhausted";
       return "coalesced";
     }
     const intent = createFreshRenderIntent(this, reason);
-    const tracked = { intent, ticket: null as SchedulerTicket | null };
-    intent.onFinish(() => {
+    const tracked: TrackedFreshRender = { completionKeys: new Set(), intent, ticket: null };
+    intent.onFinish((finish) => {
       const index = this.#freshRenders.indexOf(tracked);
       if (index >= 0) this.#freshRenders.splice(index, 1);
+      const completionResult = freshRenderCompletion(finish);
+      for (const key of tracked.completionKeys) {
+        const owner = this.#freshRenderCompletionOwners.get(key);
+        if (owner?.render !== tracked) continue;
+        this.#freshRenderCompletionOwners.delete(key);
+        notifyFreshRenderCompletion(owner.observer, completionResult);
+      }
+      tracked.completionKeys.clear();
     });
-    observeFreshRenderCompletion(intent, completion);
+    if (!this.#ownFreshRenderCompletion(tracked, completion, completionKey)) return "exhausted";
     const result = this.scheduler.schedule(intent, FEATURE_REFRESH_POLICY);
     if (result.disposition !== "accepted") {
-      return result.disposition === "retired" ? "retired" : "coalesced";
+      return result.disposition === "retired" ? "retired" : "exhausted";
     }
     if (result.ticket === undefined) throw new Error("fresh_render_ticket_missing");
     tracked.ticket = result.ticket;
@@ -122,6 +133,27 @@ export class IslandRecord {
       // Transport wakeup cannot rewrite the already accepted scheduler disposition.
     }
     return "queued";
+  }
+
+  #ownFreshRenderCompletion(
+    render: TrackedFreshRender,
+    observer: FreshRenderCompletionObserver | undefined,
+    explicitKey: string | undefined,
+  ): boolean {
+    if (observer === undefined) return true;
+    const key: CompletionOwnerKey = explicitKey ?? observer;
+    const prior = this.#freshRenderCompletionOwners.get(key);
+    if (
+      prior === undefined &&
+      this.#freshRenderCompletionOwners.size >= MAX_FRESH_RENDER_COMPLETION_OWNERS
+    ) {
+      notifyFreshRenderCompletion(observer, "failed");
+      return false;
+    }
+    prior?.render.completionKeys.delete(key);
+    render.completionKeys.add(key);
+    this.#freshRenderCompletionOwners.set(key, Object.freeze({ observer, render }));
+    return true;
   }
 
   attachScheduleObserver(observer: VoidFunction): void {
@@ -160,20 +192,27 @@ function notifyFreshRenderCompletion(
   }
 }
 
-function observeFreshRenderCompletion(
-  intent: ServerIntent,
-  observer: FreshRenderCompletionObserver | undefined,
-): void {
-  if (observer === undefined) return;
-  intent.onFinish((finish) => {
-    const result: FreshRenderCompletion =
-      finish === "accepted"
-        ? "succeeded"
-        : finish === "retired"
-          ? "retired"
-          : finish === "canceled" || finish === "superseded"
-            ? "canceled"
-            : "failed";
-    notifyFreshRenderCompletion(observer, result);
-  });
+interface TrackedFreshRender {
+  readonly completionKeys: Set<CompletionOwnerKey>;
+  readonly intent: ServerIntent;
+  ticket: SchedulerTicket | null;
+}
+
+interface FreshRenderCompletionOwner {
+  readonly observer: FreshRenderCompletionObserver;
+  readonly render: TrackedFreshRender;
+}
+
+type CompletionOwnerKey = string | FreshRenderCompletionObserver;
+
+function freshRenderCompletion(
+  finish: Parameters<ServerIntent["finish"]>[0],
+): FreshRenderCompletion {
+  return finish === "accepted"
+    ? "succeeded"
+    : finish === "retired"
+      ? "retired"
+      : finish === "canceled" || finish === "superseded"
+        ? "canceled"
+        : "failed";
 }

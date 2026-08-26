@@ -27,6 +27,7 @@ export interface PollTimerOptions {
   readonly enqueueFreshRender: (
     reason: "poll",
     completion: FreshRenderCompletionObserver,
+    completionKey?: string,
   ) => FreshRenderDisposition;
   readonly environment: PollEnvironment;
   readonly observe?: ((state: PollStatus) => void) | undefined;
@@ -327,9 +328,13 @@ export class PollTimer {
     this.#requestPending = true;
     this.#setState("polling");
     try {
-      const disposition = this.#enqueueFreshRender("poll", (completion) => {
-        this.#complete(generation, completion);
-      });
+      const disposition = this.#enqueueFreshRender(
+        "poll",
+        (completion) => {
+          this.#complete(generation, completion);
+        },
+        "poll",
+      );
       if (disposition === "retired") {
         this.#complete(generation, "retired");
         return;

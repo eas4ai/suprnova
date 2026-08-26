@@ -146,6 +146,14 @@ function ownership(root: Element): RuntimeFeatureDirectiveOwnership {
   });
 }
 
+function successfulFreshRender(
+  _reason: unknown,
+  completion?: (outcome: "succeeded" | "failed" | "canceled" | "retired") => void,
+): "queued" {
+  completion?.("succeeded");
+  return "queued";
+}
+
 function immediateHybridOwnership(root: Element): readonly RuntimeFeatureDirectiveOwnership[] {
   return Object.freeze([
     ownership(root),
@@ -211,7 +219,7 @@ describe("async feature lifecycle", () => {
   it("proves exact no-tail continuity before an immediate hybrid timer can refresh", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -285,10 +293,7 @@ describe("async feature lifecycle", () => {
     "defers $scenario morph intent until the delayed $transport membership proof",
     async ({ scenario, transport }) => {
       const timers = new FakeTimers();
-      const refresh = vi.fn((reason: unknown) => {
-        void reason;
-        return "queued" as const;
-      });
+      const refresh = vi.fn(successfulFreshRender);
       const event = vi.fn(() => "dispatched" as const);
       const diagnose = vi.fn();
       const root = Object.freeze({}) as Element;
@@ -698,7 +703,7 @@ describe("async feature lifecycle", () => {
   it("falls back from a failed pageshow reauthorization without reusing the old socket", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     let authorizations = 0;
     const owner = new AsyncDocumentOwner(
@@ -765,7 +770,7 @@ describe("async feature lifecycle", () => {
   it("observes push-only degradation publicly without creating fallback polling", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const freshness: string[] = [];
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
@@ -825,7 +830,7 @@ describe("async feature lifecycle", () => {
   it("starts descriptor-default hybrid polling only after continuity is lost", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -876,14 +881,14 @@ describe("async feature lifecycle", () => {
     );
     timers.fire(33_000);
     expect(refresh).toHaveBeenCalledOnce();
-    expect(refresh).toHaveBeenCalledWith("poll", expect.any(Function));
+    expect(refresh).toHaveBeenCalledWith("poll", expect.any(Function), "poll");
     owner.dispose();
   });
 
   it("reconciles committed stream mode changes against the current descriptor without a second transport", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const diagnose = vi.fn();
     const root = Object.freeze({}) as Element;
     let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([ownership(root)]);
@@ -981,6 +986,9 @@ describe("async feature lifecycle", () => {
           heartbeatLost: () => {
             handle.heartbeatLost();
           },
+          presentationFailed: () => {
+            handle.presentationFailed();
+          },
         });
       });
     const root = Object.freeze({}) as Element;
@@ -1008,7 +1016,7 @@ describe("async feature lifecycle", () => {
         consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: () => "dispatched",
         element: root,
-        enqueueFreshRender: () => "queued",
+        enqueueFreshRender: successfulFreshRender,
         identity: Object.freeze({
           component: "fixture.orders",
           documentKey: "document-duplicate",
@@ -1035,7 +1043,7 @@ describe("async feature lifecycle", () => {
 
   it("applies a complete initial replay only after physical membership authentication", async () => {
     const sources: FakeSource[] = [];
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -1086,6 +1094,97 @@ describe("async feature lifecycle", () => {
     owner.dispose();
   });
 
+  it("withholds replay continuity until its refresh reaches the real terminal outcome", async () => {
+    const completions: ((completion: "succeeded" | "failed" | "canceled" | "retired") => void)[] =
+      [];
+    const continuityProved = vi.fn();
+    const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
+    const stages: NonNullable<Parameters<DocumentConnectionPool["subscribe"]>[2]>[] = [];
+    const subscribe = vi
+      .spyOn(DocumentConnectionPool.prototype, "subscribe")
+      .mockImplementation((_authorization, _sink, pending) => {
+        if (pending !== null && pending !== undefined) stages.push(pending);
+        return Object.freeze({
+          close: vi.fn(),
+          continuityLost: vi.fn(),
+          continuityProved,
+          heartbeatLost: vi.fn(),
+          presentationFailed: vi.fn(),
+        });
+      });
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () =>
+            Object.freeze({
+              replay: Object.freeze([
+                envelope(1n, { kind: "refresh", name: "refresh" }),
+                envelope(2n, {
+                  kind: "presentation_signal",
+                  name: "completion_percent",
+                  scope: "root-scope",
+                  value: 50,
+                }),
+                envelope(3n, { kind: "refresh", name: "refresh" }),
+              ]),
+              subscription: authorization(0n),
+            }),
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: new FakeTimers().port,
+        transports: {
+          eventSource() {
+            throw new Error("unexpected_transport");
+          },
+          webSocket() {
+            throw new Error("unexpected_transport");
+          },
+        },
+      },
+    );
+    try {
+      owner.connectIsland({
+        consumeRegisteredEventCapability: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: root,
+        enqueueFreshRender: (_reason, completion) => {
+          if (completion !== undefined) completions.push(completion);
+          return "queued";
+        },
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: "document-pending-replay",
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: signal,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const staged = stages[0];
+      if (staged === undefined) throw new Error("missing staged replay authorization");
+      expect(staged.commit()).toBe("pending");
+      expect(continuityProved).not.toHaveBeenCalled();
+      expect(completions).toHaveLength(1);
+
+      completions[0]?.("succeeded");
+      expect(signal).toHaveBeenCalledExactlyOnceWith("root-scope", "completion_percent", 50);
+      expect(completions).toHaveLength(2);
+      expect(continuityProved).not.toHaveBeenCalled();
+
+      completions[1]?.("succeeded");
+      expect(continuityProved).toHaveBeenCalledOnce();
+    } finally {
+      owner.dispose();
+      subscribe.mockRestore();
+    }
+  });
+
   it("reauthorizes after bfcache, proves continuity, and ignores retired transport data", async () => {
     const sources: FakeSource[] = [];
     const transports: AsyncTransportPorts = {
@@ -1101,7 +1200,7 @@ describe("async feature lifecycle", () => {
     const timers = new FakeTimers();
     const authorizationRequests: AsyncAuthorizationRequest[] = [];
     const root = Object.freeze({}) as Element;
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const event = vi.fn(() => "dispatched" as const);
     const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
     const port: AsyncRuntimeIslandPort = {
@@ -1401,7 +1500,7 @@ describe("async feature lifecycle", () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
     const requests: AsyncAuthorizationRequest[] = [];
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -1501,7 +1600,7 @@ describe("async feature lifecycle", () => {
       consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
-      enqueueFreshRender: () => "queued",
+      enqueueFreshRender: successfulFreshRender,
       identity: Object.freeze({
         component: "fixture.orders",
         documentKey: "document-gap",
@@ -1554,7 +1653,7 @@ describe("async feature lifecycle", () => {
       timers: timers.port,
       webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
     });
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -1659,7 +1758,7 @@ describe("async feature lifecycle", () => {
         return socket;
       },
     });
-    const refresh = vi.fn(() => "queued" as const);
+    const refresh = vi.fn(successfulFreshRender);
     const root = Object.freeze({}) as Element;
     const websocketAuthorization = authorization(0n, {
       document: Object.freeze({
@@ -1771,7 +1870,7 @@ describe("async feature lifecycle", () => {
         consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: () => "dispatched",
         element: root,
-        enqueueFreshRender: () => "queued",
+        enqueueFreshRender: successfulFreshRender,
         identity: Object.freeze({
           component: "fixture.orders",
           documentKey: `document-silent-${lifecycle}-${String(replay)}`,

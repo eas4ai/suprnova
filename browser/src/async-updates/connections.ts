@@ -108,7 +108,7 @@ export interface LogicalSubscriptionSink {
 }
 
 export interface ReauthorizedLogicalSubscription {
-  commit(): "committed" | "degraded" | "stale";
+  commit(): "committed" | "degraded" | "pending" | "stale";
   discard(): void;
   readonly proof: "authoritative_no_tail" | "complete_replay" | null;
   readonly subscription: AuthorizedLogicalSubscription;
@@ -119,6 +119,7 @@ export interface LogicalSubscriptionHandle {
   continuityLost(): void;
   continuityProved(): void;
   heartbeatLost(): void;
+  presentationFailed(): void;
 }
 
 export type DocumentAuthorizationSource = 0 | 1;
@@ -1001,6 +1002,7 @@ interface LogicalMembership {
   provedTransportGeneration: number;
   recoveryRequestGeneration: number;
   requiresInitialAuthorization: boolean;
+  logicallyDegraded: boolean;
 }
 
 interface PhysicalGroup {
@@ -1229,6 +1231,7 @@ export class DocumentConnectionPool {
       provedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       requiresInitialAuthorization: pendingAuthorization !== null,
+      logicallyDegraded: false,
       sink,
     };
     this.#memberships.set(authorization.subscriptionId, membership);
@@ -1267,6 +1270,9 @@ export class DocumentConnectionPool {
         ) {
           this.#failed(group, group.generation, "heartbeat_lost");
         }
+      },
+      presentationFailed: () => {
+        this.#degradeLogicalMembership(membership);
       },
     });
   }
@@ -1887,6 +1893,55 @@ export class DocumentConnectionPool {
     }
   }
 
+  #degradeLogicalMembership(membership: LogicalMembership): void {
+    const group = membership.group;
+    if (
+      !membership.active ||
+      group?.state !== "open" ||
+      group.memberships.get(membership.authorization.subscriptionId) !== membership
+    ) {
+      return;
+    }
+    const transportGeneration = group.generation;
+    const membershipGeneration = ++membership.generation;
+    this.#cancelMembershipAttachment(membership);
+    this.#discardPendingAuthorization(membership);
+    membership.authenticatedTransportGeneration = -1;
+    membership.pendingProofMembershipGeneration = -1;
+    membership.pendingObservedTransportGeneration = -1;
+    membership.provedTransportGeneration = -1;
+    membership.logicallyDegraded = true;
+    try {
+      group.port?.unsubscribe(membership.authorization.subscriptionId);
+    } catch {
+      // Logical degradation remains exact when adapter cleanup fails.
+    }
+    this.#safeState(membership, "degraded");
+    const poolGeneration = this.#generation;
+    void this.#requestReauthorization(membership, poolGeneration).then((current) => {
+      if (
+        !membership.active ||
+        membership.generation !== membershipGeneration ||
+        membership.group !== group ||
+        !this.#groupCurrent(group, transportGeneration, "open") ||
+        group.memberships.get(membership.authorization.subscriptionId) !== membership
+      ) {
+        discardReauthorization(current);
+        return;
+      }
+      const staged = current === null ? null : this.#acceptedReauthorization(membership, current);
+      if (staged === null) {
+        discardReauthorization(current);
+        this.#safeState(membership, "degraded");
+        return;
+      }
+      membership.pendingAuthorization = staged;
+      membership.pendingAuthorizationKind = "successor";
+      this.#safeState(membership, "connecting");
+      this.#subscribeMembership(group, membership, transportGeneration);
+    });
+  }
+
   #settleReauthorization(
     request: ReauthorizationRequest,
     current: ReauthorizedLogicalSubscription | null,
@@ -2159,6 +2214,10 @@ export class DocumentConnectionPool {
       return;
     }
     membership.provedTransportGeneration = transportGeneration;
+    if (membership.logicallyDegraded) {
+      membership.logicallyDegraded = false;
+      this.#safeState(membership, "current");
+    }
     this.#finishContinuity(group);
   }
 

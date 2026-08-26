@@ -112,6 +112,16 @@ Acceptance criteria:
   or retirement degrades at the already-consumed stream high-water and requests
   authoritative recovery without replaying a mutating operation. Burst events
   can coalesce by the exact island semantic key without losing this completion.
+- Coalesced refresh completion uses one scheduler-intent callback plus a bounded
+  owner table keyed by exact active logical membership. A newer admission for the
+  same membership replaces that slot; it never appends another intent callback.
+  Saturation reports exhaustion and degrades the affected membership rather than
+  throwing or claiming completion.
+- Live delivery and reconnect replay use the same terminal observer. A replay
+  that reaches a refresh pauses later presentation effects and cannot finish or
+  advance through that refresh until validation, morph, and commit-after-morph
+  succeed. Terminal failure preserves the truthful committed prefix and consumed
+  high-water, degrades only that membership, and requires authoritative recovery.
 - Authorization is rechecked when fresh protected data is rendered.
 - A pushed browser event does not automatically invoke a domain-mutating Live
   action. Server-owned reactions use normal server event handlers; application
@@ -120,8 +130,20 @@ Acceptance criteria:
   revision, accepted-outcome, or domain state.
 - Core binds registered-event authority to the exact island owner and rechecks
   owner currentness and capability rotation after bounded target resolution,
-  immediately before each DOM dispatch. Forged, stale, cross-island, wrong-scope,
-  over-fanout, cyclic, or retired delivery fails without sequence commit.
+  constructs the DOM `Event`, then immediately rechecks the connected source,
+  current capability, connected target, owner, and scope before each DOM dispatch.
+  Forged, stale, detached, cross-island, wrong-scope, over-fanout, cyclic, or
+  retired delivery fails without sequence commit.
+- A fanout whose first target observes an event before a later target becomes
+  invalid returns bounded delivered/skipped counts and a closed reason. That
+  observable prefix is not rolled back, but the sequence remains uncommitted and
+  degraded at consumed high-water so it cannot be retried automatically and
+  duplicate the prefix.
+- A presentation-signal contract accepts only null, boolean, string, or
+  browser-safe signed/unsigned integer values. Its scope identity is 1--128 ASCII
+  bytes, starts alphanumeric, and then permits only alphanumeric, `.`, `_`, `:`,
+  or `-`; slash and leading punctuation are invalid. Core rechecks the exact
+  connected declared scope element and owner immediately before the write.
 - HTTP action transport remains available when push is absent.
 
 UX flow:
@@ -279,6 +301,11 @@ transport, document authorization scope)` and multiplexes island subscriptions
 - Sequence classification precedes registered dispatch. Exact-next delivery
   advances only after dispatch succeeds; dispatch rejection or failure retains
   the prior position so a fresh retry is not misclassified as a duplicate.
+- Browser fanout partial delivery is a failed dispatch, not success: the bounded
+  delivered prefix is diagnostic/observable, the current sequence does not
+  advance, the consumed position becomes recovery high-water, and later delivery
+  remains inert until authoritative recovery. The runtime never automatically
+  retries that partially delivered event.
 - Replay validates the entire bounded same-scope transcript before any dispatch
   or mutation only when the exact lane already has a sequence or pressure
   recovery obligation. A healthy lane rejects every transcript before host
@@ -556,10 +583,15 @@ UX flow:
   target, and truthfully reports partial fanout. Stream refresh success waits for
   the existing scheduler's validation/morph/commit terminal outcome, while
   failure retains the consumed high-water and activates exact-membership
-  recovery. Completion and error retain bounded reasons and own exact membership,
-  heartbeat, and hybrid-fallback lifecycle. Presentation signals are registered,
-  encoded, decoded, and dispatched by exact stable scope identity plus name and
-  compatible type rather than an island-root or nearest-scope default.
+  recovery. One callback per scheduler intent fans out through a bounded
+  exact-membership completion table, and replay serializes later effects behind
+  the same terminal observer. Completion, partial delivery, and error retain
+  bounded reasons and own exact membership, heartbeat, and hybrid-fallback
+  lifecycle without reconnecting transport siblings. Event construction precedes
+  the final connected source/target authority check. Presentation signals are
+  registered, encoded, decoded, and dispatched by the shared bounded scope
+  grammar plus name and the local-signal-only null/boolean/string/safe-integer
+  schema rather than an island-root or nearest-scope default.
 - 2026-08-26 -- Implemented one closed browser async dispatcher over the
   canonical membership-validated envelope union. Refresh enters the existing
   fresh-render scheduler, registered browser events consume a core-minted

@@ -18,7 +18,7 @@ use crate::async_updates::{
     BoundedTopics, BrowserPayloadSchema, CapabilityVersion, CompletionReason,
     CurrentSubscriptionRegistration, EventCyclePolicy, EventOrder, EventSource, EventTarget,
     MAX_ASYNC_ENVELOPE_ENTRIES, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
-    PresentationSignalContract, ReconnectPolicy, RegisteredBrowserEvent,
+    PresentationSignalContract, PresentationSignalSchema, ReconnectPolicy, RegisteredBrowserEvent,
     RegisteredPresentationSignal, ReplayDispatchError, ReplayDispatchOutcome,
     ResolvedAsyncDelivery, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, SequenceDisposition,
     SequenceErrorKind, SequenceMachine, SequenceState, StreamEpoch, StreamErrorCode, StreamName,
@@ -430,17 +430,12 @@ fn membership_registry_for(authorized: &AuthorizedSubscription) -> TestMembershi
             PresentationSignalContract::new(
                 SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse("completion_percent").expect("signal name"),
-                BrowserPayloadSchema::U64,
+                PresentationSignalSchema::U64,
             ),
             PresentationSignalContract::new(
                 SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse("signed_count").expect("signal name"),
-                BrowserPayloadSchema::I64,
-            ),
-            PresentationSignalContract::new(
-                SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-                BrowserOperationName::parse("measurement").expect("signal name"),
-                BrowserPayloadSchema::F64,
+                PresentationSignalSchema::I64,
             ),
         ])
         .expect("signals"),
@@ -618,7 +613,6 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
         ("signed_count", safe),
         ("completion_percent", 0.0),
         ("completion_percent", safe),
-        ("measurement", f64::MAX),
     ] {
         let signal = RegisteredPresentationSignal::new(
             &context,
