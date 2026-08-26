@@ -998,11 +998,12 @@ plain JSON response was received.
 ```
 
 The client checks one thing before it will render anything: an
-`X-Inertia: true` header on the response. A `403` from
-[`PermissionMiddleware`](authorization.md), a `404` for an unrouted path,
-a `429` from the rate limiter, a `500` from a failing handler - all of
-them carry the framework's JSON error body and no such header, so the
-client hands them to its modal. A user with the wrong role clicks a nav
+`X-Inertia: true` header on the response. A `403` from an
+[authorization](authorization.md) check or an RBAC permission
+middleware, a `404` for an unrouted path, a `429` from the
+[rate limiter](rate-limiting.md), a `500` from a
+[failing handler](errors.md) - all of them carry the framework's JSON
+error body and no such header, so the client hands them to its modal. A user with the wrong role clicks a nav
 link and the app appears to break.
 
 Name a page component and the framework renders those responses through
