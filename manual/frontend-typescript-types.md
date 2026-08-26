@@ -33,10 +33,21 @@ suprnova generate-types --output frontend/src/types/props.ts
 
 The route file path is fixed at `frontend/src/types/routes.ts` and the
 message-key file at `frontend/src/types/lang-keys.ts`; only the props
-file path is configurable. The watcher polls `src/` and regenerates the
-props file on any `.rs` change; when the project has a `lang/`
-directory, it also watches that tree and regenerates `lang-keys.ts` on
-any `.ftl` change.
+file path is configurable. The watcher watches `src/` and regenerates the
+props file when a `.rs` file is created, written, or deleted; when the
+project has a `lang/` directory, it watches that tree too and regenerates
+`lang-keys.ts` on the same kinds of change to a `.ftl` file. Reads don't
+count - the generator reads every `.rs` file under `src/` on each run, and
+treating that as a change would make the watcher regenerate forever. A
+burst of saves coalesces into a single run 500 ms after the last write,
+so a `cargo fmt` or a branch switch regenerates once, from the finished
+tree, rather than once per file from a half-written one.
+
+Every run writes a file only when the emitted content differs from what is
+already there. A regeneration that changed nothing reports
+`<path> is up to date` and leaves the file, and its timestamp, untouched -
+which is what keeps `suprnova serve` from restarting your backend over a
+file it decided not to write.
 
 ## Page props
 
@@ -113,6 +124,7 @@ equivalents.
 | `Option<T>` | `T \| null` | |
 | `Vec<T>` | `Array<T>` | The props generator emits `Array<T>`; the routes generator emits `T[]` for form-request fields |
 | `HashMap<K, V>`, `BTreeMap<K, V>` | `Record<K, V>` | |
+| `serde_json::Value` | `JsonValue` | A recursive alias the generator declares once at the top of the file, and only when something references it. A bare `Value` maps here too, unless the project defines its own `Value` struct - that one wins |
 | `Field<T>` (from `#[derive(Data)]`) | `field?: T \| null` | Field is optional on the wire |
 | `Prop<T>` (lazy / deferred) | `field?: T` | Lazy props omit the `null` half |
 | Anything else | bare identifier | See "Custom types" below |

@@ -6,11 +6,66 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 1.3.5 - 2026-08-26
 
+### Changed
+
+- **Every changelog section reads in all six manual translations.** The de, es,
+  fr, ja, pt-BR and zh-Hans manuals used to carry the 1.3.0 to 1.3.2 sections in
+  English behind a translator's note, and older sections with stray English
+  lines; every section from 1.3.5 back to 0.1.0 is now translated, and the
+  notes are gone.
+
 ### Fixed
 
 - **Local-filesystem disks publish every object in one step.** `Storage::register_fs` and `register_fs_with` now stage `disk.write(...)`, `disk.writer(...)`, and `disk.copy(...)` as a temp file under `<root>/.suprnova-atomic/` and publish it onto the target with a single `rename(2)`, so none of them is ever observable at a partial length. Before this, the driver opened the target with `create + truncate` and streamed into it in place: a concurrent reader got an empty or half-written object for the whole duration of the write, and a crash mid-write left a truncated object at the live path. `abort()` on a writer now discards the staged file instead of failing with `Unsupported`.
 - **`write_with(..).if_not_exists(true)` is a true exclusive create on a local disk.** It is published with `link(2)`, which fails atomically in the kernel when the target exists, so exactly one of any number of racing callers succeeds and every other one gets `ConditionNotMatch` having written nothing. A staged write published by a plain rename would have degraded the condition to a check followed by an overwrite, silently discarding all but the last writer - which is the opposite of what the primitive is reached for.
 - **An `append` that creates the object is still an append.** Appends are the one in-place operation on a local disk, and that now holds for the first one too, so two writers appending to the same missing object both land instead of one staging its own copy and overwriting the other.
+
+- **`suprnova serve` no longer rebuilds a project nobody has touched, and
+  neither does `suprnova generate-types --watch`.** Both watchers classified a
+  filesystem event by its path alone, and the generator reads every `.rs` file
+  under the same `src/` tree they are watching - so on Linux, where the kernel
+  reports those reads, each regeneration scheduled the next one. A freshly
+  scaffolded project regenerated its types and restarted its backend every half
+  second, forever, without a single source edit. Only events that mean the bytes
+  on disk actually changed count now. `generate-types --watch` also had no
+  debounce at all, so it acted on the first file of a burst rather than the last;
+  it now shares `serve`'s 500 ms trailing edge, and both watchers share one
+  implementation so the next fix cannot land in only one of them. The generator
+  compares before it writes, so a regeneration whose output is byte-identical
+  leaves the file, and its mtime, alone.
+
+- **The backend watcher is scoped to the paths the server is built from.**
+  `cargo watch` ran with no `-w`, so it watched the whole non-gitignored project:
+  saving a Svelte component, or regenerating
+  `frontend/src/types/inertia-props.ts`, rebuilt the framework and restarted the
+  server. It now watches `src/`, `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env`, and
+  `lang/` - the build inputs plus the two trees read once at boot - each included
+  only when it exists, since cargo-watch refuses a `-w` path that does not.
+  `cmd/` is where the full-stack scaffold keeps the server binary's `main.rs`.
+  The invocation also passes `--no-vcs-ignores`, because cargo-watch applies
+  `.gitignore` to explicitly named `-w` roots and the scaffold ignores `.env`,
+  which would otherwise leave `-w .env` watching nothing; `-w` has already
+  narrowed the surface, so the flag cannot widen it. Frontend edits and generated
+  `.ts` files no longer restart the backend.
+
+- **`serde_json::Value` generates as `JsonValue` instead of `unknown`.** It used to
+  degrade to `unknown` and warn that it "isn't a struct this project defines",
+  advice that is wrong for a JSON document - and the scaffold's own login and
+  register pages tripped it twice on every regeneration, so every fresh project
+  warned out of the box. It now emits a recursive `JsonValue` alias, declared once
+  at the top of the generated file and only when something references it. A bare
+  `Value` maps there too, unless the project defines a `Value` struct of its own.
+
+- **Neither `generate-types` nor `serve` reports a file it did not write as
+  generated.** Because a pass now writes only when the emitted content differs,
+  `Generated <path>` was a claim about the filesystem that was false on every
+  rerun of an unchanged project. `generate-types` says `<path> is up to date`
+  instead, in one-shot and `--watch` alike, and `serve`'s startup pass says
+  `N type(s) up to date → <path>`, keeping the count. `serve`'s file watcher
+  now stays silent on a regeneration that wrote nothing, in text and under
+  `--json` both: a `types_regenerated` event means the generated file on disk is
+  different now, so silence after a save tells you your edit did not change any
+  prop shape.
 
 ### Upgrading
 

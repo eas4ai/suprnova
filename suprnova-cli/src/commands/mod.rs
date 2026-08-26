@@ -25,6 +25,9 @@ pub mod schedule_work;
 pub mod serve;
 pub mod ssr_check;
 pub mod ssr_start;
+// Every item inside is `pub(crate)`; a `pub mod` would only add an
+// empty module to the lib's public rustdoc.
+pub(crate) mod watcher;
 pub mod web_run;
 pub mod workflow_install;
 pub mod workflow_work;

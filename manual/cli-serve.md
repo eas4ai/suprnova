@@ -135,8 +135,29 @@ When you run `suprnova serve`, the CLI:
    starting a dev server should not also be choosing versions for you.
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
    Skipped under `--backend-only`, and when the project has no frontend.
-7. Spawns `cargo watch -x 'run --bin <package-name>'` for the backend.
-   `cargo-watch` re-runs the binary whenever a `.rs` file changes.
+7. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
+   server is actually built from: `src/`, `cmd/`, `Cargo.toml`,
+   `Cargo.lock`, `.env`, and `lang/`. `cmd/` is where the full-stack
+   scaffold puts the server binary's `main.rs`; the `--api` scaffold puts
+   it in `src/` and has no `cmd/`. Each path is passed only when it
+   exists, because cargo-watch refuses to start on a `-w` path that
+   doesn't - a project that hasn't been built yet has no `Cargo.lock`, and
+   it's picked up on the next `serve`.
+
+   `--no-vcs-ignores` goes with them. cargo-watch applies your
+   `.gitignore` to explicitly named `-w` roots, not just to its own
+   project walk, and the scaffold gitignores `.env` - so without that flag
+   `-w .env` watches nothing at all. It can't widen what restarts the
+   backend, because `-w` has already narrowed that to the six paths above,
+   and the only gitignored things inside them are `.env` and (on `--api`)
+   `Cargo.lock`, both watched on purpose. `target/`, `node_modules`, and
+   the rest sit outside every watched root either way.
+
+   On a scaffolded full-stack project the full invocation is
+   `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
+   -w .env -w lang -x 'run --bin <package-name>'`. Frontend edits and the
+   generated `frontend/src/types/*.ts` are outside that scope, so they
+   never restart the backend.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
@@ -146,11 +167,19 @@ When you run `suprnova serve`, the CLI:
    otherwise juggle in another terminal.
 10. Starts a file watcher on `src/` that re-runs the type generator whenever
     a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
+    Only real changes count - a creation, a write, or a deletion. Reads do
+    not, which matters because the generator reads every `.rs` file under
+    the tree it is watching on each run.
     Skipped when the project has no frontend, the same as the startup type
     generation in step 4. The debounce is trailing-edge, so a burst -
     `cargo fmt`, format-on-save across several files, a branch switch -
     coalesces into exactly one regeneration that runs *after* the last
     write, rather than one that fires on the first file and misses the rest.
+    A regeneration writes the file only when the emitted TypeScript differs
+    from what's already there, and the watcher reports only what it wrote:
+    an edit that doesn't change any prop shape prints nothing and emits no
+    `types_regenerated` event. Silence after a save means your edit didn't
+    change the generated types.
 11. Forwards every child's stdout/stderr to your terminal with a `[name]`
     prefix (`[backend]`, `[frontend]`, or the process's configured name),
     optionally timestamped with `--timestamps` - or, with `--json`, as
@@ -199,10 +228,17 @@ solves. See the corresponding row in
 
 ## Hot reload
 
-**Backend.** `cargo watch -x 'run --bin <package>'` is the loop. It rebuilds
-and restarts the server on every `.rs` change in the project. Cold rebuilds
-after touching a heavy crate can take several seconds; incremental changes
-in a single file are usually sub-second.
+**Backend.** `cargo watch` is the loop, scoped to the paths the server is
+built from. It rebuilds and restarts on a change under `src/` or `cmd/`,
+to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
+once by `Config::init` at boot and the Fluent catalogs once at bootstrap,
+so a change to either only takes effect on a restart. `.env` is watched
+through `--no-vcs-ignores`, without which your `.gitignore` would hide it
+from the watcher. Saving a component,
+or regenerating `frontend/src/types/inertia-props.ts`, is outside that
+scope and leaves the backend running. Cold rebuilds after touching a heavy
+crate can take several seconds; incremental changes in a single file are
+usually sub-second.
 
 **Frontend.** Vite's HMR injects component changes in place without a full
 reload, preserving component state. Tailwind classes update live via the
@@ -211,7 +247,11 @@ Tailwind v4 watcher.
 **TypeScript types.** Whenever a `.rs` file changes, the type watcher re-runs
 the generator. If new `#[derive(InertiaProps)]` structs appear (or existing
 ones change shape), the regenerated `frontend/src/types/inertia-props.ts`
-triggers Vite's HMR for the component that imports them.
+triggers Vite's HMR for the component that imports them. When the emitted
+TypeScript is byte-identical to what's already on disk the file is left
+untouched and the watcher says nothing, so a regeneration that changed
+nothing isn't a change anything downstream has to react to - not Vite, not
+the backend watcher, and not whatever is reading `--json`.
 
 ## Extra dev processes
 
@@ -268,7 +308,7 @@ field:
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
 | `restart_succeeded` | `ts`, `name`, `pid` | A scheduled respawn succeeded; the process is running again under a new PID. |
 | `gave_up` | `ts`, `name`, `tries` | The process crashed `tries` consecutive times (`--restart-tries`) and `serve` stopped retrying it. The session, and every other process, keep running. |
-| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher regenerated a TypeScript artifact in response to a `.rs`/`.ftl` change. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher rewrote a TypeScript artifact after a `.rs`/`.ftl` change. Fires only when the generated file actually changed: a `.rs` edit that leaves the emitted TypeScript byte-identical writes nothing and emits nothing, so an event always means the file on disk is different now. `count` is the number of structs (or message ids) in the rewritten file, not the number that changed. |
 | `shutdown` | `ts` | The session is shutting down. Always the last line. |
 
 For example, a Vite crash and its respawn look like:

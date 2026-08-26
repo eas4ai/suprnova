@@ -48,8 +48,20 @@ pub enum RustType {
     Field(Box<RustType>),
     /// `Prop<T>` - deferred/lazy prop; optional, never null
     Prop(Box<RustType>),
+    /// `serde_json::Value` - an arbitrary JSON document, emitted as the
+    /// recursive `JsonValue` alias rather than degraded to `unknown`.
+    Json,
     Custom(String),
 }
+
+/// The TypeScript alias [`RustType::Json`] renders as, declared once at
+/// the top of the generated file and only when something references it.
+///
+/// A JSON document has a precise shape in TypeScript, just a recursive
+/// one, and TypeScript can only express recursion through a named type -
+/// hence an alias rather than an inline union at each use site.
+const JSON_VALUE_ALIAS: &str = "export type JsonValue = string | number | boolean | null | JsonValue[] \
+| { [key: string]: JsonValue };\n\n";
 
 /// Visitor that collects structs with #[derive(InertiaProps)] or #[derive(Data)]
 /// into `structs`, and every other named-field struct into `plain_structs` so
@@ -122,6 +134,18 @@ impl InertiaPropsVisitor {
             Type::Path(type_path) => {
                 let segment = type_path.path.segments.last().unwrap();
                 let ident = segment.ident.to_string();
+
+                // `serde_json::Value` names itself unambiguously, so it
+                // resolves here. A *bare* `Value` cannot: the project may
+                // define a struct by that name, and only the whole-crate
+                // scan knows. `resolve_bare_json` settles that one after
+                // `resolve_reachable`, with the project's struct winning.
+                if ident == "Value"
+                    && type_path.path.segments.len() == 2
+                    && type_path.path.segments[0].ident == "serde_json"
+                {
+                    return RustType::Json;
+                }
 
                 match ident.as_str() {
                     "String" | "str" => RustType::String,
@@ -350,7 +374,96 @@ fn resolve_reachable(
         }
     }
 
+    resolve_bare_json(&mut derived);
     derived
+}
+
+/// Turn a bare `Value` that nothing in the project defines into
+/// [`RustType::Json`].
+///
+/// `use serde_json::Value;` is the common spelling, and by the time a
+/// field's type reaches the generator the import is gone - all that is
+/// left is the bare ident. Treating it as JSON has to happen after the
+/// whole-crate scan, because a project is entitled to its own `Value`
+/// struct (or a generic parameter of that name), and that has to win.
+/// Before this, the scaffold's own `Option<serde_json::Value>` degraded to
+/// `unknown` and warned every fresh project twice per regeneration, with
+/// advice ("mirror it as a local struct") that is wrong for a JSON value.
+///
+/// The guard is `known` plus the struct's generic parameters, and `known`
+/// only ever holds named-field structs. So a project-defined `Value` that
+/// is a tuple struct, an enum, or a `type Value = ...` alias is invisible
+/// here and becomes `JsonValue`, where it used to become `unknown` with a
+/// warning. Both answers are wrong for such a type; this one is quiet
+/// about it. Widening the guard needs the scanner to collect those
+/// declarations in the first place, which it does not do today.
+fn resolve_bare_json(structs: &mut [InertiaPropsStruct]) {
+    let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
+    if known.contains("Value") {
+        return;
+    }
+
+    for s in structs.iter_mut() {
+        let generics = &s.type_params;
+        if generics.iter().any(|g| g == "Value") {
+            continue;
+        }
+        for f in &mut s.fields {
+            rewrite_bare_json(&mut f.ty);
+        }
+    }
+}
+
+/// Rewrite every `Custom("Value")` nested anywhere inside a type.
+fn rewrite_bare_json(ty: &mut RustType) {
+    match ty {
+        RustType::Custom(name) if name == "Value" => *ty = RustType::Json,
+        RustType::Option(inner)
+        | RustType::Vec(inner)
+        | RustType::Field(inner)
+        | RustType::Prop(inner) => rewrite_bare_json(inner),
+        RustType::HashMap(key, val) => {
+            rewrite_bare_json(key);
+            rewrite_bare_json(val);
+        }
+        _ => {}
+    }
+}
+
+/// The TypeScript identifier [`RustType::Json`] renders as.
+const JSON_VALUE_NAME: &str = "JsonValue";
+
+/// Whether the `JsonValue` alias should be declared for this file.
+///
+/// A project is entitled to its own `JsonValue` struct, and emitting both
+/// `export type JsonValue` and `export interface JsonValue` is a
+/// duplicate-identifier error that fails `tsc` on the whole file. The
+/// project's declaration wins, exactly as it does for `Value`, and the
+/// JSON fields degrade to `unknown` rather than referencing an identifier
+/// that means something else - the same contract `rust_type_to_ts` keeps
+/// for every other unresolvable name.
+fn json_alias_needed(structs: &[InertiaPropsStruct], known: &HashSet<String>) -> bool {
+    references_json(structs) && !known.contains(JSON_VALUE_NAME)
+}
+
+/// Whether any emitted struct references [`RustType::Json`], and so needs
+/// the `JsonValue` alias declared.
+fn references_json(structs: &[InertiaPropsStruct]) -> bool {
+    fn contains_json(ty: &RustType) -> bool {
+        match ty {
+            RustType::Json => true,
+            RustType::Option(inner)
+            | RustType::Vec(inner)
+            | RustType::Field(inner)
+            | RustType::Prop(inner) => contains_json(inner),
+            RustType::HashMap(key, val) => contains_json(key) || contains_json(val),
+            _ => false,
+        }
+    }
+
+    structs
+        .iter()
+        .any(|s| s.fields.iter().any(|f| contains_json(&f.ty)))
 }
 
 /// Convert a RustType to a TypeScript type string.
@@ -376,6 +489,15 @@ fn rust_type_to_ts(ty: &RustType, known: &HashSet<String>, generics: &[String]) 
         ),
         RustType::Field(inner) => format!("{} | null", rust_type_to_ts(inner, known, generics)),
         RustType::Prop(inner) => rust_type_to_ts(inner, known, generics),
+        RustType::Json => {
+            if known.contains(JSON_VALUE_NAME) {
+                // The project owns the name; the alias stood down (see
+                // `json_alias_needed`), so there is nothing to reference.
+                "unknown".to_string()
+            } else {
+                JSON_VALUE_NAME.to_string()
+            }
+        }
         RustType::Custom(name) => {
             if is_resolved_custom(name, known, generics) {
                 name.clone()
@@ -517,17 +639,24 @@ fn collect_type_deps(ty: &RustType, deps: &mut HashSet<String>, known: &HashSet<
 /// A field whose type references something the generator can't emit - not an
 /// InertiaProps/Data struct, not a generic parameter. Reported as a warning; the
 /// field itself is emitted as `unknown` (see `rust_type_to_ts`).
-struct UnresolvedRef {
-    struct_name: String,
-    field_name: String,
-    type_name: String,
+pub struct UnresolvedRef {
+    /// The generated struct carrying the field.
+    pub struct_name: String,
+    /// The field whose type could not be resolved.
+    pub field_name: String,
+    /// The unresolvable type name, as written in the Rust source.
+    pub type_name: String,
 }
 
 /// Walk every generated struct's fields and collect references to custom types
 /// that aren't generated (and aren't generic parameters). Uses the same
 /// `is_resolved_custom` predicate as emission, so the diagnostic and the emitted
 /// `unknown` can never disagree.
-fn collect_unresolved_refs(structs: &[InertiaPropsStruct]) -> Vec<UnresolvedRef> {
+///
+/// `pub` so the template-drift suite can assert the scaffold's own
+/// controllers resolve cleanly without going through the printing
+/// wrapper below.
+pub fn collect_unresolved_refs(structs: &[InertiaPropsStruct]) -> Vec<UnresolvedRef> {
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
     let mut refs = Vec::new();
     for s in structs {
@@ -651,6 +780,9 @@ pub fn generate_typescript(structs: &[InertiaPropsStruct]) -> String {
     let mut output = String::new();
     output.push_str("// This file is auto-generated by Suprnova. Do not edit manually.\n");
     output.push_str("// Run `suprnova generate-types` to regenerate.\n\n");
+    if json_alias_needed(structs, &known) {
+        output.push_str(JSON_VALUE_ALIAS);
+    }
 
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
@@ -698,18 +830,83 @@ pub fn generate_types_string(input: ScanInput) -> String {
     let sorted = topological_sort(&structs);
     let known: HashSet<String> = structs.iter().map(|s| s.name.clone()).collect();
     let mut output = String::new();
+    if json_alias_needed(&structs, &known) {
+        output.push_str(JSON_VALUE_ALIAS);
+    }
     for s in sorted {
         output.push_str(&emit_ts_for_struct(s, &known));
     }
     output
 }
 
+/// Write `contents` to `path`, but only when they differ from what is
+/// already there. Returns whether a write actually happened.
+///
+/// Regeneration is not a change. `suprnova serve` runs the backend under
+/// `cargo watch`, which restarts on any write inside the project, and the
+/// generator reruns on every `.rs` save - so an unconditional write turned
+/// each regeneration into a backend restart even when the emitted
+/// TypeScript was byte-identical to the file already on disk. Comparing
+/// first makes a no-op rerun genuinely a no-op, which is also what stops
+/// the file from churning its mtime in version control.
+///
+/// A file that exists but cannot be read counts as changed: the write is
+/// attempted anyway, so a real permissions or IO problem surfaces as the
+/// write error it is rather than as a silent skip.
+fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
+    if let Ok(existing) = fs::read(path)
+        && existing == contents.as_bytes()
+    {
+        return Ok(false);
+    }
+
+    fs::write(path, contents).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    Ok(true)
+}
+
+/// What one generation pass did.
+///
+/// The count alone could not distinguish "wrote five types" from "emitted
+/// the same five types that were already on disk and left the file alone",
+/// so every caller reported both as `Generated <path>`. That is a claim
+/// about the filesystem, and it was false half the time.
+pub struct GenerationOutcome {
+    /// How many items the pass emitted: structs, or message ids.
+    pub count: usize,
+    /// Whether the output file on disk actually changed - written, or
+    /// removed when it went stale. `false` means the emitted content was
+    /// byte-identical to what was already there.
+    pub wrote: bool,
+}
+
+impl GenerationOutcome {
+    /// Whether a watcher should announce this pass.
+    ///
+    /// Two kinds of pass say nothing. One that emitted no items at all has
+    /// no artifact to talk about. One that emitted the same bytes already
+    /// on disk deliberately did not touch the file - and a watcher only
+    /// reaches here after a real source change, so silence carries
+    /// information: your edit did not change the props. Announcing it
+    /// anyway would contradict the write the tool decided not to make, and
+    /// under `--json` it would put a `types_regenerated` event on the wire
+    /// for a regeneration that did not happen.
+    pub(crate) fn is_reportable_regeneration(&self) -> bool {
+        self.count > 0 && self.wrote
+    }
+}
+
 /// Generate types and write to the output file
-pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result<usize, String> {
+pub fn generate_types_to_file(
+    project_path: &Path,
+    output_path: &Path,
+) -> Result<GenerationOutcome, String> {
     let structs = scan_inertia_props(project_path);
 
     if structs.is_empty() {
-        return Ok(0);
+        return Ok(GenerationOutcome {
+            count: 0,
+            wrote: false,
+        });
     }
 
     // Surface prop fields that reference un-generatable types (degraded to
@@ -723,10 +920,12 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
     }
 
     let typescript = generate_typescript(&structs);
-    fs::write(output_path, typescript)
-        .map_err(|e| format!("Failed to write TypeScript file: {}", e))?;
+    let wrote = write_if_changed(output_path, &typescript)?;
 
-    Ok(structs.len())
+    Ok(GenerationOutcome {
+        count: structs.len(),
+        wrote,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1073,7 +1272,7 @@ fn collect_lang_message_ids(project_path: &Path, locale: &str) -> Vec<String> {
 pub fn generate_lang_keys_to_file(
     project_path: &Path,
     output_path: &Path,
-) -> Result<usize, String> {
+) -> Result<GenerationOutcome, String> {
     let locale = resolve_default_locale(project_path);
     let parents = resolve_locale_parents(project_path);
     let chain = locale_chain(&locale, &parents);
@@ -1086,11 +1285,17 @@ pub fn generate_lang_keys_to_file(
     ids.dedup();
 
     if ids.is_empty() {
-        if output_path.exists() {
+        // Removing a stale file is a change to the output path too, so it
+        // counts as having written.
+        let removed = output_path.exists();
+        if removed {
             fs::remove_file(output_path)
                 .map_err(|e| format!("Failed to remove stale {}: {}", output_path.display(), e))?;
         }
-        return Ok(0);
+        return Ok(GenerationOutcome {
+            count: 0,
+            wrote: removed,
+        });
     }
 
     if let Some(parent) = output_path.parent() {
@@ -1099,10 +1304,35 @@ pub fn generate_lang_keys_to_file(
     }
 
     let contents = render_lang_keys_file(&ids, &chain);
-    fs::write(output_path, contents)
-        .map_err(|e| format!("Failed to write {}: {}", output_path.display(), e))?;
+    let wrote = write_if_changed(output_path, &contents)?;
 
-    Ok(ids.len())
+    Ok(GenerationOutcome {
+        count: ids.len(),
+        wrote,
+    })
+}
+
+/// Report what a generation pass did to its output file.
+///
+/// `Generated <path>` is a statement about the filesystem, so it is only
+/// made when the file actually changed. A rerun that emitted identical
+/// content left the file untouched on purpose - that is what keeps
+/// `serve`'s backend watcher from restarting on a no-op - and telling the
+/// user it was generated would contradict the thing the tool just did.
+fn report_generation(output_path: &Path, outcome: &GenerationOutcome) {
+    if outcome.wrote {
+        ui::success(&format!("Generated {}", output_path.display()));
+    } else {
+        report_up_to_date(output_path);
+    }
+}
+
+/// The one place that words "this artifact did not change".
+///
+/// One-shot and `--watch` both reach it, so the phrasing cannot drift
+/// between them the way it did when each spelled the line out itself.
+fn report_up_to_date(output_path: &Path) {
+    ui::info(&format!("{} is up to date", output_path.display()));
 }
 
 /// Main entry point for the generate-types command
@@ -1123,12 +1353,12 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
     ui::info("Scanning for InertiaProps structs...");
 
     match generate_types_to_file(project_path, &output_path) {
-        Ok(0) => {
+        Ok(outcome) if outcome.count == 0 => {
             ui::warning("No InertiaProps structs found.");
         }
-        Ok(count) => {
-            ui::info(&format!("Found {} InertiaProps struct(s)", count));
-            ui::success(&format!("Generated {}", output_path.display()));
+        Ok(outcome) => {
+            ui::info(&format!("Found {} InertiaProps struct(s)", outcome.count));
+            report_generation(&output_path, &outcome);
         }
         Err(e) => {
             ui::error(&e);
@@ -1143,10 +1373,10 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
     // single run forever.
     let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
     match generate_lang_keys_to_file(project_path, &lang_keys_output) {
-        Ok(0) => {}
-        Ok(count) => {
-            ui::info(&format!("Found {} message id(s) in lang/", count));
-            ui::success(&format!("Generated {}", lang_keys_output.display()));
+        Ok(outcome) if outcome.count == 0 => {}
+        Ok(outcome) => {
+            ui::info(&format!("Found {} message id(s) in lang/", outcome.count));
+            report_generation(&lang_keys_output, &outcome);
         }
         Err(e) => {
             ui::error(&e);
@@ -1204,9 +1434,10 @@ fn start_watcher(
     output_path: &Path,
     lang_keys_output: &Path,
 ) -> Result<(), String> {
+    use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-    use std::sync::mpsc::channel;
-    use std::time::Duration;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::{Duration, Instant};
 
     let (tx, rx) = channel();
     let src_path = project_path.join("src");
@@ -1239,49 +1470,463 @@ fn start_watcher(
     let lang_keys_output = lang_keys_output.to_path_buf();
     let project_path = project_path.to_path_buf();
 
+    // Same schedule `serve`'s watcher uses, for the same two reasons: the
+    // generator reads the tree it is watching, so its own reads must not
+    // count as changes; and a burst of saves is one edit, not six.
+    let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+
     loop {
-        match rx.recv() {
-            Ok(event) => {
-                let is_rust_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
-                let is_ftl_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "ftl").unwrap_or(false));
-
-                if is_rust_change {
-                    ui::hint("Detected changes, regenerating types...");
-                    match generate_types_to_file(&project_path, &output_path) {
-                        Ok(count) => {
-                            ui::success(&format!("Regenerated {} type(s)", count));
-                        }
-                        Err(e) => {
-                            ui::error(&format!("Failed to regenerate: {}", e));
-                        }
-                    }
-                }
-
-                if is_ftl_change {
-                    ui::hint("Detected lang/ changes, regenerating lang-keys...");
-                    match generate_lang_keys_to_file(&project_path, &lang_keys_output) {
-                        Ok(0) => {
-                            ui::hint("lang-keys.ts removed (no message ids)");
-                        }
-                        Ok(count) => {
-                            ui::success(&format!("Regenerated {} message id(s)", count));
-                        }
-                        Err(e) => {
-                            ui::error(&format!("Failed to regenerate lang-keys: {}", e));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
+        // `recv_timeout` rather than `recv` is what makes a trailing edge
+        // possible: after the last event of a burst nothing more arrives,
+        // so the loop has to wake on its own to notice the quiet period
+        // elapsed.
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => schedule.observe(&event, Instant::now()),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(e @ RecvTimeoutError::Disconnected) => {
                 return Err(format!("Watch error: {}", e));
             }
         }
+
+        let due = schedule.due(Instant::now());
+
+        if due.rust {
+            ui::hint("Detected changes, regenerating types...");
+            match generate_types_to_file(&project_path, &output_path) {
+                Ok(outcome) if outcome.wrote => {
+                    ui::success(&format!("Regenerated {} type(s)", outcome.count));
+                }
+                Ok(_) => report_up_to_date(&output_path),
+                Err(e) => {
+                    ui::error(&format!("Failed to regenerate: {}", e));
+                }
+            }
+        }
+
+        if due.ftl {
+            ui::hint("Detected lang/ changes, regenerating lang-keys...");
+            match generate_lang_keys_to_file(&project_path, &lang_keys_output) {
+                // A zero count means no message ids anywhere. Say the file
+                // was removed only when one actually was: a project that
+                // never had a `lang/` has nothing to report.
+                Ok(outcome) if outcome.count == 0 => {
+                    if outcome.wrote {
+                        ui::hint("lang-keys.ts removed (no message ids)");
+                    }
+                }
+                Ok(outcome) if outcome.wrote => {
+                    ui::success(&format!("Regenerated {} message id(s)", outcome.count));
+                }
+                Ok(_) => report_up_to_date(&lang_keys_output),
+                Err(e) => {
+                    ui::error(&format!("Failed to regenerate lang-keys: {}", e));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod watch_loop_tests {
+    use super::*;
+    use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule, WatchTrigger};
+    use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::{Duration, Instant};
+
+    /// The whole bug, end to end, against a real watcher and the real
+    /// generator: running `generate_types_to_file` over a tree that is
+    /// being watched must not schedule another run.
+    ///
+    /// The unit tests prove the classifier ignores `Access` events; only
+    /// this proves that `Access` is in fact all the generator's own reads
+    /// produce, and that nothing else about a regeneration (creating
+    /// `frontend/src/types/`, writing the output) lands back inside the
+    /// watched tree.
+    ///
+    /// Linux-only: the inotify backend is the one that registers
+    /// `WatchMask::OPEN` and so reports reads at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_regeneration_does_not_schedule_another_regeneration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed props.rs");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        let (tx, rx) = channel();
+        let watcher_result = RecommendedWatcher::new(
+            move |res| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            },
+            Config::default().with_poll_interval(Duration::from_secs(2)),
+        );
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                println!("skipping: no filesystem watcher available ({e})");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&src, RecursiveMode::Recursive) {
+            println!("skipping: cannot watch a temp dir ({e})");
+            return;
+        }
+
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        // Drain whatever registering the watch produced.
+        while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
+
+        assert_eq!(
+            generate_types_to_file(dir.path(), &out)
+                .expect("first run")
+                .count,
+            1
+        );
+
+        // Positive control: one event a live watcher must deliver, whose
+        // extension is neither `.rs` nor `.ftl` so it arms nothing. Without
+        // it, a dead or stalled watcher would sail through the assertion
+        // below by delivering no events at all.
+        let control = src.join("control.probe");
+        fs::write(&control, "1\n").expect("write control file");
+
+        // Pump the loop exactly as `start_watcher` does, for well past the
+        // quiet period. Nothing may ever come due.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_control = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => {
+                    saw_control |= event.paths.iter().any(|p| p == &control);
+                    schedule.observe(&event, Instant::now());
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            assert_eq!(
+                schedule.due(Instant::now()),
+                WatchTrigger::NONE,
+                "a regeneration scheduled another one: this is the loop"
+            );
+        }
+        assert!(
+            saw_control,
+            "the control event never arrived, so 'nothing came due' proves \
+             nothing - treat this as a dead or stalled watcher, not a pass"
+        );
+
+        // And a real edit must still get through, or the fix traded a loop
+        // for a watcher that never runs.
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n    pub n: i64,\n}\n",
+        )
+        .expect("edit props.rs");
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut fired = false;
+        while !fired && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => schedule.observe(&event, Instant::now()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            fired = schedule.due(Instant::now()).rust;
+        }
+        assert!(fired, "a real edit must still schedule a regeneration");
+    }
+}
+
+#[cfg(test)]
+mod json_value_tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<InertiaPropsStruct> {
+        let syntax = syn::parse_file(src).expect("valid Rust");
+        let mut visitor = InertiaPropsVisitor::new();
+        visitor.visit_file(&syntax);
+        resolve_reachable(visitor.structs, visitor.plain_structs)
+    }
+
+    fn unresolved(structs: &[InertiaPropsStruct]) -> Vec<String> {
+        collect_unresolved_refs(structs)
+            .into_iter()
+            .map(|r| r.type_name)
+            .collect()
+    }
+
+    const JSON_ALIAS: &str = "export type JsonValue = string | number | boolean | null \
+                              | JsonValue[] | { [key: string]: JsonValue };";
+
+    #[test]
+    fn an_optional_serde_json_value_emits_the_alias_and_warns_about_nothing() {
+        // The scaffold's own `LoginProps`. Advising the user to "mirror it
+        // as a local struct" is wrong for a JSON value, and there was
+        // nothing wrong to advise about.
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct LoginProps {\n    \
+             pub errors: Option<serde_json::Value>,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains(JSON_ALIAS), "alias missing from:\n{ts}");
+        assert!(
+            ts.contains("errors: JsonValue | null;"),
+            "Option must render the same way it always has:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn a_bare_value_field_is_json_too() {
+        let structs = parse(
+            "use serde_json::Value;\n#[derive(InertiaProps)]\npub struct P {\n    \
+             pub payload: Value,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        assert!(generate_typescript(&structs).contains("payload: JsonValue;"));
+    }
+
+    #[test]
+    fn a_project_defined_value_struct_still_wins() {
+        // A project is allowed to own the name. Its own struct resolves
+        // first, so `Value` keeps emitting as `Value`.
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct P {\n    pub v: Value,\n}\n\
+             pub struct Value {\n    pub inner: String,\n}\n",
+        );
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains("v: Value;"), "{ts}");
+        assert!(ts.contains("export interface Value {"), "{ts}");
+        assert!(!ts.contains("JsonValue"), "{ts}");
+    }
+
+    #[test]
+    fn the_alias_is_declared_once_however_many_structs_use_it() {
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct A {\n    pub a: serde_json::Value,\n}\n\
+             #[derive(InertiaProps)]\npub struct B {\n    pub b: serde_json::Value,\n}\n",
+        );
+        let ts = generate_typescript(&structs);
+        assert_eq!(
+            ts.matches("export type JsonValue").count(),
+            1,
+            "the alias must be declared exactly once:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn the_alias_is_absent_when_nothing_references_it() {
+        let structs = parse("#[derive(InertiaProps)]\npub struct A {\n    pub a: String,\n}\n");
+        assert!(!generate_typescript(&structs).contains("JsonValue"));
+    }
+
+    #[test]
+    fn a_project_that_owns_the_name_jsonvalue_does_not_get_a_duplicate() {
+        // Emitting both `export type JsonValue` and
+        // `export interface JsonValue` in one file is a TypeScript
+        // duplicate-identifier error - exactly the class of breakage the
+        // `unknown` degradation exists to prevent, reached from the other
+        // direction.
+        let structs = parse(
+            "#[derive(InertiaProps)]\npub struct P {\n    pub payload: serde_json::Value,\n}\n\
+             #[derive(InertiaProps)]\npub struct JsonValue {\n    pub inner: String,\n}\n",
+        );
+        let ts = generate_typescript(&structs);
+
+        assert_eq!(
+            ts.matches("export type JsonValue").count(),
+            0,
+            "the project owns the name, so the alias must stand down:\n{ts}"
+        );
+        assert!(
+            ts.contains("export interface JsonValue {"),
+            "the project's own struct still emits:\n{ts}"
+        );
+        assert!(
+            ts.contains("payload: unknown;"),
+            "with no alias to name, the JSON field degrades rather than \
+             referencing an undeclared type:\n{ts}"
+        );
+    }
+
+    #[test]
+    fn a_generic_parameter_named_value_is_not_json() {
+        // `Value` here is the struct's own type parameter, not a JSON
+        // document. Rewriting it would emit an alias for a generic.
+        let structs =
+            parse("#[derive(InertiaProps)]\npub struct P<Value> {\n    pub v: Value,\n}\n");
+        assert_eq!(unresolved(&structs), Vec::<String>::new());
+        let ts = generate_typescript(&structs);
+        assert!(ts.contains("v: Value;"), "{ts}");
+        assert!(!ts.contains("JsonValue"), "{ts}");
+    }
+}
+
+#[cfg(test)]
+mod reportable_regeneration_tests {
+    use super::*;
+
+    fn outcome(count: usize, wrote: bool) -> GenerationOutcome {
+        GenerationOutcome { count, wrote }
+    }
+
+    #[test]
+    fn a_pass_that_wrote_the_file_is_announced() {
+        assert!(outcome(5, true).is_reportable_regeneration());
+    }
+
+    #[test]
+    fn a_pass_that_wrote_nothing_stays_silent() {
+        // A watcher only runs after a real source change, so silence here
+        // carries information: the edit did not change the props. Saying
+        // "Regenerated 5 type(s)" would contradict the write the tool
+        // deliberately did not make, and under `--json` it would put a
+        // `types_regenerated` event on the wire for a regeneration that
+        // did not happen.
+        assert!(!outcome(5, false).is_reportable_regeneration());
+    }
+
+    #[test]
+    fn a_pass_that_emitted_nothing_stays_silent() {
+        // No structs, or no message ids: there is no artifact to talk
+        // about. This is the pre-existing "stay quiet" case, and the
+        // stale-file removal that reports `wrote` with a zero count rides
+        // on it - the watcher has never announced that either.
+        assert!(!outcome(0, false).is_reportable_regeneration());
+        assert!(!outcome(0, true).is_reportable_regeneration());
+    }
+}
+
+#[cfg(test)]
+mod write_if_changed_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// A timestamp far enough in the past that no incidental write could
+    /// coincide with it.
+    fn long_ago() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    }
+
+    fn set_old_mtime(path: &Path) -> SystemTime {
+        let stamp = long_ago();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for set_modified");
+        file.set_modified(stamp).expect("set_modified");
+        stamp
+    }
+
+    fn mtime(path: &Path) -> SystemTime {
+        fs::metadata(path)
+            .expect("metadata")
+            .modified()
+            .expect("modified")
+    }
+
+    #[test]
+    fn identical_contents_are_not_rewritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "same\n").expect("seed");
+        let before = set_old_mtime(&path);
+
+        assert!(
+            !write_if_changed(&path, "same\n").expect("write_if_changed"),
+            "identical contents must not be written"
+        );
+        assert_eq!(
+            mtime(&path),
+            before,
+            "an unchanged file must keep its mtime, or every watcher \
+             downstream sees a change that did not happen"
+        );
+    }
+
+    #[test]
+    fn different_contents_are_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "old\n").expect("seed");
+        set_old_mtime(&path);
+
+        assert!(
+            write_if_changed(&path, "new\n").expect("write_if_changed"),
+            "changed contents must be written"
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new\n");
+    }
+
+    #[test]
+    fn a_missing_file_counts_as_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+
+        assert!(write_if_changed(&path, "fresh\n").expect("write_if_changed"));
+        assert_eq!(fs::read_to_string(&path).expect("read"), "fresh\n");
+    }
+
+    #[test]
+    fn regenerating_an_unchanged_project_leaves_the_output_file_alone() {
+        // The `serve` watcher watches the tree the generator reads, and
+        // cargo-watch watches the tree the generator writes into. A
+        // no-op regeneration that still touches the file is a change
+        // event to both of them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed props.rs");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        let first_run = generate_types_to_file(dir.path(), &out).expect("first run");
+        assert_eq!(first_run.count, 1);
+        assert!(first_run.wrote, "a first run really does write the file");
+        let first = fs::read_to_string(&out).expect("read output");
+        let before = set_old_mtime(&out);
+
+        let second_run = generate_types_to_file(dir.path(), &out).expect("second run");
+        assert_eq!(second_run.count, 1, "the same struct is still emitted");
+        assert!(
+            !second_run.wrote,
+            "the pass must report that it wrote nothing, or the CLI cannot \
+             tell the user the truth about what it did"
+        );
+        assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
+        assert_eq!(fs::read_to_string(&out).expect("read output"), first);
+    }
+
+    #[test]
+    fn regenerating_unchanged_lang_keys_leaves_the_output_file_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lang = dir.path().join("lang/en");
+        fs::create_dir_all(&lang).expect("create lang/en");
+        fs::write(lang.join("app.ftl"), "welcome = Hello\n").expect("seed app.ftl");
+        let out = dir.path().join("frontend/src/types/lang-keys.ts");
+
+        let first_run = generate_lang_keys_to_file(dir.path(), &out).expect("first run");
+        assert_eq!(first_run.count, 1);
+        assert!(first_run.wrote);
+        let before = set_old_mtime(&out);
+
+        let second_run = generate_lang_keys_to_file(dir.path(), &out).expect("second run");
+        assert_eq!(second_run.count, 1);
+        assert!(!second_run.wrote, "an identical rerun wrote nothing");
+        assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
     }
 }
 
@@ -1528,8 +2173,9 @@ mod lang_keys_tests {
         .expect("write messages.ftl");
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 2);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -1548,9 +2194,13 @@ mod lang_keys_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
 
-        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+        let outcome = generate_lang_keys_to_file(dir.path(), &output_path)
             .expect("a non-localized project is not an error");
-        assert_eq!(count, 0);
+        assert_eq!(outcome.count, 0);
+        assert!(
+            !outcome.wrote,
+            "there was no file to write and none to remove"
+        );
         assert!(
             !output_path.exists(),
             "non-localized projects must see no new artifact"
@@ -1568,9 +2218,13 @@ mod lang_keys_tests {
         // No lang/ dir this run (e.g. it was deleted, or every catalog now
         // declares zero messages) - the stale file must be cleaned up, not
         // left around asserting keys that no longer exist.
-        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+        let outcome = generate_lang_keys_to_file(dir.path(), &output_path)
             .expect("removing a stale file is not an error");
-        assert_eq!(count, 0);
+        assert_eq!(outcome.count, 0);
+        assert!(
+            outcome.wrote,
+            "deleting the artifact changes the output path just as writing it does"
+        );
         assert!(!output_path.exists(), "the stale file must be removed");
     }
 
@@ -1601,8 +2255,9 @@ mod lang_keys_tests {
         .expect("write pt-BR messages.ftl");
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 3);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -1638,8 +2293,9 @@ mod lang_keys_tests {
         fs::write(&output_path, "export type MessageKey =\n  | \"stale\";\n")
             .expect("seed a stale lang-keys.ts");
 
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 1);
         assert!(
             output_path.exists(),
@@ -1670,8 +2326,9 @@ mod lang_keys_tests {
         }
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 3);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -1704,7 +2361,8 @@ mod lang_keys_tests {
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
         let count = generate_lang_keys_to_file(dir.path(), &output_path)
-            .expect("a cycle must not be a hard error");
+            .expect("a cycle must not be a hard error")
+            .count;
         assert_eq!(count, 2, "both cycle members are walked exactly once");
 
         let written = fs::read_to_string(&output_path).expect("read generated file");

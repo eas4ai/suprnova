@@ -11,6 +11,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
 use crate::ui;
 
 /// Floor of the respawn backoff: how long to wait before the *first*
@@ -1031,18 +1032,19 @@ pub fn run(
             ui::info("Generating TypeScript types...");
         }
         match super::generate_types::generate_types_to_file(project_path, &output_path) {
-            Ok(0) => {
+            Ok(outcome) if outcome.count == 0 => {
                 if !json {
                     ui::hint("No InertiaProps structs found (skipping type generation)");
                 }
             }
-            Ok(count) => {
+            Ok(outcome) => {
                 if !json {
-                    ui::success(&format!(
-                        "Generated {} type(s) → {}",
-                        count,
-                        output_path.display()
-                    ));
+                    report_startup_generation(
+                        outcome.count,
+                        "type(s)",
+                        &output_path,
+                        outcome.wrote,
+                    );
                 }
             }
             Err(e) => {
@@ -1057,14 +1059,15 @@ pub fn run(
         // permanent noise for the common case.
         let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
         match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output) {
-            Ok(0) => {}
-            Ok(count) => {
+            Ok(outcome) if outcome.count == 0 => {}
+            Ok(outcome) => {
                 if !json {
-                    ui::success(&format!(
-                        "Generated {} message id(s) → {}",
-                        count,
-                        lang_keys_output.display()
-                    ));
+                    report_startup_generation(
+                        outcome.count,
+                        "message id(s)",
+                        &lang_keys_output,
+                        outcome.wrote,
+                    );
                 }
             }
             Err(e) => {
@@ -1138,9 +1141,11 @@ pub fn run(
         ];
 
         let run_cmd = format!("run --bin {}", package_name);
+        let watch_args = backend_watch_args(Path::new("."), &run_cmd);
+        let watch_args: Vec<&str> = watch_args.iter().map(String::as_str).collect();
         if let Err(e) = manager.spawn_with_prefix(
             "cargo",
-            &["watch", "-x", &run_cmd],
+            &watch_args,
             None,
             &backend_env,
             "[backend] ",
@@ -1227,6 +1232,114 @@ pub fn run(
     }
 }
 
+/// The line the startup type-generation pass prints for one artifact.
+///
+/// `Generated` is a claim about the filesystem, and the generator writes
+/// only when the emitted bytes differ from what is already there - so on
+/// every `serve` of a project whose props have not moved since the last
+/// run, that claim was false. The count survives either way: how many
+/// types the project has is worth knowing on a boot; what changes is
+/// whether the file was touched.
+fn generation_notice(count: usize, unit: &str, path: &Path, wrote: bool) -> String {
+    if wrote {
+        format!("Generated {} {} → {}", count, unit, path.display())
+    } else {
+        format!("{} {} up to date → {}", count, unit, path.display())
+    }
+}
+
+/// Print [`generation_notice`], as a success when the file changed and as
+/// plain information when it did not.
+fn report_startup_generation(count: usize, unit: &str, path: &Path, wrote: bool) {
+    let notice = generation_notice(count, unit, path, wrote);
+    if wrote {
+        ui::success(&notice);
+    } else {
+        ui::info(&notice);
+    }
+}
+
+/// Paths, relative to the project root, whose contents the backend
+/// process actually depends on - in the order they are handed to
+/// `cargo watch`.
+///
+/// `src`, `cmd`, `Cargo.toml`, and `Cargo.lock` are the build inputs.
+/// `cmd/` is not optional decoration: the full-stack scaffold declares
+/// `path = "cmd/main.rs"` for the server binary, so that file holds the
+/// whole boot wiring - `config`, `bootstrap`, `routes`, `migrations`. The
+/// API scaffold puts `main.rs` under `src/` instead and simply has no
+/// `cmd/`, which the skip-if-absent rule below already handles.
+///
+/// `.env` is read once by `Config::init` at boot, and `lang/` once by
+/// `Localization::bootstrap`, which compiles every `lang/<locale>/*.ftl`
+/// catalog into the translator - neither is re-read at request time, so a
+/// change to either only takes effect on a restart.
+const BACKEND_WATCH_PATHS: [&str; 6] = ["src", "cmd", "Cargo.toml", "Cargo.lock", ".env", "lang"];
+
+/// Turns off cargo-watch's `.gitignore` filtering.
+///
+/// cargo-watch applies gitignore rules to explicitly named `-w` roots, not
+/// just to its default project walk, and every scaffold ignores `.env`
+/// (the API scaffold ignores `Cargo.lock` too). Without this flag
+/// `-w .env` is inert: probed against cargo-watch 8.5.3, editing a
+/// gitignored `.env` under `--postpone -w .env` produced no run at all,
+/// and the same edit fired immediately once this flag was added.
+///
+/// It cannot widen the restart surface, because the surface is already
+/// scoped by `-w`: of everything the scaffolds gitignore, the only entries
+/// that fall inside [`BACKEND_WATCH_PATHS`] are `.env` and `Cargo.lock`,
+/// which are watched on purpose. `target/`, `frontend/node_modules`,
+/// `public/assets`, `storage/mail/` and the editor directories all sit
+/// outside every watched root. This is deliberately not `--ignore-nothing`,
+/// which would also drop cargo-watch's built-in `target/` and `.git/`
+/// exclusions, and not `--no-dot-ignores`, so a hand-written `.ignore`
+/// still filters.
+const NO_GITIGNORE_FILTER: &str = "--no-vcs-ignores";
+
+/// Build the `cargo watch` argument list for the backend pane.
+///
+/// Without any `-w`, cargo-watch watches the whole non-gitignored project,
+/// which means every Vite component save and every regenerated
+/// `frontend/src/types/*.ts` restarted the backend - a full framework
+/// rebuild triggered by editing a `.svelte` file. Naming the paths the
+/// backend is actually built from is the entire fix; no `-i` ignore list
+/// is needed once the scope is right.
+///
+/// A `-w` path that does not exist makes cargo-watch refuse to start
+/// outright (`Path error: couldn't canonicalize ...`), so each candidate is
+/// included only when it is present at spawn time. That is not a rare case:
+/// a freshly scaffolded project has no `Cargo.lock` until its first build.
+/// A candidate that appears later is picked up by the next `serve`, the
+/// same watcher-registration-time gap the type watcher has with `lang/`.
+///
+/// [`NO_GITIGNORE_FILTER`] is added only when `.env` is one of the watched
+/// paths, so the flag never appears without the reason it exists.
+///
+/// With no candidate present at all the result is a bare `cargo watch -x`,
+/// which watches the whole project root. That is the pre-scoping behaviour
+/// and it is chosen rather than stumbled into: there is nothing left to
+/// scope to, and refusing to start would be a worse answer than a noisy
+/// watcher. `validate_suprnova_project` has already required `Cargo.toml`
+/// by the time `serve` reaches here, so it is not a case a user meets.
+fn backend_watch_args(project: &Path, run_cmd: &str) -> Vec<String> {
+    let present: Vec<&str> = BACKEND_WATCH_PATHS
+        .into_iter()
+        .filter(|candidate| project.join(candidate).exists())
+        .collect();
+
+    let mut args = vec!["watch".to_string()];
+    if present.contains(&".env") {
+        args.push(NO_GITIGNORE_FILTER.to_string());
+    }
+    for candidate in present {
+        args.push("-w".to_string());
+        args.push(candidate.to_string());
+    }
+    args.push("-x".to_string());
+    args.push(run_cmd.to_string());
+    args
+}
+
 /// File watcher that regenerates TypeScript types when Rust files change,
 /// and `lang-keys.ts` when `.ftl` catalogs under `lang/` change. `mode`
 /// governs stdout exactly like everywhere else in this module: purely
@@ -1303,13 +1416,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
     let output_path = project_path.join("frontend/src/types/inertia-props.ts");
     let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
 
-    let mut debounce = Debounce::new(Duration::from_millis(500));
-    // Independent debounce/regeneration for `lang-keys.ts`, mirroring the
-    // Rust-file one exactly (same quiet period, same trailing-edge fire) -
-    // separate because a `.rs` save shouldn't reparse every `.ftl` file
-    // and vice versa; the two artifacts have nothing to do with each
-    // other beyond sharing this watcher loop.
-    let mut lang_debounce = Debounce::new(Duration::from_millis(500));
+    let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -1321,73 +1428,68 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
         // burst, this wakes every 100ms until the quiet period elapses and
         // the pending regeneration fires.
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(event) => {
-                // Check if it's a Rust file change
-                let is_rust_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
-                let is_ftl_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "ftl").unwrap_or(false));
-
-                if is_rust_change {
-                    debounce.on_event(std::time::Instant::now());
-                }
-                if is_ftl_change {
-                    lang_debounce.on_event(std::time::Instant::now());
-                }
-            }
+            Ok(event) => schedule.observe(&event, Instant::now()),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if debounce.should_fire(std::time::Instant::now()) {
+        let due = schedule.due(Instant::now());
+
+        if due.rust {
             match super::generate_types::generate_types_to_file(project_path, &output_path) {
-                Ok(count) if count > 0 => {
+                Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
                             mode,
                             DevEvent::TypesRegenerated {
                                 ts: now_ts(),
                                 artifact: TypesArtifact::InertiaProps,
-                                count: count as u32,
+                                count: outcome.count as u32,
                             },
                         );
                     } else {
-                        println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
+                        println!(
+                            "{} Regenerated {} type(s)",
+                            style("[types]").blue(),
+                            outcome.count
+                        );
                     }
                 }
-                Ok(_) => {} // No types found, stay quiet
+                // Nothing emitted, or the emitted bytes were identical to
+                // what was already on disk. Either way there is no
+                // regeneration to report - see
+                // `GenerationOutcome::is_reportable_regeneration`.
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
                 }
             }
         }
 
-        if lang_debounce.should_fire(std::time::Instant::now()) {
+        if due.ftl {
             match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output)
             {
-                Ok(count) if count > 0 => {
+                Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
                             mode,
                             DevEvent::TypesRegenerated {
                                 ts: now_ts(),
                                 artifact: TypesArtifact::LangKeys,
-                                count: count as u32,
+                                count: outcome.count as u32,
                             },
                         );
                     } else {
                         println!(
                             "{} Regenerated {} message id(s)",
                             style("[types]").blue(),
-                            count
+                            outcome.count
                         );
                     }
                 }
-                Ok(_) => {} // No message ids (or lang/ removed); stale file already cleaned up
+                // No message ids (or `lang/` removed, stale file already
+                // cleaned up), or the union is unchanged. Nothing to say.
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!(
                         "{} Failed to regenerate lang-keys: {}",
@@ -1396,59 +1498,6 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
                     );
                 }
             }
-        }
-    }
-}
-
-/// Trailing-edge debounce: fire once the burst has gone quiet.
-///
-/// The watcher used to debounce on the *leading* edge -
-/// `if is_rust_change && last_regen.elapsed() > debounce_duration` - which
-/// regenerates on the first event of a burst and then silently drops every
-/// event for the next 500ms with no trailing run.
-///
-/// That loses work rather than merely delaying it, and it loses the work
-/// most likely to matter. A burst is not a rare event: `cargo fmt`,
-/// format-on-save across several files, a branch switch, and any editor
-/// that writes a temp file and renames it all produce one. The regenerate
-/// fires on the *first* file, before the rest are written, so the types on
-/// disk reflect a partial edit - and nothing regenerates them until some
-/// unrelated future save happens to land outside a quiet window. The
-/// developer sees stale types and no error.
-///
-/// Firing on the trailing edge inverts that: the burst is coalesced into
-/// exactly one regeneration, and it runs after the last write.
-struct Debounce {
-    /// How long the burst must be quiet before firing.
-    quiet: Duration,
-    /// When the most recent event arrived, if one is waiting to fire.
-    pending_since: Option<std::time::Instant>,
-}
-
-impl Debounce {
-    fn new(quiet: Duration) -> Self {
-        Self {
-            quiet,
-            pending_since: None,
-        }
-    }
-
-    /// Record an event. Each one restarts the quiet period, so a steady
-    /// stream of saves coalesces into a single run after the last.
-    fn on_event(&mut self, now: std::time::Instant) {
-        self.pending_since = Some(now);
-    }
-
-    /// Whether the pending burst has gone quiet long enough to fire.
-    ///
-    /// Consumes the pending flag, so one burst produces exactly one run.
-    fn should_fire(&mut self, now: std::time::Instant) -> bool {
-        match self.pending_since {
-            Some(last) if now.duration_since(last) >= self.quiet => {
-                self.pending_since = None;
-                true
-            }
-            _ => false,
         }
     }
 }
@@ -1560,122 +1609,263 @@ mod tests {
 }
 
 #[cfg(test)]
-mod debounce_tests {
-    //! P2-13. The watcher debounced on the leading edge, which does not
-    //! delay work - it discards it. These drive `Debounce` with explicit
-    //! `Instant`s, so they are deterministic and take no wall-clock time.
-
-    use super::Debounce;
-    use std::time::{Duration, Instant};
-
-    const QUIET: Duration = Duration::from_millis(500);
+mod generation_notice_tests {
+    use super::*;
 
     #[test]
-    fn nothing_fires_without_an_event() {
-        let mut d = Debounce::new(QUIET);
-        let t0 = Instant::now();
-
-        assert!(!d.should_fire(t0));
-        assert!(
-            !d.should_fire(t0 + Duration::from_secs(60)),
-            "an idle watcher must never regenerate - the quiet period is \
-             measured from an event, not from process start"
+    fn a_written_artifact_is_reported_as_generated() {
+        assert_eq!(
+            generation_notice(5, "type(s)", Path::new("frontend/src/types/x.ts"), true),
+            "Generated 5 type(s) → frontend/src/types/x.ts"
         );
     }
 
     #[test]
-    fn a_single_event_fires_once_after_the_quiet_period() {
-        let mut d = Debounce::new(QUIET);
-        let t0 = Instant::now();
-        d.on_event(t0);
-
-        assert!(
-            !d.should_fire(t0 + Duration::from_millis(499)),
-            "must not fire before the quiet period elapses"
-        );
-        assert!(d.should_fire(t0 + Duration::from_millis(500)));
-        assert!(
-            !d.should_fire(t0 + Duration::from_secs(10)),
-            "one event must produce exactly one run, not a repeating timer"
+    fn an_unwritten_artifact_is_reported_as_up_to_date() {
+        // The count stays: "how many types this project has" is still
+        // useful on a `serve` boot. What changes is the claim about the
+        // file, which the generator deliberately did not touch.
+        assert_eq!(
+            generation_notice(5, "type(s)", Path::new("frontend/src/types/x.ts"), false),
+            "5 type(s) up to date → frontend/src/types/x.ts"
         );
     }
 
-    /// The regression, stated directly. A burst of saves must produce one
-    /// regeneration, and it must happen *after the last one* - that is the
-    /// save whose types were previously lost.
     #[test]
-    fn a_burst_fires_once_and_only_after_its_final_event() {
-        let mut d = Debounce::new(QUIET);
-        let t0 = Instant::now();
+    fn the_unit_carries_through_for_message_ids() {
+        assert_eq!(
+            generation_notice(12, "message id(s)", Path::new("lang-keys.ts"), false),
+            "12 message id(s) up to date → lang-keys.ts"
+        );
+    }
+}
 
-        // A burst: five saves 100ms apart. `cargo fmt` across a few files
-        // looks exactly like this.
-        for i in 0..5 {
-            let at = t0 + Duration::from_millis(i * 100);
-            d.on_event(at);
+#[cfg(test)]
+mod backend_watch_args_tests {
+    use super::*;
+
+    const RUN: &str = "run --bin app";
+
+    #[test]
+    fn a_bare_project_watches_only_what_it_actually_has() {
+        // cargo-watch refuses to start when a `-w` path does not exist,
+        // so a project without a lockfile, a `.env`, or `lang/` must not
+        // be handed those paths.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+
+        // No `.env`, so no reason to disable gitignore filtering either.
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec!["watch", "-w", "src", "-w", "Cargo.toml", "-x", RUN]
+        );
+    }
+
+    #[test]
+    fn the_api_layout_keeps_its_entry_point_watched_through_src() {
+        // The API scaffold puts `main.rs` inside `src/`
+        // (`templates/files/api/Cargo.toml.tpl`), so it has no `cmd/` and
+        // must not be handed one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").expect("create main.rs");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+
+        let args = backend_watch_args(dir.path(), RUN);
+        assert!(!args.iter().any(|a| a == "cmd"), "{args:?}");
+        assert!(args.iter().any(|a| a == "src"), "{args:?}");
+    }
+
+    #[test]
+    fn a_full_project_watches_sources_manifests_env_and_catalogs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::create_dir(dir.path().join("cmd")).expect("create cmd");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+        std::fs::write(dir.path().join("Cargo.lock"), "\n").expect("create lockfile");
+        std::fs::write(dir.path().join(".env"), "APP_KEY=x\n").expect("create .env");
+        std::fs::create_dir(dir.path().join("lang")).expect("create lang");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec![
+                "watch",
+                "--no-vcs-ignores",
+                "-w",
+                "src",
+                "-w",
+                "cmd",
+                "-w",
+                "Cargo.toml",
+                "-w",
+                "Cargo.lock",
+                "-w",
+                ".env",
+                "-w",
+                "lang",
+                "-x",
+                RUN
+            ]
+        );
+    }
+
+    #[test]
+    fn the_full_stack_entry_point_is_watched() {
+        // The full-stack scaffold declares `path = "cmd/main.rs"` for the
+        // server binary. Leaving `cmd/` out meant editing the app's whole
+        // boot wiring - config, bootstrap, routes, migrations - rebuilt
+        // nothing, with no signal that anything had been dropped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::create_dir(dir.path().join("cmd")).expect("create cmd");
+        std::fs::write(dir.path().join("cmd/main.rs"), "fn main() {}\n").expect("create main.rs");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec![
+                "watch",
+                "-w",
+                "src",
+                "-w",
+                "cmd",
+                "-w",
+                "Cargo.toml",
+                "-x",
+                RUN
+            ]
+        );
+    }
+
+    #[test]
+    fn a_directory_with_nothing_to_scope_to_falls_back_to_an_unscoped_watch() {
+        // Pinned as a decision rather than left as an accident: with no
+        // candidate present there is nothing to scope to, and a bare
+        // `cargo watch -x` (which watches the project root) beats
+        // refusing to start. `validate_suprnova_project` has already
+        // required `Cargo.toml` before `serve` gets here, so a user does
+        // not meet this.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec!["watch", "-x", RUN],
+            "no candidates means no -w, and no gitignore flag either"
+        );
+    }
+
+    /// The argument vector cannot show *why* a path is in the list. These
+    /// read the scaffold templates the CLI actually ships, so that if a
+    /// scaffold moves its entry point or stops ignoring `.env`, the
+    /// justification fails here rather than rotting in a doc comment.
+    #[test]
+    fn every_scaffold_binary_path_falls_inside_the_watch_set() {
+        for (kind, manifest) in [
+            (
+                "full-stack",
+                crate::templates::cargo_toml("my_app", "d", ""),
+            ),
+            ("api", crate::templates::api::cargo_toml("my_api", "my-api")),
+        ] {
+            let table: toml::Table = manifest.parse().expect("manifest parses");
+            let bins = table
+                .get("bin")
+                .and_then(toml::Value::as_array)
+                .unwrap_or_else(|| panic!("{kind} manifest declares [[bin]]"));
+
+            for bin in bins {
+                let path = bin
+                    .get("path")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_else(|| panic!("{kind} [[bin]] declares a path"));
+                let root = path
+                    .split('/')
+                    .next()
+                    .unwrap_or_else(|| panic!("{kind} bin path is not empty"));
+                assert!(
+                    BACKEND_WATCH_PATHS.contains(&root),
+                    "{kind} builds a binary from `{path}`, whose root `{root}` is \
+                     not watched - editing it would rebuild nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_scaffolds_gitignore_the_env_file_the_watcher_is_told_to_watch() {
+        // This is the entire reason `NO_GITIGNORE_FILTER` exists. If a
+        // scaffold ever stops ignoring `.env`, the flag stops being
+        // load-bearing and this test says so.
+        for (kind, ignored) in [
+            ("full-stack", crate::templates::gitignore()),
+            ("api", crate::templates::api::gitignore()),
+        ] {
             assert!(
-                !d.should_fire(at),
-                "firing at event {i} would regenerate from a partially \
-                 written burst - the leading-edge bug"
+                gitignore_entries(ignored).iter().any(|e| e == ".env"),
+                "{kind} scaffold must gitignore .env for the flag to be needed"
             );
         }
-
-        let last_event = t0 + Duration::from_millis(400);
-        assert!(
-            !d.should_fire(last_event + Duration::from_millis(499)),
-            "the quiet period restarts on every event, so it is measured \
-             from the LAST save, not the first"
-        );
-        assert!(
-            d.should_fire(last_event + Duration::from_millis(500)),
-            "the burst must regenerate once it goes quiet; under the old \
-             leading-edge debounce the final four saves were dropped and \
-             nothing regenerated them"
-        );
-        assert!(
-            !d.should_fire(last_event + Duration::from_secs(10)),
-            "and exactly once"
-        );
     }
 
-    /// A save arriving during the quiet period extends it rather than
-    /// being swallowed. This is the case the old code got wrong: it
-    /// dropped these events entirely.
     #[test]
-    fn an_event_during_the_quiet_period_is_not_lost() {
-        let mut d = Debounce::new(QUIET);
-        let t0 = Instant::now();
-        d.on_event(t0);
-
-        // 300ms in - inside the old 500ms window, where this event used
-        // to be discarded outright.
-        let second = t0 + Duration::from_millis(300);
-        d.on_event(second);
-
-        assert!(
-            !d.should_fire(t0 + Duration::from_millis(500)),
-            "the window must have been extended by the second event"
-        );
-        assert!(
-            d.should_fire(second + QUIET),
-            "and the fire must come after the SECOND event, so its changes \
-             are included"
-        );
+    fn nothing_gitignored_hides_inside_the_watch_set_except_what_we_watch() {
+        // `NO_GITIGNORE_FILTER` turns gitignore filtering off for every
+        // watched root at once, so it is only safe while the sole
+        // gitignored things under those roots are the ones we watch
+        // deliberately (`.env` in both scaffolds, `Cargo.lock` in the API
+        // one). Anything else appearing there would silently widen the
+        // restart surface.
+        for (kind, ignored) in [
+            ("full-stack", crate::templates::gitignore()),
+            ("api", crate::templates::api::gitignore()),
+        ] {
+            for entry in gitignore_entries(ignored) {
+                let inside = BACKEND_WATCH_PATHS
+                    .iter()
+                    .any(|w| entry == *w || entry.starts_with(&format!("{w}/")));
+                if inside {
+                    assert!(
+                        BACKEND_WATCH_PATHS.contains(&entry.as_str()),
+                        "{kind} gitignores `{entry}`, which sits inside a watched \
+                         root without being one - disabling gitignore filtering \
+                         would start restarting the backend on it"
+                    );
+                }
+            }
+        }
     }
 
-    /// Separate bursts each get their own run.
+    /// Gitignore lines, stripped of comments, blanks, and the leading and
+    /// trailing slashes that only affect anchoring.
+    fn gitignore_entries(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                line.trim_start_matches('/')
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_later_burst_fires_again() {
-        let mut d = Debounce::new(QUIET);
-        let t0 = Instant::now();
+    fn the_frontend_and_the_generated_types_are_never_watched() {
+        // This is the whole point of scoping: a Vite component save, and
+        // the `.ts` the type generator writes, must not restart the
+        // backend.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+        std::fs::create_dir_all(dir.path().join("frontend/src/types")).expect("create frontend");
 
-        d.on_event(t0);
-        assert!(d.should_fire(t0 + QUIET));
-
-        let later = t0 + Duration::from_secs(30);
-        d.on_event(later);
-        assert!(!d.should_fire(later));
-        assert!(d.should_fire(later + QUIET));
+        let args = backend_watch_args(dir.path(), RUN);
+        assert!(
+            !args.iter().any(|a| a.contains("frontend")),
+            "frontend must stay out of the backend watch scope: {args:?}"
+        );
     }
 }
 
