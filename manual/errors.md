@@ -78,6 +78,14 @@ Each `?` uses one direct conversion. Code that returns
 `Result<_, FrameworkError>` instead of `Response` may use `.await?` on
 the SeaORM call because `DbErr` converts directly to `FrameworkError`.
 
+Every one of those conversions ends in the framework's JSON error body -
+`{ "message": …, "request_id": … }` at the matching status. That is the
+right answer for an API client and the wrong one for an Inertia visit,
+which needs a page. Name an
+[error page](frontend-inertia-responses.md#error-pages) and an Inertia
+app renders these errors as a real page while API clients keep the JSON
+unchanged.
+
 ## `AppError` - inline domain errors
 
 Use `AppError` for one-off errors that don't deserve a dedicated type.
@@ -626,6 +634,7 @@ and the lookup failure to a response.
 | Duplicate-key violation → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Annotate an existing error | `err.context("creating user")` |
 | Observe every 5xx | Listen for `ErrorOccurred` |
+| Render errors as an Inertia page | `InertiaConfig::error_page("Error")` |
 
 ## Next
 

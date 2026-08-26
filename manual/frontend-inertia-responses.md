@@ -950,6 +950,9 @@ with it.
 5. Registers `InertiaValidationRedirectMiddleware` - turns a `422` on an
    Inertia visit into a `303` back to the form page with the errors
    flashed. See [Validation failures](#validation-failures).
+6. Registers `InertiaErrorPageMiddleware`, **only when** `cfg` names an
+   `.error_page(...)` - turns the framework's own error responses into
+   that page. See [Error pages](#error-pages).
 
 Order matters: the headers middleware is registered first, so it is the
 outermost and sees every response - including the `409` the version
@@ -983,6 +986,133 @@ Skip the call only if you genuinely don't want one of these middlewares
 representations of a URL, silent stale-bundle, form-replay-on-redirect,
 and a validation `422` dead-ending in the client's error modal instead of
 reaching `form.errors`).
+
+## Error pages
+
+An Inertia visit that gets back a non-2xx from the framework does not
+show an error page - it shows a crash screen:
+
+```
+All Inertia requests must receive a valid Inertia response, however a
+plain JSON response was received.
+```
+
+The client checks one thing before it will render anything: an
+`X-Inertia: true` header on the response. A `403` from
+[`PermissionMiddleware`](authorization.md), a `404` for an unrouted path,
+a `429` from the rate limiter, a `500` from a failing handler - all of
+them carry the framework's JSON error body and no such header, so the
+client hands them to its modal. A user with the wrong role clicks a nav
+link and the app appears to break.
+
+Name a page component and the framework renders those responses through
+it instead, keeping the status code:
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new()
+            .version(env!("CARGO_PKG_VERSION"))
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+`"Error"` is resolved exactly like any other page name, so
+`frontend/src/pages/Error.svelte` (or `.tsx`, or `.vue`) is all it takes.
+**The three starters ship one and set `.error_page("Error")` already** -
+a new project is covered without doing anything.
+
+### What the page receives
+
+| Prop | Type | Always present | What it is |
+|---|---|---|---|
+| `status` | `number` | yes | The original HTTP status - `403`, `404`, `500`. |
+| `message` | `string` | yes | The error body's `message`, or the status's reason phrase when it carried none. Already sanitized: a `5xx` reads `"Internal Server Error"`, never the underlying error. |
+| `request_id` | `string` | no | Present only when the error body carried one. The same id the structured log records, so the page can show a reference the operator can search. |
+
+```svelte
+<script lang="ts">
+  interface ErrorProps {
+    status: number
+    message: string
+    request_id?: string
+  }
+
+  let { status, message, request_id }: ErrorProps = $props()
+</script>
+
+<h1>{status}</h1>
+<p>{message}</p>
+{#if request_id}<p>Reference: {request_id}</p>{/if}
+```
+
+Declare the props in the component rather than importing them from
+`types/inertia-props.ts`: [`suprnova generate-types`](frontend-typescript-types.md) rewrites
+that file from your own `#[derive(InertiaProps)]` structs, and these
+props come from the framework.
+
+Both audiences are covered. An Inertia XHR visit gets the JSON page
+object with `X-Inertia: true`; a hard navigation - someone pasting
+`/admin/articles` into the address bar - gets the full HTML shell, the
+same one a first load of any page gets. So the error page works whether
+the user arrived through the SPA or not.
+
+### What it never touches
+
+The middleware only stands in where nobody else has an answer. It leaves
+alone:
+
+- **Validation `422`s.** `InertiaValidationRedirectMiddleware` owns
+  those - see [Validation failures](#validation-failures). A `422` that
+  survives that middleware (no `errors` object, or a Precognition
+  dry-run) keeps its body too.
+- **Anything carrying `X-Inertia-Location`.** The `409` version bounce,
+  and the `redirect_to` form of the RBAC middlewares. The client acts on
+  the header, not the body.
+- **Redirects.** Only `400`-`599` is in scope.
+- **API clients.** A request whose `Accept` prefers `application/json`
+  over `text/html` keeps the JSON contract it has always had. `curl`'s
+  `*/*` counts as no preference, so it keeps JSON too. Only an Inertia
+  visit or a browser navigation gets a page.
+- **Responses that already are Inertia pages.** A handler that rendered
+  its own page and gave it a `410` keeps its own component.
+- **Bodies your app authored.** Your own HTML error page, or a JSON
+  envelope in some other shape, is a considered answer; the framework
+  does not overrule it.
+- **Everything, when `error_page` is unset.** The middleware is not
+  registered at all, so an app that has not opted in runs exactly the
+  code it ran before.
+
+One gap worth knowing: a handler that **panics** is out of reach. The
+panic net wraps the whole middleware chain, so the synthesized `500` is
+built after every middleware frame has already unwound. Panicking
+handlers still surface the client's modal. Return `Err(...)` rather than
+panicking (see [Errors](errors.md)) and the error page covers it.
+
+If the page itself fails to render - the component cannot be resolved,
+SSR is down, a shared prop errors - the framework logs a `warn` with the
+request id and returns the original error response. A broken error page
+never masks the error it was rendering.
+
+### Why Suprnova diverges
+
+Laravel puts this in the exception handler: you edit
+`bootstrap/app.php`, match on the status yourself, and call
+`Inertia::render('Error', ['status' => $response->getStatusCode()])`
+with `$response->setStatusCode(...)` to put the code back. That is
+flexible, and it is also a piece of framework plumbing every project
+rewrites by hand, usually after seeing the modal in production first.
+
+Here it is one config line, because the decision is the same for every
+app: an Inertia visit or a browser navigation gets a page, an API client
+gets JSON, and everything another contract owns is left alone. The
+escape hatch is the same either way - a route middleware of your own,
+registered inside this one, can answer with whatever it likes and the
+error-page middleware will leave that body alone.
 
 ## Server-driven `<head>` elements
 

@@ -4,6 +4,16 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.6 - 2026-08-26
+
+### Added
+
+- **Framework errors can render your own Inertia page instead of the client's crash modal.** A user without a permission clicked a nav link into a guarded route and got Inertia's "All Inertia requests must receive a valid Inertia response, however a plain JSON response was received" screen: the `403` carried the framework's JSON error body and no `X-Inertia` header, so the client refused it. The same held for an unrouted `404`, a rate-limited `429`, and a failing handler's `500`. Name a page component with `InertiaConfig::error_page("Error")` and those responses render that page at their original status, with `status`, `message`, and - when the error carried one - `request_id` props. An Inertia visit gets the JSON page object; a hard navigation gets the full HTML shell, so pasting the URL into the address bar works too. Everything with an owner is left alone: validation `422`s still redirect back to the form, `X-Inertia-Location` bounces and responses that already are Inertia pages pass through, and a client whose `Accept` prefers JSON keeps the exact body it got before. `suprnova new` scaffolds `frontend/src/pages/Error.*` and sets `.error_page("Error")`, so new projects are covered without doing anything.
+
+### Upgrading
+
+- Nothing changes for an existing app until it opts in. `InertiaConfig::error_page` defaults to `None`, and `Inertia::install` registers the error-page middleware only when a component is named, so error responses keep their exact bodies. To adopt it, add a page component named `Error` beside your others (it receives `status`, `message`, and an optional `request_id`) and chain `.error_page("Error")` onto the `InertiaConfig` you pass to `Inertia::install`. A handler that **panics** stays out of scope: the panic net wraps the whole middleware chain, so its synthesized `500` is built after every middleware has unwound. Return `Err(...)` rather than panicking and the error page covers it.
+
 ## 1.3.5 - 2026-08-26
 
 ### Changed
