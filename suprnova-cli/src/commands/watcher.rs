@@ -174,6 +174,124 @@ impl RegenerationSchedule {
 }
 
 #[cfg(test)]
+mod regeneration_schedule_tests {
+    //! The per-event decision both watchers make, driven with explicit
+    //! `Instant`s so these take no wall-clock time.
+
+    use super::*;
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind};
+    use std::path::PathBuf;
+
+    fn event_on(kind: EventKind, path: &str) -> notify::Event {
+        notify::Event::new(kind).add_path(PathBuf::from(path))
+    }
+
+    fn wrote(path: &str) -> notify::Event {
+        event_on(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            path,
+        )
+    }
+
+    #[test]
+    fn an_access_event_arms_nothing() {
+        // `generate-types --watch` regenerated on any event whose path
+        // ended in `.rs`, and the generator reads every `.rs` file under
+        // the tree it watches. On Linux that is a closed loop.
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        let t0 = Instant::now();
+
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Read),
+        ] {
+            schedule.observe(&event_on(kind, "src/a.rs"), t0);
+            schedule.observe(&event_on(kind, "lang/en/x.ftl"), t0);
+        }
+
+        assert_eq!(
+            schedule.due(t0 + Duration::from_secs(60)),
+            WatchTrigger::NONE,
+            "reads must never schedule a regeneration, however long we wait"
+        );
+    }
+
+    #[test]
+    fn a_write_fires_once_the_burst_goes_quiet() {
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        let t0 = Instant::now();
+        schedule.observe(&wrote("src/a.rs"), t0);
+
+        assert_eq!(
+            schedule.due(t0 + Duration::from_millis(100)),
+            WatchTrigger::NONE,
+            "still inside the quiet period"
+        );
+        assert_eq!(
+            schedule.due(t0 + REGEN_QUIET),
+            WatchTrigger {
+                rust: true,
+                ftl: false
+            }
+        );
+        assert_eq!(
+            schedule.due(t0 + REGEN_QUIET + REGEN_QUIET),
+            WatchTrigger::NONE,
+            "one burst produces exactly one run"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_saves_collapses_into_one_run() {
+        // `cargo fmt`, format-on-save across a few files, a branch switch.
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        let t0 = Instant::now();
+        for step in 0..5 {
+            schedule.observe(&wrote("src/a.rs"), t0 + Duration::from_millis(step * 100));
+            assert_eq!(
+                schedule.due(t0 + Duration::from_millis(step * 100)),
+                WatchTrigger::NONE,
+                "must not fire mid-burst, on a half-written tree"
+            );
+        }
+        let last = t0 + Duration::from_millis(400);
+        assert!(
+            schedule.due(last + REGEN_QUIET).rust,
+            "the run happens after the last write, not the first"
+        );
+    }
+
+    #[test]
+    fn the_two_artifacts_are_scheduled_independently() {
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        let t0 = Instant::now();
+        schedule.observe(&wrote("lang/en/app.ftl"), t0);
+        schedule.observe(
+            &event_on(EventKind::Create(CreateKind::File), "src/b.rs"),
+            t0,
+        );
+
+        assert_eq!(
+            schedule.due(t0 + REGEN_QUIET),
+            WatchTrigger {
+                rust: true,
+                ftl: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_neither_rust_nor_fluent_arms_nothing() {
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        let t0 = Instant::now();
+        schedule.observe(&wrote("src/notes.md"), t0);
+        assert_eq!(schedule.due(t0 + REGEN_QUIET), WatchTrigger::NONE);
+    }
+}
+
+#[cfg(test)]
 mod watch_trigger_tests {
     use super::*;
     use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind};

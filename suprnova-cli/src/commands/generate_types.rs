@@ -1330,9 +1330,10 @@ fn start_watcher(
     output_path: &Path,
     lang_keys_output: &Path,
 ) -> Result<(), String> {
+    use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-    use std::sync::mpsc::channel;
-    use std::time::Duration;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::{Duration, Instant};
 
     let (tx, rx) = channel();
     let src_path = project_path.join("src");
@@ -1365,49 +1366,153 @@ fn start_watcher(
     let lang_keys_output = lang_keys_output.to_path_buf();
     let project_path = project_path.to_path_buf();
 
+    // Same schedule `serve`'s watcher uses, for the same two reasons: the
+    // generator reads the tree it is watching, so its own reads must not
+    // count as changes; and a burst of saves is one edit, not six.
+    let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+
     loop {
-        match rx.recv() {
-            Ok(event) => {
-                let is_rust_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
-                let is_ftl_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "ftl").unwrap_or(false));
-
-                if is_rust_change {
-                    ui::hint("Detected changes, regenerating types...");
-                    match generate_types_to_file(&project_path, &output_path) {
-                        Ok(count) => {
-                            ui::success(&format!("Regenerated {} type(s)", count));
-                        }
-                        Err(e) => {
-                            ui::error(&format!("Failed to regenerate: {}", e));
-                        }
-                    }
-                }
-
-                if is_ftl_change {
-                    ui::hint("Detected lang/ changes, regenerating lang-keys...");
-                    match generate_lang_keys_to_file(&project_path, &lang_keys_output) {
-                        Ok(0) => {
-                            ui::hint("lang-keys.ts removed (no message ids)");
-                        }
-                        Ok(count) => {
-                            ui::success(&format!("Regenerated {} message id(s)", count));
-                        }
-                        Err(e) => {
-                            ui::error(&format!("Failed to regenerate lang-keys: {}", e));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
+        // `recv_timeout` rather than `recv` is what makes a trailing edge
+        // possible: after the last event of a burst nothing more arrives,
+        // so the loop has to wake on its own to notice the quiet period
+        // elapsed.
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => schedule.observe(&event, Instant::now()),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(e @ RecvTimeoutError::Disconnected) => {
                 return Err(format!("Watch error: {}", e));
             }
         }
+
+        let due = schedule.due(Instant::now());
+
+        if due.rust {
+            ui::hint("Detected changes, regenerating types...");
+            match generate_types_to_file(&project_path, &output_path) {
+                Ok(count) => {
+                    ui::success(&format!("Regenerated {} type(s)", count));
+                }
+                Err(e) => {
+                    ui::error(&format!("Failed to regenerate: {}", e));
+                }
+            }
+        }
+
+        if due.ftl {
+            ui::hint("Detected lang/ changes, regenerating lang-keys...");
+            match generate_lang_keys_to_file(&project_path, &lang_keys_output) {
+                Ok(0) => {
+                    ui::hint("lang-keys.ts removed (no message ids)");
+                }
+                Ok(count) => {
+                    ui::success(&format!("Regenerated {} message id(s)", count));
+                }
+                Err(e) => {
+                    ui::error(&format!("Failed to regenerate lang-keys: {}", e));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod watch_loop_tests {
+    use super::*;
+    use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule, WatchTrigger};
+    use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::time::{Duration, Instant};
+
+    /// The whole bug, end to end, against a real watcher and the real
+    /// generator: running `generate_types_to_file` over a tree that is
+    /// being watched must not schedule another run.
+    ///
+    /// The unit tests prove the classifier ignores `Access` events; only
+    /// this proves that `Access` is in fact all the generator's own reads
+    /// produce, and that nothing else about a regeneration (creating
+    /// `frontend/src/types/`, writing the output) lands back inside the
+    /// watched tree.
+    ///
+    /// Linux-only: the inotify backend is the one that registers
+    /// `WatchMask::OPEN` and so reports reads at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_regeneration_does_not_schedule_another_regeneration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed props.rs");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        let (tx, rx) = channel();
+        let watcher_result = RecommendedWatcher::new(
+            move |res| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            },
+            Config::default().with_poll_interval(Duration::from_secs(2)),
+        );
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                println!("skipping: no filesystem watcher available ({e})");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&src, RecursiveMode::Recursive) {
+            println!("skipping: cannot watch a temp dir ({e})");
+            return;
+        }
+
+        let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
+        // Drain whatever registering the watch produced.
+        while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
+
+        assert_eq!(
+            generate_types_to_file(dir.path(), &out).expect("first run"),
+            1
+        );
+
+        // Pump the loop exactly as `start_watcher` does, for well past the
+        // quiet period. Nothing may ever come due.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => schedule.observe(&event, Instant::now()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            assert_eq!(
+                schedule.due(Instant::now()),
+                WatchTrigger::NONE,
+                "a regeneration scheduled another one: this is the loop"
+            );
+        }
+
+        // And a real edit must still get through, or the fix traded a loop
+        // for a watcher that never runs.
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n    pub n: i64,\n}\n",
+        )
+        .expect("edit props.rs");
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut fired = false;
+        while !fired && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => schedule.observe(&event, Instant::now()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            fired = schedule.due(Instant::now()).rust;
+        }
+        assert!(fired, "a real edit must still schedule a regeneration");
     }
 }
 
