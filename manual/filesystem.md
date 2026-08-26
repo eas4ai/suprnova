@@ -369,9 +369,36 @@ A move deletes the fallback source on both paths - whether the primary held
 the source or not. Without that, the next read would promote the fallback
 copy back and undo the move.
 
-If the stream fails partway, the half-written destination is aborted and
-deleted before the error reaches you, so a failed transfer is never
-observable as a truncated object.
+The two paths differ in when they delete it, and the difference is what a
+failed move leaves behind:
+
+- The primary held the source. The fallback copy goes first, before the
+  rename. While the primary holds the path, the fallback's copy is unreachable
+  through this disk, so removing it first changes nothing you can observe - and
+  if the delete fails, nothing has moved yet. Retry the move.
+- Only the fallback held it. The delete can only come after the destination is
+  in place, so a move that fails on the delete leaves the destination written
+  and the source still on the fallback. Retry the move; the source is now on
+  the primary, so the retry takes the first path.
+
+Either way a failed move is safe to retry, and the destination you end up with
+is the object the move started from.
+
+Conditions travel with the operation on the streaming path too. `if_not_exists`
+becomes a conditional write, so a guarded copy or move still refuses an
+existing destination rather than clobbering it, and a copy that names a source
+version gets that version out of the fallback. A copy's `if_match` is the one
+exception: it is a condition the backend applies inside its own copy, which is
+the call this path cannot make, so it is refused with an `Unsupported` error
+naming the condition rather than quietly ignored.
+
+If the stream fails partway, the writer is aborted and a destination the
+transfer created is deleted before the error reaches you, so a failed transfer
+is not observable as a truncated object. A destination that was already there
+is left alone - a failed copy must not be the thing that destroys an object it
+never wrote. On a local-filesystem primary that guarantee is weaker than it
+looks: the driver opens the target itself and truncates it, so a pre-existing
+local destination is already gone by the time a transfer can fail.
 
 ### Versioned and conditional reads
 
@@ -440,11 +467,20 @@ on the promoting path where the whole object is needed anyway.
 Laravel's cross-fallback `copy` and `move` also buffer the source through
 `php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
 fallback is where the large, rarely-touched objects live, and deletes a
-half-written destination before returning the error. One more difference
-follows from OpenDAL: deleting a path that is not there counts as success, so
-a move clears the fallback source without first checking that it exists. If
-that delete does fail, the move fails with it - a source left on the fallback
-is a move that did not happen.
+half-written destination before returning the error. Two more differences
+follow from OpenDAL. Deleting a path that is not there counts as success, so a
+move clears the fallback source without first checking that it exists. And
+OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
+equivalent for, so Suprnova has to decide what each one means when the source
+is only on the fallback: `if_not_exists` and a copy's source version are
+honoured, and a copy's `if_match` is refused rather than dropped.
+
+Laravel deletes the fallback source after the move on both paths. Suprnova
+deletes it first when the primary holds the source, because the two orders
+differ under a retry: the source is unreachable through the disk either way,
+but deleting last means a move that lost its delete to a transient fault comes
+back as a move whose source is now fallback-only, and streams the fallback's
+stale copy over the destination the first attempt already wrote correctly.
 
 ## Registry hygiene
 

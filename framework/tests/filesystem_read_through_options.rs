@@ -10,6 +10,7 @@
 //! Every operation used here (`read`, `write`, `exists`, `copy`, `rename`) is
 //! native to `Operator`, so `DiskExt` is deliberately not imported.
 
+use suprnova::opendal::ErrorKind;
 use suprnova::{ReadThroughConfig, Storage};
 
 #[tokio::test]
@@ -381,5 +382,161 @@ async fn copy_and_rename_of_a_source_on_neither_disk_fail() {
             .await
             .expect("primary exists answers"),
         "a failed copy must leave no partial destination"
+    );
+}
+
+#[tokio::test]
+async fn copy_streams_a_multi_chunk_object() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    register_fs_primary(tmp.path(), "assets", true);
+
+    // Two 64 KiB transfer chunks and a few bytes over, so the streaming loop
+    // runs more than once - the only shape that walks it.
+    let body: Vec<u8> = (0..(64 * 1024 * 2 + 7)).map(|i| (i % 251) as u8).collect();
+    Storage::disk("fallback")
+        .expect("fallback disk")
+        .write("big.bin", body.clone())
+        .await
+        .expect("seed the fallback");
+
+    Storage::disk("assets")
+        .expect("read-through disk")
+        .copy("big.bin", "warm.bin")
+        .await
+        .expect("copy spans the fallback");
+
+    assert_eq!(
+        Storage::disk("primary")
+            .expect("primary disk")
+            .read("warm.bin")
+            .await
+            .expect("destination lands on the primary")
+            .to_vec(),
+        body,
+        "every chunk has to arrive, in order and unaltered"
+    );
+}
+
+#[tokio::test]
+async fn a_conditional_copy_of_a_fallback_only_source_refuses_to_clobber() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    register_fs_primary(tmp.path(), "assets", true);
+
+    Storage::disk("fallback")
+        .expect("fallback disk")
+        .write("cold.txt", "cold bytes")
+        .await
+        .expect("seed the fallback");
+    let primary = Storage::disk("primary").expect("primary disk");
+    primary
+        .write("warm.txt", "the destination that was already there")
+        .await
+        .expect("seed the destination");
+
+    let err = Storage::disk("assets")
+        .expect("read-through disk")
+        .copy_with("cold.txt", "warm.txt")
+        .if_not_exists(true)
+        .await
+        .expect_err("if_not_exists must refuse an existing destination");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::ConditionNotMatch,
+        "a refused condition must not reach the caller as a transport failure, got: {err}"
+    );
+
+    assert_eq!(
+        &primary
+            .read("warm.txt")
+            .await
+            .expect("the destination is still there")
+            .to_vec(),
+        b"the destination that was already there",
+        "a refused conditional copy must leave the destination untouched"
+    );
+}
+
+#[tokio::test]
+async fn a_conditional_rename_of_a_fallback_only_source_refuses_to_clobber() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    register_fs_primary(tmp.path(), "assets", true);
+
+    let fallback = Storage::disk("fallback").expect("fallback disk");
+    fallback
+        .write("cold.txt", "cold bytes")
+        .await
+        .expect("seed the fallback");
+    let primary = Storage::disk("primary").expect("primary disk");
+    primary
+        .write("warm.txt", "the destination that was already there")
+        .await
+        .expect("seed the destination");
+
+    let err = Storage::disk("assets")
+        .expect("read-through disk")
+        .rename_with("cold.txt", "warm.txt")
+        .if_not_exists(true)
+        .await
+        .expect_err("if_not_exists must refuse an existing destination");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::ConditionNotMatch,
+        "a refused condition must not reach the caller as a transport failure, got: {err}"
+    );
+
+    assert_eq!(
+        &primary
+            .read("warm.txt")
+            .await
+            .expect("the destination is still there")
+            .to_vec(),
+        b"the destination that was already there",
+        "a refused conditional move must leave the destination untouched"
+    );
+    assert!(
+        fallback.exists("cold.txt").await.expect("fallback exists"),
+        "a move that never landed must not have removed its source"
+    );
+}
+
+#[tokio::test]
+async fn a_copy_of_a_fallback_only_source_refuses_an_if_match_condition() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    register_fs_primary(tmp.path(), "assets", true);
+
+    Storage::disk("fallback")
+        .expect("fallback disk")
+        .write("cold.txt", "cold bytes")
+        .await
+        .expect("seed the fallback");
+
+    let err = Storage::disk("assets")
+        .expect("read-through disk")
+        .copy_with("cold.txt", "warm.txt")
+        .if_match("\"etag-live\"")
+        .await
+        .expect_err("if_match is a backend copy condition a streaming transfer cannot apply");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::Unsupported,
+        "refusing beats silently dropping the condition, got: {err}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("if_match"),
+        "the error must name the condition it cannot honour, got: {message}"
+    );
+
+    assert!(
+        !Storage::disk("primary")
+            .expect("primary disk")
+            .exists("warm.txt")
+            .await
+            .expect("primary exists answers"),
+        "a refused copy must write nothing"
     );
 }

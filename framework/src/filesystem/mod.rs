@@ -228,9 +228,24 @@ impl std::fmt::Debug for GcsConfig {
 /// `copy` and `rename` resolve the source against the primary first. When only
 /// the fallback holds it, the object is streamed across and the destination
 /// lands on the primary - without that, either call would fail on an object
-/// the disk happily reads. A `rename` additionally deletes the fallback's copy
-/// of the source, on both branches, or the next read would promote it straight
-/// back and undo the move.
+/// the disk happily reads. A `rename` also deletes the fallback's copy of the
+/// source, on both branches, or the next read would promote it straight back
+/// and undo the move.
+///
+/// The two branches order that delete differently, and the order is the
+/// contract. When the primary holds the source, the fallback copy goes first:
+/// it is unreachable through this disk while the primary has the object, so
+/// nothing observable is lost, and a move that fails is a move where nothing
+/// has happened yet. When only the fallback holds it, the delete can only come
+/// after the destination is in place, so a move that fails between the two
+/// leaves the destination written and the source still there - safe to retry.
+///
+/// Conditions travel with the operation on the streaming branch too:
+/// `if_not_exists` becomes a conditional write on the destination, and a copy's
+/// source version selects which object the fallback hands over. A copy's
+/// `if_match` is refused with `Unsupported` rather than ignored - it is a
+/// condition the backend applies inside its own copy, which is the one call
+/// this branch cannot make.
 #[derive(Clone, Debug)]
 pub struct ReadThroughConfig {
     /// Name of the disk that answers writes and listings, and that promoted

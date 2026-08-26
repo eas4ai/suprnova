@@ -39,7 +39,7 @@
 //! rename (memory, S3, Azure Blob, GCS) publish a write as a single indivisible
 //! operation, so for those the direct write is already atomic and is what runs.
 
-use opendal::options::{DeleteOptions, ReadOptions, WriteOptions};
+use opendal::options::{DeleteOptions, ReadOptions, ReaderOptions, WriteOptions};
 use opendal::raw::oio::Copy as _;
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
@@ -253,7 +253,35 @@ impl Service for ReadThroughService {
                 };
             }
 
-            stream_across(&primary, &fallback, &from, &to)
+            // Nothing below this layer will apply the caller's conditions on
+            // this branch: opendal's `CorrectnessCheckLayer` sits under the
+            // primary's stack, and the primary's `copy` - the call it would
+            // have checked - is exactly the call a fallback-only source cannot
+            // make. So the conditions are honoured here, by hand, or not at
+            // all.
+            if let Some(etag) = args.if_match() {
+                // `if_match` on a copy is a condition on the destination
+                // object's ETag, which the backend applies as part of its own
+                // copy. A streaming write cannot stand in for that, and
+                // silently dropping the condition would turn a guarded copy
+                // into a clobber.
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    format!(
+                        "read-through copy of '{from}' to '{to}' cannot honour \
+                         `if_match` ({etag}): the source lives only on the \
+                         fallback disk, so the copy is a streaming write rather \
+                         than a backend copy"
+                    ),
+                ));
+            }
+
+            let conditions = TransferConditions {
+                source_version: args.source_version().map(str::to_owned),
+                if_not_exists: args.if_not_exists(),
+            };
+
+            stream_across(&primary, &fallback, &from, &to, &conditions)
                 .await
                 .map_err(|e| copy_failed(&from, &to, e))
         }))
@@ -266,18 +294,37 @@ impl Service for ReadThroughService {
         to: &str,
         args: OpRename,
     ) -> Result<RpRename> {
+        // The fallback's copy of the source goes on both branches: leaving it
+        // behind would let the next read promote it straight back and undo the
+        // move. Deleting a missing path is a success in opendal, so neither
+        // branch needs an existence probe first.
         if self.primary.exists(from).await? {
-            self.inner.rename(ctx, from, to, args).await?;
-        } else {
-            stream_across(&self.primary, &self.fallback, from, to)
+            // Delete it *before* the rename. While the primary holds `from`,
+            // the fallback's copy is unreachable through this disk, so removing
+            // it first changes nothing a caller can observe - and it makes a
+            // retry safe. The other order does not: a rename that succeeded and
+            // then lost its fallback delete to a transient fault leaves a
+            // retry to find `from` gone from the primary, take the streaming
+            // branch, and overwrite the destination it just moved correctly
+            // with the fallback's stale bytes.
+            self.fallback
+                .delete(from)
                 .await
                 .map_err(|e| move_failed(from, to, e))?;
+            self.inner.rename(ctx, from, to, args).await?;
+            return Ok(RpRename::new());
         }
 
-        // Unconditional, on both branches: leaving the fallback source behind
-        // would let the next read promote it straight back and undo the move.
-        // Deleting a missing path is a success in opendal, so no existence
-        // probe is needed.
+        // On this branch the order has to be the other way round: the fallback
+        // holds the only copy until the destination is in place.
+        let conditions = TransferConditions {
+            source_version: None,
+            if_not_exists: args.if_not_exists(),
+        };
+        stream_across(&self.primary, &self.fallback, from, to, &conditions)
+            .await
+            .map_err(|e| move_failed(from, to, e))?;
+
         self.fallback
             .delete(from)
             .await
@@ -635,39 +682,85 @@ impl oio::Delete for ReadThroughDeleter {
 /// round-trips reasonable without materializing a whole object.
 const CROSS_DISK_CHUNK_BYTES: usize = 64 * 1024;
 
+/// The parts of a caller's `copy` / `rename` arguments that a fallback-spanning
+/// transfer can carry across.
+///
+/// It is a struct rather than two parameters so that adding a condition later
+/// forces every call site to decide what it means, instead of silently
+/// defaulting the new one away - which is precisely how `if_not_exists` was
+/// lost the first time.
+#[derive(Debug, Default)]
+struct TransferConditions {
+    /// The source version to read from the fallback, from
+    /// [`opendal::raw::OpCopy::source_version`]. A `rename` has no equivalent.
+    source_version: Option<String>,
+    /// Whether the destination write must fail if the primary already holds
+    /// the object, from `OpCopy::if_not_exists` / `OpRename::if_not_exists`.
+    if_not_exists: bool,
+}
+
 /// Stream `from` out of the fallback and into `to` on the primary.
 ///
 /// Laravel's `copyFromFallback` buffers the source through `php://temp`;
 /// streaming instead keeps a cold-tier object off the heap, which matters
 /// because the fallback is where the large, rarely-touched objects live.
 ///
-/// A failure mid-stream must never be observable as a truncated destination,
-/// so the writer is aborted and the destination deleted before the error is
-/// returned - the same cleanup `copy_between_disks` performs.
+/// The caller's conditions ride along in `conditions`: the source version
+/// selects which object the fallback hands over, and `if_not_exists` becomes a
+/// conditional write so a guarded copy still refuses to clobber. A primary that
+/// cannot express that condition fails the transfer through opendal's own
+/// correctness check rather than quietly ignoring it.
+///
+/// A failure mid-stream must not be observable as a truncated destination, so
+/// the writer is aborted and a destination this transfer created is deleted
+/// before the error is returned - the same cleanup `copy_between_disks`
+/// performs. A destination that was already there is left alone; see
+/// [`discard_partial`].
 async fn stream_across(
     primary: &Operator,
     fallback: &Operator,
     from: &str,
     to: &str,
+    conditions: &TransferConditions,
 ) -> Result<Metadata> {
     let reader = fallback
-        .reader_with(from)
-        .chunk(CROSS_DISK_CHUNK_BYTES)
+        .reader_options(
+            from,
+            ReaderOptions {
+                version: conditions.source_version.clone(),
+                chunk: Some(CROSS_DISK_CHUNK_BYTES),
+                ..Default::default()
+            },
+        )
         .await?;
     let mut stream = std::pin::pin!(reader.into_bytes_stream(..).await?);
-    let mut writer = primary.writer(to).await?;
+
+    // Whether the destination is this transfer's to remove if it fails. An
+    // object that was already there belongs to the caller, and a failed copy
+    // must not be the thing that destroys it.
+    let destination_existed = primary.exists(to).await?;
+
+    let mut writer = primary
+        .writer_options(
+            to,
+            WriteOptions {
+                if_not_exists: conditions.if_not_exists,
+                ..Default::default()
+            },
+        )
+        .await?;
 
     loop {
         match futures::TryStreamExt::try_next(&mut stream).await {
             Ok(Some(chunk)) => {
                 if let Err(e) = writer.write(chunk).await {
-                    discard_partial(primary, &mut writer, to).await;
+                    discard_partial(primary, &mut writer, to, destination_existed).await;
                     return Err(e);
                 }
             }
             Ok(None) => break,
             Err(e) => {
-                discard_partial(primary, &mut writer, to).await;
+                discard_partial(primary, &mut writer, to, destination_existed).await;
                 return Err(Error::new(
                     ErrorKind::Unexpected,
                     format!("reading '{from}' from the fallback disk failed"),
@@ -680,7 +773,7 @@ async fn stream_across(
     match writer.close().await {
         Ok(meta) => Ok(meta),
         Err(e) => {
-            discard_partial(primary, &mut writer, to).await;
+            discard_partial(primary, &mut writer, to, destination_existed).await;
             Err(e)
         }
     }
@@ -690,7 +783,23 @@ async fn stream_across(
 /// writes for backends that buffer them; `delete` removes an already-visible
 /// partial object. Both are logged rather than propagated so the caller still
 /// sees the failure that actually mattered.
-async fn discard_partial(primary: &Operator, writer: &mut opendal::Writer, to: &str) {
+///
+/// `destination_existed` is what keeps the cleanup from becoming the worse
+/// failure. On an object store - the tiering case this whole feature exists
+/// for - a write is buffered until it is published, so an intact object sits at
+/// `to` for the whole transfer and deleting it would destroy data the transfer
+/// never wrote. When it was already there, it is left alone.
+///
+/// The local filesystem is the asymmetry: without an atomic write directory it
+/// opens the target itself with `O_TRUNC`, so a pre-existing destination is
+/// already gone by the time a transfer can fail, and nothing here can bring it
+/// back.
+async fn discard_partial(
+    primary: &Operator,
+    writer: &mut opendal::Writer,
+    to: &str,
+    destination_existed: bool,
+) {
     if let Err(e) = writer.abort().await {
         tracing::warn!(
             path = %to,
@@ -698,6 +807,17 @@ async fn discard_partial(primary: &Operator, writer: &mut opendal::Writer, to: &
             "failed to abort the writer while cleaning up a failed read-through transfer"
         );
     }
+
+    if destination_existed {
+        tracing::warn!(
+            path = %to,
+            "a read-through transfer failed onto a destination that already \
+             existed; leaving it in place, though a local-filesystem primary \
+             will have truncated it when the writer opened"
+        );
+        return;
+    }
+
     if let Err(e) = primary.delete(to).await {
         tracing::warn!(
             path = %to,
@@ -709,19 +829,25 @@ async fn discard_partial(primary: &Operator, writer: &mut opendal::Writer, to: &
 
 /// Rewrap a fallback-spanning copy failure. Mirrors Laravel's
 /// `UnableToCopyFile`, so a caller can tell a failed copy from a failed move.
+///
+/// The source's kind is kept rather than flattened to `Unexpected`: a caller
+/// that set `if_not_exists` has to see `ConditionNotMatch`, and one that copied
+/// a path on neither disk has to see `NotFound`, exactly as a single-disk copy
+/// would report them. Only the message says the failure was a read-through one.
 fn copy_failed(from: &str, to: &str, source: Error) -> Error {
     Error::new(
-        ErrorKind::Unexpected,
+        source.kind(),
         format!("read-through copy of '{from}' to '{to}' failed"),
     )
     .set_source(source)
 }
 
 /// Rewrap a fallback-spanning move failure. Mirrors Laravel's
-/// `UnableToMoveFile`.
+/// `UnableToMoveFile`. Keeps the source's kind for the same reason
+/// [`copy_failed`] does.
 fn move_failed(from: &str, to: &str, source: Error) -> Error {
     Error::new(
-        ErrorKind::Unexpected,
+        source.kind(),
         format!("read-through move of '{from}' to '{to}' failed"),
     )
     .set_source(source)
@@ -800,9 +926,18 @@ mod tests {
     #[derive(Debug, Clone, Copy, Default)]
     struct StubSpec {
         contents: Option<&'static str>,
+        /// A generated body of this many `.` bytes, used instead of
+        /// `contents`. Exists so a transfer can be made to span more than one
+        /// 64 KiB chunk, which is the only way to walk the streaming loop.
+        generated_bytes: Option<usize>,
         content_type: Option<&'static str>,
         /// Whether `stat` fails rather than answering.
         stat_fails: bool,
+        /// How many `read` calls answer normally before every later one
+        /// fails. `None` never fails on a count. It is what puts a failure
+        /// *after* the destination writer is open, which is the only state in
+        /// which the transfer cleanup runs.
+        read_fails_after: Option<usize>,
         /// How many `stat` calls answer normally before every later one fails.
         ///
         /// `None` never fails on a count. It exists to reach the promotion's
@@ -810,6 +945,11 @@ mod tests {
         /// disk that failed every `stat` would fail the first probe instead
         /// and never get there.
         stat_fails_after: Option<usize>,
+        /// How many leading `delete` calls fail before the disk starts
+        /// accepting them. Stands in for a transient fault on the fallback's
+        /// delete, which is the only way to observe *when* a move removes the
+        /// source relative to moving it.
+        delete_failures: usize,
         /// Whether the disk advertises and implements a rename.
         renames: bool,
         writes: WriteBehaviour,
@@ -844,7 +984,10 @@ mod tests {
                 // scheme; nothing under test reads it.
                 info: memory().service().info(),
                 spec,
-                contents: spec.contents.map(Buffer::from),
+                contents: spec
+                    .generated_bytes
+                    .map(|len| Buffer::from(vec![b'.'; len]))
+                    .or_else(|| spec.contents.map(Buffer::from)),
                 journal: Arc::clone(&journal),
             };
             (
@@ -865,12 +1008,23 @@ mod tests {
     /// much of the fallback object a read actually fetches.
     struct StubReader {
         contents: Buffer,
+        read_fails_after: Option<usize>,
         journal: Arc<Journal>,
     }
 
     impl StubReader {
         fn slice(&self, range: BytesRange) -> Result<Buffer> {
-            locked(&self.journal.ranges).push(range);
+            let answered = {
+                let mut ranges = locked(&self.journal.ranges);
+                ranges.push(range);
+                ranges.len() - 1
+            };
+            if self.read_fails_after.is_some_and(|after| answered >= after) {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "the stub disk dropped the transfer part-way through",
+                ));
+            }
             let slice = range.to_content_range(self.contents.len())?;
             Ok(self.contents.slice(slice))
         }
@@ -925,12 +1079,23 @@ mod tests {
     }
 
     struct StubDeleter {
+        failures: usize,
         journal: Arc<Journal>,
     }
 
     impl oio::Delete for StubDeleter {
         async fn delete(&mut self, path: &str, _args: OpDelete) -> Result<()> {
-            locked(&self.journal.deletes).push(path.to_owned());
+            let attempt = {
+                let mut deletes = locked(&self.journal.deletes);
+                deletes.push(path.to_owned());
+                deletes.len() - 1
+            };
+            if attempt < self.failures {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "the stub disk cannot delete right now",
+                ));
+            }
             Ok(())
         }
 
@@ -1021,6 +1186,7 @@ mod tests {
             // reader before it knows whether the primary holds the object.
             Ok(StubReader {
                 contents: self.contents.clone().unwrap_or_default(),
+                read_fails_after: self.spec.read_fails_after,
                 journal: Arc::clone(&self.journal),
             })
         }
@@ -1041,6 +1207,7 @@ mod tests {
 
         fn delete(&self, _ctx: &OperationContext) -> Result<Self::Deleter> {
             Ok(StubDeleter {
+                failures: self.spec.delete_failures,
                 journal: Arc::clone(&self.journal),
             })
         }
@@ -1502,6 +1669,181 @@ mod tests {
             ranges[0].is_full(),
             "promotion writes the whole object through, so the whole object is \
              what a promoting read fetches"
+        );
+    }
+
+    /// A body that spans two transfer chunks, so the streaming loop runs more
+    /// than once and a failure can land between chunks.
+    const TWO_CHUNK_BYTES: usize = CROSS_DISK_CHUNK_BYTES + 4096;
+
+    /// An operator over a real local-filesystem directory.
+    fn fs_operator(root: &std::path::Path) -> Operator {
+        Operator::new(
+            services::Fs::default().root(root.to_str().expect("a tempdir path is valid UTF-8")),
+        )
+        .expect("the fs service builds over an existing directory")
+    }
+
+    /// Compose a read-through disk over a *real* primary and a stub fallback.
+    ///
+    /// The transfer tests need a primary that really stores what it is given -
+    /// what sits at the destination after a failed transfer is the whole
+    /// assertion - while still needing a fallback that can drop a transfer
+    /// part-way or lose a delete, which only the stub can do.
+    fn read_through_over(primary: Operator, fallback_spec: StubSpec) -> (Operator, Arc<Journal>) {
+        let (fallback, fallback_journal) = StubDisk::operator(fallback_spec);
+        let assets = primary.clone().layer(ReadThroughLayer {
+            primary,
+            fallback,
+            copy: true,
+            throw_on_promotion_failure: false,
+        });
+        (assets, fallback_journal)
+    }
+
+    /// A fallback holding a two-chunk body that fails after handing over the
+    /// first chunk - a transfer that dies with the destination writer open.
+    fn interrupted_fallback() -> StubSpec {
+        StubSpec {
+            generated_bytes: Some(TWO_CHUNK_BYTES),
+            read_fails_after: Some(1),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_transfer_does_not_destroy_a_pre_existing_destination() {
+        // An in-memory primary buffers a write until it is published, which is
+        // how every object store behaves and why the destination is intact for
+        // the whole transfer - and therefore destroyable by a careless cleanup.
+        let primary = memory();
+        primary
+            .write("warm.txt", "the destination that was already there")
+            .await
+            .expect("seed the destination");
+
+        let (assets, _fallback) = read_through_over(primary.clone(), interrupted_fallback());
+
+        let err = assets
+            .copy("cold.txt", "warm.txt")
+            .await
+            .expect_err("the fallback drops the transfer part-way through");
+        assert!(
+            err.to_string().contains("cold.txt"),
+            "the failure must name the source, got: {err}"
+        );
+
+        assert_eq!(
+            &primary
+                .read("warm.txt")
+                .await
+                .expect("the destination is still there")
+                .to_vec(),
+            b"the destination that was already there",
+            "a failed transfer must not be the thing that destroys an object it \
+             never wrote"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_transfer_cleans_up_a_partial_destination() {
+        // A local-filesystem primary without an atomic write directory opens
+        // the target itself, so a transfer that dies part-way leaves a real,
+        // truncated file unless the cleanup removes it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let primary = fs_operator(tmp.path());
+
+        let (assets, _fallback) = read_through_over(primary.clone(), interrupted_fallback());
+
+        assets
+            .copy("cold.txt", "warm.txt")
+            .await
+            .expect_err("the fallback drops the transfer part-way through");
+
+        assert!(
+            !primary
+                .exists("warm.txt")
+                .await
+                .expect("primary exists answers"),
+            "a partial destination this transfer created has to go; nothing \
+             else sweeps it and a listing shows it forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_replays_the_source_version_onto_the_fallback() {
+        let (assets, fallback) = read_through_over(
+            memory(),
+            StubSpec {
+                contents: Some("cold bytes"),
+                ..Default::default()
+            },
+        );
+
+        assets
+            .copy_with("cold.txt", "warm.txt")
+            .source_version("v7")
+            .await
+            .expect("the stub disk ignores versions, so this resolves");
+
+        let reads = fallback.reads();
+        assert_eq!(reads.len(), 1, "the fallback was read once");
+        assert_eq!(
+            reads[0].version(),
+            Some("v7"),
+            "a copy that names a source version must get that version; the \
+             fallback would otherwise hand over whatever is current"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_move_does_not_overwrite_the_destination_with_stale_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let primary = fs_operator(tmp.path());
+        primary
+            .write("both.txt", "primary copy")
+            .await
+            .expect("seed the primary");
+
+        // The fallback holds a stale copy of the same path and loses its first
+        // delete to a transient fault.
+        let (assets, _fallback) = read_through_over(
+            primary.clone(),
+            StubSpec {
+                contents: Some("stale fallback copy"),
+                delete_failures: 1,
+                ..Default::default()
+            },
+        );
+
+        assets
+            .rename("both.txt", "moved.txt")
+            .await
+            .expect_err("the fallback delete fails on the first attempt");
+        assert!(
+            !primary
+                .exists("moved.txt")
+                .await
+                .expect("primary exists answers"),
+            "the source goes before the rename, so a move that loses its \
+             delete has not moved anything yet"
+        );
+
+        assets
+            .rename("both.txt", "moved.txt")
+            .await
+            .expect("the retry finds the source still on the primary");
+
+        assert_eq!(
+            &primary
+                .read("moved.txt")
+                .await
+                .expect("the destination is on the primary")
+                .to_vec(),
+            b"primary copy",
+            "a retry must move the primary's object, not resurrect the \
+             fallback's stale copy over a destination the first attempt \
+             already wrote correctly"
         );
     }
 }
