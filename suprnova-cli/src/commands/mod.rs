@@ -25,6 +25,7 @@ pub mod schedule_work;
 pub mod serve;
 pub mod ssr_check;
 pub mod ssr_start;
+pub mod watcher;
 pub mod web_run;
 pub mod workflow_install;
 pub mod workflow_work;
