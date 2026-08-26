@@ -104,22 +104,26 @@ pub(super) enum ReplaceBack<T> {
 
 /// Lock-scoped decision for admitting a value relative to the current tail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TailAdmission {
+pub(crate) enum TailAdmission {
     /// Append the value as a distinct FIFO item.
     Append,
     /// Replace the current tail without changing its FIFO position.
     Replace,
+    /// Retain the current tail and discard the semantically redundant value.
+    Retain,
     /// Reject the value without mutating the queue.
     Reject,
 }
 
 /// Result of a successful lock-scoped tail admission decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TailAdmissionOutcome {
+pub(crate) enum TailAdmissionOutcome {
     /// The value was appended as a distinct FIFO item.
     Appended,
     /// The value replaced the current tail.
     Replaced,
+    /// The existing tail was retained because the value was redundant.
+    Retained,
     /// The value was rejected by the caller's semantic decision.
     Rejected,
 }
@@ -127,6 +131,7 @@ pub enum TailAdmissionOutcome {
 pub(super) enum TailAdmissionPreserving<T> {
     Appended,
     Replaced(T),
+    Retained(T),
     Rejected(T),
 }
 
@@ -278,6 +283,7 @@ impl<T> BoundedQueue<T> {
                 Ok(ReplaceBack::Empty(rejected)) => Ok(TailAdmissionPreserving::Rejected(rejected)),
                 Err(rejected) => Err(rejected),
             },
+            TailAdmission::Retain => Ok(TailAdmissionPreserving::Retained(value)),
             TailAdmission::Reject => Ok(TailAdmissionPreserving::Rejected(value)),
         }
     }
@@ -337,6 +343,7 @@ impl<T> BoundedQueue<T> {
             .iter()
             .take(count)
             .enumerate()
+            .skip(1)
             .any(|(index, item)| classify(index, &item.value) != Some(count))
         {
             return None;

@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::identity::{BrowserOperationName, ContentDigest};
@@ -17,9 +18,9 @@ use super::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeDispatchPort, AsyncPayload,
     AsyncTelemetryCounter, AsyncTelemetrySnapshot, AuthorizationMemo, BrowserPayloadSchema,
     DocumentAuthorizationScope, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
-    ReplayDispatchError, ReplayDispatchOutcome, SequenceDisposition, SequenceError,
-    SequenceMachine, StreamEpoch, StreamName, StreamPosition, SubscriptionBinding, SubscriptionId,
-    encode_async_envelope,
+    ReplayDispatchError, ReplayDispatchOutcome, ResolvedAsyncDelivery, SequenceDisposition,
+    SequenceError, SequenceMachine, StreamEpoch, StreamName, StreamPosition, SubscriptionBinding,
+    SubscriptionId, encode_async_envelope,
 };
 
 const PRESSURE_CAUSE_KIND_COUNT: usize = 4;
@@ -217,6 +218,24 @@ struct PressureState {
     saturated: bool,
 }
 
+#[derive(Clone, Default)]
+struct DocumentDeliveryActivity(Arc<AtomicUsize>);
+
+impl DocumentDeliveryActivity {
+    fn start(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn finish(&self) {
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "document delivery activity cannot underflow");
+    }
+
+    fn active(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 impl PressureTracker {
     fn lock(&self) -> MutexGuard<'_, PressureState> {
         self.state
@@ -407,6 +426,17 @@ impl AuthorizedAsyncBufferEntry {
         self.resolved_fanout == resolved_fanout
             && self._resolved_target_scope.as_ref() == resolved_target_scope
     }
+
+    pub(crate) fn resolved_delivery(
+        &self,
+        deployment_fanout_limit: usize,
+    ) -> ResolvedAsyncDelivery<'_> {
+        ResolvedAsyncDelivery::new(
+            self.membership.as_active(),
+            self.membership.resolved_event(),
+            deployment_fanout_limit,
+        )
+    }
 }
 
 impl fmt::Debug for AuthorizedAsyncBufferEntry {
@@ -448,16 +478,39 @@ pub(crate) struct AsyncDeliveryLease {
     entries: Vec<AsyncBufferEntry>,
     permit: Option<Permit>,
     queue: ResourceQueue<AsyncBufferEntry>,
-    permits: PermitPool,
+    activity: DocumentDeliveryActivity,
     cancellation: crate::resource::CancellationFlag,
     pressure: PressureTracker,
     membership: PressureMembership,
     high_water: StreamPosition,
+    deployment_fanout_limit: usize,
     resolved: bool,
+}
+
+pub(crate) struct PulledCandidateLossGuard {
+    pressure: PressureTracker,
+    membership: Option<PressureMembership>,
+    high_water: StreamPosition,
+}
+
+impl PulledCandidateLossGuard {
+    pub(crate) fn disarm(&mut self) {
+        self.membership = None;
+    }
+}
+
+impl Drop for PulledCandidateLossGuard {
+    fn drop(&mut self) {
+        if let Some(membership) = self.membership.take() {
+            self.pressure
+                .record(membership, PressureCause::Delivery, self.high_water);
+        }
+    }
 }
 
 pub(crate) enum LeaseDispatchError {
     Retired,
+    AuthorizationLost,
     Sequence(SequenceError),
     Replay(ReplayDispatchError),
 }
@@ -517,7 +570,13 @@ impl AsyncDeliveryLease {
             .expect("single delivery lease owns one entry");
         debug_assert_eq!(self.entries.len(), 1);
         debug_assert_eq!(entry.group, AsyncBufferGroup::Single);
-        let outcome = sequence.dispatch(entry.authorized.membership.as_active(), now, dispatcher);
+        let outcome = sequence.dispatch(
+            entry
+                .authorized
+                .resolved_delivery(self.deployment_fanout_limit),
+            now,
+            dispatcher,
+        );
         match outcome {
             Ok(
                 disposition @ (SequenceDisposition::Apply
@@ -549,29 +608,80 @@ impl AsyncDeliveryLease {
     }
 
     /// Consumes one atomically admitted transcript through Task 3 recovery.
-    pub(crate) fn dispatch_replay(
+    pub(crate) fn dispatch_replay_with<F>(
         mut self,
         sequence: &mut SequenceMachine,
-        now: crate::identity::UnixMillis,
         dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
-    ) -> Result<ReplayDispatchOutcome, LeaseDispatchError> {
+        mut validate_current: F,
+    ) -> Result<ReplayDispatchOutcome, LeaseDispatchError>
+    where
+        F: FnMut(
+            &mut AuthorizedAsyncBufferEntry,
+        ) -> Result<crate::identity::UnixMillis, LeaseDispatchError>,
+    {
         if self.cancellation.is_canceled() {
             return Err(LeaseDispatchError::Retired);
         }
         debug_assert!(self.is_replay());
-        let transcript = self
+        let envelopes = self
             .entries
             .iter()
-            .map(|entry| entry.authorized.membership.as_active())
-            .collect();
-        let outcome = if let Some(required_high_water) =
-            self.pressure.required_high_water(&self.membership)
-            && sequence.state() == super::SequenceState::Current
-        {
-            sequence.recover_from_pressure_replay(transcript, required_high_water, now, dispatcher)
-        } else {
-            sequence.recover_from_replay(transcript, now, dispatcher)
+            .map(|entry| entry.authorized.envelope())
+            .collect::<Vec<_>>();
+        let required_high_water = self
+            .pressure
+            .required_high_water(&self.membership)
+            .filter(|_| sequence.state() == super::SequenceState::Current);
+        let mut recovery = match sequence.prepare_replay(&envelopes, required_high_water) {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                self.pressure.record(
+                    self.membership.clone(),
+                    PressureCause::Delivery,
+                    self.high_water,
+                );
+                self.resolved = true;
+                return Err(LeaseDispatchError::Replay(error));
+            }
         };
+        for entry in &mut self.entries {
+            if self.cancellation.is_canceled() {
+                self.pressure.record(
+                    self.membership.clone(),
+                    PressureCause::Delivery,
+                    self.high_water,
+                );
+                self.resolved = true;
+                return Err(LeaseDispatchError::Retired);
+            }
+            let now = match validate_current(&mut entry.authorized) {
+                Ok(now) => now,
+                Err(error) => {
+                    self.pressure.record(
+                        self.membership.clone(),
+                        PressureCause::Delivery,
+                        self.high_water,
+                    );
+                    self.resolved = true;
+                    return Err(error);
+                }
+            };
+            let delivery = entry
+                .authorized
+                .resolved_delivery(self.deployment_fanout_limit);
+            if let Err(error) =
+                sequence.dispatch_replay_entry(&mut recovery, delivery, now, dispatcher)
+            {
+                self.pressure.record(
+                    self.membership.clone(),
+                    PressureCause::Delivery,
+                    self.high_water,
+                );
+                self.resolved = true;
+                return Err(LeaseDispatchError::Replay(error));
+            }
+        }
+        let outcome = sequence.finish_replay(recovery);
         match outcome {
             Ok(outcome) => {
                 self.resolved = true;
@@ -603,16 +713,17 @@ impl Drop for AsyncDeliveryLease {
         // idle boundary. A dequeued sibling is still retained work until its
         // delivery lease resolves or is abandoned.
         drop(self.permit.take());
-        commit_recoveries_if_idle(&self.queue, &self.permits, &self.pressure);
+        self.activity.finish();
+        commit_recoveries_if_idle(&self.queue, &self.activity, &self.pressure);
     }
 }
 
 fn commit_recoveries_if_idle(
     queue: &ResourceQueue<AsyncBufferEntry>,
-    permits: &PermitPool,
+    activity: &DocumentDeliveryActivity,
     pressure: &PressureTracker,
 ) {
-    if queue.is_empty() && permits.active() == 0 {
+    if queue.is_empty() && activity.active() == 0 {
         pressure.commit_recoveries();
     }
 }
@@ -627,6 +738,7 @@ impl fmt::Debug for AsyncDeliveryLease {
 pub(crate) struct AsyncBackpressure {
     owner: ResourceOwner<AsyncBufferEntry>,
     permits: PermitPool,
+    activity: DocumentDeliveryActivity,
     policy: AsyncPolicy,
     pressure: PressureTracker,
     closed: Option<AsyncCloseCode>,
@@ -667,6 +779,7 @@ impl AsyncBackpressure {
         Ok(Self {
             owner,
             permits,
+            activity: DocumentDeliveryActivity::default(),
             policy,
             pressure: PressureTracker::default(),
             closed: None,
@@ -695,19 +808,13 @@ impl AsyncBackpressure {
         let encoded = match encode_async_envelope(authorized.envelope(), &AsyncCodecLimits::v1()) {
             Ok(encoded) => encoded,
             Err(_) => {
-                self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                return Err(AsyncBackpressureError {
-                    close_code: AsyncCloseCode::InvalidEnvelope,
-                });
+                return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope)));
             }
         };
         let payload_bytes = match canonical_async_payload_len(authorized.envelope()) {
             Ok(payload_bytes) => payload_bytes,
             Err(_) => {
-                self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                return Err(AsyncBackpressureError {
-                    close_code: AsyncCloseCode::InvalidEnvelope,
-                });
+                return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope)));
             }
         };
         if payload_bytes > self.policy.max_payload_bytes.get() {
@@ -729,6 +836,7 @@ impl AsyncBackpressure {
                     .record(pressure_membership, PressureCause::Admission, position);
                 Ok(self.finish(BufferDisposition::Coalesced))
             }
+            Ok(TailAdmissionOutcome::Retained) => Ok(self.finish(BufferDisposition::Coalesced)),
             Ok(TailAdmissionOutcome::Rejected) => {
                 self.pressure
                     .record(pressure_membership, PressureCause::Admission, position);
@@ -799,19 +907,19 @@ impl AsyncBackpressure {
                 match encode_async_envelope(authorized.envelope(), &AsyncCodecLimits::v1()) {
                     Ok(encoded) => encoded,
                     Err(_) => {
-                        self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                        return Err(AsyncBackpressureError {
-                            close_code: AsyncCloseCode::InvalidEnvelope,
-                        });
+                        return Ok(
+                            self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope))
+                        );
                     }
                 };
-            let payload_bytes =
-                canonical_async_payload_len(authorized.envelope()).map_err(|_| {
-                    self.telemetry.increment(AsyncTelemetryCounter::Rejected);
-                    AsyncBackpressureError {
-                        close_code: AsyncCloseCode::InvalidEnvelope,
-                    }
-                })?;
+            let payload_bytes = match canonical_async_payload_len(authorized.envelope()) {
+                Ok(payload_bytes) => payload_bytes,
+                Err(_) => {
+                    return Ok(
+                        self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope))
+                    );
+                }
+            };
             if payload_bytes > self.policy.max_payload_bytes.get() {
                 return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::PayloadTooLarge)));
             }
@@ -888,7 +996,11 @@ impl AsyncBackpressure {
     /// Returns the number of delivery-work permits currently held.
     #[must_use]
     pub(crate) fn active_permits(&self) -> usize {
-        self.permits.active()
+        self.activity.active()
+    }
+
+    pub(crate) const fn closed_code(&self) -> Option<AsyncCloseCode> {
+        self.closed
     }
 
     /// Returns whether pressure made exact sequence continuity uncertain.
@@ -911,6 +1023,18 @@ impl AsyncBackpressure {
         self.finish(BufferDisposition::Degraded);
     }
 
+    pub(crate) fn track_pulled_candidate(
+        &self,
+        membership: PressureMembership,
+        high_water: StreamPosition,
+    ) -> PulledCandidateLossGuard {
+        PulledCandidateLossGuard {
+            pressure: self.pressure.clone(),
+            membership: Some(membership),
+            high_water,
+        }
+    }
+
     pub(crate) fn record_replay_recovery(
         &self,
         membership: &PressureMembership,
@@ -920,8 +1044,15 @@ impl AsyncBackpressure {
         self.commit_recoveries_if_drained();
     }
 
+    pub(crate) fn required_high_water(
+        &self,
+        membership: &PressureMembership,
+    ) -> Option<StreamPosition> {
+        self.pressure.required_high_water(membership)
+    }
+
     pub(crate) fn commit_recoveries_if_drained(&self) {
-        commit_recoveries_if_idle(self.owner.queue(), &self.permits, &self.pressure);
+        commit_recoveries_if_idle(self.owner.queue(), &self.activity, &self.pressure);
     }
 
     /// Returns one bounded low-cardinality telemetry snapshot.
@@ -956,15 +1087,17 @@ impl AsyncBackpressure {
             .map(|entry| entry.authorized.envelope().position())
             .max_by_key(|position| (position.epoch().get(), position.sequence().get()))
             .expect("a dequeued resource batch is never empty");
+        self.activity.start();
         Some(AsyncDeliveryLease {
             entries,
             permit: Some(permit),
             queue: self.owner.queue().clone(),
-            permits: self.permits.clone(),
+            activity: self.activity.clone(),
             cancellation: self.owner.cancellation(),
             pressure: self.pressure.clone(),
             membership,
             high_water,
+            deployment_fanout_limit: self.policy.max_fanout.get(),
             resolved: false,
         })
     }
@@ -1139,7 +1272,9 @@ fn classify_tail(
     else {
         return TailAdmission::Reject;
     };
-    if position.sequence().get() == expected {
+    if position.sequence() <= tail.authorized.envelope().position().sequence() {
+        TailAdmission::Retain
+    } else if position.sequence().get() == expected {
         TailAdmission::Replace
     } else {
         TailAdmission::Reject

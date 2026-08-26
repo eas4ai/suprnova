@@ -116,6 +116,17 @@ impl fmt::Debug for Permit {
 }
 
 /// Thread-safe handle to one owner's bounded FIFO queue.
+/// Cloneable bounded queue with application-facing payload-neutral operations.
+///
+/// Lock-scoped semantic callback operations are framework-internal:
+///
+/// ```compile_fail
+/// use suprnova_live::resource::ResourceQueue;
+///
+/// fn bypass(queue: &ResourceQueue<u8>) {
+///     let _ = queue.any(|_| true);
+/// }
+/// ```
 pub struct ResourceQueue<T> {
     state: Arc<Mutex<BoundedQueue<T>>>,
 }
@@ -183,7 +194,7 @@ impl<T> ResourceQueue<T> {
     /// The decision callback may inspect only the current tail and runs before
     /// mutation. Replaced and rejected values, along with the callback itself,
     /// are dropped after the queue lock is released.
-    pub fn try_admit_tail_with<F>(
+    pub(crate) fn try_admit_tail_with<F>(
         &self,
         bytes: usize,
         value: T,
@@ -211,6 +222,10 @@ impl<T> ResourceQueue<T> {
                 drop(previous);
                 Ok(TailAdmissionOutcome::Replaced)
             }
+            Ok(TailAdmissionPreserving::Retained(rejected)) => {
+                drop(rejected);
+                Ok(TailAdmissionOutcome::Retained)
+            }
             Ok(TailAdmissionPreserving::Rejected(rejected)) => {
                 drop(rejected);
                 Ok(TailAdmissionOutcome::Rejected)
@@ -226,7 +241,7 @@ impl<T> ResourceQueue<T> {
     ///
     /// The predicate observes one lock-scoped snapshot. Removed values and the
     /// predicate itself are dropped only after the queue lock is released.
-    pub fn remove_if<F>(&self, mut predicate: F) -> (usize, usize)
+    pub(crate) fn remove_if<F>(&self, mut predicate: F) -> (usize, usize)
     where
         F: FnMut(&T) -> bool,
     {
@@ -244,7 +259,7 @@ impl<T> ResourceQueue<T> {
     }
 
     /// Returns whether one lock-scoped queue snapshot contains a match.
-    pub fn any<F>(&self, mut predicate: F) -> bool
+    pub(crate) fn any<F>(&self, mut predicate: F) -> bool
     where
         F: FnMut(&T) -> bool,
     {
@@ -290,7 +305,7 @@ impl<T> ResourceQueue<T> {
     /// zero-based position. A missing or inconsistent marker leaves the queue
     /// untouched. The classifier and removed values are dropped only after the
     /// accounting lock is released.
-    pub fn pop_batch_with<F>(&self, mut classify: F) -> Option<Vec<T>>
+    pub(crate) fn pop_batch_with<F>(&self, mut classify: F) -> Option<Vec<T>>
     where
         F: FnMut(usize, &T) -> Option<usize>,
     {
@@ -420,5 +435,203 @@ impl<T> fmt::Debug for ResourceOwner<T> {
             .field("queue", &self.queue)
             .field("canceled", &self.cancellation.is_canceled())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn queue_dequeues_one_validated_contiguous_batch_under_one_lock() {
+        let owner = ResourceOwner::new(ResourceBounds::new(4, 10).expect("valid bounds"));
+        owner
+            .queue()
+            .try_push_batch(vec![(1, (0, 3)), (2, (1, 3)), (3, (2, 3))])
+            .expect("replay-shaped batch");
+        owner.queue().try_push(4, (0, 1)).expect("successor");
+        let batch = owner
+            .queue()
+            .pop_batch_with(|index, &(member, count)| (member == index).then_some(count))
+            .expect("validated group");
+        assert_eq!(batch, vec![(0, 3), (1, 3), (2, 3)]);
+        assert_eq!(owner.queue().pop(), Some((0, 1)));
+    }
+
+    #[test]
+    fn batch_pop_classifies_each_member_exactly_once() {
+        let owner = ResourceOwner::new(ResourceBounds::new(3, 12).expect("valid bounds"));
+        owner
+            .queue()
+            .try_push_batch(vec![(1, (0usize, 2usize)), (1, (1, 2))])
+            .expect("group");
+        let calls = Arc::new(Mutex::new(vec![0usize; 2]));
+        let observed = Arc::clone(&calls);
+        let popped = owner.queue().pop_batch_with(|index, &(_, count)| {
+            observed.lock().expect("call-count lock")[index] += 1;
+            Some(count)
+        });
+        assert_eq!(popped.expect("complete group").len(), 2);
+        assert_eq!(*calls.lock().expect("call-count lock"), vec![1, 1]);
+    }
+
+    #[test]
+    fn tail_admission_is_linearized_with_competing_cloned_handle() {
+        let owner = ResourceOwner::new(ResourceBounds::new(3, 12).expect("valid bounds"));
+        owner.queue().try_push(2, "replaceable").expect("tail");
+        let replacement_queue = owner.queue().clone();
+        let competing_queue = owner.queue().clone();
+        let inspected = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_inspected = Arc::clone(&inspected);
+        let worker_release = Arc::clone(&release);
+        let replacement = thread::spawn(move || {
+            replacement_queue.try_admit_tail_with(3, "replacement", |tail| {
+                assert_eq!(tail, Some(&"replaceable"));
+                worker_inspected.wait();
+                worker_release.wait();
+                TailAdmission::Replace
+            })
+        });
+        inspected.wait();
+        let competing = thread::spawn(move || competing_queue.try_push(4, "later"));
+        release.wait();
+        assert_eq!(
+            replacement.join().expect("replacement worker"),
+            Ok(TailAdmissionOutcome::Replaced)
+        );
+        competing.join().expect("append worker").expect("append");
+        assert_eq!(owner.queue().pop(), Some("replacement"));
+        assert_eq!(owner.queue().pop(), Some("later"));
+    }
+
+    struct PanickingDecisionDrop {
+        queue: ResourceQueue<Self>,
+        dropped: mpsc::Sender<usize>,
+    }
+
+    impl Drop for PanickingDecisionDrop {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(self.queue.len());
+        }
+    }
+
+    #[test]
+    fn panicking_tail_decision_drops_unadmitted_value_after_unlock() {
+        let owner = ResourceOwner::new(ResourceBounds::new(1, 1).expect("valid bounds"));
+        let queue = owner.queue().clone();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let _ = queue.try_admit_tail_with(
+                    1,
+                    PanickingDecisionDrop {
+                        queue: queue.clone(),
+                        dropped: dropped_tx,
+                    },
+                    |_| panic!("tail-decision-sentinel"),
+                );
+            }));
+            let _ = finished_tx.send(outcome.is_err());
+        });
+        assert_eq!(
+            dropped_rx.recv_timeout(Duration::from_millis(500)),
+            Ok(0),
+            "incoming payload drops only after queue unlock"
+        );
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_millis(500)),
+            Ok(true)
+        );
+    }
+
+    struct ReentrantQueueDrop {
+        queue: ResourceQueue<Self>,
+        dropped: mpsc::Sender<(usize, usize)>,
+    }
+
+    impl Drop for ReentrantQueueDrop {
+        fn drop(&mut self) {
+            let _ = self
+                .dropped
+                .send((self.queue.len(), self.queue.retained_bytes()));
+        }
+    }
+
+    #[test]
+    fn batch_rejection_and_predicate_removal_drop_values_after_unlock() {
+        let rejected_owner = ResourceOwner::new(ResourceBounds::new(1, 2).expect("valid bounds"));
+        let rejected_queue = rejected_owner.queue().clone();
+        let (rejected_tx, rejected_rx) = mpsc::channel();
+        assert_eq!(
+            rejected_queue.try_push_batch(vec![
+                (
+                    1,
+                    ReentrantQueueDrop {
+                        queue: rejected_queue.clone(),
+                        dropped: rejected_tx.clone(),
+                    },
+                ),
+                (
+                    1,
+                    ReentrantQueueDrop {
+                        queue: rejected_queue.clone(),
+                        dropped: rejected_tx,
+                    },
+                ),
+            ]),
+            Err(ResourceError::ItemsExceeded)
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                rejected_rx.recv_timeout(Duration::from_millis(500)),
+                Ok((0, 0)),
+                "batch rejection drops only after releasing the queue lock"
+            );
+        }
+
+        let removed_owner = ResourceOwner::new(ResourceBounds::new(2, 2).expect("valid bounds"));
+        let removed_queue = removed_owner.queue().clone();
+        let (removed_tx, removed_rx) = mpsc::channel();
+        for _ in 0..2 {
+            removed_queue
+                .try_push(
+                    1,
+                    ReentrantQueueDrop {
+                        queue: removed_queue.clone(),
+                        dropped: removed_tx.clone(),
+                    },
+                )
+                .expect("removable item");
+        }
+        assert_eq!(removed_queue.remove_if(|_| true), (2, 2));
+        for _ in 0..2 {
+            assert_eq!(
+                removed_rx.recv_timeout(Duration::from_millis(500)),
+                Ok((0, 0)),
+                "predicate removal drops only after releasing the queue lock"
+            );
+        }
+    }
+
+    #[test]
+    fn predicate_removal_releases_exact_items_and_bytes() {
+        let owner = ResourceOwner::new(ResourceBounds::new(4, 12).expect("valid bounds"));
+        owner.queue().try_push(2, (1, "first")).expect("first");
+        owner.queue().try_push(3, (2, "sibling")).expect("sibling");
+        owner.queue().try_push(4, (1, "second")).expect("second");
+        assert!(owner.queue().any(|(membership, _)| *membership == 2));
+        assert_eq!(
+            owner.queue().remove_if(|(membership, _)| *membership == 1),
+            (2, 6)
+        );
+        assert_eq!(owner.queue().pop(), Some((2, "sibling")));
     }
 }

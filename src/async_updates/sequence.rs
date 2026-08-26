@@ -3,11 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::identity::UnixMillis;
+use crate::identity::{ContentDigest, UnixMillis};
 
 use super::{
-    ActiveAsyncMembershipGuard, AsyncEnvelope, AsyncEnvelopeContext, StreamName, StreamPosition,
-    SubscriptionId,
+    ActiveAsyncMembershipGuard, AsyncEnvelope, AsyncEnvelopeContext, ResolvedEventFanout,
+    StreamName, StreamPosition, SubscriptionId,
 };
 
 /// Maximum number of validated envelopes accepted as one replay transcript.
@@ -18,7 +18,7 @@ pub const MAX_REPLAY_TRANSCRIPT_ENVELOPES: usize = 1_024;
 pub enum SequenceState {
     /// The baseline is authoritative and the next exact sequence may apply.
     Current,
-    /// A gap, overflow, or new epoch requires explicit continuity authority.
+    /// A gap or new epoch requires explicit continuity authority.
     Degraded,
 }
 
@@ -29,8 +29,6 @@ pub enum SequenceDegradation {
     Gap,
     /// A newer epoch arrived without authoritative refresh.
     EpochChanged,
-    /// The current sequence has no representable successor.
-    SequenceOverflow,
 }
 
 /// Pure result of observing one membership- and registry-validated envelope.
@@ -153,10 +151,69 @@ impl fmt::Debug for AsyncDispatchError {
 
 impl Error for AsyncDispatchError {}
 
+/// Non-forgeable proof of one current, fanout-bounded registered delivery.
+pub struct ResolvedAsyncDelivery<'a> {
+    guard: ActiveAsyncMembershipGuard<'a>,
+    resolved_event: Option<&'a ResolvedEventFanout>,
+    deployment_fanout_limit: usize,
+}
+
+impl<'a> ResolvedAsyncDelivery<'a> {
+    pub(crate) const fn new(
+        guard: ActiveAsyncMembershipGuard<'a>,
+        resolved_event: Option<&'a ResolvedEventFanout>,
+        deployment_fanout_limit: usize,
+    ) -> Self {
+        Self {
+            guard,
+            resolved_event,
+            deployment_fanout_limit,
+        }
+    }
+
+    /// Returns the exact registered envelope covered by this proof.
+    #[must_use]
+    pub const fn envelope(&self) -> &AsyncEnvelope {
+        self.guard.envelope()
+    }
+
+    /// Returns the trusted current recipient count for a browser event.
+    #[must_use]
+    pub fn resolved_recipients(&self) -> Option<std::num::NonZeroU16> {
+        self.resolved_event.map(ResolvedEventFanout::recipients)
+    }
+
+    /// Returns the trusted exact target-set digest for a browser event.
+    #[must_use]
+    pub fn resolved_target_scope(&self) -> Option<&ContentDigest> {
+        self.resolved_event.map(ResolvedEventFanout::target_scope)
+    }
+
+    /// Returns the document deployment's validated fanout ceiling.
+    #[must_use]
+    pub const fn deployment_fanout_limit(&self) -> usize {
+        self.deployment_fanout_limit
+    }
+
+    pub(crate) fn is_current_at(&self, now: UnixMillis) -> bool {
+        self.guard.is_current_at(now)
+    }
+
+    pub(crate) const fn context(&self) -> &AsyncEnvelopeContext {
+        self.guard.context()
+    }
+}
+
+impl fmt::Debug for ResolvedAsyncDelivery<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<ResolvedAsyncDelivery:redacted>")
+    }
+}
+
 /// Host-owned closed dispatcher for one fully registered asynchronous envelope.
 pub trait AsyncEnvelopeDispatchPort {
-    /// Applies the closed envelope payload or returns without committing it.
-    fn dispatch(&mut self, envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError>;
+    /// Applies the closed, resolved delivery or returns without committing it.
+    fn dispatch(&mut self, delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError>;
 }
 
 /// Redacted sequence-authority rejection.
@@ -247,9 +304,16 @@ pub trait AsyncContinuityAuthorityPort: Send + Sync {
     fn authoritative_refresh(&self, request: AsyncContinuityRequest<'_>) -> Option<StreamPosition>;
 }
 
+pub(crate) struct ReplayRecovery {
+    through: StreamPosition,
+    total: usize,
+    applied: usize,
+    restore_on_finish: bool,
+}
+
 /// Per-logical-subscription sequence authority independent of transport choice.
 #[derive(Debug, Eq, PartialEq)]
-pub struct SequenceMachine {
+pub(crate) struct SequenceMachine {
     context: AsyncEnvelopeContext,
     current: StreamPosition,
     state: SequenceState,
@@ -260,7 +324,7 @@ pub struct SequenceMachine {
 impl SequenceMachine {
     /// Starts from one sealed membership context and authoritative descriptor baseline.
     #[must_use]
-    pub fn new(context: &AsyncEnvelopeContext) -> Self {
+    pub(crate) fn new(context: &AsyncEnvelopeContext) -> Self {
         Self {
             context: context.clone(),
             current: context.authoritative_baseline(),
@@ -284,6 +348,7 @@ impl SequenceMachine {
 
     /// Returns the highest validated position observed while degraded.
     #[must_use]
+    #[cfg(test)]
     pub const fn high_water(&self) -> Option<StreamPosition> {
         self.high_water
     }
@@ -293,19 +358,19 @@ impl SequenceMachine {
     /// Scope is checked before the position is read. Exact-next delivery commits
     /// only after the closed dispatcher succeeds. Gaps record continuity state
     /// only after fresh admission and never invoke application dispatch.
-    pub fn dispatch(
+    pub(crate) fn dispatch(
         &mut self,
-        guard: ActiveAsyncMembershipGuard<'_>,
+        delivery: ResolvedAsyncDelivery<'_>,
         now: UnixMillis,
         dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
     ) -> Result<SequenceDisposition, SequenceError> {
-        if !guard.is_current_at(now) {
+        if !delivery.is_current_at(now) {
             return Err(SequenceError::new(SequenceErrorKind::MembershipExpired));
         }
-        let (context, envelope) = guard.into_parts();
-        if context != &self.context || !self.matches_scope(envelope) {
+        if delivery.context() != &self.context || !self.matches_scope(delivery.envelope()) {
             return Err(SequenceError::new(SequenceErrorKind::ScopeMismatch));
         }
+        let envelope = delivery.envelope();
         let observed = envelope.position();
         if observed.epoch() < self.current.epoch() {
             return Ok(SequenceDisposition::IgnoreStaleEpoch);
@@ -328,110 +393,72 @@ impl SequenceMachine {
                 SequenceDegradation::EpochChanged,
             ));
         }
-        let Some(expected) = self.current.sequence().get().checked_add(1) else {
-            self.degrade(SequenceDegradation::SequenceOverflow, observed);
-            return Ok(SequenceDisposition::Degraded(
-                SequenceDegradation::SequenceOverflow,
-            ));
-        };
+        // When the current sequence is `u64::MAX`, every same-epoch value was
+        // classified as duplicate above. Only a newer epoch can advance, and
+        // it takes the authoritative-refresh path. The subtraction is
+        // therefore unreachable at this point unless a successor exists.
+        let expected = self.current.sequence().get() + 1;
         if observed.sequence().get() != expected {
             self.degrade(SequenceDegradation::Gap, observed);
             return Ok(SequenceDisposition::Degraded(SequenceDegradation::Gap));
         }
         dispatcher
-            .dispatch(envelope)
+            .dispatch(delivery)
             .map_err(|error| SequenceError::new(dispatch_error_kind(error)))?;
         self.current = observed;
         Ok(SequenceDisposition::Apply)
     }
 
     /// Replays one fully prevalidated transcript and commits only dispatched prefixes.
-    pub fn recover_from_replay(
+    #[cfg(test)]
+    pub(crate) fn recover_from_replay(
         &mut self,
-        transcript: Vec<ActiveAsyncMembershipGuard<'_>>,
+        transcript: Vec<ResolvedAsyncDelivery<'_>>,
         now: UnixMillis,
         dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
     ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
-        if self.state != SequenceState::Degraded
-            || self.degradation != Some(SequenceDegradation::Gap)
-            || transcript.is_empty()
-            || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES
-        {
-            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+        let envelopes = transcript
+            .iter()
+            .map(ResolvedAsyncDelivery::envelope)
+            .collect::<Vec<_>>();
+        let mut recovery = self.prepare_replay(&envelopes, None)?;
+        for delivery in transcript {
+            self.dispatch_replay_entry(&mut recovery, delivery, now, dispatcher)?;
         }
-        let high_water = self
-            .high_water
-            .ok_or_else(|| self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0))?;
-        if high_water.epoch() != self.current.epoch() {
-            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
-        }
-
-        let mut expected = self
-            .current
-            .sequence()
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0))?;
-        let mut through = self.current;
-        for (index, guard) in transcript.iter().enumerate() {
-            if !guard.is_current_at(now) {
-                return Err(self.replay_error(SequenceErrorKind::MembershipExpired, 0));
-            }
-            if guard.context() != &self.context || !self.matches_scope(guard.envelope()) {
-                return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, 0));
-            }
-            let envelope = guard.envelope();
-            let position = envelope.position();
-            if position.epoch() != self.current.epoch() || position.sequence().get() != expected {
-                return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
-            }
-            through = position;
-            if index + 1 < transcript.len() {
-                expected = expected.checked_add(1).ok_or_else(|| {
-                    self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0)
-                })?;
-            }
-        }
-        if through.sequence() < high_water.sequence() {
-            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
-        }
-
-        let mut applied = 0;
-        for guard in transcript {
-            let (_, envelope) = guard.into_parts();
-            if let Err(error) = dispatcher.dispatch(envelope) {
-                return Err(self.replay_error(dispatch_error_kind(error), applied));
-            }
-            self.current = envelope.position();
-            applied += 1;
-        }
-        self.restore(through);
-        Ok(ReplayDispatchOutcome {
-            applied,
-            current: self.current,
-            state: self.state,
-        })
+        self.finish_replay(recovery)
     }
 
-    /// Recovers a bounded-delivery loss while the ordinary sequence lane stayed current.
-    ///
-    /// The pressure layer supplies only the exact authorized lost high-water fact;
-    /// this machine still validates and commits every sequence transition itself.
-    pub(crate) fn recover_from_pressure_replay(
-        &mut self,
-        transcript: Vec<ActiveAsyncMembershipGuard<'_>>,
-        required_high_water: StreamPosition,
-        now: UnixMillis,
-        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
-    ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
-        if self.state != SequenceState::Current
-            || transcript.is_empty()
-            || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES
-            || required_high_water.epoch() != self.current.epoch()
-            || required_high_water.sequence() <= self.current.sequence()
-        {
+    pub(crate) fn prepare_replay(
+        &self,
+        transcript: &[&AsyncEnvelope],
+        pressure_high_water: Option<StreamPosition>,
+    ) -> Result<ReplayRecovery, ReplayDispatchError> {
+        if transcript.is_empty() || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES {
             return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
         }
+        let (required_high_water, restore_on_finish) = match pressure_high_water {
+            Some(required)
+                if self.state == SequenceState::Current
+                    && required.epoch() == self.current.epoch()
+                    && required.sequence() > self.current.sequence() =>
+            {
+                (required, false)
+            }
+            None if self.state == SequenceState::Degraded
+                && self.degradation == Some(SequenceDegradation::Gap) =>
+            {
+                let required = self.high_water.ok_or_else(|| {
+                    self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0)
+                })?;
+                if required.epoch() != self.current.epoch() {
+                    return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+                }
+                (required, true)
+            }
+            _ => {
+                return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+            }
+        };
 
         let mut expected = self
             .current
@@ -440,14 +467,11 @@ impl SequenceMachine {
             .checked_add(1)
             .ok_or_else(|| self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0))?;
         let mut through = self.current;
-        for (index, guard) in transcript.iter().enumerate() {
-            if !guard.is_current_at(now) {
-                return Err(self.replay_error(SequenceErrorKind::MembershipExpired, 0));
-            }
-            if guard.context() != &self.context || !self.matches_scope(guard.envelope()) {
+        for (index, envelope) in transcript.iter().enumerate() {
+            if !self.matches_scope(envelope) {
                 return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, 0));
             }
-            let position = guard.envelope().position();
+            let position = envelope.position();
             if position.epoch() != self.current.epoch() || position.sequence().get() != expected {
                 return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
             }
@@ -461,34 +485,80 @@ impl SequenceMachine {
         if through.sequence() < required_high_water.sequence() {
             return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
         }
+        Ok(ReplayRecovery {
+            through,
+            total: transcript.len(),
+            applied: 0,
+            restore_on_finish,
+        })
+    }
 
-        let mut applied = 0;
-        for guard in transcript {
-            let (_, envelope) = guard.into_parts();
-            if let Err(error) = dispatcher.dispatch(envelope) {
-                return Err(self.replay_error(dispatch_error_kind(error), applied));
-            }
-            self.current = envelope.position();
-            applied += 1;
+    pub(crate) fn dispatch_replay_entry(
+        &mut self,
+        recovery: &mut ReplayRecovery,
+        delivery: ResolvedAsyncDelivery<'_>,
+        now: UnixMillis,
+        dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
+    ) -> Result<(), ReplayDispatchError> {
+        if !delivery.is_current_at(now) {
+            return Err(self.replay_error(SequenceErrorKind::MembershipExpired, recovery.applied));
+        }
+        if delivery.context() != &self.context || !self.matches_scope(delivery.envelope()) {
+            return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, recovery.applied));
+        }
+        let position = delivery.envelope().position();
+        if let Err(error) = dispatcher.dispatch(delivery) {
+            return Err(self.replay_error(dispatch_error_kind(error), recovery.applied));
+        }
+        self.current = position;
+        recovery.applied += 1;
+        Ok(())
+    }
+
+    pub(crate) fn finish_replay(
+        &mut self,
+        recovery: ReplayRecovery,
+    ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
+        if recovery.applied != recovery.total {
+            return Err(
+                self.replay_error(SequenceErrorKind::InvalidReplayTranscript, recovery.applied)
+            );
+        }
+        if recovery.restore_on_finish {
+            self.restore(recovery.through);
         }
         Ok(ReplayDispatchOutcome {
-            applied,
+            applied: recovery.applied,
             current: self.current,
             state: self.state,
         })
     }
 
     /// Requests and installs a baseline only through trusted host continuity authority.
-    pub fn recover_from_authoritative_refresh(
+    #[cfg(test)]
+    pub(crate) fn recover_from_authoritative_refresh(
         &mut self,
         authority: &dyn AsyncContinuityAuthorityPort,
     ) -> Result<BaselineDisposition, SequenceError> {
+        self.recover_from_authoritative_refresh_covering(authority, None)
+    }
+
+    pub(crate) fn recover_from_authoritative_refresh_covering(
+        &mut self,
+        authority: &dyn AsyncContinuityAuthorityPort,
+        pressure_high_water: Option<StreamPosition>,
+    ) -> Result<BaselineDisposition, SequenceError> {
+        let required_high_water = match (self.high_water, pressure_high_water) {
+            (Some(left), Some(right)) if position_precedes(left, right) => Some(right),
+            (Some(left), _) => Some(left),
+            (None, right) => right,
+        };
         let baseline = authority
             .authoritative_refresh(AsyncContinuityRequest {
                 subscription: self.context.subscription(),
                 stream: self.context.stream(),
                 current: self.current,
-                high_water: self.high_water,
+                high_water: required_high_water,
             })
             .ok_or_else(|| {
                 SequenceError::new(SequenceErrorKind::AuthoritativeRefreshUnavailable)
@@ -496,10 +566,7 @@ impl SequenceMachine {
         if position_precedes(baseline, self.current) {
             return Err(SequenceError::new(SequenceErrorKind::BaselineRegression));
         }
-        if self
-            .high_water
-            .is_some_and(|high_water| position_precedes(baseline, high_water))
-        {
+        if required_high_water.is_some_and(|high_water| position_precedes(baseline, high_water)) {
             return Err(SequenceError::new(
                 SequenceErrorKind::AuthoritativeBaselineInsufficient,
             ));

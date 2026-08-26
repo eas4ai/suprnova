@@ -15,11 +15,11 @@ use suprnova_live::async_updates::{
     AuthorizedTransportSubscription, BoundedDocumentTransportSession, CloseDisposition,
     CompletionReason, DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, Heartbeat,
-    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, SequenceDegradation,
-    SequenceDisposition, SseEncoder, SseMembershipControl, SseResponseContract, StreamErrorCode,
-    SubscriptionMode, VerifiedOrigin, WebSocketAuthentication, WebSocketCodec,
-    WebSocketControlRecord, WebSocketFrame, WebSocketMembershipControl, WebSocketOriginPolicy,
-    decode_async_envelope,
+    MAX_DOCUMENT_TRANSPORT_MEMBERSHIPS, RegisteredRefresh, ResolvedAsyncDelivery,
+    SequenceDegradation, SequenceDisposition, SseEncoder, SseMembershipControl,
+    SseResponseContract, StreamErrorCode, SubscriptionMode, VerifiedOrigin,
+    WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
+    WebSocketMembershipControl, WebSocketOriginPolicy, decode_async_envelope,
 };
 use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
@@ -130,8 +130,8 @@ impl DerefMut for ConformanceDocument {
 struct CaptureDispatcher(Option<AsyncEnvelope>);
 
 impl AsyncEnvelopeDispatchPort for CaptureDispatcher {
-    fn dispatch(&mut self, envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
-        self.0 = Some(envelope.clone());
+    fn dispatch(&mut self, delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError> {
+        self.0 = Some(delivery.envelope().clone());
         Ok(())
     }
 }
@@ -1656,8 +1656,8 @@ struct RecordingDispatcher {
 }
 
 impl AsyncEnvelopeDispatchPort for RecordingDispatcher {
-    fn dispatch(&mut self, envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
-        self.applied.push(envelope.position());
+    fn dispatch(&mut self, delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError> {
+        self.applied.push(delivery.envelope().position());
         Ok(())
     }
 }

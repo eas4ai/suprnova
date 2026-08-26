@@ -11,7 +11,5 @@ pub use bounds::{
 };
 pub use cancel::CancellationFlag;
 pub use owner::{Permit, PermitPool, ResourceOwner, ResourceQueue};
-pub use queue::{
-    BoundedQueue, ResourceDiagnostic, ResourceError, Retirement, TailAdmission,
-    TailAdmissionOutcome,
-};
+pub use queue::{BoundedQueue, ResourceDiagnostic, ResourceError, Retirement};
+pub(crate) use queue::{TailAdmission, TailAdmissionOutcome};

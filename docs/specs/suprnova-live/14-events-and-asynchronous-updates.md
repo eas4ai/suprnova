@@ -220,9 +220,13 @@ Acceptance criteria:
   advances only after dispatch succeeds; dispatch rejection or failure retains
   the prior position so a fresh retry is not misclassified as a duplicate.
 - Replay validates the entire bounded same-scope transcript before any dispatch
-  or mutation, then dispatches in order and commits after each success. Partial
-  failure reports its applied prefix, retains degraded state and observed
-  high-water, and resumes only from freshly admitted remaining suffix evidence.
+  or mutation through one atomic current-membership registry snapshot. It then
+  final-validates and immediately dispatches each entry in order, with no host
+  callback between that entry's accepted authority and registered dispatch.
+  Partial failure reports its applied prefix, retains degraded state and
+  observed high-water, and resumes only from freshly admitted remaining suffix
+  evidence. Replay carries presentation data only; `Complete` is accepted only
+  from the live provider path because lifecycle detachment is not replayable.
 - An invalidation or authoritative change enters the normal island scheduler and
   obtains HTML and snapshot state through an ordinary verified refresh/action
   response.
@@ -262,9 +266,10 @@ Acceptance criteria:
   document pressure-continuity tracker. The document owns exactly one Task 3
   sequence machine lane for each exact logical subscription binding and selects
   that lane itself; callers cannot provide a different machine or report
-  success. Raw `DocumentTransportSession` envelope delivery is private; every
-  public provider-delivery path enters the bounded document owner. Commit or
-  dispatch time is captured before the final current-host validation and is
+  success. Raw envelope admission, sequence mutation, and
+  `DocumentTransportSession` envelope delivery are private; every public
+  provider-delivery and recovery path enters the bounded document owner. Commit
+  or dispatch time is captured before the final current-host validation and is
   passed through that validation; no host callback may occur between the final
   accepted facts and synchronous queue mutation or registered dispatch.
   Successful apply, duplicate, and stale-epoch outcomes resolve truthfully.
@@ -277,7 +282,10 @@ Acceptance criteria:
   contract, binding, document-scope, memo, expiry, or revocation drift before
   queue mutation and before per-target cloning. The resolved count must satisfy
   both the full current event contract and deployment policy; self, parent, and
-  exact named-island targets resolve to exactly one recipient.
+  exact named-island targets resolve to exactly one recipient. Registered
+  dispatch consumes a private-construction resolved-delivery capability carrying
+  the exact accepted target-scope digest, resolved count, and deployment limit;
+  the dispatcher cannot substitute caller-proposed recipients.
 - Admission checks the 32 KiB canonical payload ceiling, replay count and
   aggregate bytes, current descriptor-bound event fanout, deployment fanout
   policy, queue count/bytes, and owner cancellation before per-target cloning or
@@ -309,21 +317,32 @@ Acceptance criteria:
   conservatively degraded until aggregate retirement rather than discarding an
   unknown obligation. Authorization or dispatcher failure retains the exact
   unresolved cause and exposes the truthful committed replay prefix.
+- A freshly authorized document-owned authoritative refresh may recover the
+  exact private sequence lane and only that membership's covered pressure
+  causes. The baseline cannot regress and must cover both sequence and pressure
+  high-water. Under the `u64` sequence vocabulary there is no same-epoch value
+  after `u64::MAX`: equal and lower values are duplicates, while a greater
+  position necessarily enters a new epoch and requires authoritative recovery.
 - Coalescing may replace only the newest exact contiguous refresh for the same
   signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
   and registered signal identity and schema contract. Semantic comparison and
   replacement occur under the same shared queue lock, so a cloned handle cannot
-  redirect replacement to a changed tail. Replacement retains the latest
-  envelope but marks continuity degraded because an earlier sequence was
-  superseded.
+  redirect replacement to a changed tail. A redundant equal-or-older
+  replaceable tail is retained without inventing a delivery loss. Actual
+  successor replacement retains the latest envelope but marks continuity
+  degraded because an earlier sequence was superseded.
   Required ordered browser events, heartbeats, completion, and errors never
   coalesce; pressure never evicts one while claiming continuity.
 - Admission returns the closed `Queued`, `Coalesced`, `Degraded`, or
   `Closed(code)` disposition. Terminal policy violations cancel and drain the
-  owning delivery scope once. Telemetry uses only the finite queued, coalesced,
-  degraded, closed, rejected, and cleanup labels; subscription, stream, event,
-  principal, payload, descriptor, and raw-error values are forbidden labels.
+  owning delivery scope once; later pumps perform no provider or authority read.
+  A provider item extracted before an authority callback remains under an RAII
+  loss guard, so panic or cancellation before queue ownership records truthful
+  pressure loss and releases resources. Telemetry uses only the finite queued,
+  coalesced, degraded, closed, rejected, and cleanup labels; subscription,
+  stream, event, principal, payload, descriptor, and raw-error values are
+  forbidden labels.
 - Stream lifetime, cancellation, heartbeat, and deployment shutdown are
   observable and bounded.
 - Explicit membership removal and provider failure atomically purge only queued
@@ -385,6 +404,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Closed the bounded-delivery authority surface after independent
+  review. Raw Task 3 admission and sequence mutation remain private to the
+  document owner; replay uses one atomic current-membership snapshot, rejects
+  replayed lifecycle completion, preserves truthful dispatch prefixes, and
+  exposes no host-callback gap after an entry's final validation. Registered
+  dispatch consumes a private-construction resolved-delivery capability binding
+  trusted target scope and fanout. Document-owned authoritative refresh covers
+  exact sequence and pressure high-water; terminal buffers stop provider reads,
+  extracted candidates retain RAII loss ownership, redundant tails create no
+  false loss, and recovery idleness is document-owned. The unreachable
+  `SequenceOverflow` branch was removed: at `u64::MAX`, same-epoch values are
+  duplicates and only a newer epoch can advance through authoritative recovery.
 - 2026-08-25 -- Bound Task 5 pressure recovery and terminal sequencing to exact
   logical memberships. The document retains finite redacted pressure causes by
   binding and scope, so one sibling's replay cannot clear another sibling's

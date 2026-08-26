@@ -10,12 +10,13 @@ use std::task::{Context, Poll, Waker};
 
 use suprnova_live::async_updates::{
     AsyncEnvelope, AsyncEventSession, AsyncEventSource, AsyncMembershipRegistryPort,
-    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AsyncTransportAuthorityPort,
-    AsyncTransportAuthorityRequest, AsyncTransportAuthorityValidation, AsyncTransportError,
-    AsyncTransportErrorKind, AsyncTransportFuture, AuthoritativeStreamPosition, AuthorizationMemo,
-    AuthorizedSubscription, AuthorizedTransportSubscription, BoundedEventContracts,
-    BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics,
-    BrowserPayloadSchema, CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
+    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload, AsyncReplayMembershipRequest,
+    AsyncReplayMembershipValidation, AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest,
+    AsyncTransportAuthorityValidation, AsyncTransportError, AsyncTransportErrorKind,
+    AsyncTransportFuture, AuthoritativeStreamPosition, AuthorizationMemo, AuthorizedSubscription,
+    AuthorizedTransportSubscription, BoundedEventContracts, BoundedEventNames,
+    BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics, BrowserPayloadSchema,
+    CapabilityVersion, CloseDisposition, CurrentSubscriptionRegistration,
     DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
     DocumentTransportLimits, DocumentTransportSession, EventCyclePolicy, EventOrder, EventSource,
     EventTarget, PollFallbackPolicy, PollInitialBehavior, PollVisibilityPolicy,
@@ -346,9 +347,11 @@ pub struct MembershipRegistry {
     resolved_event_fanout: AtomicUsize,
     resolved_target_scope: Mutex<ContentDigest>,
     delivery_validation_calls: AtomicUsize,
+    panic_delivery_validation_call: AtomicUsize,
     delivery_drift_call: AtomicUsize,
     delivery_drift: Mutex<Option<DeliveryAuthorityDrift>>,
     now_calls: AtomicUsize,
+    panic_now_call: AtomicUsize,
     now_drift_call: AtomicUsize,
     now_drift: Mutex<Option<DeliveryAuthorityDrift>>,
     expected_delivery_binding: Mutex<Option<SubscriptionBinding>>,
@@ -430,6 +433,29 @@ impl MembershipRegistry {
     )]
     pub fn delivery_validation_call_count(&self) -> usize {
         self.delivery_validation_calls.load(Ordering::Acquire)
+    }
+
+    /// Panics from one exact future delivery-registry callback.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes this Task 5 panic control to one focused suite"
+    )]
+    pub fn panic_on_delivery_validation_call(&self, call: usize) {
+        assert!(call > 0, "delivery validation call is one-based");
+        self.delivery_validation_calls.store(0, Ordering::Release);
+        self.panic_delivery_validation_call
+            .store(call, Ordering::Release);
+    }
+
+    /// Panics from one exact future host-clock callback.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes this Task 5 panic control to one focused suite"
+    )]
+    pub fn panic_on_now_call(&self, call: usize) {
+        assert!(call > 0, "now call is one-based");
+        self.now_calls.store(0, Ordering::Release);
+        self.panic_now_call.store(call, Ordering::Release);
     }
 
     /// Returns the current full event contract set for deterministic drift setup.
@@ -570,6 +596,18 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
         request: AsyncMembershipRequest<'_>,
         validation: &mut AsyncMembershipValidation<'_>,
     ) {
+        let delivery_call = if request.envelope().is_some() || request.binding().is_some() {
+            self.delivery_validation_calls
+                .fetch_add(1, Ordering::AcqRel)
+                + 1
+        } else {
+            0
+        };
+        assert_ne!(
+            delivery_call,
+            self.panic_delivery_validation_call.load(Ordering::Acquire),
+            "controlled delivery-registry panic"
+        );
         let exact_binding = request.binding().is_none_or(|binding| {
             self.expected_delivery_binding
                 .lock()
@@ -619,38 +657,126 @@ impl AsyncMembershipRegistryPort for MembershipRegistry {
                         .expect("document authorization scope lock"),
                     resolved,
                 );
+            } else if request.binding().is_some() {
+                validation.accept_scope_current(
+                    &self.stream,
+                    &events,
+                    &signals,
+                    &self
+                        .authorization_memo
+                        .lock()
+                        .expect("authorization memo lock"),
+                    &self
+                        .document_scope
+                        .lock()
+                        .expect("document authorization scope lock"),
+                );
             } else {
                 validation.accept_current(&self.stream, &events, &signals);
             }
         }
-        if request.envelope().is_some() {
-            let call = self
-                .delivery_validation_calls
-                .fetch_add(1, Ordering::AcqRel)
-                + 1;
-            if call == self.delivery_drift_call.load(Ordering::Acquire)
-                && let Some(drift) = self
-                    .delivery_drift
+        if delivery_call > 0
+            && delivery_call == self.delivery_drift_call.load(Ordering::Acquire)
+            && let Some(drift) = self
+                .delivery_drift
+                .lock()
+                .expect("delivery drift lock")
+                .take()
+        {
+            self.apply_delivery_drift(drift);
+        }
+    }
+
+    fn validate_replay_current(
+        &self,
+        request: AsyncReplayMembershipRequest<'_>,
+        validation: &mut AsyncReplayMembershipValidation<'_>,
+    ) {
+        let call = self
+            .delivery_validation_calls
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        assert_ne!(
+            call,
+            self.panic_delivery_validation_call.load(Ordering::Acquire),
+            "controlled replay-registry panic"
+        );
+        let exact_binding = self
+            .expected_delivery_binding
+            .lock()
+            .expect("expected delivery binding lock")
+            .as_ref()
+            .is_none_or(|expected| expected == request.binding());
+        let active = self.active.load(Ordering::Acquire)
+            && exact_binding
+            && self
+                .subscriptions
+                .lock()
+                .expect("membership registry lock")
+                .iter()
+                .any(|subscription| subscription == request.subscription());
+        if active {
+            let resolved = request
+                .envelopes()
+                .iter()
+                .map(|envelope| match envelope.payload() {
+                    AsyncPayload::BrowserEvent(_) => NonZeroU16::new(
+                        u16::try_from(self.resolved_event_fanout.load(Ordering::Acquire))
+                            .unwrap_or(u16::MAX),
+                    )
+                    .map(|recipients| {
+                        ResolvedEventFanout::from_host(
+                            recipients,
+                            self.resolved_target_scope
+                                .lock()
+                                .expect("resolved target scope lock")
+                                .clone(),
+                        )
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            validation.accept_current(
+                &self.stream,
+                &self.events.lock().expect("event contracts lock"),
+                &self.signals.lock().expect("presentation signal lock"),
+                &self
+                    .authorization_memo
                     .lock()
-                    .expect("delivery drift lock")
-                    .take()
-            {
-                self.apply_delivery_drift(drift);
-            }
+                    .expect("authorization memo lock"),
+                &self
+                    .document_scope
+                    .lock()
+                    .expect("document authorization scope lock"),
+                &resolved,
+            );
+        }
+        if call == self.delivery_drift_call.load(Ordering::Acquire)
+            && let Some(drift) = self
+                .delivery_drift
+                .lock()
+                .expect("delivery drift lock")
+                .take()
+        {
+            self.apply_delivery_drift(drift);
         }
     }
 }
 
 impl AsyncTransportAuthorityPort for MembershipRegistry {
     fn now(&self) -> UnixMillis {
-        let now = UnixMillis::new(self.now.load(Ordering::Acquire));
         let call = self.now_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        assert_ne!(
+            call,
+            self.panic_now_call.load(Ordering::Acquire),
+            "controlled host-clock panic"
+        );
         if call == self.now_drift_call.load(Ordering::Acquire)
             && let Some(drift) = self.now_drift.lock().expect("now drift lock").take()
         {
             self.apply_delivery_drift(drift);
         }
-        now
+        UnixMillis::new(self.now.load(Ordering::Acquire))
     }
 
     fn validate_current<'a>(
@@ -933,9 +1059,11 @@ impl TransportFixture {
                 ContentDigest::from_bytes(&[0xf1; 32]).expect("resolved target scope"),
             ),
             delivery_validation_calls: AtomicUsize::new(0),
+            panic_delivery_validation_call: AtomicUsize::new(usize::MAX),
             delivery_drift_call: AtomicUsize::new(usize::MAX),
             delivery_drift: Mutex::new(None),
             now_calls: AtomicUsize::new(0),
+            panic_now_call: AtomicUsize::new(usize::MAX),
             now_drift_call: AtomicUsize::new(usize::MAX),
             now_drift: Mutex::new(None),
             expected_delivery_binding: Mutex::new(None),
@@ -1042,6 +1170,7 @@ pub struct ScriptedSource {
     close_error_attempts: usize,
     close_error_kind: AsyncTransportErrorKind,
     close_count: Arc<AtomicUsize>,
+    next_poll_count: Arc<AtomicUsize>,
     close_poll_count: Arc<AtomicUsize>,
     drop_count: Arc<AtomicUsize>,
     close_gate: Option<Arc<WakeGate>>,
@@ -1058,6 +1187,7 @@ impl ScriptedSource {
             close_error_attempts: 0,
             close_error_kind: AsyncTransportErrorKind::SourceFailed,
             close_count: Arc::new(AtomicUsize::new(0)),
+            next_poll_count: Arc::new(AtomicUsize::new(0)),
             close_poll_count: Arc::new(AtomicUsize::new(0)),
             drop_count: Arc::new(AtomicUsize::new(0)),
             close_gate: None,
@@ -1103,6 +1233,15 @@ impl ScriptedSource {
     /// Returns how many logical sessions performed their first close transition.
     pub fn close_count(&self) -> usize {
         self.close_count.load(Ordering::Acquire)
+    }
+
+    /// Returns the total number of provider data-read polls.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes this Task 5 source-read counter to one focused suite"
+    )]
+    pub fn next_poll_count(&self) -> usize {
+        self.next_poll_count.load(Ordering::Acquire)
     }
 
     /// Returns the total number of persistent close polls across logical sessions.
@@ -1164,6 +1303,7 @@ impl AsyncEventSource for ScriptedSource {
                 close_error_attempts: self.close_error_attempts,
                 close_error_kind: self.close_error_kind,
                 close_count: self.close_count.clone(),
+                next_poll_count: self.next_poll_count.clone(),
                 close_poll_count: self.close_poll_count.clone(),
                 drop_count: self.drop_count.clone(),
                 close_gate: self.close_gate.clone(),
@@ -1304,6 +1444,7 @@ fn ready_controlled_session(
         close_error_attempts: 0,
         close_error_kind: AsyncTransportErrorKind::SourceFailed,
         close_count: source.close_count.clone(),
+        next_poll_count: Arc::new(AtomicUsize::new(0)),
         close_poll_count: Arc::new(AtomicUsize::new(0)),
         drop_count: source.drop_count.clone(),
         close_gate: None,
@@ -1331,6 +1472,7 @@ struct ScriptedSession {
     close_error_attempts: usize,
     close_error_kind: AsyncTransportErrorKind,
     close_count: Arc<AtomicUsize>,
+    next_poll_count: Arc<AtomicUsize>,
     close_poll_count: Arc<AtomicUsize>,
     drop_count: Arc<AtomicUsize>,
     close_gate: Option<Arc<WakeGate>>,
@@ -1354,6 +1496,7 @@ impl AsyncEventSession for ScriptedSession {
         task: &mut Context<'_>,
     ) -> Poll<Result<Option<AsyncEnvelope>, AsyncTransportError>> {
         let this = self.get_mut();
+        this.next_poll_count.fetch_add(1, Ordering::AcqRel);
         if this.closed {
             return Poll::Ready(Err(AsyncTransportError::new(
                 AsyncTransportErrorKind::Closed,

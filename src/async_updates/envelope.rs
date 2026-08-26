@@ -298,6 +298,54 @@ pub struct AsyncMembershipRequest<'a> {
     document_scope: Option<&'a DocumentAuthorizationScope>,
 }
 
+/// Exact bounded replay transcript supplied to one atomic host-registry check.
+#[derive(Clone, Copy)]
+pub struct AsyncReplayMembershipRequest<'a> {
+    verified: &'a VerifiedSubscriptionDescriptor,
+    subscription: &'a SubscriptionId,
+    envelopes: &'a [AsyncEnvelope],
+    binding: &'a SubscriptionBinding,
+    document_scope: &'a DocumentAuthorizationScope,
+}
+
+impl<'a> AsyncReplayMembershipRequest<'a> {
+    /// Returns the Task 2 integrity-verified subscription descriptor.
+    #[must_use]
+    pub const fn verified(self) -> &'a VerifiedSubscriptionDescriptor {
+        self.verified
+    }
+
+    /// Returns the exact logical membership identity.
+    #[must_use]
+    pub const fn subscription(self) -> &'a SubscriptionId {
+        self.subscription
+    }
+
+    /// Returns the complete bounded transcript being admitted atomically.
+    #[must_use]
+    pub const fn envelopes(self) -> &'a [AsyncEnvelope] {
+        self.envelopes
+    }
+
+    /// Returns the exact signed-descriptor binding.
+    #[must_use]
+    pub const fn binding(self) -> &'a SubscriptionBinding {
+        self.binding
+    }
+
+    /// Returns the exact document authorization scope.
+    #[must_use]
+    pub const fn document_scope(self) -> &'a DocumentAuthorizationScope {
+        self.document_scope
+    }
+}
+
+impl fmt::Debug for AsyncReplayMembershipRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AsyncReplayMembershipRequest:redacted>")
+    }
+}
+
 impl<'a> AsyncMembershipRequest<'a> {
     /// Returns the Task 2 integrity-verified subscription descriptor.
     #[must_use]
@@ -347,6 +395,18 @@ pub trait AsyncMembershipRegistryPort: Send + Sync {
         request: AsyncMembershipRequest<'_>,
         validation: &mut AsyncMembershipValidation<'_>,
     );
+
+    /// Atomically validates one complete bounded replay transcript.
+    ///
+    /// The default denies admission. Hosts that support replay must provide one
+    /// coherent registry snapshot and one resolved fanout proof per envelope.
+    fn validate_replay_current(
+        &self,
+        request: AsyncReplayMembershipRequest<'_>,
+        validation: &mut AsyncReplayMembershipValidation<'_>,
+    ) {
+        let _ = (request, validation);
+    }
 }
 
 /// Trusted current recipient resolution for one registered browser event.
@@ -392,6 +452,13 @@ struct ValidatedMembership {
     events: BoundedEventContracts,
     presentation_signals: BoundedPresentationSignalContracts,
     resolved_event: Option<ResolvedEventFanout>,
+}
+
+struct ValidatedReplayMembership {
+    stream: StreamName,
+    events: BoundedEventContracts,
+    presentation_signals: BoundedPresentationSignalContracts,
+    resolved_events: Vec<Option<ResolvedEventFanout>>,
 }
 
 /// Framework-owned sink that seals exactly one host-validated registry snapshot.
@@ -469,21 +536,7 @@ impl AsyncMembershipValidation<'_> {
             self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
             return false;
         }
-        let resolved_is_valid = match envelope.payload() {
-            AsyncPayload::BrowserEvent(event) => resolved_event.as_ref().is_some_and(|resolved| {
-                let recipients = resolved.recipients().get();
-                recipients <= event.maximum_fanout().get()
-                    && match event.target() {
-                        EventTarget::SelfIsland
-                        | EventTarget::Parent
-                        | EventTarget::NamedIsland(_) => recipients == 1,
-                        EventTarget::Child | EventTarget::Document | EventTarget::Browser(_) => {
-                            true
-                        }
-                    }
-            }),
-            _ => resolved_event.is_none(),
-        };
+        let resolved_is_valid = resolved_event_is_valid(envelope, resolved_event.as_ref());
         if !resolved_is_valid {
             self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
             return false;
@@ -493,6 +546,39 @@ impl AsyncMembershipValidation<'_> {
             events: events.clone(),
             presentation_signals: presentation_signals.clone(),
             resolved_event,
+        });
+        true
+    }
+
+    /// Accepts one current exact membership scope without a payload delivery.
+    pub fn accept_scope_current(
+        &mut self,
+        stream: &StreamName,
+        events: &BoundedEventContracts,
+        presentation_signals: &BoundedPresentationSignalContracts,
+        authorization_memo: &AuthorizationMemo,
+        document_scope: &DocumentAuthorizationScope,
+    ) -> bool {
+        if self.candidate.is_some() || self.rejected.is_some() {
+            self.candidate = None;
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        let claims = self.verified.claims();
+        if self.expected_envelope.is_some()
+            || stream != claims.stream()
+            || events != claims.events()
+            || authorization_memo != claims.authorization_memo()
+            || self.expected_document_scope != Some(document_scope)
+        {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        self.candidate = Some(ValidatedMembership {
+            stream: stream.clone(),
+            events: events.clone(),
+            presentation_signals: presentation_signals.clone(),
+            resolved_event: None,
         });
         true
     }
@@ -507,9 +593,93 @@ impl AsyncMembershipValidation<'_> {
     }
 }
 
+fn resolved_event_is_valid(
+    envelope: &AsyncEnvelope,
+    resolved_event: Option<&ResolvedEventFanout>,
+) -> bool {
+    match envelope.payload() {
+        AsyncPayload::BrowserEvent(event) => resolved_event.is_some_and(|resolved| {
+            let recipients = resolved.recipients().get();
+            recipients <= event.maximum_fanout().get()
+                && match event.target() {
+                    EventTarget::SelfIsland | EventTarget::Parent | EventTarget::NamedIsland(_) => {
+                        recipients == 1
+                    }
+                    EventTarget::Child | EventTarget::Document | EventTarget::Browser(_) => true,
+                }
+        }),
+        _ => resolved_event.is_none(),
+    }
+}
+
 impl fmt::Debug for AsyncMembershipValidation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("<AsyncMembershipValidation:redacted>")
+    }
+}
+
+/// Framework-owned sink for one atomic replay-registry snapshot.
+pub struct AsyncReplayMembershipValidation<'a> {
+    verified: &'a VerifiedSubscriptionDescriptor,
+    expected_envelopes: &'a [AsyncEnvelope],
+    expected_document_scope: &'a DocumentAuthorizationScope,
+    candidate: Option<ValidatedReplayMembership>,
+    rejected: Option<AsyncEnvelopeErrorKind>,
+}
+
+impl AsyncReplayMembershipValidation<'_> {
+    /// Accepts the complete current contract and exact fanout proof vector once.
+    pub fn accept_current(
+        &mut self,
+        stream: &StreamName,
+        events: &BoundedEventContracts,
+        presentation_signals: &BoundedPresentationSignalContracts,
+        authorization_memo: &AuthorizationMemo,
+        document_scope: &DocumentAuthorizationScope,
+        resolved_events: &[Option<ResolvedEventFanout>],
+    ) -> bool {
+        if self.candidate.is_some() || self.rejected.is_some() {
+            self.candidate = None;
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        let claims = self.verified.claims();
+        if stream != claims.stream()
+            || events != claims.events()
+            || authorization_memo != claims.authorization_memo()
+            || document_scope != self.expected_document_scope
+            || resolved_events.len() != self.expected_envelopes.len()
+            || self
+                .expected_envelopes
+                .iter()
+                .zip(resolved_events)
+                .any(|(envelope, resolved)| !resolved_event_is_valid(envelope, resolved.as_ref()))
+        {
+            self.rejected = Some(AsyncEnvelopeErrorKind::UnregisteredPayload);
+            return false;
+        }
+        self.candidate = Some(ValidatedReplayMembership {
+            stream: stream.clone(),
+            events: events.clone(),
+            presentation_signals: presentation_signals.clone(),
+            resolved_events: resolved_events.to_vec(),
+        });
+        true
+    }
+
+    fn finish(self) -> Result<ValidatedReplayMembership, AsyncEnvelopeError> {
+        self.candidate.ok_or_else(|| {
+            AsyncEnvelopeError::new(
+                self.rejected
+                    .unwrap_or(AsyncEnvelopeErrorKind::SubscriptionMismatch),
+            )
+        })
+    }
+}
+
+impl fmt::Debug for AsyncReplayMembershipValidation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<AsyncReplayMembershipValidation:redacted>")
     }
 }
 
@@ -565,7 +735,8 @@ impl AsyncEnvelopeContext {
     ///
     /// The returned guard is non-cloneable and consumed by the sequence machine.
     /// Physical transport membership remains outside this operation.
-    pub fn admit<'a>(
+    #[cfg(test)]
+    pub(crate) fn admit<'a>(
         &'a self,
         envelope: &'a AsyncEnvelope,
         registry: &dyn AsyncMembershipRegistryPort,
@@ -648,6 +819,91 @@ impl AsyncEnvelopeContext {
             resolved_event: validated.resolved_event,
         })
     }
+
+    pub(crate) fn admit_replay_owned(
+        &self,
+        envelopes: Vec<AsyncEnvelope>,
+        binding: &SubscriptionBinding,
+        document_scope: &DocumentAuthorizationScope,
+        registry: &dyn AsyncMembershipRegistryPort,
+        now: UnixMillis,
+    ) -> Result<Vec<OwnedActiveAsyncMembershipGuard>, AsyncEnvelopeError> {
+        if now >= self.verified.expires_at() {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::MembershipExpired,
+            ));
+        }
+        for envelope in &envelopes {
+            if envelope.subscription != self.subscription {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::SubscriptionMismatch,
+                ));
+            }
+            if envelope.stream != self.stream {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::StreamMismatch,
+                ));
+            }
+            validate_registered_payload(self, &envelope.payload)?;
+        }
+        let validated = validate_replay_membership(
+            &self.verified,
+            &self.subscription,
+            &envelopes,
+            binding,
+            document_scope,
+            registry,
+        )?;
+        if validated.stream != self.stream
+            || validated.events != self.events
+            || validated.presentation_signals != self.presentation_signals
+        {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::UnregisteredPayload,
+            ));
+        }
+        Ok(envelopes
+            .into_iter()
+            .zip(validated.resolved_events)
+            .map(
+                |(envelope, resolved_event)| OwnedActiveAsyncMembershipGuard {
+                    context: self.clone(),
+                    envelope,
+                    resolved_event,
+                },
+            )
+            .collect())
+    }
+
+    pub(crate) fn validate_current_scope(
+        &self,
+        binding: &SubscriptionBinding,
+        document_scope: &DocumentAuthorizationScope,
+        registry: &dyn AsyncMembershipRegistryPort,
+        now: UnixMillis,
+    ) -> Result<(), AsyncEnvelopeError> {
+        if now >= self.verified.expires_at() {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::MembershipExpired,
+            ));
+        }
+        let validated = validate_delivery_scope(
+            &self.verified,
+            &self.subscription,
+            binding,
+            document_scope,
+            registry,
+        )?;
+        if validated.stream != self.stream
+            || validated.events != self.events
+            || validated.presentation_signals != self.presentation_signals
+        {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::UnregisteredPayload,
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_membership(
@@ -699,6 +955,57 @@ fn validate_delivery_membership(
     validation.finish()
 }
 
+fn validate_replay_membership(
+    verified: &VerifiedSubscriptionDescriptor,
+    subscription: &SubscriptionId,
+    envelopes: &[AsyncEnvelope],
+    binding: &SubscriptionBinding,
+    document_scope: &DocumentAuthorizationScope,
+    registry: &dyn AsyncMembershipRegistryPort,
+) -> Result<ValidatedReplayMembership, AsyncEnvelopeError> {
+    let request = AsyncReplayMembershipRequest {
+        verified,
+        subscription,
+        envelopes,
+        binding,
+        document_scope,
+    };
+    let mut validation = AsyncReplayMembershipValidation {
+        verified,
+        expected_envelopes: envelopes,
+        expected_document_scope: document_scope,
+        candidate: None,
+        rejected: None,
+    };
+    registry.validate_replay_current(request, &mut validation);
+    validation.finish()
+}
+
+fn validate_delivery_scope(
+    verified: &VerifiedSubscriptionDescriptor,
+    subscription: &SubscriptionId,
+    binding: &SubscriptionBinding,
+    document_scope: &DocumentAuthorizationScope,
+    registry: &dyn AsyncMembershipRegistryPort,
+) -> Result<ValidatedMembership, AsyncEnvelopeError> {
+    let request = AsyncMembershipRequest {
+        verified,
+        subscription,
+        envelope: None,
+        binding: Some(binding),
+        document_scope: Some(document_scope),
+    };
+    let mut validation = AsyncMembershipValidation {
+        verified,
+        expected_envelope: None,
+        expected_document_scope: Some(document_scope),
+        candidate: None,
+        rejected: None,
+    };
+    registry.validate_current(request, &mut validation);
+    validation.finish()
+}
+
 /// One-use proof that an envelope passed current host membership admission.
 ///
 /// ```compile_fail
@@ -716,7 +1023,7 @@ fn validate_delivery_membership(
 ///     let _ = machine.dispatch(guard, UnixMillis::new(0), dispatcher);
 /// }
 /// ```
-pub struct ActiveAsyncMembershipGuard<'a> {
+pub(crate) struct ActiveAsyncMembershipGuard<'a> {
     context: &'a AsyncEnvelopeContext,
     envelope: &'a AsyncEnvelope,
 }
@@ -732,10 +1039,6 @@ impl<'a> ActiveAsyncMembershipGuard<'a> {
 
     pub(crate) const fn envelope(&self) -> &'a AsyncEnvelope {
         self.envelope
-    }
-
-    pub(crate) const fn into_parts(self) -> (&'a AsyncEnvelopeContext, &'a AsyncEnvelope) {
-        (self.context, self.envelope)
     }
 }
 

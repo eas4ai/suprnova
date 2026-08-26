@@ -1,24 +1,31 @@
 #![no_main]
 
+use std::collections::VecDeque;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
 use libfuzzer_sys::fuzz_target;
 use suprnova_live::async_updates::{
-    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
-    AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeDispatchPort, BaselineDisposition,
-    MAX_REPLAY_TRANSCRIPT_ENVELOPES, SequenceDisposition, SequenceMachine, StreamEpoch,
+    AsyncCodecLimits, AsyncContinuityAuthorityPort, AsyncContinuityRequest,
+    AsyncDeliveryDisposition, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
+    AsyncEventSession, AsyncEventSource, AsyncPolicy, AsyncTransportError, AsyncTransportFuture,
+    BaselineDisposition, BoundedDocumentTransportSession, BufferDisposition, CloseDisposition,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, ResolvedAsyncDelivery, SequenceDisposition, StreamEpoch,
     StreamPosition, StreamSequence, decode_async_envelope,
 };
-use suprnova_live::identity::UnixMillis;
+use suprnova_live::resource::{PermitPool, ResourceBounds};
 
 const MAX_TRANSITIONS: usize = 256;
 
 mod support;
 
 struct FuzzContinuityAuthority(StreamPosition);
-
 struct AcceptingDispatcher;
 
 impl AsyncEnvelopeDispatchPort for AcceptingDispatcher {
-    fn dispatch(&mut self, _envelope: &AsyncEnvelope) -> Result<(), AsyncDispatchError> {
+    fn dispatch(&mut self, _delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError> {
         Ok(())
     }
 }
@@ -29,6 +36,60 @@ impl AsyncContinuityAuthorityPort for FuzzContinuityAuthority {
         _request: AsyncContinuityRequest<'_>,
     ) -> Option<StreamPosition> {
         Some(self.0)
+    }
+}
+
+struct QueueSource {
+    baseline: StreamPosition,
+    queue: Arc<Mutex<VecDeque<AsyncEnvelope>>>,
+}
+
+impl AsyncEventSource for QueueSource {
+    fn subscribe<'a>(
+        &'a self,
+        _request: &'a suprnova_live::async_updates::AuthorizedTransportSubscription,
+    ) -> AsyncTransportFuture<'a, Result<Pin<Box<dyn AsyncEventSession>>, AsyncTransportError>> {
+        Box::pin(async move {
+            Ok(Box::pin(QueueSession {
+                baseline: self.baseline,
+                queue: Arc::clone(&self.queue),
+                closed: false,
+            }) as Pin<Box<dyn AsyncEventSession>>)
+        })
+    }
+}
+
+struct QueueSession {
+    baseline: StreamPosition,
+    queue: Arc<Mutex<VecDeque<AsyncEnvelope>>>,
+    closed: bool,
+}
+
+impl AsyncEventSession for QueueSession {
+    fn baseline(&self) -> StreamPosition {
+        self.baseline
+    }
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _task: &mut Context<'_>,
+    ) -> Poll<Result<Option<AsyncEnvelope>, AsyncTransportError>> {
+        let this = self.get_mut();
+        if this.closed {
+            return Poll::Ready(Ok(None));
+        }
+        match this.queue.lock().expect("fuzz queue lock").pop_front() {
+            Some(envelope) => Poll::Ready(Ok(Some(envelope))),
+            None => Poll::Pending,
+        }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _task: &mut Context<'_>,
+    ) -> Poll<Result<CloseDisposition, AsyncTransportError>> {
+        self.get_mut().closed = true;
+        Poll::Ready(Ok(CloseDisposition::Closed))
     }
 }
 
@@ -45,7 +106,7 @@ fn u64_at(bytes: &[u8], start: usize) -> u64 {
 fn heartbeat(
     position: StreamPosition,
     limits: &AsyncCodecLimits,
-    context: &AsyncEnvelopeContext,
+    context: &suprnova_live::async_updates::AsyncEnvelopeContext,
 ) -> AsyncEnvelope {
     let subscription = support::async_subscription_id().to_base64url();
     let encoded = format!(
@@ -61,97 +122,99 @@ fuzz_target!(|bytes: &[u8]| {
     if bytes.len() < 16 {
         return;
     }
-    let context = support::async_sequence_context(bytes[0]);
-    let mut machine = SequenceMachine::new(context);
-    let subscription = support::async_subscription_id().to_base64url();
+    let support::FuzzTransportSetup {
+        mut document,
+        request,
+        registry,
+    } = support::async_transport_setup(bytes[0]);
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    let source = QueueSource {
+        baseline: request.baseline(),
+        queue: Arc::clone(&queue),
+    };
+    let pending = document.prepare_add(request.clone()).expect("fuzz prepare add");
+    let authorized = support::block_on_ready(pending.authorize()).expect("fuzz authorize add");
+    let establishing = document
+        .prepare_establish(authorized)
+        .expect("fuzz prepare establish");
+    let ready = support::block_on_ready(establishing.establish(&source))
+        .expect("fuzz establish source");
+    document.commit_add(ready).expect("fuzz commit add");
+    let mut bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(64, 256 * 1024).expect("fuzz document bounds"),
+        PermitPool::new(4).expect("fuzz permits"),
+        AsyncPolicy {
+            max_payload_bytes: NonZeroUsize::new(32 * 1024).expect("payload"),
+            max_replay_events: NonZeroUsize::new(MAX_REPLAY_TRANSCRIPT_ENVELOPES)
+                .expect("replay"),
+            max_fanout: NonZeroUsize::new(100).expect("fanout"),
+        },
+    )
+    .expect("fuzz bounded document");
     let limits = AsyncCodecLimits::v1();
-    let registry = support::async_membership_registry();
     let mut dispatcher = AcceptingDispatcher;
 
     for chunk in bytes[16..].chunks(17).take(MAX_TRANSITIONS) {
         let operation = chunk[0] % 3;
-        let epoch = u64_at(chunk, 1);
-        let sequence = u64_at(chunk, 9);
-        let position = StreamPosition::new(StreamEpoch::new(epoch), StreamSequence::new(sequence));
-        let before = machine.current();
+        let position = StreamPosition::new(
+            StreamEpoch::new(u64_at(chunk, 1)),
+            StreamSequence::new(u64_at(chunk, 9)),
+        );
+        let before = bounded
+            .sequence_position(&request)
+            .expect("active fuzz sequence lane");
         match operation {
             0 => {
-                let encoded = format!(
-                    "{{\"payload\":{{\"kind\":\"heartbeat\"}},\"position\":{{\"epoch\":\"{epoch}\",\"sequence\":\"{sequence}\"}},\"protocol_version\":1,\"stream\":\"fuzz\",\"subscription\":\"{subscription}\"}}"
-                );
-                let envelope = decode_async_envelope(encoded.as_bytes(), &limits, context)
-                    .expect("generated bounded heartbeat");
-                let guard = context
-                    .admit(&envelope, &registry, UnixMillis::new(1_200))
-                    .expect("current fuzz membership");
-                match machine.dispatch(guard, UnixMillis::new(1_200), &mut dispatcher) {
-                    Ok(SequenceDisposition::Apply) => {
-                        assert_eq!(machine.current(), position);
-                        assert_eq!(position.epoch(), before.epoch());
-                        assert_eq!(
-                            position.sequence().get(),
-                            before.sequence().get().checked_add(1).expect("applied successor"),
-                        );
-                    }
-                    Ok(
-                        SequenceDisposition::Degraded(_)
-                        | SequenceDisposition::AwaitingRecovery
-                        | SequenceDisposition::IgnoreDuplicate
-                        | SequenceDisposition::IgnoreStaleEpoch
-                        | SequenceDisposition::ScopeMismatch,
-                    )
-                    | Err(_) => {
-                        assert_eq!(machine.current(), before);
+                queue
+                    .lock()
+                    .expect("fuzz queue lock")
+                    .push_back(heartbeat(position, &limits, request.context()));
+                if matches!(
+                    support::block_on_ready(bounded.pump_next(registry.as_ref())),
+                    Ok(Some(BufferDisposition::Queued | BufferDisposition::Coalesced))
+                ) {
+                    let result = bounded.dispatch_next(registry.as_ref(), &mut dispatcher);
+                    if matches!(
+                        result,
+                        Ok(Some(AsyncDeliveryDisposition::Sequence(
+                            SequenceDisposition::Apply
+                        )))
+                    ) {
+                        assert_eq!(bounded.sequence_position(&request), Some(position));
                     }
                 }
             }
             1 => {
-                let transcript = machine.high_water().and_then(|high_water| {
-                    if high_water.epoch() != before.epoch() {
-                        return None;
-                    }
-                    let first = before.sequence().get().checked_add(1)?;
-                    let distance = high_water.sequence().get().checked_sub(first)?;
-                    if distance >= MAX_REPLAY_TRANSCRIPT_ENVELOPES as u64 {
-                        return None;
-                    }
-                    Some(
-                        (first..=high_water.sequence().get())
-                            .map(|value| {
-                                heartbeat(
-                                    StreamPosition::new(
-                                        before.epoch(),
-                                        StreamSequence::new(value),
-                                    ),
-                                    &limits,
-                                    context,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                });
-                let transcript = transcript.unwrap_or_default();
-                let guards = transcript
-                    .iter()
-                    .map(|envelope| {
-                        context
-                            .admit(envelope, &registry, UnixMillis::new(1_200))
-                            .expect("current fuzz replay membership")
+                if position.epoch() != before.epoch()
+                    || position.sequence() <= before.sequence()
+                    || position.sequence().get() - before.sequence().get()
+                        > MAX_REPLAY_TRANSCRIPT_ENVELOPES as u64
+                {
+                    continue;
+                }
+                let transcript = (before.sequence().get() + 1..=position.sequence().get())
+                    .map(|value| {
+                        heartbeat(
+                            StreamPosition::new(before.epoch(), StreamSequence::new(value)),
+                            &limits,
+                            request.context(),
+                        )
                     })
                     .collect::<Vec<_>>();
-                let result = machine.recover_from_replay(
-                    guards,
-                    UnixMillis::new(1_200),
-                    &mut dispatcher,
-                );
-                if result.is_ok() {
-                    assert_eq!(machine.current().epoch(), before.epoch());
-                    assert!(machine.current().sequence() > before.sequence());
+                if matches!(
+                    bounded.admit_replay(&request, transcript, registry.as_ref()),
+                    Ok(BufferDisposition::Queued)
+                ) {
+                    let _ = bounded.dispatch_next(registry.as_ref(), &mut dispatcher);
                 }
             }
             _ => {
-                let result = machine
-                    .recover_from_authoritative_refresh(&FuzzContinuityAuthority(position));
+                let result = bounded.recover_from_authoritative_refresh(
+                    &request,
+                    registry.as_ref(),
+                    &FuzzContinuityAuthority(position),
+                );
                 if matches!(
                     result,
                     Ok(BaselineDisposition::Adopted | BaselineDisposition::AlreadyCurrent)

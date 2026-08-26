@@ -530,6 +530,13 @@ cancellation, or dispatcher failure releases the permit and degrades continuity;
 callers cannot mark it successful.
 _Avoid_: public pop result, caller acknowledgment token, detached delivery future
 
+**Resolved async delivery capability**:
+The non-cloneable private-construction value consumed by registered dispatch,
+binding one freshly accepted envelope to the host-resolved target-scope digest,
+recipient count, and deployment fanout limit. It carries delivery proof rather
+than letting a dispatcher or browser substitute recipients after admission.
+_Avoid_: caller fanout count, target list hint, reusable dispatch token, raw envelope
+
 **Bounded document transport session**:
 The cohesive server owner that composes one Task 4 round-robin physical document
 transport with one aggregate Task 5 queue and shared delivery permits. It pulls

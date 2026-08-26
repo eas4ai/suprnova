@@ -10,9 +10,15 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use suprnova_live::async_updates::{
     AsyncEnvelopeContext, AsyncMembershipRegistryPort, AsyncMembershipRequest,
-    AsyncMembershipValidation, AuthoritativeStreamPosition, BoundedEventContracts,
+    AsyncMembershipValidation, AsyncPayload, AsyncReplayMembershipRequest,
+    AsyncReplayMembershipValidation, AsyncTransportAuthorityPort, AsyncTransportAuthorityRequest,
+    AsyncTransportAuthorityValidation, AsyncTransportFuture, AuthorizationMemo,
+    AuthorizedSubscription, AuthorizedTransportSubscription, AuthoritativeStreamPosition,
+    BoundedEventContracts,
     BoundedEventNames, BoundedPresentationSignalContracts, BoundedTargets, BoundedTopics,
-    BrowserPayloadSchema, CapabilityVersion, CurrentSubscriptionRegistration, EventCyclePolicy,
+    BrowserPayloadSchema, CapabilityVersion, CurrentSubscriptionRegistration,
+    DocumentAuthorizationScope, DocumentTransportHandle, DocumentTransportKind,
+    DocumentTransportLimits, DocumentTransportSession, EventCyclePolicy,
     EventOrder, EventSource, EventTarget, PollFallbackPolicy, PollInitialBehavior,
     PollVisibilityPolicy, ReconnectPolicy, StreamEpoch, StreamName, StreamPosition, StreamSequence,
     SubscriptionAuthorizationDecision, SubscriptionAuthorizationPort,
@@ -22,7 +28,7 @@ use suprnova_live::async_updates::{
     SubscriptionError, SubscriptionFuture, SubscriptionId,
     SubscriptionEventContract, SubscriptionIssueRequest, SubscriptionMetadata, SubscriptionMode,
     SubscriptionModes, SubscriptionRegistryPort, SubscriptionRegistryRequest,
-    SubscriptionService, TopicName, TransportCredential, TrustedMountParameters,
+    SubscriptionService, TopicName, TransportCredential, TrustedMountParameters, VerifiedOrigin,
 };
 use suprnova_live::checker::{CheckReport, CheckerLimits, TemplateCatalog, TemplateChecker};
 use suprnova_live::child::{ChildParameterLimits, ExpectedChildParametersV1};
@@ -157,13 +163,112 @@ impl AsyncMembershipRegistryPort for FuzzMembershipRegistry {
     }
 }
 
+pub(crate) struct FuzzTransportRegistry {
+    subscription: SubscriptionId,
+    stream: StreamName,
+    topics: BoundedTopics,
+    events: BoundedEventContracts,
+    signals: BoundedPresentationSignalContracts,
+    modes: SubscriptionModes,
+    memo: AuthorizationMemo,
+    document_scope: DocumentAuthorizationScope,
+}
+
+impl AsyncMembershipRegistryPort for FuzzTransportRegistry {
+    fn validate_current(
+        &self,
+        request: AsyncMembershipRequest<'_>,
+        validation: &mut AsyncMembershipValidation<'_>,
+    ) {
+        if request.subscription() != &self.subscription {
+            return;
+        }
+        if request.envelope().is_some() {
+            let _ = validation.accept_delivery_current(
+                &self.stream,
+                &self.events,
+                &self.signals,
+                &self.memo,
+                &self.document_scope,
+                None,
+            );
+        } else if request.binding().is_some() {
+            let _ = validation.accept_scope_current(
+                &self.stream,
+                &self.events,
+                &self.signals,
+                &self.memo,
+                &self.document_scope,
+            );
+        } else {
+            let _ = validation.accept_current(&self.stream, &self.events, &self.signals);
+        }
+    }
+
+    fn validate_replay_current(
+        &self,
+        request: AsyncReplayMembershipRequest<'_>,
+        validation: &mut AsyncReplayMembershipValidation<'_>,
+    ) {
+        if request.subscription() == &self.subscription {
+            let resolved = request
+                .envelopes()
+                .iter()
+                .map(|envelope| match envelope.payload() {
+                    AsyncPayload::BrowserEvent(_) => unreachable!("fuzz sequence emits heartbeat"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let _ = validation.accept_current(
+                &self.stream,
+                &self.events,
+                &self.signals,
+                &self.memo,
+                &self.document_scope,
+                &resolved,
+            );
+        }
+    }
+}
+
+impl AsyncTransportAuthorityPort for FuzzTransportRegistry {
+    fn now(&self) -> UnixMillis {
+        UnixMillis::new(1_200)
+    }
+
+    fn validate_current<'a>(
+        &'a self,
+        request: AsyncTransportAuthorityRequest<'a>,
+        validation: &'a mut AsyncTransportAuthorityValidation,
+    ) -> AsyncTransportFuture<'a, ()> {
+        Box::pin(async move {
+            if request.subscription() == &self.subscription {
+                let _ = validation.accept_current(
+                    &self.document_scope,
+                    &self.memo,
+                    &self.stream,
+                    &self.topics,
+                    &self.events,
+                    &self.modes,
+                );
+            }
+        })
+    }
+}
+
+pub(crate) struct FuzzTransportSetup {
+    pub(crate) document: DocumentTransportSession,
+    pub(crate) request: AuthorizedTransportSubscription,
+    pub(crate) registry: Arc<FuzzTransportRegistry>,
+}
+
 struct NoopWake;
 
 impl Wake for NoopWake {
     fn wake(self: Arc<Self>) {}
 }
 
-fn block_on_ready<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on_ready<F: Future>(future: F) -> F::Output {
     let waker = Waker::from(Arc::new(NoopWake));
     let mut task_context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
@@ -235,6 +340,17 @@ pub(crate) fn async_sequence_context(selector: u8) -> &'static AsyncEnvelopeCont
 }
 
 fn build_async_context(baseline: StreamPosition) -> AsyncEnvelopeContext {
+    let authorized = build_authorized_subscription(baseline);
+    let membership = async_membership_registry();
+    AsyncEnvelopeContext::from_authorized(
+        &authorized,
+        async_subscription_id(),
+        &membership,
+    )
+    .expect("active fuzz membership")
+}
+
+fn build_authorized_subscription(baseline: StreamPosition) -> AuthorizedSubscription {
     let ports = Arc::new(FuzzSubscriptionPorts {
         component: async_component_metadata(),
         parameters: TrustedMountParameters::new(Vec::new()).expect("empty mount parameters"),
@@ -259,20 +375,73 @@ fn build_async_context(baseline: StreamPosition) -> AsyncEnvelopeContext {
         UnixMillis::new(1_000),
     ))
     .expect("fuzz subscription issuance");
-    let authorized = block_on_ready(service.connect(
+    block_on_ready(service.connect(
         &trusted,
         issued.descriptor(),
         issued.transport_credential(),
         UnixMillis::new(1_100),
     ))
-    .expect("fuzz subscription authorization");
-    let membership = async_membership_registry();
-    AsyncEnvelopeContext::from_authorized(
+    .expect("fuzz subscription authorization")
+}
+
+pub(crate) fn async_transport_setup(selector: u8) -> FuzzTransportSetup {
+    let baseline = match selector % 4 {
+        0 => StreamPosition::new(StreamEpoch::new(0), StreamSequence::new(0)),
+        1 => StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(10)),
+        2 => StreamPosition::new(
+            StreamEpoch::new(9),
+            StreamSequence::new(u64::MAX - 1),
+        ),
+        _ => StreamPosition::new(StreamEpoch::new(9), StreamSequence::new(u64::MAX)),
+    };
+    let authorized = build_authorized_subscription(baseline);
+    let scope_facts = HostScopeFacts::new(
+        ScopeFingerprint::from_bytes(&[0x65; 32]).expect("static scope"),
+        None,
+        None,
+        None,
+    );
+    let document_scope = DocumentAuthorizationScope::derive(
+        &scope_facts,
+        &ContentDigest::from_bytes(&[0x66; 32]).expect("static transport policy"),
+    )
+    .expect("static document scope");
+    let modes = SubscriptionModes::new(vec![SubscriptionMode::ServerSentEvents])
+        .expect("static modes");
+    let registry = Arc::new(FuzzTransportRegistry {
+        subscription: async_subscription_id(),
+        stream: async_stream(),
+        topics: authorized.verified().claims().topics().clone(),
+        events: authorized.verified().claims().events().clone(),
+        signals: BoundedPresentationSignalContracts::new(Vec::new()).expect("signals"),
+        modes: modes.clone(),
+        memo: authorized.verified().claims().authorization_memo().clone(),
+        document_scope: document_scope.clone(),
+    });
+    let origin = VerifiedOrigin::parse("https://fuzz.test").expect("static origin");
+    let request = AuthorizedTransportSubscription::new(
         &authorized,
         async_subscription_id(),
-        &membership,
+        registry.as_ref(),
+        origin.clone(),
+        document_scope.clone(),
+        modes,
+        registry.clone(),
+        UnixMillis::new(1_100),
     )
-    .expect("active fuzz membership")
+    .expect("static transport request");
+    let document = DocumentTransportSession::new(
+        origin,
+        DocumentTransportKind::ServerSentEvents,
+        DocumentTransportHandle::from_bytes(&[0x67; 16]).expect("static handle"),
+        DocumentTransportLimits::new(1).expect("one membership"),
+        document_scope,
+    );
+    FuzzTransportSetup {
+        document,
+        request,
+        registry,
+    }
 }
 
 fn async_event_metadata() -> EventMetadata {

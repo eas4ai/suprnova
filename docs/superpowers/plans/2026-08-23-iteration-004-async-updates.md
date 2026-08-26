@@ -438,6 +438,14 @@
   detachment let exact or rotated same-ID admission create another sequence lane
   while the queued predecessor retained the first. Exact pressure/replay and
   pending-terminal admission tests failed before correction.
+- [x] Record the independent-review correction REDs: raw Task 3 admission and
+  sequence mutation remained public, replay currentness was validated through
+  multiple host callbacks, replay accepted lifecycle completion, and trusted
+  fanout proof stopped before registered dispatch. Further REDs covered missing
+  document-owned authoritative refresh, panic-time pulled-candidate loss,
+  terminal provider reads, false degradation for a redundant tail,
+  pool-global recovery idleness, untracked degraded replay rejection, and
+  lock-callback/classifier hazards in the shared resource queue.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -514,6 +522,20 @@
   sole lane; after delivery, re-admission creates exactly one fresh lane. Four
   finite cause classes cap retained tracker state at four times the existing
   document membership ceiling; saturation remains conservatively degraded.
+- [x] Close the public and reentrant authority surface. The bounded document
+  owner alone performs raw admission, sequence mutation, replay, and recovery.
+  Replay obtains one atomic current-membership snapshot, excludes `Complete`,
+  and final-validates each member immediately before registered dispatch while
+  preserving a truthful committed prefix. Dispatch consumes a
+  private-construction resolved-delivery capability with exact trusted target
+  scope/count and policy limit. RAII protects provider candidates extracted
+  across panicking callbacks, closed pressure performs no further source read,
+  redundant tails do not invent loss, document-local activity gates recovery,
+  and invalid replay has a typed non-continuity error unless an obligation
+  already exists. Shared conditional queue operations remain crate-private and
+  classify each member exactly once. The unreachable same-epoch sequence-
+  overflow branch is removed; `u64::MAX` equal/lower positions are duplicates
+  and a newer epoch uses document-owned authoritative refresh.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

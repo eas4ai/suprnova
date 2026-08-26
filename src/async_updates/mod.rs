@@ -11,6 +11,9 @@ mod telemetry;
 mod transport;
 mod websocket;
 
+#[cfg(test)]
+mod sequence_tests;
+
 pub use authorization::{
     AuthoritativeStreamPosition, AuthorizedSubscription, CurrentSubscriptionRegistration,
     IssuedSubscription, SubscriptionAuthorizationDecision, SubscriptionAuthorizationOperation,
@@ -28,15 +31,18 @@ pub use backpressure::{
     AsyncBackpressureError, AsyncCloseCode, AsyncPolicy, BufferDisposition, MAX_ASYNC_BUFFER_BYTES,
     MAX_ASYNC_BUFFER_EVENTS, MAX_ASYNC_PAYLOAD_BYTES,
 };
+pub(crate) use envelope::ActiveAsyncMembershipGuard;
 pub use envelope::{
-    ActiveAsyncMembershipGuard, AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext,
-    AsyncEnvelopeError, AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort,
-    AsyncMembershipRequest, AsyncMembershipValidation, AsyncPayload,
-    BoundedPresentationSignalContracts, CompletionReason, Heartbeat, MAX_ASYNC_ENVELOPE_ENTRIES,
-    PresentationSignalContract, RegisteredBrowserEvent, RegisteredPresentationSignal,
-    RegisteredRefresh, ResolvedEventFanout, SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode,
-    SubscriptionId, decode_async_envelope, encode_async_envelope,
+    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEnvelopeError,
+    AsyncEnvelopeErrorKind, AsyncMembershipRegistryPort, AsyncMembershipRequest,
+    AsyncMembershipValidation, AsyncPayload, AsyncReplayMembershipRequest,
+    AsyncReplayMembershipValidation, BoundedPresentationSignalContracts, CompletionReason,
+    Heartbeat, MAX_ASYNC_ENVELOPE_ENTRIES, PresentationSignalContract, RegisteredBrowserEvent,
+    RegisteredPresentationSignal, RegisteredRefresh, ResolvedEventFanout,
+    SUPPORTED_ASYNC_PROTOCOL_VERSIONS, StreamErrorCode, SubscriptionId, decode_async_envelope,
+    encode_async_envelope,
 };
+pub(crate) use sequence::SequenceMachine;
 
 pub use metadata::{
     BoundedEventNames, BoundedTargets, BoundedTopics, BrowserPayloadSchema, EventCyclePolicy,
@@ -49,8 +55,8 @@ pub use sequence::{
     AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
     AsyncDispatchErrorKind, AsyncEnvelopeDispatchPort, BaselineDisposition,
     MAX_REPLAY_TRANSCRIPT_ENVELOPES, ReplayDispatchError, ReplayDispatchOutcome,
-    SequenceDegradation, SequenceDisposition, SequenceError, SequenceErrorKind, SequenceMachine,
-    SequenceState,
+    ResolvedAsyncDelivery, SequenceDegradation, SequenceDisposition, SequenceError,
+    SequenceErrorKind, SequenceState,
 };
 pub use sse::{SseEncoder, SseEvent, SseMembershipControl, SseResponseContract};
 pub use subscription::{
