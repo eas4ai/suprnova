@@ -442,10 +442,20 @@ queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
 bytes for each core and async variant without unsupported absolute ceilings and
 enforces 20 KiB for each upload variant. Async variants compare against
 `browser/benchmarks/baselines/artifact-size-v1.json`: its closed schema records
-the Task 6 source commit, decision, rationale, deterministic build/compression
-method, and 16,356-byte ESM plus 14,155-byte classic measurements. More than 15
-percent unreviewed growth fails; a candidate cannot supply, overwrite, or silently
-self-baseline the reviewed file. The binding browser benchmark independently
+an append-only reviewed history, deterministic build/compression method, and
+exact role hashes and measurements. Its immutable Task 6 anchor retains source
+commit `499eda2287f17d6a46c9b8c306df5791b1f671d8`, decision, rationale,
+16,356-byte ESM, and 14,155-byte classic measurements. The explicit Task 7
+quality-review entry records stable decision provenance, rationale,
+18,638-byte ESM with SHA-256
+`244da05005037fe07041e1fccd6f11719559d203f3616187989c922407ba3bab`, and
+16,420-byte classic with SHA-256
+`b14898ef30df20f9e7b0e1eacf2081c370020e96875e3679f4ff639300e1c4cf`.
+The ordinary gate admits Task 7's 18,638-byte ESM and 16,420-byte classic as
+the newest explicitly reviewed baseline, not as an automatic self-baseline.
+More than 15 percent growth from the newest reviewed entry fails as unreviewed
+drift; a candidate cannot supply, overwrite, delete, collapse, or silently
+self-baseline the reviewed history. The binding browser benchmark independently
 compares a separately recorded current core candidate with its prior performance
 baseline and refuses a self-comparison path. Runtime workloads enforce the
 formula, count, and latency caps in the overview and the existing 15-percent
@@ -470,12 +480,18 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Appended the independently reviewed Task 7 artifact baseline:
+  18,638-byte ESM and 16,420-byte classic, each bound to its exact SHA-256 and
+  the stable `iteration-004-task-7-quality-review` decision. The schema retains
+  and anchors Task 6 unchanged, rejects deletion, overwrite, history collapse,
+  missing provenance, or hash mismatch, and continues the 15-percent alert from
+  the newest reviewed entry. Production-build hooks use isolated output roots
+  and an explicit 30-second timeout; shared-`dist/` tests use the cross-process
+  lock.
 - 2026-08-26 -- Replaced the async artifacts' arbitrary 16 KiB total-size cliff
   with deterministic exact-byte reporting and a closed-provenance Task 6 size
-  baseline. The ordinary gate admits Task 7's 17,987-byte ESM and 15,773-byte
-  classic artifacts because their 9.97- and 11.43-percent growth remains within
-  the reviewed 15-percent drift threshold. Missing, malformed, self-derived, or
-  greater-than-threshold baselines fail rather than silently rebaseline.
+  baseline. Missing, malformed, self-derived, or greater-than-threshold
+  unreviewed candidates fail rather than silently rebaseline.
 - 2026-08-25 -- Restored the prior approved browser benchmark as binding
   provenance and prohibited self-baselining. Current artifacts write only an
   ignored candidate result; the binding gate compares candidate versus prior,

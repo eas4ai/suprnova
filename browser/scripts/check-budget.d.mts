@@ -3,6 +3,7 @@ export interface ArtifactBudgetInput {
   readonly file: string;
   readonly compatibleCore: string;
   readonly brotliBytes: number;
+  readonly sha256?: string;
 }
 
 export interface ArtifactBudgetEvaluation {
@@ -12,6 +13,7 @@ export interface ArtifactBudgetEvaluation {
 
 export function evaluateArtifactBudgets(
   assets: readonly ArtifactBudgetInput[],
+  baselineValue: unknown,
 ): ArtifactBudgetEvaluation;
 
 export function evaluateBindingEvidence(

@@ -107,6 +107,42 @@ type TestFreshRenderEnqueue = (
   completion: TestFreshRenderCallback,
 ) => "queued" | "coalesced" | "retired";
 
+function pollOwnership(
+  root: Element,
+  modifiers: readonly string[],
+): RuntimeFeatureDirectiveOwnership {
+  return Object.freeze({
+    attributeName: `live:poll${modifiers.map((modifier) => `.${modifier}`).join("")}`,
+    directive: Object.freeze({
+      capability: "async@1" as const,
+      modifiers: Object.freeze([...modifiers]),
+      name: "poll",
+      ok: true as const,
+      role: null,
+      value: "",
+    }),
+    element: root,
+  });
+}
+
+function streamOwnership(
+  root: Element,
+  modifiers: readonly string[],
+): RuntimeFeatureDirectiveOwnership {
+  return Object.freeze({
+    attributeName: `live:stream${modifiers.map((modifier) => `.${modifier}`).join("")}`,
+    directive: Object.freeze({
+      capability: "async@1" as const,
+      modifiers: Object.freeze([...modifiers]),
+      name: "stream",
+      ok: true as const,
+      role: null,
+      value: "orders",
+    }),
+    element: root,
+  });
+}
+
 function fixture(
   currentPolicy: PollPolicy = policy(),
   random = 0,
@@ -217,25 +253,45 @@ describe("controlled polling timer", () => {
     }).toThrow("async_randomness_invalid");
   });
 
-  it("marks hidden or offline work stale and resumes without a catch-up burst", () => {
+  it("pauses hidden or offline work until an eligibility event reschedules without catch-up", () => {
     const current = fixture();
     current.environment.visible(false);
     current.timer.start();
-    current.clock.advanceToNextTimer();
     expect(current.timer.status()).toBe("degraded");
+    expect(current.clock.pending.size).toBe(0);
+    current.clock.advance(60_000);
     expect(current.enqueueFreshRender).not.toHaveBeenCalled();
 
     current.environment.visible(true);
-    current.environment.online(false);
-    current.clock.advanceToNextTimer();
-    expect(current.timer.status()).toBe("offline");
-    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
-
-    current.environment.online(true);
-    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
     expect(current.clock.pending.size).toBe(1);
     current.clock.advanceToNextTimer();
     expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+
+    current.environment.online(false);
+    expect(current.timer.status()).toBe("offline");
+    expect(current.clock.pending.size).toBe(0);
+    current.clock.advance(60_000);
+    expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+
+    current.environment.online(true);
+    expect(current.enqueueFreshRender).toHaveBeenCalledOnce();
+    expect(current.clock.pending.size).toBe(1);
+    current.clock.advanceToNextTimer();
+    expect(current.enqueueFreshRender).toHaveBeenCalledTimes(2);
+  });
+
+  it("derives initial offline status before observation and owns no ineligible timer", () => {
+    const states: string[] = [];
+    const current = fixture(policy(), 0, undefined, (state) => states.push(state));
+    current.environment.online(false);
+
+    current.timer.start();
+
+    expect(current.timer.status()).toBe("offline");
+    expect(states).toEqual(["offline"]);
+    expect(current.clock.pending.size).toBe(0);
+    current.clock.advance(300_000);
+    expect(current.enqueueFreshRender).not.toHaveBeenCalled();
   });
 
   it("keeps offline presentation authoritative when an admitted refresh fails", () => {
@@ -253,7 +309,7 @@ describe("controlled polling timer", () => {
     completions[0]?.("failed");
 
     expect(current.timer.status()).toBe("offline");
-    expect(current.clock.pending.size).toBe(1);
+    expect(current.clock.pending.size).toBe(0);
   });
 
   it("continues while hidden only under the always policy", () => {
@@ -410,6 +466,44 @@ describe("controlled polling timer", () => {
     expect(new Set(due).size).toBe(100);
     for (const timer of timers) timer.dispose();
   });
+
+  it("keeps 100 offline and hidden islands event-driven at randomness boundaries", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const refreshes = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completion("succeeded");
+      return "queued";
+    });
+    environment.online(false);
+    environment.visible(false);
+    const timers = Array.from(
+      { length: 100 },
+      (_, index) =>
+        new PollTimer({
+          enqueueFreshRender: refreshes,
+          environment,
+          policy: policy({ intervalMs: 5_000, jitterRatio: 0.2 }),
+          randomness: { number: () => (index < 50 ? 0 : 0.999_999) },
+          timers: clock,
+        }),
+    );
+
+    for (const timer of timers) timer.start();
+    expect(clock.pending.size).toBe(0);
+    clock.advance(3_600_000);
+    expect(refreshes).not.toHaveBeenCalled();
+
+    environment.online(true);
+    expect(clock.pending.size).toBe(0);
+    environment.visible(true);
+    expect(refreshes).not.toHaveBeenCalled();
+    expect(clock.pending.size).toBe(100);
+    const due = [...clock.pending.values()].map(({ due }) => due);
+    expect(new Set(due).size).toBe(2);
+    clock.advance(5_000);
+    expect(refreshes).toHaveBeenCalledTimes(50);
+    for (const timer of timers) timer.dispose();
+  });
 });
 
 describe("fresh-render overlap remains owned by the island scheduler", () => {
@@ -554,5 +648,174 @@ describe("poll-only feature integration", () => {
           },
         ),
     ).toThrow("async_feature_configuration_invalid");
+  });
+
+  it("activates polling added by a committed morph on an initially directive-free island", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const root = Object.freeze({}) as Element;
+    const refresh = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completion("succeeded");
+      return "queued";
+    });
+    let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([]);
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        clock: { now: () => 0 },
+        pollEnvironment: environment,
+        randomness: { number: () => 0 },
+        timers: clock,
+      },
+    );
+    const controller = owner.connectIsland({
+      authorizeRegisteredEvents: vi.fn(),
+      dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.poll",
+        documentKey: "document-morph-add",
+        slot: "poll-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: vi.fn(() => "accepted" as const),
+      queryDirectiveOwnership: () => ownerships,
+      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    });
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pollOwnership(root, ["5s"])]);
+    controller.afterMorph?.();
+    clock.advance(5_000);
+
+    expect(refresh).toHaveBeenCalledOnce();
+    controller.dispose();
+    owner.dispose();
+  });
+
+  it("keeps aborted morph policy inert and atomically replaces a committed interval", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const root = Object.freeze({}) as Element;
+    const refresh = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completion("succeeded");
+      return "queued";
+    });
+    let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([
+      pollOwnership(root, ["5s"]),
+    ]);
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        clock: { now: () => 0 },
+        pollEnvironment: environment,
+        randomness: { number: () => 0 },
+        timers: clock,
+      },
+    );
+    const controller = owner.connectIsland({
+      authorizeRegisteredEvents: vi.fn(),
+      dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.poll",
+        documentKey: "document-morph-interval",
+        slot: "poll-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: vi.fn(() => "accepted" as const),
+      queryDirectiveOwnership: () => ownerships,
+      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    });
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pollOwnership(root, ["10s"])]);
+    controller.abortMorph?.();
+    clock.advance(5_000);
+    expect(refresh).toHaveBeenCalledOnce();
+
+    controller.beforeMorph?.();
+    controller.afterMorph?.();
+    expect(clock.delays()).toEqual([10_000]);
+    clock.advance(5_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    clock.advance(5_000);
+    expect(refresh).toHaveBeenCalledTimes(2);
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pollOwnership(root, ["immediate", "10s"])]);
+    controller.afterMorph?.();
+    expect(refresh).toHaveBeenCalledTimes(3);
+
+    environment.visible(false);
+    expect(clock.pending.size).toBe(0);
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pollOwnership(root, ["always", "10s"])]);
+    controller.afterMorph?.();
+    expect(clock.delays()).toEqual([10_000]);
+    clock.advance(10_000);
+    expect(refresh).toHaveBeenCalledTimes(4);
+    controller.dispose();
+    owner.dispose();
+  });
+
+  it("retires removed polling, fences late completion, and fails a morph conflict closed", () => {
+    const clock = new ControlledClock();
+    const environment = new Environment();
+    const root = Object.freeze({}) as Element;
+    const diagnose = vi.fn();
+    const completions: TestFreshRenderCallback[] = [];
+    const refresh = vi.fn<TestFreshRenderEnqueue>((_reason, completion) => {
+      completions.push(completion);
+      return "queued";
+    });
+    let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([
+      pollOwnership(root, ["immediate", "5s"]),
+    ]);
+    const owner = new AsyncDocumentOwner(
+      { diagnose, onDispose: vi.fn() },
+      {
+        clock: { now: () => 0 },
+        pollEnvironment: environment,
+        randomness: { number: () => 0 },
+        timers: clock,
+      },
+    );
+    const controller = owner.connectIsland({
+      authorizeRegisteredEvents: vi.fn(),
+      dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.poll",
+        documentKey: "document-morph-retire",
+        slot: "poll-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: vi.fn(() => "accepted" as const),
+      queryDirectiveOwnership: () => ownerships,
+      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    });
+    expect(refresh).toHaveBeenCalledOnce();
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([]);
+    controller.afterMorph?.();
+    completions[0]?.("succeeded");
+    clock.advance(60_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(clock.pending.size).toBe(0);
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([streamOwnership(root, ["push-only"]), pollOwnership(root, ["5s"])]);
+    controller.afterMorph?.();
+    clock.advance(60_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(clock.pending.size).toBe(0);
+    expect(diagnose).toHaveBeenCalledWith("operation_rejected");
+    controller.dispose();
+    owner.dispose();
   });
 });

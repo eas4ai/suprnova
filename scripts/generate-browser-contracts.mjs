@@ -57,15 +57,14 @@ const MODIFIER_GROUPS = [
   "navigation",
 ];
 const MAX_MODIFIER_SEGMENTS = 3;
-const FRESHNESS_COMBINATIONS = [
-  [false, "absent", "none"],
-  [true, "absent", "poll_only"],
-  [false, "default", "hybrid_descriptor"],
-  [true, "default", "hybrid_poll_override"],
-  [false, "hybrid", "hybrid_descriptor"],
-  [true, "hybrid", "hybrid_poll_override"],
-  [false, "push-only", "push_only"],
-  [true, "push-only", "directive_conflict"],
+const FRESHNESS_STREAM_MODES = ["absent", "default", "hybrid", "push-only"];
+const FRESHNESS_RESULTS = [
+  "none",
+  "poll_only",
+  "hybrid_descriptor",
+  "hybrid_poll_override",
+  "push_only",
+  "directive_conflict",
 ];
 const VALUE_GRAMMAR = {
   token: {
@@ -222,7 +221,8 @@ function validateModifierGroups(grammar) {
 
 export function loadFreshnessCombinations(grammar) {
   const entries = grammar["freshness_combinations"];
-  if (!Array.isArray(entries) || entries.length !== FRESHNESS_COMBINATIONS.length) {
+  const expectedCount = FRESHNESS_STREAM_MODES.length * 2;
+  if (!Array.isArray(entries) || entries.length !== expectedCount) {
     throw new TypeError("invalid_freshness_combinations");
   }
   const combinations = entries.map((entry, index) => {
@@ -232,16 +232,48 @@ export function loadFreshnessCombinations(grammar) {
       ["poll", "stream", "result"],
       `freshness_combination_${String(index)}`,
     );
-    return [
-      combination["poll"],
-      string(combination["stream"], "freshness_stream"),
-      string(combination["result"], "freshness_result"),
-    ];
+    const poll = combination["poll"];
+    const stream = string(combination["stream"], "freshness_stream");
+    const result = string(combination["result"], "freshness_result");
+    if (
+      typeof poll !== "boolean" ||
+      !FRESHNESS_STREAM_MODES.includes(stream) ||
+      !FRESHNESS_RESULTS.includes(result) ||
+      !validFreshnessResult(poll, stream, result)
+    ) {
+      throw new TypeError("invalid_freshness_combinations");
+    }
+    return [poll, stream, result];
   });
-  if (JSON.stringify(combinations) !== JSON.stringify(FRESHNESS_COMBINATIONS)) {
+  const keys = combinations.map(
+    ([poll, stream]) => `${String(poll)}:${stream}`,
+  );
+  const expectedKeys = FRESHNESS_STREAM_MODES.flatMap((stream) => [
+    `false:${stream}`,
+    `true:${stream}`,
+  ]);
+  if (
+    new Set(keys).size !== expectedCount ||
+    expectedKeys.some((key) => !keys.includes(key))
+  ) {
     throw new TypeError("invalid_freshness_combinations");
   }
   return combinations;
+}
+
+function validFreshnessResult(poll, stream, result) {
+  if (result === "directive_conflict") return poll || stream !== "absent";
+  if (result === "none") return !poll && stream === "absent";
+  if (result === "poll_only") return poll && stream === "absent";
+  if (result === "push_only") return !poll && stream === "push-only";
+  if (result === "hybrid_descriptor") {
+    return !poll && (stream === "default" || stream === "hybrid");
+  }
+  return (
+    result === "hybrid_poll_override" &&
+    poll &&
+    (stream === "default" || stream === "hybrid")
+  );
 }
 
 function variant(value) {
@@ -704,7 +736,7 @@ pub fn is_reserved_directive(name: &str) -> bool {
 `;
 }
 
-function renderTypeScript(grammar, manifest, contracts) {
+export function renderTypeScript(grammar, manifest, contracts) {
   const syntax = object(grammar["syntax"], "syntax");
   const valueGrammar = object(syntax["value_grammar"], "value_grammar");
   const tokenGrammar = object(valueGrammar["token"], "value_grammar_token");

@@ -30,6 +30,23 @@ const ASYNC_ARTIFACTS = new Map([
   ["async-esm", "suprnova-live.async.esm.js"],
   ["async-classic", "suprnova-live.async.classic.js"],
 ]);
+const TASK6_REVIEW = Object.freeze({
+  decision: "iteration-004-task-6",
+  rationale:
+    "Last reviewed complete Task 6 deterministic production artifacts before polling implementation.",
+  recordedAt: "2026-08-26T06:27:18-04:00",
+  sourceCommit: "499eda2287f17d6a46c9b8c306df5791b1f671d8",
+});
+const TASK6_ROLES = Object.freeze({
+  "async-classic": Object.freeze({
+    artifact: "suprnova-live.async.classic.js",
+    brotliBytes: 14_155,
+  }),
+  "async-esm": Object.freeze({
+    artifact: "suprnova-live.async.esm.js",
+    brotliBytes: 16_356,
+  }),
+});
 
 function exactKeys(value, expected) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -41,38 +58,84 @@ export function validateArtifactSizeBaseline(value) {
   try {
     if (
       !exactKeys(value, [
+        "history",
         "maximumUnreviewedIncreaseBasisPoints",
         "methodology",
-        "review",
-        "roles",
         "schemaVersion",
       ]) ||
-      value.schemaVersion !== 1 ||
+      value.schemaVersion !== 2 ||
       value.maximumUnreviewedIncreaseBasisPoints !== 1_500 ||
       !exactKeys(value.methodology, ["buildCommand", "compression", "deterministic"]) ||
       value.methodology.buildCommand !== "npm run build" ||
       value.methodology.compression !== "brotli-quality-11" ||
       value.methodology.deterministic !== true ||
-      !exactKeys(value.review, ["decision", "rationale", "recordedAt", "sourceCommit"]) ||
-      !/^[a-z0-9][a-z0-9._-]{2,127}$/u.test(value.review.decision) ||
-      typeof value.review.rationale !== "string" ||
-      value.review.rationale.length < 20 ||
-      !Number.isFinite(Date.parse(value.review.recordedAt)) ||
-      !/^[0-9a-f]{40}$/u.test(value.review.sourceCommit) ||
-      !exactKeys(value.roles, ["async-classic", "async-esm"])
+      !Array.isArray(value.history) ||
+      value.history.length < 2 ||
+      value.history.length > 64
     ) {
       throw new Error("artifact_size_baseline_invalid");
     }
-    for (const [role, artifact] of ASYNC_ARTIFACTS) {
-      const record = value.roles[role];
+    const decisions = new Set();
+    let priorRecordedAt = Number.NEGATIVE_INFINITY;
+    for (const [index, entry] of value.history.entries()) {
+      if (!exactKeys(entry, ["review", "roles"])) {
+        throw new Error("artifact_size_baseline_invalid");
+      }
+      const { review, roles } = entry;
+      const commitReview = exactKeys(review, [
+        "decision",
+        "rationale",
+        "recordedAt",
+        "sourceCommit",
+      ]);
+      const decisionReview = exactKeys(review, [
+        "decision",
+        "rationale",
+        "recordedAt",
+        "sourceDecision",
+      ]);
+      const recordedAt = Date.parse(review.recordedAt);
       if (
-        !exactKeys(record, ["artifact", "brotliBytes"]) ||
-        record.artifact !== artifact ||
-        !Number.isSafeInteger(record.brotliBytes) ||
-        record.brotliBytes <= 0
+        (!commitReview && !decisionReview) ||
+        !/^[a-z0-9][a-z0-9._-]{2,127}$/u.test(review.decision) ||
+        decisions.has(review.decision) ||
+        typeof review.rationale !== "string" ||
+        review.rationale.length < 20 ||
+        !Number.isFinite(recordedAt) ||
+        recordedAt <= priorRecordedAt ||
+        (commitReview && !/^[0-9a-f]{40}$/u.test(review.sourceCommit)) ||
+        (decisionReview && review.sourceDecision !== review.decision) ||
+        !exactKeys(roles, ["async-classic", "async-esm"])
       ) {
         throw new Error("artifact_size_baseline_invalid");
       }
+      decisions.add(review.decision);
+      priorRecordedAt = recordedAt;
+      for (const [role, artifact] of ASYNC_ARTIFACTS) {
+        const record = roles[role];
+        const expectedKeys =
+          index === 0 ? ["artifact", "brotliBytes"] : ["artifact", "brotliBytes", "sha256"];
+        if (
+          !exactKeys(record, expectedKeys) ||
+          record.artifact !== artifact ||
+          !Number.isSafeInteger(record.brotliBytes) ||
+          record.brotliBytes <= 0 ||
+          (index > 0 && !/^[0-9a-f]{64}$/u.test(record.sha256))
+        ) {
+          throw new Error("artifact_size_baseline_invalid");
+        }
+      }
+    }
+    const initial = value.history[0];
+    if (
+      Object.keys(TASK6_REVIEW).some((key) => initial.review[key] !== TASK6_REVIEW[key]) ||
+      [...ASYNC_ARTIFACTS.keys()].some(
+        (role) =>
+          initial.roles[role].artifact !== TASK6_ROLES[role].artifact ||
+          initial.roles[role].brotliBytes !== TASK6_ROLES[role].brotliBytes,
+      )
+    ) {
+      throw new Error("artifact_size_baseline_invalid");
     }
     return Object.freeze(value);
   } catch {
@@ -85,6 +148,8 @@ export function evaluateArtifactBudgets(assets, baselineValue) {
     throw new Error("artifact_size_baseline_missing");
   }
   const baseline = validateArtifactSizeBaseline(baselineValue);
+  const reviewedEntry = baseline.history.at(-1);
+  if (reviewedEntry === undefined) throw new Error("artifact_size_baseline_invalid");
   const byRole = new Map();
   const duplicateRoles = new Set();
   const unknownRoles = new Set();
@@ -115,7 +180,7 @@ export function evaluateArtifactBudgets(assets, baselineValue) {
   for (const [role, ceiling] of ROLE_CEILINGS) {
     const asset = byRole.get(role);
     const bytes = asset?.brotliBytes;
-    const reviewed = ASYNC_ARTIFACTS.has(role) ? baseline.roles[role] : undefined;
+    const reviewed = ASYNC_ARTIFACTS.has(role) ? reviewedEntry.roles[role] : undefined;
     const increase =
       reviewed === undefined || !Number.isSafeInteger(bytes) || bytes <= reviewed.brotliBytes
         ? 0
@@ -142,6 +207,9 @@ export function evaluateArtifactBudgets(assets, baselineValue) {
     }
     if (asset !== undefined && reviewed !== undefined && asset.file !== reviewed.artifact) {
       issues.push(`artifact_budget:baseline_artifact:${role}`);
+    }
+    if (asset !== undefined && reviewed?.sha256 !== undefined && asset.sha256 !== reviewed.sha256) {
+      issues.push(`artifact_budget:baseline_hash:${role}`);
     }
   }
   return Object.freeze({ lines: Object.freeze(lines), issues: Object.freeze(issues) });
@@ -240,6 +308,7 @@ async function checkBudgets(release, binding) {
       brotliBytes: brotliCompressSync(content, {
         params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
       }).byteLength,
+      sha256: createHash("sha256").update(content).digest("hex"),
     });
   }
   const artifactBudgets = evaluateArtifactBudgets(measured, artifactSizeBaseline);

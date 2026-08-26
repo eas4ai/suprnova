@@ -140,7 +140,7 @@ export class PollTimer {
   #policy: PollPolicy;
   #requestPending = false;
   #started = false;
-  #state: PollStatus = "degraded";
+  #state: PollStatus;
   #suspended = false;
   #continuityCurrent = false;
 
@@ -151,6 +151,7 @@ export class PollTimer {
     this.#observe = options.observe;
     this.#policy = options.policy;
     this.#randomness = options.randomness;
+    this.#state = this.#freshnessState();
     this.#timers = options.timers;
   }
 
@@ -160,10 +161,11 @@ export class PollTimer {
     this.#environmentDisposer = this.#environment.subscribe(() => {
       this.#environmentChanged();
     });
+    this.#state = this.#freshnessState();
     this.#emitState();
     if (this.#policy.mode === "push_only") return;
     if (this.#policy.initial === "immediate" && this.#eligible()) this.#tick();
-    else this.#arm(false);
+    else if (this.#eligible()) this.#arm(false);
   }
 
   status(): PollStatus {
@@ -176,20 +178,36 @@ export class PollTimer {
     if (this.#continuityCurrent) {
       this.#clear();
       this.#fenceRequest();
-      this.#setState("current");
+      this.#setState(this.#freshnessState());
       return;
     }
-    this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
-    if (this.#policy.mode === "hybrid" && this.#started && !this.#suspended) this.#arm(false);
+    this.#setState(this.#freshnessState());
+    if (this.#policy.mode === "hybrid" && this.#started && !this.#suspended && this.#eligible()) {
+      this.#arm(false);
+    }
   }
 
-  updatePolicy(policy: PollPolicy): void {
+  updatePolicy(policy: PollPolicy, applyInitial = false): void {
     if (!validPolicy(policy)) throw new Error("poll_policy_invalid");
     if (this.#state === "closed") return;
+    const current = this.#policy;
+    if (
+      current.initial === policy.initial &&
+      current.intervalMs === policy.intervalMs &&
+      current.jitterRatio === policy.jitterRatio &&
+      current.mode === policy.mode &&
+      current.visibility === policy.visibility
+    ) {
+      return;
+    }
     this.#policy = policy;
     this.#clear();
     this.#fenceRequest();
-    if (this.#started && !this.#suspended && this.#shouldPoll()) this.#arm(false);
+    this.#setState(this.#freshnessState());
+    if (this.#started && !this.#suspended && this.#shouldPoll() && this.#eligible()) {
+      if (applyInitial && this.#policy.initial === "immediate") this.#tick();
+      else this.#arm(false);
+    }
   }
 
   suspend(): void {
@@ -203,10 +221,8 @@ export class PollTimer {
   resume(): void {
     if (this.#state === "closed" || !this.#suspended) return;
     this.#suspended = false;
-    this.#setState(
-      this.#continuityCurrent ? "current" : this.#environment.isOnline() ? "degraded" : "offline",
-    );
-    if (this.#shouldPoll()) this.#arm(false);
+    this.#setState(this.#freshnessState());
+    if (this.#shouldPoll() && this.#eligible()) this.#arm(false);
   }
 
   dispose(): void {
@@ -219,14 +235,18 @@ export class PollTimer {
   }
 
   #environmentChanged(): void {
-    if (!this.#started || this.#suspended || this.#state === "closed" || !this.#shouldPoll()) {
+    if (!this.#started || this.#suspended || this.#state === "closed") {
       return;
     }
     this.#clear();
-    if (!this.#environment.isOnline()) this.#setState("offline");
-    else if (!this.#eligible()) this.#setState("degraded");
-    else if (this.#state === "offline") this.#setState("degraded");
-    this.#arm(!this.#eligible());
+    this.#setState(this.#freshnessState());
+    if (this.#state === "offline" || this.#state === "current") return;
+    if (this.#shouldPoll() && this.#eligible()) this.#arm(false);
+  }
+
+  #freshnessState(): PollStatus {
+    if (!this.#environment.isOnline()) return "offline";
+    return this.#continuityCurrent && this.#policy.mode !== "poll_only" ? "current" : "degraded";
   }
 
   #eligible(): boolean {
@@ -270,7 +290,8 @@ export class PollTimer {
       !this.#shouldPoll() ||
       this.#state === "closed" ||
       this.#suspended ||
-      this.#requestPending
+      this.#requestPending ||
+      !this.#eligible()
     ) {
       return;
     }
@@ -298,7 +319,6 @@ export class PollTimer {
     }
     if (!this.#eligible()) {
       this.#setState(this.#environment.isOnline() ? "degraded" : "offline");
-      this.#arm(true);
       return;
     }
     const generation = ++this.#generation;

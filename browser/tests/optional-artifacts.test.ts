@@ -17,6 +17,8 @@ import vm from "node:vm";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { PRODUCTION_BUILD_HOOK_TIMEOUT_MS } from "./support/production-build.js";
+
 const OUTPUT_NAMES = Object.freeze([
   "index.d.ts",
   "suprnova-live.assets.json",
@@ -95,7 +97,7 @@ beforeAll(async () => {
   temporaryRoot = await mkdtemp(join(tmpdir(), "suprnova-live-optional-assets-"));
   outputDirectory = join(temporaryRoot, "first");
   runBuild(outputDirectory);
-});
+}, PRODUCTION_BUILD_HOOK_TIMEOUT_MS);
 
 afterAll(async () => {
   if (temporaryRoot.length > 0) await rm(temporaryRoot, { recursive: true, force: true });
@@ -158,33 +160,35 @@ describe("role-typed optional production artifacts", () => {
     expect(declarations).toContain("export interface ClassicFeatureSurface");
   });
 
-  it("resolves exact core and optional types through real package exports", async () => {
-    const consumer = join(temporaryRoot, "type-consumer");
-    const installed = join(consumer, "node_modules", "@suprnova", "live");
-    await mkdir(join(installed, "dist"), { recursive: true });
-    await copyFile(new URL("../package.json", import.meta.url), join(installed, "package.json"));
-    await copyFile(join(outputDirectory, "index.d.ts"), join(installed, "dist", "index.d.ts"));
-    await writeFile(join(consumer, "package.json"), '{"type":"module"}\n', "utf8");
-    await writeFile(
-      join(consumer, "tsconfig.json"),
-      `${JSON.stringify({
-        compilerOptions: {
-          lib: ["ES2020", "DOM"],
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-          noEmit: true,
-          skipLibCheck: false,
-          strict: true,
-          target: "ES2020",
-          types: [],
-        },
-        files: ["consumer.ts"],
-      })}\n`,
-      "utf8",
-    );
-    await writeFile(
-      join(consumer, "consumer.ts"),
-      `import live, {
+  it(
+    "resolves exact core and optional types through real package exports",
+    async () => {
+      const consumer = join(temporaryRoot, "type-consumer");
+      const installed = join(consumer, "node_modules", "@suprnova", "live");
+      await mkdir(join(installed, "dist"), { recursive: true });
+      await copyFile(new URL("../package.json", import.meta.url), join(installed, "package.json"));
+      await copyFile(join(outputDirectory, "index.d.ts"), join(installed, "dist", "index.d.ts"));
+      await writeFile(join(consumer, "package.json"), '{"type":"module"}\n', "utf8");
+      await writeFile(
+        join(consumer, "tsconfig.json"),
+        `${JSON.stringify({
+          compilerOptions: {
+            lib: ["ES2020", "DOM"],
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            noEmit: true,
+            skipLibCheck: false,
+            strict: true,
+            target: "ES2020",
+            types: [],
+          },
+          files: ["consumer.ts"],
+        })}\n`,
+        "utf8",
+      );
+      await writeFile(
+        join(consumer, "consumer.ts"),
+        `import live, {
         boot,
         RUNTIME_SYMBOL,
         runtimeContractVersion,
@@ -404,22 +408,22 @@ describe("role-typed optional production artifacts", () => {
         rootTypeExports,
       ];
       `,
-      "utf8",
-    );
-    const allowed = spawnSync(
-      process.execPath,
-      [typeScript.pathname, "--project", "tsconfig.json"],
-      {
-        cwd: consumer,
-        encoding: "utf8",
-      },
-    );
-    expect(`${allowed.stdout}${allowed.stderr}`).toBe("");
-    expect(allowed.status).toBe(0);
+        "utf8",
+      );
+      const allowed = spawnSync(
+        process.execPath,
+        [typeScript.pathname, "--project", "tsconfig.json"],
+        {
+          cwd: consumer,
+          encoding: "utf8",
+        },
+      );
+      expect(`${allowed.stdout}${allowed.stderr}`).toBe("");
+      expect(allowed.status).toBe(0);
 
-    await writeFile(
-      join(consumer, "consumer.ts"),
-      `import type {
+      await writeFile(
+        join(consumer, "consumer.ts"),
+        `import type {
         DocumentTransportConnectRequest,
         DocumentTransportPort,
       } from "@suprnova/live/async";
@@ -437,21 +441,21 @@ describe("role-typed optional production artifacts", () => {
       };
       void [voidSubscribe, missingGeneration];
       `,
-      "utf8",
-    );
-    const invalidAsyncPort = spawnSync(
-      process.execPath,
-      [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
-      { cwd: consumer, encoding: "utf8" },
-    );
-    const invalidAsyncDiagnostics = `${invalidAsyncPort.stdout}${invalidAsyncPort.stderr}`;
-    expect(invalidAsyncPort.status).toBe(2);
-    expect(invalidAsyncDiagnostics).toContain("Type 'void' is not assignable");
-    expect(invalidAsyncDiagnostics).toContain("transportGeneration");
+        "utf8",
+      );
+      const invalidAsyncPort = spawnSync(
+        process.execPath,
+        [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
+        { cwd: consumer, encoding: "utf8" },
+      );
+      const invalidAsyncDiagnostics = `${invalidAsyncPort.stdout}${invalidAsyncPort.stderr}`;
+      expect(invalidAsyncPort.status).toBe(2);
+      expect(invalidAsyncDiagnostics).toContain("Type 'void' is not assignable");
+      expect(invalidAsyncDiagnostics).toContain("transportGeneration");
 
-    await writeFile(
-      join(consumer, "consumer.ts"),
-      `import uploadsDefault, { asyncFeature, boot } from "@suprnova/live/uploads";
+      await writeFile(
+        join(consumer, "consumer.ts"),
+        `import uploadsDefault, { asyncFeature, boot } from "@suprnova/live/uploads";
       import {
         uploadsFeature,
         type DiagnosticMode,
@@ -466,42 +470,44 @@ describe("role-typed optional production artifacts", () => {
       type Forbidden = DiagnosticMode | EffectRunStatus | IslandExtensionIdentity | JsonArray | JsonObject | RuntimeFeatureName;
       void [asyncFeature, boot, uploadsFeature, invalidCore, null as Forbidden | null];
       `,
-      "utf8",
-    );
-    const forbidden = spawnSync(
-      process.execPath,
-      [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
-      { cwd: consumer, encoding: "utf8" },
-    );
-    const diagnostics = `${forbidden.stdout}${forbidden.stderr}`;
-    expect(forbidden.status).toBe(2);
-    expect(diagnostics).toContain("has no exported member 'asyncFeature'");
-    expect(diagnostics).toContain("has no exported member 'boot'");
-    expect(diagnostics).toContain("has no exported member 'uploadsFeature'");
-    expect(diagnostics).toContain("has no exported member 'DiagnosticMode'");
-    expect(diagnostics).toContain("has no exported member 'EffectRunStatus'");
-    expect(diagnostics).toContain("has no exported member 'IslandExtensionIdentity'");
-    expect(diagnostics).toContain("has no exported member 'JsonArray'");
-    expect(diagnostics).toContain("has no exported member 'JsonObject'");
-    expect(diagnostics).toMatch(/has no exported member (?:named )?'RuntimeFeatureName'/u);
-    expect(diagnostics).toContain("is not assignable to type 'SuprnovaLivePublicApi'");
+        "utf8",
+      );
+      const forbidden = spawnSync(
+        process.execPath,
+        [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
+        { cwd: consumer, encoding: "utf8" },
+      );
+      const diagnostics = `${forbidden.stdout}${forbidden.stderr}`;
+      expect(forbidden.status).toBe(2);
+      expect(diagnostics).toContain("has no exported member 'asyncFeature'");
+      expect(diagnostics).toContain("has no exported member 'boot'");
+      expect(diagnostics).toContain("has no exported member 'uploadsFeature'");
+      expect(diagnostics).toContain("has no exported member 'DiagnosticMode'");
+      expect(diagnostics).toContain("has no exported member 'EffectRunStatus'");
+      expect(diagnostics).toContain("has no exported member 'IslandExtensionIdentity'");
+      expect(diagnostics).toContain("has no exported member 'JsonArray'");
+      expect(diagnostics).toContain("has no exported member 'JsonObject'");
+      expect(diagnostics).toMatch(/has no exported member (?:named )?'RuntimeFeatureName'/u);
+      expect(diagnostics).toContain("is not assignable to type 'SuprnovaLivePublicApi'");
 
-    await writeFile(
-      join(consumer, "consumer.ts"),
-      `import runtime, { boot, type RuntimeHandle } from "@suprnova/live/runtime";
+      await writeFile(
+        join(consumer, "consumer.ts"),
+        `import runtime, { boot, type RuntimeHandle } from "@suprnova/live/runtime";
       const handle = null as RuntimeHandle | null;
       void [runtime, boot, handle];
       `,
-      "utf8",
-    );
-    const runtimeOnly = spawnSync(
-      process.execPath,
-      [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
-      { cwd: consumer, encoding: "utf8" },
-    );
-    expect(`${runtimeOnly.stdout}${runtimeOnly.stderr}`).toBe("");
-    expect(runtimeOnly.status).toBe(0);
-  }, 15_000);
+        "utf8",
+      );
+      const runtimeOnly = spawnSync(
+        process.execPath,
+        [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
+        { cwd: consumer, encoding: "utf8" },
+      );
+      expect(`${runtimeOnly.stdout}${runtimeOnly.stderr}`).toBe("");
+      expect(runtimeOnly.status).toBe(0);
+    },
+    PRODUCTION_BUILD_HOOK_TIMEOUT_MS,
+  );
 
   it("keeps optional graphs out of core implementation and third-party runtime code", async () => {
     const entries = [

@@ -13,6 +13,9 @@ const validateV4Evolution =
 const partitionRuntimeContracts =
   generator.partitionRuntimeContracts ??
   (() => assert.fail("missing runtime contract partitioner"));
+const renderTypeScript =
+  generator.renderTypeScript ??
+  (() => assert.fail("missing TypeScript contract renderer"));
 
 const fixture = JSON.parse(
   await readFile(
@@ -204,31 +207,60 @@ test("schema 2 carries closed modifier-conflict groups", () => {
   );
 });
 
-test("schema 2 carries one closed generated freshness-combination table", () => {
-  assert.deepEqual(
-    fixture.freshness_combinations.map(
-      ({ poll, stream, result }) => [poll, stream, result],
-    ),
-    [
-      [false, "absent", "none"],
-      [true, "absent", "poll_only"],
-      [false, "default", "hybrid_descriptor"],
-      [true, "default", "hybrid_poll_override"],
-      [false, "hybrid", "hybrid_descriptor"],
-      [true, "hybrid", "hybrid_poll_override"],
-      [false, "push-only", "push_only"],
-      [true, "push-only", "directive_conflict"],
-    ],
+test("schema 2 emits fixture-owned freshness policy without a handwritten mapping", () => {
+  const policyChanged = changed((grammar) => {
+    const combination = grammar.freshness_combinations.find(
+      ({ poll, stream }) => poll === true && stream === "default",
+    );
+    combination.result = "directive_conflict";
+    grammar.freshness_combinations.reverse();
+  });
+
+  const rendered = renderTypeScript(
+    policyChanged,
+    "a".repeat(64),
+    loadContracts(policyChanged),
   );
-  assert.throws(
-    () =>
-      loadContracts(
-        changed((grammar) => {
-          grammar.freshness_combinations.pop();
-        }),
-      ),
-    /invalid_freshness_combinations/,
+
+  assert.match(rendered, /\[true, "default", "directive_conflict"\]/);
+  assert.ok(
+    rendered.indexOf('[true, "push-only", "directive_conflict"]') <
+      rendered.indexOf('[false, "absent", "none"]'),
   );
+});
+
+test("schema 2 structurally closes freshness coverage and legal result shapes", () => {
+  for (const mutate of [
+    (grammar) => grammar.freshness_combinations.pop(),
+    (grammar) => {
+      grammar.freshness_combinations[0] = structuredClone(
+        grammar.freshness_combinations[1],
+      );
+    },
+    (grammar) => {
+      grammar.freshness_combinations[0].poll = "false";
+    },
+    (grammar) => {
+      grammar.freshness_combinations[0].stream = "websocket";
+    },
+    (grammar) => {
+      grammar.freshness_combinations[0].result = "stale";
+    },
+    (grammar) => {
+      grammar.freshness_combinations[0].result = "poll_only";
+    },
+    (grammar) => {
+      const combination = grammar.freshness_combinations.find(
+        ({ poll, stream }) => poll === true && stream === "push-only",
+      );
+      combination.result = "hybrid_poll_override";
+    },
+  ]) {
+    assert.throws(
+      () => loadContracts(changed(mutate)),
+      /invalid_freshness_combinations/,
+    );
+  }
 });
 
 test("v4 evolution preserves every v3 contract and promotes only four reviewed names", () => {

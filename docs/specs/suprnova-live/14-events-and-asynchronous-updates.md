@@ -120,9 +120,10 @@ UX flow:
 ### Polling
 
 Applications shall be able to declare bounded polling for state that benefits
-from periodic refresh without a persistent connection. Polling shall pause or
-reduce work when hidden, offline, disconnected, or superseded by another update
-mechanism according to policy.
+from periodic refresh without a persistent connection. Polling shall pause when
+hidden, offline, disconnected, or superseded by another update mechanism
+according to policy. Hidden or offline polling owns no retry timer; the next
+eligible environment transition schedules normal jitter without catch-up work.
 
 Acceptance criteria:
 
@@ -133,6 +134,12 @@ Acceptance criteria:
   recovery, and application completion from that scheduler intent. Admission or
   coalescing alone never resets failure state.
 - Polling stops when its scope is removed or unauthorized.
+- Every async-enabled island, including one with no initial freshness directive,
+  owns the async lifecycle bridge. Only a committed morph rescans directives
+  owned by that island; an aborted or failed morph preserves the prior policy.
+  Removal retires its timer and pending completion, addition starts the resolved
+  policy, and interval, visibility, initial, or stream-mode changes replace the
+  prior generation atomically. Nested child-island directives remain child-owned.
 - Server cache and conditional mechanisms may avoid unchanged render work.
 - An application can expose stale/freshness status when polling is material.
 - Applications may select polling-only, push-only, or hybrid policy. Under the
@@ -154,8 +161,8 @@ UX flow:
 
 1. Poll interval elapses in an eligible document -> runtime requests the
    registered refresh under scheduling policy.
-2. Document hides or network fails -> polling pauses/backs off and resumes
-   without a request storm.
+2. Document hides or network fails -> polling pauses without an eligibility
+   retry timer and resumes with normal jitter, without a catch-up request storm.
 
 ### SSE/WebSocket typed event streams
 
@@ -512,6 +519,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Made freshness directives committed-morph lifecycle state for
+  every async-enabled island, including initially directive-free islands. Only
+  island-owned directives are rescanned after commit; removal, addition, and
+  policy changes generation-fence obsolete timers and completions. Hidden and
+  offline polling now pauses event-first with no eligibility retry timer and
+  resumes under normal jitter without catch-up work.
 - 2026-08-26 -- Hardened Task 7 around proof and completion truth: the generated
   v4 freshness table is now enforced by the real island-level Rust checker;
   replay/no-tail continuity is committed before an immediate hybrid timer;

@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
+import {
+  PRODUCTION_BUILD_HOOK_TIMEOUT_MS,
+  withProductionBuildLock,
+} from "./support/production-build.js";
+
 interface MatrixTarget {
   readonly id: string;
   readonly browserProduct: "chrome" | "edge" | "firefox" | "safari";
@@ -270,14 +275,16 @@ describe("actual-browser compatibility evidence", () => {
     });
   });
 
-  it("writes evidence only after every authenticated current-artifact case receipt", async () => {
-    const root = await mkdtemp(join(tmpdir(), "suprnova-live-adapter-"));
-    temporaryDirectories.push(root);
-    const results = join(root, "results");
-    const adapter = join(root, "adapter.mjs");
-    await writeFile(
-      adapter,
-      `export async function runCompatibility(input) {
+  it(
+    "writes evidence only after every authenticated current-artifact case receipt",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "suprnova-live-adapter-"));
+      temporaryDirectories.push(root);
+      const results = join(root, "results");
+      const adapter = join(root, "adapter.mjs");
+      await writeFile(
+        adapter,
+        `export async function runCompatibility(input) {
         return {
           attestation: "urn:suprnova-live:provider-attestation:verified",
           browserProduct: input.target.browserProduct,
@@ -290,38 +297,40 @@ describe("actual-browser compatibility evidence", () => {
           testRun: input.challenge,
         };
       }\n`,
-      "utf8",
-    );
-    const execution = spawnSync(
-      process.execPath,
-      [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
-      {
-        encoding: "utf8",
-        env: { ...process.env, BROWSER_PROVIDER_TOKEN: "SECRET_SENTINEL" },
-        timeout: 30_000,
-      },
-    );
-    expect(execution.status).toBe(0);
-    expect(execution.stdout).toContain("chrome-minimum-111");
-    expect(`${execution.stdout}${execution.stderr}`).not.toContain("SECRET_SENTINEL");
-    const evidence = await readFile(join(results, "chrome-minimum-111.json"), "utf8");
-    expect(evidence).not.toContain("SECRET_SENTINEL");
-    expect(Object.keys(JSON.parse(evidence) as object).sort()).toEqual([
-      "attestation",
-      "browserProduct",
-      "browserVersion",
-      "executedAt",
-      "fixtureManifestSha256",
-      "operatingSystem",
-      "provider",
-      "result",
-      "runtimeSha256",
-      "schemaVersion",
-    ]);
+        "utf8",
+      );
+      const execution = await withProductionBuildLock(() =>
+        spawnSync(
+          process.execPath,
+          [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
+          {
+            encoding: "utf8",
+            env: { ...process.env, BROWSER_PROVIDER_TOKEN: "SECRET_SENTINEL" },
+            timeout: 30_000,
+          },
+        ),
+      );
+      expect(execution.status).toBe(0);
+      expect(execution.stdout).toContain("chrome-minimum-111");
+      expect(`${execution.stdout}${execution.stderr}`).not.toContain("SECRET_SENTINEL");
+      const evidence = await readFile(join(results, "chrome-minimum-111.json"), "utf8");
+      expect(evidence).not.toContain("SECRET_SENTINEL");
+      expect(Object.keys(JSON.parse(evidence) as object).sort()).toEqual([
+        "attestation",
+        "browserProduct",
+        "browserVersion",
+        "executedAt",
+        "fixtureManifestSha256",
+        "operatingSystem",
+        "provider",
+        "result",
+        "runtimeSha256",
+        "schemaVersion",
+      ]);
 
-    await writeFile(
-      adapter,
-      `export async function runCompatibility(input) {
+      await writeFile(
+        adapter,
+        `export async function runCompatibility(input) {
         return {
           attestation: "urn:suprnova-live:provider-attestation:incomplete",
           browserProduct: input.target.browserProduct,
@@ -334,17 +343,21 @@ describe("actual-browser compatibility evidence", () => {
           testRun: input.challenge,
         };
       }\n`,
-      "utf8",
-    );
-    await unlink(join(results, "chrome-minimum-111.json"));
-    const incomplete = spawnSync(
-      process.execPath,
-      [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
-      { encoding: "utf8", timeout: 30_000 },
-    );
-    expect(incomplete.status).toBe(1);
-    await expect(readFile(join(results, "chrome-minimum-111.json"), "utf8")).rejects.toThrow(
-      /ENOENT/u,
-    );
-  }, 30_000);
+        "utf8",
+      );
+      await unlink(join(results, "chrome-minimum-111.json"));
+      const incomplete = await withProductionBuildLock(() =>
+        spawnSync(
+          process.execPath,
+          [RUNNER, "--target", "chrome-minimum-111", "--adapter", adapter, "--results", results],
+          { encoding: "utf8", timeout: 30_000 },
+        ),
+      );
+      expect(incomplete.status).toBe(1);
+      await expect(readFile(join(results, "chrome-minimum-111.json"), "utf8")).rejects.toThrow(
+        /ENOENT/u,
+      );
+    },
+    PRODUCTION_BUILD_HOOK_TIMEOUT_MS * 2,
+  );
 });

@@ -208,11 +208,13 @@ iteration must do that explicitly.
   Budget revision and implementation optimization are separate changes unless
   the developer explicitly approves them together.
 - An artifact with no absolute transfer ceiling still has mechanical drift
-  control. Its reviewed artifact-size baseline uses a closed version-controlled
-  schema with source commit, decision, rationale, and deterministic measurement
-  method; the current candidate is never an implicit or automatically written
-  baseline. More than the approved drift threshold requires an explicit reviewed
-  baseline decision in the same coherent change.
+  control. Its reviewed artifact-size baseline uses a closed, append-only,
+  version-controlled history with source commit or stable decision provenance,
+  artifact hashes, decision, rationale, and deterministic measurement method.
+  The immutable Task 6 anchor cannot be overwritten, deleted, or collapsed, and
+  the current candidate is never an implicit or automatically written baseline.
+  More than the approved drift threshold requires an explicit reviewed baseline
+  decision in the same coherent change.
 
 ### Testing strategy
 
@@ -228,6 +230,11 @@ iteration must do that explicitly.
 - Browser tests own DOM identity, forms, selection, IME, focus, controllers,
   signals, transitions, uploads, offline/retry, history, bfcache, CSP,
   accessibility, and old/new runtime compatibility.
+- Production-build test hooks declare a 30-second timeout and build into unique
+  temporary output roots. Tests that must mutate the shared deterministic
+  `dist/` set instead share one cross-process production-build lock. Other tests
+  keep their normal timeout; concurrent processes may not compare half-built
+  artifacts.
 - Concurrency tests use deterministic barriers, injected clocks, and controlled
   providers rather than sleep-based probability.
 - Every defect receives a failing regression test at the lowest layer that can
@@ -509,6 +516,14 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Advanced the async artifact baseline through an explicit
+  independent Task 7 review. The closed schema now retains append-only Task 6
+  and Task 7 entries, anchors Task 6 against overwrite/deletion, binds later
+  entries to exact artifact hashes plus commit or stable-decision provenance,
+  and continues to treat 15 percent as an alert between reviewed baselines.
+  Production-build hooks use isolated temporary output roots and an explicit
+  30-second timeout; only tests that must mutate shared `dist/` bytes serialize
+  behind the cross-process lock, rather than inflating unrelated test limits.
 - 2026-08-26 -- Removed the async artifacts' arbitrary 16 KiB total-size
   ceiling. Exact ESM/classic Brotli measurement remains mandatory; a separate
   closed-provenance Task 6 baseline gates only unreviewed growth greater than 15

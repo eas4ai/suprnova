@@ -179,6 +179,24 @@ function pushOnlyOwnership(root: Element): RuntimeFeatureDirectiveOwnership {
   });
 }
 
+function pollOwnership(
+  root: Element,
+  modifiers: readonly string[],
+): RuntimeFeatureDirectiveOwnership {
+  return Object.freeze({
+    attributeName: `live:poll${modifiers.map((modifier) => `.${modifier}`).join("")}`,
+    directive: Object.freeze({
+      capability: "async@1" as const,
+      modifiers: Object.freeze([...modifiers]),
+      name: "poll",
+      ok: true as const,
+      role: null,
+      value: "",
+    }),
+    element: root,
+  });
+}
+
 function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]> {
   return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
 }
@@ -436,6 +454,85 @@ describe("async feature lifecycle", () => {
     timers.fire(33_000);
     expect(refresh).toHaveBeenCalledOnce();
     expect(refresh).toHaveBeenCalledWith("poll", expect.any(Function));
+    owner.dispose();
+  });
+
+  it("reconciles committed stream mode changes against the current descriptor without a second transport", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const refresh = vi.fn(() => "queued" as const);
+    const diagnose = vi.fn();
+    const root = Object.freeze({}) as Element;
+    let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([ownership(root)]);
+    const owner = new AsyncDocumentOwner(
+      { diagnose, onDispose: vi.fn() },
+      {
+        authority: { authorize: () => authorization(0n) },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    const controller = owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-morph-mode",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => ownerships,
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    await Promise.resolve();
+    sources[0]?.emit(envelope(3n, { kind: "heartbeat" }));
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      true,
+    );
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pushOnlyOwnership(root)]);
+    controller.afterMorph?.();
+    expect(sources).toHaveLength(1);
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      false,
+    );
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([ownership(root)]);
+    controller.afterMorph?.();
+    expect(sources).toHaveLength(1);
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      true,
+    );
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pushOnlyOwnership(root), pollOwnership(root, ["5s"])]);
+    controller.afterMorph?.();
+    expect(diagnose).toHaveBeenCalledWith("operation_rejected");
+    expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+      false,
+    );
+    timers.fire(5_000);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(sources).toHaveLength(1);
     owner.dispose();
   });
 

@@ -778,6 +778,19 @@
 - [x] Expose one configured immutable semantic freshness observer with the
   closed current/degraded/polling/offline/suspended/closed state set and no
   mutable authority, DOM event bus, or unbounded listener registry.
+- [x] Reconcile freshness policy only after committed morphs for every
+  async-enabled island, including initially directive-free islands. Rescan only
+  island-owned directives; atomically fence removal, addition, interval,
+  visibility, initial, and stream-mode changes; keep aborted/failed morphs inert.
+- [x] Pause hidden/offline timers event-first with no eligibility retry timer;
+  visible/online transitions resume under ordinary jitter with no catch-up
+  burst, including the 100-island random-boundary workload.
+- [x] Give production-build test hooks isolated temporary output roots and an
+  explicit 30-second timeout; serialize only tests that must mutate shared
+  `dist/` bytes behind the bounded cross-process lock. Append the independently
+  reviewed Task 7 artifact-size baseline without deleting or overwriting the
+  immutable Task 6 provenance; retain the 15-percent alert between reviewed
+  baselines.
 - [x] Run corrected Rust checker, controlled-clock poll, real scheduler,
   connectivity, visibility, bfcache, 100-subscription storm, public declaration,
   deterministic build, drift-budget, and full project gates.

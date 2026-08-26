@@ -461,11 +461,11 @@ class AsyncIslandController implements FeatureIslandController {
   readonly #freshnessObserver: ((state: PollStatus) => void) | undefined;
   readonly #owner: AsyncDocumentOwner;
   readonly #pollEnvironment: PollEnvironment;
-  readonly #pollModifiers: readonly string[] | null;
+  #pollModifiers: readonly string[] | null;
   readonly #port: RuntimeFeatureIslandPort;
   readonly #randomness: AsyncRandomness;
   readonly #stream: string;
-  readonly #streamModifiers: readonly string[];
+  #streamModifiers: readonly string[];
   readonly #timers: AsyncTimerPort;
   #authorizationAbort: AbortController | null = null;
   #generation = 0;
@@ -514,6 +514,10 @@ class AsyncIslandController implements FeatureIslandController {
 
   authorizationId(): string | null {
     return this.#authorization()?.subscriptionId ?? null;
+  }
+
+  configuredStream(): string {
+    return this.#stream;
   }
 
   needsInitialResume(): boolean {
@@ -612,6 +616,19 @@ class AsyncIslandController implements FeatureIslandController {
     this.#subscription?.close();
     this.#subscription = null;
     this.#owner.retire(this);
+  }
+
+  reconcileFreshness(
+    pollModifiers: readonly string[] | null,
+    streamModifiers: readonly string[],
+  ): void {
+    if (this.#state === "disposed") return;
+    this.#pollModifiers = pollModifiers;
+    this.#streamModifiers = streamModifiers;
+    const authorization = this.#currentAuthorization ?? this.#pendingAuthorization?.authorization;
+    if (authorization === undefined) return;
+    const continuity = this.#subscription?.state() === "current" ? "current" : "degraded";
+    this.#commitPollPolicy(authorization, continuity, true);
   }
 
   async #authorize(
@@ -900,13 +917,26 @@ class AsyncIslandController implements FeatureIslandController {
   #commitPollPolicy(
     authorization: AuthorizedLogicalSubscription,
     continuity: "current" | "degraded",
+    applyInitial = false,
   ): void {
-    const policy = resolvePollPolicy(
-      this.#pollModifiers,
-      this.#streamModifiers,
-      authorization.fallbackPoll,
-    );
-    if (policy === null) return;
+    let policy: PollPolicy | null;
+    try {
+      policy = resolvePollPolicy(
+        this.#pollModifiers,
+        this.#streamModifiers,
+        authorization.fallbackPoll,
+      );
+    } catch {
+      this.#poll?.dispose();
+      this.#poll = null;
+      report(this.#context, "operation_rejected");
+      return;
+    }
+    if (policy === null) {
+      this.#poll?.dispose();
+      this.#poll = null;
+      return;
+    }
     if (this.#poll === null) {
       this.#poll = new PollTimer({
         enqueueFreshRender: (reason, completion) =>
@@ -921,7 +951,7 @@ class AsyncIslandController implements FeatureIslandController {
       if (this.#state === "suspended" || this.#state === "resuming") this.#poll.suspend();
       this.#poll.start();
     } else {
-      this.#poll.updatePolicy(policy);
+      this.#poll.updatePolicy(policy, applyInitial);
       this.#poll.continuity(continuity);
     }
   }
@@ -968,12 +998,137 @@ class PollingIslandController implements FeatureIslandController {
     this.#timer.resume();
   }
 
+  reconcileFreshness(policy: PollPolicy): void {
+    this.#timer.updatePolicy(policy, true);
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#timer.dispose();
     this.#owner.retirePoll(this);
   }
+}
+
+type ActiveAsyncIslandController = AsyncIslandController | PollingIslandController;
+
+type AsyncIslandDirectiveState =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{
+      diagnostic: "operation_rejected" | "resource_exhausted";
+      kind: "invalid";
+    }>
+  | Readonly<{ kind: "poll"; policy: PollPolicy }>
+  | Readonly<{
+      kind: "stream";
+      pollModifiers: readonly string[] | null;
+      stream: string;
+      streamModifiers: readonly string[];
+    }>;
+
+function directiveState(port: RuntimeFeatureIslandPort): AsyncIslandDirectiveState {
+  const ownership = port.queryDirectiveOwnership(parseFeatureDirective);
+  const streams = ownership.filter(
+    ({ directive }) => directive.name === "stream" && directive.role === null,
+  );
+  const polls = ownership.filter(
+    ({ directive }) => directive.name === "poll" && directive.role === null,
+  );
+  if (streams.length > MAX_STREAMS_PER_ISLAND || polls.length > 1) {
+    return {
+      diagnostic: "resource_exhausted" as const,
+      kind: "invalid" as const,
+    };
+  }
+  const stream = streams[0]?.directive;
+  const poll = polls[0]?.directive;
+  if (stream === undefined) {
+    try {
+      const policy = resolvePollPolicy(poll?.modifiers ?? null, null, null);
+      return policy === null
+        ? { kind: "none" as const }
+        : {
+            kind: "poll" as const,
+            policy,
+          };
+    } catch {
+      return {
+        diagnostic: "operation_rejected" as const,
+        kind: "invalid" as const,
+      };
+    }
+  }
+  return {
+    kind: "stream" as const,
+    pollModifiers: poll?.modifiers ?? null,
+    stream: stream.value,
+    streamModifiers: stream.modifiers,
+  };
+}
+
+function createAsyncIslandLifecycleController(
+  owner: AsyncDocumentOwner,
+  context: RuntimeFeatureDocumentContext,
+  port: RuntimeFeatureIslandPort,
+): FeatureIslandController {
+  let active: ActiveAsyncIslandController | null = null;
+  let disposed = false;
+  let morphPending = false;
+
+  const reconcile = (): void => {
+    const next = directiveState(port);
+    if (next.kind === "invalid") {
+      report(context, next.diagnostic);
+    }
+    if (next.kind === "invalid" || next.kind === "none") {
+      active?.dispose();
+      active = null;
+      return;
+    }
+    if (next.kind === "poll") {
+      if (active instanceof PollingIslandController) {
+        active.reconcileFreshness(next.policy);
+        return;
+      }
+      active?.dispose();
+      active = owner.activatePoll(port, next.policy);
+      return;
+    }
+    if (active instanceof AsyncIslandController && active.configuredStream() === next.stream) {
+      active.reconcileFreshness(next.pollModifiers, next.streamModifiers);
+      return;
+    }
+    active?.dispose();
+    active = owner.activateStream(port, next.stream, next.pollModifiers, next.streamModifiers);
+  };
+
+  reconcile();
+  return {
+    abortMorph(): void {
+      morphPending = false;
+    },
+    afterMorph(): void {
+      if (disposed || !morphPending) return;
+      morphPending = false;
+      reconcile();
+    },
+    beforeMorph(): void {
+      if (!disposed) morphPending = true;
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      morphPending = false;
+      active?.dispose();
+      active = null;
+    },
+    resume(): void {
+      if (active instanceof PollingIslandController) active.resume();
+    },
+    suspend(): void {
+      active?.suspend();
+    },
+  };
 }
 
 function freshnessObserver(
@@ -1017,59 +1172,43 @@ export class AsyncDocumentOwner {
 
   connectIsland(port: RuntimeFeatureIslandPort): FeatureIslandController {
     if (this.#state === "disposed") throw new Error("async_document_retired");
-    const ownership = port.queryDirectiveOwnership(parseFeatureDirective);
-    const streams = ownership.filter(
-      ({ directive }) => directive.name === "stream" && directive.role === null,
-    );
-    const polls = ownership.filter(
-      ({ directive }) => directive.name === "poll" && directive.role === null,
-    );
-    if (streams.length > MAX_STREAMS_PER_ISLAND || polls.length > 1) {
-      report(this.#context, "resource_exhausted");
-      return Object.freeze({ dispose: () => undefined });
-    }
-    const stream = streams[0]?.directive;
-    const poll = polls[0]?.directive;
-    if (stream === undefined) {
-      const policy = resolvePollPolicy(poll?.modifiers ?? null, null, null);
-      if (policy === null) return Object.freeze({ dispose: () => undefined });
-      const controller = new PollingIslandController(this, port, policy, this.#options);
-      this.#pollControllers.add(controller);
-      controller.start();
-      return controller;
-    }
+    return createAsyncIslandLifecycleController(this, this.#context, port);
+  }
+
+  activatePoll(port: RuntimeFeatureIslandPort, policy: PollPolicy): PollingIslandController {
+    if (this.#state === "disposed") throw new Error("async_document_retired");
+    const controller = new PollingIslandController(this, port, policy, this.#options);
+    this.#pollControllers.add(controller);
+    controller.start();
+    if (this.#state === "suspended" || this.#state === "resuming") controller.suspend();
+    return controller;
+  }
+
+  activateStream(
+    port: RuntimeFeatureIslandPort,
+    stream: string,
+    pollModifiers: readonly string[] | null,
+    streamModifiers: readonly string[],
+  ): AsyncIslandController | null {
+    if (this.#state === "disposed") throw new Error("async_document_retired");
     const configured = streamOptions(this.#options);
     if (configured === null || this.#pool === null) {
       report(this.#context, "operation_rejected");
-      return Object.freeze({ dispose: () => undefined });
-    }
-    try {
-      resolvePollPolicy(
-        poll?.modifiers ?? null,
-        stream.modifiers,
-        Object.freeze({
-          initial: "wait",
-          intervalMs: 30_000,
-          jitterRatio: 0,
-          visibility: "visible",
-        }),
-      );
-    } catch {
-      report(this.#context, "operation_rejected");
-      return Object.freeze({ dispose: () => undefined });
+      return null;
     }
     const controller = new AsyncIslandController(
       this,
       this.#context,
       port,
-      stream.value,
-      poll?.modifiers ?? null,
-      stream.modifiers,
+      stream,
+      pollModifiers,
+      streamModifiers,
       configured,
       this.#authorizationScheduler,
     );
     this.#controllers.add(controller);
-    controller.start();
+    if (this.#state === "suspended" || this.#state === "resuming") controller.suspend();
+    else controller.start();
     return controller;
   }
 

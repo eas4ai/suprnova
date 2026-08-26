@@ -1,25 +1,49 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "maximumUnreviewedIncreaseBasisPoints": 1500,
   "methodology": {
     "buildCommand": "npm run build",
     "compression": "brotli-quality-11",
     "deterministic": true
   },
-  "review": {
-    "decision": "iteration-004-task-6",
-    "rationale": "Last reviewed complete Task 6 deterministic production artifacts before polling implementation.",
-    "recordedAt": "2026-08-26T06:27:18-04:00",
-    "sourceCommit": "499eda2287f17d6a46c9b8c306df5791b1f671d8"
-  },
-  "roles": {
-    "async-esm": {
-      "artifact": "suprnova-live.async.esm.js",
-      "brotliBytes": 16356
+  "history": [
+    {
+      "review": {
+        "decision": "iteration-004-task-6",
+        "rationale": "Last reviewed complete Task 6 deterministic production artifacts before polling implementation.",
+        "recordedAt": "2026-08-26T06:27:18-04:00",
+        "sourceCommit": "499eda2287f17d6a46c9b8c306df5791b1f671d8"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 16356
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 14155
+        }
+      }
     },
-    "async-classic": {
-      "artifact": "suprnova-live.async.classic.js",
-      "brotliBytes": 14155
+    {
+      "review": {
+        "decision": "iteration-004-task-7-quality-review",
+        "rationale": "Lifecycle-aware committed-morph rescan, event-driven offline and hidden storm prevention, and public semantic correctness from independent production review.",
+        "recordedAt": "2026-08-26T09:45:00-04:00",
+        "sourceDecision": "iteration-004-task-7-quality-review"
+      },
+      "roles": {
+        "async-esm": {
+          "artifact": "suprnova-live.async.esm.js",
+          "brotliBytes": 18638,
+          "sha256": "244da05005037fe07041e1fccd6f11719559d203f3616187989c922407ba3bab"
+        },
+        "async-classic": {
+          "artifact": "suprnova-live.async.classic.js",
+          "brotliBytes": 16420,
+          "sha256": "b14898ef30df20f9e7b0e1eacf2081c370020e96875e3679f4ff639300e1c4cf"
+        }
+      }
     }
-  }
+  ]
 }

@@ -100,4 +100,17 @@ describe("production browser package contract", () => {
     expect(source).not.toMatch(/\beval\s*\(/u);
     expect(source).not.toMatch(/\bnew\s+Function\s*\(/u);
   });
+
+  it("gives production builds proportional time and isolates or serializes their outputs", async () => {
+    for (const file of ["build-contract.test.ts", "optional-artifacts.test.ts"]) {
+      const source = await readFile(new URL(file, import.meta.url), "utf8");
+      expect(source).toContain("PRODUCTION_BUILD_HOOK_TIMEOUT_MS");
+      expect(source).toContain("mkdtemp");
+      expect(source).toContain("runBuild(outputDirectory)");
+    }
+    for (const file of ["budget-contract.test.ts", "compatibility-evidence.test.ts"]) {
+      const source = await readFile(new URL(file, import.meta.url), "utf8");
+      expect(source).toContain("withProductionBuildLock");
+    }
+  });
 });
