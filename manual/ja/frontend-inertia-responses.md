@@ -95,29 +95,29 @@ pub async fn show(req: Request) -> Response {
     let resp = InertiaResponse::new("Posts/Show")
         .with("title", "Welcome")
         .with("post", load_post(42).await?)
-        // Lazy: closure runs only when the prop will actually be sent
-        // (initial visit, or partial reload that requests this key).
+        // Lazy: プロップが実際に送られるときにだけクロージャが走る
+        // （初回訪問、またはこのキーを要求する部分リロード）。
         .lazy("recent_activity", || async {
             Ok::<_, FrameworkError>(load_activity().await?)
         })
-        // Optional: never sent on initial visits; the client must
-        // explicitly ask for the key via X-Inertia-Partial-Data.
+        // Optional: 初回訪問では決して送られない。クライアントは
+        // X-Inertia-Partial-Data で明示的にキーを要求する必要がある。
         .optional("permissions", || async {
             Ok::<_, FrameworkError>(load_permissions().await?)
         })
-        // Defer: skipped on the initial render; the client issues a
-        // follow-up XHR and the closure runs then.
+        // Defer: 初回のレンダリングではスキップされる。クライアントが
+        // 追いかけのXHRを発行し、そのときクロージャが走る。
         .defer("notifications", || async {
             Ok::<_, FrameworkError>(load_notifications().await?)
         })
-        // Merge: append-into-existing on partial reloads ("load more").
+        // Merge: 部分リロードで既存のものへ追加する（「もっと読み込む」）。
         .merge("rows", next_page().await?)
-        // Once: cached client-side across navigations; resolver skipped
-        // on subsequent visits unless server forces refresh.
+        // Once: ナビゲーションをまたいでクライアント側にキャッシュされる。
+        // サーバーが更新を強制しない限り、以降の訪問ではリゾルバがスキップされる。
         .once("plans", || async {
             Ok::<_, FrameworkError>(load_plan_catalog().await?)
         })
-        // Flash: one-shot toast; appears under `page.flash`, not `props`.
+        // Flash: ワンショットのトースト。`props`ではなく`page.flash`の下に現れる。
         .flash("toast", serde_json::json!({"type":"info","msg":"Saved"}))
         .resolve(&req)
         .await
@@ -210,7 +210,7 @@ use suprnova::{InertiaResponse, MergeStrategy};
 InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
-        next_page,                                     // the new page slice
+        next_page,                                     // 新しいページのスライス
         MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
@@ -251,7 +251,7 @@ InertiaResponse::new("Feed/Index").merge_lazy("posts", || async {
 無限スクロールは、ページネーションメタデータを付けた同じ仕組みです。`.scroll` / `.scroll_with`、または`LengthAwarePaginator`や`CursorPaginator`を直接適応させる`.paginate`は、データの隣に`scrollProps`を出力し、クライアントの`<InfiniteScroll>`コンポーネントが次/前の取得を駆動します:
 
 ```rust
-// `posts` is a CursorPaginator from the query builder.
+// `posts` はクエリビルダーから来た CursorPaginator。
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
@@ -373,19 +373,19 @@ use suprnova::App;
 use std::sync::Arc;
 
 pub fn register() {
-    // Sync, materialized once at boot.
+    // 同期。起動時に一度だけ実体化される。
     App::inertia_share("appName", "Suprnova");
     App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
 
-    // Async, resolved per response (skipped by partial reloads that
-    // exclude the key).
+    // 非同期。レスポンスごとに解決される（そのキーを除外する部分リロード
+    // ではスキップされる）。
     App::inertia_share_lazy("locale", || async {
         Ok::<_, suprnova::FrameworkError>(detect_locale().await)
     });
 
-    // Cached on the client across navigations - `share_once` runs on
-    // the first page that needs it, then the client skips re-resolution
-    // via `X-Inertia-Except-Once-Props` until the cache key changes.
+    // ナビゲーションをまたいでクライアントにキャッシュされる - `share_once` はそれを
+    // 必要とする最初のページで走り、その後クライアントはキャッシュキーが変わるまで
+    // `X-Inertia-Except-Once-Props` 経由で再解決をスキップする。
     App::inertia_share_once("plans", || async {
         Ok::<_, suprnova::FrameworkError>(load_plan_catalog().await?)
     });
@@ -447,7 +447,7 @@ impl InertiaSharedData for AuthShare {
                 })),
             );
         }
-        // Vary by page: only the admin dashboard needs the nav counts.
+        // ページごとに変える: ナビのカウントが必要なのは管理ダッシュボードだけ。
         if component == "Admin/Dashboard" {
             out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
         }
@@ -466,13 +466,13 @@ App::register_inertia_shared(Arc::new(AuthShare));
 フラッシュデータは、次のレンダリングに現れてその後消えるべきワンショットの状態です - トーストメッセージ、「たった今作成された」ID、バリデーションのまとめなどです。SuprnovaはすべてのInertiaレスポンスで`page.flash`の下にそれを表面化します。書き手は3つあります:
 
 ```rust
-// 1. Push into the current request's flash bag.
+// 1. 現在のリクエストのフラッシュバッグへ入れる。
 App::flash("toast", "Saved");
 
-// 2. Attach to a specific response (same effect on this response only).
+// 2. 特定のレスポンスへ付ける（このレスポンスにだけ同じ効果）。
 InertiaResponse::new("Posts/Show").flash("toast", "Saved")
 
-// 3. Carry across a redirect via the Redirect facade.
+// 3. Redirectファサード経由でリダイレクトをまたいで運ぶ。
 use suprnova::Redirect;
 
 Redirect::to("/posts").with("toast", "Created")
@@ -489,14 +489,14 @@ Redirect::to("/posts").with("toast", "Created")
 `Redirect`はLaravelの完全な表面です:
 
 ```rust
-Redirect::to("/dashboard")                       // 302 to a path
-Redirect::route("posts.show").with("id", "42")   // named route, route params
-Redirect::back("/")                              // session-recorded previous URL
-Redirect::refresh()                              // same URL, fresh GET
-Redirect::guest(&req, "/login")                  // stashes intended URL
-Redirect::intended("/dashboard")                 // pops the stashed URL
-Redirect::signed_route("downloads.show", &[("id","42")])?  // signed URL
-Redirect::to("/posts/42").preserve_fragment()    // keep #frag across visit
+Redirect::to("/dashboard")                       // パスへの302
+Redirect::route("posts.show").with("id", "42")   // 名前付きルート、ルートパラメータ
+Redirect::back("/")                              // セッションに記録された直前のURL
+Redirect::refresh()                              // 同じURL、新しいGET
+Redirect::guest(&req, "/login")                  // intended URLを退避する
+Redirect::intended("/dashboard")                 // 退避したURLを取り出す
+Redirect::signed_route("downloads.show", &[("id","42")])?  // 署名付きURL
+Redirect::to("/posts/42").preserve_fragment()    // 訪問をまたいで#fragを保つ
 ```
 
 すべての`Redirect`変種は`.with(k, v)`、`.with_input(map)`、`.with_errors(map)`、`.with_errors_bag(name, map)`、`.cookie(c)`、`.header(k, v)`、`.permanent()`、`.status(303)`などを受け付けます。完全なチェーンはLaravelの`RedirectResponse`を反映します。
@@ -553,18 +553,18 @@ Inertiaはアセットマニフェストにバージョンを付けるため、�
 ```rust
 use suprnova::{InertiaConfig, VersionResolver};
 
-// Default - hash the build manifest. Nothing to write.
+// デフォルト - ビルドマニフェストをハッシュする。何も書かなくてよい。
 let cfg = InertiaConfig::new();
 
-// A different manifest location; the version follows it.
+// マニフェストの場所を変える。バージョンはそれに従う。
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
 
-// Static - bake in a build-time identifier. Survives a later
-// `.manifest_path(...)` call: an explicit version is deliberate.
+// 静的 - ビルド時の識別子を焼き込む。後続の `.manifest_path(...)` 呼び出しを
+// 生き延びる: 明示的なバージョンは意図的なものだから。
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic - a container deployment id, anything. The closure runs on
-// every version check; cache inside if it isn't cheap.
+// 動的 - コンテナのデプロイメントid、何でもよい。クロージャはバージョン検査の
+// たびに走る。安価でないなら内側でキャッシュすること。
 let cfg = InertiaConfig::new().version_with(|| deployment_id());
 ```
 
@@ -606,7 +606,7 @@ Application::new()
     .http_bootstrap(|| async { bootstrap::register_http_stack() })
 ```
 
-`bootstrap::register`の中には置かないでください。`public/assets`を出荷しないworkerまたはconsoleイメージの状態がまさにそうであるように、`Inertia::install`はビルド済みフロントエンドマニフェストが本番で欠けているとfail closedします。プロセス全体のフックからインストールすると、そのバイナリも一緒に停止してしまいます。
+`bootstrap::register`の中には置かないでください。`public/assets`を出荷しないワーカーまたはconsoleイメージの状態がまさにそうであるように、`Inertia::install`はビルド済みフロントエンドマニフェストが本番で欠けているとfail closedします。プロセス全体のフックからインストールすると、そのバイナリも一緒に停止してしまいます。
 
 `Inertia::install`は`Result`を返し、次の順序で処理します:
 
@@ -615,7 +615,7 @@ Application::new()
 3. `InertiaVersionMiddleware`を登録します - クライアントとサーバーがアセットバージョンで一致しない場合、`409` + `X-Inertia-Location`を出力します。
 4. `Inertia303Middleware`を登録します - GET以外のInertiaリダイレクトで`302`を`303`へ格上げします。
 5. `InertiaValidationRedirectMiddleware`を登録します - Inertia訪問の`422`を、エラーをフラッシュしたフォームページへの`303`へ変換します。[バリデーション失敗](#バリデーション失敗)を参照してください。
-6. `cfg`が`.error_page(...)`を名指ししている**ときだけ**、`InertiaErrorPageMiddleware`を登録します - フレームワーク自身のエラーレスポンスを、そのページへ変えます。[エラーページ](#エラーページ)を参照してください。
+6. `cfg`が`.error_page(...)`を名指ししている**ときだけ**、`InertiaErrorPageMiddleware`を登録します - フレームワーク自身のエラーレスポンスを、そのページへ変えます。[エラーページ](#エラーページ)を参照してください。より外側に自分で登録している場合は、あなたのものがその位置と、それが名指ししているコンポーネントを保ち、このステップはスキップされます - [ページが描画される場所](#ページが描画される場所)を参照してください。
 
 順序が重要です。ヘッダーミドルウェアが最初に登録されるため最も外側になり、ハンドラが実行される前にバージョンミドルウェアが返す`409`も含め、すべてのレスポンスを見ます。バリデーションリダイレクトミドルウェアは最後に登録されるため最も内側、つまりハンドラに最も近くなり、他の3つが触れる前の`422`を見ます。
 
@@ -626,6 +626,8 @@ Application::new()
 フラッシュデータを使う場合は、`SessionMiddleware`を`Inertia::install`**より前に**登録してください。バージョンミドルウェアはクライアントを跳ね返す前にセッションを再フラッシュするため、フラッシュされたエラーは追いかけのページ全体のGETを生き延びます。これはセッションスコープ内でのみ可能です。
 
 [`LocaleMiddleware`](localization.md)も、[エラーページ](#エラーページ)を使うのであれば**その前に**登録してください。ミドルウェアの`next`より後のコードは、その内側にあるすべてがすでに戻ってから走ります。そのため、エラーページのミドルウェアが描画するのは、その内側で開かれたスコープがすべて取り払われた後です - ロケールミドルウェアにとってこれは、ページが訪問者のロケールではなくアプリのデフォルトのロケールを受け取ってしまう、ということです。Inertiaの層はローカライゼーションから何も読まないため、ロケールをその外側に置いてもコストはありません。スキャフォルドされる`bootstrap.rs`は、すでにそうしています。同じ理屈は、エラーページが読む必要のあるリクエストスコープを持つ、あなた自身のあらゆるミドルウェアに当てはまります。
+
+この呼び出しより**後**に登録するものはすべて、エラーページにカバーされます。その上にあるものはカバーされません。`next`を呼ばずに自分で答えるミドルウェアは、自分のレスポンスを、その内側にある何にも手渡さないからです。`CsrfMiddleware`、レートリミッター、あるいは認証ガードをインストールより上に置かなければならないのなら、エラーページのミドルウェアをその間に自分で登録してください - [ページが描画される場所](#ページが描画される場所)を参照してください。
 
 これらのミドルウェアのどれかを本当に望まない場合にだけ呼び出しを省略してください（まれです。それぞれが実際の失敗モードを塞ぎます - 1つのURLの2つの表現をまたぐキャッシュポイズニング、静かな古いバンドル、リダイレクト時のフォーム再送信、そしてクライアントのエラーモーダルで行き止まりになり`form.errors`へ届かないバリデーション`422`）。
 
@@ -657,7 +659,41 @@ pub fn register_http_stack() {
 
 `"Error"`は、ほかのページ名とまったく同じように解決されるため、`frontend/src/pages/Error.svelte`（あるいは`.tsx`、`.vue`）を置くだけで済みます。**3つのスターターは、すでにこれを同梱し、`.error_page("Error")`を設定しています** - 新しいプロジェクトは、何もしなくてもカバーされます。
 
-これには順序の規則が1つ付いてきます: **`LocaleMiddleware`を`Inertia::install`より前に登録してください**。さもないと、エラーページは訪問者のロケールではなく、アプリのデフォルトのロケールで描画されます。エラーページは出ていく途中で、Inertiaの層の内側に登録されたすべてのミドルウェアが戻り、自分が開いたスコープを取り払った後に組み立てられるからです。スキャフォルドされる`bootstrap.rs`はこれを正しく行っています。自分で書いたのなら、確認してください。エラーページの共有プロップが読む、あなた自身のリクエストスコープのミドルウェアについても、同じことが当てはまります。
+### ページが描画される場所
+
+`Inertia::install`は`InertiaErrorPageMiddleware`をInertiaの層の**最も内側**として登録します。そのため、ハンドラとルートのミドルウェアが実際に生み出したレスポンスを見ます。その呼び出しより*後*に登録するものも、すべてカバーされます - スキャフォルドが`CsrfMiddleware`をその下に置いているのは、これが理由です。
+
+呼び出しより**上**に登録されたものは、カバーされません。`next`を呼ばずに自分で答えるミドルウェアは、自分のレスポンスを、その内側に登録された何にも手渡さないため、その拒否はそもそもInertiaの層へ届きません。噛みついてくるのは、セッションが切れたままフォームを送信する場合です: `CsrfMiddleware`は`{"message":"CSRF token mismatch."}`を伴う`419`で答えるため、それが`Inertia::install`より上にあると、ユーザーは、最も踏みやすい、まさにその1つのフローでクラッシュモーダルを見ることになります。外側のレートリミッターの`429`と認証ガードの`401`も、同じように振る舞います。
+
+あなたのアプリがその形をしているのなら、その拒否をカバーさせたいミドルウェアの外側に、自分でミドルウェアを登録してください。これは1.3.6でも副作用として動いていました - 型は公開されており、グローバルな登録は型ごとにべき等なので、先に行われた登録はその位置を保っていたのです - けれども、そう述べたものはどこにもありませんでした。1.3.7からは、ドキュメント化された契約です: `install`はあなたの登録を確認し、`debug`でログに記録し、自分自身の登録を省きます。
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // CSRFの外側なので、その下の層へ決して届かない419を見ることができる。
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install`はその登録を見て、自分自身のものを省き、そのことを`debug`で告げます。あなたが選んだ位置がそのまま通り、あなたが名指ししたコンポーネントもそのまま通ります - チェーンの中にいるのは、そのインスタンスです。ページを名指しするのは、自分自身の登録での**一度だけ**です。そのため、ここでは設定の`.error_page(...)`は省略可能になります: 残しても外してもかまいません。ほかにそれを読むものはありません。それでもなお、自分ではミドルウェアを置かないアプリのために`install`にミドルウェアを登録させるのは、この設定です。
+
+自分で置く場合には、順序の規則が2つ付いてきます。
+
+**`SessionMiddleware`と[`LocaleMiddleware`](localization.md)より後に。** このページはあなたの共有プロップ - `auth.user`、フラッシュ、ロケールの共有 - を運び、しかも出ていく*途中*で、その内側に登録されたすべてのミドルウェアが戻り、自分が開いたリクエストスコープを取り払った後に組み立てられます。この2つより上に登録されると、あらゆるエラーページは訪問者のセッションを失い、訪問者のものではなくアプリのデフォルトのロケールで描画されます。同じことは、エラーページの共有プロップがその状態を読む、あなた自身のあらゆるリクエストスコープのミドルウェアにも当てはまります。
+
+**その拒否をカバーさせたいミドルウェアより前に**、そしてそれより外へは出さないでください。そこを通り抜けるレスポンスは、どれもそれが分類しなければならないボディを1つ増やすことになり、その外側にいるミドルウェアは、それが走る前に答えてしまうことが依然としてできます。
+
+自分では何も登録しないのであれば、`Inertia::install`がこれをすべてやってくれます - そしてスキャフォルドされる`bootstrap.rs`は、すでに`SessionMiddleware`と`LocaleMiddleware`をその呼び出しの上に、`CsrfMiddleware`をその下に置いています。
 
 ### ページが受け取るもの
 
@@ -754,9 +790,9 @@ async fn show(RouteParam(post): RouteParam<Post>, req: Request) -> Response {
 
 ```js
 createInertiaApp({
-  serverHead: true,        // reads the `head` prop
-  // serverHead: 'meta',   // or read a differently-named prop
-  // serverHead: (page) => [...],  // or compute from the whole page
+  serverHead: true,        // `head`プロップを読む
+  // serverHead: 'meta',   // あるいは別名のプロップを読む
+  // serverHead: (page) => [...],  // あるいはページ全体から計算する
 })
 ```
 
@@ -766,19 +802,19 @@ createInertiaApp({
 
 ## SSR
 
-Suprnovaはプロセス外のSSR worker - 通常はNode / Bun / Denoの下で動く`@inertiajs/{svelte,react,vue}/server`の`createServer()`バンドル - とHTTPループバック経由で通信します。[`Inertia::install`](#ブートストラップ-inertia-install)に渡す設定で有効にしてください。その設定がすべてのレスポンスの出発点なので、ハンドラを通して配管するものはありません:
+Suprnovaはプロセス外のSSR ワーカー - 通常はNode / Bun / Denoの下で動く`@inertiajs/{svelte,react,vue}/server`の`createServer()`バンドル - とHTTPループバック経由で通信します。[`Inertia::install`](#ブートストラップ-inertia-install)に渡す設定で有効にしてください。その設定がすべてのレスポンスの出発点なので、ハンドラを通して配管するものはありません:
 
 ```rust
 Inertia::install(
     &InertiaConfig::new()
-        .ssr("http://127.0.0.1:13714")  // worker URL
+        .ssr("http://127.0.0.1:13714")  // ワーカーの URL
         .ssr_timeout(std::time::Duration::from_millis(500))
         .ssr_exclude("/admin/**")
         .ssr_max_response_bytes(8 * 1024 * 1024),
 )?;
 ```
 
-SSRはデフォルトでオフで、設定のプロパティです。インストールされた設定から構築されるすべてのレスポンスではオンになり、SSRを設定しない`.with_config(...)`で上書きするレスポンスではオフになります。有効な場合、フレームワークはページオブジェクトを`<url>/render`へPOSTし、`{ head, body }`をHTMLシェルにインライン化します。workerのエラーやタイムアウト時はレスポンスがCSR（クライアントがhydrateする空の`<div id="app">`）へフォールバックし、`on_ssr_error(...)`フックが発火します。代わりにCIで`ssr_throw_on_error(true)`を設定すると、失敗をハードな500にできます。
+SSRはデフォルトでオフで、設定のプロパティです。インストールされた設定から構築されるすべてのレスポンスではオンになり、SSRを設定しない`.with_config(...)`で上書きするレスポンスではオフになります。有効な場合、フレームワークはページオブジェクトを`<url>/render`へPOSTし、`{ head, body }`をHTMLシェルにインライン化します。自分自身の`<title>`を運ぶワーカーのhead - Inertiaの`Head`コンポーネントを使うページはすべてこれに当たります - は、シェルのタイトルに加わるのではなく、それを**置き換えます**。これは設定の`.default_title(...)`と、レスポンスごとの`.title(...)`の両方に当てはまります: タイトルが2つあるドキュメントは先頭のものを表示するため、シェルのタイトルが、タブでも、検索結果でも、あらゆるリンクプレビューでも、ページの本当のタイトルに勝ってしまうからです。SSRがオンなら、タイトルはレスポンスではなく`Head`で設定してください。タイトルを持たないheadは、シェルのタイトルをそのままの場所に残します。ワーカーのエラーやタイムアウト時はレスポンスがCSR（クライアントがhydrateする空の`<div id="app">`）へフォールバックし、`on_ssr_error(...)`フックが発火します。代わりにCIで`ssr_throw_on_error(true)`を設定すると、失敗をハードな500にできます。
 
 ディスパッチ前に、ゲートウェイがビルド済みSSRバンドルがディスクに存在するか確認することもできます。`.ssr_bundle_path(...)`をオプトインし、通常の`frontend/bootstrap/ssr/ssr.js`を指定してください（確認自体はデフォルトで有効な`.ssr_ensure_bundle_exists(true)`ですが、パスを設定するまで効果はありません。これは意図的に自動検出しないため、テストダブルでSSRを有効にしてもディスク上のバンドルをスタブする必要がありません）。バンドルが欠けていると即座にCSRへフォールバックし、決して成功しない接続で`ssr_timeout`を待つことがありません。これはLaravelの`ensure_bundle_exists`設定に対応します。
 
@@ -793,14 +829,14 @@ Inertia::install(
 )?;
 ```
 
-`suprnova new`はすべてのstarterで`frontend/src/ssr.{ts,tsx}`と`build:ssr` npmスクリプトをscaffoldします。ビルドしてからworkerを起動します:
+`suprnova new`はすべてのstarterで`frontend/src/ssr.{ts,tsx}`と`build:ssr` npmスクリプトをscaffoldします。ビルドしてからワーカーを起動します:
 
 ```bash
 cd frontend && npm run build:ssr
 suprnova ssr:start
 ```
 
-`suprnova ssr:check`はworkerが実際に応答していることを検証します。worker自身の`GET /health`ルートへアクセスしますが、これはすべての`createServer()`バンドルが追加コードなしで公開するものです。
+`suprnova ssr:check`はワーカーが実際に応答していることを検証します。ワーカー自身の`GET /health`ルートへアクセスしますが、これはすべての`createServer()`バンドルが追加コードなしで公開するものです。
 
 ## 設定
 
@@ -810,17 +846,17 @@ Inertiaの動作は`InertiaConfig`でプログラム的に設定され、[`Inert
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)               // overrides SUPRNOVA_FRONTEND
+    .frontend(Frontend::Svelte)               // SUPRNOVA_FRONTEND を上書きする
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)             // cap lazy-prop fan-out
-    .with_all_errors(false)                   // one message per field, or all
-    .url_resolver(|req| req.path_and_query()) // how `page.url` is derived
-    .production();                            // false → loads from Vite dev server
+    .max_concurrent_resolvers(16)             // レイジープロップのファンアウトの上限
+    .with_all_errors(false)                   // フィールドごとに1メッセージ、またはすべて
+    .url_resolver(|req| req.path_and_query()) // `page.url` の導出方法
+    .production();                            // false → Vite開発サーバーから読み込む
 ```
 
 フロントエンド固有のデフォルト:
@@ -830,6 +866,12 @@ let cfg = InertiaConfig::new()
 | Svelte（デフォルト） | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`、`.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+HTMLシェルの属性のうち、2つは特筆に値します。
+
+`<title>`は、レスポンスの`.title(...)`から来ます。レスポンスが何も設定しなかった場合は`.default_title(...)`から来ます。[SSR](#ssr)の下では、ページ自身のheadが**その両方**に勝ちます: `<title>`を運ぶワーカーのheadがドキュメントの唯一のタイトルになり、シェルは自分のタイトルをまったく出力しません。
+
+`<html lang="...">`は、あなたが設定できない唯一の属性です。正しい値がすでに分かっているからです - それは、そのリクエストで有効なロケール、つまり`LocaleMiddleware`が検出したもの、あるいは何も検出しなかった場合は設定された`APP_LOCALE`です。[ローカライゼーション](localization.md)を参照してください。スクリーンリーダーはその属性から声を選び、検索エンジンはそれをページの言語として読むため、複数の言語を配信するアプリは、それを直すために出来上がったドキュメントを書き換える必要が、もうありません。
 
 ### `url`フィールド
 

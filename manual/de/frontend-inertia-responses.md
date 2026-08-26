@@ -275,7 +275,7 @@ use suprnova::{InertiaResponse, MergeStrategy};
 InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
-        next_page,                                     // the new page slice
+        next_page,                                     // der neue Seitenausschnitt
         MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
@@ -316,7 +316,7 @@ Der Resolver läuft nur, wenn die Merge-Prop tatsächlich gesendet wird; wie jed
 Infinite Scroll ist dieselbe Maschinerie mit angehängten Paginierungsmetadaten. `.scroll` / `.scroll_with` - oder `.paginate`, das einen `LengthAwarePaginator` oder `CursorPaginator` direkt adaptiert - geben `scrollProps` neben den Daten aus; die Komponente `<InfiniteScroll>` des Clients steuert die Abrufe für die nächste beziehungsweise vorherige Seite:
 
 ```rust
-// `posts` is a CursorPaginator from the query builder.
+// `posts` ist ein CursorPaginator aus dem Query Builder.
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
@@ -517,7 +517,7 @@ impl InertiaSharedData for AuthShare {
                 })),
             );
         }
-        // Vary by page: only the admin dashboard needs the nav counts.
+        // Nach Seite variieren: nur das Admin-Dashboard braucht die Navigationszähler.
         if component == "Admin/Dashboard" {
             out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
         }
@@ -648,18 +648,18 @@ Standardmäßig müssen Sie nichts setzen: `InertiaConfig` hasht Ihr Vite-Build-
 ```rust
 use suprnova::{InertiaConfig, VersionResolver};
 
-// Default - hash the build manifest. Nothing to write.
+// Standard - hasht das Build-Manifest. Nichts zu schreiben.
 let cfg = InertiaConfig::new();
 
-// A different manifest location; the version follows it.
+// Ein anderer Speicherort des Manifests; die Version folgt ihm.
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
 
-// Static - bake in a build-time identifier. Survives a later
-// `.manifest_path(...)` call: an explicit version is deliberate.
+// Statisch - einen Build-Zeit-Identifier fest hinterlegen. Überlebt einen
+// späteren `.manifest_path(...)`-Aufruf: eine explizite Version ist Absicht.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic - a container deployment id, anything. The closure runs on
-// every version check; cache inside if it isn't cheap.
+// Dynamisch - eine Container-Deployment-ID, was auch immer. Die Closure
+// läuft bei jeder Versionsprüfung; cachen Sie darin, wenn sie nicht günstig ist.
 let cfg = InertiaConfig::new().version_with(|| deployment_id());
 ```
 
@@ -676,7 +676,7 @@ Für asynchrone oder fehlerhafte Versionsauflösung (beispielsweise einen Manife
 
 ## Bootstrap: `Inertia::install`
 
-Die meisten Anwendungen installieren die Protokoll-Middlewares mit einem Aufruf aus `register_http_stack` - dem Bootstrap-Hook nur für HTTP, den der Server-Pfad ausführt und den die Binaries für Queue, Scheduler, Workflow und Konsole überspringen (siehe [Bootstrap](bootstrap.md)):
+Die meisten Anwendungen installieren die Protokoll-Middlewares mit einem Aufruf aus `register_http_stack` - dem Bootstrap-Hook nur für HTTP, den der Server-Pfad ausführt und den die Binaries für Queue, Scheduler, Workflow und Konsole überspringen (siehe [Application Bootstrap](bootstrap.md)):
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -716,6 +716,10 @@ Halten Sie den Aufruf aus `bootstrap::register` heraus. `Inertia::install` schl�
 6. Es registriert `InertiaErrorPageMiddleware`, **nur wenn** `cfg` eine
    `.error_page(...)` benennt - wandelt die eigenen Fehler-Responses des
    Frameworks in diese Seite um. Siehe [Fehlerseiten](#fehlerseiten).
+   Haben Sie selbst eine weiter außen registriert, behält diese ihre
+   Position und die von ihr benannte Komponente, und dieser Schritt
+   entfällt - siehe
+   [Wo die Seite gerendert wird](#wo-die-seite-gerendert-wird).
 
 Die Reihenfolge ist wichtig: Die Headers-Middleware wird zuerst registriert, ist daher die äußerste und sieht jede Response - einschließlich des `409`, den die Version-Middleware zurückgibt, bevor der Handler überhaupt läuft. Die Middleware für den Validierungs-Redirect wird zuletzt registriert, ist damit die innerste - am nächsten beim Handler - und sieht einen `422`, bevor die anderen drei Middlewares ihn berühren können.
 
@@ -754,6 +758,14 @@ aus der Lokalisierung, Locale außerhalb davon zu setzen kostet also
 nichts. Die gescaffoldete `bootstrap.rs` tut das bereits. Dieselbe
 Überlegung gilt für jede eigene Middleware, deren Anfrage-Scope die
 Fehlerseite lesen muss.
+
+Alles, was Sie **nach** diesem Aufruf registrieren, ist von der
+Fehlerseite abgedeckt; alles darüber nicht, denn eine Middleware, die
+antwortet, ohne `next` aufzurufen, übergibt ihre Response an nichts,
+was in ihr liegt. Muss Ihre `CsrfMiddleware`, Ihr Rate-Limiter oder
+Ihr Auth-Guard über dem Aufruf sitzen, registrieren Sie die
+Fehlerseiten-Middleware selbst dazwischen - siehe
+[Wo die Seite gerendert wird](#wo-die-seite-gerendert-wird).
 
 Überspringen Sie den Aufruf nur, wenn Sie wirklich eine dieser Middlewares nicht möchten (selten; jede von ihnen schließt einen echten Fehlermodus: Cache Poisoning zwischen den zwei Repräsentationen einer URL, stilles veraltetes Bundle, Wiederholung eines Formulars beim Redirect und ein Validierungs-`422`, das im Fehlermodal des Clients endet, statt `form.errors` zu erreichen).
 
@@ -801,15 +813,81 @@ also. **Die drei Starter liefern bereits eine solche Seite mit und
 setzen `.error_page("Error")`** - ein neues Projekt ist ohne jedes Zutun
 abgedeckt.
 
-Eine Regel zur Reihenfolge kommt mit: **Registrieren Sie
-`LocaleMiddleware` vor `Inertia::install`**, sonst rendern Fehlerseiten
-im Standard-Locale der Anwendung und nicht in dem des Besuchers. Die
-Fehlerseite wird auf dem Rückweg gebaut, nachdem jede innerhalb der
-Inertia-Schicht registrierte Middleware zurückgekehrt ist und jeden von
-ihr geöffneten Scope wieder abgeräumt hat. Die gescaffoldete
-`bootstrap.rs` macht das richtig; haben Sie Ihre eigene geschrieben,
-prüfen Sie sie. Dasselbe gilt für jede eigene Middleware mit
-Anfrage-Scope, aus dem die gemeinsamen Props der Fehlerseite lesen.
+### Wo die Seite gerendert wird
+
+`Inertia::install` registriert `InertiaErrorPageMiddleware` als
+**innerste** der Inertia-Schicht, sie sieht also die Response, die der
+Handler und die Route-Middleware tatsächlich erzeugt haben. Alles, was
+Sie *nach* diesem Aufruf registrieren, ist ebenfalls abgedeckt - genau
+deshalb setzt das Scaffold `CsrfMiddleware` darunter.
+
+Alles, was **über** dem Aufruf registriert ist, ist nicht abgedeckt.
+Eine Middleware, die antwortet, ohne `next` aufzurufen, übergibt ihre
+Response an nichts, was in ihr registriert ist; ihre Ablehnung erreicht
+die Inertia-Schicht also überhaupt nicht. Der Fall, der wehtut, ist eine
+abgelaufene Session, die ein Formular absendet: `CsrfMiddleware`
+antwortet mit `419` und `{"message":"CSRF token mismatch."}`, und sitzt
+sie über `Inertia::install`, bekommt der Benutzer genau in dem Flow, den
+er am ehesten durchläuft, das Absturzmodal. Der `429` eines weiter außen
+liegenden Rate-Limiters und der `401` eines Auth-Guards verhalten sich
+genauso.
+
+Registrieren Sie die Middleware selbst, wenn Ihr Aufbau so aussieht -
+außerhalb der Middleware, deren Ablehnungen sie abdecken soll. Das
+funktionierte schon in 1.3.6 als Nebeneffekt - der Typ war öffentlich
+und die globale Registrierung ist pro Typ idempotent, eine frühere
+Registrierung behielt also ihren Platz -, aber nirgends stand es. Seit
+1.3.7 ist es ein dokumentierter Vertrag: `install` prüft auf Ihre
+Registrierung, protokolliert auf `debug` und überspringt die eigene.
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // Außerhalb von CSRF, damit sie den 419 sieht, der die Schicht darunter nie erreicht.
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install` sieht die Registrierung, überspringt die eigene und
+meldet das auf `debug`. Die Position, die Sie gewählt haben, ist die, die
+gilt, und ebenso die Komponente, die Sie benannt haben - diese Instanz
+ist die in der Kette. Sie benennen die Seite **einmal**, bei Ihrer
+eigenen Registrierung, was `.error_page(...)` auf der Config hier
+optional macht: behalten oder weglassen, nichts sonst liest es. Sie ist
+weiterhin das, was `install` dazu veranlasst, für eine Anwendung, die
+selbst keine Middleware platziert, eine zu registrieren.
+
+Mit dem eigenen Platzieren kommen zwei Regeln zur Reihenfolge.
+
+**Nach `SessionMiddleware` und [`LocaleMiddleware`](localization.md).**
+Die Seite trägt Ihre gemeinsamen Props - `auth.user`, Flash, den
+Locale-Share - und sie wird auf dem Weg *hinaus* gebaut, nachdem jede in
+ihr registrierte Middleware zurückgekehrt ist und jeden von ihr
+geöffneten Anfrage-Scope wieder abgeräumt hat. Über diesen beiden
+registriert, verliert jede Fehlerseite die Session des Besuchers und
+rendert im Standard-Locale der Anwendung statt in seinem. Dasselbe gilt
+für jede eigene Middleware mit Anfrage-Scope, deren Zustand die
+gemeinsamen Props der Fehlerseite lesen.
+
+**Vor der Middleware, deren Ablehnungen sie abdecken soll**, und nicht
+weiter außen als das. Jede Response, die durch sie hindurchgeht, ist ein
+weiterer Body, den sie klassifizieren muss, und eine Middleware
+außerhalb von ihr kann immer noch antworten, bevor sie läuft.
+
+Registrieren Sie selbst nichts, erledigt `Inertia::install` all das für
+Sie - und die gescaffoldete `bootstrap.rs` hat `SessionMiddleware` und
+`LocaleMiddleware` bereits über dem Aufruf und `CsrfMiddleware`
+darunter.
 
 ### Was die Seite bekommt
 
@@ -1029,7 +1107,7 @@ Inertia::install(
 )?;
 ```
 
-SSR ist standardmäßig ausgeschaltet und eine Eigenschaft der Konfiguration: eingeschaltet für jede aus der installierten Config gebaute Response, ausgeschaltet für jede Response, die mit einer `.with_config(...)` ohne diese Einstellung überschreibt. Ist SSR aktiviert, postet das Framework das Page-Objekt an `<url>/render` und fügt `{ head, body }` in die HTML-Shell ein. Bei Worker-Fehler oder Timeout fällt die Response auf CSR zurück (ein leeres `<div id="app">`, das der Client hydriert), und der Hook `on_ssr_error(...)` wird ausgelöst. Schalten Sie in CI `ssr_throw_on_error(true)` ein, damit diese Fehlschläge stattdessen harte 500er sind.
+SSR ist standardmäßig ausgeschaltet und eine Eigenschaft der Konfiguration: eingeschaltet für jede aus der installierten Config gebaute Response, ausgeschaltet für jede Response, die mit einer `.with_config(...)` ohne diese Einstellung überschreibt. Ist SSR aktiviert, postet das Framework das Page-Objekt an `<url>/render` und fügt `{ head, body }` in die HTML-Shell ein. Ein Worker-Head, der ein eigenes `<title>` trägt - also jede Seite, die Inertias `Head`-Komponente verwendet -, **ersetzt** den Titel der Shell, statt sich zu ihm zu gesellen, und das gilt für beides: `.default_title(...)` auf der Config und ein `.title(...)` pro Response. Ein Dokument mit zwei Titeln zeigt den ersten, der Titel der Shell würde also im Browser-Tab, in den Suchergebnissen und in jeder Link-Vorschau über den echten Titel der Seite gewinnen. Setzen Sie den Titel bei aktivem SSR in `Head` statt auf der Response. Ein Head ohne Titel lässt den Titel der Shell genau dort, wo er war. Bei Worker-Fehler oder Timeout fällt die Response auf CSR zurück (ein leeres `<div id="app">`, das der Client hydriert), und der Hook `on_ssr_error(...)` wird ausgelöst. Schalten Sie in CI `ssr_throw_on_error(true)` ein, damit diese Fehlschläge stattdessen harte 500er sind.
 
 Noch bevor das Gateway überhaupt dispatcht, kann es prüfen, ob das gebaute SSR-Bundle auf der Festplatte existiert. Aktivieren Sie dies mit `.ssr_bundle_path(...)`, gerichtet auf das übliche `frontend/bootstrap/ssr/ssr.js`. Die Prüfung selbst ist standardmäßig eingeschaltet (`.ssr_ensure_bundle_exists(true)`), hat aber keine Wirkung, bis ein Pfad gesetzt ist. Das wird bewusst nicht automatisch erkannt, damit das Aktivieren von SSR gegen ein Test-Double nicht zusätzlich ein Bundle auf der Festplatte stubben muss. Bei einem fehlenden Bundle fällt die Response sofort auf CSR zurück, ohne `ssr_timeout` für eine Verbindung zu verbrauchen, die nie erfolgreich sein kann. Dies entspricht Laravels Konfiguration `ensure_bundle_exists`.
 
@@ -1061,17 +1139,17 @@ Das Verhalten von Inertia wird programmatisch über `InertiaConfig` konfiguriert
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)               // overrides SUPRNOVA_FRONTEND
+    .frontend(Frontend::Svelte)               // überschreibt SUPRNOVA_FRONTEND
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)             // cap lazy-prop fan-out
-    .with_all_errors(false)                   // one message per field, or all
-    .url_resolver(|req| req.path_and_query()) // how `page.url` is derived
-    .production();                            // false → loads from Vite dev server
+    .max_concurrent_resolvers(16)             // Fan-out von Lazy-Props begrenzen
+    .with_all_errors(false)                   // eine Meldung pro Feld oder alle
+    .url_resolver(|req| req.path_and_query()) // wie `page.url` abgeleitet wird
+    .production();                            // false → lädt vom Vite-Dev-Server
 ```
 
 Frontend-spezifische Standardwerte:
@@ -1081,6 +1159,23 @@ Frontend-spezifische Standardwerte:
 | Svelte (Standard) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+Zwei Attribute der HTML-Shell sind eine Erwähnung wert.
+
+`<title>` kommt von `.title(...)` auf der Response oder von
+`.default_title(...)`, wenn die Response keinen gesetzt hat. Unter
+[SSR](#ssr) gewinnt der eigene Head der Seite über **beide**: Ein
+Worker-Head, der ein `<title>` trägt, ist das einzige `<title>` des
+Dokuments, und die Shell lässt ihren Titel ganz weg.
+
+`<html lang="...">` ist das eine Attribut, das Sie nicht setzen können,
+denn der richtige Wert ist bereits bekannt - es ist das für die Anfrage
+geltende Locale, also das, was `LocaleMiddleware` erkannt hat, oder das
+konfigurierte `APP_LOCALE`, wenn nichts es erkannt hat. Siehe
+[Lokalisierung](localization.md); ein Screenreader bezieht seine Stimme
+aus diesem Attribut und eine Suchmaschine liest es als die Sprache der
+Seite, sodass eine Anwendung mit mehr als einer Sprache das fertige
+Dokument nicht mehr umschreiben muss, um es zu korrigieren.
 
 ### Das Feld `url`
 

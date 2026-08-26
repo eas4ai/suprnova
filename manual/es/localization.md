@@ -595,6 +595,14 @@ las páginas de error se renderizarían en el locale predeterminado.
 Sesión fuera de locale fuera de Inertia es el orden que usa el
 andamiaje.
 
+Una vez conectado, el shell del documento de Inertia declara por sí
+mismo el locale activo: `<html lang="ja">` para un visitante cuyo locale
+negociado es el japonés, en la misma forma BCP 47 que produce `Locale`
+(`pt-BR`, `zh-Hans`). Los lectores de pantalla toman su voz de ese atributo y los
+motores de búsqueda lo leen como el idioma de la página, así que una app
+que sirve más de un idioma ya no necesita un middleware propio que
+reescriba el documento terminado.
+
 ### Cambiar el locale a mitad de solicitud
 
 `Lang::set_locale` es el `App::setLocale` de Laravel - reescribe el

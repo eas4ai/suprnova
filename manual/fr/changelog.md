@@ -6,6 +6,94 @@ Une version est publiée quand son commit de version et le tag
 `v<version>` correspondant sont poussés atomiquement. Les plus récentes
 en premier.
 
+## 1.3.7 - 2026-08-26
+
+### Ajouté
+
+- **L'emplacement du middleware de page d'erreur Inertia vous appartient
+  désormais, et il est documenté.** `Inertia::install` enregistre
+  `InertiaErrorPageMiddleware` comme le plus interne de la couche Inertia :
+  il couvre donc le handler, les middlewares de route et tout ce que
+  vous enregistrez après cet appel - c'est pourquoi le scaffold place
+  `CsrfMiddleware` en dessous de lui. Il ne couvre rien de ce qui est
+  enregistré *au-dessus* de l'appel, car un middleware qui répond sans
+  appeler `next` ne transmet jamais sa réponse à ce qui est enregistré à
+  l'intérieur. Le cas qui pose problème est celui d'une session expirée
+  qui poste un formulaire : un `CsrfMiddleware` enregistré au-dessus de
+  l'installation répond `419` avec `{"message":"CSRF token mismatch."}` et
+  l'utilisateur obtient la modale de plantage d'Inertia sur le flux qu'il
+  est le plus susceptible d'emprunter ; le `429` d'un limiteur de débit
+  placé plus à l'extérieur et le `401` d'un guard d'authentification font
+  de même. Enregistrer le middleware vous-même, plus à l'extérieur,
+  fonctionnait déjà en 1.3.6 - le type était public et l'enregistrement
+  est idempotent par type, si bien qu'un enregistrement antérieur gardait
+  sa place - mais rien ne le disait et rien dans `install` ne le
+  reconnaissait, ce qui en faisait un accident plutôt qu'un contrat. C'en
+  est un désormais : enregistrez
+  `InertiaErrorPageMiddleware::new("Error")` après `SessionMiddleware` et
+  `LocaleMiddleware` et avant le middleware dont il doit couvrir les
+  rejets, et `install` le détecte, journalise au niveau `debug` et
+  n'enregistre pas le sien. Le composant que vous avez nommé lors de cet
+  enregistrement est celui qui est rendu : vous nommez donc la page une
+  seule fois et `.error_page(...)` sur la config devient facultatif -
+  c'est toujours lui qui fait enregistrer un middleware par `install` pour
+  une application qui n'en place pas elle-même. Les deux règles d'ordre
+  sont documentées sur le type et dans le manuel.
+
+### Corrigé
+
+- **Une page SSR a un seul `<title>`, et c'est celui de la page.** La
+  coquille HTML écrivait son `default_title` puis le head du worker SSR
+  tel quel, si bien que chaque page qui rendait un titre via le composant
+  `Head` d'Inertia produisait un document à deux éléments `<title>`, celui
+  du framework, générique, en premier. C'est le premier que lisent
+  l'onglet du navigateur, le robot d'indexation et l'aperçu de lien : le
+  vrai titre ne s'affichait donc jamais. Un head de worker qui porte un
+  titre remplace désormais celui de la coquille au lieu de s'y ajouter -
+  `default_title` comme un `InertiaResponse::title(...)` par réponse
+  s'effacent ; un head qui n'en porte aucun laisse le titre de la coquille
+  exactement où il était.
+- **Le document déclare la langue dans laquelle il est écrit.** La
+  coquille codait `<html lang="en">` en dur : un lecteur passé au japonais
+  recevait donc de la prose japonaise dans un document qui se déclarait
+  anglais - un lecteur d'écran choisit sa voix d'après cet attribut et un
+  moteur de recherche y lit le signal de langue de la page. Elle porte
+  désormais la locale en vigueur pour la requête : ce que
+  `LocaleMiddleware` a détecté, puis un remplacement par
+  `Lang::set_locale`, puis l'`APP_LOCALE` configuré, sous la même forme
+  BCP 47 que rend `Locale` (`pt-BR`, `zh-Hans`). Cela vaut aussi pour la
+  page d'erreur, qui est rendue au retour et qui est le cas ayant fait
+  apparaître le problème. Sans la feature `localization`, la coquille
+  conserve `en`.
+
+### Mise à niveau
+
+- Rien n'est requis. Les deux correctifs s'appliquent à chaque application
+  Inertia dès la mise à niveau, et `Inertia::install` se comporte
+  exactement comme avant pour une application qui n'enregistre pas
+  elle-même le middleware de page d'erreur.
+- Une application qui insérait `<html lang="...">` dans le document fini
+  au moyen d'un middleware à elle peut le supprimer - la coquille le fait
+  désormais, à partir de la même locale que lisait ce middleware.
+- Une application dont le `CsrfMiddleware`, le limiteur de débit ou le
+  guard d'authentification est enregistré **avant** `Inertia::install`
+  devrait enregistrer `InertiaErrorPageMiddleware::new("Error")` après
+  `LocaleMiddleware` et avant ce middleware, pour que ses rejets rendent
+  la page d'erreur au lieu d'atteindre le client sous forme de JSON brut.
+  `install` s'abstient alors d'ajouter le sien, et le composant que vous
+  avez nommé à l'enregistrement est celui qui est rendu :
+  `.error_page("Error")` sur la config est donc facultatif - gardez-le ou
+  supprimez-le. Le `bootstrap.rs` scaffoldé enregistre CSRF après
+  l'installation : un projet généré par `suprnova new` n'a donc rien à
+  changer.
+- Une application qui rend son propre `<title>` via le composant `Head`
+  d'Inertia sous SSR verra le titre de la coquille cesser d'apparaître
+  dans le document - aussi bien `InertiaConfig::default_title` qu'un
+  `InertiaResponse::title(...)` par réponse. C'est le correctif : le titre
+  de la page est le seul du document. Si vous comptiez sur le titre de la
+  coquille comme préfixe ou suffixe, déplacez-le dans le composant `Head`,
+  là où vit le reste du titre.
+
 ## 1.3.6 - 2026-08-26
 
 ### Ajouté

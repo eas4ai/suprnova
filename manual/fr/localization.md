@@ -600,6 +600,15 @@ moment-là, et chaque page d'erreur s'afficherait dans la locale par
 défaut. Session à l'extérieur, locale au milieu, Inertia à l'intérieur :
 c'est l'ordre qu'utilise le scaffold.
 
+Une fois qu'il est câblé, la coquille de document Inertia déclare
+elle-même la locale active : `<html lang="ja">` pour un visiteur dont
+la locale négociée est le japonais, sous la même forme BCP 47 que rend
+`Locale` (`pt-BR`, `zh-Hans`). Les lecteurs d'écran choisissent leur
+voix d'après cet attribut et les moteurs de recherche y lisent la
+langue de la page : une application qui sert plus d'une langue n'a
+donc plus besoin d'un middleware à elle pour réécrire le document
+fini.
+
 ### Changer de locale en cours de requête
 
 `Lang::set_locale` est le `App::setLocale` de Laravel - il réécrit la
@@ -1105,7 +1114,7 @@ le middleware directement, parce que les cas intéressants concernent le
 parsing d'en-tête et la question de quelle source gagne. Montez une
 route dont le handler retourne `__!("welcome")`, enregistrez
 `LocaleMiddleware` dans le `MiddlewareRegistry`, et pilotez-la avec le
-harnais loopback de [HTTP Tests](http-tests.md), en envoyant
+harnais loopback de [Tests HTTP](http-tests.md), en envoyant
 `Accept-Language: fr, es;q=0.8` et en affirmant sur le corps espagnol.
 Les cas qui méritent d'être épinglés : un en-tête négocie, un cookie
 bat un en-tête, une locale indisponible est ignorée plutôt que de

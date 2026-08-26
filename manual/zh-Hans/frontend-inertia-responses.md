@@ -210,7 +210,7 @@ use suprnova::{InertiaResponse, MergeStrategy};
 InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
-        next_page,                                     // the new page slice
+        next_page,                                     // 新的这一页切片
         MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
@@ -251,7 +251,7 @@ InertiaResponse::new("Feed/Index").merge_lazy("posts", || async {
 无限滚动就是同一套机制，外加上分页元数据。`.scroll` / `.scroll_with` - 或者 `.paginate`，它能直接适配一个 `LengthAwarePaginator` 或 `CursorPaginator` - 会在数据旁边发出 `scrollProps`，而客户端的 `<InfiniteScroll>` 组件会驱动下一页/上一页的获取：
 
 ```rust
-// `posts` is a CursorPaginator from the query builder.
+// `posts` 是查询构造器返回的一个 CursorPaginator。
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
@@ -616,7 +616,7 @@ Application::new()
 3. 注册 `InertiaVersionMiddleware` - 客户端和服务器资产版本不一致时，发送 `409` + `X-Inertia-Location`。
 4. 注册 `Inertia303Middleware` - 在非 GET Inertia 重定向上将 `302` 升级为 `303`。
 5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#验证失败)。
-6. **仅当** `cfg` 点名了一个 `.error_page(...)` 时才注册 `InertiaErrorPageMiddleware` - 它会把框架自己的那些错误响应变成那个页面。参见[错误页面](#错误页面)。
+6. **仅当** `cfg` 点名了一个 `.error_page(...)` 时才注册 `InertiaErrorPageMiddleware` - 它会把框架自己的那些错误响应变成那个页面。参见[错误页面](#错误页面)。如果您自己在更外层注册了一个，您那个会保住它的位置和它点名的那个组件，这一步会被跳过 - 参见[这个页面是在哪里渲染的](#这个页面是在哪里渲染的)。
 
 顺序很重要：headers middleware 最先注册，所以最外层且能看到每一个响应，包括版本 middleware 在处理程序尚未运行前返回的 `409`。验证重定向 middleware 最后注册，因此最内层、最接近处理程序，在另外三个 middleware 有机会触及它之前先看到 `422`。
 
@@ -627,6 +627,8 @@ Application::new()
 若使用 flash 数据，请在 `Inertia::install` **之前**注册 `SessionMiddleware`。版本 middleware 会在客户端弹回前重新 flash 会话，使 flash 错误经受后续完整页面 GET；它只能在会话作用域内完成此事。
 
 也请把 [`LocaleMiddleware`](localization.md) 注册在**它之前** - 前提是您用了[错误页面](#错误页面)。一个中间件里 `next` 之后的代码，是在它内部的一切都已经返回之后才运行的，所以错误页面中间件渲染的时候，任何在它内部打开的作用域都已经被弹出了 - 对语言区域中间件来说，这意味着这个页面拿到的会是应用的默认语言区域，而不是访客的。Inertia 这一层不从本地化读取任何东西，所以把语言区域放到它外面不会有任何代价。脚手架出来的 `bootstrap.rs` 已经这么做了。同样的道理适用于您自己的任何一个中间件，只要错误页面需要读取它的请求作用域。
+
+您在这次调用**之后**注册的一切，都在错误页面的覆盖范围内；在它之上的则不在，因为一个不调用 `next` 就直接作答的中间件，它那份响应根本不会经过注册在它内部的任何东西。如果您的 `CsrfMiddleware`、速率限制器或者认证守卫必须位于这次安装之上，请自己把错误页面中间件注册在它们之间 - 参见[这个页面是在哪里渲染的](#这个页面是在哪里渲染的)。
 
 仅当确实不想要某个 middleware 时才跳过此调用（很少；它们分别阻止 URL 两种表示之间的缓存投毒、静默的陈旧 bundle、重定向上的表单重放，以及验证 `422` 在客户端错误模态框中结束而无法到达 `form.errors`）。
 
@@ -658,7 +660,41 @@ pub fn register_http_stack() {
 
 `"Error"` 的解析方式和其他任何页面名完全一样，所以只要有一个 `frontend/src/pages/Error.svelte`（或者 `.tsx`、`.vue`）就够了。**三个起始套件都已经带上了这样一个页面，并且已经设置好了 `.error_page("Error")`** - 一个新项目什么都不用做就已经就绪了。
 
-随之而来有一条顺序规则：**请在 `Inertia::install` 之前注册 `LocaleMiddleware`**，否则错误页面渲染时用的会是应用的默认语言区域，而不是访客的。错误页面是在返回的路上构建的 - 到那时候，在 Inertia 这一层内部注册的每一个中间件都已经返回，并且弹出了它各自打开的那个作用域。脚手架出来的 `bootstrap.rs` 把这件事做对了；如果是您自己写的，请检查一下。对您自己的任何一个请求作用域中间件也是一样，只要错误页面的共享 props 会读取它。
+### 这个页面是在哪里渲染的
+
+`Inertia::install` 把 `InertiaErrorPageMiddleware` 注册为 Inertia 这一层的**最内层**，所以它看到的是处理程序和路由中间件实际产出的那份响应。您在那次调用*之后*注册的一切也都在覆盖范围内 - 这正是脚手架把 `CsrfMiddleware` 放在它下面的原因。
+
+注册在这次调用**之上**的东西则不在覆盖范围内。一个不调用 `next` 就直接作答的中间件，它那份响应根本不会经过注册在它内部的任何东西，所以它那次拒绝压根到不了 Inertia 这一层。真正会出事的情形是一个过期会话去提交表单：`CsrfMiddleware` 用 `{"message":"CSRF token mismatch."}` 回答一个 `419`，而如果它位于 `Inertia::install` 之上，用户就会在他们最可能走到的那条流程上拿到崩溃模态框。一个更外层的速率限制器给出的 `429`，以及一个认证守卫给出的 `401`，行为都是一样的。
+
+当您的中间件栈就是这种形态时，请自己注册这个中间件，把它放在那个“它应当覆盖其拒绝”的中间件外面。这在 1.3.6 里作为一个副作用就已经能用了 - 那个类型是公开的，而全局注册是按类型幂等的，所以一次更早的注册会保住它的位置 - 只是没有任何地方这么说过。从 1.3.7 起，它是一条写下来的契约：`install` 会检查您的注册，在 `debug` 级别记一条日志，然后跳过它自己那次。
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // 在 CSRF 外面，这样它才看得到那个永远到不了下面那一层的 419。
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install` 会看到这次注册，跳过它自己那次，并且在 `debug` 级别说出来。您选定的那个位置就是最终生效的那个，您点名的那个组件也是 - 在这条链里的就是那个实例。您只在自己那次注册处给这个页面点名**一次**，这让配置上的 `.error_page(...)` 在这里成了可选项：留着或者去掉都行，没有别的东西会读它。而对于一个不自己安放中间件的应用，仍然是它让 `install` 去注册一个中间件。
+
+自己安放它，随之而来有两条顺序规则。
+
+**放在 `SessionMiddleware` 和 [`LocaleMiddleware`](localization.md) 之后**。这个页面携带着您的共享 props - `auth.user`、flash、语言区域那份共享数据 - 而它是在返回的路*上*构建的，那时候在它内部注册的每一个中间件都已经返回，并且弹出了它各自打开的那个请求作用域。要是注册在这两者之上，每一个错误页面都会丢掉访客的会话，并且以应用的默认语言区域渲染，而不是访客的。对您自己的任何一个请求作用域中间件也是一样，只要错误页面的共享 props 会读取它的状态。
+
+**放在那个“它应当覆盖其拒绝”的中间件之前**，而且不要比这更靠外。每一个经过它的响应，都是它要多分类一次的响应体；而一个在它外面的中间件，仍然可以在它跑起来之前就先作答。
+
+如果您自己什么都不注册，`Inertia::install` 会把这一切都替您做了 - 而且脚手架出来的 `bootstrap.rs` 已经把 `SessionMiddleware` 和 `LocaleMiddleware` 放在了这次调用之上，把 `CsrfMiddleware` 放在了它下面。
 
 ### 页面会收到什么
 
@@ -779,7 +815,7 @@ Inertia::install(
 )?;
 ```
 
-SSR 默认是关闭的，而且它是这份配置的一个属性：对每一个由已安装配置构建出来的响应它是开的，对任何用一份没有设置它的 `.with_config(...)` 覆盖过的响应它就是关的。启用之后，框架会把页面对象 POST 到 `<url>/render`，并把 `{ head, body }` 内联进 HTML 外壳。当工作进程出错或超时时，响应会回退到 CSR（一个空的 `<div id="app">`，由客户端去水合），同时 `on_ssr_error(...)` 钩子会触发；在 CI 里把 `ssr_throw_on_error(true)` 打开，就能让这些失败变成硬性的 500。
+SSR 默认是关闭的，而且它是这份配置的一个属性：对每一个由已安装配置构建出来的响应它是开的，对任何用一份没有设置它的 `.with_config(...)` 覆盖过的响应它就是关的。启用之后，框架会把页面对象 POST 到 `<url>/render`，并把 `{ head, body }` 内联进 HTML 外壳。一份携带着自己 `<title>` 的工作进程 head - 也就是每一个用了 Inertia `Head` 组件的页面 - 会**替换**掉外壳的标题，而不是和它并排放，这一点对配置上的 `.default_title(...)` 和逐响应的 `.title(...)` 都成立：一份带着两个标题的文档显示的是头一个，所以在标签页里、在搜索结果里、在每一次链接预览里，胜出的都会是外壳那个，而不是这个页面真正的标题。开着 SSR 时，请把标题设置在 `Head` 里，而不是设置在响应上。一份没有标题的 head，会让外壳的标题原封不动地留在原处。当工作进程出错或超时时，响应会回退到 CSR（一个空的 `<div id="app">`，由客户端去水合），同时 `on_ssr_error(...)` 钩子会触发；在 CI 里把 `ssr_throw_on_error(true)` 打开，就能让这些失败变成硬性的 500。
 
 在它进行任何分发前，网关可以检查已构建 SSR bundle 是否存在于磁盘 - 通过指向约定路径 `frontend/bootstrap/ssr/ssr.js` 的 `.ssr_bundle_path(...)` 选择加入（检查本身默认开启，即 `.ssr_ensure_bundle_exists(true)`，但设置路径前没有效果 - 这不会被自动检测，因此针对 test double 启用 SSR 无需同时在磁盘 stub bundle）。缺少 bundle 会立即回退到 CSR，不会为注定失败的连接付出 `ssr_timeout`。这映照 Laravel 的 `ensure_bundle_exists` 配置。
 
@@ -831,6 +867,12 @@ let cfg = InertiaConfig::new()
 | Svelte（默认） | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`、`.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+这个 HTML 外壳有两个属性值得点出来。
+
+`<title>` 来自响应上的 `.title(...)`，或者当这个响应一个都没设时，来自 `.default_title(...)`。在 [SSR](#ssr) 之下，这个页面自己的 head 会同时胜过**这两者**：一份携带着 `<title>` 的工作进程 head 就是这份文档里唯一的那个标题，而外壳会把它自己的标题整个略去。
+
+`<html lang="...">` 是您唯一一个设置不了的属性，因为那个正确的值本来就已经知道了 - 它就是这个请求当前生效的语言区域，也就是 `LocaleMiddleware` 检测到的那个，或者在什么都没检测到时那个已配置的 `APP_LOCALE`。参见[本地化](localization.md)；屏幕阅读器会依据这个属性选择朗读用的语音，搜索引擎也把它读作这个页面的语言，所以一个服务于不止一种语言的应用，不再需要去重写那份已经成型的文档来纠正它。
 
 ### `url` 字段
 

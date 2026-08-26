@@ -739,7 +739,8 @@ impl InertiaSharedData for AuthShare {
                 })),
             );
         }
-        // Vary by page: only the admin dashboard needs the nav counts.
+        // Varie selon la page : seul le tableau de bord admin a besoin
+        // des compteurs de navigation.
         if component == "Admin/Dashboard" {
             out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
         }
@@ -934,18 +935,19 @@ Redéfinissez-la lorsque vous voulez autre chose :
 ```rust
 use suprnova::{InertiaConfig, VersionResolver};
 
-// Default - hash the build manifest. Nothing to write.
+// Par défaut - hachage du manifeste de build. Rien à écrire.
 let cfg = InertiaConfig::new();
 
-// A different manifest location; the version follows it.
+// Un autre emplacement de manifeste ; la version le suit.
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
 
-// Static - bake in a build-time identifier. Survives a later
-// `.manifest_path(...)` call: an explicit version is deliberate.
+// Statique - fige un identifiant de build. Survit à un appel
+// `.manifest_path(...)` ultérieur : une version explicite est délibérée.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic - a container deployment id, anything. The closure runs on
-// every version check; cache inside if it isn't cheap.
+// Dynamique - un id de déploiement de conteneur, ou n'importe quoi d'autre.
+// La closure s'exécute à chaque vérification de version ; mettez le résultat
+// en cache si son calcul n'est pas bon marché.
 let cfg = InertiaConfig::new().version_with(|| deployment_id());
 ```
 
@@ -1028,7 +1030,10 @@ processus rendrait aussi ces binaires indisponibles.
    avec les erreurs flashées. Voir [Échecs de validation](#échecs-de-validation).
 6. Enregistre `InertiaErrorPageMiddleware`, **uniquement lorsque** `cfg`
    nomme un `.error_page(...)` - transforme les réponses d'erreur propres
-   au framework en cette page. Voir [Pages d'erreur](#pages-d-erreur).
+   au framework en cette page. Voir [Pages d'erreur](#pages-d-erreur). Si
+   vous en avez enregistré un vous-même, plus à l'extérieur, le vôtre
+   garde sa place et le composant qu'il nomme, et cette étape est sautée -
+   voir [Où la page est rendue](#où-la-page-est-rendue).
 
 L'ordre compte : le middleware d'en-têtes est enregistré en premier, il est
 donc le plus externe et voit chaque réponse  -  y compris le `409` que le
@@ -1072,6 +1077,15 @@ visiteur. La couche Inertia ne lit rien de la localisation, mettre la
 locale à l'extérieur ne coûte donc rien. Le `bootstrap.rs` scaffoldé le
 fait déjà. Le même raisonnement vaut pour tout middleware à vous dont la
 page d'erreur a besoin de lire la portée de requête.
+
+Tout ce que vous enregistrez **après** cet appel est couvert par la
+page d'erreur ; ce qui se trouve au-dessus ne l'est pas, car un
+middleware qui répond sans appeler `next` ne transmet sa réponse à
+rien de ce qui est enregistré à l'intérieur. Si votre
+`CsrfMiddleware`, votre limiteur de débit ou votre guard
+d'authentification doit se placer au-dessus de l'installation,
+enregistrez vous-même le middleware de page d'erreur entre les deux -
+voir [Où la page est rendue](#où-la-page-est-rendue).
 
 Ne sautez l'appel que si vous ne voulez véritablement pas l'un de ces
 middlewares (c'est rare ; chacun ferme un vrai mode d'échec  -
@@ -1121,15 +1135,86 @@ pub fn register_http_stack() {
 **Les trois starters en livrent une et posent déjà `.error_page("Error")`** -
 un nouveau projet est couvert sans rien faire.
 
-Une règle d'ordre l'accompagne : **enregistrez `LocaleMiddleware` avant
-`Inertia::install`**, sinon les pages d'erreur s'affichent dans la locale
-par défaut de l'application plutôt que dans celle du visiteur. La page
-d'erreur est construite au retour, après que chaque middleware enregistré
-à l'intérieur de la couche Inertia a rendu la main et dépilé la portée
-qu'il avait ouverte. Le `bootstrap.rs` scaffoldé s'en charge
-correctement ; si vous avez écrit le vôtre, vérifiez-le. Il en va de même
-pour tout middleware à vous, à portée de requête, que lisent les props
-partagées de la page d'erreur.
+### Où la page est rendue
+
+`Inertia::install` enregistre `InertiaErrorPageMiddleware` comme le
+**plus interne** de la couche Inertia : il voit donc la réponse que le
+handler et les middlewares de route ont réellement produite. Tout ce
+que vous enregistrez *après* cet appel est couvert lui aussi - c'est
+pourquoi le scaffold place `CsrfMiddleware` en dessous de lui.
+
+Rien de ce qui est enregistré **au-dessus** de l'appel n'est couvert.
+Un middleware qui répond sans appeler `next` ne transmet sa réponse à
+rien de ce qui est enregistré à l'intérieur : son rejet n'atteint donc
+jamais la couche Inertia. Le cas qui pose problème est celui d'une
+session expirée qui poste un formulaire : `CsrfMiddleware` répond
+`419` avec `{"message":"CSRF token mismatch."}` et, s'il se trouve
+au-dessus d'`Inertia::install`, l'utilisateur obtient la modale de
+plantage sur le flux qu'il est le plus susceptible d'emprunter. Le
+`429` d'un limiteur de débit plus externe et le `401` d'un guard
+d'authentification se comportent de la même façon.
+
+Enregistrez le middleware vous-même si c'est ainsi que votre
+application est agencée, à l'extérieur du middleware dont il doit
+couvrir les rejets. Cela fonctionnait en 1.3.6 par effet de bord - le
+type était public et l'enregistrement global est idempotent par type,
+si bien qu'un enregistrement antérieur gardait sa place - mais rien ne
+le disait. C'est un contrat documenté depuis la 1.3.7 : `install`
+vérifie votre enregistrement, journalise au niveau `debug` et
+n'enregistre pas le sien.
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // À l'extérieur de CSRF, pour qu'il voie le 419 qui n'atteint jamais
+    // la couche en dessous.
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install` voit l'enregistrement, n'ajoute pas le sien et le
+dit au niveau `debug`. La position que vous avez choisie est celle qui
+tient, et le composant que vous avez nommé aussi - c'est cette
+instance-là qui se trouve dans la chaîne. Vous nommez la page **une
+seule fois**, à votre propre enregistrement, ce qui rend
+`.error_page(...)` sur la config facultatif ici : gardez-le ou
+supprimez-le, rien d'autre ne le lit. C'est toujours lui qui fait
+enregistrer un middleware par `install` pour une application qui n'en
+place pas elle-même.
+
+Deux règles d'ordre accompagnent ce placement manuel.
+
+**Après `SessionMiddleware` et
+[`LocaleMiddleware`](localization.md).** La page porte vos props
+partagées - `auth.user`, le flash, le partage de locale - et elle est
+construite au *retour*, après que chaque middleware enregistré à
+l'intérieur a rendu la main et dépilé la portée de requête qu'il avait
+ouverte. Enregistré au-dessus de ces deux-là, le middleware de page
+d'erreur prive chaque page d'erreur de la session du visiteur et la
+fait s'afficher dans la locale par défaut de l'application plutôt que
+dans celle du visiteur. Il en va de même pour tout middleware à vous,
+à portée de requête, dont les props partagées de la page d'erreur
+lisent l'état.
+
+**Avant le middleware dont il doit couvrir les rejets**, et pas plus à
+l'extérieur que cela. Chaque réponse qui le traverse est un corps de
+plus à classer, et un middleware situé à l'extérieur peut de toute
+façon répondre avant qu'il ne s'exécute.
+
+Si vous n'enregistrez rien vous-même, `Inertia::install` fait tout
+cela pour vous - et le `bootstrap.rs` scaffoldé a déjà
+`SessionMiddleware` et `LocaleMiddleware` au-dessus de l'appel et
+`CsrfMiddleware` en dessous.
 
 ### Ce que la page reçoit
 
@@ -1354,10 +1439,20 @@ activé pour chaque réponse construite à partir de la config installée,
 désactivé pour toute réponse qui redéfinit avec un `.with_config(...)`
 qui ne le pose pas. Quand il est activé, le framework poste l'objet de
 page vers `<url>/render` et intègre `{ head, body }` dans la coquille
-HTML. En cas d'erreur ou d'expiration du worker, la réponse retombe
-sur le CSR (un `<div id="app">` vide que le client hydrate) et le hook
-`on_ssr_error(...)` se déclenche ; basculez `ssr_throw_on_error(true)`
-en CI pour transformer ces échecs en vrais 500.
+HTML. Un head de worker qui porte son propre `<title>` - c'est-à-dire
+chaque page qui utilise le composant `Head` d'Inertia - **remplace**
+le titre de la coquille au lieu de s'y ajouter, et cela vaut aussi
+bien pour `.default_title(...)` sur la config que pour un
+`.title(...)` par réponse : un document à deux titres affiche le
+premier, celui de la coquille l'emporterait donc sur le vrai titre de
+la page dans l'onglet, dans les résultats de recherche et dans chaque
+aperçu de lien. Avec le SSR activé, posez le titre dans `Head` plutôt
+que sur la réponse. Un head sans titre laisse le titre de la coquille
+exactement où il était. En cas d'erreur ou d'expiration du worker, la
+réponse retombe sur le CSR (un `<div id="app">` vide que le client
+hydrate) et le hook `on_ssr_error(...)` se déclenche ; basculez
+`ssr_throw_on_error(true)` en CI pour transformer ces échecs en vrais
+500.
 
 Avant même de lancer une requête, la passerelle peut vérifier que le bundle SSR
 construit existe sur le disque : activez cette vérification avec
@@ -1418,7 +1513,7 @@ let cfg = InertiaConfig::new()
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
     .max_concurrent_resolvers(16)             // plafonne le fan-out des props lazy
-    .with_all_errors(false)                   // one message per field, or all
+    .with_all_errors(false)                   // un message par champ, ou tous
     .url_resolver(|req| req.path_and_query()) // comment `page.url` est dérivé
     .production();                            // false → charge depuis le serveur de dev Vite
 ```
@@ -1430,6 +1525,23 @@ Défauts propres à chaque frontend :
 | Svelte (par défaut) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+Deux attributs de la coquille HTML méritent d'être signalés.
+
+`<title>` vient du `.title(...)` posé sur la réponse, ou du
+`.default_title(...)` quand la réponse n'en a posé aucun. Sous
+[SSR](#ssr), le head propre à la page l'emporte sur **les deux** : un
+head de worker qui porte un `<title>` est le seul du document, et la
+coquille laisse entièrement le sien de côté.
+
+`<html lang="...">` est le seul attribut que vous ne pouvez pas poser,
+parce que la bonne valeur est déjà connue - c'est la locale en vigueur
+pour la requête, celle que `LocaleMiddleware` a détectée ou
+l'`APP_LOCALE` configuré quand rien ne l'a détectée. Voir
+[Localisation](localization.md) ; un lecteur d'écran choisit sa voix
+d'après cet attribut et un moteur de recherche y lit la langue de la
+page : une application qui sert plus d'une langue n'a donc plus à
+réécrire le document fini pour corriger cette valeur.
 
 ### Le champ `url`
 

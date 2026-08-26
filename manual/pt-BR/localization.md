@@ -588,6 +588,14 @@ aberto dentro da camada Inertia já não existe mais nesse ponto, e toda
 página de erro seria renderizada no locale padrão. Sessão por fora de
 locale por fora de Inertia é a ordem que o scaffold usa.
 
+Uma vez conectado, o shell do documento Inertia declara o locale ativo
+por conta própria: `<html lang="ja">` para um visitante negociado para o
+japonês, na mesma forma BCP 47 que o `Locale` renderiza (`pt-BR`,
+`zh-Hans`). Leitores de tela tiram sua voz desse atributo e mecanismos
+de busca o leem como o idioma da página, então um app que serve mais de
+um idioma não precisa mais de um middleware próprio para reescrever o
+documento já pronto.
+
 ### Mudando o locale no meio da solicitação
 
 `Lang::set_locale` é o `App::setLocale` do Laravel - ele reescreve o

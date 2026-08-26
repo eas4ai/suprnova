@@ -632,6 +632,15 @@ weg, und jede Fehlerseite würde im Standard-Locale rendern. Session
 außen, dann Locale, dann Inertia - das ist die Reihenfolge, die das
 Scaffold verwendet.
 
+Ist sie einmal verdrahtet, gibt die Inertia-Dokument-Shell das
+aktive Locale selbst an: `<html lang="ja">` für einen Besucher,
+der zu Japanisch ausgehandelt wurde, in derselben Form nach
+BCP 47, die `Locale` rendert (`pt-BR`, `zh-Hans`). Screenreader
+beziehen ihre Stimme aus diesem Attribut und Suchmaschinen lesen
+es als die Sprache der Seite - eine Anwendung, die mehr als eine
+Sprache ausliefert, braucht daher keine eigene Middleware mehr,
+die das fertige Dokument umschreibt.
+
 ### Das Locale mitten in der Anfrage wechseln
 
 `Lang::set_locale` ist Laravels `App::setLocale` - es schreibt das

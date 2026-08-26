@@ -144,29 +144,29 @@ pub async fn show(req: Request) -> Response {
     let resp = InertiaResponse::new("Posts/Show")
         .with("title", "Welcome")
         .with("post", load_post(42).await?)
-        // Lazy: closure runs only when the prop will actually be sent
-        // (initial visit, or partial reload that requests this key).
+        // Lazy: el closure se ejecuta solo cuando el prop se vaya a enviar
+        // (visita inicial, o recarga parcial que solicite esta clave).
         .lazy("recent_activity", || async {
             Ok::<_, FrameworkError>(load_activity().await?)
         })
-        // Optional: never sent on initial visits; the client must
-        // explicitly ask for the key via X-Inertia-Partial-Data.
+        // Optional: nunca se envía en las visitas iniciales; el cliente
+        // debe pedir la clave explícitamente vía X-Inertia-Partial-Data.
         .optional("permissions", || async {
             Ok::<_, FrameworkError>(load_permissions().await?)
         })
-        // Defer: skipped on the initial render; the client issues a
-        // follow-up XHR and the closure runs then.
+        // Defer: se omite en el render inicial; el cliente lanza un XHR
+        // posterior y el closure se ejecuta entonces.
         .defer("notifications", || async {
             Ok::<_, FrameworkError>(load_notifications().await?)
         })
-        // Merge: append-into-existing on partial reloads ("load more").
+        // Merge: añade a lo existente en las recargas parciales ("cargar más").
         .merge("rows", next_page().await?)
-        // Once: cached client-side across navigations; resolver skipped
-        // on subsequent visits unless server forces refresh.
+        // Once: cacheado en el cliente entre navegaciones; el resolver se omite
+        // en las visitas siguientes salvo que el servidor fuerce el refresco.
         .once("plans", || async {
             Ok::<_, FrameworkError>(load_plan_catalog().await?)
         })
-        // Flash: one-shot toast; appears under `page.flash`, not `props`.
+        // Flash: toast de un solo uso; aparece bajo `page.flash`, no `props`.
         .flash("toast", serde_json::json!({"type":"info","msg":"Saved"}))
         .resolve(&req)
         .await
@@ -313,7 +313,7 @@ use suprnova::{InertiaResponse, MergeStrategy};
 InertiaResponse::new("Feed/Index")
     .merge_with(
         "posts",
-        next_page,                                     // the new page slice
+        next_page,                                     // el nuevo segmento de página
         MergeStrategy::Append { match_on: Some(vec!["id".into()]) },
     )
 ```
@@ -382,7 +382,7 @@ los datos, y el componente `<InfiniteScroll>` del cliente dirige las
 peticiones siguiente/anterior:
 
 ```rust
-// `posts` is a CursorPaginator from the query builder.
+// `posts` es un CursorPaginator del constructor de consultas.
 InertiaResponse::new("Feed/Index").paginate("posts", posts)
 ```
 
@@ -602,19 +602,19 @@ use suprnova::App;
 use std::sync::Arc;
 
 pub fn register() {
-    // Sync, materialized once at boot.
+    // Síncrono, materializado una vez en el arranque.
     App::inertia_share("appName", "Suprnova");
     App::inertia_share("appVersion", env!("CARGO_PKG_VERSION"));
 
-    // Async, resolved per response (skipped by partial reloads that
-    // exclude the key).
+    // Asíncrono, resuelto por respuesta (se omite en las recargas
+    // parciales que excluyen la clave).
     App::inertia_share_lazy("locale", || async {
         Ok::<_, suprnova::FrameworkError>(detect_locale().await)
     });
 
-    // Cached on the client across navigations - `share_once` runs on
-    // the first page that needs it, then the client skips re-resolution
-    // via `X-Inertia-Except-Once-Props` until the cache key changes.
+    // Cacheado en el cliente entre navegaciones - `share_once` se ejecuta en la
+    // primera página que lo necesita; después el cliente omite la re-resolución
+    // vía `X-Inertia-Except-Once-Props` hasta que cambia la clave de caché.
     App::inertia_share_once("plans", || async {
         Ok::<_, suprnova::FrameworkError>(load_plan_catalog().await?)
     });
@@ -698,7 +698,7 @@ impl InertiaSharedData for AuthShare {
                 })),
             );
         }
-        // Vary by page: only the admin dashboard needs the nav counts.
+        // Varía por página: solo el panel de admin necesita los contadores de navegación.
         if component == "Admin/Dashboard" {
             out.insert("pendingReviews".into(), Prop::eager(serde_json::json!(12)));
         }
@@ -706,7 +706,7 @@ impl InertiaSharedData for AuthShare {
     }
 }
 
-// In bootstrap:
+// En bootstrap:
 App::register_inertia_shared(Arc::new(AuthShare));
 ```
 
@@ -721,13 +721,13 @@ resúmenes de validación. Suprnova los expone bajo `page.flash` en cada
 respuesta de Inertia. Hay tres escritores:
 
 ```rust
-// 1. Push into the current request's flash bag.
+// 1. Empuja a la flash bag de la solicitud actual.
 App::flash("toast", "Saved");
 
-// 2. Attach to a specific response (same effect on this response only).
+// 2. Adjunta a una respuesta concreta (mismo efecto, solo en esta respuesta).
 InertiaResponse::new("Posts/Show").flash("toast", "Saved")
 
-// 3. Carry across a redirect via the Redirect facade.
+// 3. Transporta a través de una redirección vía la fachada Redirect.
 use suprnova::Redirect;
 
 Redirect::to("/posts").with("toast", "Created")
@@ -752,14 +752,14 @@ Las claves internas de sesión (cualquier cosa con prefijo `_`) se filtran de
 `Redirect` es toda la superficie de Laravel:
 
 ```rust
-Redirect::to("/dashboard")                       // 302 to a path
-Redirect::route("posts.show").with("id", "42")   // named route, route params
-Redirect::back("/")                              // session-recorded previous URL
-Redirect::refresh()                              // same URL, fresh GET
-Redirect::guest(&req, "/login")                  // stashes intended URL
-Redirect::intended("/dashboard")                 // pops the stashed URL
-Redirect::signed_route("downloads.show", &[("id","42")])?  // signed URL
-Redirect::to("/posts/42").preserve_fragment()    // keep #frag across visit
+Redirect::to("/dashboard")                       // 302 a una ruta
+Redirect::route("posts.show").with("id", "42")   // ruta con nombre, parámetros de ruta
+Redirect::back("/")                              // URL previa registrada en la sesión
+Redirect::refresh()                              // misma URL, GET nuevo
+Redirect::guest(&req, "/login")                  // guarda la URL prevista
+Redirect::intended("/dashboard")                 // saca la URL guardada
+Redirect::signed_route("downloads.show", &[("id","42")])?  // URL firmada
+Redirect::to("/posts/42").preserve_fragment()    // conserva #frag entre visitas
 ```
 
 Todas las variantes de `Redirect` aceptan `.with(k, v)`, `.with_input(map)`,
@@ -889,18 +889,18 @@ Sobrescríbela cuando quieras otra cosa:
 ```rust
 use suprnova::{InertiaConfig, VersionResolver};
 
-// Default - hash the build manifest. Nothing to write.
+// Por defecto - hashea el manifiesto de build. Nada que escribir.
 let cfg = InertiaConfig::new();
 
-// A different manifest location; the version follows it.
+// Otra ubicación del manifiesto; la versión la sigue.
 let cfg = InertiaConfig::new().manifest_path("dist/.vite/manifest.json");
 
-// Static - bake in a build-time identifier. Survives a later
-// `.manifest_path(...)` call: an explicit version is deliberate.
+// Estática - fija un identificador de tiempo de build. Sobrevive a una
+// llamada posterior a `.manifest_path(...)`: una versión explícita es deliberada.
 let cfg = InertiaConfig::new().version(env!("CARGO_PKG_VERSION"));
 
-// Dynamic - a container deployment id, anything. The closure runs on
-// every version check; cache inside if it isn't cheap.
+// Dinámica - un id de despliegue del contenedor, lo que sea. El closure
+// se ejecuta en cada comprobación de versión; cachea dentro si no es barato.
 let cfg = InertiaConfig::new().version_with(|| deployment_id());
 ```
 
@@ -925,7 +925,7 @@ de un manifest desde S3), haz la lectura una vez durante el arranque y pasa la
 La mayoría de las apps instala los middlewares del protocolo en una
 sola llamada, desde `register_http_stack`: el hook de arranque solo HTTP, que
 ejecuta la ruta del servidor y omiten los binarios de queue, schedule, workflow
-y console (consulta [Bootstrap](bootstrap.md)):
+y console (consulta [Arranque de la aplicación](bootstrap.md)):
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -981,6 +981,9 @@ consigo esos binarios.
 6. Registra `InertiaErrorPageMiddleware`, **solo cuando** `cfg` nombra un
    `.error_page(...)`: convierte las propias respuestas de error del
    framework en esa página. Consulta [Páginas de error](#páginas-de-error).
+   Si registraste uno tú mismo, más hacia fuera, el tuyo conserva su
+   posición y el componente que nombra, y este paso se omite; consulta
+   [Dónde se renderiza la página](#dónde-se-renderiza-la-página).
 
 El orden importa: el middleware de headers se registra primero, por lo que es
 el más externo y ve todas las respuestas, incluido el `409` que el middleware
@@ -1021,6 +1024,15 @@ Inertia no lee nada de la localización, así que poner el locale por fuera no
 cuesta nada. El `bootstrap.rs` del andamiaje ya lo hace. El mismo
 razonamiento vale para cualquier middleware tuyo cuyo scope de solicitud
 necesite leer la página de error.
+
+Todo lo que registres **después** de esta llamada queda cubierto por la
+página de error; lo que quede por encima, no, porque un middleware que
+responde sin llamar a `next` entrega su respuesta a nada de lo que hay
+dentro de él. Si tu `CsrfMiddleware`, tu limitador de velocidad o tu
+guard de autenticación tienen que ir por encima de la llamada a
+`install`, registra tú mismo el middleware de página de error entre
+ellos; consulta
+[Dónde se renderiza la página](#dónde-se-renderiza-la-página).
 
 Omite la llamada solo si realmente no quieres uno de estos middlewares (es
 raro; cada uno cierra un modo de fallo real: envenenamiento de caché entre
@@ -1070,15 +1082,80 @@ es todo lo que hace falta. **Los tres starters incluyen una y ya
 establecen `.error_page("Error")`** - un proyecto nuevo queda cubierto
 sin hacer nada.
 
-Viene con una regla de orden: **registra `LocaleMiddleware` antes de
-`Inertia::install`**, o las páginas de error se renderizarán en el
-locale predeterminado de la aplicación y no en el del visitante. La
-página de error se construye en la salida, después de que todo
-middleware registrado dentro de la capa de Inertia haya retornado y haya
-desapilado cualquier scope que hubiera abierto. El `bootstrap.rs` del
-andamiaje lo hace bien; si escribiste el tuyo, compruébalo. Lo mismo
-vale para cualquier middleware propio con scope de solicitud cuyo estado
-lean los props compartidos de la página de error.
+### Dónde se renderiza la página
+
+`Inertia::install` registra `InertiaErrorPageMiddleware` como el **más
+interno** de la capa de Inertia, así que ve la respuesta que realmente
+produjeron el handler y el middleware de ruta. Todo lo que registres
+*después* de esa llamada también queda cubierto, que es por lo que el
+andamiaje pone `CsrfMiddleware` por debajo.
+
+Lo que se registre **por encima** de la llamada no queda cubierto. Un
+middleware que responde sin llamar a `next` entrega su respuesta a nada
+de lo registrado dentro de él, así que su rechazo no llega nunca a la
+capa de Inertia. El caso que duele es una sesión caducada que envía un
+formulario: `CsrfMiddleware` responde `419` con
+`{"message":"CSRF token mismatch."}` y, si está por encima de
+`Inertia::install`, el usuario recibe el modal de fallo justo en el
+flujo que más probablemente va a usar. El `429` de un limitador de
+velocidad más externo y el `401` de un guard de autenticación se
+comportan igual.
+
+Registra tú mismo el middleware cuando tu app tenga esa forma, por fuera
+del middleware cuyos rechazos debe cubrir. Esto ya funcionaba en 1.3.6
+como efecto secundario - el tipo era público y el registro global es
+idempotente por tipo, así que un registro anterior conservaba su sitio -
+pero nada lo decía. Desde 1.3.7 es un contrato documentado: `install`
+comprueba tu registro, registra un `debug` y se salta el suyo.
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // Por fuera de CSRF, así ve el 419 que nunca llega a la capa de abajo.
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install` ve el registro, se salta el suyo y lo dice en
+`debug`. La posición que elegiste es la que se mantiene, y también el
+componente que nombraste: esa instancia es la que está en la cadena.
+Nombras la página **una sola vez**, en tu propio registro, lo que aquí
+hace opcional `.error_page(...)` en la config: consérvalo o quítalo,
+nada más lo lee. Sigue siendo lo que hace que `install` registre un
+middleware para una app que no coloca ninguno por su cuenta.
+
+Colocarlo tú mismo viene con dos reglas de orden.
+
+**Después de `SessionMiddleware` y
+[`LocaleMiddleware`](localization.md).** La página lleva tus props
+compartidos - `auth.user`, el flash, la compartición de locale - y se
+construye en la *salida*, después de que todo middleware registrado
+dentro de él haya retornado y haya desapilado cualquier scope de
+solicitud que hubiera abierto. Si se registra por encima de esos dos,
+cada página de error pierde la sesión del visitante y se renderiza en el
+locale predeterminado de la aplicación y no en el suyo. Lo mismo vale
+para cualquier middleware propio con scope de solicitud cuyo estado lean
+los props compartidos de la página de error.
+
+**Antes del middleware cuyos rechazos debe cubrir**, y no más hacia
+fuera que eso. Cada respuesta que lo atraviesa es un cuerpo más que
+tiene que clasificar, y un middleware por fuera de él todavía puede
+responder antes de que se ejecute.
+
+Si no registras nada por tu cuenta, `Inertia::install` hace todo esto
+por ti, y el `bootstrap.rs` del andamiaje ya tiene `SessionMiddleware` y
+`LocaleMiddleware` por encima de la llamada y `CsrfMiddleware` por
+debajo.
 
 ### Qué recibe la página
 
@@ -1261,9 +1338,9 @@ Actívalo en el cliente:
 
 ```js
 createInertiaApp({
-  serverHead: true,        // reads the `head` prop
-  // serverHead: 'meta',   // or read a differently-named prop
-  // serverHead: (page) => [...],  // or compute from the whole page
+  serverHead: true,        // lee el prop `head`
+  // serverHead: 'meta',   // o lee un prop con otro nombre
+  // serverHead: (page) => [...],  // o calcúlalo a partir de la página entera
 })
 ```
 
@@ -1297,7 +1374,15 @@ SSR está desactivado de forma predeterminada y es una propiedad de la config:
 activado para cada respuesta construida desde la config instalada, desactivado
 para cualquier respuesta que sobrescriba con `.with_config(...)` sin
 establecerlo. Cuando está activado, el framework publica el objeto de página
-en `<url>/render` e inserta `{ head, body }` en el shell HTML. Ante un error o
+en `<url>/render` e inserta `{ head, body }` en el shell HTML. Un head del
+worker que lleva su propio `<title>` - que es toda página que use el
+componente `Head` de Inertia - **reemplaza** el título del shell en lugar de
+sumarse a él, y eso vale tanto para `.default_title(...)` en la config como
+para un `.title(...)` por respuesta: un documento con dos títulos muestra el
+primero, así que el del shell le ganaría al título real de la página en la
+pestaña, en los resultados de búsqueda y en cada vista previa de enlace. Con
+SSR activado, establece el título en `Head` y no en la respuesta. Un head sin
+título deja el título del shell exactamente donde estaba. Ante un error o
 timeout del worker, la respuesta vuelve a CSR (un `<div id="app">` vacío que
 el cliente hidrata) y se ejecuta el hook `on_ssr_error(...)`; cambia
 `ssr_throw_on_error(true)` en CI para convertir esos fallos en errores 500
@@ -1352,17 +1437,17 @@ crea `suprnova new --frontend react`. Todo lo demás tiene forma de builder:
 use suprnova::{InertiaConfig, Frontend};
 
 let cfg = InertiaConfig::new()
-    .frontend(Frontend::Svelte)               // overrides SUPRNOVA_FRONTEND
+    .frontend(Frontend::Svelte)               // sobrescribe SUPRNOVA_FRONTEND
     .vite_dev_server("http://localhost:5765")
     .entry_point("src/main.ts")
     .version(env!("CARGO_PKG_VERSION"))
     .default_title("My App")
     .manifest_path("public/assets/.vite/manifest.json")
     .assets_base_url("/assets")
-    .max_concurrent_resolvers(16)             // cap lazy-prop fan-out
-    .with_all_errors(false)                   // one message per field, or all
-    .url_resolver(|req| req.path_and_query()) // how `page.url` is derived
-    .production();                            // false → loads from Vite dev server
+    .max_concurrent_resolvers(16)             // tope de dispersión de props perezosos
+    .with_all_errors(false)                   // un mensaje por campo, o todos
+    .url_resolver(|req| req.path_and_query()) // cómo se deriva `page.url`
+    .production();                            // false → carga desde el servidor de desarrollo Vite
 ```
 
 Valores predeterminados específicos por frontend:
@@ -1372,6 +1457,22 @@ Valores predeterminados específicos por frontend:
 | Svelte (predeterminado) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+Conviene señalar dos atributos del shell HTML.
+
+`<title>` viene de `.title(...)` en la respuesta, o de
+`.default_title(...)` cuando la respuesta no estableció ninguno. Bajo
+[SSR](#ssr) el head de la propia página gana a **ambos**: un head del worker
+que lleva un `<title>` es el único del documento, y el shell deja el suyo
+fuera por completo.
+
+`<html lang="...">` es el único atributo que no puedes establecer, porque el
+valor correcto ya se conoce: es el locale vigente para la solicitud, el que
+detectó `LocaleMiddleware` o el `APP_LOCALE` configurado cuando no lo detectó
+nadie. Consulta [Localización](localization.md); un lector de pantalla toma su
+voz de ese atributo y un motor de búsqueda lo lee como el idioma de la página,
+así que una app que sirve más de un idioma ya no tiene que reescribir el
+documento terminado para corregirlo.
 
 ### El campo `url`
 

@@ -5,6 +5,96 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 1.3.7 - 2026-08-26
+
+### Hinzugefügt
+
+- **Wo die Inertia-Fehlerseiten-Middleware sitzt, ist jetzt Ihre Wahl -
+  und dokumentiert.** `Inertia::install` registriert
+  `InertiaErrorPageMiddleware` als innerste der Inertia-Schicht, sie
+  deckt also den Handler, die Route-Middleware und alles ab, was Sie
+  nach diesem Aufruf registrieren - genau deshalb setzt das Scaffold
+  `CsrfMiddleware` darunter. Sie deckt nichts ab, was *über* dem Aufruf
+  registriert ist, denn eine Middleware, die antwortet, ohne `next`
+  aufzurufen, übergibt ihre Response an nichts, was in ihr registriert
+  ist. Der Fall, der wehtut, ist eine abgelaufene Session, die ein
+  Formular absendet: Eine über `Inertia::install` registrierte
+  `CsrfMiddleware` antwortet mit `419` und
+  `{"message":"CSRF token mismatch."}`, und der Benutzer bekommt genau
+  in dem Flow, den er am ehesten durchläuft, Inertias Absturzmodal; der
+  `429` eines weiter außen liegenden Rate-Limiters und der `401` eines
+  Auth-Guards sind derselbe Fall. Die Middleware selbst weiter außen zu
+  registrieren, funktionierte schon in 1.3.6 - der Typ war öffentlich
+  und die Registrierung ist pro Typ idempotent, eine frühere
+  Registrierung behielt also ihren Platz -, aber nirgends stand es und
+  nichts in `install` nahm davon Notiz, was es zu einem Zufall statt zu
+  einem Vertrag machte. Jetzt ist es ein Vertrag: Registrieren Sie
+  `InertiaErrorPageMiddleware::new("Error")` nach `SessionMiddleware`
+  und `LocaleMiddleware` und vor der Middleware, deren Ablehnungen sie
+  abdecken soll; `install` prüft darauf, protokolliert auf `debug` und
+  überspringt die eigene. Gerendert wird die Komponente, die Sie bei
+  dieser Registrierung benannt haben, Sie benennen die Seite also
+  einmal, und `.error_page(...)` auf der Config wird optional - sie ist
+  weiterhin das, was `install` dazu veranlasst, für eine Anwendung, die
+  selbst keine Middleware platziert, eine zu registrieren. Die beiden
+  Regeln zur Reihenfolge sind am Typ und im Handbuch dokumentiert.
+
+### Behoben
+
+- **Eine SSR-Seite hat ein `<title>`, und es ist das der Seite selbst.**
+  Die HTML-Shell schrieb ihr `default_title` und danach den Head des
+  SSR-Workers unverändert, jede Seite, die ihren Titel über Inertias
+  `Head`-Komponente rendert, erzeugte also ein Dokument mit zwei
+  `<title>`-Elementen und dem generischen des Frameworks an erster
+  Stelle. Gelesen wird das erste - vom Browser-Tab, vom Crawler und von
+  der Link-Vorschau -, der echte Titel erschien also nie. Ein
+  Worker-Head, der einen Titel trägt, ersetzt jetzt den Titel der
+  Shell, statt sich zu ihm zu gesellen - sowohl `default_title` als
+  auch ein `InertiaResponse::title(...)` pro Response treten zurück;
+  ein Head ohne Titel lässt den Titel der Shell genau dort, wo er war.
+- **Das Dokument gibt an, in welcher Sprache es geschrieben ist.** Die
+  Shell hatte `<html lang="en">` fest codiert, ein auf Japanisch
+  umgeschalteter Leser bekam also japanische Prosa in einem Dokument,
+  das von sich behauptete, englisch zu sein - ein Screenreader bezieht
+  seine Stimme aus diesem Attribut und eine Suchmaschine nimmt es als
+  Sprachsignal der Seite. Sie trägt jetzt das für die Anfrage geltende
+  Locale: das, was `LocaleMiddleware` erkannt hat, dann ein Override
+  per `Lang::set_locale`, dann das konfigurierte `APP_LOCALE`, in
+  derselben Form nach BCP 47, die `Locale` rendert (`pt-BR`,
+  `zh-Hans`). Das gilt auch für die Fehlerseite, die auf dem Rückweg
+  gerendert wird und der Fall war, der es zutage brachte. Ohne das
+  `localization`-Feature behält die Shell `en`.
+
+### Upgrade
+
+- Nichts ist erforderlich. Beide Fixes greifen beim Upgrade in jeder
+  Inertia-Anwendung, und `Inertia::install` verhält sich für eine
+  Anwendung, die die Fehlerseiten-Middleware nicht selbst registriert,
+  genau wie zuvor.
+- Eine Anwendung, die `<html lang="...">` mit einer eigenen Middleware
+  in das fertige Dokument eingefügt hat, kann diese löschen - die Shell
+  erledigt das jetzt, aus demselben Locale, das jene Middleware gelesen
+  hat.
+- Eine Anwendung, deren `CsrfMiddleware`, Rate-Limiter oder Auth-Guard
+  **vor** `Inertia::install` registriert ist, sollte
+  `InertiaErrorPageMiddleware::new("Error")` nach `LocaleMiddleware`
+  und vor jener Middleware registrieren, damit deren Ablehnungen die
+  Fehlerseite rendern, statt als rohes JSON beim Client zu landen.
+  `install` verzichtet dann darauf, eine eigene hinzuzufügen, und
+  gerendert wird die Komponente, die Sie bei der Registrierung benannt
+  haben; `.error_page("Error")` auf der Config ist damit optional -
+  behalten oder weglassen. Die gescaffoldete `bootstrap.rs` registriert
+  CSRF nach dem Aufruf, ein von `suprnova new` erzeugtes Projekt
+  braucht also keine Änderung.
+- Eine Anwendung, die ihr eigenes `<title>` unter SSR über Inertias
+  `Head`-Komponente rendert, wird sehen, dass der Titel der Shell nicht
+  mehr im Dokument erscheint - weder `InertiaConfig::default_title`
+  noch ein `InertiaResponse::title(...)` pro Response. Genau das ist
+  der Fix: Der eigene Titel der Seite ist der einzige des Dokuments.
+  Haben Sie sich auf den Titel der Shell als Präfix oder Suffix
+  verlassen, verschieben Sie ihn in die `Head`-Komponente, wo der Rest
+  des Titels lebt.
+
 ## 1.3.6 - 2026-08-26
 
 ### Hinzugefügt

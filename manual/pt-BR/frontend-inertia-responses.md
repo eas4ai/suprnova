@@ -595,7 +595,6 @@ Regras:
   pois não há cache de fallback - o comportamento de "restaurar do cache" só
   se aplica a uma página que o cliente já tenha visto.
 
-
 ## Dados compartilhados via `App::inertia_share*`
 
 Algumas props são as mesmas em toda página Inertia - estado de autenticação,
@@ -719,7 +718,6 @@ App::register_inertia_shared(Arc::new(AuthShare));
 
 Ignore `component` (`_component`) se seu provider não precisar variar por
 página.
-
 
 ## Flash e redirects
 
@@ -927,13 +925,12 @@ Para resolução de versão assíncrona ou falível (por exemplo, ler um hash de
 manifesto do S3), faça a leitura uma vez no boot e passe a `String` em cache
 para `.version(...)`.
 
-
 ## Bootstrap: `Inertia::install`
 
 A maioria dos apps instala os middlewares de protocolo em uma única
 chamada, a partir de `register_http_stack` - o hook de bootstrap somente HTTP,
 que o caminho do servidor executa e os binários de queue, schedule, workflow e
-console pulam (veja [Bootstrap](bootstrap.md)):
+console pulam (veja [Inicialização da aplicação](bootstrap.md)):
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -988,7 +985,10 @@ esses binários junto.
    flash. Veja [Falhas de validação](#falhas-de-validação).
 6. Registra `InertiaErrorPageMiddleware`, **somente quando** `cfg` nomear
    um `.error_page(...)` - transforma as próprias respostas de erro do
-   framework nessa página. Veja [Páginas de erro](#páginas-de-erro).
+   framework nessa página. Veja [Páginas de erro](#páginas-de-erro). Se
+   você mesmo registrou um, mais para fora, o seu mantém a posição e o
+   componente que ele nomeia, e este passo é pulado - veja
+   [Onde a página é renderizada](#onde-a-página-é-renderizada).
 
 A ordem importa: o middleware de headers é registrado primeiro, então é o
 mais externo e vê toda resposta - incluindo o `409` que o middleware de
@@ -1030,12 +1030,19 @@ localização, então colocar o locale por fora dela não custa nada. O
 qualquer middleware seu cujo escopo de solicitação a página de erro
 precise ler.
 
+Tudo o que você registra **depois** dessa chamada é coberto pela página
+de erro; o que está acima dela não é, porque um middleware que responde
+sem chamar `next` entrega a sua resposta a nada que esteja dentro dele.
+Se o seu `CsrfMiddleware`, limitador de taxa ou guard de autenticação
+precisa ficar acima da instalação, registre o middleware de página de
+erro você mesmo entre os dois - veja
+[Onde a página é renderizada](#onde-a-página-é-renderizada).
+
 Pule a chamada somente se você genuinamente não quiser um desses middlewares
 (raro; cada um fecha um modo de falha real - envenenamento de cache entre
 as duas representações de uma URL, bundle obsoleto silencioso,
 reenvio de formulário em redirect e um `422` de validação terminando no
 modal de erro do cliente em vez de chegar a `form.errors`).
-
 
 ## Páginas de erro
 
@@ -1079,15 +1086,78 @@ pub fn register_http_stack() {
 preciso. **Os três starters já trazem uma e já definem
 `.error_page("Error")`** - um projeto novo está coberto sem fazer nada.
 
-Uma regra de ordem vem junto: **registre o `LocaleMiddleware` antes de
-`Inertia::install`**, ou as páginas de erro serão renderizadas no locale
-padrão do app em vez do locale do visitante. A página de erro é
-construída na saída, depois que todo middleware registrado dentro da
-camada Inertia já retornou e desempilhou qualquer escopo que tenha
-aberto. O `bootstrap.rs` com scaffold acerta isso; se você escreveu o
-seu próprio, confira. O mesmo vale para qualquer middleware seu com
-escopo de solicitação que as props compartilhadas da página de erro
-leiam.
+### Onde a página é renderizada
+
+O `Inertia::install` registra o `InertiaErrorPageMiddleware` na posição
+**mais interna** da camada Inertia, então ele vê a resposta que o handler
+e o middleware de rota de fato produziram. Tudo o que você registra
+*depois* dessa chamada também é coberto - é por isso que o scaffold
+coloca o `CsrfMiddleware` abaixo dela.
+
+O que está registrado **acima** da chamada não é coberto. Um middleware
+que responde sem chamar `next` entrega a sua resposta a nada que esteja
+registrado dentro dele, então a recusa dele nunca chega à camada Inertia.
+O caso que realmente pega é uma sessão expirada enviando um formulário: o
+`CsrfMiddleware` responde `419` com `{"message":"CSRF token mismatch."}`,
+e se ele estiver acima do `Inertia::install` o usuário recebe o modal de
+falha justamente no fluxo que ele tem mais chance de encontrar. O `429`
+de um limitador de taxa mais externo e o `401` de um guard de
+autenticação se comportam do mesmo jeito.
+
+Registre o middleware você mesmo quando esse for o formato da sua stack,
+por fora do middleware cujas recusas ele deve cobrir. Isso já funcionava
+na 1.3.6 como efeito colateral - o tipo era público e o registro global é
+idempotente por tipo, então um registro anterior mantinha o seu lugar -
+mas nada dizia isso. É um contrato documentado a partir da 1.3.7: o
+`install` procura o seu registro, loga em `debug` e pula o próprio.
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // Por fora do CSRF, para que veja o 419 que nunca chega à camada abaixo.
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+O `Inertia::install` vê o registro, pula o próprio e diz isso em `debug`.
+A posição que você escolheu é a que vale, e o componente que você nomeou
+também - aquela instância é a que está na chain. Você nomeia a página
+**uma vez**, no seu próprio registro, o que torna o `.error_page(...)` da
+config opcional aqui: mantenha ou remova, nada mais o lê. Ele continua
+sendo o que faz o `install` registrar um middleware para um app que não
+coloca um por conta própria.
+
+Duas regras de ordem vêm junto quando você mesmo o posiciona.
+
+**Depois do `SessionMiddleware` e do
+[`LocaleMiddleware`](localization.md).** A página carrega as suas props
+compartilhadas - `auth.user`, flash, o compartilhamento de locale - e é
+construída na *saída*, depois que todo middleware registrado dentro dela
+já retornou e desempilhou qualquer escopo de solicitação que tenha
+aberto. Com ele registrado acima desses dois, toda página de erro perde a
+sessão do visitante e é renderizada no locale padrão do app, não no dele.
+O mesmo vale para qualquer middleware seu com escopo de solicitação cujo
+estado as props compartilhadas da página de erro leiam.
+
+**Antes do middleware cujas recusas ele deve cobrir**, e não mais para
+fora que isso. Toda resposta que passa por ele é mais um corpo que ele
+tem que classificar, e um middleware por fora dele ainda pode responder
+antes que ele rode.
+
+Se você não registrar nada por conta própria, o `Inertia::install` faz
+tudo isso por você - e o `bootstrap.rs` com scaffold já tem o
+`SessionMiddleware` e o `LocaleMiddleware` acima da chamada e o
+`CsrfMiddleware` abaixo dela.
 
 ### O que a página recebe
 
@@ -1241,7 +1311,6 @@ ela um corpo que o critério não reconheça, ou marcá-la como já sendo uma
 resposta Inertia - veja
 [Quais corpos são reescritos](#quais-corpos-são-reescritos).
 
-
 ## Elementos `<head>` controlados pelo servidor
 
 O Inertia 3.5 adicionou uma opção de cliente para deixar o servidor decidir o
@@ -1284,7 +1353,6 @@ correspondência posicional.
 Escape qualquer coisa interpolada a partir de dados do usuário - essas
 strings são injetadas como HTML, então as regras usuais se aplicam.
 
-
 ## SSR
 
 O Suprnova conversa com um worker SSR fora do processo - tipicamente o bundle
@@ -1308,7 +1376,15 @@ O SSR vem desligado por padrão e é uma propriedade da config: ligado para
 toda resposta construída a partir da config instalada, desligado para
 qualquer resposta que sobrescreva com um `.with_config(...)` que não o
 defina. Quando habilitado, o framework faz POST do objeto de página para
-`<url>/render` e inclui `{ head, body }` no shell HTML. Em caso de erro ou
+`<url>/render` e inclui `{ head, body }` no shell HTML. Um head de worker
+que carrega o próprio `<title>` - que é toda página que usa o componente
+`Head` do Inertia - **substitui** o título do shell em vez de se somar a
+ele, e isso vale tanto para o `.default_title(...)` da config quanto para
+um `.title(...)` por resposta: um documento com dois títulos mostra o
+primeiro, então o do shell venceria o título real da página na aba, nos
+resultados de busca e em toda prévia de link. Com o SSR ligado, defina o
+título no `Head` em vez de na resposta. Um head sem título deixa o título
+do shell exatamente onde ele estava. Em caso de erro ou
 timeout do worker, a resposta recai para CSR (uma `<div id="app">` vazia que
 o cliente hidrata) e o hook `on_ssr_error(...)` dispara; ative
 `ssr_throw_on_error(true)` no CI para transformar essas falhas em 500s
@@ -1347,7 +1423,6 @@ suprnova ssr:start
 própria rota `GET /health` do worker, que todo bundle `createServer()` expõe
 sem código adicional.
 
-
 ## Configuração
 
 O comportamento do Inertia é configurado programaticamente via
@@ -1385,6 +1460,21 @@ Padrões específicos de cada frontend:
 | Svelte (padrão) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+Dois atributos do shell HTML merecem destaque.
+
+O `<title>` vem do `.title(...)` na resposta, ou do `.default_title(...)`
+quando a resposta não definiu nenhum. Sob [SSR](#ssr), o head da própria
+página vence os **dois**: um head de worker que carrega um `<title>` é o
+único do documento, e o shell deixa o título dele de fora por completo.
+
+O `<html lang="...">` é o único atributo que você não pode definir, porque
+o valor certo já é conhecido - é o locale em vigor para a solicitação, o
+que o `LocaleMiddleware` detectou ou o `APP_LOCALE` configurado quando
+nada detectou. Veja [Localização](localization.md); um leitor de tela
+tira a sua voz desse atributo e um mecanismo de busca o lê como o idioma
+da página, então um app que serve mais de um idioma não precisa mais
+reescrever o documento já pronto para corrigi-lo.
 
 ### O campo `url`
 
@@ -1513,7 +1603,6 @@ Nove outras escolhas com formato de Rust que vale sinalizar:
 correspondência nunca é acionada. O ponto de aninhamento é inequívoco aqui -
 uma prop scroll tem no máximo um wrapper - então o Suprnova deriva o
 prefixo em vez de fazer você digitá-lo. Escreva o nome do campo simples, não o path.
-
 
 ## Próximos passos
 
