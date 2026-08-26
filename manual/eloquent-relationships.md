@@ -667,8 +667,8 @@ the engine emits `WHERE 1 = 0` so the query safely returns nothing.
 ### Why this beats LEFT JOIN
 
 Laravel's older `has` / `whereHas` engine used to emit JOINs and
-duplicate parent rows; the correlated EXISTS rewrite landed in Laravel
-9. Suprnova ships EXISTS from day one. The advantages: no duplicates
+duplicate parent rows; the correlated EXISTS rewrite landed in Laravel 9.
+Suprnova ships EXISTS from day one. The advantages: no duplicates
 in the result set, no GROUP BY workarounds for aggregates, no need
 for `DISTINCT`, and the database's optimiser sees a real subquery
 instead of a JOIN it can't push predicates through. For
