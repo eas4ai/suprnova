@@ -26,10 +26,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `cargo watch` ran with no `-w`, so it watched the whole non-gitignored project:
   saving a Svelte component, or regenerating
   `frontend/src/types/inertia-props.ts`, rebuilt the framework and restarted the
-  server. It now watches `src/`, `Cargo.toml`, `Cargo.lock`, `.env`, and `lang/` -
-  the build inputs plus the two trees read once at boot - each included only when
-  it exists, since cargo-watch refuses a `-w` path that does not. Frontend edits
-  and generated `.ts` files no longer restart the backend.
+  server. It now watches `src/`, `cmd/`, `Cargo.toml`, `Cargo.lock`, `.env`, and
+  `lang/` - the build inputs plus the two trees read once at boot - each included
+  only when it exists, since cargo-watch refuses a `-w` path that does not.
+  `cmd/` is where the full-stack scaffold keeps the server binary's `main.rs`.
+  The invocation also passes `--no-vcs-ignores`, because cargo-watch applies
+  `.gitignore` to explicitly named `-w` roots and the scaffold ignores `.env`,
+  which would otherwise leave `-w .env` watching nothing; `-w` has already
+  narrowed the surface, so the flag cannot widen it. Frontend edits and generated
+  `.ts` files no longer restart the backend.
 
 - **`serde_json::Value` generates as `JsonValue` instead of `unknown`.** It used to
   degrade to `unknown` and warn that it "isn't a struct this project defines",

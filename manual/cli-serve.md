@@ -136,13 +136,28 @@ When you run `suprnova serve`, the CLI:
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
    Skipped under `--backend-only`, and when the project has no frontend.
 7. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
-   server is actually built from: `src/`, `Cargo.toml`, `Cargo.lock`,
-   `.env`, and `lang/`. Each is passed only when it exists, because
-   cargo-watch refuses to start on a `-w` path that doesn't. On a
-   scaffolded project the full invocation is `cargo watch -w src -w
-   Cargo.toml -w Cargo.lock -w .env -w lang -x 'run --bin <package-name>'`.
-   Frontend edits and the generated `frontend/src/types/*.ts` are outside
-   that scope, so they never restart the backend.
+   server is actually built from: `src/`, `cmd/`, `Cargo.toml`,
+   `Cargo.lock`, `.env`, and `lang/`. `cmd/` is where the full-stack
+   scaffold puts the server binary's `main.rs`; the `--api` scaffold puts
+   it in `src/` and has no `cmd/`. Each path is passed only when it
+   exists, because cargo-watch refuses to start on a `-w` path that
+   doesn't - a project that hasn't been built yet has no `Cargo.lock`, and
+   it's picked up on the next `serve`.
+
+   `--no-vcs-ignores` goes with them. cargo-watch applies your
+   `.gitignore` to explicitly named `-w` roots, not just to its own
+   project walk, and the scaffold gitignores `.env` - so without that flag
+   `-w .env` watches nothing at all. It can't widen what restarts the
+   backend, because `-w` has already narrowed that to the six paths above,
+   and the only gitignored things inside them are `.env` and (on `--api`)
+   `Cargo.lock`, both watched on purpose. `target/`, `node_modules`, and
+   the rest sit outside every watched root either way.
+
+   On a scaffolded full-stack project the full invocation is
+   `cargo watch --no-vcs-ignores -w src -w cmd -w Cargo.toml -w Cargo.lock
+   -w .env -w lang -x 'run --bin <package-name>'`. Frontend edits and the
+   generated `frontend/src/types/*.ts` are outside that scope, so they
+   never restart the backend.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
@@ -214,10 +229,12 @@ solves. See the corresponding row in
 ## Hot reload
 
 **Backend.** `cargo watch` is the loop, scoped to the paths the server is
-built from. It rebuilds and restarts on a change under `src/`, to
-`Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
+built from. It rebuilds and restarts on a change under `src/` or `cmd/`,
+to `Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
 once by `Config::init` at boot and the Fluent catalogs once at bootstrap,
-so a change to either only takes effect on a restart. Saving a component,
+so a change to either only takes effect on a restart. `.env` is watched
+through `--no-vcs-ignores`, without which your `.gitignore` would hide it
+from the watcher. Saving a component,
 or regenerating `frontend/src/types/inertia-props.ts`, is outside that
 scope and leaves the backend running. Cold rebuilds after touching a heavy
 crate can take several seconds; incremental changes in a single file are
