@@ -235,17 +235,26 @@ impl std::fmt::Debug for GcsConfig {
 /// The two branches order that delete differently, and the order is the
 /// contract. When the primary holds the source, the fallback copy goes first:
 /// it is unreachable through this disk while the primary has the object, so
-/// nothing observable is lost, and a move that fails is a move where nothing
-/// has happened yet. When only the fallback holds it, the delete can only come
-/// after the destination is in place, so a move that fails between the two
-/// leaves the destination written and the source still there - safe to retry.
+/// nothing observable is lost, and a rename that then fails leaves the primary
+/// still holding the source, so a retry re-enters the same branch and renames
+/// again. When only the fallback holds it, the delete can only come after the
+/// destination is in place, so a move that fails between the two leaves the
+/// destination written and the source still there - safe to retry.
+///
+/// A move the primary would refuse is refused before anything is deleted: a
+/// primary with no `rename`, a guarded move onto a primary with no conditional
+/// `rename`, and a guarded move onto a destination that already exists all fail
+/// with the fallback source untouched.
 ///
 /// Conditions travel with the operation on the streaming branch too:
 /// `if_not_exists` becomes a conditional write on the destination, and a copy's
 /// source version selects which object the fallback hands over. A copy's
 /// `if_match` is refused with `Unsupported` rather than ignored - it is a
 /// condition the backend applies inside its own copy, which is the one call
-/// this branch cannot make.
+/// this branch cannot make. Because those conditions are answered by whichever
+/// disk holds the source, a driver that supports a plain `copy` but not a
+/// conditional one - a local directory is exactly that - accepts
+/// `if_not_exists` on a fallback-only source and refuses it on its own.
 #[derive(Clone, Debug)]
 pub struct ReadThroughConfig {
     /// Name of the disk that answers writes and listings, and that promoted

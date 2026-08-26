@@ -299,14 +299,65 @@ impl Service for ReadThroughService {
         // move. Deleting a missing path is a success in opendal, so neither
         // branch needs an existence probe first.
         if self.primary.exists(from).await? {
-            // Delete it *before* the rename. While the primary holds `from`,
-            // the fallback's copy is unreachable through this disk, so removing
-            // it first changes nothing a caller can observe - and it makes a
-            // retry safe. The other order does not: a rename that succeeded and
-            // then lost its fallback delete to a transient fault leaves a
-            // retry to find `from` gone from the primary, take the streaming
-            // branch, and overwrite the destination it just moved correctly
-            // with the fallback's stale bytes.
+            // Everything the primary would refuse this rename for has to be
+            // established *before* the fallback source is deleted. A move that
+            // is never attempted must leave both disks exactly as it found
+            // them - the delete-first order below is what makes an attempted
+            // move safe to retry, not a licence to destroy the cold copy for a
+            // move that was going to be rejected anyway. Nothing else will
+            // catch these in time: opendal's correctness check sits under this
+            // layer, so it only speaks once the rename is already running.
+            //
+            // The primary's own capability, not `Service::capability`'s union
+            // with the fallback - the question is what the primary can be
+            // asked to do.
+            let capability = self.inner.capability();
+            if !capability.rename {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    format!(
+                        "read-through move of '{from}' to '{to}' cannot run: the \
+                         primary disk has no `rename`"
+                    ),
+                ));
+            }
+            if args.if_not_exists() {
+                if !capability.rename_with_if_not_exists {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        format!(
+                            "read-through move of '{from}' to '{to}' cannot \
+                             honour `if_not_exists`: the primary disk has no \
+                             conditional `rename`"
+                        ),
+                    ));
+                }
+                if self.primary.exists(to).await? {
+                    return Err(Error::new(
+                        ErrorKind::ConditionNotMatch,
+                        format!(
+                            "read-through move of '{from}' to '{to}' is refused \
+                             by `if_not_exists`: the primary disk already holds \
+                             '{to}'"
+                        ),
+                    ));
+                }
+            }
+
+            // Now delete the fallback's copy, *before* the rename. While the
+            // primary holds `from`, that copy is unreachable through this disk,
+            // so removing it first changes nothing a caller can observe - and
+            // it makes a retry safe. The other order does not: a rename that
+            // succeeded and then lost its fallback delete to a transient fault
+            // leaves a retry to find `from` gone from the primary, take the
+            // streaming branch, and overwrite the destination it just moved
+            // correctly with the fallback's stale bytes.
+            //
+            // A rename that fails *after* the delete leaves the primary still
+            // holding `from`, the fallback copy gone, and `to` unwritten. A
+            // retry re-enters this same branch, finds the fallback delete a
+            // no-op, and runs the rename again - so the failure costs the cold
+            // copy and nothing else.
             self.fallback
                 .delete(from)
                 .await
@@ -952,6 +1003,11 @@ mod tests {
         delete_failures: usize,
         /// Whether the disk advertises and implements a rename.
         renames: bool,
+        /// Whether the disk advertises a *conditional* rename. Separate from
+        /// `renames` because a backend can have one without the other - the
+        /// local filesystem is exactly that case - and the two refusals it
+        /// produces are different.
+        renames_conditionally: bool,
         writes: WriteBehaviour,
     }
 
@@ -1126,6 +1182,7 @@ mod tests {
                 write: true,
                 delete: true,
                 rename: self.spec.renames,
+                rename_with_if_not_exists: self.spec.renames_conditionally,
                 read_with_version: true,
                 read_with_if_match: true,
                 read_with_if_none_match: true,
@@ -1844,6 +1901,101 @@ mod tests {
             "a retry must move the primary's object, not resurrect the \
              fallback's stale copy over a destination the first attempt \
              already wrote correctly"
+        );
+    }
+
+    /// A read-through disk whose primary holds the source and whose fallback
+    /// holds a stale copy of it, over a primary with the given rename
+    /// capabilities. Returns the composite and the fallback's journal.
+    fn move_refusal_read_through(
+        renames: bool,
+        renames_conditionally: bool,
+    ) -> (Operator, Arc<Journal>) {
+        let (assets, _primary, fallback) = read_through(
+            StubSpec {
+                contents: Some("primary copy"),
+                renames,
+                renames_conditionally,
+                ..Default::default()
+            },
+            StubSpec {
+                contents: Some("stale fallback copy"),
+                ..Default::default()
+            },
+            false,
+        );
+        (assets, fallback)
+    }
+
+    #[tokio::test]
+    async fn a_move_a_primary_cannot_perform_leaves_the_fallback_source_alone() {
+        let (assets, fallback) = move_refusal_read_through(false, false);
+
+        let err = assets
+            .rename("both.txt", "moved.txt")
+            .await
+            .expect_err("a primary without a rename cannot move anything");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Unsupported,
+            "the caller has to see the refusal for what it is, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("rename"),
+            "the error must name what the primary cannot do, got: {err}"
+        );
+        assert!(
+            fallback.deletes().is_empty(),
+            "a move that was never attempted must not have removed its source \
+             from the fallback; the cold copy would be gone with nothing moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_move_a_primary_cannot_guard_leaves_the_fallback_source_alone() {
+        let (assets, fallback) = move_refusal_read_through(true, false);
+
+        let err = assets
+            .rename_with("both.txt", "moved.txt")
+            .if_not_exists(true)
+            .await
+            .expect_err("a primary without a conditional rename cannot guard one");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Unsupported,
+            "the caller has to see the refusal for what it is, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("if_not_exists"),
+            "the error must name the condition it cannot honour, got: {err}"
+        );
+        assert!(
+            fallback.deletes().is_empty(),
+            "the rename would have been rejected under this layer, after the \
+             fallback source was already gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_move_onto_an_existing_destination_leaves_the_fallback_source_alone() {
+        // The stub answers every path from one body, so the destination exists
+        // as far as the condition is concerned.
+        let (assets, fallback) = move_refusal_read_through(true, true);
+
+        let err = assets
+            .rename_with("both.txt", "moved.txt")
+            .if_not_exists(true)
+            .await
+            .expect_err("if_not_exists must refuse an existing destination");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::ConditionNotMatch,
+            "a refused condition must not reach the caller as anything else, got: {err}"
+        );
+        assert!(
+            fallback.deletes().is_empty(),
+            "a move the condition refuses never happens, so its source stays \
+             where it is on both disks"
         );
     }
 }

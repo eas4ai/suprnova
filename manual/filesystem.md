@@ -375,7 +375,11 @@ failed move leaves behind:
 - The primary held the source. The fallback copy goes first, before the
   rename. While the primary holds the path, the fallback's copy is unreachable
   through this disk, so removing it first changes nothing you can observe - and
-  if the delete fails, nothing has moved yet. Retry the move.
+  if the delete fails, nothing has moved yet. Retry the move. If instead the
+  delete succeeded and the rename then failed, the fallback holds nothing for
+  that path, the destination is unwritten, and the primary still holds the
+  source - so a retry takes this same path and renames again. The failure costs
+  the cold copy and nothing else.
 - Only the fallback held it. The delete can only come after the destination is
   in place, so a move that fails on the delete leaves the destination written
   and the source still on the fallback. Retry the move; the source is now on
@@ -391,6 +395,19 @@ version gets that version out of the fallback. A copy's `if_match` is the one
 exception: it is a condition the backend applies inside its own copy, which is
 the call this path cannot make, so it is refused with an `Unsupported` error
 naming the condition rather than quietly ignored.
+
+That makes conditions the one place where which disk holds the source shows
+through. A local directory advertises `copy` and `rename` but neither of their
+conditional forms, so `copy_with(a, b).if_not_exists(true)` succeeds when only
+the fallback holds `a` (it becomes a conditional write) and is refused with
+`Unsupported` when the primary holds it. Check the condition you need against
+the primary driver rather than assuming it holds for every object on the disk.
+
+A move the primary would refuse is refused before anything is deleted. A
+primary with no `rename` at all, a guarded move onto a primary with no
+conditional `rename`, and a guarded move onto a destination that already exists
+all fail with the fallback source still in place - a move that never happens
+must not cost you the cold copy.
 
 If the stream fails partway, the writer is aborted and a destination the
 transfer created is deleted before the error reaches you, so a failed transfer
