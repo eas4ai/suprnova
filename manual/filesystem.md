@@ -109,7 +109,9 @@ target untouched rather than truncated at the live path.
 `append` is the one in-place operation, because staging an append would mean
 copying the whole object first. That holds for the append that *creates* the
 object as much as for every append after it, so two writers appending to the
-same new object both land.
+same new object both land. Being in place is also what an append costs you: one
+that fails or is aborted leaves the object behind, empty or short, exactly as an
+append onto an existing object always has.
 
 A conditional write is published with `link(2)` rather than a rename, which
 keeps it a real exclusive create rather than a check followed by an overwrite:
@@ -120,11 +122,23 @@ keeps it a real exclusive create rather than a check followed by an overwrite:
 disk.write_with("locks/import.json", body).if_not_exists(true).await?;
 ```
 
+That publish needs a filesystem with hard links. On FAT, exFAT, and some network
+filesystems `link(2)` is unsupported, and a conditional write fails there rather
+than silently degrading into a check followed by an overwrite - which would hand
+you an exclusivity guarantee that does not hold. Every other operation is
+unaffected.
+
 Publishing by rename replaces the object's inode. A rewrite therefore does not
 preserve the previous file's mode, owner, or hard links, and a reader holding
 an open descriptor keeps reading the old content instead of seeing the new
 bytes. That is the usual trade for atomic publishing, but it is a change if you
 were relying on either.
+
+A path that reaches the disk through a symlink the guard cannot resolve - a
+dangling one, whose target does not exist - is refused rather than treated as a
+free name to create. Creating through such a link would create the link's
+target, anywhere on the host, so the guard cannot tell a harmless dangling link
+apart from an escape and refuses both.
 
 The `.suprnova-atomic` name is reserved at the root of every local disk. Any
 path whose first component is that name is refused with a permission error, and
