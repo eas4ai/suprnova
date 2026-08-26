@@ -1568,6 +1568,34 @@ impl DocumentTransportSession {
         Ok(())
     }
 
+    fn resolve_active_stored_authorization(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+    ) -> Result<AuthorizedTransportSubscription, AsyncTransportError> {
+        self.validate_common(authorization)?;
+        let stored = self
+            .memberships
+            .iter()
+            .find(|logical| {
+                logical.authorization.subscription() == authorization.subscription()
+                    && logical.authorization.binding() == authorization.binding()
+                    && logical.authorization.document_scope() == authorization.document_scope()
+            })
+            .map(|logical| logical.authorization.clone())
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        if stored.context() != authorization.context()
+            || stored.origin() != authorization.origin()
+            || stored.document_scope() != authorization.document_scope()
+            || stored.binding() != authorization.binding()
+            || !Arc::ptr_eq(&stored.authority, &authorization.authority)
+        {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::InvalidEnvelope,
+            ));
+        }
+        Ok(stored)
+    }
+
     fn control_snapshot(&self) -> DocumentControlSnapshot {
         DocumentControlSnapshot {
             owner: Arc::clone(&self.control_owner),
@@ -2084,26 +2112,9 @@ impl BoundedDocumentTransportSession {
                 return Ok(BufferDisposition::Closed(code));
             }
         }
-        self.transport.validate_common(authorization)?;
         let stored_authorization = self
             .transport
-            .memberships
-            .iter()
-            .find(|logical| {
-                logical.authorization.subscription() == authorization.subscription()
-                    && logical.authorization.binding() == authorization.binding()
-                    && logical.authorization.document_scope() == authorization.document_scope()
-            })
-            .map(|logical| logical.authorization.clone())
-            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
-        if stored_authorization.context() != authorization.context()
-            || stored_authorization.origin() != authorization.origin()
-            || !Arc::ptr_eq(&stored_authorization.authority, &authorization.authority)
-        {
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::InvalidEnvelope,
-            ));
-        }
+            .resolve_active_stored_authorization(authorization)?;
         for envelope in &transcript {
             stored_authorization
                 .context()
@@ -2394,27 +2405,25 @@ impl BoundedDocumentTransportSession {
         registry: &dyn AsyncMembershipRegistryPort,
         authority: &dyn AsyncContinuityAuthorityPort,
     ) -> Result<BaselineDisposition, AsyncDeliveryError> {
-        if self.transport.validate_common(authorization).is_err()
-            || !self.transport.memberships.iter().any(|logical| {
-                logical.authorization.subscription() == authorization.subscription()
-                    && logical.authorization.binding() == authorization.binding()
-            })
-        {
-            return Err(AsyncDeliveryError::new(
-                AsyncDeliveryErrorKind::AuthorizationLost,
-            ));
-        }
+        let stored_authorization = self
+            .transport
+            .resolve_active_stored_authorization(authorization)
+            .map_err(|_| AsyncDeliveryError::new(AsyncDeliveryErrorKind::AuthorizationLost))?;
         let pressure_membership = PressureMembership::new(
-            authorization.subscription().clone(),
-            authorization.binding().clone(),
-            authorization.document_scope().clone(),
-            authorization.verified.claims().authorization_memo().clone(),
+            stored_authorization.subscription().clone(),
+            stored_authorization.binding().clone(),
+            stored_authorization.document_scope().clone(),
+            stored_authorization
+                .verified
+                .claims()
+                .authorization_memo()
+                .clone(),
         );
         let pressure_high_water = self.pressure.required_high_water(&pressure_membership);
         let lane_index = self
             .sequence_lanes
             .iter()
-            .position(|lane| lane.matches(authorization))
+            .position(|lane| lane.matches(&stored_authorization))
             .ok_or_else(|| AsyncDeliveryError::new(AsyncDeliveryErrorKind::AuthorizationLost))?;
         let baseline = authority
             .authoritative_refresh(
@@ -2427,12 +2436,12 @@ impl BoundedDocumentTransportSession {
                     SequenceErrorKind::AuthoritativeRefreshUnavailable,
                 ))
             })?;
-        let commit_now = authorization.authority.now();
-        authorization
+        let commit_now = stored_authorization.authority.now();
+        stored_authorization
             .context()
             .validate_current_scope(
-                authorization.binding(),
-                authorization.document_scope(),
+                stored_authorization.binding(),
+                stored_authorization.document_scope(),
                 registry,
                 commit_now,
             )

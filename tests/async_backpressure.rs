@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::task::{Context, Poll};
 use std::thread;
@@ -83,6 +84,11 @@ struct DriftingContinuityAuthority {
     baseline: suprnova_live::async_updates::StreamPosition,
 }
 
+struct CountingContinuityAuthority {
+    calls: Arc<AtomicUsize>,
+    baseline: suprnova_live::async_updates::StreamPosition,
+}
+
 struct BlockingDispatcher {
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
@@ -103,6 +109,16 @@ impl AsyncContinuityAuthorityPort for DriftingContinuityAuthority {
         _request: AsyncContinuityRequest<'_>,
     ) -> Option<suprnova_live::async_updates::StreamPosition> {
         self.registry.change_document_scope();
+        Some(self.baseline)
+    }
+}
+
+impl AsyncContinuityAuthorityPort for CountingContinuityAuthority {
+    fn authoritative_refresh(
+        &self,
+        _request: AsyncContinuityRequest<'_>,
+    ) -> Option<suprnova_live::async_updates::StreamPosition> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
         Some(self.baseline)
     }
 }
@@ -1891,6 +1907,57 @@ async fn authoritative_refresh_revalidates_after_the_host_proposes_a_baseline() 
         Some(SequenceState::Degraded)
     );
     assert_eq!(bounded.unresolved_pressure_cause_count(), causes_before);
+    assert!(bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn authoritative_refresh_rejects_reconstructed_clock_before_any_host_callback() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = pressure_only_replay_document(&fixture, 0xc8).await;
+    let substitute = TransportFixture::new(position(7, 0)).await;
+    let reconstructed = fixture
+        .cross_component_request(
+            &substitute,
+            authorization.subscription().clone(),
+            VerifiedOrigin::parse("https://example.test").expect("origin"),
+        )
+        .expect("same signed facts with substituted clock authority");
+    substitute
+        .registry
+        .set_now(suprnova_live::identity::UnixMillis::new(10_000));
+    let continuity_calls = Arc::new(AtomicUsize::new(0));
+    let authority = CountingContinuityAuthority {
+        calls: Arc::clone(&continuity_calls),
+        baseline: position(7, 4),
+    };
+    let stored_now_calls = fixture.registry.now_call_count();
+    let substitute_now_calls = substitute.registry.now_call_count();
+    let registry_calls = fixture.registry.delivery_validation_call_count();
+    let position_before = bounded.sequence_position(&authorization);
+    let state_before = bounded.sequence_state(&authorization);
+    let pressure_before = bounded.unresolved_pressure_cause_count();
+
+    assert_eq!(
+        bounded
+            .recover_from_authoritative_refresh(
+                &reconstructed,
+                fixture.registry.as_ref(),
+                &authority,
+            )
+            .expect_err("reconstructed clock is not stored refresh authority")
+            .kind(),
+        AsyncDeliveryErrorKind::AuthorizationLost
+    );
+    assert_eq!(continuity_calls.load(Ordering::Acquire), 0);
+    assert_eq!(fixture.registry.now_call_count(), stored_now_calls);
+    assert_eq!(substitute.registry.now_call_count(), substitute_now_calls);
+    assert_eq!(
+        fixture.registry.delivery_validation_call_count(),
+        registry_calls
+    );
+    assert_eq!(bounded.sequence_position(&authorization), position_before);
+    assert_eq!(bounded.sequence_state(&authorization), state_before);
+    assert_eq!(bounded.unresolved_pressure_cause_count(), pressure_before);
     assert!(bounded.is_degraded());
 }
 

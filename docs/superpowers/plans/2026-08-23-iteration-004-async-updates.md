@@ -459,6 +459,10 @@
   focused public suite failed five tests before correction. Post-prefix shared
   retirement remains an internal lease invariant because the synchronous closed
   document owner intentionally exposes no concurrent cancellation capability.
+- [x] Record the final authoritative-refresh RED: reconstructed authorization
+  with the same signed facts and a substituted stale clock invoked continuity
+  authority before it failed current validation. The public regression observed
+  one forbidden callback and proved sequence and pressure state stayed unchanged.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -570,6 +574,11 @@
   dispatcher failure. Count each public typed replay rejection exactly once and
   successful admission zero times without adding a second cancellation or
   lifecycle authority.
+- [x] Bind authoritative refresh to that same stored active authorization
+  closure. Resolve and callback-free compare signed context, origin, document
+  scope, binding, and authority identity before continuity authority; then use
+  only the stored clock and final current-registry validation before
+  callback-free baseline installation and exact pressure recovery.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

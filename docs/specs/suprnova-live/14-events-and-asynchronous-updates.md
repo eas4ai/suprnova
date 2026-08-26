@@ -338,13 +338,16 @@ Acceptance criteria:
   unresolved cause and exposes the truthful committed replay prefix.
 - A freshly authorized document-owned authoritative refresh may recover the
   exact private sequence lane and only that membership's covered pressure
-  causes. The host proposes the baseline first; commit time and exact current
+  causes. Before the continuity callback, the document resolves the exact stored
+  active authorization and callback-free compares the caller's signed context,
+  origin, document scope, binding, and authority identity. The host then
+  proposes the baseline; commit time from the stored clock and exact current
   scope/expiry/registry validation follow as the final host callback, after
-  which callback-free validation and installation occur. The baseline cannot
-  regress and must cover both sequence and pressure high-water. Under the `u64`
-  sequence vocabulary there is no same-epoch value after `u64::MAX`: equal and
-  lower values are duplicates, while a greater position necessarily enters a
-  new epoch and requires authoritative recovery.
+  which callback-free baseline installation and pressure recovery occur. The
+  baseline cannot regress and must cover both sequence and pressure high-water.
+  Under the `u64` sequence vocabulary there is no same-epoch value after
+  `u64::MAX`: equal and lower values are duplicates, while a greater position
+  necessarily enters a new epoch and requires authoritative recovery.
 - Coalescing may replace only the newest exact contiguous refresh for the same
   signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
@@ -427,6 +430,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Bound authoritative refresh to the exact stored active
+  authorization before continuity authority runs. Reconstructed caller
+  authorization, including a substituted clock with otherwise matching signed
+  facts, now fails through callback-free comparison without invoking continuity,
+  clock, or registry callbacks and without changing sequence or pressure state.
+  Final expiry and current-registry validation use only the stored authority.
 - 2026-08-25 -- Closed replay's stored-authority, progress, and observability
   invariants. Replay now rejects foreign, detached, reconstructed-clock, and
   undeclared-payload input through bounded local validation before any host
