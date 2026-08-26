@@ -731,6 +731,24 @@ impl AsyncEnvelopeContext {
         self.authoritative_baseline
     }
 
+    /// Checks immutable membership and registered-payload facts without host callbacks.
+    pub(crate) fn validate_local_envelope(
+        &self,
+        envelope: &AsyncEnvelope,
+    ) -> Result<(), AsyncEnvelopeError> {
+        if envelope.subscription != self.subscription {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::SubscriptionMismatch,
+            ));
+        }
+        if envelope.stream != self.stream {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::StreamMismatch,
+            ));
+        }
+        validate_registered_payload(self, &envelope.payload)
+    }
+
     /// Freshly admits one envelope against current host membership and registry authority.
     ///
     /// The returned guard is non-cloneable and consumed by the sequence machine.

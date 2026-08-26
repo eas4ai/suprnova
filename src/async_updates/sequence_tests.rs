@@ -1530,6 +1530,37 @@ fn replay_dispatch_failure_reports_truth_and_resumes_only_the_remaining_suffix()
 }
 
 #[test]
+fn pressure_only_replay_retirement_keeps_effective_high_water_and_truthful_kind() {
+    let context = context_at(position(4, 40));
+    let registry = membership_registry();
+    let replay = [
+        decode("{\"kind\":\"heartbeat\"}", 4, 41),
+        decode("{\"kind\":\"heartbeat\"}", 4, 42),
+    ];
+    let mut machine = SequenceMachine::new(&context);
+    let envelopes = replay.iter().collect::<Vec<_>>();
+    let mut recovery = machine
+        .prepare_replay(&envelopes, Some(position(4, 42)))
+        .expect("pressure-only recovery transcript");
+    let first = admit(&context, &replay[0], &registry);
+    machine
+        .dispatch_replay_entry(
+            &mut recovery,
+            first,
+            UnixMillis::new(1_200),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("first replay entry commits");
+
+    let error = machine.interrupt_replay(&recovery, SequenceErrorKind::DeliveryRetired);
+    assert_eq!(error.kind(), SequenceErrorKind::DeliveryRetired);
+    assert_eq!(error.applied(), 1);
+    assert_eq!(error.current(), position(4, 41));
+    assert_eq!(error.state(), SequenceState::Current);
+    assert_eq!(error.high_water(), Some(position(4, 42)));
+}
+
+#[test]
 fn cross_scope_envelopes_and_replay_cannot_change_sequence_authority() {
     let context_a = context();
     let other_id = SubscriptionId::from_bytes(b"subscription-002").expect("other id");

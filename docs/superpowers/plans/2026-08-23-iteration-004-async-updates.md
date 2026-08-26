@@ -452,6 +452,13 @@
   returned `Degraded`; post-prefix authorization loss discarded replay progress;
   replay closure delayed cleanup; and MAX-tail successor arithmetic rejected
   redundant equal/lower positions. Each failed before its focused correction.
+- [x] Record the stored-authority/progress REDs: pressure-only replay failures
+  lost their effective high-water; registry drift was mislabeled as expiry; a
+  reconstructed authorization invoked its substituted clock; local and
+  structural replay rejection stages emitted no `Rejected` telemetry. The
+  focused public suite failed five tests before correction. Post-prefix shared
+  retirement remains an internal lease invariant because the synchronous closed
+  document owner intentionally exposes no concurrent cancellation capability.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -554,6 +561,15 @@
   transport cleanup. `Coalesced` covers redundant-tail absorption and successor
   replacement, with only replacement creating pressure loss; compare MAX tails
   before successor arithmetic and prove resolved delivery is non-cloneable.
+- [x] Bind replay to the exact stored active authorization before host work.
+  Preflight count/resources, then locally validate common document facts,
+  descriptor binding, scope, context, and registered payload/event/signal/target
+  identity before invoking only the stored clock and atomic registry seal.
+  Retain the effective sequence-or-pressure high-water on every post-prepare
+  failure and distinguish delivery retirement, expiry, authorization loss, and
+  dispatcher failure. Count each public typed replay rejection exactly once and
+  successful admission zero times without adding a second cancellation or
+  lifecycle authority.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

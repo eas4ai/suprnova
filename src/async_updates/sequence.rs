@@ -66,6 +66,10 @@ pub enum SequenceErrorKind {
     ScopeMismatch,
     /// A once-current membership guard was retained through descriptor expiry.
     MembershipExpired,
+    /// The document-owned delivery scope was canceled or retired.
+    DeliveryRetired,
+    /// Current host membership, registry, or authorization scope was revoked.
+    AuthorizationLost,
     /// A host baseline attempted to regress known authority.
     BaselineRegression,
     /// A host baseline did not cover the observed high-water position.
@@ -86,6 +90,8 @@ impl SequenceErrorKind {
             Self::InvalidReplayTranscript => "invalid_async_replay_transcript",
             Self::ScopeMismatch => "async_sequence_scope_mismatch",
             Self::MembershipExpired => "async_membership_expired",
+            Self::DeliveryRetired => "async_delivery_retired",
+            Self::AuthorizationLost => "async_sequence_authorization_lost",
             Self::BaselineRegression => "async_baseline_regression",
             Self::AuthoritativeBaselineInsufficient => "async_baseline_insufficient",
             Self::AuthoritativeRefreshUnavailable => "async_authoritative_refresh_unavailable",
@@ -306,6 +312,7 @@ pub trait AsyncContinuityAuthorityPort: Send + Sync {
 
 pub(crate) struct ReplayRecovery {
     through: StreamPosition,
+    effective_high_water: StreamPosition,
     total: usize,
     applied: usize,
     restore_on_finish: bool,
@@ -487,6 +494,7 @@ impl SequenceMachine {
         }
         Ok(ReplayRecovery {
             through,
+            effective_high_water: required_high_water,
             total: transcript.len(),
             applied: 0,
             restore_on_finish,
@@ -501,14 +509,14 @@ impl SequenceMachine {
         dispatcher: &mut dyn AsyncEnvelopeDispatchPort,
     ) -> Result<(), ReplayDispatchError> {
         if !delivery.is_current_at(now) {
-            return Err(self.replay_error(SequenceErrorKind::MembershipExpired, recovery.applied));
+            return Err(self.recovery_error(recovery, SequenceErrorKind::MembershipExpired));
         }
         if delivery.context() != &self.context || !self.matches_scope(delivery.envelope()) {
-            return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, recovery.applied));
+            return Err(self.recovery_error(recovery, SequenceErrorKind::ScopeMismatch));
         }
         let position = delivery.envelope().position();
         if let Err(error) = dispatcher.dispatch(delivery) {
-            return Err(self.replay_error(dispatch_error_kind(error), recovery.applied));
+            return Err(self.recovery_error(recovery, dispatch_error_kind(error)));
         }
         self.current = position;
         recovery.applied += 1;
@@ -520,9 +528,7 @@ impl SequenceMachine {
         recovery: ReplayRecovery,
     ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
         if recovery.applied != recovery.total {
-            return Err(
-                self.replay_error(SequenceErrorKind::InvalidReplayTranscript, recovery.applied)
-            );
+            return Err(self.recovery_error(&recovery, SequenceErrorKind::InvalidReplayTranscript));
         }
         if recovery.restore_on_finish {
             self.restore(recovery.through);
@@ -539,7 +545,7 @@ impl SequenceMachine {
         recovery: &ReplayRecovery,
         kind: SequenceErrorKind,
     ) -> ReplayDispatchError {
-        self.replay_error(kind, recovery.applied)
+        self.recovery_error(recovery, kind)
     }
 
     /// Requests and installs a baseline only through trusted host continuity authority.
@@ -632,6 +638,24 @@ impl SequenceMachine {
             current: self.current,
             state: self.state,
             high_water: self.high_water,
+        }
+    }
+
+    fn recovery_error(
+        &self,
+        recovery: &ReplayRecovery,
+        kind: SequenceErrorKind,
+    ) -> ReplayDispatchError {
+        let high_water = match self.high_water {
+            Some(current) if position_precedes(recovery.effective_high_water, current) => current,
+            _ => recovery.effective_high_water,
+        };
+        ReplayDispatchError {
+            kind,
+            applied: recovery.applied,
+            current: self.current,
+            state: self.state,
+            high_water: Some(high_water),
         }
     }
 }

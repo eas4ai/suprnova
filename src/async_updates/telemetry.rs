@@ -10,7 +10,7 @@ const COUNTER_COUNT: usize = 6;
 pub enum AsyncTelemetryCounter {
     /// A new bounded queue position was admitted.
     Queued = 0,
-    /// A replaceable tail position was superseded.
+    /// Replaceable work was absorbed by the current tail through replacement or retention.
     Coalesced = 1,
     /// Exact continuity became uncertain.
     Degraded = 2,

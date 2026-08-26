@@ -71,6 +71,11 @@ struct DriftAfterFirstDispatcher {
     applied: usize,
 }
 
+struct ExpireAfterFirstDispatcher {
+    registry: Arc<support::MembershipRegistry>,
+    applied: usize,
+}
+
 struct StaticContinuityAuthority(suprnova_live::async_updates::StreamPosition);
 
 struct DriftingContinuityAuthority {
@@ -145,6 +150,17 @@ impl AsyncEnvelopeDispatchPort for DriftAfterFirstDispatcher {
         self.applied += 1;
         if self.applied == 1 {
             self.registry.change_document_scope();
+        }
+        Ok(())
+    }
+}
+
+impl AsyncEnvelopeDispatchPort for ExpireAfterFirstDispatcher {
+    fn dispatch(&mut self, _delivery: ResolvedAsyncDelivery<'_>) -> Result<(), AsyncDispatchError> {
+        self.applied += 1;
+        if self.applied == 1 {
+            self.registry
+                .set_now(suprnova_live::identity::UnixMillis::new(10_000));
         }
         Ok(())
     }
@@ -409,6 +425,54 @@ async fn bounded_two_memberships(
     (bounded, first, second)
 }
 
+async fn pressure_only_replay_document(
+    fixture: &TransportFixture,
+    membership_marker: u8,
+) -> (
+    BoundedDocumentTransportSession,
+    suprnova_live::async_updates::AuthorizedTransportSubscription,
+) {
+    let (mut bounded, target) = bounded_document_with_script_and_config(
+        fixture,
+        membership_marker,
+        vec![
+            ScriptItem::Envelope(position(7, 1), AsyncPayload::Heartbeat(Heartbeat)),
+            ScriptItem::Envelope(position(7, 2), AsyncPayload::Heartbeat(Heartbeat)),
+            ScriptItem::Envelope(position(7, 4), AsyncPayload::Heartbeat(Heartbeat)),
+        ],
+        ResourceBounds::new(2, 256 * 1024).expect("two-item pressure bound"),
+        1,
+        policy(),
+    )
+    .await;
+    for expected in [
+        BufferDisposition::Queued,
+        BufferDisposition::Queued,
+        BufferDisposition::Degraded,
+    ] {
+        assert_eq!(
+            bounded.pump_next(fixture.registry.as_ref()).await,
+            Ok(Some(expected))
+        );
+    }
+    let mut dispatcher = RecordingDispatcher::default();
+    for _ in 0..2 {
+        assert!(matches!(
+            bounded.dispatch_next(fixture.registry.as_ref(), &mut dispatcher),
+            Ok(Some(AsyncDeliveryDisposition::Sequence(
+                SequenceDisposition::Apply
+            )))
+        ));
+    }
+    assert_eq!(
+        bounded.sequence_state(&target),
+        Some(SequenceState::Current)
+    );
+    assert_eq!(bounded.sequence_position(&target), Some(position(7, 2)));
+    assert!(bounded.is_degraded());
+    (bounded, target)
+}
+
 async fn add_empty_membership(
     bounded: &mut BoundedDocumentTransportSession,
     authorization: suprnova_live::async_updates::AuthorizedTransportSubscription,
@@ -665,9 +729,9 @@ async fn final_admission_rejects_target_count_and_target_set_drift_without_mutat
 #[tokio::test]
 async fn replay_final_validation_is_all_or_nothing_when_authority_drifts_before_snapshot() {
     let fixture = TransportFixture::new(position(7, 0)).await;
-    let (mut bounded, authorization) = bounded_document(&fixture, 0x62, vec![]).await;
+    let (mut bounded, authorization) = pressure_only_replay_document(&fixture, 0x62).await;
     let context = authorization.context();
-    let transcript = vec![refresh(context, 1), refresh(context, 2)];
+    let transcript = vec![refresh(context, 3), refresh(context, 4)];
     fixture
         .registry
         .drift_after_now_call(1, DeliveryAuthorityDrift::DocumentScope);
@@ -685,7 +749,7 @@ async fn replay_final_validation_is_all_or_nothing_when_authority_drifts_before_
 #[tokio::test]
 async fn replay_final_validation_follows_the_last_host_clock_callback_before_batch_commit() {
     let fixture = TransportFixture::new(position(7, 0)).await;
-    let (mut bounded, authorization) = bounded_document(&fixture, 0x6e, vec![]).await;
+    let (mut bounded, authorization) = pressure_only_replay_document(&fixture, 0x6e).await;
     fixture
         .registry
         .drift_after_now_call(1, DeliveryAuthorityDrift::Revoke);
@@ -695,8 +759,8 @@ async fn replay_final_validation_follows_the_last_host_clock_callback_before_bat
             .admit_replay(
                 &authorization,
                 vec![
-                    heartbeat_at(authorization.context(), 7, 1),
-                    heartbeat_at(authorization.context(), 7, 2),
+                    heartbeat_at(authorization.context(), 7, 3),
+                    heartbeat_at(authorization.context(), 7, 4),
                 ],
                 fixture.registry.as_ref(),
             )
@@ -2181,6 +2245,12 @@ async fn invalid_replay_without_a_recovery_obligation_is_a_typed_rejection() {
     );
     assert_eq!(empty.retained_events(), 0);
     assert_eq!(fixture.registry.delivery_validation_call_count(), 0);
+    assert_eq!(
+        empty
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
 
     let limited = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document_with_config(
@@ -2212,6 +2282,12 @@ async fn invalid_replay_without_a_recovery_obligation_is_a_typed_rejection() {
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
     assert_eq!(limited.registry.delivery_validation_call_count(), 0);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
 
     let huge = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document(&huge, 0x83, vec![]).await;
@@ -2230,6 +2306,12 @@ async fn invalid_replay_without_a_recovery_obligation_is_a_typed_rejection() {
     assert_eq!(huge.registry.delivery_validation_call_count(), 0);
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2296,6 +2378,13 @@ async fn replay_rejects_middle_or_final_complete_without_detaching_later_deliver
     }
     assert_eq!(
         bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        2,
+        "middle and final lifecycle records are rejected exactly once each"
+    );
+    assert_eq!(
+        bounded
             .admit_replay(
                 &authorization,
                 vec![
@@ -2319,6 +2408,13 @@ async fn replay_rejects_middle_or_final_complete_without_detaching_later_deliver
     assert_eq!(outcome.applied(), 3);
     assert_eq!(outcome.current(), position(7, 3));
     assert_eq!(outcome.state(), SequenceState::Current);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        2,
+        "successful replay does not increment rejected telemetry"
+    );
     assert_eq!(
         bounded.sequence_position(&authorization),
         Some(position(7, 3))
@@ -2375,9 +2471,195 @@ async fn healthy_lane_rejects_every_replay_before_host_authority_work() {
         validation_calls
     );
     assert_eq!(fixture.registry.now_call_count(), now_calls);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        2,
+        "each healthy-lane replay rejection is counted exactly once"
+    );
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
     assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn replay_rejects_reconstructed_clock_before_any_host_callback() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut bounded, authorization) = pressure_only_replay_document(&fixture, 0xbb).await;
+    let substitute = TransportFixture::new(position(7, 0)).await;
+    let reconstructed = fixture
+        .cross_component_request(
+            &substitute,
+            authorization.subscription().clone(),
+            VerifiedOrigin::parse("https://example.test").expect("origin"),
+        )
+        .expect("same facts with a substituted host clock");
+    let stored_now_calls = fixture.registry.now_call_count();
+    let substitute_now_calls = substitute.registry.now_call_count();
+    let stored_validation_calls = fixture.registry.delivery_validation_call_count();
+    let substitute_validation_calls = substitute.registry.delivery_validation_call_count();
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &reconstructed,
+                vec![
+                    heartbeat_at(authorization.context(), 7, 3),
+                    heartbeat_at(authorization.context(), 7, 4),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect_err("a reconstructed host clock is not stored membership authority")
+            .kind(),
+        AsyncTransportErrorKind::InvalidEnvelope
+    );
+    assert_eq!(substitute.registry.now_call_count(), substitute_now_calls);
+    assert_eq!(fixture.registry.now_call_count(), stored_now_calls);
+    assert_eq!(
+        fixture.registry.delivery_validation_call_count(),
+        stored_validation_calls
+    );
+    assert_eq!(
+        substitute.registry.delivery_validation_call_count(),
+        substitute_validation_calls
+    );
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1,
+        "the local authority rejection increments telemetry exactly once"
+    );
+}
+
+#[tokio::test]
+async fn replay_rejects_foreign_detached_and_undeclared_input_before_callbacks() {
+    let foreign_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut foreign_bounded, foreign_authorization) =
+        pressure_only_replay_document(&foreign_fixture, 0xbe).await;
+    let other_scope = TransportFixture::new_in_scope(position(7, 0), 0xc1).await;
+    let foreign_request = other_scope.request(
+        foreign_authorization.subscription().clone(),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let stored_validation_calls = foreign_fixture.registry.delivery_validation_call_count();
+    let stored_now_calls = foreign_fixture.registry.now_call_count();
+    let foreign_validation_calls = other_scope.registry.delivery_validation_call_count();
+    let foreign_now_calls = other_scope.registry.now_call_count();
+    assert_eq!(
+        foreign_bounded
+            .admit_replay(
+                &foreign_request,
+                vec![
+                    heartbeat_at(foreign_authorization.context(), 7, 3),
+                    heartbeat_at(foreign_authorization.context(), 7, 4),
+                ],
+                foreign_fixture.registry.as_ref(),
+            )
+            .expect_err("foreign document scope is not a replay selector")
+            .kind(),
+        AsyncTransportErrorKind::AuthorizationScopeMismatch
+    );
+    assert_eq!(
+        foreign_fixture.registry.delivery_validation_call_count(),
+        stored_validation_calls
+    );
+    assert_eq!(foreign_fixture.registry.now_call_count(), stored_now_calls);
+    assert_eq!(
+        other_scope.registry.delivery_validation_call_count(),
+        foreign_validation_calls
+    );
+    assert_eq!(other_scope.registry.now_call_count(), foreign_now_calls);
+    assert_eq!(
+        foreign_bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
+
+    let undeclared_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut undeclared_bounded, undeclared_authorization) =
+        pressure_only_replay_document(&undeclared_fixture, 0xc2).await;
+    let changed_contract = TransportFixture::new_with_contract_revision(position(7, 0)).await;
+    let changed_context = changed_contract
+        .request(
+            undeclared_authorization.subscription().clone(),
+            VerifiedOrigin::parse("https://example.test").expect("origin"),
+        )
+        .context()
+        .clone();
+    let validation_calls = undeclared_fixture.registry.delivery_validation_call_count();
+    let now_calls = undeclared_fixture.registry.now_call_count();
+    assert_eq!(
+        undeclared_bounded
+            .admit_replay(
+                &undeclared_authorization,
+                vec![
+                    heartbeat_at(undeclared_authorization.context(), 7, 3),
+                    browser_event(&changed_context, 4),
+                ],
+                undeclared_fixture.registry.as_ref(),
+            )
+            .expect_err("stored event contract rejects the foreign payload")
+            .kind(),
+        AsyncTransportErrorKind::InvalidEnvelope
+    );
+    assert_eq!(
+        undeclared_fixture.registry.delivery_validation_call_count(),
+        validation_calls
+    );
+    assert_eq!(undeclared_fixture.registry.now_call_count(), now_calls);
+    assert_eq!(undeclared_bounded.retained_events(), 0);
+    assert_eq!(
+        undeclared_bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
+
+    let detached_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut detached_bounded, detached_authorization) =
+        pressure_only_replay_document(&detached_fixture, 0xc5).await;
+    let ready = detached_bounded
+        .prepare_remove(&detached_authorization)
+        .expect("prepare authenticated retirement")
+        .authorize()
+        .await
+        .expect("authorize retirement");
+    assert_eq!(
+        detached_bounded
+            .commit_remove(ready)
+            .expect("commit retirement"),
+        CloseDisposition::Closed
+    );
+    let validation_calls = detached_fixture.registry.delivery_validation_call_count();
+    let now_calls = detached_fixture.registry.now_call_count();
+    assert_eq!(
+        detached_bounded
+            .admit_replay(
+                &detached_authorization,
+                vec![
+                    heartbeat_at(detached_authorization.context(), 7, 3),
+                    heartbeat_at(detached_authorization.context(), 7, 4),
+                ],
+                detached_fixture.registry.as_ref(),
+            )
+            .expect_err("detached membership cannot admit replay")
+            .kind(),
+        AsyncTransportErrorKind::InvalidEnvelope
+    );
+    assert_eq!(
+        detached_fixture.registry.delivery_validation_call_count(),
+        validation_calls
+    );
+    assert_eq!(detached_fixture.registry.now_call_count(), now_calls);
+    assert_eq!(
+        detached_bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2503,6 +2785,13 @@ async fn degraded_lane_rejects_invalid_replay_before_host_authority_work() {
         validation_calls
     );
     assert_eq!(fixture.registry.now_call_count(), now_calls);
+    assert_eq!(
+        bounded
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        2,
+        "structural and byte-cap rejections are counted exactly once each"
+    );
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.retained_bytes(), 0);
     assert_eq!(bounded.unresolved_pressure_cause_count(), causes);
@@ -2789,6 +3078,117 @@ async fn partial_replay_dispatch_failure_keeps_truthful_prefix_and_degraded_cont
     assert!(bounded.is_degraded());
     assert_eq!(bounded.retained_events(), 0);
     assert_eq!(bounded.active_permits(), 0);
+}
+
+#[tokio::test]
+async fn pressure_only_replay_failures_keep_effective_high_water_and_truthful_kind() {
+    let dispatcher_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut dispatcher_bounded, dispatcher_authorization) =
+        pressure_only_replay_document(&dispatcher_fixture, 0xb2).await;
+    assert_eq!(
+        dispatcher_bounded
+            .admit_replay(
+                &dispatcher_authorization,
+                vec![
+                    heartbeat_at(dispatcher_authorization.context(), 7, 3),
+                    heartbeat_at(dispatcher_authorization.context(), 7, 4),
+                ],
+                dispatcher_fixture.registry.as_ref(),
+            )
+            .expect("pressure-only replay admission"),
+        BufferDisposition::Queued
+    );
+    let dispatcher_error = dispatcher_bounded
+        .dispatch_next(
+            dispatcher_fixture.registry.as_ref(),
+            &mut FailOnDispatcher {
+                attempts: 0,
+                fail_on: 2,
+            },
+        )
+        .expect_err("second replay dispatch fails");
+    assert_eq!(
+        dispatcher_error.kind(),
+        AsyncDeliveryErrorKind::Sequence(SequenceErrorKind::DispatchFailed)
+    );
+    let dispatcher_replay = dispatcher_error.replay_error().expect("replay progress");
+    assert_eq!(dispatcher_replay.applied(), 1);
+    assert_eq!(dispatcher_replay.current(), position(7, 3));
+    assert_eq!(dispatcher_replay.state(), SequenceState::Current);
+    assert_eq!(dispatcher_replay.high_water(), Some(position(7, 4)));
+
+    let authorization_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut authorization_bounded, authorization) =
+        pressure_only_replay_document(&authorization_fixture, 0xb5).await;
+    authorization_bounded
+        .admit_replay(
+            &authorization,
+            vec![
+                heartbeat_at(authorization.context(), 7, 3),
+                heartbeat_at(authorization.context(), 7, 4),
+            ],
+            authorization_fixture.registry.as_ref(),
+        )
+        .expect("pressure-only replay admission");
+    let authorization_error = authorization_bounded
+        .dispatch_next(
+            authorization_fixture.registry.as_ref(),
+            &mut DriftAfterFirstDispatcher {
+                registry: authorization_fixture.registry.clone(),
+                applied: 0,
+            },
+        )
+        .expect_err("scope drift after the committed prefix");
+    assert_eq!(
+        authorization_error.kind(),
+        AsyncDeliveryErrorKind::AuthorizationLost
+    );
+    let authorization_replay = authorization_error
+        .replay_error()
+        .expect("authorization loss preserves replay progress");
+    assert_eq!(
+        authorization_replay.kind().as_str(),
+        "async_sequence_authorization_lost"
+    );
+    assert_eq!(authorization_replay.applied(), 1);
+    assert_eq!(authorization_replay.current(), position(7, 3));
+    assert_eq!(authorization_replay.state(), SequenceState::Current);
+    assert_eq!(authorization_replay.high_water(), Some(position(7, 4)));
+
+    let expiry_fixture = TransportFixture::new(position(7, 0)).await;
+    let (mut expiry_bounded, expiry_authorization) =
+        pressure_only_replay_document(&expiry_fixture, 0xb8).await;
+    expiry_bounded
+        .admit_replay(
+            &expiry_authorization,
+            vec![
+                heartbeat_at(expiry_authorization.context(), 7, 3),
+                heartbeat_at(expiry_authorization.context(), 7, 4),
+            ],
+            expiry_fixture.registry.as_ref(),
+        )
+        .expect("pressure-only replay admission");
+    let expiry_error = expiry_bounded
+        .dispatch_next(
+            expiry_fixture.registry.as_ref(),
+            &mut ExpireAfterFirstDispatcher {
+                registry: expiry_fixture.registry.clone(),
+                applied: 0,
+            },
+        )
+        .expect_err("descriptor expiry after the committed prefix");
+    assert_eq!(
+        expiry_error.kind(),
+        AsyncDeliveryErrorKind::AuthorizationLost
+    );
+    let expiry_replay = expiry_error
+        .replay_error()
+        .expect("expiry preserves replay progress");
+    assert_eq!(expiry_replay.kind(), SequenceErrorKind::MembershipExpired);
+    assert_eq!(expiry_replay.applied(), 1);
+    assert_eq!(expiry_replay.current(), position(7, 3));
+    assert_eq!(expiry_replay.state(), SequenceState::Current);
+    assert_eq!(expiry_replay.high_water(), Some(position(7, 4)));
 }
 
 #[tokio::test]
@@ -3323,6 +3723,12 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
     );
     assert_eq!(exact.retained_events(), 2);
     assert_eq!(exact.retained_bytes(), aggregate);
+    assert_eq!(
+        exact
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        0
+    );
 
     let first_over_fixture = TransportFixture::new(position(7, 0)).await;
     let provisional = first_over_fixture.request(
@@ -3373,6 +3779,12 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
     );
     assert_eq!(first_over.retained_events(), 0);
     assert_eq!(first_over.retained_bytes(), 0);
+    assert_eq!(
+        first_over
+            .telemetry_snapshot()
+            .count(AsyncTelemetryCounter::Rejected),
+        1
+    );
 }
 
 #[tokio::test]

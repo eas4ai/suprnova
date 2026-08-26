@@ -222,17 +222,26 @@ Acceptance criteria:
 - Replay validates the entire bounded same-scope transcript before any dispatch
   or mutation only when the exact lane already has a sequence or pressure
   recovery obligation. A healthy lane rejects every transcript before host
-  clock or registry work. Count, payload, aggregate bytes, queue capacity, exact
-  scope, and contiguous coverage preflight before one atomic current-membership
-  registry snapshot; invalid evidence is a typed input rejection and never a
-  new `Degraded` pressure outcome. Delivery then final-validates and immediately
+  clock or registry work. Count, payload, aggregate bytes, and queue capacity
+  preflight before bounded local work. The document then resolves the exact
+  stored active authorization by binding and document scope and validates its
+  immutable context, registered payload/event/signal/target contract, exact
+  scope, and contiguous coverage before any host callback. A reconstructed
+  authorization or substituted clock is not stored authority. Only then may the
+  stored clock and one atomic current-membership registry snapshot run; invalid
+  evidence is a typed input rejection and never a new `Degraded` pressure
+  outcome. Delivery then final-validates and immediately
   dispatches each entry in order, with no host callback between that entry's
   accepted authority and registered dispatch. Partial failure, authorization
   loss, cancellation, or retirement reports its applied prefix, current
-  position, state, and high-water independently of the outer failure kind,
-  retains degraded state, and resumes only from freshly admitted remaining
-  suffix evidence. Replay carries presentation data only; `Complete` is accepted
-  only from the live provider path because lifecycle detachment is not replayable.
+  position, state, and effective required high-water, including pressure-only
+  recovery while the sequence lane itself is current, independently of the outer
+  failure kind. Nested interruption kinds distinguish expiry, current-authority
+  loss, delivery retirement, and registered-dispatch failure.
+  The exact recovery obligation remains degraded and resumes only from freshly
+  admitted remaining suffix evidence. Replay carries presentation data only;
+  `Complete` is accepted only from the live provider path because lifecycle
+  detachment is not replayable.
 - An invalidation or authoritative change enters the normal island scheduler and
   obtains HTML and snapshot state through an ordinary verified refresh/action
   response.
@@ -281,7 +290,11 @@ Acceptance criteria:
   Successful apply, duplicate, and stale-epoch outcomes resolve truthfully.
   Authority loss, cancellation, gaps, epoch change, dispatcher failure, or an
   unresolved lease drop mark pressure continuity degraded and never advance
-  sequence falsely.
+  sequence falsely. The synchronous closed document owner does not expose a
+  second cancellation capability: aggregate retirement cannot interleave through
+  another public mutable path while registered dispatch owns `&mut self`; the
+  private lease still observes its shared retirement flag and reports the exact
+  delivery-retired recovery progress if internal lifecycle cancellation occurs.
 - For a browser event, the trusted host registry supplies the current resolved
   nonzero recipient count and an exact target-set scope digest. The browser and
   buffer caller cannot propose fanout. Admission rejects target-count, target,
@@ -414,6 +427,18 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Closed replay's stored-authority, progress, and observability
+  invariants. Replay now rejects foreign, detached, reconstructed-clock, and
+  undeclared-payload input through bounded local validation before any host
+  callback, then uses only the exact stored authorization and clock for its
+  atomic current-registry seal. Recovery retains the effective required
+  high-water even for a pressure-only obligation on a current sequence lane,
+  and nested errors distinguish expiry, authorization loss, delivery retirement,
+  and dispatcher failure while preserving the committed prefix. Every typed
+  replay rejection increments the finite redacted `Rejected` counter exactly
+  once; successful replay increments it zero times. Cancellation remains inside
+  the closed synchronous document lifecycle rather than exposing a second public
+  cancellation authority.
 - 2026-08-25 -- Closed the final Task 5 replay and refresh invariants.
   Authoritative refresh now obtains a trusted proposed baseline before commit
   time and its final current-registry callback, then performs only callback-free

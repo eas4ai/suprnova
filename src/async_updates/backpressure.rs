@@ -517,8 +517,10 @@ impl Drop for PulledCandidateLossGuard {
 pub(crate) enum LeaseDispatchError {
     Retired,
     AuthorizationLost,
+    MembershipExpired,
     ReplayRetired(ReplayDispatchError),
     ReplayAuthorizationLost(ReplayDispatchError),
+    ReplayMembershipExpired(ReplayDispatchError),
     Sequence(SequenceError),
     Replay(ReplayDispatchError),
 }
@@ -661,8 +663,7 @@ impl AsyncDeliveryLease {
                 );
                 self.resolved = true;
                 return Err(LeaseDispatchError::ReplayRetired(
-                    sequence
-                        .interrupt_replay(&recovery, super::SequenceErrorKind::MembershipExpired),
+                    sequence.interrupt_replay(&recovery, super::SequenceErrorKind::DeliveryRetired),
                 ));
             }
             let now = match validate_current(&mut entry.authorized) {
@@ -678,11 +679,17 @@ impl AsyncDeliveryLease {
                         LeaseDispatchError::Retired => {
                             LeaseDispatchError::ReplayRetired(sequence.interrupt_replay(
                                 &recovery,
-                                super::SequenceErrorKind::MembershipExpired,
+                                super::SequenceErrorKind::DeliveryRetired,
                             ))
                         }
                         LeaseDispatchError::AuthorizationLost => {
                             LeaseDispatchError::ReplayAuthorizationLost(sequence.interrupt_replay(
+                                &recovery,
+                                super::SequenceErrorKind::AuthorizationLost,
+                            ))
+                        }
+                        LeaseDispatchError::MembershipExpired => {
+                            LeaseDispatchError::ReplayMembershipExpired(sequence.interrupt_replay(
                                 &recovery,
                                 super::SequenceErrorKind::MembershipExpired,
                             ))
@@ -1037,10 +1044,13 @@ impl AsyncBackpressure {
     }
 
     fn invalid_replay(&mut self) -> AsyncBackpressureError {
-        self.telemetry.increment(AsyncTelemetryCounter::Rejected);
         AsyncBackpressureError {
             close_code: AsyncCloseCode::InvalidEnvelope,
         }
+    }
+
+    pub(crate) fn record_replay_rejection(&mut self) {
+        self.telemetry.increment(AsyncTelemetryCounter::Rejected);
     }
 
     /// Returns the exact number of retained queue entries.

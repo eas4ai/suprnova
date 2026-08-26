@@ -2055,29 +2055,22 @@ impl BoundedDocumentTransportSession {
         transcript: Vec<AsyncEnvelope>,
         registry: &dyn AsyncMembershipRegistryPort,
     ) -> Result<BufferDisposition, AsyncTransportError> {
+        let result = self.admit_replay_inner(authorization, transcript, registry);
+        if result.is_err() {
+            self.pressure.record_replay_rejection();
+        }
+        result
+    }
+
+    fn admit_replay_inner(
+        &mut self,
+        authorization: &AuthorizedTransportSubscription,
+        transcript: Vec<AsyncEnvelope>,
+        registry: &dyn AsyncMembershipRegistryPort,
+    ) -> Result<BufferDisposition, AsyncTransportError> {
         if let Some(code) = self.pressure.closed_code() {
             self.transport.begin_bounded_close();
             return Ok(BufferDisposition::Closed(code));
-        }
-        let replay_membership = PressureMembership::new(
-            authorization.subscription().clone(),
-            authorization.binding().clone(),
-            authorization.document_scope().clone(),
-            authorization.verified.claims().authorization_memo().clone(),
-        );
-        let lane_index = self
-            .sequence_lanes
-            .iter()
-            .position(|lane| lane.matches(authorization))
-            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
-        let pressure_high_water = self.pressure.required_high_water(&replay_membership);
-        let recovery_pending = self.sequence_lanes[lane_index].machine.state()
-            == SequenceState::Degraded
-            || pressure_high_water.is_some();
-        if !recovery_pending {
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::InvalidEnvelope,
-            ));
         }
         match self.pressure.preflight_replay(&transcript) {
             ReplayPreflight::Ready => {}
@@ -2090,6 +2083,56 @@ impl BoundedDocumentTransportSession {
                 self.transport.begin_bounded_close();
                 return Ok(BufferDisposition::Closed(code));
             }
+        }
+        self.transport.validate_common(authorization)?;
+        let stored_authorization = self
+            .transport
+            .memberships
+            .iter()
+            .find(|logical| {
+                logical.authorization.subscription() == authorization.subscription()
+                    && logical.authorization.binding() == authorization.binding()
+                    && logical.authorization.document_scope() == authorization.document_scope()
+            })
+            .map(|logical| logical.authorization.clone())
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        if stored_authorization.context() != authorization.context()
+            || stored_authorization.origin() != authorization.origin()
+            || !Arc::ptr_eq(&stored_authorization.authority, &authorization.authority)
+        {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::InvalidEnvelope,
+            ));
+        }
+        for envelope in &transcript {
+            stored_authorization
+                .context()
+                .validate_local_envelope(envelope)
+                .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        }
+        let replay_membership = PressureMembership::new(
+            stored_authorization.subscription().clone(),
+            stored_authorization.binding().clone(),
+            stored_authorization.document_scope().clone(),
+            stored_authorization
+                .verified
+                .claims()
+                .authorization_memo()
+                .clone(),
+        );
+        let lane_index = self
+            .sequence_lanes
+            .iter()
+            .position(|lane| lane.matches(&stored_authorization))
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        let pressure_high_water = self.pressure.required_high_water(&replay_membership);
+        let recovery_pending = self.sequence_lanes[lane_index].machine.state()
+            == SequenceState::Degraded
+            || pressure_high_water.is_some();
+        if !recovery_pending {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::InvalidEnvelope,
+            ));
         }
         if transcript
             .iter()
@@ -2106,10 +2149,13 @@ impl BoundedDocumentTransportSession {
             .machine
             .prepare_replay(&replay_envelopes, pressure_recovery)
             .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
-        let commit_now = authorization.authority.now();
-        let sealed =
-            self.transport
-                .seal_async_replay(authorization, transcript, registry, commit_now)?;
+        let commit_now = stored_authorization.authority.now();
+        let sealed = self.transport.seal_async_replay(
+            &stored_authorization,
+            transcript,
+            registry,
+            commit_now,
+        )?;
         if sealed.iter().any(|authorized| {
             authorized.document_generation() != self.transport.control_generation
                 || !authorized.is_current_at(commit_now)
@@ -2214,6 +2260,9 @@ impl BoundedDocumentTransportSession {
             delivery
                 .dispatch_replay_with(&mut sequence.machine, dispatcher, |authorized| {
                     let now = authorization.authority.now();
+                    if now >= authorization.verified.expires_at() {
+                        return Err(LeaseDispatchError::MembershipExpired);
+                    }
                     transport
                         .revalidate_async_delivery(
                             &authorization,
@@ -2254,11 +2303,17 @@ impl BoundedDocumentTransportSession {
             Err(LeaseDispatchError::AuthorizationLost) => Err(AsyncDeliveryError::new(
                 AsyncDeliveryErrorKind::AuthorizationLost,
             )),
+            Err(LeaseDispatchError::MembershipExpired) => Err(AsyncDeliveryError::new(
+                AsyncDeliveryErrorKind::AuthorizationLost,
+            )),
             Err(LeaseDispatchError::ReplayRetired(replay)) => Err(AsyncDeliveryError::with_replay(
                 AsyncDeliveryErrorKind::Retired,
                 replay,
             )),
             Err(LeaseDispatchError::ReplayAuthorizationLost(replay)) => Err(
+                AsyncDeliveryError::with_replay(AsyncDeliveryErrorKind::AuthorizationLost, replay),
+            ),
+            Err(LeaseDispatchError::ReplayMembershipExpired(replay)) => Err(
                 AsyncDeliveryError::with_replay(AsyncDeliveryErrorKind::AuthorizationLost, replay),
             ),
             Err(LeaseDispatchError::Sequence(error)) => Err(AsyncDeliveryError::new(
