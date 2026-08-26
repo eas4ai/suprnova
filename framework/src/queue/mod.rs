@@ -332,6 +332,14 @@ impl Queue {
         overrides: EnvelopeOverrides,
         debounce: Option<debounce::DebounceOptions>,
     ) -> Result<(), FrameworkError> {
+        // Above the fake on purpose, unlike the arming below it. Two
+        // declarations that cannot both hold is a bug in the job, not a
+        // property of the environment, so `Queue::fake()` must surface it
+        // rather than hide it until production. Only the check is hoisted: a
+        // fake push writes nothing to the cache, so there is no window to arm.
+        if J::debounce_for().is_some() && job.unique_id().is_some() {
+            return Err(debounce_conflict(J::job_name()));
+        }
         if testing::is_active() {
             let available_at = when.resolve::<J>()?;
             // Records `overrides` too, so a test can assert on the
@@ -400,10 +408,15 @@ impl Queue {
         })
         .await;
         let env_id = env.id;
-        let armed_key = env
-            .debounce_owner
-            .is_some()
-            .then(|| debounce_key(&env.job_name, env.debounce_id.as_deref()));
+        // Cloned before `env` moves into the driver: the cleanup below is
+        // owner-checked, so it needs this dispatch's own token and not just the
+        // key.
+        let armed = env.debounce_owner.clone().map(|owner| {
+            (
+                debounce_key(&env.job_name, env.debounce_id.as_deref()),
+                owner,
+            )
+        });
         // Resolving the driver is inside the guarded block, not above it: a
         // missing driver after the window was armed is the same hazard as a
         // failed write, and leaving it outside would skip the cleanup.
@@ -417,9 +430,11 @@ impl Queue {
             // Leaving the token in place would make every earlier envelope of
             // this burst look superseded, and the worker would drop work whose
             // own push reported success. Let the window lapse instead - a
-            // lapsed window fails open, so whatever is still queued runs.
-            if let Some(key) = armed_key
-                && let Err(cleanup) = debounce::abandon(&key).await
+            // lapsed window fails open, so whatever is still queued runs. Only
+            // while this dispatch still owns it: a newer one that armed and
+            // enqueued while this write was failing keeps its window.
+            if let Some((key, owner)) = armed
+                && let Err(cleanup) = debounce::abandon(&key, &owner).await
             {
                 tracing::warn!(
                     job = J::job_name(),
@@ -562,6 +577,13 @@ impl Queue {
     /// and reports `true` for `Fresh` and `FreshUnfenced` (the envelope
     /// reached the driver either way), `false` only for `Duplicate`.
     async fn push_unique_at<J: Job>(job: J, when: AvailableAt) -> Result<bool, FrameworkError> {
+        // The conflict is in the declarations, not in which entry point was
+        // called: a job reaching the queue through `push_unique` must not have
+        // its declared window quietly demoted to nothing. Above the fake for
+        // the reason `dispatch_push` gives.
+        if J::debounce_for().is_some() && job.unique_id().is_some() {
+            return Err(debounce_conflict(J::job_name()));
+        }
         if testing::is_active() {
             // In fake mode, dedupe is irrelevant - record and report fresh.
             testing::record::<J>(&job, when.resolve::<J>()?)?;
@@ -572,12 +594,6 @@ impl Queue {
                 "Queue::push_unique requires Job::unique_id(&self) to return Some(...)",
             )
         })?;
-        // The conflict is in the declarations, not in which entry point was
-        // called: a job reaching the queue through `push_unique` must not have
-        // its declared window quietly demoted to nothing.
-        if J::debounce_for().is_some() {
-            return Err(debounce_conflict(J::job_name()));
-        }
         let ttl = J::unique_for();
         let key = unique_key(J::job_name(), &id);
         // The closure below takes `id` by value to stamp the envelope's
@@ -1425,6 +1441,12 @@ async fn arm_debounce<J: Job>(
         return Err(debounce_conflict(J::job_name()));
     }
     let key = debounce_key(J::job_name(), id.as_deref());
+    // Converted before the window is armed, not after. It depends only on
+    // `window`, and failing this conversion below `acquire` would leave an
+    // owner token in the cache with no envelope behind it - which is the one
+    // way a debounce can silently discard work.
+    let window_delay = chrono::Duration::from_std(window)
+        .map_err(|e| FrameworkError::internal(format!("debounce window overflow: {e}")))?;
     let armed = debounce::acquire(&key, window, max_wait).await?;
     env.debounce_id = id;
     env.debounce_owner = Some(armed.owner);
@@ -1432,8 +1454,7 @@ async fn arm_debounce<J: Job>(
         // The burst has been deferring this long enough; queue it immediately.
         chrono::Duration::zero()
     } else {
-        chrono::Duration::from_std(window)
-            .map_err(|e| FrameworkError::internal(format!("debounce window overflow: {e}")))?
+        window_delay
     };
     Ok(Some(Utc::now() + delay))
 }

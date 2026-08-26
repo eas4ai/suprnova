@@ -422,6 +422,9 @@ because a lost token is not evidence that somebody else owns the window.
 
 The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
 and nothing is ever collapsed. Laravel's sync driver behaves the same way.
+`Queue::bulk` pushes at the driver level and does not arm a window either, so a
+debounced job pushed in bulk runs every copy. Laravel's `Queue::bulk` skips its
+own debounce acquisition for the same reason.
 
 Set the window at the call site instead when it belongs to the caller:
 
@@ -1537,6 +1540,14 @@ every entry point except `push_with`/`later_with` - see
 `pushed_with_overrides`, the assertions over it. In fake mode,
 `push_unique` always records the push as fresh - dedupe is irrelevant
 when no driver is wired.
+
+A debounced push behaves the same way: the fake writes nothing to the
+cache, so no window is armed and the recorded `available_at` carries no
+debounce delay. `assert_pushed_later` sees it as undelayed. What the
+fake does still catch is a job declaring both `debounce_for` and
+`unique_id` - that pair cannot hold whatever the environment is, so the
+push returns an error under `Queue::fake()` exactly as it would in
+production.
 
 ## Idempotency is the worker's contract with you
 

@@ -23,6 +23,7 @@ use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
 use suprnova::queue::{DebounceOptions, Job, Queue};
 use suprnova::testing::TestContainer;
 use suprnova::{FrameworkError, async_trait};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 fn cache_init() {
@@ -339,8 +340,11 @@ async fn a_push_that_fails_after_arming_lets_the_window_lapse() {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone)]
-struct ReportSupersession;
+struct ReportSupersession {
+    dispatch: u32,
+}
 static SUPERSESSION_RUNS: AtomicU32 = AtomicU32::new(0);
+static SUPERSESSION_SURVIVOR: AtomicU32 = AtomicU32::new(0);
 
 #[async_trait]
 impl Job for ReportSupersession {
@@ -352,6 +356,7 @@ impl Job for ReportSupersession {
     }
     async fn handle(self) -> Result<(), FrameworkError> {
         SUPERSESSION_RUNS.fetch_add(1, Ordering::SeqCst);
+        SUPERSESSION_SURVIVOR.store(self.dispatch, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -361,14 +366,19 @@ impl Job for ReportSupersession {
 async fn a_superseded_envelope_is_dropped_and_reports_it() {
     cache_init();
     SUPERSESSION_RUNS.store(0, Ordering::SeqCst);
+    SUPERSESSION_SURVIVOR.store(0, Ordering::SeqCst);
     register_job::<ReportSupersession>();
 
     let driver = Arc::new(MemoryQueueDriver::new());
     Queue::set_driver(driver.clone());
 
     let _fake = EventFacade::fake();
-    Queue::push(ReportSupersession).await.expect("first");
-    Queue::push(ReportSupersession).await.expect("second");
+    Queue::push(ReportSupersession { dispatch: 1 })
+        .await
+        .expect("first");
+    Queue::push(ReportSupersession { dispatch: 2 })
+        .await
+        .expect("second");
 
     let handle = tokio::spawn(run_worker(
         driver.clone(),
@@ -382,6 +392,12 @@ async fn a_superseded_envelope_is_dropped_and_reports_it() {
         SUPERSESSION_RUNS.load(Ordering::SeqCst),
         1,
         "the second dispatch supersedes the first"
+    );
+    assert_eq!(
+        SUPERSESSION_SURVIVOR.load(Ordering::SeqCst),
+        2,
+        "and the survivor is the SECOND dispatch: a comparison that dropped the \
+         current envelope and ran the stale one would also leave one run behind"
     );
     assert_eq!(
         dispatched_count::<JobDebounced>(|e| e.job.job_name == "queue_debounce::ReportSupersession"),
@@ -692,6 +708,271 @@ async fn a_cache_failure_fails_the_push_instead_of_enqueueing_an_unjudgeable_job
         0,
         "an envelope with no armed window would be judged against a key nothing \
          wrote; the push fails instead"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Arming is all-or-nothing: a half-armed window must not outlive its dispatch
+// ---------------------------------------------------------------------------
+
+/// Delegates to the real cache except for the debounce timestamp key, whose
+/// reads fail. That is the shape of a Redis blip mid-arming, and also of a
+/// stamp key holding a value that will not deserialize as an `i64` - which
+/// fails deterministically on every push.
+struct StampBrokenCache {
+    inner: Arc<dyn CacheStore>,
+}
+
+fn is_stamp(key: &str) -> bool {
+    key.ends_with(":first_dispatched_at")
+}
+
+#[async_trait]
+impl CacheStore for StampBrokenCache {
+    async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
+        if is_stamp(key) {
+            return Err(FrameworkError::internal("cache store unreachable"));
+        }
+        self.inner.get_raw(key).await
+    }
+    async fn put_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.inner.put_raw(key, value, ttl).await
+    }
+    fn default_ttl(&self) -> Option<Duration> {
+        self.inner.default_ttl()
+    }
+    async fn has(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.inner.has(key).await
+    }
+    async fn forget(&self, key: &str) -> Result<bool, FrameworkError> {
+        self.inner.forget(key).await
+    }
+    async fn flush(&self) -> Result<(), FrameworkError> {
+        self.inner.flush().await
+    }
+    async fn increment(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.inner.increment(key, amount).await
+    }
+    async fn decrement(&self, key: &str, amount: i64) -> Result<i64, FrameworkError> {
+        self.inner.decrement(key, amount).await
+    }
+    async fn tagged_put_raw(
+        &self,
+        tags: &[&str],
+        key: &str,
+        value: &str,
+        ttl: Option<Duration>,
+    ) -> Result<(), FrameworkError> {
+        self.inner.tagged_put_raw(tags, key, value, ttl).await
+    }
+    async fn flush_tags(&self, tags: &[&str]) -> Result<(), FrameworkError> {
+        self.inner.flush_tags(tags).await
+    }
+    async fn acquire_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+    ) -> Result<Option<String>, FrameworkError> {
+        self.inner.acquire_lock(key, ttl).await
+    }
+    async fn release_lock(&self, key: &str, token: &str) -> Result<bool, FrameworkError> {
+        self.inner.release_lock(key, token).await
+    }
+    async fn refresh_lock(
+        &self,
+        key: &str,
+        token: &str,
+        ttl: Duration,
+    ) -> Result<bool, FrameworkError> {
+        self.inner.refresh_lock(key, token, ttl).await
+    }
+    async fn touch(&self, key: &str, ttl: Duration) -> Result<bool, FrameworkError> {
+        self.inner.touch(key, ttl).await
+    }
+}
+
+/// The owner token is written before the max-wait bookkeeping runs, so an
+/// arming that fails halfway would otherwise leave a token in the cache that no
+/// envelope carries - and every earlier envelope of the burst, whose own push
+/// returned `Ok`, would be dropped at the worker as superseded by a dispatch
+/// that never completed. Only jobs declaring `max_debounce_wait` reach that
+/// bookkeeping at all, which is the manual's headline example.
+#[tokio::test]
+#[serial]
+async fn an_arming_that_fails_halfway_hands_the_window_back() {
+    cache_init();
+    COMPACT_RUNS.store(0, Ordering::SeqCst);
+    register_job::<CompactLedger>();
+    Cache::forget("queue-debounce:queue_debounce::CompactLedger::first_dispatched_at")
+        .await
+        .expect("cache");
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    // A arms cleanly and is enqueued. Its push returned Ok, so its work is
+    // owed.
+    Queue::push(CompactLedger).await.expect("first");
+
+    {
+        // B writes its owner token over A's, then fails reading the timestamp
+        // key.
+        let real = Cache::store().expect("cache store");
+        let _container = TestContainer::fake();
+        TestContainer::bind::<dyn CacheStore>(Arc::new(StampBrokenCache { inner: real }));
+        Queue::push(CompactLedger)
+            .await
+            .expect_err("the arming could not complete");
+    }
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| COMPACT_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+
+    assert_eq!(
+        COMPACT_RUNS.load(Ordering::SeqCst),
+        1,
+        "an arming that could not complete must hand its window back, so the \
+         envelope already on the queue still runs"
+    );
+}
+
+/// A driver that parks inside `push` until released, then fails - so a slow
+/// failing write can be interleaved with a newer dispatch that arms the same
+/// window and enqueues successfully.
+struct GatedFailingQueueDriver {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl QueueDriver for GatedFailingQueueDriver {
+    async fn push(&self, _env: suprnova::queue::Envelope) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Err(FrameworkError::internal("driver refused the write"))
+    }
+    async fn pop(&self, _vt: Duration) -> Result<Option<Reservation>, FrameworkError> {
+        Ok(None)
+    }
+    async fn ack(&self, _token: &ReservationToken) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn nack(
+        &self,
+        _token: &ReservationToken,
+        _delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+/// Handing a window back has to be owner-checked, or the cleanup becomes the
+/// opposite bug: a dispatch whose write fails slowly tears down a window a
+/// newer dispatch has since armed and filled, and the whole burst un-collapses.
+#[tokio::test]
+#[serial]
+async fn a_failed_push_never_tears_down_a_newer_dispatch_window() {
+    cache_init();
+    SYNC_ORDER_RUNS.store(0, Ordering::SeqCst);
+    SYNC_ORDER_LAST_REVISION.store(0, Ordering::SeqCst);
+    register_job::<SyncOrder>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    // A arms and is enqueued.
+    Queue::push(SyncOrder {
+        order_id: 800,
+        revision: 1,
+    })
+    .await
+    .expect("first");
+
+    // B arms, then parks inside the driver write that will fail.
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    Queue::set_driver(Arc::new(GatedFailingQueueDriver {
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let parked = tokio::spawn(async {
+        Queue::push(SyncOrder {
+            order_id: 800,
+            revision: 2,
+        })
+        .await
+    });
+    entered.notified().await;
+
+    // C arms over B's token and is enqueued. B's cleanup must not touch it.
+    Queue::set_driver(driver.clone());
+    Queue::push(SyncOrder {
+        order_id: 800,
+        revision: 3,
+    })
+    .await
+    .expect("third");
+
+    release.notify_one();
+    parked
+        .await
+        .expect("join")
+        .expect_err("B's driver write failed");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        worker_cfg(),
+        CancellationToken::new(),
+    ));
+    settle(|| SYNC_ORDER_RUNS.load(Ordering::SeqCst) > 0).await;
+    handle.abort();
+
+    assert_eq!(
+        SYNC_ORDER_RUNS.load(Ordering::SeqCst),
+        1,
+        "an unconditional cleanup would delete the live owner token, and every \
+         queued envelope of the burst would fail open and run"
+    );
+    assert_eq!(
+        SYNC_ORDER_LAST_REVISION.load(Ordering::SeqCst),
+        3,
+        "the survivor is the newest dispatch that actually reached the queue"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The fake must not hide a conflict that is a bug in the job
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn the_fake_refuses_a_job_declaring_both_too() {
+    let _fake = suprnova::queue::testing::install_fake();
+
+    let err = Queue::push(ConfusedJob)
+        .await
+        .expect_err("the declarations conflict whether or not a driver is wired");
+    assert!(
+        err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
+        "the error must name both declarations: {err}"
+    );
+
+    let err = Queue::push_unique(ConfusedJob)
+        .await
+        .expect_err("and through the unique entry point too");
+    assert!(
+        err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
+        "the error must name both declarations: {err}"
     );
 }
 
