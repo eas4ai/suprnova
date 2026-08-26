@@ -96,6 +96,26 @@ means an app that stores files locally or on S3 never carries that crate.
 S3 is deliberately *not* gated - its signer never depended on `rsa`, so
 gating it would break the most-used cloud backend and remove nothing.
 
+### Atomic local writes
+
+A local disk writes every object through a staging file. `disk.write(...)`,
+`disk.writer(...)`, and everything built on them land in
+`<root>/.suprnova-atomic/`, are flushed and synced there, and are then renamed
+onto the target path. A concurrent reader therefore sees either the previous
+object or the finished new one and never a partial length, and a process that
+dies mid-write leaves the target untouched rather than truncated at the live
+path. `append` is the exception - it writes in place, because staging an
+append would mean copying the whole object first.
+
+The `.suprnova-atomic` name is reserved at the root of every local disk. Any
+path whose first component is that name is refused with a permission error, so
+you cannot read another writer's staging file, write into the directory, or
+delete it, and the entry is filtered out of `files`, `directories`,
+`all_files`, and `all_directories` so it never shows up as an object. The name
+is exported as `suprnova::ATOMIC_STAGING_DIR` because backup and sync tooling
+needs to name it: the directory holds only in-flight temp files, so exclude it
+the way you would exclude a lock directory.
+
 ### Path-traversal guard
 
 Local filesystem disks have a `PathGuardLayer` applied before any user-supplied
@@ -413,9 +433,10 @@ If the stream fails partway, the writer is aborted and a destination the
 transfer created is deleted before the error reaches you, so a failed transfer
 is not observable as a truncated object. A destination that was already there
 is left alone - a failed copy must not be the thing that destroys an object it
-never wrote. On a local-filesystem primary that guarantee is weaker than it
-looks: the driver opens the target itself and truncates it, so a pre-existing
-local destination is already gone by the time a transfer can fail.
+never wrote. A local-filesystem primary honors that too, because it stages the
+transfer under `.suprnova-atomic/` and only renames on success; aborting the
+writer removes the staged file, so a failed transfer leaves neither a partial
+destination nor a leftover temp file.
 
 ### Versioned and conditional reads
 
