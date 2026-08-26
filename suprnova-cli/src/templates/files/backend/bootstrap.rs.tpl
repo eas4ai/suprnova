@@ -98,7 +98,8 @@ pub fn register_http_stack() {
     // than a replayed PUT/DELETE), and the validation-redirect middleware
     // (turns a `422` carrying an `errors` object into the redirect-back the
     // Inertia client expects, so a failed validation restores the form with
-    // its messages instead of surfacing a raw 422).
+    // its messages instead of surfacing a raw 422). Naming an `error_page`
+    // below adds a fifth: the error-page middleware.
     //
     // This sits here, after SessionMiddleware, rather than beside the container
     // wiring below, for two reasons. It registers middleware of its own, so
@@ -129,8 +130,19 @@ pub fn register_http_stack() {
     //
     // Everything set on this config reaches every page: `Inertia::install`
     // retains it as the default each `InertiaResponse` starts from.
-    Inertia::install(&InertiaConfig::new().frontend(Frontend::{frontend_variant}))
-        .expect("Inertia install failed (production needs a built frontend manifest)");
+    // `.error_page` names the page every framework error response renders
+    // through - a 403 from an authorization check, a 404 for an unknown
+    // route, a 500. Without it those reach the Inertia client as a JSON
+    // body with no `X-Inertia` header, and the client answers with its
+    // "a plain JSON response was received" modal instead of a page.
+    // `frontend/src/pages/Error.*` is the component; it receives
+    // `status`, `message`, and `request_id` when the error carried one.
+    Inertia::install(
+        &InertiaConfig::new()
+            .frontend(Frontend::{frontend_variant})
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
 
     // Locale detection - registered after SessionMiddleware, since its
     // detection chain checks the session first (then cookie, then

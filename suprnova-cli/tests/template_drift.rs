@@ -1502,3 +1502,76 @@ fn scaffolded_controllers_generate_types_without_unresolved_props() {
         "a fresh scaffold must not warn about any prop type: {unresolved:?}"
     );
 }
+
+/// The scaffolded backend opts into the error page, and every starter
+/// ships the component it names.
+///
+/// These two halves are only useful together. `error_page("Error")`
+/// without an `Error.*` component resolves to nothing and the Inertia
+/// client fails the visit; an `Error.*` component nobody enabled is dead
+/// code. One test, so neither half can be removed on its own.
+#[test]
+fn every_frontend_ships_the_error_page_the_backend_enables() {
+    let bootstrap = read("src/templates/files/backend/bootstrap.rs.tpl");
+    assert!(
+        bootstrap.contains(r#".error_page("Error")"#),
+        "the scaffolded bootstrap must enable the error page, or a 403 / 404 / 500 \
+         reaches the Inertia client as a plain JSON body and it shows its error \
+         modal; got:\n{bootstrap}"
+    );
+
+    for (frontend, tpl) in [
+        (
+            "react",
+            "src/templates/files/frontend/react/src/pages/Error.tsx.tpl",
+        ),
+        (
+            "svelte",
+            "src/templates/files/frontend/svelte/src/pages/Error.svelte.tpl",
+        ),
+        (
+            "vue",
+            "src/templates/files/frontend/vue/src/pages/Error.vue.tpl",
+        ),
+    ] {
+        let body = read(tpl);
+        for prop in ["status", "message", "request_id"] {
+            assert!(
+                body.contains(prop),
+                "{frontend}'s Error page must render the `{prop}` prop the \
+                 error-page middleware sends; got:\n{body}"
+            );
+        }
+        assert!(
+            !body.contains("from '../types/inertia-props'"),
+            "{frontend}'s Error page must declare its own props: \
+             `suprnova generate-types` rewrites types/inertia-props.ts from the \
+             project's #[derive(InertiaProps)] structs, so an import from there \
+             would vanish on the next regeneration; got:\n{body}"
+        );
+    }
+}
+
+/// Scaffolding writes the `Error` page next to `Home`, under whichever
+/// extension the chosen frontend uses.
+#[test]
+fn scaffolding_writes_the_error_page_for_every_frontend() {
+    for (frontend, ext) in [
+        (suprnova_cli::templates::Frontend::React, "tsx"),
+        (suprnova_cli::templates::Frontend::Svelte, "svelte"),
+        (suprnova_cli::templates::Frontend::Vue, "vue"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        suprnova_cli::templates::scaffold_frontend(dir.path(), "my_app", "My App", frontend)
+            .expect("scaffold frontend");
+        let page = dir
+            .path()
+            .join("frontend/src/pages")
+            .join(format!("Error.{ext}"));
+        assert!(
+            page.is_file(),
+            "{frontend:?} must scaffold {}",
+            page.display()
+        );
+    }
+}
