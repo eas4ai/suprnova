@@ -160,7 +160,10 @@ Acceptance criteria:
   which remain isolated in each logical membership's authorization memo. SSE
   uses an authenticated same-origin membership control path around a
   non-authority document-transport handle; WebSocket uses bounded
-  subscribe/unsubscribe frames.
+  subscribe/unsubscribe frames. Compatibility also requires the exact current
+  cookie/bearer credential contract and the commutative strict intersection of
+  every member's reconnect bounds. A physical group never adopts whichever
+  island happened to register first as credential or retry-policy authority.
 - A cookie-authorized WebSocket upgrade rejects missing, null, or unapproved
   `Origin` before accepting the connection. Explicit cross-origin deployment
   requires a configured non-wildcard allowlist and separate credential contract;
@@ -385,6 +388,19 @@ Acceptance criteria:
   forgive lost continuity. A healthy sibling remains routable throughout cleanup.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
+- Every ordinary reconnect and bfcache restore reauthorizes each exact logical
+  membership at its current position and requires complete replay or an
+  authoritative no-tail proof before delivery may be current. Document-owned
+  reauthorization uses at most eight fair concurrent calls, gives each call an
+  owned abortable deadline, and generation-fences late noncooperative results.
+  Raw socket open never resets the retry counter; only authenticated transport
+  membership plus later continuity evidence does. Reconnect policy therefore
+  has a positive exponential base and terminally degrades after its attempt cap.
+- SSE membership controls have bounded count and time, own their cancellation,
+  and settle or abort on reconnect and retirement. Native EventSource remains
+  cookie-only; bearer SSE uses the bounded fetch stream without a URL secret.
+  WebSocket subscribe frames bind the exact subscription, stream, and signed
+  descriptor digest rather than carrying a subscription ID alone.
 - Persisted `pagehide` closes long-lived transports and transport timers before
   bfcache. `pageshow` reauthorizes and establishes a new physical connection
   before currentness may be reclaimed.
@@ -430,6 +446,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Hardened the Task 6 browser boundary after adversarial review.
+  Document transport groups now own compatible credential and aggregate retry
+  authority; ordinary reconnect and bfcache restoration share bounded,
+  deadline-owned current-position reauthorization; retry reset requires
+  post-open continuity evidence; SSE controls and WebSocket membership frames
+  have exact bounded ownership. Registered stream events use a core-minted
+  opaque capability that snapshots full source/schema/scope/fanout/cycle
+  authority, invalidates stale registrations, and accepts no caller fanout.
+  Canonical payload ceilings count UTF-8 bytes, and the classic async artifact
+  exposes one typed preboot configuration method while remaining inert by
+  default.
 - 2026-08-25 -- Bound authoritative refresh to the exact stored active
   authorization before continuity authority runs. Reconstructed caller
   authorization, including a substituted clock with otherwise matching signed

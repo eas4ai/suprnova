@@ -594,7 +594,7 @@
 
 **Files:** `browser/src/async-updates/{types,envelope,subscription,connections,continuity}.ts`, async entry points, browser tests
 
-- [ ] Add failing fake-transport tests for authoritative initial baseline, complete validated replay transcripts, subscription routing, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, 100 logical subscriptions sharing one document transport, and at most eight concurrent handshakes per origin across multiple documents:
+- [x] Add failing fake-transport tests for authoritative initial baseline, complete validated replay transcripts, subscription routing, duplicate/gap handling, reconnect, heartbeat loss, authorization uncertainty, page suspension, late delivery, 100 logical subscriptions sharing one document transport, and at most eight concurrent handshakes per origin across multiple documents:
 
   ```ts
   it("cannot claim current on initial connect without proof", () => {
@@ -609,8 +609,8 @@
   });
   ```
 
-- [ ] Run async envelope/subscription/continuity tests; record failure because the async feature is inert.
-- [ ] Implement the state machine and injected transport ports:
+- [x] Run async envelope/subscription/continuity tests; record failure because the async feature is inert.
+- [x] Implement the state machine and injected transport ports:
 
   ```ts
   export type SubscriptionState =
@@ -650,8 +650,19 @@
   establishes a new physical transport, and proves continuity before accepting
   late data.
 
-- [ ] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
-- [ ] Commit: `feat(browser): establish bounded subscription continuity`.
+  The adversarial hardening pass additionally requires ordinary reconnect to
+  reauthorize each exact membership at its current position, positive-base
+  retry policy whose counter resets only after post-open continuity evidence,
+  commutative credential/policy compatibility rather than first-member
+  authority, and at most eight fair reauthorization calls with owned per-call
+  deadlines and generation fencing. SSE controls are bounded/deadlined and
+  WebSocket subscribe frames carry exact stream and descriptor binding. Event
+  dispatch uses a core-minted opaque current-registration capability; payload
+  ceilings count canonical UTF-8 bytes. The exact classic artifact exposes a
+  typed preboot async configuration method but remains inert without it.
+
+- [x] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
+- [x] Commit: `feat(browser): establish bounded subscription continuity`.
 
 ## Task 7: Make polling complete and hybrid fallback continuity-aware
 
@@ -844,12 +855,12 @@
 
 ## Plan self-review checklist
 
-- [ ] Initial connect and reconnect cannot claim current without descriptor baseline plus a complete validated replay transcript or authoritative host refresh.
-- [ ] Stream credentials are secret and separate from signed descriptors.
+- [x] Initial connect and reconnect cannot claim current without descriptor baseline plus a complete validated replay transcript or authoritative host refresh.
+- [x] Stream credentials are secret and separate from signed descriptors.
 - [ ] Poll-only is complete; push-only reports degradation; hybrid fallback is continuity-aware and jittered.
 - [ ] `live:poll` carries no action value; the signed descriptor supplies hybrid fallback and a legal poll directive only overrides its interval policy.
 - [ ] Push has exactly three productive effects: registered refresh, registered browser event, or declared presentation signal.
-- [ ] Browser-event dispatch crosses the typed core feature port and is validated there; no optional artifact receives a generic authority-writing seam.
+- [x] Browser-event dispatch crosses the typed core feature port and is validated there; no optional artifact receives a generic authority-writing seam.
 - [ ] Refresh uses the existing scheduler and protocol v2 response machine; no streamed HTML or second snapshot protocol exists.
 - [ ] WebSocket upgrade rejects missing or unapproved origins before credentials; approved cross-origin use requires an explicit allowlist and separate non-cookie credential.
 - [ ] Async policy wraps the shared bounded-resource foundation rather than implementing a second queue, owner, permit pool, or cancellation model.

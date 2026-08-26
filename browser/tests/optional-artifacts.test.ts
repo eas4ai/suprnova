@@ -152,6 +152,8 @@ describe("role-typed optional production artifacts", () => {
     expect(declarations).toContain("export function resumeUpload");
     expect(declarations).not.toContain("export function createUploadsFeature");
     expect(declarations).toContain("export const asyncFeature: RuntimeFeature");
+    expect(declarations).toContain("export function configureAsync");
+    expect(declarations).toContain("export interface ClassicFeatureSurface");
   });
 
   it("resolves exact core and optional types through real package exports", async () => {
@@ -187,6 +189,8 @@ describe("role-typed optional production artifacts", () => {
         supportedProtocolVersions,
         version,
         type BootstrapOptions,
+        CLASSIC_FEATURE_SYMBOL,
+        type ClassicFeatureSurface,
         type EffectContext,
         type EffectInvocation,
         type EffectRegistration,
@@ -246,11 +250,15 @@ describe("role-typed optional production artifacts", () => {
       import asynchronous, {
         asyncFeature,
         asyncRegistration,
+        configureAsync,
+        type AsyncFeatureOptions,
       } from "@suprnova/live/async";
       const liveApi: SuprnovaLivePublicApi = live;
       const runtimeApi: SuprnovaLivePublicApi = runtime;
       const upload: RuntimeFeature = uploads;
       const asynchronousFeature: RuntimeFeature = asynchronous;
+      const asyncOptions = null as AsyncFeatureOptions | null;
+      const classicSurface = null as ClassicFeatureSurface | null;
       const stimulusOutcome: RuntimeFeatureRegistrationOutcome = stimulus;
       const uploadApplication = null as UploadApplicationPort | null;
       const uploadOptions = null as UploadFeatureOptions | null;
@@ -264,6 +272,7 @@ describe("role-typed optional production artifacts", () => {
       };
       type RootTypeExports = [
         BootstrapOptions,
+        ClassicFeatureSurface,
         EffectContext,
         EffectInvocation,
         EffectRegistration,
@@ -318,10 +327,14 @@ describe("role-typed optional production artifacts", () => {
         resumeUpload,
         asyncFeature,
         asyncRegistration,
+        configureAsync,
+        CLASSIC_FEATURE_SYMBOL,
         liveApi,
         runtimeApi,
         upload,
         asynchronousFeature,
+        asyncOptions,
+        classicSurface,
         stimulusOutcome,
         uploadApplication,
         uploadOptions,
@@ -507,6 +520,7 @@ describe("role-typed optional production artifacts", () => {
     const setup = `
       globalThis.registrationAttempts = 0;
       const surface = {
+        configureAsync() {},
         version: 1,
         register() {
           globalThis.registrationAttempts += 1;
@@ -519,6 +533,9 @@ describe("role-typed optional production artifacts", () => {
       Object.defineProperty(surface, Symbol.for("suprnova.live.features.v1.stimulus-adapter"), {
         value: () => "registered",
       });
+      Object.defineProperty(surface, Symbol.for("suprnova.live.features.v1.async-configuration"), {
+        value: () => undefined,
+      });
       Object.freeze(surface);
       Object.defineProperty(globalThis, Symbol.for("suprnova.live.features.v1"), { value: surface });
     `;
@@ -528,6 +545,37 @@ describe("role-typed optional production artifacts", () => {
       vm.runInContext(await readFile(join(outputDirectory, name), "utf8"), context);
       expect(vm.runInContext("globalThis.registrationAttempts", context) as unknown).toBe(1);
     }
+  });
+
+  it("exposes an inert-by-default but configurable classic async preboot surface", async () => {
+    const source = await readFile(join(outputDirectory, "suprnova-live.async.classic.js"), "utf8");
+    const unconfigured = vm.createContext({});
+    vm.runInContext(source, unconfigured);
+    expect(
+      vm.runInContext(
+        'typeof globalThis[Symbol.for("suprnova.live.features.v1")].configureAsync',
+        unconfigured,
+      ),
+    ).toBe("function");
+
+    const configured = vm.createContext({});
+    vm.runInContext(source, configured);
+    vm.runInContext(
+      `globalThis[Symbol.for("suprnova.live.features.v1")].configureAsync({
+        authority: { authorize() { throw new Error("not_invoked_before_boot"); } },
+        clock: { now() { return 0; } },
+        randomness: { number() { return 0.5; } },
+        timers: { clearTimeout() {}, timeout() { return 1; } },
+        transports: { eventSource() { throw new Error("not_invoked_before_boot"); }, webSocket() { throw new Error("not_invoked_before_boot"); } },
+      })`,
+      configured,
+    );
+    expect(() => {
+      vm.runInContext(
+        `globalThis[Symbol.for("suprnova.live.features.v1")].configureAsync({})`,
+        configured,
+      );
+    }).toThrow("async_configuration_locked");
   });
 
   it("contains no source maps or runtime code-generation forms and rebuilds byte-identically", async () => {

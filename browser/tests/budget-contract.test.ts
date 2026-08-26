@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 
 type ArtifactBudgetInput = Readonly<{
@@ -85,5 +87,28 @@ describe("role-aware production artifact budgets", () => {
       "artifact_budget:uploads-esm:+7",
     ]);
     expect(result.lines).toHaveLength(8);
+  });
+});
+
+describe("browser benchmark provenance", () => {
+  it("refuses to overwrite the binding baseline with its own candidate output", async () => {
+    const loaded = (await import("../scripts/run-browser-budget.mjs")) as {
+      readonly argumentsFrom: (arguments_: readonly string[]) => unknown;
+    };
+
+    expect(() =>
+      loaded.argumentsFrom([
+        "--baseline",
+        "benchmarks/baselines/browser-budget-v1.json",
+        "--output",
+        "benchmarks/baselines/browser-budget-v1.json",
+      ]),
+    ).toThrow("baseline_overwrite_forbidden");
+  });
+
+  it("keeps the binding evaluator from comparing the prior artifact to itself", async () => {
+    const source = await readFile(new URL("../scripts/check-budget.mjs", import.meta.url), "utf8");
+    expect(source).not.toContain("evaluateBrowserBudget(baseline, baseline");
+    expect(source).toContain("evaluateBrowserBudget(baseline, undefined");
   });
 });

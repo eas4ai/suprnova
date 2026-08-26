@@ -114,7 +114,9 @@ function targetValid(target: string): boolean {
 function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): AsyncPayload {
   const fields = record(value, "async_payload_invalid");
   const kind = string(fields["kind"], "async_payload_invalid");
-  if (canonicalize(fields).length > MAX_PAYLOAD_BYTES) fail("async_payload_too_large");
+  if (new TextEncoder().encode(canonicalize(fields)).byteLength > MAX_PAYLOAD_BYTES) {
+    fail("async_payload_too_large");
+  }
   switch (kind) {
     case "refresh": {
       exact(fields, ["kind", "name"], "async_payload_invalid");

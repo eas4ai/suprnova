@@ -142,6 +142,8 @@ describe("upload feature presentation and morph ownership", () => {
     const initial = surface("stable");
     let ownerships = initial.ownerships;
     const port: RuntimeFeatureIslandPort = {
+      authorizeRegisteredEvents: () =>
+        Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>,
       dispatchRegisteredEvent: () => "dispatched",
       element: { nodeType: 1 } as Element,
       enqueueFreshRender: () => "queued",

@@ -10,10 +10,18 @@ export interface StreamPosition {
 
 export type AsyncPayloadSchema = "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
 
+export type AsyncEventCycle =
+  | Readonly<{ kind: "forbid_repeated_island" }>
+  | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
+
 export interface AsyncRegisteredEventContract {
+  readonly cycle: AsyncEventCycle;
   readonly maximumFanout: number;
   readonly name: string;
+  readonly order: "per_source_sequence";
+  readonly payloadContract: string;
   readonly schema: AsyncPayloadSchema;
+  readonly source: "stream";
   readonly targets: readonly string[];
   readonly version: number;
 }

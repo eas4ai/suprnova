@@ -189,6 +189,35 @@ type RuntimeFeatureDiagnosticDetail =
   | "resource_exhausted";
 type FreshRenderReason = "poll" | "stream";
 type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+type RegisteredBrowserEventDisposition =
+  | "dispatched"
+  | "no_target"
+  | "fanout_exceeded"
+  | "rejected"
+  | "retired";
+const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
+interface RegisteredBrowserEventCapability {
+  readonly [REGISTERED_BROWSER_EVENT_CAPABILITY]: never;
+}
+interface RegisteredBrowserEventDispatch {
+  readonly event: string;
+  readonly payload: JsonValue;
+  readonly schemaVersion: number;
+  readonly target: string;
+}
+interface RegisteredBrowserEventContract {
+  readonly cycle:
+    | Readonly<{ kind: "forbid_repeated_island" }>
+    | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
+  readonly maximumFanout: number;
+  readonly name: string;
+  readonly order: "per_source_sequence";
+  readonly payloadContract: string;
+  readonly schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+  readonly source: "stream";
+  readonly targets: readonly string[];
+  readonly version: number;
+}
 export type UploadHandle = string;
 export type UploadHandleProposal = UploadHandle | readonly UploadHandle[] | null;
 export type UploadHandleProposalDisposition = "accepted" | "unchanged" | "retired";
@@ -236,6 +265,14 @@ export interface RuntimeFeatureDocumentContext {
 export interface RuntimeFeatureIslandPort {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
+  authorizeRegisteredEvents(registration: Readonly<{
+    descriptorBinding: string;
+    events: readonly RegisteredBrowserEventContract[];
+  }>): RegisteredBrowserEventCapability;
+  dispatchRegisteredEvent(
+    capability: RegisteredBrowserEventCapability,
+    event: RegisteredBrowserEventDispatch,
+  ): RegisteredBrowserEventDisposition;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
   proposeUploadHandle(
@@ -260,6 +297,12 @@ export interface FeatureDocumentController {
   dispose(): void;
   resume?(): void;
   suspend?(): void;
+}
+export const CLASSIC_FEATURE_SYMBOL: unique symbol;
+export interface ClassicFeatureSurface {
+  readonly version: 1;
+  configureAsync(options: import("@suprnova/live/async").AsyncFeatureOptions): void;
+  register(feature: unknown): RuntimeFeatureRegistrationOutcome;
 }
 export interface EffectInvocation {
   readonly name: string;
@@ -536,7 +579,126 @@ export default uploadsFeature;
 }
 
 declare module "@suprnova/live/async" {
-import type { RuntimeFeature, RuntimeFeatureRegistrationOutcome } from "@suprnova/live";
+import type { JsonValue, RuntimeFeature, RuntimeFeatureRegistrationOutcome } from "@suprnova/live";
+export interface AsyncClock { now(): number; }
+export interface AsyncRandomness { number(): number; }
+export interface AsyncTimerPort {
+  clearTimeout(handle: number): void;
+  timeout(callback: () => void, milliseconds: number): number;
+}
+export interface StreamPosition { readonly epoch: bigint; readonly sequence: bigint; }
+export interface AsyncRegisteredEventContract {
+  readonly cycle:
+    | Readonly<{ kind: "forbid_repeated_island" }>
+    | Readonly<{ kind: "maximum_hops"; maximumHops: number }>;
+  readonly maximumFanout: number;
+  readonly name: string;
+  readonly order: "per_source_sequence";
+  readonly payloadContract: string;
+  readonly schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+  readonly source: "stream";
+  readonly targets: readonly string[];
+  readonly version: number;
+}
+export interface AuthorizedLogicalSubscription {
+  readonly authorization:
+    | Readonly<{ kind: "session_cookie" }>
+    | Readonly<{ credential: string; kind: "bearer" }>;
+  readonly baseline: StreamPosition;
+  readonly descriptorBinding: string;
+  readonly document: Readonly<{
+    authorizationScope: string;
+    origin: string;
+    transport: "sse" | "websocket";
+  }>;
+  readonly events: readonly AsyncRegisteredEventContract[];
+  readonly expiresAt: number;
+  readonly heartbeatTimeoutMs: number;
+  readonly presentationSignals: readonly Readonly<{
+    name: string;
+    schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+  }>[];
+  readonly reconnect: Readonly<{
+    kind: "refresh_on_reconnect" | "resume_or_refresh";
+    maximumAttempts: number;
+    maximumDelayMs: number;
+    minimumDelayMs: number;
+  }>;
+  readonly stream: string;
+  readonly subscriptionId: string;
+}
+export type AsyncTransportAuthorization = AuthorizedLogicalSubscription["authorization"];
+export type DocumentTransportKey = AuthorizedLogicalSubscription["document"];
+export type DocumentTransportFailure =
+  | "authorization_lost"
+  | "heartbeat_lost"
+  | "protocol_invalid"
+  | "transport_lost";
+export interface DocumentTransportConnectRequest {
+  readonly authorization: AsyncTransportAuthorization;
+  readonly key: DocumentTransportKey;
+  failed(reason: DocumentTransportFailure): void;
+  message(encoded: string): void;
+  opened(): void;
+}
+export interface AsyncAuthorizationRequest {
+  readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
+  readonly position: StreamPosition | null;
+  readonly prior: AuthorizedLogicalSubscription | null;
+  readonly signal: AbortSignal;
+  readonly stream: string;
+}
+export interface AsyncAuthorizationResult {
+  readonly replay: readonly string[];
+  readonly subscription: AuthorizedLogicalSubscription;
+}
+export interface AsyncAuthorityPort {
+  authorize(request: AsyncAuthorizationRequest):
+    | AsyncAuthorizationResult
+    | AuthorizedLogicalSubscription
+    | Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+}
+export interface DocumentTransportPort {
+  subscribe(subscription: AuthorizedLogicalSubscription): void;
+  unsubscribe(subscriptionId: string): void;
+  close(reason: "page_suspended" | "document_retired" | "transport_replaced" | "subscription_empty"): void;
+}
+export interface AsyncTransportPorts {
+  eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort;
+  webSocket(connect: DocumentTransportConnectRequest): DocumentTransportPort;
+}
+export class OriginHandshakeScheduler {
+  constructor(maximum?: number);
+  active(origin: string): number;
+}
+export interface AsyncFeatureOptions {
+  readonly authority: AsyncAuthorityPort;
+  readonly clock: AsyncClock;
+  readonly handshakeScheduler?: OriginHandshakeScheduler;
+  readonly randomness: AsyncRandomness;
+  readonly timers: AsyncTimerPort;
+  readonly transports: AsyncTransportPorts;
+}
+export interface BrowserAsyncTransportOptions {
+  readonly eventSource: (url: string, init: Readonly<{ withCredentials: true }>) => { close(): void };
+  readonly fetch: typeof globalThis.fetch;
+  readonly membershipTimeoutMs: number;
+  readonly sseMembership: (
+    operation: "subscribe" | "unsubscribe",
+    subscription: AuthorizedLogicalSubscription,
+    key: AuthorizedLogicalSubscription["document"],
+    signal: AbortSignal,
+  ) => Promise<void> | void;
+  readonly timers: AsyncTimerPort;
+  readonly webSocket: (url: string) => { close(code?: number, reason?: string): void; send(data: string): void };
+}
+export class BrowserAsyncTransportPorts implements AsyncTransportPorts {
+  constructor(options: BrowserAsyncTransportOptions);
+  eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort;
+  webSocket(connect: DocumentTransportConnectRequest): DocumentTransportPort;
+}
+export function configureAsync(options: AsyncFeatureOptions): void;
+export function createAsyncFeature(options: AsyncFeatureOptions): RuntimeFeature;
 export const asyncFeature: RuntimeFeature;
 export const asyncRegistration: RuntimeFeatureRegistrationOutcome;
 export default asyncFeature;

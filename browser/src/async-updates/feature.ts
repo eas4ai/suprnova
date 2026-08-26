@@ -5,6 +5,7 @@ import {
   type RuntimeFeatureDefinition,
   type RuntimeFeatureDocumentContext,
   type RuntimeFeatureIslandPort,
+  type RegisteredBrowserEventCapability,
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import {
@@ -34,6 +35,7 @@ const MAX_PRESENTATION_SIGNALS = 64;
 const MAX_RECONNECT_ATTEMPTS = 16;
 const MAX_TRANSPORT_DELAY_MS = 300_000;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
+const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 
 export interface AsyncAuthorizationRequest {
@@ -105,6 +107,19 @@ function validPosition(position: StreamPosition): boolean {
   );
 }
 
+function isAuthorizationResult(
+  value: AsyncAuthorizationResult | AuthorizedLogicalSubscription,
+): value is AsyncAuthorizationResult {
+  try {
+    return (
+      Object.prototype.hasOwnProperty.call(value, "subscription") &&
+      Array.isArray(Reflect.get(value, "replay"))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function validateAuthorization(value: AuthorizedLogicalSubscription): void {
   let valid: boolean;
   try {
@@ -125,18 +140,34 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       value.document.authorizationScope.length <= 256 &&
       value.events.length <= MAX_EVENTS &&
       eventNames.size === value.events.length &&
-      value.events.every(
-        (event) =>
+      value.events.every((event) => {
+        const cycle = event.cycle;
+        const cycleKind: unknown = Reflect.get(cycle, "kind");
+        const maximumHops: unknown = Reflect.get(cycle, "maximumHops");
+        const order: unknown = Reflect.get(event, "order");
+        const source: unknown = Reflect.get(event, "source");
+        return (
           OPERATION_NAME.test(event.name) &&
+          PAYLOAD_CONTRACT.test(event.payloadContract) &&
+          source === "stream" &&
+          order === "per_source_sequence" &&
           Number.isSafeInteger(event.version) &&
           event.version >= 1 &&
           event.version <= 65_535 &&
           Number.isSafeInteger(event.maximumFanout) &&
-          event.maximumFanout >= 1 &&
+          event.maximumFanout >= event.targets.length &&
           event.maximumFanout <= 256 &&
           event.targets.length >= 1 &&
-          event.targets.length <= MAX_EVENT_TARGETS,
-      ) &&
+          event.targets.length <= MAX_EVENT_TARGETS &&
+          new Set(event.targets).size === event.targets.length &&
+          (cycleKind === "forbid_repeated_island" ||
+            (cycleKind === "maximum_hops" &&
+              Number.isSafeInteger(maximumHops) &&
+              typeof maximumHops === "number" &&
+              maximumHops >= 1 &&
+              maximumHops <= 255))
+        );
+      }) &&
       Number.isSafeInteger(value.expiresAt) &&
       value.expiresAt >= 0 &&
       Number.isSafeInteger(value.heartbeatTimeoutMs) &&
@@ -149,7 +180,7 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       reconnect.maximumAttempts >= 1 &&
       reconnect.maximumAttempts <= MAX_RECONNECT_ATTEMPTS &&
       Number.isSafeInteger(reconnect.minimumDelayMs) &&
-      reconnect.minimumDelayMs >= 0 &&
+      reconnect.minimumDelayMs >= 1 &&
       Number.isSafeInteger(reconnect.maximumDelayMs) &&
       reconnect.maximumDelayMs >= reconnect.minimumDelayMs &&
       reconnect.maximumDelayMs <= MAX_TRANSPORT_DELAY_MS &&
@@ -173,6 +204,8 @@ class AsyncIslandController implements FeatureIslandController {
   #generation = 0;
   #heartbeatTimer: number | null = null;
   #handle: LogicalSubscriptionHandle | null = null;
+  #currentAuthorization: AuthorizedLogicalSubscription | null = null;
+  #eventCapability: RegisteredBrowserEventCapability | null = null;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
   #subscription: AsyncSubscription | null = null;
 
@@ -202,20 +235,27 @@ class AsyncIslandController implements FeatureIslandController {
     return this.#authorization()?.subscriptionId ?? null;
   }
 
-  async resumeAuthorization(
+  async reauthorize(
     prior: AuthorizedLogicalSubscription,
+    signal: AbortSignal,
   ): Promise<AuthorizedLogicalSubscription> {
-    if (this.#state !== "suspended" || this.authorizationId() !== prior.subscriptionId) {
+    if (
+      (this.#state !== "suspended" && this.#state !== "active") ||
+      this.authorizationId() !== prior.subscriptionId
+    ) {
       throw new Error("async_reauthorization_invalid");
     }
-    this.#state = "resuming";
+    const resume = this.#state === "suspended";
+    if (resume) this.#state = "resuming";
     try {
-      const current = await this.#authorize(prior);
-      if (!this.#resuming()) throw new Error("async_authorization_stale");
-      this.#state = "active";
+      const current = await this.#authorize(prior, signal);
+      if (resume) {
+        if (!this.#resuming()) throw new Error("async_authorization_stale");
+        this.#state = "active";
+      }
       return current;
     } catch (error: unknown) {
-      if (this.#state === "resuming") this.#state = "suspended";
+      if (resume && this.#state === "resuming") this.#state = "suspended";
       throw error;
     }
   }
@@ -246,23 +286,42 @@ class AsyncIslandController implements FeatureIslandController {
 
   async #authorize(
     prior: AuthorizedLogicalSubscription | null,
+    externalSignal?: AbortSignal,
   ): Promise<AuthorizedLogicalSubscription> {
     const generation = ++this.#generation;
     this.#authorizationAbort?.abort();
     const abort = new AbortController();
     this.#authorizationAbort = abort;
+    const externallyAbort = () => {
+      abort.abort();
+    };
+    externalSignal?.addEventListener("abort", externallyAbort, { once: true });
+    if (externalSignal?.aborted === true) abort.abort();
     const position = this.#subscription?.position() ?? null;
-    const resolved = await this.#authority.authorize(
-      Object.freeze({
-        identity: this.#port.identity,
-        position,
-        prior,
-        signal: abort.signal,
-        stream: this.#stream,
-      }),
-    );
-    const current = "subscription" in resolved ? resolved.subscription : resolved;
-    const replay = "subscription" in resolved ? resolved.replay : Object.freeze([]);
+    let resolved: AsyncAuthorizationResult | AuthorizedLogicalSubscription;
+    try {
+      resolved = await this.#authority.authorize(
+        Object.freeze({
+          identity: this.#port.identity,
+          position,
+          prior,
+          signal: abort.signal,
+          stream: this.#stream,
+        }),
+      );
+    } finally {
+      externalSignal?.removeEventListener("abort", externallyAbort);
+    }
+    let current: AuthorizedLogicalSubscription;
+    let replay: readonly string[];
+    if (isAuthorizationResult(resolved)) {
+      current = resolved.subscription;
+      replay = resolved.replay;
+    } else {
+      if (prior !== null) throw new Error("async_continuity_proof_required");
+      current = resolved;
+      replay = Object.freeze([]);
+    }
     validateAuthorization(current);
     if (
       abort.signal.aborted ||
@@ -273,9 +332,21 @@ class AsyncIslandController implements FeatureIslandController {
       throw new Error("async_authorization_stale");
     }
     this.#authorizationAbort = null;
-    if (prior === null) this.#install(current);
-    else this.#subscription?.reauthorize(current);
-    if (replay.length !== 0) this.#subscription?.receiveReplay(replay);
+    if (prior === null) {
+      this.#install(current);
+      if (replay.length !== 0) this.#subscription?.receiveReplay(replay);
+    } else {
+      const subscription = this.#subscription;
+      if (subscription === null || position === null) throw new Error("async_subscription_retired");
+      subscription.reauthorize(current);
+      this.#eventCapability = this.#port.authorizeRegisteredEvents(
+        Object.freeze({ descriptorBinding: current.descriptorBinding, events: current.events }),
+      );
+      this.#currentAuthorization = current;
+      this.#owner.remember(this, current);
+      if (replay.length !== 0) subscription.receiveReplay(replay);
+      else subscription.proveAuthoritativeBaseline(position);
+    }
     return current;
   }
 
@@ -291,14 +362,23 @@ class AsyncIslandController implements FeatureIslandController {
     if (this.#subscription !== null || this.#handle !== null) {
       throw new Error("async_subscription_duplicate");
     }
+    const eventCapability = this.#port.authorizeRegisteredEvents(
+      Object.freeze({
+        descriptorBinding: authorization.descriptorBinding,
+        events: authorization.events,
+      }),
+    );
     const dispatch: AsyncDispatchPort = Object.freeze({
       browserEvent: (event: Extract<AsyncPayload, { kind: "browser_event" }>) => {
-        const contract = authorization.events.find(({ name }) => name === event.event);
+        const contract = this.#currentAuthorization?.events.find(
+          ({ name }) => name === event.event,
+        );
+        const capability = this.#eventCapability;
         return (
           contract !== undefined &&
-          this.#port.dispatchRegisteredEvent({
+          capability !== null &&
+          this.#port.dispatchRegisteredEvent(capability, {
             event: event.event,
-            maximumFanout: contract.maximumFanout,
             payload: event.payload,
             schemaVersion: event.schema_version,
             target: event.target,
@@ -317,30 +397,36 @@ class AsyncIslandController implements FeatureIslandController {
     });
     const subscription = new AsyncSubscription(authorization, dispatch, this.#clock);
     this.#subscription = subscription;
+    this.#eventCapability = eventCapability;
+    this.#currentAuthorization = authorization;
     this.#owner.remember(this, authorization);
     this.#handle = this.#owner.subscribe(authorization, {
       envelope: (encoded) => {
         try {
-          subscription.receive(encoded);
-          this.#armHeartbeat(authorization.heartbeatTimeoutMs);
+          const disposition = subscription.receive(encoded);
+          if (disposition === "applied" || disposition === "duplicate") {
+            this.#handle?.continuityProved();
+          }
+          this.#armHeartbeat(this.#heartbeatTimeout());
         } catch {
           subscription.authorizationUncertain();
           report(this.#context, "operation_rejected");
         }
       },
+      reauthorize: (prior, signal) => this.reauthorize(prior, signal),
       state: (state) => {
-        this.#transportState(state, authorization.heartbeatTimeoutMs);
+        this.#transportState(state);
       },
     });
   }
 
-  #transportState(state: SubscriptionState, heartbeatTimeoutMs: number): void {
+  #transportState(state: SubscriptionState): void {
     const subscription = this.#subscription;
     if (subscription === null || this.#state === "disposed") return;
     switch (state) {
       case "connecting":
         subscription.connected();
-        this.#armHeartbeat(heartbeatTimeoutMs);
+        this.#armHeartbeat(this.#heartbeatTimeout());
         break;
       case "reconnecting":
       case "disconnected":
@@ -356,7 +442,7 @@ class AsyncIslandController implements FeatureIslandController {
         subscription.close();
         break;
       case "current":
-        this.#armHeartbeat(heartbeatTimeoutMs);
+        this.#armHeartbeat(this.#heartbeatTimeout());
         break;
     }
   }
@@ -376,6 +462,10 @@ class AsyncIslandController implements FeatureIslandController {
     if (this.#heartbeatTimer === null) return;
     this.#timers.clearTimeout(this.#heartbeatTimer);
     this.#heartbeatTimer = null;
+  }
+
+  #heartbeatTimeout(): number {
+    return this.#currentAuthorization?.heartbeatTimeoutMs ?? 1;
   }
 }
 
@@ -451,15 +541,7 @@ export class AsyncDocumentOwner {
   async resume(): Promise<void> {
     if (this.#state !== "suspended") return;
     this.#state = "resuming";
-    await this.#pool.resume(async (prior) => {
-      const controller = [...this.#controllers].find(
-        (candidate) => candidate.authorizationId() === prior.subscriptionId,
-      );
-      if (controller === undefined) throw new Error("async_subscription_retired");
-      const current = await controller.resumeAuthorization(prior);
-      this.#authorizations.set(controller, current);
-      return current;
-    });
+    await this.#pool.resume();
     if (this.#resuming()) this.#state = "active";
   }
 

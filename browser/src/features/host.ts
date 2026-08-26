@@ -1,4 +1,5 @@
 import type { JsonValue } from "../canonical.js";
+import type { AsyncRegisteredEventContract } from "../async-updates/types.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
@@ -12,9 +13,19 @@ export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
 export type RegisteredBrowserEventDisposition =
   "dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
 
+declare const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
+
+export interface RegisteredBrowserEventCapability {
+  readonly [REGISTERED_BROWSER_EVENT_CAPABILITY]: never;
+}
+
+export interface RegisteredBrowserEventRegistration {
+  readonly descriptorBinding: string;
+  readonly events: readonly AsyncRegisteredEventContract[];
+}
+
 export interface RegisteredBrowserEventDispatch {
   readonly event: string;
-  readonly maximumFanout: number;
   readonly payload: JsonValue;
   readonly schemaVersion: number;
   readonly target: string;
@@ -28,7 +39,13 @@ export interface RuntimeFeatureDriverDocumentPort {
 export interface RuntimeFeatureDriverIslandPort {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
-  dispatchRegisteredEvent(event: RegisteredBrowserEventDispatch): RegisteredBrowserEventDisposition;
+  authorizeRegisteredEvents(
+    registration: RegisteredBrowserEventRegistration,
+  ): RegisteredBrowserEventCapability;
+  dispatchRegisteredEvent(
+    capability: RegisteredBrowserEventCapability,
+    event: RegisteredBrowserEventDispatch,
+  ): RegisteredBrowserEventDisposition;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   proposeUploadHandle(
     field: string,

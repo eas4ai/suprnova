@@ -114,15 +114,23 @@ function harness(scheduler = new OriginHandshakeScheduler(8)) {
   return { pool, scheduler, sources, timers, transports };
 }
 
+function logicalSink(
+  envelope: (encoded: string) => void = vi.fn(),
+  state: (state: import("../src/async-updates/types.js").SubscriptionState) => void = vi.fn(),
+  reauthorize = (prior: AuthorizedLogicalSubscription) => Promise.resolve(prior),
+) {
+  return { envelope, reauthorize, state };
+}
+
 describe("multiplexed document transports", () => {
   it("shares exactly one physical connection across 100 logical subscriptions", () => {
     const { pool, sources } = harness();
     const deliveries: string[] = [];
     for (let index = 0; index < 100; index += 1) {
-      pool.subscribe(authorized(index), {
-        envelope: (encoded) => deliveries.push(encoded),
-        state: vi.fn(),
-      });
+      pool.subscribe(
+        authorized(index),
+        logicalSink((encoded) => deliveries.push(encoded)),
+      );
     }
 
     expect(sources).toHaveLength(1);
@@ -143,8 +151,8 @@ describe("multiplexed document transports", () => {
     const { pool, sources } = harness();
     const left = vi.fn();
     const right = vi.fn();
-    const leftHandle = pool.subscribe(authorized(1), { envelope: left, state: vi.fn() });
-    pool.subscribe(authorized(2), { envelope: right, state: vi.fn() });
+    const leftHandle = pool.subscribe(authorized(1), logicalSink(left));
+    pool.subscribe(authorized(2), logicalSink(right));
     sources[0]?.open();
     leftHandle.close();
 
@@ -166,10 +174,7 @@ describe("multiplexed document transports", () => {
     const scheduler = new OriginHandshakeScheduler(8);
     const documents = Array.from({ length: 12 }, () => harness(scheduler));
     for (const [index, document] of documents.entries()) {
-      document.pool.subscribe(authorized(index, `scope-${String(index)}`), {
-        envelope: vi.fn(),
-        state: vi.fn(),
-      });
+      document.pool.subscribe(authorized(index, `scope-${String(index)}`), logicalSink());
     }
 
     expect(documents.reduce((total, document) => total + document.sources.length, 0)).toBe(8);
@@ -178,17 +183,18 @@ describe("multiplexed document transports", () => {
     expect(scheduler.active("https://app.example.test")).toBe(8);
   });
 
-  it("uses bounded full-jitter reconnect and one reconnect for all logical memberships", () => {
+  it("uses bounded full-jitter reconnect and one reconnect for all logical memberships", async () => {
     const { pool, sources, timers } = harness();
     const states = vi.fn();
     for (let index = 0; index < 100; index += 1) {
-      pool.subscribe(authorized(index), { envelope: vi.fn(), state: states });
+      pool.subscribe(authorized(index), logicalSink(vi.fn(), states));
     }
     sources[0]?.open();
     sources[0]?.fail();
 
     expect(timers.pending.size).toBe(1);
     timers.flush();
+    for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
     expect(sources).toHaveLength(2);
     expect(states).toHaveBeenCalledWith("reconnecting");
   });
@@ -196,7 +202,13 @@ describe("multiplexed document transports", () => {
   it("closes ports and timers for persisted pagehide then reauthorizes on pageshow", async () => {
     const { pool, sources, timers } = harness();
     const late = vi.fn();
-    pool.subscribe(authorized(1), { envelope: late, state: vi.fn() });
+    const reauthorize = vi.fn((prior: AuthorizedLogicalSubscription) =>
+      Promise.resolve({
+        ...prior,
+        descriptorBinding: "binding-restored",
+      }),
+    );
+    pool.subscribe(authorized(1), logicalSink(late, vi.fn(), reauthorize));
     sources[0]?.open();
     sources[0]?.fail();
     expect(timers.pending.size).toBe(1);
@@ -216,13 +228,7 @@ describe("multiplexed document transports", () => {
     );
     expect(late).not.toHaveBeenCalled();
 
-    const reauthorize = vi.fn((prior: AuthorizedLogicalSubscription) =>
-      Promise.resolve({
-        ...prior,
-        descriptorBinding: "binding-restored",
-      }),
-    );
-    await pool.resume(reauthorize);
+    await pool.resume();
     expect(reauthorize).toHaveBeenCalledOnce();
     expect(sources).toHaveLength(2);
     sources[1]?.open();
@@ -233,11 +239,14 @@ describe("multiplexed document transports", () => {
     const { pool, sources } = harness();
     const state = vi.fn();
     const envelope = vi.fn();
-    pool.subscribe(authorized(1), { envelope, state });
+    pool.subscribe(
+      authorized(1),
+      logicalSink(envelope, state, () => Promise.reject(new Error("authorization_unavailable"))),
+    );
     sources[0]?.open();
     pool.suspend();
 
-    await pool.resume(() => Promise.reject(new Error("authorization_unavailable")));
+    await pool.resume();
     expect(state).toHaveBeenCalledWith("degraded");
     sources[0]?.emit("late-data");
     expect(envelope).not.toHaveBeenCalled();
@@ -267,7 +276,9 @@ describe("browser SSE authorization adapters", () => {
     const ports = new BrowserAsyncTransportPorts({
       eventSource: native,
       fetch: fetchPort,
+      membershipTimeoutMs: 5_000,
       sseMembership: membership,
+      timers: new FakeTimers().port,
       webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
     });
     const request = connectRequest(Object.freeze({ kind: "session_cookie" as const }));
@@ -299,7 +310,9 @@ describe("browser SSE authorization adapters", () => {
     const ports = new BrowserAsyncTransportPorts({
       eventSource: native,
       fetch: fetchPort,
+      membershipTimeoutMs: 5_000,
       sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
       webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
     });
     const request = connectRequest(Object.freeze({ credential: secret, kind: "bearer" as const }));
@@ -351,7 +364,9 @@ describe("browser SSE authorization adapters", () => {
           ),
         ),
       ),
+      membershipTimeoutMs: 5_000,
       sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
       webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
     });
 
@@ -362,5 +377,89 @@ describe("browser SSE authorization adapters", () => {
     );
 
     await expect(failed).resolves.toBe("protocol_invalid");
+  });
+
+  it("bounds and cancels noncooperative SSE membership controls", () => {
+    const timers = new FakeTimers();
+    const signals: AbortSignal[] = [];
+    const failed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(_operation, _subscription, _key, signal) {
+        signals.push(signal);
+        return new Promise(() => undefined);
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const port = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+    );
+
+    for (let index = 0; index < 65; index += 1) {
+      port.subscribe(authorized(index));
+    }
+    expect(signals).toHaveLength(64);
+    expect(failed).toHaveBeenCalledWith("authorization_lost");
+
+    port.close("page_suspended");
+    expect(signals.every(({ aborted }) => aborted)).toBe(true);
+    expect(timers.pending.size).toBe(0);
+  });
+
+  it("settles timed-out SSE controls and aborts their authority signal", () => {
+    const timers = new FakeTimers();
+    let membershipSignal: AbortSignal | undefined;
+    const failed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(_operation, _subscription, _key, signal) {
+        membershipSignal = signal;
+        return new Promise(() => undefined);
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const port = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+    );
+    port.subscribe(authorized(1));
+
+    timers.flush();
+
+    expect(membershipSignal?.aborted).toBe(true);
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed).toHaveBeenCalledWith("authorization_lost");
+    expect(timers.pending.size).toBe(0);
+    port.close("transport_replaced");
+  });
+
+  it("binds WebSocket membership controls to the exact signed descriptor", () => {
+    const sent: string[] = [];
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket: () => ({ close: vi.fn(), send: (value) => sent.push(value) }),
+    });
+    const port = ports.webSocket({
+      ...connectRequest(Object.freeze({ kind: "session_cookie" as const })),
+      key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+    });
+
+    port.subscribe(authorized(1));
+
+    expect(JSON.parse(sent[0] ?? "null")).toEqual({
+      descriptor_binding: "binding-1",
+      kind: "subscribe",
+      stream: "stream-1",
+      subscription: "subscription-001",
+    });
   });
 });

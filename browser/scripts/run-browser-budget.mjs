@@ -30,7 +30,7 @@ function positiveInteger(value, maximum, code) {
   return parsed;
 }
 
-function argumentsFrom(argv) {
+export function argumentsFrom(argv) {
   const options = {
     baseline: DEFAULT_BASELINE,
     dedicated: false,
@@ -64,6 +64,7 @@ function argumentsFrom(argv) {
   if (options.release && (options.samples < 30 || options.idleMs !== 30_000)) {
     fail("release_methodology_invalid");
   }
+  if (options.output === options.baseline) fail("baseline_overwrite_forbidden");
   return Object.freeze(options);
 }
 
@@ -160,4 +161,6 @@ async function main() {
   }
 }
 
-await main();
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

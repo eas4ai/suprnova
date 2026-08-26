@@ -38,8 +38,10 @@ import {
   type RuntimeFeatureDriverRegistrationHost,
   type RuntimeFeatureDriverValue,
   type RuntimeFeatureRegistrationOutcome,
+  type RegisteredBrowserEventCapability,
   type RegisteredBrowserEventDispatch,
   type RegisteredBrowserEventDisposition,
+  type RegisteredBrowserEventRegistration,
 } from "../src/features/host.js";
 import { MAX_PRESENT_DIRECTIVES } from "../src/directives/parser.js";
 import { parseFeatureDirective } from "../src/features/directive-parser.js";
@@ -126,8 +128,14 @@ function feature(
 }
 
 interface DriverIslandSource {
+  readonly authorizeRegisteredEvents: Mock<
+    (registration: RegisteredBrowserEventRegistration) => RegisteredBrowserEventCapability
+  >;
   readonly dispatchRegisteredEvent: Mock<
-    (event: RegisteredBrowserEventDispatch) => RegisteredBrowserEventDisposition
+    (
+      capability: RegisteredBrowserEventCapability,
+      event: RegisteredBrowserEventDispatch,
+    ) => RegisteredBrowserEventDisposition
   >;
   readonly element: Element;
   readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
@@ -144,8 +152,10 @@ interface DriverIslandSource {
 
 function islandSource(name: string, element?: Element): DriverIslandSource {
   let active = true;
+  const capability = Object.freeze({}) as RegisteredBrowserEventCapability;
   return {
     active: () => active,
+    authorizeRegisteredEvents: vi.fn(() => capability),
     dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
     element: element ?? ({ nodeType: 1, setAttribute: vi.fn() } as unknown as Element),
     enqueueFreshRender: vi.fn(() => "queued"),
@@ -273,9 +283,16 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
     const current = (): boolean =>
       this.#current(driver) && island.claimed && island.source.active();
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
-      dispatchRegisteredEvent: (event: RegisteredBrowserEventDispatch) => {
+      authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) => {
+        if (!current()) throw new Error("stale_driver_port");
+        return island.source.authorizeRegisteredEvents(registration);
+      },
+      dispatchRegisteredEvent: (
+        capability: RegisteredBrowserEventCapability,
+        event: RegisteredBrowserEventDispatch,
+      ) => {
         if (!current()) return "retired";
-        return island.source.dispatchRegisteredEvent(event);
+        return island.source.dispatchRegisteredEvent(capability, event);
       },
       element: island.source.element,
       enqueueFreshRender: (reason: FreshRenderReason) => {
@@ -697,6 +714,7 @@ describe("one driver claim and optional owner per island", () => {
     const islandPort = uploads.islandPorts[0];
     expect(Object.keys(documentContext ?? {}).sort()).toEqual(["diagnose", "onDispose"]);
     expect(Object.keys(islandPort ?? {}).sort()).toEqual([
+      "authorizeRegisteredEvents",
       "dispatchRegisteredEvent",
       "element",
       "enqueueFreshRender",
@@ -730,6 +748,22 @@ describe("one driver claim and optional owner per island", () => {
       "018f47c1-2af0-7cc4-a001-000000000001",
     );
     expect(islandPort?.writePresentationSignal(source.element, "progress", 42)).toBe(42);
+    const eventCapability = islandPort?.authorizeRegisteredEvents({
+      descriptorBinding: "binding-v1",
+      events: [
+        {
+          cycle: { kind: "forbid_repeated_island" },
+          maximumFanout: 1,
+          name: "orders.updated",
+          order: "per_source_sequence",
+          payloadContract: "orders.updated.v1",
+          schema: "json",
+          source: "stream",
+          targets: ["self"],
+          version: 1,
+        },
+      ],
+    });
     expect(
       Reflect.apply(
         Reflect.get(islandPort ?? {}, "dispatchRegisteredEvent") as (
@@ -737,9 +771,9 @@ describe("one driver claim and optional owner per island", () => {
         ) => unknown,
         islandPort,
         [
+          eventCapability,
           Object.freeze({
             event: "orders.updated",
-            maximumFanout: 1,
             payload: Object.freeze({ count: 1 }),
             schemaVersion: 1,
             target: "self",
@@ -747,6 +781,7 @@ describe("one driver claim and optional owner per island", () => {
         ],
       ),
     ).toBe("dispatched");
+    expect(source.authorizeRegisteredEvents).toHaveBeenCalledOnce();
     expect(source.dispatchRegisteredEvent).toHaveBeenCalledOnce();
   });
 
@@ -1323,7 +1358,7 @@ describe("shared ESM and classic registration timing", () => {
     expect(uploads.counters.connectDocument).toHaveBeenCalledOnce();
     expect(runtime.size()).toBe(1);
     const surface = Reflect.get(target, CLASSIC_FEATURE_SYMBOL) as object;
-    expect(Object.keys(surface).sort()).toEqual(["register", "version"]);
+    expect(Object.keys(surface).sort()).toEqual(["configureAsync", "register", "version"]);
     expect("pending" in surface).toBe(false);
   });
 

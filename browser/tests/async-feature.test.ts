@@ -18,7 +18,10 @@ import type {
   RuntimeFeatureIslandPort,
 } from "../src/features/contract.js";
 
-function authorization(sequence: bigint): AuthorizedLogicalSubscription {
+function authorization(
+  sequence: bigint,
+  overrides: Partial<AuthorizedLogicalSubscription> = {},
+): AuthorizedLogicalSubscription {
   return Object.freeze({
     authorization: Object.freeze({ kind: "session_cookie" as const }),
     baseline: Object.freeze({ epoch: 1n, sequence }),
@@ -30,9 +33,13 @@ function authorization(sequence: bigint): AuthorizedLogicalSubscription {
     }),
     events: Object.freeze([
       Object.freeze({
+        cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
         maximumFanout: 4,
         name: "orders.updated",
+        order: "per_source_sequence" as const,
+        payloadContract: "orders.updated.v1",
         schema: "json" as const,
+        source: "stream" as const,
         targets: Object.freeze(["self"]),
         version: 1,
       }),
@@ -50,6 +57,7 @@ function authorization(sequence: bigint): AuthorizedLogicalSubscription {
     }),
     stream: "orders",
     subscriptionId: "subscription-001",
+    ...overrides,
   });
 }
 
@@ -117,7 +125,63 @@ function ownership(root: Element): RuntimeFeatureDirectiveOwnership {
   });
 }
 
+function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]> {
+  return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
+}
+
 describe("async feature lifecycle", () => {
+  it("applies a complete initial replay from the signed baseline before transport delivery", async () => {
+    const sources: FakeSource[] = [];
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () =>
+            Object.freeze({
+              replay: Object.freeze([envelope(1n, { kind: "refresh", name: "refresh" })]),
+              subscription: authorization(0n),
+            }),
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: new FakeTimers().port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-initial-replay",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(1);
+    owner.dispose();
+  });
+
   it("reauthorizes after bfcache, proves continuity, and ignores retired transport data", async () => {
     const sources: FakeSource[] = [];
     const transports: AsyncTransportPorts = {
@@ -137,6 +201,7 @@ describe("async feature lifecycle", () => {
     const event = vi.fn(() => "dispatched" as const);
     const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
     const port: RuntimeFeatureIslandPort = {
+      authorizeRegisteredEvents: eventCapability,
       dispatchRegisteredEvent: event,
       element: root,
       enqueueFreshRender: refresh,
@@ -196,9 +261,8 @@ describe("async feature lifecycle", () => {
 
     expect(refresh).toHaveBeenCalledOnce();
     expect(signal).toHaveBeenCalledWith(root, "completion_percent", 75);
-    expect(event).toHaveBeenCalledWith({
+    expect(event).toHaveBeenCalledWith(expect.any(Object), {
       event: "orders.updated",
-      maximumFanout: 4,
       payload: { order: 42 },
       schemaVersion: 1,
       target: "self",
@@ -232,6 +296,7 @@ describe("async feature lifecycle", () => {
     const root = Object.freeze({}) as Element;
     const source = vi.fn();
     const port = {
+      authorizeRegisteredEvents: eventCapability,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -269,6 +334,164 @@ describe("async feature lifecycle", () => {
     owner.dispose();
   });
 
+  it("atomically uses rotated event authority and heartbeat policy after reauthorization", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const initial = authorization(0n);
+    const initialEvent = initial.events[0];
+    if (initialEvent === undefined) throw new Error("missing_event_fixture");
+    const rotated = authorization(0n, {
+      descriptorBinding: "binding-rotated",
+      events: Object.freeze([Object.freeze({ ...initialEvent, maximumFanout: 1, version: 2 })]),
+      heartbeatTimeoutMs: 777,
+    });
+    let calls = 0;
+    const capabilities: object[] = [];
+    const authorizeRegisteredEvents = vi.fn(() => {
+      const capability = Object.freeze({});
+      capabilities.push(capability);
+      return capability as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
+    });
+    const dispatch = vi.fn<RuntimeFeatureIslandPort["dispatchRegisteredEvent"]>(
+      () => "dispatched" as const,
+    );
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize() {
+            calls += 1;
+            return calls === 1
+              ? initial
+              : Object.freeze({ replay: Object.freeze([]), subscription: rotated });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents,
+      dispatchRegisteredEvent: dispatch,
+      element: root,
+      enqueueFreshRender: () => "queued",
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-rotation",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    owner.suspend();
+    await owner.resume();
+    sources[1]?.open();
+    sources[1]?.emit(
+      envelope(1n, {
+        event: "orders.updated",
+        kind: "browser_event",
+        payload: { order: 84 },
+        schema_version: 2,
+        target: "self",
+      }),
+    );
+
+    expect(authorizeRegisteredEvents).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        descriptorBinding: "binding-rotated",
+        events: [expect.objectContaining({ maximumFanout: 1, version: 2 })],
+      }),
+    );
+    expect(dispatch.mock.calls[0]?.[0]).toBe(capabilities[1]);
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(777);
+    owner.dispose();
+  });
+
+  it("recovers an ordinary reconnect tail before opening the replacement transport", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const requests: AsyncAuthorizationRequest[] = [];
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            requests.push(request);
+            const current = authorization(request.position?.sequence ?? 0n);
+            return request.prior === null
+              ? current
+              : Object.freeze({
+                  replay: Object.freeze([envelope(2n, { kind: "refresh", name: "refresh" })]),
+                  subscription: current,
+                });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-reconnect",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
+    sources[0]?.request.failed("transport_lost");
+    timers.fire(50);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+
+    expect(requests[1]?.position).toEqual({ epoch: 1n, sequence: 1n });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(2);
+    sources[1]?.open();
+    sources[1]?.emit(envelope(3n, { kind: "refresh", name: "refresh" }));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    owner.dispose();
+  });
+
   it("cancels an in-progress pageshow reauthorization when the page suspends again", async () => {
     let resolveResume: ((value: AuthorizedLogicalSubscription) => void) | undefined;
     let authorizations = 0;
@@ -285,6 +508,7 @@ describe("async feature lifecycle", () => {
     };
     const root = Object.freeze({}) as Element;
     const port = {
+      authorizeRegisteredEvents: eventCapability,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: vi.fn(() => "queued" as const),

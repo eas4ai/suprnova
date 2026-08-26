@@ -431,17 +431,21 @@ configuration/resume exports, and absence of ambient browser persistence across
 selection and lifecycle. Real-browser upload fixtures additionally prove
 truthful accessible progress, same-identity morph survival, replacement and
 rekey retirement, empty-string-only native clearing, reduced motion, strict
-CSP, and all three browser engines. The exact changed core artifact is remeasured in
-Chromium before its baseline hash is updated; a source edit or hand-written hash
-alone is not qualification evidence.
+CSP, and all three browser engines. The exact changed core artifact is remeasured
+in Chromium as a separate candidate and compared with the prior approved binding
+baseline. A source edit, hand-written hash, or candidate copied over that
+baseline is not qualification evidence.
 
 `U4/16`, `E100/1K`, and `R100` record the architecture budget's exact optional
 artifact, retained-memory, buffered-byte, scheduler, progress/event dispatch,
 queue, and reconnect limits on `S1`/`B1`. The build gate reports exact Brotli
 bytes for each core variant without an unsupported absolute ceiling, enforces 20
-KiB for each upload variant and 16 KiB for each async variant, and rejects a stale
-exact-artifact browser baseline. Runtime workloads enforce the formula, count, and
-latency caps in the overview and the existing 15-percent regression policy.
+KiB for each upload variant and 16 KiB for each async variant. The artifact gate
+reports whether the binding baseline describes the current or a prior artifact;
+the browser benchmark gate compares a separately recorded current candidate to
+that baseline and refuses a self-comparison path. Runtime workloads enforce the
+formula, count, and latency caps in the overview and the existing 15-percent
+regression policy.
 Reduced deterministic budget cases run on every ordinary gate; the full-scale
 workloads run under explicit release qualification on pinned `S1`/`B1`. A larger
 application upload limit may increase stored file bytes but may not authorize
@@ -462,6 +466,11 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Restored the prior approved browser benchmark as binding
+  provenance and prohibited self-baselining. Current artifacts write only an
+  ignored candidate result; the binding gate compares candidate versus prior,
+  requires the existing three-run confirmation for a 15-percent regression,
+  and updates the baseline only after explicit approval.
 - 2026-08-25 -- Refactored Task 4 transport conformance so the complete shared
   semantic suite executes through both genuine adapter factories. SSE exercises
   its same-origin HTTP control and one-way record path; WebSocket exercises

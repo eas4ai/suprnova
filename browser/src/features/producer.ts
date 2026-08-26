@@ -9,9 +9,16 @@ import {
   type ClassicFeatureSurface,
 } from "./global.js";
 import type { RuntimeFeatureRegistrationOutcome } from "./host.js";
+import type { AsyncFeatureOptions } from "../async-updates/feature.js";
 
 const CLASSIC_STIMULUS_ADAPTER_SYMBOL = Symbol.for("suprnova.live.features.v1.stimulus-adapter");
+const CLASSIC_ASYNC_CONFIGURATION_SYMBOL = Symbol.for(
+  "suprnova.live.features.v1.async-configuration",
+);
 type ProducerFeatureSurface = ClassicFeatureSurface & {
+  readonly [CLASSIC_ASYNC_CONFIGURATION_SYMBOL]: (
+    configure: (options: AsyncFeatureOptions) => void,
+  ) => void;
   readonly [CLASSIC_STIMULUS_ADAPTER_SYMBOL]: (
     adapter: RuntimeStimulusAdapter,
   ) => RuntimeFeatureRegistrationOutcome;
@@ -22,6 +29,7 @@ type InspectedClassicSurface = readonly [
   register: ClassicFeatureSurface["register"],
   driver: ClassicFeatureSurface[typeof CLASSIC_FEATURE_ADOPT_SYMBOL],
   stimulus: ProducerFeatureSurface[typeof CLASSIC_STIMULUS_ADAPTER_SYMBOL],
+  asynchronous: ProducerFeatureSurface[typeof CLASSIC_ASYNC_CONFIGURATION_SYMBOL],
 ];
 
 function inspectClassicFeatureSurface(target: typeof globalThis): InspectedClassicSurface | null {
@@ -36,11 +44,15 @@ function inspectClassicFeatureSurface(target: typeof globalThis): InspectedClass
   let register: unknown;
   let driver: unknown;
   let stimulus: unknown;
+  let asynchronous: unknown;
+  let configureAsync: unknown;
   try {
     version = Reflect.get(current as object, "version");
     register = Reflect.get(current as object, "register");
     driver = Reflect.get(current as object, CLASSIC_FEATURE_ADOPT_SYMBOL);
     stimulus = Reflect.get(current as object, CLASSIC_STIMULUS_ADAPTER_SYMBOL);
+    asynchronous = Reflect.get(current as object, CLASSIC_ASYNC_CONFIGURATION_SYMBOL);
+    configureAsync = Reflect.get(current as object, "configureAsync");
   } catch {
     throw new Error("feature_global_symbol_conflict");
   }
@@ -50,7 +62,9 @@ function inspectClassicFeatureSurface(target: typeof globalThis): InspectedClass
     version !== 1 ||
     typeof register !== "function" ||
     typeof driver !== "function" ||
-    typeof stimulus !== "function"
+    typeof stimulus !== "function" ||
+    typeof asynchronous !== "function" ||
+    typeof configureAsync !== "function"
   ) {
     throw new Error("feature_global_symbol_conflict");
   }
@@ -59,6 +73,7 @@ function inspectClassicFeatureSurface(target: typeof globalThis): InspectedClass
     register as ClassicFeatureSurface["register"],
     driver as ClassicFeatureSurface[typeof CLASSIC_FEATURE_ADOPT_SYMBOL],
     stimulus as ProducerFeatureSurface[typeof CLASSIC_STIMULUS_ADAPTER_SYMBOL],
+    asynchronous as ProducerFeatureSurface[typeof CLASSIC_ASYNC_CONFIGURATION_SYMBOL],
   ];
 }
 
@@ -74,7 +89,19 @@ function outcome(value: unknown): RuntimeFeatureRegistrationOutcome {
 
 function createSurface(): ClassicFeatureSurface {
   const registry = createOptionalFeatureDriver();
+  let asyncConfiguration: AsyncFeatureOptions | null = null;
+  let asyncConfigurationPending = false;
+  let asyncConfigure: ((options: AsyncFeatureOptions) => void) | null = null;
   const surface = {
+    configureAsync(options: AsyncFeatureOptions): void {
+      if (asyncConfigure !== null) {
+        asyncConfigure(options);
+        return;
+      }
+      if (asyncConfigurationPending) throw new Error("async_configuration_locked");
+      asyncConfiguration = options;
+      asyncConfigurationPending = true;
+    },
     version: 1 as const,
     register(feature: RuntimeFeature): RuntimeFeatureRegistrationOutcome {
       return registry.register(feature);
@@ -90,6 +117,20 @@ function createSurface(): ClassicFeatureSurface {
     configurable: false,
     enumerable: false,
     value: (adapter: RuntimeStimulusAdapter) => registry.registerStimulus(adapter),
+    writable: false,
+  });
+  Object.defineProperty(surface, CLASSIC_ASYNC_CONFIGURATION_SYMBOL, {
+    configurable: false,
+    enumerable: false,
+    value: (configure: (options: AsyncFeatureOptions) => void) => {
+      if (asyncConfigure !== null) return;
+      asyncConfigure = configure;
+      if (!asyncConfigurationPending || asyncConfiguration === null) return;
+      const current = asyncConfiguration;
+      asyncConfiguration = null;
+      asyncConfigurationPending = false;
+      configure(current);
+    },
     writable: false,
   });
   return Object.freeze(surface) as ClassicFeatureSurface;
@@ -156,6 +197,16 @@ export function registerRuntimeFeature(
 }
 
 export { registerRuntimeFeature as registerClassicFeature };
+
+export function registerClassicAsyncFeature(
+  target: typeof globalThis,
+  feature: RuntimeFeature,
+  configure: (options: AsyncFeatureOptions) => void,
+): RuntimeFeatureRegistrationOutcome {
+  const inspected = inspectClassicFeatureSurface(target) ?? installSurface(target);
+  Reflect.apply(inspected[4], inspected[0], [configure]);
+  return registerRuntimeFeature(target, feature);
+}
 
 export function registerRuntimeStimulusAdapter(
   target: typeof globalThis,

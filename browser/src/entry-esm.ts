@@ -49,6 +49,8 @@ export type {
   RuntimeFeatureIslandPort,
   RuntimeFeatureRegistrationOutcome,
 } from "./features/contract.js";
+export { CLASSIC_FEATURE_SYMBOL } from "./features/global.js";
+export type { ClassicFeatureSurface } from "./features/global.js";
 export type {
   StimulusApplicationPort,
   StimulusBootstrapOptions,

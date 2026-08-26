@@ -15,8 +15,10 @@ import {
   RUNTIME_FEATURE_DRIVER_FORMAT,
   type FreshRenderDisposition,
   type FreshRenderReason,
+  type RegisteredBrowserEventCapability,
   type RegisteredBrowserEventDispatch,
   type RegisteredBrowserEventDisposition,
+  type RegisteredBrowserEventRegistration,
   type RuntimeFeatureDiagnosticDetail,
   type RuntimeFeatureDriver,
   type RuntimeFeatureDriverDocumentPort,
@@ -28,8 +30,10 @@ import {
 export type {
   FreshRenderDisposition,
   FreshRenderReason,
+  RegisteredBrowserEventCapability,
   RegisteredBrowserEventDispatch,
   RegisteredBrowserEventDisposition,
+  RegisteredBrowserEventRegistration,
   RuntimeFeatureDiagnosticDetail,
   RuntimeFeatureRegistrationOutcome,
 } from "./host.js";
@@ -56,7 +60,13 @@ export interface RuntimeFeatureDocumentContext {
 export interface RuntimeFeatureIslandPort {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
-  dispatchRegisteredEvent(event: RegisteredBrowserEventDispatch): RegisteredBrowserEventDisposition;
+  authorizeRegisteredEvents(
+    registration: RegisteredBrowserEventRegistration,
+  ): RegisteredBrowserEventCapability;
+  dispatchRegisteredEvent(
+    capability: RegisteredBrowserEventCapability,
+    event: RegisteredBrowserEventDispatch,
+  ): RegisteredBrowserEventDisposition;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   onDispose(dispose: () => void): void;
   proposeUploadHandle(
@@ -426,8 +436,12 @@ function defineFeature(
       const pending: IslandOwnership = [null, disposers];
       islands.set(port.element, pending);
       const featurePort: RuntimeFeatureIslandPort = Object.freeze({
-        dispatchRegisteredEvent: (event: RegisteredBrowserEventDispatch) =>
-          port.dispatchRegisteredEvent(event),
+        authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) =>
+          port.authorizeRegisteredEvents(registration),
+        dispatchRegisteredEvent: (
+          capability: RegisteredBrowserEventCapability,
+          event: RegisteredBrowserEventDispatch,
+        ) => port.dispatchRegisteredEvent(capability, event),
         element: port.element,
         enqueueFreshRender: (reason: FreshRenderReason) => port.enqueueFreshRender(reason),
         identity: port.identity,

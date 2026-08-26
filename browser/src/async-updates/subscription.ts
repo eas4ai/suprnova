@@ -128,6 +128,11 @@ export class AsyncSubscription {
     return Object.freeze({ applied, through: this.#continuity.position() });
   }
 
+  proveAuthoritativeBaseline(position: StreamPosition): void {
+    this.#assertCurrentAuthority();
+    this.#continuity.proveAuthoritativeBaseline(position);
+  }
+
   #assertCurrentAuthority(): void {
     const now = this.#clock.now();
     if (!Number.isSafeInteger(now) || now < 0 || now >= this.#authorization.expiresAt) {

@@ -567,7 +567,10 @@ _Avoid_: retryable provider failure, reusable credential, Task 3 sequence result
 
 **Document transport**:
 One physical SSE or WebSocket connection owned by a browser document for a
-compatible origin, transport kind, and document authorization scope. It multiplexes
+compatible origin, transport kind, and document authorization scope. Compatible
+logical memberships additionally have one exact current credential contract and
+a nonempty intersection of reconnect bounds; the grouping key never elects the
+first island's credential or retry policy as document authority. It multiplexes
 bounded subscription identities; it is not one connection per Live island.
 _Avoid_: island socket, global shared socket, subscription authority, event bus
 

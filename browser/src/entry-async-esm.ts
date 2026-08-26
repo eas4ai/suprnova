@@ -16,8 +16,16 @@ export type {
 export type {
   AsyncTransportPorts,
   BrowserAsyncTransportOptions,
+  DocumentTransportConnectRequest,
+  DocumentTransportFailure,
   DocumentTransportPort,
 } from "./async-updates/connections.js";
+export type {
+  AsyncTransportAuthorization,
+  AuthorizedLogicalSubscription,
+  DocumentTransportKey,
+  StreamPosition,
+} from "./async-updates/types.js";
 export const asyncRegistration = registerRuntimeFeature(globalThis, asyncFeature);
 
 export default asyncFeature;

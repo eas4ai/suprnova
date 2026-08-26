@@ -27,9 +27,13 @@ function authorized(baseline: StreamPosition = position(4n, 40n)): AuthorizedLog
     }),
     events: Object.freeze([
       Object.freeze({
+        cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
         maximumFanout: 8,
         name: "orders.updated",
+        order: "per_source_sequence" as const,
+        payloadContract: "orders.updated.v1",
         schema: "json" as const,
+        source: "stream" as const,
         targets: Object.freeze(["self"]),
         version: 1,
       }),
@@ -251,6 +255,58 @@ describe("browser asynchronous subscription continuity", () => {
       ),
     ).toThrow("async_payload_unregistered");
     expect(browserEvent).toHaveBeenCalledOnce();
+  });
+
+  it("bounds payloads by canonical UTF-8 bytes rather than UTF-16 code units", () => {
+    const { subscription } = fixture();
+    const astralPayload = Array.from({ length: 9 }, () => "💥".repeat(1_000));
+
+    expect(() =>
+      subscription.receive(
+        envelope(
+          position(4n, 41n),
+          Object.freeze({
+            event: "orders.updated",
+            kind: "browser_event",
+            payload: Object.freeze(astralPayload),
+            schema_version: 1,
+            target: "self",
+          }),
+        ),
+      ),
+    ).toThrow("async_payload_too_large");
+  });
+
+  it("accepts the exact UTF-8 payload boundary and rejects the first multibyte overflow", () => {
+    const fields = {
+      event: "orders.updated",
+      kind: "browser_event",
+      payload: {
+        chunks: Array.from({ length: 8 }, () => "💥".repeat(900)),
+        tail: "",
+      },
+      schema_version: 1,
+      target: "self",
+    };
+    const currentBytes = new TextEncoder().encode(canonicalize(fields)).byteLength;
+    const remaining = 32 * 1_024 - currentBytes;
+    fields.payload.tail = `${"💥".repeat(Math.floor(remaining / 4))}${"x".repeat(remaining % 4)}`;
+    expect(new TextEncoder().encode(canonicalize(fields)).byteLength).toBe(32 * 1_024);
+
+    const { subscription } = fixture();
+    expect(
+      subscription.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload)),
+    ).toBe("applied");
+
+    fields.payload.tail += "é";
+    const overflow = new AsyncSubscription(
+      authorized(),
+      { browserEvent: () => true, presentationSignal: () => true, refresh: () => true },
+      { now: () => 1_000 },
+    );
+    expect(() =>
+      overflow.receive(envelope(position(4n, 41n), fields as unknown as AsyncPayload)),
+    ).toThrow("async_payload_too_large");
   });
 
   it("retains the applied position but requires proof after restored authorization", () => {

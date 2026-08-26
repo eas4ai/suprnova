@@ -3,12 +3,14 @@ import type {
   RuntimeFeatureDriverRegistrationHost,
   RuntimeFeatureRegistrationOutcome,
 } from "./host.js";
+import type { AsyncFeatureOptions } from "../async-updates/feature.js";
 
 export const CLASSIC_FEATURE_SYMBOL = Symbol.for("suprnova.live.features.v1");
 export const CLASSIC_FEATURE_ADOPT_SYMBOL = Symbol.for("suprnova.live.features.v1.adopt");
 
 export interface ClassicFeatureSurface {
   readonly version: 1;
+  configureAsync(options: AsyncFeatureOptions): void;
   register(feature: unknown): RuntimeFeatureRegistrationOutcome;
   readonly [CLASSIC_FEATURE_ADOPT_SYMBOL]: () => RuntimeFeatureDriver;
 }
