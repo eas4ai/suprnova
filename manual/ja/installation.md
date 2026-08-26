@@ -4,7 +4,7 @@
 
 ## 要件
 
-- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.3.2 リリースでも、最低要件は同じく Rust 1.94.0 です。[rustup](https://rustup.rs/) でインストールしてください：
+- **Rust 1.94.0+** が現在の `main` に必要です（workspace は 2024 edition を使用します）。タグ付きの v1.3.3 リリースでも、最低要件は同じく Rust 1.94.0 です。[rustup](https://rustup.rs/) でインストールしてください：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -24,7 +24,7 @@
 Suprnova は Cargo プロジェクトとして配布されており、CLI のインストーラーはフレームワークを git から取得します（crates.io からではありません - 下記の[プレローンチの注記](#pre-launch-note)を参照してください）：
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.3 suprnova-cli
 ```
 
 これは `suprnova` バイナリをコンパイルし、`~/.cargo/bin` に配置します。うまくいったか確認してください：
@@ -140,7 +140,7 @@ my-app/
 CLI はあなたの `~/.cargo/bin` にあります。最新版に更新するには：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.3 suprnova-cli
 ```
 
 `--force` は Cargo に既存のバイナリを上書きさせます。
@@ -150,7 +150,7 @@ cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 
 スキャフォルドされたアプリは、`Cargo.toml` の git 依存性を経由して `suprnova` フレームワーククレートに依存します：
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
 ```
 
 最新のフレームワークの変更を取り込むには：
@@ -163,7 +163,7 @@ git 依存性は、名前を指定されたリリースタグを追跡します�
 
 ## 配布モデル
 
-Suprnova は crates.io ではなく git を通じて配布されます - フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはタグ付きの GitHub Release（例えば `v1.2.4`）として公開されており、あなたのアプリが依存するのはそのタグです：スキャフォルドされた `Cargo.toml` は `tag = "v1.3.2"` をピン留めし、`Cargo.lock` はそのタグが解決した正確なコミットを記録するため、あなたが移ると決めるまで、ビルドは再現可能なままです。更新は意図的な操作であり、偶発的に起こることは決してありません - タグを上げて `cargo update -p suprnova` を実行してください。アプリのフレームワークバージョンを更新するセクションが、その手順を説明しています。
+Suprnova は crates.io ではなく git を通じて配布されます - フレームワークと CLI の両方が GitHub からインストールされます。各バージョンはタグ付きの GitHub Release（例えば `v1.2.4`）として公開されており、あなたのアプリが依存するのはそのタグです：スキャフォルドされた `Cargo.toml` は `tag = "v1.3.3"` をピン留めし、`Cargo.lock` はそのタグが解決した正確なコミットを記録するため、あなたが移ると決めるまで、ビルドは再現可能なままです。更新は意図的な操作であり、偶発的に起こることは決してありません - タグを上げて `cargo update -p suprnova` を実行してください。アプリのフレームワークバージョンを更新するセクションが、その手順を説明しています。
 
 ## エディタセットアップ
 
