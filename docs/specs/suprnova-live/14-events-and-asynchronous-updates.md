@@ -99,6 +99,11 @@ Acceptance criteria:
 
 - Push metadata identifies registered response/presentation behavior, not an
   arbitrary method, action, effect, or JavaScript invocation.
+- One exhaustive browser dispatcher consumes only canonical membership-validated
+  envelopes. Its three productive branches use the existing island feature port
+  for fresh render, a core-minted registered-event capability, or the declared
+  presentation-signal write; lifecycle payloads only observe, close, or degrade
+  the exact subscription.
 - Push-triggered work enters the owning island scheduler and respects current
   revision.
 - Burst events can coalesce refreshes without losing required state transitions.
@@ -108,6 +113,10 @@ Acceptance criteria:
   users invoke registered mutating actions deliberately.
 - Presentation-only stream data cannot write component, authorization,
   revision, accepted-outcome, or domain state.
+- Core binds registered-event authority to the exact island owner and rechecks
+  owner currentness and capability rotation after bounded target resolution,
+  immediately before each DOM dispatch. Forged, stale, cross-island, wrong-scope,
+  over-fanout, cyclic, or retired delivery fails without sequence commit.
 - HTTP action transport remains available when push is absent.
 
 UX flow:
@@ -535,6 +544,14 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Implemented one closed browser async dispatcher over the
+  canonical membership-validated envelope union. Refresh enters the existing
+  fresh-render scheduler, registered browser events consume a core-minted
+  exact-island capability with a final check before every resolved target, declared
+  presentation signals use the existing typed signal port, and lifecycle records
+  only observe, close, or degrade their exact subscription. No action, effect,
+  call, HTML, snapshot, revision, component-state, or second scheduler seam was
+  added.
 - 2026-08-26 -- Made suspended polling state authoritative over start, policy,
   environment, and continuity recomputation. A replacement stage discarded by
   page suspension may restore the newest committed policy object, but it remains

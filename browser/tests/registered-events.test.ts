@@ -38,12 +38,13 @@ function resolver(target: EventTarget, current = () => true): RegisteredEventTar
 describe("core registered-event authority", () => {
   it("rejects unknown names, schema drift, forbidden scope, and forged capabilities", () => {
     const authority = new RegisteredEventAuthority();
+    const owner = {};
     const dispatchEvent = vi.fn(() => true);
     const target = { dispatchEvent } as unknown as EventTarget;
-    const capability = authority.replace({}, registration([contract()]), resolver(target));
+    const capability = authority.replace(owner, registration([contract()]), resolver(target));
 
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "unknown.event",
         payload: {},
         schemaVersion: 1,
@@ -51,7 +52,7 @@ describe("core registered-event authority", () => {
       }),
     ).toBe("rejected");
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 2,
@@ -59,7 +60,7 @@ describe("core registered-event authority", () => {
       }),
     ).toBe("rejected");
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,
@@ -67,7 +68,7 @@ describe("core registered-event authority", () => {
       }),
     ).toBe("rejected");
     expect(
-      authority.dispatch(Object.freeze({}) as typeof capability, {
+      authority.dispatch(owner, Object.freeze({}) as typeof capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,
@@ -94,7 +95,7 @@ describe("core registered-event authority", () => {
     );
 
     expect(
-      authority.dispatch(first, {
+      authority.dispatch(owner, first, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,
@@ -103,7 +104,7 @@ describe("core registered-event authority", () => {
     ).toBe("rejected");
     active = false;
     expect(
-      authority.dispatch(second, {
+      authority.dispatch(owner, second, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 2,
@@ -134,15 +135,16 @@ describe("core registered-event authority", () => {
 
   it("snapshots mutable registration input before issuing authority", () => {
     const authority = new RegisteredEventAuthority();
+    const owner = {};
     const target = { dispatchEvent: vi.fn(() => true) } as unknown as EventTarget;
     const mutableTargets = ["self"];
     const mutable = { ...contract(), targets: mutableTargets, version: 1 };
-    const capability = authority.replace({}, registration([mutable]), resolver(target));
+    const capability = authority.replace(owner, registration([mutable]), resolver(target));
     mutable.version = 2;
     mutableTargets[0] = "document";
 
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,
@@ -153,14 +155,15 @@ describe("core registered-event authority", () => {
 
   it("enforces resolved fanout without trusting a caller-supplied maximum", () => {
     const authority = new RegisteredEventAuthority();
+    const owner = {};
     const target = { dispatchEvent: vi.fn(() => true) } as unknown as EventTarget;
-    const capability = authority.replace({}, registration([contract()]), {
+    const capability = authority.replace(owner, registration([contract()]), {
       ...resolver(target),
       targets: () => [target, target],
     });
 
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,
@@ -171,15 +174,20 @@ describe("core registered-event authority", () => {
 
   it("does not dispatch to a target that retired during core resolution", () => {
     const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let active = true;
     const dispatchEvent = vi.fn(() => true);
     const target = { dispatchEvent } as unknown as EventTarget;
-    const capability = authority.replace({}, registration([contract({ schema: "boolean" })]), {
-      ...resolver(target),
-      targets: () => [],
+    const capability = authority.replace(owner, registration([contract({ schema: "boolean" })]), {
+      ...resolver(target, () => active),
+      targets: () => {
+        active = false;
+        return [target];
+      },
     });
 
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: "not-a-boolean",
         schemaVersion: 1,
@@ -187,25 +195,53 @@ describe("core registered-event authority", () => {
       }),
     ).toBe("rejected");
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: true,
         schemaVersion: 1,
         target: "self",
       }),
-    ).toBe("no_target");
+    ).toBe("retired");
     expect(dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  it("stops fanout when an earlier DOM listener retires the island", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    const secondDispatch = vi.fn(() => true);
+    const first = {
+      dispatchEvent() {
+        authority.retire(owner);
+        return true;
+      },
+    } as unknown as EventTarget;
+    const second = { dispatchEvent: secondDispatch } as unknown as EventTarget;
+    const capability = authority.replace(owner, registration([contract({ maximumFanout: 2 })]), {
+      ...resolver(first),
+      targets: () => [first, second],
+    });
+
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: {},
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("rejected");
+    expect(secondDispatch).not.toHaveBeenCalled();
   });
 
   it("stops synchronous delivery cycles under the registered policy", () => {
     const authority = new RegisteredEventAuthority();
+    const owner = {};
     const capabilities: ReturnType<RegisteredEventAuthority["replace"]>[] = [];
     const forged = Object.freeze({}) as ReturnType<RegisteredEventAuthority["replace"]>;
     const nested = vi.fn();
     const target = {
       dispatchEvent() {
         nested(
-          authority.dispatch(capabilities[0] ?? forged, {
+          authority.dispatch(owner, capabilities[0] ?? forged, {
             event: "orders.updated",
             payload: {},
             schemaVersion: 1,
@@ -215,11 +251,11 @@ describe("core registered-event authority", () => {
         return true;
       },
     } as unknown as EventTarget;
-    const capability = authority.replace({}, registration([contract()]), resolver(target));
+    const capability = authority.replace(owner, registration([contract()]), resolver(target));
     capabilities.push(capability);
 
     expect(
-      authority.dispatch(capability, {
+      authority.dispatch(owner, capability, {
         event: "orders.updated",
         payload: {},
         schemaVersion: 1,

@@ -820,7 +820,7 @@
 
 **Files:** `browser/src/async-updates/dispatch.ts`, scheduler intent/island record, event/signal routers, dispatch/security tests
 
-- [ ] Add failing hostile tests proving push cannot invoke mutating action/effect/call names, install HTML/snapshots, alter revisions/component state, exceed target fanout, or reach retired/wrong-scope islands:
+- [x] Add failing hostile tests proving push cannot invoke mutating action/effect/call names, install HTML/snapshots, alter revisions/component state, exceed target fanout, or reach retired/wrong-scope islands:
 
   ```ts
   it("rejects every authority-writing payload", () => {
@@ -840,8 +840,8 @@
   });
   ```
 
-- [ ] Run async dispatch/security tests; record failure because no dispatcher exists.
-- [ ] Implement a closed dispatcher:
+- [x] Run async dispatch/security tests; record failure because no dispatcher exists.
+- [x] Implement a closed dispatcher:
 
   ```ts
   export class AsyncDispatcher {
@@ -880,8 +880,8 @@
   coalescing key so each island retains at most one queued plus one in-flight
   async refresh.
 
-- [ ] Run dispatch, scheduler, response-ordering, morph failure, event ownership, signal, and security suites.
-- [ ] Commit: `feat(async): dispatch bounded presentation updates`.
+- [x] Run dispatch, scheduler, response-ordering, morph failure, event ownership, signal, and security suites.
+- [x] Commit: `feat(async): dispatch bounded presentation updates`.
 
 ## Task 9: Add exact lifecycle, accessibility, and real-browser behavior
 

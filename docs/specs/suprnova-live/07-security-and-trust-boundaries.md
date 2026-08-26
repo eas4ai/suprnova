@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-08-26
 
 ## Scope
 
@@ -185,6 +185,12 @@ Acceptance criteria:
   caller, selects the exact binding's existing sequence machine and invokes the
   registered dispatcher. Denial, cancellation, dispatch failure, or unresolved
   drop cannot be reported as successful delivery.
+- The browser async artifact accepts only membership-decoded envelopes through
+  one exhaustive presentation dispatcher over its core-owned island feature
+  port. It has no action, effect, call, HTML, snapshot, revision, component-state,
+  or generic write seam. A registered-event capability is bound to the exact
+  island owner, and core rechecks that owner and the current capability after
+  target resolution immediately before each bounded DOM dispatch.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Upload cleanup metrics are limited to closed age, retained-volume, outcome,
   retry, and orphan buckets. They never carry upload handles, lease identities,
@@ -266,6 +272,12 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Closed browser push dispatch to one exhaustive validated-envelope
+  router with exactly refresh, registered browser-event, and declared local-signal
+  presentation effects. Bound each core-minted event capability to its exact
+  island port and repeated owner/current-capability checks after target resolution,
+  preventing forged, stale, cross-island, retired, or resolver-raced authority from
+  reaching DOM dispatch.
 - 2026-08-25 -- Removed the public seal-to-offer and pop-to-success trust gaps
   from async delivery. Only the document owner may perform final admission and
   closed registered dispatch; raw sealed entries, offers, and delivery leases

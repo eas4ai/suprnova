@@ -49,4 +49,16 @@ describe("optional feature import boundaries", () => {
     expect(names.some((name) => name.endsWith("stimulus/lifecycle.ts"))).toBe(true);
     expect(names.some((name) => name.includes("@hotwired/stimulus"))).toBe(false);
   });
+
+  it("keeps the async dispatcher free of action, effect, morph, and state authority", async () => {
+    const names = await inputs(`
+      export { AsyncDispatcher } from "./src/async-updates/dispatch.ts";
+    `);
+
+    expect(
+      names.filter((name) =>
+        /(?:application|extensions|models|morph|scheduler|signals)\//u.test(name),
+      ),
+    ).toEqual([]);
+  });
 });

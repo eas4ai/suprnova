@@ -482,6 +482,14 @@ response and cannot carry HTML, snapshots, arbitrary actions, or executable
 effects.
 _Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push payload
 
+**Async presentation dispatcher**:
+The exhaustive browser router that consumes only a membership-validated
+asynchronous event envelope. Its productive branches can enqueue the existing
+fresh-render intent, consume an exact current registered-event capability, or
+write a declared presentation signal; it owns no action, effect, call, HTML,
+snapshot, revision, component-state, or generic write path.
+_Avoid_: action dispatcher, event bus, streamed DOM patch, feature RPC
+
 **Sequence authority**:
 The per-logical-subscription state machine initialized only from the signed
 baseline retained by its sealed active async membership context. It applies only

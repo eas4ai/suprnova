@@ -902,7 +902,7 @@ export class DocumentRuntime {
       dispatchRegisteredEvent: (
         capability: RegisteredBrowserEventCapability,
         event: RegisteredBrowserEventDispatch,
-      ) => this.#dispatchRegisteredEvent(capability, event),
+      ) => this.#dispatchRegisteredEvent(record, capability, event),
       element: record.element,
       enqueueFreshRender: (
         reason: FreshRenderReason,
@@ -935,10 +935,11 @@ export class DocumentRuntime {
   }
 
   #dispatchRegisteredEvent(
+    owner: IslandRecord,
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition {
-    return this.#registeredEvents.dispatch(capability, event);
+    return this.#registeredEvents.dispatch(owner, capability, event);
   }
 
   #registeredEventTargets(

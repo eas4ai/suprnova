@@ -6,11 +6,11 @@ import {
   type JsonValue,
 } from "../canonical.js";
 import type {
-  AsyncEnvelope,
   AsyncPayload,
   AsyncPayloadSchema,
   AuthorizedLogicalSubscription,
   StreamPosition,
+  ValidatedAsyncEnvelope,
 } from "./types.js";
 
 const MAX_U64 = (1n << 64n) - 1n;
@@ -209,7 +209,7 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
 export function decodeAsyncEnvelope(
   encoded: string,
   membership: AuthorizedLogicalSubscription,
-): AsyncEnvelope {
+): ValidatedAsyncEnvelope {
   let parsed: JsonValue;
   try {
     parsed = parseCanonicalJson(encoded, ASYNC_LIMITS);
@@ -238,7 +238,7 @@ export function decodeAsyncEnvelope(
     protocolVersion: 1,
     stream,
     subscriptionId,
-  });
+  }) as ValidatedAsyncEnvelope;
 }
 
 export function inspectAsyncEnvelopeSubscription(encoded: string): string {

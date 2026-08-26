@@ -135,12 +135,14 @@ export class RegisteredEventAuthority {
   }
 
   dispatch(
+    owner: object,
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition {
     const token = capability as object;
     const authority = this.#capabilities.get(token);
     if (authority === undefined) return "rejected";
+    if (authority.owner !== owner) return "rejected";
     if (!authority.resolver.current()) return "retired";
     if (this.#current.get(authority.owner) !== token) return "rejected";
     const contract = authority.contracts.get(event.event);
@@ -166,12 +168,16 @@ export class RegisteredEventAuthority {
       return "rejected";
     }
     const targets = authority.resolver.targets(event.target, contract.maximumFanout);
+    if (!authority.resolver.current()) return "retired";
+    if (this.#current.get(authority.owner) !== token) return "rejected";
     if (targets === "fanout_exceeded") return "fanout_exceeded";
     if (targets.length === 0) return "no_target";
     if (targets.length > contract.maximumFanout) return "fanout_exceeded";
     authority.activeDepth.set(contract.name, depth + 1);
     try {
       for (const target of targets) {
+        if (!authority.resolver.current()) return "retired";
+        if (this.#current.get(authority.owner) !== token) return "rejected";
         target.dispatchEvent(authority.resolver.event(`suprnova:${contract.name}`, event.payload));
       }
     } catch {

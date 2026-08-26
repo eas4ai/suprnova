@@ -59,6 +59,13 @@ export interface AsyncEnvelope {
   readonly subscriptionId: string;
 }
 
+declare const VALIDATED_ASYNC_ENVELOPE: unique symbol;
+
+/** A canonical envelope that passed the closed membership-aware decoder. */
+export interface ValidatedAsyncEnvelope extends AsyncEnvelope {
+  readonly [VALIDATED_ASYNC_ENVELOPE]: never;
+}
+
 export type AsyncTransportKind = "sse" | "websocket";
 
 export interface DocumentTransportKey {
@@ -108,12 +115,6 @@ export interface PollFallbackPolicy {
 
 export type AsyncReceiveDisposition =
   "applied" | "duplicate" | "stale" | "gap" | "continuity_required" | "dispatch_failed" | "closed";
-
-export interface AsyncDispatchPort {
-  browserEvent(event: Extract<AsyncPayload, { kind: "browser_event" }>): boolean;
-  presentationSignal(signal: Extract<AsyncPayload, { kind: "presentation_signal" }>): boolean;
-  refresh(refresh: Extract<AsyncPayload, { kind: "refresh" }>): boolean;
-}
 
 export interface AsyncClock {
   now(): number;

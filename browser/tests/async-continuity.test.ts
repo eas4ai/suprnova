@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { canonicalize, type JsonValue } from "../src/canonical.js";
+import type { AsyncEnvelopeDispatcher } from "../src/async-updates/dispatch.js";
 import { AsyncSubscription } from "../src/async-updates/subscription.js";
 import type {
-  AsyncDispatchPort,
   AsyncPayload,
   AuthorizedLogicalSubscription,
   StreamPosition,
+  ValidatedAsyncEnvelope,
 } from "../src/async-updates/types.js";
 
 const SUBSCRIPTION_ID = "c3Vic2NyaXB0aW9uLTAwMQ";
@@ -76,15 +77,26 @@ function fixture() {
     applied.push(event);
     return true;
   });
-  const dispatch: AsyncDispatchPort = {
-    browserEvent,
-    presentationSignal: vi.fn((signal: Extract<AsyncPayload, { kind: "presentation_signal" }>) => {
-      applied.push(signal);
-      return true;
-    }),
-    refresh: vi.fn((refresh: Extract<AsyncPayload, { kind: "refresh" }>) => {
-      applied.push(refresh);
-      return true;
+  const dispatch: AsyncEnvelopeDispatcher = {
+    dispatch: vi.fn(({ payload }: ValidatedAsyncEnvelope) => {
+      switch (payload.kind) {
+        case "browser_event":
+          browserEvent(payload);
+          return "dispatched";
+        case "presentation_signal":
+          applied.push(payload);
+          return "signal_updated";
+        case "refresh":
+          applied.push(payload);
+          return "queued";
+        case "heartbeat":
+          return "observed";
+        case "complete":
+          return "closed";
+        case "error":
+          return "degraded";
+      }
+      throw new Error("unreachable_async_payload");
     }),
   };
   const subscription = new AsyncSubscription(authorized(), dispatch, { now: () => 1_000 });
@@ -164,11 +176,7 @@ describe("browser asynchronous subscription continuity", () => {
     };
     const subscription = new AsyncSubscription(
       membership,
-      {
-        browserEvent: () => true,
-        presentationSignal: () => true,
-        refresh: () => true,
-      },
+      { dispatch: () => "observed" },
       { now: () => 1_000 },
     );
     const transcript = Array.from({ length: 9 }, (_, index) =>
@@ -307,7 +315,7 @@ describe("browser asynchronous subscription continuity", () => {
     fields.payload.tail += "é";
     const overflow = new AsyncSubscription(
       authorized(),
-      { browserEvent: () => true, presentationSignal: () => true, refresh: () => true },
+      { dispatch: () => "observed" },
       { now: () => 1_000 },
     );
     expect(() =>

@@ -1,9 +1,8 @@
 import { ContinuityMachine } from "./continuity.js";
+import type { AsyncEnvelopeDispatcher } from "./dispatch.js";
 import { decodeAsyncEnvelope, validExpiration } from "./envelope.js";
 import type {
   AsyncClock,
-  AsyncDispatchPort,
-  AsyncEnvelope,
   AsyncReceiveDisposition,
   AuthorizedLogicalSubscription,
   StreamPosition,
@@ -23,11 +22,11 @@ export class AsyncSubscription {
   #authorization: AuthorizedLogicalSubscription;
   readonly #clock: AsyncClock;
   #continuity: ContinuityMachine;
-  readonly #dispatch: AsyncDispatchPort;
+  readonly #dispatch: AsyncEnvelopeDispatcher;
 
   constructor(
     authorization: AuthorizedLogicalSubscription,
-    dispatch: AsyncDispatchPort,
+    dispatch: AsyncEnvelopeDispatcher,
     clock: AsyncClock,
   ) {
     if (!validExpiration(authorization.expiresAt) || typeof clock.now !== "function") {
@@ -130,7 +129,7 @@ export class AsyncSubscription {
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
     const observation = this.#continuity.observe(envelope.position);
     if (observation !== "apply") return observation;
-    if (!this.#dispatchEnvelope(envelope)) {
+    if (this.#dispatch.dispatch(envelope) === "rejected") {
       this.#continuity.degrade();
       return "dispatch_failed";
     }
@@ -156,7 +155,7 @@ export class AsyncSubscription {
     let applied = 0;
     for (const envelope of transcript) {
       this.#assertCurrentAuthority();
-      if (!this.#dispatchEnvelope(envelope)) {
+      if (this.#dispatch.dispatch(envelope) === "rejected") {
         this.#continuity.degrade();
         throw new Error("async_replay_dispatch_failed");
       }
@@ -217,21 +216,6 @@ export class AsyncSubscription {
     if (!Number.isSafeInteger(now) || now < 0 || now >= this.#authorization.expiresAt) {
       this.#continuity.degrade();
       throw new Error("async_membership_expired");
-    }
-  }
-
-  #dispatchEnvelope(envelope: AsyncEnvelope): boolean {
-    switch (envelope.payload.kind) {
-      case "refresh":
-        return this.#dispatch.refresh(envelope.payload);
-      case "browser_event":
-        return this.#dispatch.browserEvent(envelope.payload);
-      case "presentation_signal":
-        return this.#dispatch.presentationSignal(envelope.payload);
-      case "heartbeat":
-      case "complete":
-      case "error":
-        return true;
     }
   }
 }

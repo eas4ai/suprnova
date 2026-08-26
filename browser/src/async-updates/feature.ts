@@ -17,6 +17,7 @@ import {
   type LogicalSubscriptionHandle,
   type ReauthorizedLogicalSubscription,
 } from "./connections.js";
+import { AsyncDispatcher } from "./dispatch.js";
 import { AsyncSubscription } from "./subscription.js";
 import {
   PollTimer,
@@ -27,8 +28,6 @@ import {
 } from "./poll.js";
 import type {
   AsyncClock,
-  AsyncDispatchPort,
-  AsyncPayload,
   AsyncRandomness,
   AsyncTimerPort,
   AuthorizedLogicalSubscription,
@@ -749,34 +748,8 @@ class AsyncIslandController implements FeatureIslandController {
     if (this.#subscription !== null || this.#handle !== null) {
       throw new Error("async_subscription_duplicate");
     }
-    const dispatch: AsyncDispatchPort = Object.freeze({
-      browserEvent: (event: Extract<AsyncPayload, { kind: "browser_event" }>) => {
-        const contract = this.#currentAuthorization?.events.find(
-          ({ name }) => name === event.event,
-        );
-        const capability = this.#eventCapability;
-        return (
-          contract !== undefined &&
-          capability !== null &&
-          this.#port.dispatchRegisteredEvent(capability, {
-            event: event.event,
-            payload: event.payload,
-            schemaVersion: event.schema_version,
-            target: event.target,
-          }) === "dispatched"
-        );
-      },
-      presentationSignal: (signal: Extract<AsyncPayload, { kind: "presentation_signal" }>) => {
-        try {
-          this.#port.writePresentationSignal(this.#port.element, signal.name, signal.value);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      refresh: () => this.#port.enqueueFreshRender("stream") !== "retired",
-    });
-    const subscription = new AsyncSubscription(authorization, dispatch, this.#clock);
+    const dispatcher = new AsyncDispatcher(this.#port, () => this.#eventCapability);
+    const subscription = new AsyncSubscription(authorization, dispatcher, this.#clock);
     this.#subscription = subscription;
     const preflight = subscription.preflightInitialReplay(replay);
     const proof = carriesContinuityEvidence ? preflight : null;
