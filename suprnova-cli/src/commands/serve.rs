@@ -1227,6 +1227,70 @@ pub fn run(
     }
 }
 
+/// What one filesystem event asks the type watcher to regenerate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchTrigger {
+    /// Regenerate `inertia-props.ts`: a `.rs` file changed.
+    rust: bool,
+    /// Regenerate `lang-keys.ts`: a `.ftl` catalog changed.
+    ftl: bool,
+}
+
+impl WatchTrigger {
+    /// Nothing to regenerate.
+    const NONE: Self = Self {
+        rust: false,
+        ftl: false,
+    };
+
+    /// Whether this event asks for any regeneration at all.
+    fn any(&self) -> bool {
+        self.rust || self.ftl
+    }
+}
+
+/// Classify one `notify` event into what it should regenerate.
+///
+/// The event *kind* gate is what keeps this watcher from feeding itself.
+/// `notify`'s inotify backend registers `WatchMask::OPEN` on every watched
+/// directory, so the kernel reports a plain read of a file as
+/// `Access(Open(..))` followed by `Access(Close(Read))`. Regeneration
+/// reads every `.rs` file under `src/` - the exact tree this watcher is
+/// watching - so each run emits a burst of those `Access` events on the
+/// watcher's own channel. Counting them as changes re-arms the
+/// trailing-edge debounce, which fires another regeneration 500ms later,
+/// which reads the tree again: a project nobody has touched rebuilds its
+/// types (and, through cargo-watch, its backend) forever.
+///
+/// Only kinds that mean the bytes on disk are different now count:
+/// `Create`, `Modify`, `Remove`, and `Any` (the backends' "we do not know
+/// what this was" catch-all, which must stay conservative). `Access` and
+/// `Other` never do.
+fn watch_trigger(event: &notify::Event) -> WatchTrigger {
+    let is_change = matches!(
+        event.kind,
+        notify::EventKind::Create(_)
+            | notify::EventKind::Modify(_)
+            | notify::EventKind::Remove(_)
+            | notify::EventKind::Any
+    );
+    if !is_change {
+        return WatchTrigger::NONE;
+    }
+
+    let has_extension = |ext: &str| {
+        event
+            .paths
+            .iter()
+            .any(|p| p.extension().map(|e| e == ext).unwrap_or(false))
+    };
+
+    WatchTrigger {
+        rust: has_extension("rs"),
+        ftl: has_extension("ftl"),
+    }
+}
+
 /// File watcher that regenerates TypeScript types when Rust files change,
 /// and `lang-keys.ts` when `.ftl` catalogs under `lang/` change. `mode`
 /// governs stdout exactly like everywhere else in this module: purely
@@ -1322,20 +1386,11 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
         // the pending regeneration fires.
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
-                // Check if it's a Rust file change
-                let is_rust_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "rs").unwrap_or(false));
-                let is_ftl_change = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().map(|e| e == "ftl").unwrap_or(false));
-
-                if is_rust_change {
+                let trigger = watch_trigger(&event);
+                if trigger.rust {
                     debounce.on_event(std::time::Instant::now());
                 }
-                if is_ftl_change {
+                if trigger.ftl {
                     lang_debounce.on_event(std::time::Instant::now());
                 }
             }
@@ -1556,6 +1611,151 @@ mod tests {
         // The Cargo.toml half of the check is all that is left, and it
         // does not care about the frontend at all.
         assert!(validate_suprnova_project(true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod watch_trigger_tests {
+    use super::*;
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind, RemoveKind};
+
+    fn event_on(kind: EventKind, path: &str) -> notify::Event {
+        notify::Event::new(kind).add_path(PathBuf::from(path))
+    }
+
+    /// The three kinds that mean "the bytes on disk are different now".
+    fn real_changes() -> [EventKind; 3] {
+        [
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Remove(RemoveKind::File),
+        ]
+    }
+
+    #[test]
+    fn reading_a_rust_file_is_not_a_change() {
+        // This is the loop: the generator opens and reads every `.rs`
+        // file under the tree this watcher is watching, so its own reads
+        // must not schedule the next regeneration.
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        ] {
+            assert_eq!(
+                watch_trigger(&event_on(kind, "src/a.rs")),
+                WatchTrigger::NONE,
+                "{kind:?} on a .rs file must not trigger a regeneration"
+            );
+        }
+    }
+
+    #[test]
+    fn writing_creating_or_removing_a_rust_file_triggers_types() {
+        for kind in real_changes() {
+            let trigger = watch_trigger(&event_on(kind, "src/a.rs"));
+            assert!(trigger.rust, "{kind:?} on a .rs file must regenerate types");
+            assert!(!trigger.ftl, "{kind:?} on a .rs file is not a lang change");
+        }
+    }
+
+    #[test]
+    fn writing_creating_or_removing_a_catalog_triggers_lang_keys() {
+        for kind in real_changes() {
+            let trigger = watch_trigger(&event_on(kind, "lang/en/x.ftl"));
+            assert!(
+                trigger.ftl,
+                "{kind:?} on a .ftl file must regenerate lang keys"
+            );
+            assert!(
+                !trigger.rust,
+                "{kind:?} on a .ftl file is not a Rust change"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_neither_rust_nor_fluent_triggers_nothing() {
+        assert_eq!(
+            watch_trigger(&event_on(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                "src/notes.md"
+            )),
+            WatchTrigger::NONE
+        );
+    }
+
+    /// End-to-end against a real inotify watcher, because the bug lived in
+    /// the gap between what `notify` emits and what the classifier looked
+    /// at: nothing that only builds `Event` values by hand can prove the
+    /// kernel does not hand us an `Access` event for a plain read.
+    ///
+    /// Linux-only: the `OPEN`/`CLOSE` watch mask is an inotify detail, and
+    /// the other backends do not report reads at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_real_read_of_a_watched_file_produces_no_trigger_but_a_write_does() {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        let file = src.join("a.rs");
+        std::fs::write(&file, "pub struct A;\n").expect("seed a.rs");
+
+        let (tx, rx) = channel();
+        let watcher_result = RecommendedWatcher::new(
+            move |res| {
+                if let Ok(event) = res {
+                    let _ = tx.send(event);
+                }
+            },
+            Config::default().with_poll_interval(Duration::from_secs(2)),
+        );
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                println!("skipping: no filesystem watcher available ({e})");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&src, RecursiveMode::Recursive) {
+            println!("skipping: cannot watch a temp dir ({e})");
+            return;
+        }
+
+        // Drain whatever registering the watch produced.
+        while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
+
+        // A read is exactly what the generator does to every file under
+        // the watched tree on each run.
+        let _ = std::fs::read_to_string(&file).expect("read a.rs");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => assert!(
+                    !watch_trigger(&event).any(),
+                    "reading a watched file must not schedule a regeneration, got {:?}",
+                    event.kind
+                ),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        // A write must still get through, or the fix would have traded a
+        // loop for a dead watcher.
+        std::fs::write(&file, "pub struct A;\npub struct B;\n").expect("rewrite a.rs");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_change = false;
+        while !saw_change && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => saw_change = watch_trigger(&event).rust,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(saw_change, "a write to a watched .rs file must trigger");
     }
 }
 
