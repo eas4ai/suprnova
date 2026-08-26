@@ -280,6 +280,33 @@ pub struct InertiaConfig {
     /// this cap a page with N lazy props issues N parallel database /
     /// HTTP calls per request.
     pub max_concurrent_resolvers: usize,
+    /// Page component that renders framework error responses, or `None`
+    /// (the default) to leave every error response exactly as it is.
+    ///
+    /// Without this, a `403` from a permission middleware, a `404` for an
+    /// unrouted path, a `429`, or a `500` reaches the Inertia client as a
+    /// JSON body with no `X-Inertia` header. The client treats any such
+    /// response as non-Inertia
+    /// (`inertia-3.6.1/packages/core/src/response.ts:68,173-175`) and
+    /// shows its "All Inertia requests must receive a valid Inertia
+    /// response, however a plain JSON response was received" modal -
+    /// which is what a real user saw on a `403` in production. Naming a
+    /// component here makes those responses render that page instead,
+    /// keeping the original status code.
+    ///
+    /// The component receives three props:
+    ///
+    /// - `status` (`u16`) - the original HTTP status.
+    /// - `message` (`String`) - the error body's `message`, or the
+    ///   status's reason phrase when the body carried none. Already
+    ///   sanitized: a `5xx` message is the generic
+    ///   `"Internal Server Error"`, never the underlying error.
+    /// - `request_id` (`String`, optional) - present only when the error
+    ///   body carried one, so the page can show the same id the operator
+    ///   sees in the logs.
+    ///
+    /// Set it with [`error_page`](Self::error_page).
+    pub error_page: Option<String>,
     /// Lazy-loaded Vite manifest cache.
     ///
     /// Initialized on first call to [`Self::vite_manifest`]. The cache
@@ -510,6 +537,9 @@ impl Default for InertiaConfig {
             assets_base_url: "/assets".to_string(),
             with_all_errors: false,
             max_concurrent_resolvers: 16,
+            // `None` so an app upgrading into this release keeps the
+            // exact error bodies it had. Opting in is one builder call.
+            error_page: None,
             manifest: Arc::new(OnceLock::new()),
             url_resolver: None,
         }
@@ -745,6 +775,27 @@ impl InertiaConfig {
     /// ```
     pub fn with_all_errors(mut self, on: bool) -> Self {
         self.with_all_errors = on;
+        self
+    }
+
+    /// Render framework error responses through the named Inertia page
+    /// component instead of letting their JSON body reach the client.
+    ///
+    /// This is the opt-in for [`error_page`](Self::error_page) - read
+    /// that field's documentation for which responses are rewritten,
+    /// which are deliberately left alone, and the three props the
+    /// component receives. [`crate::Inertia::install`] registers the
+    /// middleware that does the work only when this is set, so an app
+    /// that never calls it pays nothing and behaves exactly as before.
+    ///
+    /// ```rust,no_run
+    /// use suprnova::InertiaConfig;
+    ///
+    /// let cfg = InertiaConfig::new().error_page("Error");
+    /// # let _ = cfg;
+    /// ```
+    pub fn error_page(mut self, component: impl Into<String>) -> Self {
+        self.error_page = Some(component.into());
         self
     }
 
@@ -1003,5 +1054,25 @@ mod tests {
     fn glob_empty_pattern_matches_only_empty_path() {
         assert!(glob_match("", ""));
         assert!(!glob_match("", "/x"));
+    }
+}
+
+#[cfg(test)]
+mod error_page_tests {
+    use super::*;
+
+    #[test]
+    fn error_page_is_off_until_a_component_is_named() {
+        // Backwards compatibility is the whole point of the default: an
+        // app upgrading into this release must keep the error bodies it
+        // already ships until it opts in.
+        assert_eq!(InertiaConfig::new().error_page, None);
+        assert_eq!(
+            InertiaConfig::new()
+                .error_page("Error")
+                .error_page
+                .as_deref(),
+            Some("Error"),
+        );
     }
 }
