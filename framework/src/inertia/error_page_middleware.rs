@@ -30,8 +30,6 @@
 //! `install` - registers the middleware itself, further out; see
 //! [`InertiaErrorPageMiddleware`] for where it may sit.
 
-use std::sync::{OnceLock, RwLock};
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -86,9 +84,13 @@ use super::InertiaResponse;
 /// ```
 ///
 /// `Inertia::install` sees the registration and skips its own, so the
-/// position you chose is the one that stands. Naming a *different*
-/// component in the config than the one registered here is a
-/// configuration error and `install` says so rather than picking one.
+/// position you chose is the one that stands - and so does the component
+/// you named here, since this instance is the one in the chain. The page
+/// is therefore named **once**, at your own registration, and
+/// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) becomes
+/// optional: harmless to keep (nothing else reads it), and still what
+/// makes `install` register a middleware for an app that does not place
+/// one itself.
 ///
 /// **Where it must sit.** After
 /// [`SessionMiddleware`](crate::SessionMiddleware) and `LocaleMiddleware`,
@@ -102,36 +104,6 @@ pub struct InertiaErrorPageMiddleware {
     component: String,
 }
 
-/// The component named by the **first** [`InertiaErrorPageMiddleware`]
-/// this process constructed.
-///
-/// The global middleware registry is keyed by `TypeId` and stores
-/// type-erased closures, so
-/// [`has_global_middleware`](crate::middleware::has_global_middleware) can
-/// answer "is one of these in the chain" but not "which page does it
-/// render". This slot closes that gap for the one caller that needs it:
-/// [`Inertia::install`](crate::Inertia::install) has to tell an app that
-/// registered the same page itself (skip its own registration, quietly)
-/// from an app that registered a *different* one (a configuration bug
-/// worth failing on).
-///
-/// Recorded at construction because construction is the only point the
-/// framework sees the component, and **first write wins** so an instance
-/// built later and never registered cannot overwrite the one that is
-/// actually in the chain. `install` reads it only after
-/// `has_global_middleware` has confirmed a registration exists.
-static FIRST_COMPONENT: OnceLock<RwLock<Option<String>>> = OnceLock::new();
-
-/// The component [`FIRST_COMPONENT`] recorded, or `None` if nothing has
-/// been constructed yet.
-pub(crate) fn first_constructed_component() -> Option<String> {
-    FIRST_COMPONENT
-        .get()?
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-}
-
 impl InertiaErrorPageMiddleware {
     /// Build the middleware for a page component name (e.g. `"Error"`).
     ///
@@ -141,13 +113,9 @@ impl InertiaErrorPageMiddleware {
     /// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) and
     /// let [`Inertia::install`](crate::Inertia::install) place it.
     pub fn new(component: impl Into<String>) -> Self {
-        let component = component.into();
-        let slot = FIRST_COMPONENT.get_or_init(|| RwLock::new(None));
-        let mut guard = slot.write().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            *guard = Some(component.clone());
+        Self {
+            component: component.into(),
         }
-        Self { component }
     }
 }
 

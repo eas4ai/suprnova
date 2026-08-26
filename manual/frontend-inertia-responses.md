@@ -957,8 +957,8 @@ with it.
 6. Registers `InertiaErrorPageMiddleware`, **only when** `cfg` names an
    `.error_page(...)` - turns the framework's own error responses into
    that page. See [Error pages](#error-pages). If you registered one
-   yourself, further out, yours keeps its position and this step is
-   skipped - see
+   yourself, further out, yours keeps its position and the component it
+   names, and this step is skipped - see
    [Where the page is rendered](#where-the-page-is-rendered).
 
 Order matters: the headers middleware is registered first, so it is the
@@ -1090,13 +1090,13 @@ pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
 }
 ```
 
-`Inertia::install` sees the registration and skips its own, so the
-position you chose is the one that stands - keep the `.error_page("Error")`
-on the config anyway, since it is what the rest of the framework reads.
-Naming a *different* component in the two places is a configuration bug:
-registration is idempotent per middleware type, so the registered page
-would keep the chain and the configured one would never render, and
-`install` returns an error naming both rather than picking one.
+`Inertia::install` sees the registration, skips its own, and says so at
+`debug`. The position you chose is the one that stands, and so is the
+component you named - that instance is the one in the chain. You name the
+page **once**, at your own registration, which makes `.error_page(...)` on
+the config optional here: keep it or drop it, nothing else reads it. It is
+still what makes `install` register a middleware for an app that does not
+place one itself.
 
 Two ordering rules come with placing it yourself.
 
