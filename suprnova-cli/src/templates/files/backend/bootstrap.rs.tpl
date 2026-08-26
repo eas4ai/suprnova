@@ -157,6 +157,17 @@ pub fn register_http_stack() {
     // "a plain JSON response was received" modal instead of a page.
     // `frontend/src/pages/Error.*` is the component; it receives
     // `status`, `message`, and `request_id` when the error carried one.
+    //
+    // The error page covers everything registered *after* this call, which
+    // is why CSRF sits below it: a middleware that answers without calling
+    // `next` hands its response to nothing registered inside it, so a
+    // CSRF rejection above this line would reach the client as raw JSON and
+    // show the crash modal again. An app that does need the error page
+    // further out - an outer rate limiter, an auth guard - registers
+    // `InertiaErrorPageMiddleware::new("Error")` itself, after
+    // `LocaleMiddleware` and before the middleware whose rejections it
+    // should cover; `Inertia::install` sees that registration and keeps it
+    // where you put it.
     Inertia::install(
         &InertiaConfig::new()
             .frontend(Frontend::{frontend_variant})

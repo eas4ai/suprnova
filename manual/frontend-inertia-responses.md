@@ -956,7 +956,10 @@ with it.
    flashed. See [Validation failures](#validation-failures).
 6. Registers `InertiaErrorPageMiddleware`, **only when** `cfg` names an
    `.error_page(...)` - turns the framework's own error responses into
-   that page. See [Error pages](#error-pages).
+   that page. See [Error pages](#error-pages). If you registered one
+   yourself, further out, yours keeps its position and this step is
+   skipped - see
+   [Where the page is rendered](#where-the-page-is-rendered).
 
 Order matters: the headers middleware is registered first, so it is the
 outermost and sees every response - including the `409` the version
@@ -995,6 +998,13 @@ from localization, so putting locale outside it costs nothing. The
 scaffolded `bootstrap.rs` already does this. The same reasoning applies
 to any middleware of yours whose request scope the error page needs to
 read.
+
+Everything you register **after** this call is covered by the error page;
+anything above it is not, because a middleware that answers without
+calling `next` hands its response to nothing inside it. If your
+`CsrfMiddleware`, rate limiter, or auth guard has to sit above the
+install, register the error-page middleware yourself between them - see
+[Where the page is rendered](#where-the-page-is-rendered).
 
 Skip the call only if you genuinely don't want one of these middlewares
 (rare; each of them closes a real failure mode - cache poisoning across
@@ -1043,14 +1053,70 @@ pub fn register_http_stack() {
 **The three starters ship one and set `.error_page("Error")` already** -
 a new project is covered without doing anything.
 
-One ordering rule comes with it: **register `LocaleMiddleware` before
-`Inertia::install`**, or error pages render in the app's default locale
-rather than the visitor's. The error page is built on the way out, after
-every middleware registered inside the Inertia layer has returned and
-popped whatever scope it opened. The scaffolded `bootstrap.rs` gets this
-right; if you wrote your own, check it. The same holds for any
-request-scoped middleware of your own that the error page's shared props
-read.
+### Where the page is rendered
+
+`Inertia::install` registers `InertiaErrorPageMiddleware` **innermost** of
+the Inertia layer, so it sees the response the handler and the route
+middleware actually produced. Everything you register *after* that call is
+covered too - which is why the scaffold puts `CsrfMiddleware` below it.
+
+Anything registered **above** the call is not covered. A middleware that
+answers without calling `next` hands its response to nothing registered
+inside it, so its rejection never reaches the Inertia layer at all. The
+case that bites is a lapsed session posting a form: `CsrfMiddleware`
+answers `419` with `{"message":"CSRF token mismatch."}`, and if it sits
+above `Inertia::install` the user gets the crash modal on the one flow
+they are most likely to hit. An outer rate limiter's `429` and an auth
+guard's `401` behave the same way.
+
+Register the middleware yourself when that is your shape, outside the
+middleware whose rejections it should cover:
+
+```rust
+use suprnova::{
+    global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+    InertiaErrorPageMiddleware, LocaleMiddleware, SessionConfig, SessionMiddleware,
+};
+
+pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+    global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+    global_middleware!(LocaleMiddleware::from_env()?);
+
+    // Outside CSRF, so it sees the 419 that never reaches the layer below.
+    global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+    global_middleware!(CsrfMiddleware::new());
+
+    Inertia::install(&InertiaConfig::new().error_page("Error"))
+}
+```
+
+`Inertia::install` sees the registration and skips its own, so the
+position you chose is the one that stands - keep the `.error_page("Error")`
+on the config anyway, since it is what the rest of the framework reads.
+Naming a *different* component in the two places is a configuration bug:
+registration is idempotent per middleware type, so the registered page
+would keep the chain and the configured one would never render, and
+`install` returns an error naming both rather than picking one.
+
+Two ordering rules come with placing it yourself.
+
+**After `SessionMiddleware` and [`LocaleMiddleware`](localization.md).**
+The page carries your shared props - `auth.user`, flash, the locale share -
+and it is built on the way *out*, after every middleware registered inside
+it has returned and popped whatever request scope it opened. Registered
+above those two, every error page loses the visitor's session and renders
+in the app's default locale rather than theirs. The same holds for any
+request-scoped middleware of your own whose state the error page's shared
+props read.
+
+**Before the middleware whose rejections it should cover**, and no
+further out than that. Every response that passes through it is one more
+body it has to classify, and a middleware outside it can still answer
+before it runs.
+
+If you register nothing yourself, `Inertia::install` does all of this for
+you - and the scaffolded `bootstrap.rs` already has `SessionMiddleware`
+and `LocaleMiddleware` above the call and `CsrfMiddleware` below it.
 
 ### What the page receives
 
@@ -1257,7 +1323,13 @@ response built from the installed config, off for any response that
 overrides with a `.with_config(...)` which doesn't set it. When enabled,
 the framework posts the page
 object to `<url>/render` and inlines `{ head, body }` in the HTML
-shell. On worker error or timeout the response falls back to CSR
+shell. A worker head that carries its own `<title>` - which is every page
+using Inertia's `Head` component - **replaces** the shell's
+`.default_title(...)` rather than joining it: a document with two titles
+shows the first one, and the framework's generic default would win over
+the page's real one in the tab, in search results, and in every link
+preview. A head with no title leaves the default exactly where it was. On
+worker error or timeout the response falls back to CSR
 (an empty `<div id="app">` the client hydrates) and the
 `on_ssr_error(...)` hook fires; flip `ssr_throw_on_error(true)` in CI
 to make those failures hard 500s instead.
@@ -1330,6 +1402,16 @@ Frontend-specific defaults:
 | Svelte (default) | `src/main.ts` | `.svelte` |
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
+
+Two attributes of the HTML shell are not configurable, because the right
+value is already known. `<title>` is `.default_title(...)`, unless the
+page supplied its own through [SSR](#ssr), in which case the page's wins.
+And `<html lang="...">` is the locale in effect for the request - what
+`LocaleMiddleware` detected, or the configured `APP_LOCALE` when nothing
+did. See [Localization](localization.md); a screen reader takes its voice
+from that attribute and a search engine reads it as the page's language,
+so an app serving more than one language no longer has to rewrite the
+finished document to correct it.
 
 ### The `url` field
 
