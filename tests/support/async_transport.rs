@@ -435,6 +435,15 @@ impl MembershipRegistry {
         self.delivery_validation_calls.load(Ordering::Acquire)
     }
 
+    /// Returns how many transport clock callbacks were entered.
+    #[allow(
+        dead_code,
+        reason = "the shared fixture exposes callback counts only to Task 5 tests"
+    )]
+    pub fn now_call_count(&self) -> usize {
+        self.now_calls.load(Ordering::Acquire)
+    }
+
     /// Panics from one exact future delivery-registry callback.
     #[allow(
         dead_code,

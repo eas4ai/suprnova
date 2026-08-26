@@ -534,35 +534,53 @@ impl SequenceMachine {
         })
     }
 
+    pub(crate) fn interrupt_replay(
+        &self,
+        recovery: &ReplayRecovery,
+        kind: SequenceErrorKind,
+    ) -> ReplayDispatchError {
+        self.replay_error(kind, recovery.applied)
+    }
+
     /// Requests and installs a baseline only through trusted host continuity authority.
     #[cfg(test)]
     pub(crate) fn recover_from_authoritative_refresh(
         &mut self,
         authority: &dyn AsyncContinuityAuthorityPort,
     ) -> Result<BaselineDisposition, SequenceError> {
-        self.recover_from_authoritative_refresh_covering(authority, None)
+        let baseline = authority
+            .authoritative_refresh(self.authoritative_refresh_request(None))
+            .ok_or_else(|| {
+                SequenceError::new(SequenceErrorKind::AuthoritativeRefreshUnavailable)
+            })?;
+        self.install_authoritative_baseline_covering(baseline, None)
     }
 
-    pub(crate) fn recover_from_authoritative_refresh_covering(
-        &mut self,
-        authority: &dyn AsyncContinuityAuthorityPort,
+    pub(crate) fn authoritative_refresh_request(
+        &self,
         pressure_high_water: Option<StreamPosition>,
-    ) -> Result<BaselineDisposition, SequenceError> {
+    ) -> AsyncContinuityRequest<'_> {
         let required_high_water = match (self.high_water, pressure_high_water) {
             (Some(left), Some(right)) if position_precedes(left, right) => Some(right),
             (Some(left), _) => Some(left),
             (None, right) => right,
         };
-        let baseline = authority
-            .authoritative_refresh(AsyncContinuityRequest {
-                subscription: self.context.subscription(),
-                stream: self.context.stream(),
-                current: self.current,
-                high_water: required_high_water,
-            })
-            .ok_or_else(|| {
-                SequenceError::new(SequenceErrorKind::AuthoritativeRefreshUnavailable)
-            })?;
+        AsyncContinuityRequest {
+            subscription: self.context.subscription(),
+            stream: self.context.stream(),
+            current: self.current,
+            high_water: required_high_water,
+        }
+    }
+
+    pub(crate) fn install_authoritative_baseline_covering(
+        &mut self,
+        baseline: StreamPosition,
+        pressure_high_water: Option<StreamPosition>,
+    ) -> Result<BaselineDisposition, SequenceError> {
+        let required_high_water = self
+            .authoritative_refresh_request(pressure_high_water)
+            .high_water();
         if position_precedes(baseline, self.current) {
             return Err(SequenceError::new(SequenceErrorKind::BaselineRegression));
         }

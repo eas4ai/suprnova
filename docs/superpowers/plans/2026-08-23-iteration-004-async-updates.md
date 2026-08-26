@@ -446,6 +446,12 @@
   terminal provider reads, false degradation for a redundant tail,
   pool-global recovery idleness, untracked degraded replay rejection, and
   lock-callback/classifier hazards in the shared resource queue.
+- [x] Record the final replay/refresh REDs: authoritative refresh installed a
+  baseline after its registry check even when the host callback drifted scope;
+  healthy replay reached host authority; malformed and byte-overflow replay
+  returned `Degraded`; post-prefix authorization loss discarded replay progress;
+  replay closure delayed cleanup; and MAX-tail successor arithmetic rejected
+  redundant equal/lower positions. Each failed before its focused correction.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -536,6 +542,18 @@
   classify each member exactly once. The unreachable same-epoch sequence-
   overflow branch is removed; `u64::MAX` equal/lower positions are duplicates
   and a newer epoch uses document-owned authoritative refresh.
+- [x] Close replay disposition and refresh commit invariants. Obtain a proposed
+  authoritative baseline first, then capture commit time and perform exact
+  current scope/expiry/registry validation as the final host callback before a
+  callback-free baseline install. Admit replay only for an existing exact lane
+  or pressure obligation; preflight bounded structure, payload, aggregate bytes,
+  queue capacity, and contiguous coverage before authority. Invalid evidence is
+  typed `InvalidEnvelope`, never newly degraded. Preserve applied/current/state/
+  high-water on every post-prefix exit independently of authorization,
+  cancellation, or retirement kind; every replay `Closed` begins once-only
+  transport cleanup. `Coalesced` covers redundant-tail absorption and successor
+  replacement, with only replacement creating pressure loss; compare MAX tails
+  before successor arithmetic and prove resolved delivery is non-cloneable.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
   implementation reuses the shared owner/queue/permit/cancellation primitives,

@@ -26,6 +26,7 @@ pub use authorization::{
 };
 pub(crate) use backpressure::{
     AsyncBackpressure, AsyncBufferEntry, AuthorizedAsyncBufferEntry, LeaseDispatchError,
+    ReplayPreflight,
 };
 pub use backpressure::{
     AsyncBackpressureError, AsyncCloseCode, AsyncPolicy, BufferDisposition, MAX_ASYNC_BUFFER_BYTES,

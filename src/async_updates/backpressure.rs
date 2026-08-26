@@ -68,11 +68,17 @@ impl AsyncCloseCode {
 pub enum BufferDisposition {
     /// The message owns one new queue position.
     Queued,
-    /// A contiguous replaceable tail message was superseded in place.
+    /// Exact replaceable work was absorbed by the current queue tail.
     Coalesced,
     /// Continuity is no longer provable and authoritative recovery is required.
     Degraded,
     /// The delivery scope is permanently closed with a safe typed reason.
+    Closed(AsyncCloseCode),
+}
+
+pub(crate) enum ReplayPreflight {
+    Ready,
+    Invalid,
     Closed(AsyncCloseCode),
 }
 
@@ -511,6 +517,8 @@ impl Drop for PulledCandidateLossGuard {
 pub(crate) enum LeaseDispatchError {
     Retired,
     AuthorizationLost,
+    ReplayRetired(ReplayDispatchError),
+    ReplayAuthorizationLost(ReplayDispatchError),
     Sequence(SequenceError),
     Replay(ReplayDispatchError),
 }
@@ -652,7 +660,10 @@ impl AsyncDeliveryLease {
                     self.high_water,
                 );
                 self.resolved = true;
-                return Err(LeaseDispatchError::Retired);
+                return Err(LeaseDispatchError::ReplayRetired(
+                    sequence
+                        .interrupt_replay(&recovery, super::SequenceErrorKind::MembershipExpired),
+                ));
             }
             let now = match validate_current(&mut entry.authorized) {
                 Ok(now) => now,
@@ -663,7 +674,21 @@ impl AsyncDeliveryLease {
                         self.high_water,
                     );
                     self.resolved = true;
-                    return Err(error);
+                    return Err(match error {
+                        LeaseDispatchError::Retired => {
+                            LeaseDispatchError::ReplayRetired(sequence.interrupt_replay(
+                                &recovery,
+                                super::SequenceErrorKind::MembershipExpired,
+                            ))
+                        }
+                        LeaseDispatchError::AuthorizationLost => {
+                            LeaseDispatchError::ReplayAuthorizationLost(sequence.interrupt_replay(
+                                &recovery,
+                                super::SequenceErrorKind::MembershipExpired,
+                            ))
+                        }
+                        other => other,
+                    });
                 }
             };
             let delivery = entry
@@ -859,9 +884,9 @@ impl AsyncBackpressure {
 
     /// Atomically preflights and admits one complete replay transcript.
     ///
-    /// Empty, over-count, or aggregate-overflow transcripts degrade without
-    /// partially changing the queue. Replay entries never coalesce because
-    /// Task 3 requires their exact ordered sequence evidence.
+    /// Replay entries never coalesce because Task 3 requires their exact
+    /// ordered sequence evidence. Structural/resource rejection is typed as an
+    /// invalid replay rather than manufacturing a new pressure obligation.
     pub(crate) fn offer_replay(
         &mut self,
         transcript: Vec<AuthorizedAsyncBufferEntry>,
@@ -872,8 +897,11 @@ impl AsyncBackpressure {
         if self.owner.cancellation().is_canceled() {
             return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
         }
-        if let Some(disposition) = self.preflight_replay_count(transcript.len()) {
-            return Ok(disposition);
+        if transcript.is_empty()
+            || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES
+            || transcript.len() > self.policy.max_replay_events.get()
+        {
+            return Err(self.invalid_replay());
         }
         if transcript.windows(2).any(|pair| {
             let [previous, next] = pair else {
@@ -888,7 +916,7 @@ impl AsyncBackpressure {
                     .checked_add(1)
                     != Some(next.envelope().position().sequence().get())
         }) {
-            return Ok(self.finish(BufferDisposition::Degraded));
+            return Err(self.invalid_replay());
         }
         let bounds = self.owner.queue().bounds();
 
@@ -907,26 +935,22 @@ impl AsyncBackpressure {
                 match encode_async_envelope(authorized.envelope(), &AsyncCodecLimits::v1()) {
                     Ok(encoded) => encoded,
                     Err(_) => {
-                        return Ok(
-                            self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope))
-                        );
+                        return Err(self.invalid_replay());
                     }
                 };
             let payload_bytes = match canonical_async_payload_len(authorized.envelope()) {
                 Ok(payload_bytes) => payload_bytes,
                 Err(_) => {
-                    return Ok(
-                        self.finish(BufferDisposition::Closed(AsyncCloseCode::InvalidEnvelope))
-                    );
+                    return Err(self.invalid_replay());
                 }
             };
             if payload_bytes > self.policy.max_payload_bytes.get() {
-                return Ok(self.finish(BufferDisposition::Closed(AsyncCloseCode::PayloadTooLarge)));
+                return Err(self.invalid_replay());
             }
             total_bytes = match total_bytes.checked_add(encoded.len()) {
                 Some(total) => total,
                 None => {
-                    return Ok(self.finish(BufferDisposition::Degraded));
+                    return Err(self.invalid_replay());
                 }
             };
             prepared.push((
@@ -938,7 +962,7 @@ impl AsyncBackpressure {
             .max_bytes()
             .saturating_sub(self.owner.queue().retained_bytes());
         if total_bytes > available_bytes {
-            return Ok(self.finish(BufferDisposition::Degraded));
+            return Err(self.invalid_replay());
         }
 
         match self.owner.queue().try_push_batch(prepared) {
@@ -951,20 +975,26 @@ impl AsyncBackpressure {
                 | ResourceError::BytesExceeded
                 | ResourceError::PermitsExceeded,
             ) => {
-                return Ok(self.finish(BufferDisposition::Degraded));
+                return Err(self.invalid_replay());
             }
         }
         Ok(self.finish(BufferDisposition::Queued))
     }
 
-    /// Rejects impossible replay sizes before allocation or host validation.
-    pub(crate) fn preflight_replay_count(&mut self, count: usize) -> Option<BufferDisposition> {
+    /// Validates bounded replay resource semantics before host callbacks.
+    pub(crate) fn preflight_replay(&mut self, transcript: &[AsyncEnvelope]) -> ReplayPreflight {
         if let Some(code) = self.closed {
-            return Some(self.finish(BufferDisposition::Closed(code)));
+            return ReplayPreflight::Closed(code);
         }
         if self.owner.cancellation().is_canceled() {
-            return Some(self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)));
+            return ReplayPreflight::Closed(
+                match self.finish(BufferDisposition::Closed(AsyncCloseCode::Retired)) {
+                    BufferDisposition::Closed(code) => code,
+                    _ => unreachable!("retired replay preflight remains closed"),
+                },
+            );
         }
+        let count = transcript.len();
         let available_items = self
             .owner
             .queue()
@@ -976,9 +1006,41 @@ impl AsyncBackpressure {
             || count > self.policy.max_replay_events.get()
             || count > available_items
         {
-            return Some(self.finish(BufferDisposition::Degraded));
+            return ReplayPreflight::Invalid;
         }
-        None
+        let available_bytes = self
+            .owner
+            .queue()
+            .bounds()
+            .max_bytes()
+            .saturating_sub(self.owner.queue().retained_bytes());
+        let mut total_bytes = 0usize;
+        for envelope in transcript {
+            let Ok(encoded) = encode_async_envelope(envelope, &AsyncCodecLimits::v1()) else {
+                return ReplayPreflight::Invalid;
+            };
+            let Ok(payload_bytes) = canonical_async_payload_len(envelope) else {
+                return ReplayPreflight::Invalid;
+            };
+            if payload_bytes > self.policy.max_payload_bytes.get() {
+                return ReplayPreflight::Invalid;
+            }
+            let Some(next_total) = total_bytes.checked_add(encoded.len()) else {
+                return ReplayPreflight::Invalid;
+            };
+            total_bytes = next_total;
+            if total_bytes > available_bytes {
+                return ReplayPreflight::Invalid;
+            }
+        }
+        ReplayPreflight::Ready
+    }
+
+    fn invalid_replay(&mut self) -> AsyncBackpressureError {
+        self.telemetry.increment(AsyncTelemetryCounter::Rejected);
+        AsyncBackpressureError {
+            close_code: AsyncCloseCode::InvalidEnvelope,
+        }
     }
 
     /// Returns the exact number of retained queue entries.
@@ -1262,6 +1324,9 @@ fn classify_tail(
     if tail_key.as_ref() != Some(key) {
         return TailAdmission::Append;
     }
+    if position.sequence() <= tail.authorized.envelope().position().sequence() {
+        return TailAdmission::Retain;
+    }
     let Some(expected) = tail
         .authorized
         .envelope()
@@ -1272,9 +1337,7 @@ fn classify_tail(
     else {
         return TailAdmission::Reject;
     };
-    if position.sequence() <= tail.authorized.envelope().position().sequence() {
-        TailAdmission::Retain
-    } else if position.sequence().get() == expected {
+    if position.sequence().get() == expected {
         TailAdmission::Replace
     } else {
         TailAdmission::Reject

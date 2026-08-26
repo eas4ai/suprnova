@@ -550,9 +550,11 @@ _Avoid_: per-island backpressure queue, caller-supplied sequence machine, second
 
 **Buffer disposition**:
 The closed outcome of one server delivery admission: `Queued`, `Coalesced`,
-`Degraded`, or `Closed(code)`. Coalesced means bounded replacement occurred,
-not that sequence continuity remains current; degraded requires replay or an
-authoritative refresh before currentness can be claimed.
+`Degraded`, or `Closed(code)`. Coalesced means exact replaceable work was
+absorbed by the current tail: an equal or older redundant request retains that
+tail without creating a continuity loss, while exact-successor replacement
+marks the affected membership degraded. `Degraded` always names an existing
+exact recovery obligation rather than malformed replay input.
 _Avoid_: success boolean, best-effort drop, currentness proof, transport status
 
 **Credential rotation uncertainty**:

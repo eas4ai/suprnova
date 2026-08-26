@@ -73,6 +73,11 @@ struct DriftAfterFirstDispatcher {
 
 struct StaticContinuityAuthority(suprnova_live::async_updates::StreamPosition);
 
+struct DriftingContinuityAuthority {
+    registry: Arc<support::MembershipRegistry>,
+    baseline: suprnova_live::async_updates::StreamPosition,
+}
+
 struct BlockingDispatcher {
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
@@ -84,6 +89,16 @@ impl AsyncContinuityAuthorityPort for StaticContinuityAuthority {
         _request: AsyncContinuityRequest<'_>,
     ) -> Option<suprnova_live::async_updates::StreamPosition> {
         Some(self.0)
+    }
+}
+
+impl AsyncContinuityAuthorityPort for DriftingContinuityAuthority {
+    fn authoritative_refresh(
+        &self,
+        _request: AsyncContinuityRequest<'_>,
+    ) -> Option<suprnova_live::async_updates::StreamPosition> {
+        self.registry.change_document_scope();
+        Some(self.baseline)
     }
 }
 
@@ -266,6 +281,28 @@ async fn bounded_document_with_script(
     BoundedDocumentTransportSession,
     suprnova_live::async_updates::AuthorizedTransportSubscription,
 ) {
+    bounded_document_with_script_and_config(
+        fixture,
+        subscription_marker,
+        script,
+        ResourceBounds::new(64, 256 * 1024).expect("document bounds"),
+        4,
+        policy(),
+    )
+    .await
+}
+
+async fn bounded_document_with_script_and_config(
+    fixture: &TransportFixture,
+    subscription_marker: u8,
+    script: Vec<ScriptItem>,
+    bounds: ResourceBounds,
+    permits: usize,
+    async_policy: AsyncPolicy,
+) -> (
+    BoundedDocumentTransportSession,
+    suprnova_live::async_updates::AuthorizedTransportSubscription,
+) {
     let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
     let mut document = fixture.document(
         origin.clone(),
@@ -284,9 +321,9 @@ async fn bounded_document_with_script(
     document.commit_add(ready).expect("commit add");
     let bounded = BoundedDocumentTransportSession::new(
         document,
-        ResourceBounds::new(64, 256 * 1024).expect("document bounds"),
-        PermitPool::new(4).expect("shared permits"),
-        policy(),
+        bounds,
+        PermitPool::new(permits).expect("shared permits"),
+        async_policy,
     )
     .expect("bounded document");
     (bounded, request)
@@ -1658,6 +1695,38 @@ async fn redundant_replaceable_tail_does_not_create_a_false_pressure_loss() {
 }
 
 #[tokio::test]
+async fn maximum_replaceable_tail_absorbs_equal_and_lower_positions_without_degradation() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x77),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, _) = bounded_document_with_script(
+        &fixture,
+        0x77,
+        vec![
+            ScriptItem::RawEnvelope(refresh(provisional.context(), u64::MAX)),
+            ScriptItem::RawEnvelope(refresh(provisional.context(), u64::MAX)),
+            ScriptItem::RawEnvelope(refresh(provisional.context(), u64::MAX - 1)),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            bounded.pump_next(fixture.registry.as_ref()).await,
+            Ok(Some(BufferDisposition::Coalesced))
+        );
+    }
+    assert_eq!(bounded.retained_events(), 1);
+    assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
 async fn document_owned_authoritative_refresh_recovers_an_epoch_change() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let provisional = fixture.request(
@@ -1706,6 +1775,59 @@ async fn document_owned_authoritative_refresh_recovers_an_epoch_change() {
         Some(SequenceState::Current)
     );
     assert!(!bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn authoritative_refresh_revalidates_after_the_host_proposes_a_baseline() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x79),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let (mut bounded, authorization) = bounded_document_with_script(
+        &fixture,
+        0x79,
+        vec![ScriptItem::RawEnvelope(heartbeat_at(
+            provisional.context(),
+            8,
+            1,
+        ))],
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("epoch-change admission");
+    bounded
+        .dispatch_next(
+            fixture.registry.as_ref(),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("epoch-change classification");
+    let causes_before = bounded.unresolved_pressure_cause_count();
+    assert!(causes_before > 0);
+
+    let error = bounded
+        .recover_from_authoritative_refresh(
+            &authorization,
+            fixture.registry.as_ref(),
+            &DriftingContinuityAuthority {
+                registry: fixture.registry.clone(),
+                baseline: position(8, 1),
+            },
+        )
+        .expect_err("authority drift during baseline proposal must fail final validation");
+    assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
+    assert_eq!(
+        bounded.sequence_position(&authorization),
+        Some(position(7, 0))
+    );
+    assert_eq!(
+        bounded.sequence_state(&authorization),
+        Some(SequenceState::Degraded)
+    );
+    assert_eq!(bounded.unresolved_pressure_cause_count(), causes_before);
+    assert!(bounded.is_degraded());
 }
 
 #[tokio::test]
@@ -1939,6 +2061,83 @@ async fn closed_pressure_stops_provider_and_authority_reads_and_starts_cleanup()
 }
 
 #[tokio::test]
+async fn replay_closed_disposition_starts_once_only_cleanup_immediately() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let origin = VerifiedOrigin::parse("https://example.test").expect("origin");
+    let request = fixture.request(subscription(0x75), origin.clone());
+    let context = request.context().clone();
+    let source = ScriptedSource::new(vec![vec![
+        ScriptItem::RawEnvelope(heartbeat_at(&context, 7, 2)),
+        ScriptItem::RawEnvelope(heartbeat_at(&context, 7, 3)),
+    ]]);
+    let mut document = fixture.document(origin, DocumentTransportKind::ServerSentEvents, 0x75, 1);
+    let ready = document
+        .prepare_establish(
+            document
+                .prepare_add(request.clone())
+                .expect("prepare")
+                .authorize()
+                .await
+                .expect("authorize"),
+        )
+        .expect("establishing")
+        .establish(&source)
+        .await
+        .expect("source");
+    document.commit_add(ready).expect("commit");
+    let mut bounded = BoundedDocumentTransportSession::new(
+        document,
+        ResourceBounds::new(8, 256 * 1024).expect("bounds"),
+        PermitPool::new(1).expect("permit"),
+        AsyncPolicy {
+            max_fanout: NonZeroUsize::new(1).expect("one recipient"),
+            ..policy()
+        },
+    )
+    .expect("bounded document");
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    bounded
+        .dispatch_next(
+            fixture.registry.as_ref(),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("gap classification");
+    fixture.registry.set_resolved_event_fanout(2);
+
+    assert_eq!(
+        bounded
+            .admit_replay(
+                &request,
+                vec![
+                    browser_event_for_target(&context, 1, EventTarget::Document),
+                    browser_event_for_target(&context, 2, EventTarget::Document),
+                ],
+                fixture.registry.as_ref(),
+            )
+            .expect("fanout pressure closes replay"),
+        BufferDisposition::Closed(AsyncCloseCode::FanoutExceeded)
+    );
+    let validation_calls = fixture.registry.delivery_validation_call_count();
+    assert_eq!(source.next_poll_count(), 1);
+    assert_eq!(source.close_count(), 1);
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Closed(
+            AsyncCloseCode::FanoutExceeded
+        )))
+    );
+    assert_eq!(source.next_poll_count(), 1);
+    assert_eq!(source.close_count(), 1);
+    assert_eq!(
+        fixture.registry.delivery_validation_call_count(),
+        validation_calls
+    );
+}
+
+#[tokio::test]
 async fn aggregate_retirement_cancels_and_drains_exactly_once() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) =
@@ -2148,29 +2347,37 @@ async fn replay_rejects_middle_or_final_complete_without_detaching_later_deliver
 }
 
 #[tokio::test]
-async fn replay_admission_uses_one_atomic_current_authority_snapshot() {
+async fn healthy_lane_rejects_every_replay_before_host_authority_work() {
     let fixture = TransportFixture::new(position(7, 0)).await;
     let (mut bounded, authorization) = bounded_document(&fixture, 0x93, vec![]).await;
-
-    assert_eq!(
-        bounded
-            .admit_replay(
-                &authorization,
-                vec![
-                    heartbeat_at(authorization.context(), 7, 1),
-                    heartbeat_at(authorization.context(), 7, 2),
-                ],
-                fixture.registry.as_ref(),
-            )
-            .expect("atomic replay admission"),
-        BufferDisposition::Queued
-    );
+    let validation_calls = fixture.registry.delivery_validation_call_count();
+    let now_calls = fixture.registry.now_call_count();
+    for transcript in [
+        vec![
+            heartbeat_at(authorization.context(), 7, 1),
+            heartbeat_at(authorization.context(), 7, 2),
+        ],
+        vec![
+            heartbeat_at(authorization.context(), 7, 1),
+            heartbeat_at(authorization.context(), 7, 3),
+        ],
+    ] {
+        assert_eq!(
+            bounded
+                .admit_replay(&authorization, transcript, fixture.registry.as_ref())
+                .expect_err("a healthy lane has no replay recovery obligation")
+                .kind(),
+            AsyncTransportErrorKind::InvalidEnvelope
+        );
+    }
     assert_eq!(
         fixture.registry.delivery_validation_call_count(),
-        1,
-        "one registry callback must seal the complete transcript"
+        validation_calls
     );
-    assert_eq!(bounded.retained_events(), 2);
+    assert_eq!(fixture.registry.now_call_count(), now_calls);
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.retained_bytes(), 0);
+    assert!(!bounded.is_degraded());
 }
 
 #[tokio::test]
@@ -2218,6 +2425,13 @@ async fn replay_dispatch_revalidates_each_entry_immediately_before_its_dispatch(
         .dispatch_next(fixture.registry.as_ref(), &mut dispatcher)
         .expect_err("authority drift after the first item must stop the remaining transcript");
     assert_eq!(error.kind(), AsyncDeliveryErrorKind::AuthorizationLost);
+    let replay = error
+        .replay_error()
+        .expect("authorization loss must retain the committed replay prefix");
+    assert_eq!(replay.applied(), 1);
+    assert_eq!(replay.current(), position(7, 1));
+    assert_eq!(replay.state(), SequenceState::Degraded);
+    assert_eq!(replay.high_water(), Some(position(7, 3)));
     assert_eq!(dispatcher.applied, 1);
     assert_eq!(
         bounded.sequence_position(&authorization),
@@ -2228,6 +2442,70 @@ async fn replay_dispatch_revalidates_each_entry_immediately_before_its_dispatch(
         bounded.sequence_state(&authorization),
         Some(SequenceState::Degraded)
     );
+    assert!(bounded.is_degraded());
+}
+
+#[tokio::test]
+async fn degraded_lane_rejects_invalid_replay_before_host_authority_work() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    let provisional = fixture.request(
+        subscription(0x9e),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let gap = heartbeat_at(provisional.context(), 7, 3);
+    let encoded_gap = encode_async_envelope(&gap, &AsyncCodecLimits::v1())
+        .expect("bounded gap envelope")
+        .len();
+    let (mut bounded, authorization) = bounded_document_with_script_and_config(
+        &fixture,
+        0x9e,
+        vec![ScriptItem::RawEnvelope(gap)],
+        ResourceBounds::new(8, encoded_gap * 2).expect("two-envelope byte bound"),
+        1,
+        policy(),
+    )
+    .await;
+    bounded
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    bounded
+        .dispatch_next(
+            fixture.registry.as_ref(),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("gap classification");
+    let validation_calls = fixture.registry.delivery_validation_call_count();
+    let now_calls = fixture.registry.now_call_count();
+    let causes = bounded.unresolved_pressure_cause_count();
+
+    for transcript in [
+        vec![
+            heartbeat_at(authorization.context(), 7, 1),
+            heartbeat_at(authorization.context(), 7, 3),
+        ],
+        vec![
+            heartbeat_at(authorization.context(), 7, 1),
+            heartbeat_at(authorization.context(), 7, 2),
+            heartbeat_at(authorization.context(), 7, 3),
+        ],
+    ] {
+        assert_eq!(
+            bounded
+                .admit_replay(&authorization, transcript, fixture.registry.as_ref())
+                .expect_err("invalid replay is not a pressure disposition")
+                .kind(),
+            AsyncTransportErrorKind::InvalidEnvelope
+        );
+    }
+    assert_eq!(
+        fixture.registry.delivery_validation_call_count(),
+        validation_calls
+    );
+    assert_eq!(fixture.registry.now_call_count(), now_calls);
+    assert_eq!(bounded.retained_events(), 0);
+    assert_eq!(bounded.retained_bytes(), 0);
+    assert_eq!(bounded.unresolved_pressure_cause_count(), causes);
     assert!(bounded.is_degraded());
 }
 
@@ -3010,10 +3288,11 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
         + encode_async_envelope(&second, &AsyncCodecLimits::v1())
             .expect("second wire")
             .len();
-    let (mut exact, authorization) = bounded_document_with_config(
+    let gap = heartbeat_at(provisional.context(), 7, 2);
+    let (mut exact, authorization) = bounded_document_with_script_and_config(
         &fixture,
         0x84,
-        vec![],
+        vec![ScriptItem::RawEnvelope(gap)],
         ResourceBounds::new(2, aggregate).expect("exact replay bytes"),
         1,
         AsyncPolicy {
@@ -3022,6 +3301,16 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
         },
     )
     .await;
+    exact
+        .pump_next(fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    exact
+        .dispatch_next(
+            fixture.registry.as_ref(),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("gap classification");
     assert_eq!(
         exact
             .admit_replay(
@@ -3048,10 +3337,11 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
         + encode_async_envelope(&second, &AsyncCodecLimits::v1())
             .expect("second wire")
             .len();
-    let (mut first_over, authorization) = bounded_document_with_config(
+    let gap = heartbeat_at(provisional.context(), 7, 2);
+    let (mut first_over, authorization) = bounded_document_with_script_and_config(
         &first_over_fixture,
         0x85,
-        vec![],
+        vec![ScriptItem::RawEnvelope(gap)],
         ResourceBounds::new(2, aggregate - 1).expect("first-over replay bytes"),
         1,
         AsyncPolicy {
@@ -3060,6 +3350,16 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
         },
     )
     .await;
+    first_over
+        .pump_next(first_over_fixture.registry.as_ref())
+        .await
+        .expect("gap admission");
+    first_over
+        .dispatch_next(
+            first_over_fixture.registry.as_ref(),
+            &mut RecordingDispatcher::default(),
+        )
+        .expect("gap classification");
     assert_eq!(
         first_over
             .admit_replay(
@@ -3067,8 +3367,9 @@ async fn replay_aggregate_byte_boundary_is_exact_and_first_over_is_atomic() {
                 vec![first, second],
                 first_over_fixture.registry.as_ref(),
             )
-            .expect("first-over replay classification"),
-        BufferDisposition::Degraded
+            .expect_err("first-over replay is typed invalid input")
+            .kind(),
+        AsyncTransportErrorKind::InvalidEnvelope
     );
     assert_eq!(first_over.retained_events(), 0);
     assert_eq!(first_over.retained_bytes(), 0);

@@ -220,13 +220,19 @@ Acceptance criteria:
   advances only after dispatch succeeds; dispatch rejection or failure retains
   the prior position so a fresh retry is not misclassified as a duplicate.
 - Replay validates the entire bounded same-scope transcript before any dispatch
-  or mutation through one atomic current-membership registry snapshot. It then
-  final-validates and immediately dispatches each entry in order, with no host
-  callback between that entry's accepted authority and registered dispatch.
-  Partial failure reports its applied prefix, retains degraded state and
-  observed high-water, and resumes only from freshly admitted remaining suffix
-  evidence. Replay carries presentation data only; `Complete` is accepted only
-  from the live provider path because lifecycle detachment is not replayable.
+  or mutation only when the exact lane already has a sequence or pressure
+  recovery obligation. A healthy lane rejects every transcript before host
+  clock or registry work. Count, payload, aggregate bytes, queue capacity, exact
+  scope, and contiguous coverage preflight before one atomic current-membership
+  registry snapshot; invalid evidence is a typed input rejection and never a
+  new `Degraded` pressure outcome. Delivery then final-validates and immediately
+  dispatches each entry in order, with no host callback between that entry's
+  accepted authority and registered dispatch. Partial failure, authorization
+  loss, cancellation, or retirement reports its applied prefix, current
+  position, state, and high-water independently of the outer failure kind,
+  retains degraded state, and resumes only from freshly admitted remaining
+  suffix evidence. Replay carries presentation data only; `Complete` is accepted
+  only from the live provider path because lifecycle detachment is not replayable.
 - An invalidation or authoritative change enters the normal island scheduler and
   obtains HTML and snapshot state through an ordinary verified refresh/action
   response.
@@ -319,10 +325,13 @@ Acceptance criteria:
   unresolved cause and exposes the truthful committed replay prefix.
 - A freshly authorized document-owned authoritative refresh may recover the
   exact private sequence lane and only that membership's covered pressure
-  causes. The baseline cannot regress and must cover both sequence and pressure
-  high-water. Under the `u64` sequence vocabulary there is no same-epoch value
-  after `u64::MAX`: equal and lower values are duplicates, while a greater
-  position necessarily enters a new epoch and requires authoritative recovery.
+  causes. The host proposes the baseline first; commit time and exact current
+  scope/expiry/registry validation follow as the final host callback, after
+  which callback-free validation and installation occur. The baseline cannot
+  regress and must cover both sequence and pressure high-water. Under the `u64`
+  sequence vocabulary there is no same-epoch value after `u64::MAX`: equal and
+  lower values are duplicates, while a greater position necessarily enters a
+  new epoch and requires authoritative recovery.
 - Coalescing may replace only the newest exact contiguous refresh for the same
   signed-descriptor binding, document authorization scope, component memo,
   subscription, stream, and epoch, or presentation signal with that same scope
@@ -336,7 +345,8 @@ Acceptance criteria:
   coalesce; pressure never evicts one while claiming continuity.
 - Admission returns the closed `Queued`, `Coalesced`, `Degraded`, or
   `Closed(code)` disposition. Terminal policy violations cancel and drain the
-  owning delivery scope once; later pumps perform no provider or authority read.
+  owning delivery scope once, including closure produced during replay
+  admission; later pumps perform no provider or authority read.
   A provider item extracted before an authority callback remains under an RAII
   loss guard, so panic or cancellation before queue ownership records truthful
   pressure loss and releases resources. Telemetry uses only the finite queued,
@@ -404,6 +414,19 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-25 -- Closed the final Task 5 replay and refresh invariants.
+  Authoritative refresh now obtains a trusted proposed baseline before commit
+  time and its final current-registry callback, then performs only callback-free
+  validation/install and exact pressure reconciliation. Replay is accepted only
+  for an existing exact recovery obligation; healthy lanes and malformed,
+  noncontiguous, count, payload, or byte/capacity failures reject before host
+  callbacks without manufacturing degradation. Post-prefix authorization,
+  cancellation, and retirement retain truthful replay progress independently of
+  the outer error, and replay closure starts once-only transport cleanup.
+  `Coalesced` now means exact work was absorbed by the tail: redundant equal or
+  lower work retains it, while exact-successor replacement degrades. MAX-tail
+  comparison occurs before successor arithmetic, and resolved delivery remains
+  both non-forgeable and non-cloneable.
 - 2026-08-25 -- Closed the bounded-delivery authority surface after independent
   review. Raw Task 3 admission and sequence mutation remain private to the
   document owner; replay uses one atomic current-membership snapshot, rejects

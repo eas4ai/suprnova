@@ -24,9 +24,9 @@ use super::{
     AsyncPayload, AsyncPolicy, AsyncTelemetrySnapshot, AuthorizationMemo,
     AuthorizedAsyncBufferEntry, AuthorizedSubscription, BaselineDisposition, BoundedEventContracts,
     BoundedTopics, BufferDisposition, LeaseDispatchError, ReplayDispatchError,
-    ReplayDispatchOutcome, SequenceDisposition, SequenceErrorKind, SequenceMachine, SequenceState,
-    StreamName, StreamPosition, SubscriptionBinding, SubscriptionId, SubscriptionMode,
-    SubscriptionModes, VerifiedSubscriptionDescriptor,
+    ReplayDispatchOutcome, ReplayPreflight, SequenceDisposition, SequenceErrorKind,
+    SequenceMachine, SequenceState, StreamName, StreamPosition, SubscriptionBinding,
+    SubscriptionId, SubscriptionMode, SubscriptionModes, VerifiedSubscriptionDescriptor,
 };
 
 const MIN_DOCUMENT_HANDLE_BYTES: usize = 16;
@@ -222,13 +222,20 @@ impl AsyncDeliveryError {
         }
     }
 
+    const fn with_replay(kind: AsyncDeliveryErrorKind, replay: ReplayDispatchError) -> Self {
+        Self {
+            kind,
+            replay: Some(replay),
+        }
+    }
+
     /// Returns the stable closed failure category.
     #[must_use]
     pub const fn kind(self) -> AsyncDeliveryErrorKind {
         self.kind
     }
 
-    /// Returns the truthful committed prefix when replay dispatch partially failed.
+    /// Returns truthful replay progress for any post-prepare failure kind.
     #[must_use]
     pub const fn replay_error(self) -> Option<ReplayDispatchError> {
         self.replay
@@ -1832,6 +1839,16 @@ impl fmt::Debug for DocumentTransportSession {
 ///     };
 /// }
 /// ```
+///
+/// The one-use resolved proof cannot be duplicated:
+///
+/// ```compile_fail
+/// use suprnova_live::async_updates::ResolvedAsyncDelivery;
+///
+/// fn duplicate(delivery: ResolvedAsyncDelivery<'_>) {
+///     let _ = delivery.clone();
+/// }
+/// ```
 pub struct BoundedDocumentTransportSession {
     transport: DocumentTransportSession,
     pressure: AsyncBackpressure,
@@ -2038,28 +2055,41 @@ impl BoundedDocumentTransportSession {
         transcript: Vec<AsyncEnvelope>,
         registry: &dyn AsyncMembershipRegistryPort,
     ) -> Result<BufferDisposition, AsyncTransportError> {
+        if let Some(code) = self.pressure.closed_code() {
+            self.transport.begin_bounded_close();
+            return Ok(BufferDisposition::Closed(code));
+        }
         let replay_membership = PressureMembership::new(
             authorization.subscription().clone(),
             authorization.binding().clone(),
             authorization.document_scope().clone(),
             authorization.verified.claims().authorization_memo().clone(),
         );
-        let recovery_pending = self
+        let lane_index = self
             .sequence_lanes
             .iter()
-            .find(|lane| lane.matches(authorization))
-            .is_some_and(|lane| lane.machine.state() == SequenceState::Degraded)
-            || self
-                .pressure
-                .required_high_water(&replay_membership)
-                .is_some();
-        if let Some(disposition) = self.pressure.preflight_replay_count(transcript.len()) {
-            if disposition == BufferDisposition::Degraded && !recovery_pending {
+            .position(|lane| lane.matches(authorization))
+            .ok_or_else(|| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        let pressure_high_water = self.pressure.required_high_water(&replay_membership);
+        let recovery_pending = self.sequence_lanes[lane_index].machine.state()
+            == SequenceState::Degraded
+            || pressure_high_water.is_some();
+        if !recovery_pending {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::InvalidEnvelope,
+            ));
+        }
+        match self.pressure.preflight_replay(&transcript) {
+            ReplayPreflight::Ready => {}
+            ReplayPreflight::Invalid => {
                 return Err(AsyncTransportError::new(
                     AsyncTransportErrorKind::InvalidEnvelope,
                 ));
             }
-            return Ok(disposition);
+            ReplayPreflight::Closed(code) => {
+                self.transport.begin_bounded_close();
+                return Ok(BufferDisposition::Closed(code));
+            }
         }
         if transcript
             .iter()
@@ -2069,6 +2099,13 @@ impl BoundedDocumentTransportSession {
                 AsyncTransportErrorKind::InvalidEnvelope,
             ));
         }
+        let replay_envelopes = transcript.iter().collect::<Vec<_>>();
+        let pressure_recovery = pressure_high_water
+            .filter(|_| self.sequence_lanes[lane_index].machine.state() == SequenceState::Current);
+        self.sequence_lanes[lane_index]
+            .machine
+            .prepare_replay(&replay_envelopes, pressure_recovery)
+            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
         let commit_now = authorization.authority.now();
         let sealed =
             self.transport
@@ -2081,9 +2118,14 @@ impl BoundedDocumentTransportSession {
                 AsyncTransportErrorKind::AuthorizationLost,
             ));
         }
-        self.pressure
+        let disposition = self
+            .pressure
             .offer_replay(sealed)
-            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))
+            .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))?;
+        if matches!(disposition, BufferDisposition::Closed(_)) {
+            self.transport.begin_bounded_close();
+        }
+        Ok(disposition)
     }
 
     /// Dispatches one leased queue head through Task 3 without exposing the lease.
@@ -2212,6 +2254,13 @@ impl BoundedDocumentTransportSession {
             Err(LeaseDispatchError::AuthorizationLost) => Err(AsyncDeliveryError::new(
                 AsyncDeliveryErrorKind::AuthorizationLost,
             )),
+            Err(LeaseDispatchError::ReplayRetired(replay)) => Err(AsyncDeliveryError::with_replay(
+                AsyncDeliveryErrorKind::Retired,
+                replay,
+            )),
+            Err(LeaseDispatchError::ReplayAuthorizationLost(replay)) => Err(
+                AsyncDeliveryError::with_replay(AsyncDeliveryErrorKind::AuthorizationLost, replay),
+            ),
             Err(LeaseDispatchError::Sequence(error)) => Err(AsyncDeliveryError::new(
                 AsyncDeliveryErrorKind::Sequence(error.kind()),
             )),
@@ -2300,16 +2349,6 @@ impl BoundedDocumentTransportSession {
                 AsyncDeliveryErrorKind::AuthorizationLost,
             ));
         }
-        let now = authorization.authority.now();
-        authorization
-            .context()
-            .validate_current_scope(
-                authorization.binding(),
-                authorization.document_scope(),
-                registry,
-                now,
-            )
-            .map_err(|_| AsyncDeliveryError::new(AsyncDeliveryErrorKind::AuthorizationLost))?;
         let pressure_membership = PressureMembership::new(
             authorization.subscription().clone(),
             authorization.binding().clone(),
@@ -2317,14 +2356,36 @@ impl BoundedDocumentTransportSession {
             authorization.verified.claims().authorization_memo().clone(),
         );
         let pressure_high_water = self.pressure.required_high_water(&pressure_membership);
-        let lane = self
+        let lane_index = self
             .sequence_lanes
-            .iter_mut()
-            .find(|lane| lane.matches(authorization))
+            .iter()
+            .position(|lane| lane.matches(authorization))
             .ok_or_else(|| AsyncDeliveryError::new(AsyncDeliveryErrorKind::AuthorizationLost))?;
+        let baseline = authority
+            .authoritative_refresh(
+                self.sequence_lanes[lane_index]
+                    .machine
+                    .authoritative_refresh_request(pressure_high_water),
+            )
+            .ok_or_else(|| {
+                AsyncDeliveryError::new(AsyncDeliveryErrorKind::Sequence(
+                    SequenceErrorKind::AuthoritativeRefreshUnavailable,
+                ))
+            })?;
+        let commit_now = authorization.authority.now();
+        authorization
+            .context()
+            .validate_current_scope(
+                authorization.binding(),
+                authorization.document_scope(),
+                registry,
+                commit_now,
+            )
+            .map_err(|_| AsyncDeliveryError::new(AsyncDeliveryErrorKind::AuthorizationLost))?;
+        let lane = &mut self.sequence_lanes[lane_index];
         let disposition = lane
             .machine
-            .recover_from_authoritative_refresh_covering(authority, pressure_high_water)
+            .install_authoritative_baseline_covering(baseline, pressure_high_water)
             .map_err(|error| {
                 AsyncDeliveryError::new(AsyncDeliveryErrorKind::Sequence(error.kind()))
             })?;
