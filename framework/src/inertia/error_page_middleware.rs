@@ -103,13 +103,16 @@ impl Middleware for InertiaErrorPageMiddleware {
             return restore(http);
         };
 
-        // `Set-Cookie` is the one header that carries state the client
-        // must keep regardless of what body it ends up rendering - a
-        // rotated session id, a cleared remember-me cookie. Everything
-        // else on an error response describes the body we are replacing.
-        let cookies: Vec<String> = http
-            .header_values("Set-Cookie")
-            .map(str::to_string)
+        // The replaced response's headers come along except the ones
+        // that only described the body being replaced - see
+        // `header_survives_rewrite` for the rule and why it is phrased as
+        // a drop list. This is what keeps `Retry-After` on a `429` and
+        // `WWW-Authenticate` on a `401` true after the body becomes a
+        // page.
+        let carried: Vec<(String, String)> = http
+            .headers()
+            .filter(|(name, _)| header_survives_rewrite(name))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
 
         let status = props.status;
@@ -121,13 +124,7 @@ impl Middleware for InertiaErrorPageMiddleware {
         }
 
         match page.resolve(&captured).await {
-            Ok(rendered) => {
-                let mut rendered = rendered.status(status);
-                for cookie in cookies {
-                    rendered = rendered.header("Set-Cookie", cookie);
-                }
-                restore(rendered)
-            }
+            Ok(rendered) => restore(rendered.status(status).with_headers(carried)),
             Err(e) => {
                 // The error page failing is not a reason to lose the
                 // error. Returning the original response means the user
@@ -306,6 +303,51 @@ fn decide(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
         message: message.unwrap_or_else(|| reason_phrase(facts.status)),
         request_id,
     })
+}
+
+/// Whether a header on the replaced response carries over onto the page.
+///
+/// One rule, stated as what is **dropped** rather than what is kept, so a
+/// header nobody here thought of survives instead of silently
+/// disappearing. A field is dropped only when it describes the
+/// representation being replaced - or how that representation was framed
+/// on the wire - or when the page response is the authority on it:
+///
+/// - **Every `Content-*` field.** `Content-Length: 94` on a four-kilobyte
+///   HTML shell is a framing bug, `Content-Type: application/json` on a
+///   page object is a lie, and `Content-Encoding: gzip` claims a
+///   compression that was never applied to the new body. The test is a
+///   prefix rather than an enumeration on purpose: a representation field
+///   added to HTTP after this was written is dropped by default, which is
+///   the safe direction for metadata that describes bytes we threw away.
+/// - **`Transfer-Encoding`**, the framing counterpart of
+///   `Content-Length`, which shares none of that prefix.
+/// - **`X-Inertia`.** Whether a response is an Inertia response is the
+///   page response's own claim to make. Unreachable in practice - a
+///   response already carrying it never reaches the rewrite, see
+///   [`decide`] - and stated anyway so the rewrite cannot inherit a
+///   contradictory claim.
+///
+/// `Content-Security-Policy` and `Content-Security-Policy-Report-Only`
+/// are the one carve-out from the prefix. They are response policy, not
+/// representation metadata - the shared prefix is a historical accident -
+/// and dropping a CSP from an error page would be a security regression.
+///
+/// Everything else describes the request, the connection, or what the
+/// client should do next: `Retry-After` on a `429`, `WWW-Authenticate` on
+/// a `401`, `Cache-Control`, `Vary`, `Set-Cookie`, `X-Request-Id`. None of
+/// that stopped being true because the body changed.
+fn header_survives_rewrite(name: &str) -> bool {
+    const CONTENT: &[u8] = b"Content-";
+    let bytes = name.as_bytes();
+    let content_prefixed =
+        bytes.len() >= CONTENT.len() && bytes[..CONTENT.len()].eq_ignore_ascii_case(CONTENT);
+    let security_policy = name.eq_ignore_ascii_case("Content-Security-Policy")
+        || name.eq_ignore_ascii_case("Content-Security-Policy-Report-Only");
+
+    !((content_prefixed && !security_policy)
+        || name.eq_ignore_ascii_case("Transfer-Encoding")
+        || name.eq_ignore_ascii_case("X-Inertia"))
 }
 
 /// Body shapes an error page may stand in for.
@@ -614,6 +656,62 @@ mod tests {
         assert!(!prefers_html_over_json(Some("")));
         assert!(!prefers_html_over_json(Some("garbage")));
         assert!(!prefers_html_over_json(Some("text/html;q=nope")));
+    }
+
+    #[test]
+    fn only_what_described_the_replaced_body_is_dropped() {
+        // Framing and representation metadata for a body that no longer
+        // exists.
+        for dropped in [
+            "Content-Type",
+            "content-length",
+            "Content-Encoding",
+            "Content-Language",
+            "Content-Location",
+            "Content-Range",
+            "Content-Disposition",
+            "Transfer-Encoding",
+            "X-Inertia",
+        ] {
+            assert!(
+                !header_survives_rewrite(dropped),
+                "{dropped} describes the body being replaced and must not carry over"
+            );
+        }
+
+        // Anything about the request, the connection, or what the client
+        // does next is still true after the body changes.
+        for kept in [
+            "Retry-After",
+            "WWW-Authenticate",
+            "Cache-Control",
+            "Vary",
+            "Set-Cookie",
+            "X-Request-Id",
+            "Access-Control-Allow-Origin",
+            "Strict-Transport-Security",
+            "Precognition",
+            "X-Inertia-Location",
+        ] {
+            assert!(
+                header_survives_rewrite(kept),
+                "{kept} says nothing about the body and must carry over"
+            );
+        }
+    }
+
+    #[test]
+    fn the_security_policy_headers_are_not_content_headers() {
+        // They share the prefix by historical accident. Dropping a CSP
+        // from the error page would be a security regression, so the
+        // prefix rule carves them out by name.
+        assert!(header_survives_rewrite("Content-Security-Policy"));
+        assert!(header_survives_rewrite(
+            "content-security-policy-report-only"
+        ));
+        // A short name that merely starts with "Content" is not prefixed
+        // by "Content-" and must not be swept up.
+        assert!(header_survives_rewrite("Content"));
     }
 
     #[test]

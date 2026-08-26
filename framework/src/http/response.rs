@@ -349,6 +349,24 @@ impl HttpResponse {
             .map(|(_, v)| v.as_str())
     }
 
+    /// Every header set on this response, as `(name, value)` pairs in
+    /// insertion order.
+    ///
+    /// Completes the accessor family: [`header_value`](Self::header_value)
+    /// reads one name's first line and
+    /// [`header_values`](Self::header_values) reads every line under one
+    /// name, but neither lets a caller reason about headers it cannot
+    /// name in advance. Middleware that rebuilds a response - swapping the
+    /// body while keeping what the original said about the request, the
+    /// connection, or the client's next move - has to iterate the set it
+    /// was handed, not a list of names it guessed at.
+    ///
+    /// Names are returned exactly as they were set, so compare with
+    /// [`str::eq_ignore_ascii_case`] rather than `==`.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))
+    }
+
     /// Replace any prior occurrences of `name` with a single value.
     /// Mirrors Laravel's `Response::header($key, $value, replace=true)`.
     pub fn replace_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {

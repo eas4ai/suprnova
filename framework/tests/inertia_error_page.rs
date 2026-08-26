@@ -169,10 +169,23 @@ fn router() -> Router {
             panic!("handler exploded");
         })
         // Middleware somewhere answers an unauthenticated Inertia visit
-        // with 401 JSON rather than a redirect.
+        // with 401 JSON rather than a redirect. The challenge header is
+        // the point of a 401 and has to outlive the body swap.
         .get("/needs-login", |_req| async {
-            let resp: Response =
-                Err(HttpResponse::json(json!({ "message": "Unauthenticated." })).status(401));
+            let resp: Response = Err(HttpResponse::json(json!({ "message": "Unauthenticated." }))
+                .status(401)
+                .header("WWW-Authenticate", "Bearer realm=\"app\"")
+                .header("Cache-Control", "no-store")
+                .header("Set-Cookie", "flash=cleared; Path=/"));
+            resp
+        })
+        // A rate-limited request. `Retry-After` is the only thing that
+        // tells the client when to come back.
+        .get("/throttled", |_req| async {
+            let resp: Response = Err(HttpResponse::from(FrameworkError::rate_limited(
+                Some(Duration::from_secs(30)),
+                "too many requests",
+            )));
             resp
         })
         // A plain redirect. Nothing to render an error page for.
@@ -593,4 +606,91 @@ async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
     assert!(!headers.contains_key("x-inertia"));
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
     assert_eq!(parsed["message"], "Internal Server Error");
+}
+
+// ---------------------------------------------------------------------
+// Headers survive the body swap
+// ---------------------------------------------------------------------
+
+/// `Content-Length` is the one header that cannot carry over: it
+/// described the JSON body we replaced. Either the framework recomputes
+/// it for the page or it is absent, but it must never still name the old
+/// body's length.
+fn assert_content_length_matches_body(headers: &HashMap<String, String>, body: &str) {
+    let len = headers
+        .get("content-length")
+        .expect("hyper sizes a buffered body, so the page response carries a content-length");
+    assert_eq!(
+        len.parse::<usize>().expect("content-length parses"),
+        body.len(),
+        "content-length must describe the page, not the JSON it replaced"
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_inertia_visit_keeps_retry_after() {
+    let addr = spawn_server(router(), stack(), 2).await;
+
+    let (status, headers, body) = request(addr, "GET", "/throttled", &inertia_visit()).await;
+
+    assert_eq!(status, 429);
+    let page = page_object(&body);
+    assert_eq!(page["component"], ERROR_PAGE);
+    assert_eq!(page["props"]["status"], 429);
+    assert_eq!(
+        headers.get("retry-after").map(String::as_str),
+        Some("30"),
+        "without Retry-After the client has no idea when to come back; got {headers:?}"
+    );
+    assert_content_length_matches_body(&headers, &body);
+}
+
+#[tokio::test]
+async fn a_throttled_browser_navigation_keeps_retry_after_too() {
+    let addr = spawn_server(router(), stack(), 2).await;
+
+    let (status, headers, body) = request(addr, "GET", "/throttled", &browser_navigation()).await;
+
+    assert_eq!(status, 429);
+    assert!(
+        headers
+            .get("content-type")
+            .is_some_and(|c| c.starts_with("text/html")),
+        "got {headers:?}"
+    );
+    assert_eq!(headers.get("retry-after").map(String::as_str), Some("30"));
+    assert_eq!(
+        embedded_page_object(&body)["props"]["status"],
+        429,
+        "the HTML shell still carries the error page"
+    );
+    assert_content_length_matches_body(&headers, &body);
+}
+
+#[tokio::test]
+async fn a_401_keeps_its_challenge_and_the_rest_of_its_headers() {
+    let addr = spawn_server(router(), stack(), 2).await;
+
+    let (status, headers, body) = request(addr, "GET", "/needs-login", &inertia_visit()).await;
+
+    assert_eq!(status, 401);
+    assert_eq!(
+        headers.get("www-authenticate").map(String::as_str),
+        Some(r#"Bearer realm="app""#),
+        "a 401 without its challenge is not a 401; got {headers:?}"
+    );
+    assert_eq!(
+        headers.get("cache-control").map(String::as_str),
+        Some("no-store")
+    );
+    assert_eq!(
+        headers.get("set-cookie").map(String::as_str),
+        Some("flash=cleared; Path=/")
+    );
+    assert_eq!(
+        headers.get("content-type").map(String::as_str),
+        Some("application/json"),
+        "the page object is JSON, so Content-Type is the page's own, not the error body's"
+    );
+    assert_content_length_matches_body(&headers, &body);
 }

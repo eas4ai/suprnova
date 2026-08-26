@@ -1056,6 +1056,23 @@ Declare the props in the component rather than importing them from
 that file from your own `#[derive(InertiaProps)]` structs, and these
 props come from the framework.
 
+### What survives the swap
+
+The status code is kept, and so is every header the original response
+set, **except** the ones that only described the body being replaced:
+every `Content-*` field (`Content-Length` on a page four times the size
+of the JSON it replaced is a framing bug) and `Transfer-Encoding`.
+`Content-Security-Policy` is carved out of that rule by name - it shares
+the prefix by historical accident and is response policy, not
+representation metadata.
+
+So `Retry-After` on a `429` still tells the client when to come back,
+`WWW-Authenticate` on a `401` still carries the challenge, and
+`Cache-Control`, `Vary`, `Set-Cookie`, and your request-id header all
+arrive intact. The rule is stated as what gets dropped rather than what
+gets kept, so a header the framework has never heard of survives instead
+of silently disappearing.
+
 Both audiences are covered. An Inertia XHR visit gets the JSON page
 object with `X-Inertia: true`; a hard navigation - someone pasting
 `/admin/articles` into the address bar - gets the full HTML shell, the
