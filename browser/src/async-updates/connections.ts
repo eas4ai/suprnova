@@ -101,7 +101,7 @@ export interface AsyncTransportPorts {
 export interface LogicalSubscriptionSink {
   envelope(encoded: string): void;
   reauthorize(
-    prior: AuthorizedLogicalSubscription,
+    prior: AuthorizedLogicalSubscription | null,
     signal: AbortSignal,
   ): ReauthorizedLogicalSubscription | Promise<ReauthorizedLogicalSubscription>;
   state(state: SubscriptionState): void;
@@ -989,6 +989,7 @@ interface LogicalMembership {
   pendingAuthorizationKind: "initial" | "successor" | null;
   provedTransportGeneration: number;
   recoveryRequestGeneration: number;
+  requiresInitialAuthorization: boolean;
 }
 
 interface PhysicalGroup {
@@ -1214,6 +1215,7 @@ export class DocumentConnectionPool {
       pendingAuthorizationKind: pendingAuthorization === null ? null : "initial",
       provedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
+      requiresInitialAuthorization: pendingAuthorization !== null,
       sink,
     };
     this.#memberships.set(authorization.subscriptionId, membership);
@@ -1287,9 +1289,11 @@ export class DocumentConnectionPool {
     const memberships = [...this.#memberships.values()].filter(({ active }) => active);
     await Promise.all(
       memberships.map(async (membership) => {
-        const current = await this.#requestReauthorization(membership, generation);
+        const initial = membership.requiresInitialAuthorization;
+        const current = await this.#requestReauthorization(membership, generation, initial);
         if (!this.#resumeCurrent(generation)) return;
-        const staged = current === null ? null : this.#acceptedReauthorization(membership, current);
+        const staged =
+          current === null ? null : this.#acceptedReauthorization(membership, current, initial);
         const accepted = staged?.subscription ?? null;
         if (accepted === null || staged === null) {
           discardReauthorization(current);
@@ -1297,7 +1301,7 @@ export class DocumentConnectionPool {
           return;
         }
         membership.pendingAuthorization = staged;
-        membership.pendingAuthorizationKind = "successor";
+        membership.pendingAuthorizationKind = initial ? "initial" : "successor";
         try {
           this.#attach(membership);
         } catch {
@@ -1744,6 +1748,7 @@ export class DocumentConnectionPool {
   #acceptedReauthorization(
     membership: LogicalMembership,
     result: ReauthorizedLogicalSubscription,
+    initial = false,
   ): ReauthorizedLogicalSubscription | null {
     let current: unknown;
     let proof: unknown;
@@ -1756,7 +1761,9 @@ export class DocumentConnectionPool {
     if (
       (typeof current !== "object" && typeof current !== "function") ||
       current === null ||
-      (proof !== "authoritative_no_tail" && proof !== "complete_replay")
+      (proof !== "authoritative_no_tail" &&
+        proof !== "complete_replay" &&
+        !(initial && proof === null))
     ) {
       return null;
     }
@@ -1773,6 +1780,7 @@ export class DocumentConnectionPool {
   #requestReauthorization(
     membership: LogicalMembership,
     generation: number,
+    initial = false,
   ): Promise<ReauthorizedLogicalSubscription | null> {
     return new Promise((resolve) => {
       const completion: ReauthorizationCompletion = { settle: null };
@@ -1783,7 +1791,7 @@ export class DocumentConnectionPool {
         generation,
         membership,
         membershipGeneration: ++membership.generation,
-        prior: membership.authorization,
+        prior: initial ? null : membership.authorization,
         resolve,
         settled: false,
         timer: null,
@@ -1816,7 +1824,6 @@ export class DocumentConnectionPool {
       const prior = request.prior;
       if (
         membership === null ||
-        prior === null ||
         !membership.active ||
         membership.generation !== request.membershipGeneration ||
         this.#generation !== request.generation
@@ -2010,6 +2017,7 @@ export class DocumentConnectionPool {
     }
     const staged = membership.pendingAuthorization;
     if (staged !== null) {
+      const stagedKind = membership.pendingAuthorizationKind;
       membership.pendingAuthorization = null;
       membership.pendingAuthorizationKind = null;
       const outcome: ReturnType<ReauthorizedLogicalSubscription["commit"]> = (() => {
@@ -2025,6 +2033,7 @@ export class DocumentConnectionPool {
         return;
       }
       membership.authorization = staged.subscription;
+      if (stagedKind === "initial") membership.requiresInitialAuthorization = false;
       if (outcome === "committed" && staged.proof !== null) {
         membership.pendingProofMembershipGeneration = membership.generation;
       }

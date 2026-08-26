@@ -397,9 +397,10 @@ transport, document authorization scope)` and multiplexes island subscriptions
   forgive lost continuity. A healthy sibling remains routable throughout cleanup.
 - Connections, subscriptions, messages, replay windows, fanout, reconnects,
   fallback polls, and browser queues have explicit count/byte/time bounds.
-- Every ordinary reconnect and bfcache restore reauthorizes each exact logical
-  membership at its current position and requires complete replay or an
-  authoritative no-tail proof before delivery may be current. Document-owned
+- Every ordinary reconnect and bfcache restore of a committed logical membership
+  reauthorizes that exact membership at its current position and requires
+  complete replay or an authoritative no-tail proof before delivery may be
+  current. Document-owned
   reauthorization uses at most eight fair concurrent calls, gives each call an
   owned abortable deadline, and generation-fences late noncooperative results.
   Raw socket open never resets the retry counter; only authenticated transport
@@ -429,8 +430,16 @@ transport, document authorization scope)` and multiplexes island subscriptions
   invoking adapter cleanup, so reentrant or late callbacks cannot consume an
   attempt or replace an owned timer.
 - Persisted `pagehide` closes long-lived transports and transport timers before
-  bfcache. `pageshow` reauthorizes and establishes a new physical connection
-  before currentness may be reclaimed.
+  bfcache. If the first exact membership acknowledgment has not committed yet,
+  suspension discards that generation's staged authorization and acknowledgment
+  authority while retaining only the fact that no predecessor exists.
+  `pageshow` then invokes a fresh initial authorization request with `prior: null`
+  and no inherited position, stages its raw/replay/no-tail result inertly, and
+  establishes a new physical connection. Only that replacement connection's
+  exact acknowledgment may commit the fresh initial authority or effects; old
+  acknowledgments and late data remain inert. A committed membership instead
+  follows current-position successor reauthorization before currentness may be
+  reclaimed.
 
 UX flow:
 
@@ -479,13 +488,15 @@ UX flow:
 - 2026-08-26 -- Kept uncommitted initial subscription authority inert and
   generation-owned across bounded pre-acknowledgment transport loss rather than
   invoking successor reauthorization without a committed predecessor. Bfcache
-  restoration and reconnect grouping use the complete staged effective
-  transport authority, with compatible aggregation independent of completion
-  order and deterministic rejection of incompatible rotations. Each physical
-  generation accepts one terminal callback and fences reentrant adapter cleanup
-  before scheduling exactly one retry. Production ESM and classic artifact
-  scenarios now prove exact membership acknowledgment and persisted lifecycle
-  restoration under CSP in every supported browser.
+  suspension discards the old generation's stage but retains the no-predecessor
+  lifecycle fact, so restoration makes a deadline-owned fresh initial request
+  with `prior: null` rather than successor reauthorization. Reconnect grouping
+  uses the complete staged effective transport authority, with compatible
+  aggregation independent of completion order and deterministic rejection of
+  incompatible rotations. Each physical generation accepts one terminal
+  callback and fences reentrant adapter cleanup before scheduling exactly one
+  retry. Production ESM and classic artifact scenarios now prove both pre- and
+  post-acknowledgment persisted restoration under CSP in every supported browser.
 - 2026-08-26 -- Staged initial and reconnect authorization, replay, event
   capability rotation, and authoritative-no-tail evidence behind the exact
   physical membership acknowledgment. Preflight cannot mutate island sequence

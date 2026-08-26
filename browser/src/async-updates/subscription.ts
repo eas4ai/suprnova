@@ -22,7 +22,7 @@ export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
 export class AsyncSubscription {
   #authorization: AuthorizedLogicalSubscription;
   readonly #clock: AsyncClock;
-  readonly #continuity: ContinuityMachine;
+  #continuity: ContinuityMachine;
   readonly #dispatch: AsyncDispatchPort;
 
   constructor(
@@ -105,6 +105,26 @@ export class AsyncSubscription {
     return this.#preflightReplay(encoded, this.#authorization);
   }
 
+  preflightFreshInitialReplay(
+    authorization: AuthorizedLogicalSubscription,
+    encoded: readonly string[],
+  ): AsyncContinuityProof {
+    this.#assertSameLogicalMembership(authorization);
+    return this.#preflightReplay(
+      encoded,
+      authorization,
+      new ContinuityMachine(authorization.baseline),
+    );
+  }
+
+  replaceUncommittedInitial(authorization: AuthorizedLogicalSubscription): void {
+    this.#assertSameLogicalMembership(authorization);
+    if (!validExpiration(authorization.expiresAt)) throw new Error("async_subscription_invalid");
+    this.#authorization = authorization;
+    this.#continuity = new ContinuityMachine(authorization.baseline);
+    this.#continuity.connected();
+  }
+
   receive(encoded: string): AsyncReceiveDisposition {
     this.#assertCurrentAuthority();
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
@@ -154,13 +174,14 @@ export class AsyncSubscription {
   #preflightReplay(
     encoded: readonly string[],
     authorization: AuthorizedLogicalSubscription,
+    continuity = this.#continuity,
   ): AsyncContinuityProof {
     const now = this.#clock.now();
     if (!Number.isSafeInteger(now) || now < 0 || now >= authorization.expiresAt) {
       throw new Error("async_membership_expired");
     }
     if (encoded.length === 0) {
-      this.#continuity.validateAuthoritativeBaseline(authorization.baseline);
+      continuity.validateAuthoritativeBaseline(authorization.baseline);
       return "authoritative_no_tail";
     }
     if (encoded.length > 1_024) throw new Error("async_replay_invalid");
@@ -173,8 +194,17 @@ export class AsyncSubscription {
     if (transcript.some(({ payload }) => payload.kind === "complete")) {
       throw new Error("async_replay_invalid");
     }
-    this.#continuity.validateReplay(transcript.map(({ position }) => position));
+    continuity.validateReplay(transcript.map(({ position }) => position));
     return "complete_replay";
+  }
+
+  #assertSameLogicalMembership(authorization: AuthorizedLogicalSubscription): void {
+    if (
+      authorization.subscriptionId !== this.#authorization.subscriptionId ||
+      authorization.stream !== this.#authorization.stream
+    ) {
+      throw new Error("async_reauthorization_invalid");
+    }
   }
 
   proveAuthoritativeBaseline(position: StreamPosition): void {

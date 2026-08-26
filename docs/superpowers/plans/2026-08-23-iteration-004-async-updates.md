@@ -687,15 +687,19 @@
 
   An uncommitted initial stage remains inert and recoverable across bounded
   pre-acknowledgment loss without calling successor reauthorization against an
-  absent committed predecessor. Attach and restore use the complete staged
-  effective transport authority for grouping, credential, kind, policy, and
-  heartbeat. Compatible multi-membership rotations aggregate independently of
-  completion order; incompatible rotations fail closed. Each physical
-  generation accepts one terminal callback and retires it before adapter close,
-  preventing reentrant or late failure from consuming another attempt or timer.
-  Exact built ESM and classic artifacts prove acknowledgment-gated continuity
-  and persisted lifecycle restoration under CSP across Chromium, Firefox, and
-  WebKit.
+  absent committed predecessor. Persisted pagehide discards the old generation's
+  stage and acknowledgment authority while preserving the no-predecessor fact;
+  pageshow performs a bounded fresh initial request with `prior: null`, stages
+  raw/replay/no-tail output inertly, and commits only after the replacement's
+  exact acknowledgment. Attach and restore use the complete staged effective
+  transport authority for grouping, credential, kind, policy, and heartbeat.
+  Compatible multi-membership rotations aggregate independently of completion
+  order; incompatible rotations fail closed. Each physical generation accepts
+  one terminal callback and retires it before adapter close, preventing
+  reentrant or late failure from consuming another attempt or timer. Exact built
+  ESM and classic artifacts prove acknowledgment-gated continuity and pre- and
+  post-acknowledgment persisted lifecycle restoration under CSP across Chromium,
+  Firefox, and WebKit.
 
 - [x] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
 - [x] Commit: `feat(browser): establish bounded subscription continuity`.

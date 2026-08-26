@@ -238,6 +238,57 @@ async function persistedTransition(page: Page, type: "pagehide" | "pageshow"): P
 }
 
 for (const kind of ["esm", "classic"] as const) {
+  test(`production async ${kind} artifact reacquires fresh initial authority after pre-ACK bfcache under CSP`, async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await installAsyncHarness(page);
+    await installArtifactRoutes(page, kind);
+    const scenario = kind === "esm" ? "cspNonce" : "cspClassicNonce";
+    await page.goto(`/scenario/${scenario}?async-artifact=${kind}`);
+
+    await expect
+      .poll(() => harnessCounts(page))
+      .toEqual({
+        authorizations: 1,
+        connections: 1,
+        pending: 1,
+      });
+    await expect(page.locator("#async-panel")).toBeHidden();
+
+    await persistedTransition(page, "pagehide");
+    await persistedTransition(page, "pageshow");
+    await expect
+      .poll(() => harnessCounts(page))
+      .toEqual({
+        authorizations: 2,
+        connections: 2,
+        pending: 2,
+      });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const harness = Reflect.get(window, "__suprnovaAsyncHarness") as {
+            authorizations: { position: string | null; prior: string | null }[];
+          };
+          return harness.authorizations;
+        }),
+      )
+      .toEqual([
+        { position: null, prior: null },
+        { position: null, prior: null },
+      ]);
+
+    await invokeHarness(page, "ack", 0);
+    await invokeHarness(page, "emit", 0, 1, true);
+    await expect(page.locator("#async-panel")).toBeHidden();
+    await invokeHarness(page, "ack", 1);
+    await invokeHarness(page, "emit", 1, 1, true);
+    await expect(page.locator("#async-panel")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
   test(`production async ${kind} artifact authenticates exact membership and restores lifecycle under CSP`, async ({
     page,
   }) => {

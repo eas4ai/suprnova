@@ -318,12 +318,13 @@ class AsyncIslandController implements FeatureIslandController {
   }
 
   async reauthorize(
-    prior: AuthorizedLogicalSubscription,
+    prior: AuthorizedLogicalSubscription | null,
     signal: AbortSignal,
   ): Promise<ReauthorizedLogicalSubscription> {
+    const initial = prior === null;
     if (
       (this.#state !== "suspended" && this.#state !== "active") ||
-      this.authorizationId() !== prior.subscriptionId
+      (initial ? this.#authorization() !== null : this.authorizationId() !== prior.subscriptionId)
     ) {
       throw new Error("async_reauthorization_invalid");
     }
@@ -337,8 +338,10 @@ class AsyncIslandController implements FeatureIslandController {
           if (settled) return "stale";
           settled = true;
           const outcome = current.commit();
-          if (outcome !== "stale" && resume && this.#resuming()) this.#state = "active";
-          else if (resume && this.#state === "resuming") this.#state = "suspended";
+          if (outcome !== "stale" && resume && this.#resuming()) {
+            this.#state = "active";
+            this.#armHeartbeat(this.#heartbeatTimeout());
+          } else if (resume && this.#state === "resuming") this.#state = "suspended";
           return outcome;
         },
         discard: () => {
@@ -393,7 +396,7 @@ class AsyncIslandController implements FeatureIslandController {
     };
     externalSignal?.addEventListener("abort", externallyAbort, { once: true });
     if (externalSignal?.aborted === true) abort.abort();
-    const position = this.#subscription?.position() ?? null;
+    const position = prior === null ? null : (this.#subscription?.position() ?? null);
     let resolved: AsyncAuthorizationResult | AuthorizedLogicalSubscription;
     try {
       resolved = await invokeAuthority(
@@ -434,7 +437,14 @@ class AsyncIslandController implements FeatureIslandController {
       throw new Error("async_authorization_stale");
     }
     if (prior === null) {
-      return this.#install(current, replay, generation, carriesContinuityEvidence);
+      const subscription = this.#subscription;
+      if (subscription === null) {
+        return this.#install(current, replay, generation, carriesContinuityEvidence);
+      }
+      const proof = carriesContinuityEvidence
+        ? subscription.preflightFreshInitialReplay(current, replay)
+        : null;
+      return this.#stageAuthorization(current, replay, proof, generation, true, true);
     }
     const subscription = this.#subscription;
     if (subscription === null || position === null) throw new Error("async_subscription_retired");
@@ -533,6 +543,7 @@ class AsyncIslandController implements FeatureIslandController {
     proof: ReauthorizedLogicalSubscription["proof"],
     generation: number,
     initial = false,
+    freshInitial = false,
   ): ReauthorizedLogicalSubscription {
     const subscription = this.#subscription;
     if (subscription === null) throw new Error("async_subscription_retired");
@@ -563,7 +574,8 @@ class AsyncIslandController implements FeatureIslandController {
               events: authorization.events,
             }),
           );
-          if (!initial) subscription.reauthorize(authorization);
+          if (freshInitial) subscription.replaceUncommittedInitial(authorization);
+          else if (!initial) subscription.reauthorize(authorization);
           this.#eventCapability = capability;
           this.#currentAuthorization = authorization;
           this.#owner.remember(this, authorization);
