@@ -885,23 +885,8 @@ export class DocumentRuntime {
       return;
     }
     this.#featureDriverClaims.add(record);
-    const sourceParent = record.element.parentNode;
-    const sourceScope = sourceParent === null ? null : this.#ownership.ownerForNode(sourceParent);
-    const current = (): boolean =>
-      this.#state === "running" &&
-      record.active() &&
-      record.element.isConnected &&
-      record.element.ownerDocument === this.#document &&
-      this.#records.get(record.element) === record &&
-      this.#ownership.ownerForNode(record.element) === record &&
-      record.element.parentNode !== null &&
-      this.#ownership.ownerForNode(record.element.parentNode) === sourceScope &&
-      record.element.getAttribute("data-suprnova-live-island") === "" &&
-      record.element.getAttribute("data-suprnova-live-component") === record.metadata.component &&
-      record.element.getAttribute("data-suprnova-live-document-key") ===
-        record.metadata.documentKey &&
-      record.element.getAttribute("data-suprnova-live-slot") === record.metadata.slot &&
-      record.element.getAttribute("data-suprnova-live-root") === record.metadata.slot;
+    const sourceScope = this.#islandParentScope(record);
+    const current = (): boolean => this.#islandCurrent(record, sourceScope);
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
       authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) =>
         this.#registeredEvents.replace(record, registration, {
@@ -962,6 +947,30 @@ export class DocumentRuntime {
     return this.#registeredEvents.dispatch(owner, capability, event);
   }
 
+  #islandParentScope(record: IslandRecord): IslandRecord | null {
+    const parent = record.element.parentNode;
+    return parent === null ? null : this.#ownership.ownerForNode(parent);
+  }
+
+  #islandCurrent(record: IslandRecord, parentScope: IslandRecord | null): boolean {
+    const { element, metadata } = record;
+    return (
+      this.#state === "running" &&
+      record.active() &&
+      element.isConnected &&
+      element.ownerDocument === this.#document &&
+      this.#records.get(element) === record &&
+      this.#ownership.ownerForNode(element) === record &&
+      element.parentNode !== null &&
+      this.#ownership.ownerForNode(element.parentNode) === parentScope &&
+      element.getAttribute("data-suprnova-live-island") === "" &&
+      element.getAttribute("data-suprnova-live-component") === metadata.component &&
+      element.getAttribute("data-suprnova-live-document-key") === metadata.documentKey &&
+      element.getAttribute("data-suprnova-live-slot") === metadata.slot &&
+      element.getAttribute("data-suprnova-live-root") === metadata.slot
+    );
+  }
+
   #registeredEventTargets(
     record: IslandRecord,
     target: string,
@@ -976,22 +985,22 @@ export class DocumentRuntime {
         current,
         dispatch: (event: Event) => eventTarget.dispatchEvent(event),
       });
-    const currentIsland = (candidate: IslandRecord): boolean =>
-      candidate.active() &&
-      candidate.element.isConnected &&
-      this.#records.get(candidate.element) === candidate &&
-      this.#ownership.ownerForNode(candidate.element) === candidate;
+    const currentIsland = (candidate: IslandRecord): (() => boolean) => {
+      const parentScope = this.#islandParentScope(candidate);
+      return () => this.#islandCurrent(candidate, parentScope);
+    };
     if (target === "self") {
-      targets.push(guard(record.element, () => currentIsland(record)));
+      targets.push(guard(record.element, currentIsland(record)));
     } else if (target === "parent") {
       const parent = record.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
       const parentRecord = parent === null ? undefined : this.#records.get(parent);
       if (parentRecord?.active() === true) {
+        const parentCurrent = currentIsland(parentRecord);
         targets.push(
           guard(
             parentRecord.element,
             () =>
-              currentIsland(parentRecord) &&
+              parentCurrent() &&
               record.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) === parentRecord.element,
           ),
         );
@@ -1001,11 +1010,12 @@ export class DocumentRuntime {
         if (!candidate.active() || candidate === record) continue;
         const parent = candidate.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
         if (parent === record.element) {
+          const candidateCurrent = currentIsland(candidate);
           targets.push(
             guard(
               candidate.element,
               () =>
-                currentIsland(candidate) &&
+                candidateCurrent() &&
                 candidate.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) === record.element,
             ),
           );
@@ -1013,16 +1023,14 @@ export class DocumentRuntime {
         if (targets.length > maximumFanout) return "fanout_exceeded";
       }
     } else if (target === "document") {
-      targets.push(guard(this.#document, () => currentIsland(record)));
+      targets.push(guard(this.#document, currentIsland(record)));
     } else if (target.startsWith("named_island:")) {
       const slot = target.slice("named_island:".length);
       for (const candidate of this.#records.values()) {
         if (candidate.active() && candidate.metadata.slot === slot) {
+          const candidateCurrent = currentIsland(candidate);
           targets.push(
-            guard(
-              candidate.element,
-              () => currentIsland(candidate) && candidate.metadata.slot === slot,
-            ),
+            guard(candidate.element, () => candidateCurrent() && candidate.metadata.slot === slot),
           );
         }
         if (targets.length > maximumFanout) return "fanout_exceeded";
@@ -1030,9 +1038,8 @@ export class DocumentRuntime {
     } else if (target.startsWith("browser:")) {
       const window = this.#document.defaultView;
       if (window !== null) {
-        targets.push(
-          guard(window, () => currentIsland(record) && this.#document.defaultView === window),
-        );
+        const sourceCurrent = currentIsland(record);
+        targets.push(guard(window, () => sourceCurrent() && this.#document.defaultView === window));
       }
     }
     return targets;

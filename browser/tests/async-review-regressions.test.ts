@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { canonicalize } from "../src/canonical.js";
 import {
   BrowserAsyncTransportPorts,
   DocumentConnectionPool,
   OriginHandshakeScheduler,
   type AsyncTransportPorts,
   type BrowserAsyncTransportOptions,
+  type DocumentMembershipOutcome,
   type DocumentTransportConnectRequest,
   type EventSourcePort,
   type LogicalSubscriptionSink,
@@ -49,7 +51,11 @@ function authorization(
 
 class Source implements EventSourcePort {
   readonly close = vi.fn();
-  readonly subscribe = vi.fn((subscription: AuthorizedLogicalSubscription) =>
+  readonly subscribe = vi.fn<
+    (
+      subscription: AuthorizedLogicalSubscription,
+    ) => DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>
+  >((subscription) =>
     Object.freeze({
       descriptorBinding: subscription.descriptorBinding,
       kind: "authenticated" as const,
@@ -64,6 +70,10 @@ class Source implements EventSourcePort {
 
   open(): void {
     this.request.opened();
+  }
+
+  emit(encoded: string): void {
+    this.request.message(encoded);
   }
 
   fail(): void {
@@ -159,6 +169,16 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
+function heartbeat(index: number, sequence: number): string {
+  return canonicalize({
+    payload: { kind: "heartbeat" },
+    position: { epoch: "1", sequence: String(sequence) },
+    protocol_version: 1,
+    stream: `stream-${String(index)}`,
+    subscription: `subscription-${String(index).padStart(3, "0")}`,
+  });
+}
+
 describe("reviewed reconnect authority", () => {
   it("degrades only the failing logical membership in a shared transport group", () => {
     const { pool, sources, timers } = harness();
@@ -199,6 +219,73 @@ describe("reviewed reconnect authority", () => {
     expect(first.state).toHaveBeenLastCalledWith("current");
     expect(second.state).toHaveBeenLastCalledWith("current");
     expect(sources[0]?.close).not.toHaveBeenCalled();
+  });
+
+  it("quarantines exact degraded-lane frames while successor attachment is pending", async () => {
+    const { pool, sources } = harness();
+    const successor = authorization(1, { descriptorBinding: "binding-1-successor" });
+    const first = sink(() => Promise.resolve(successor));
+    const second = sink();
+    const firstHandle = pool.subscribe(authorization(1), first);
+    const secondHandle = pool.subscribe(authorization(2), second);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+    secondHandle.continuityProved();
+    let acknowledge!: (value: DocumentMembershipOutcome) => void;
+    const pendingAcknowledgment = new Promise<DocumentMembershipOutcome>((resolve) => {
+      acknowledge = resolve;
+    });
+    sources[0]?.subscribe.mockImplementationOnce(() => pendingAcknowledgment);
+
+    firstHandle.presentationFailed();
+    await settle();
+    sources[0]?.emit(heartbeat(1, 1));
+
+    expect(first.envelope).not.toHaveBeenCalled();
+    expect(first.state).toHaveBeenLastCalledWith("connecting");
+    expect(second.state).toHaveBeenLastCalledWith("current");
+    expect(sources[0]?.close).not.toHaveBeenCalled();
+
+    acknowledge(
+      Object.freeze({
+        descriptorBinding: successor.descriptorBinding,
+        kind: "authenticated" as const,
+        stream: successor.stream,
+        subscriptionId: successor.subscriptionId,
+        transportGeneration: sources[0]?.request.transportGeneration ?? -1,
+      }),
+    );
+    await settle();
+    sources[0]?.emit(heartbeat(1, 2));
+
+    expect(first.state).toHaveBeenLastCalledWith("current");
+    expect(first.envelope).toHaveBeenCalledExactlyOnceWith(heartbeat(1, 2));
+    expect(second.state).toHaveBeenLastCalledWith("current");
+    expect(sources[0]?.close).not.toHaveBeenCalled();
+  });
+
+  it("keeps a shared source current when unsubscribe synchronously reenters with a degraded frame", async () => {
+    const { pool, sources } = harness();
+    const first = sink();
+    const second = sink();
+    const firstHandle = pool.subscribe(authorization(1), first);
+    const secondHandle = pool.subscribe(authorization(2), second);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+    secondHandle.continuityProved();
+    sources[0]?.unsubscribe.mockImplementationOnce(() => {
+      sources[0]?.emit(heartbeat(1, 1));
+    });
+
+    firstHandle.presentationFailed();
+    await settle();
+    sources[0]?.emit(heartbeat(1, 2));
+
+    expect(first.envelope).toHaveBeenCalledExactlyOnceWith(heartbeat(1, 2));
+    expect(first.state).toHaveBeenLastCalledWith("current");
+    expect(second.state).toHaveBeenLastCalledWith("current");
+    expect(sources[0]?.close).not.toHaveBeenCalled();
+    expect(sources).toHaveLength(1);
   });
 
   it("reauthorizes every ordinary reconnect before opening a replacement transport", async () => {

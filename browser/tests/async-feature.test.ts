@@ -827,6 +827,132 @@ describe("async feature lifecycle", () => {
     expect(freshness[freshness.length - 1]).toBe("closed");
   });
 
+  it.each([
+    { fallback: true, mode: "hybrid" },
+    { fallback: false, mode: "push-only" },
+  ] as const)(
+    "degrades only an exhausted $mode membership and reports resource exhaustion",
+    async ({ fallback, mode }) => {
+      const sources: FakeSource[] = [];
+      const timers = new FakeTimers();
+      const diagnose = vi.fn();
+      const freshness: { documentKey: string; state: string }[] = [];
+      const firstRoot = Object.freeze({}) as Element;
+      const secondRoot = Object.freeze({}) as Element;
+      const firstRefresh = vi.fn(
+        (
+          _reason: unknown,
+          completion?: (outcome: "succeeded" | "failed" | "canceled" | "retired") => void,
+        ) => {
+          completion?.("failed");
+          return "exhausted" as const;
+        },
+      );
+      const secondRefresh = vi.fn(successfulFreshRender);
+      const owner = new AsyncDocumentOwner(
+        { diagnose, onDispose: vi.fn() },
+        {
+          authority: {
+            authorize: ({ identity }) => {
+              const second = identity.documentKey === "document-resource-sibling";
+              return Object.freeze({
+                replay: Object.freeze([]),
+                subscription: authorization(0n, {
+                  descriptorBinding: second ? "binding-sibling" : "binding-exhausted",
+                  subscriptionId: second ? "subscription-002" : "subscription-001",
+                }),
+              });
+            },
+          },
+          clock: { now: () => 100 },
+          observeFreshness: ({ documentKey, state }) => freshness.push({ documentKey, state }),
+          randomness: { number: () => 0.5 },
+          timers: timers.port,
+          transports: {
+            eventSource(request) {
+              const source = new FakeSource(request);
+              sources.push(source);
+              return source;
+            },
+            webSocket() {
+              throw new Error("unexpected_websocket");
+            },
+          },
+        },
+      );
+      owner.connectIsland({
+        consumeRegisteredEventCapability: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: firstRoot,
+        enqueueFreshRender: firstRefresh,
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: "document-resource-exhausted",
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        queryDirectiveOwnership: () =>
+          mode === "hybrid" ? [ownership(firstRoot)] : [pushOnlyOwnership(firstRoot)],
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      owner.connectIsland({
+        consumeRegisteredEventCapability: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: secondRoot,
+        enqueueFreshRender: secondRefresh,
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: "document-resource-sibling",
+          slot: "orders-sibling-slot",
+        }),
+        onDispose: vi.fn(),
+        queryDirectiveOwnership: () => [pushOnlyOwnership(secondRoot)],
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      await flushMicrotasks();
+      sources[0]?.open();
+      await flushMicrotasks();
+
+      sources[0]?.emit(envelope(1n, { kind: "refresh", name: "refresh" }));
+
+      expect(firstRefresh).toHaveBeenCalledOnce();
+      expect(secondRefresh).not.toHaveBeenCalled();
+      expect(diagnose).toHaveBeenCalledWith("resource_exhausted");
+      expect(sources[0]?.unsubscribe).toHaveBeenCalledExactlyOnceWith("subscription-001");
+      expect(sources[0]?.close).not.toHaveBeenCalled();
+      expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 33_000)).toBe(
+        fallback,
+      );
+      expect(
+        freshness.filter(
+          ({ documentKey, state }) =>
+            documentKey === "document-resource-sibling" && state === "degraded",
+        ),
+      ).toHaveLength(0);
+
+      sources[0]?.emit(
+        canonicalize({
+          payload: { kind: "heartbeat" },
+          position: { epoch: "1", sequence: "1" },
+          protocol_version: 1,
+          stream: "orders",
+          subscription: "subscription-002",
+        }),
+      );
+      await flushMicrotasks();
+
+      expect(sources).toHaveLength(1);
+      expect(sources[0]?.close).not.toHaveBeenCalled();
+      expect(
+        freshness.filter(
+          ({ documentKey, state }) =>
+            documentKey === "document-resource-sibling" && state === "degraded",
+        ),
+      ).toHaveLength(0);
+      owner.dispose();
+    },
+  );
+
   it("starts descriptor-default hybrid polling only after continuity is lost", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();

@@ -54,7 +54,12 @@ export type AsyncSubscriptionLifecycleOutcome =
     }>
   | Readonly<{
       kind: "dispatch_failed";
-      reason: "presentation_rejected" | "refresh_failed" | "refresh_canceled" | "refresh_retired";
+      reason:
+        | "presentation_rejected"
+        | "refresh_failed"
+        | "refresh_canceled"
+        | "refresh_retired"
+        | "resource_exhausted";
     }>
   | Readonly<{
       delivered: number;
@@ -278,6 +283,11 @@ export class AsyncSubscription {
       else this.#completeRefresh(completion);
     });
     dispatching = false;
+    if (disposition === "exhausted") {
+      this.#activeRefresh = null;
+      this.#failPresentation("resource_exhausted", segment.last);
+      return;
+    }
     if (disposition !== "queued" && disposition !== "coalesced") {
       this.#activeRefresh = null;
       this.#failPresentation("presentation_rejected", segment.last);

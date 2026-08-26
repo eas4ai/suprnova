@@ -1000,6 +1000,8 @@ interface LogicalMembership {
   pendingAuthorization: ReauthorizedLogicalSubscription | null;
   pendingAuthorizationKind: "initial" | "successor" | null;
   provedTransportGeneration: number;
+  quarantinedDescriptorBinding: string | null;
+  quarantinedTransportGeneration: number;
   recoveryRequestGeneration: number;
   requiresInitialAuthorization: boolean;
   logicallyDegraded: boolean;
@@ -1229,6 +1231,8 @@ export class DocumentConnectionPool {
       pendingAuthorization,
       pendingAuthorizationKind: pendingAuthorization === null ? null : "initial",
       provedTransportGeneration: -1,
+      quarantinedDescriptorBinding: null,
+      quarantinedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       requiresInitialAuthorization: pendingAuthorization !== null,
       logicallyDegraded: false,
@@ -1504,6 +1508,13 @@ export class DocumentConnectionPool {
     const membership = group.memberships.get(subscriptionId);
     if (membership === undefined || !membership.active || membership.group !== group) return;
     if (membership.authenticatedTransportGeneration !== generation) {
+      if (
+        membership.logicallyDegraded &&
+        membership.quarantinedTransportGeneration === generation &&
+        membership.quarantinedDescriptorBinding === membership.authorization.descriptorBinding
+      ) {
+        return;
+      }
       this.#failed(group, generation, "authorization_lost");
       return;
     }
@@ -1906,6 +1917,8 @@ export class DocumentConnectionPool {
     membership.generation += 1;
     this.#cancelMembershipAttachment(membership);
     this.#discardPendingAuthorization(membership);
+    membership.quarantinedDescriptorBinding = membership.authorization.descriptorBinding;
+    membership.quarantinedTransportGeneration = transportGeneration;
     membership.authenticatedTransportGeneration = -1;
     membership.pendingProofMembershipGeneration = -1;
     membership.pendingObservedTransportGeneration = -1;
@@ -2126,6 +2139,8 @@ export class DocumentConnectionPool {
       }
     }
     membership.authenticatedTransportGeneration = transportGeneration;
+    membership.quarantinedDescriptorBinding = null;
+    membership.quarantinedTransportGeneration = -1;
     if (
       staged !== null &&
       staged.proof !== null &&

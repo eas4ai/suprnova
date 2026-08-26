@@ -19,6 +19,7 @@ export type AsyncDispatchDisposition =
   | "degraded:replay_unavailable"
   | "degraded:backpressure"
   | "degraded:stream_unavailable"
+  | "exhausted"
   | PartiallyDispatchedBrowserEvent
   | "rejected";
 
@@ -174,7 +175,9 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
     };
     try {
       const disposition = this.#island.enqueueFreshRender("stream", observe, subscriptionId);
-      return disposition === "queued" || disposition === "coalesced" ? disposition : "rejected";
+      return disposition === "queued" || disposition === "coalesced" || disposition === "exhausted"
+        ? disposition
+        : "rejected";
     } catch {
       return "rejected";
     }

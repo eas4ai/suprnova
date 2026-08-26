@@ -792,7 +792,12 @@ class AsyncIslandController implements FeatureIslandController {
         }
         this.#handle?.presentationFailed();
         this.#poll?.continuity("degraded");
-        report(this.#context, "operation_rejected");
+        report(
+          this.#context,
+          outcome.kind === "dispatch_failed" && outcome.reason === "resource_exhausted"
+            ? "resource_exhausted"
+            : "operation_rejected",
+        );
       },
     );
     this.#subscription = subscription;

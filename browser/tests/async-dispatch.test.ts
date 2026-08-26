@@ -788,6 +788,56 @@ describe("closed asynchronous presentation dispatcher", () => {
     record.dispose();
   });
 
+  it("preserves real scheduler exhaustion as one truthful subscription terminal", () => {
+    const element = { setAttribute: vi.fn() } as unknown as Element;
+    const record = new IslandRecord(
+      element,
+      Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-orders-subscription-exhaustion",
+        instanceId: "MDEyMzQ1Njc4OTo7PD0-Pw",
+        lazyComplete: false,
+        protocolMinimum: 2,
+        revision: 7n,
+        runtimeContract: 1,
+        slot: "orders-slot",
+        snapshot: Object.freeze({}),
+        snapshotForm: "instance" as const,
+      }),
+    );
+    for (let index = 0; index < 256; index += 1) {
+      expect(record.enqueueFreshRender("stream", vi.fn(), `occupied-${String(index)}`)).toBe(
+        index === 0 ? "queued" : "coalesced",
+      );
+    }
+    const { port } = fakePort({
+      element,
+      enqueueFreshRender: (reason, completion, completionKey) =>
+        record.enqueueFreshRender(reason, completion, completionKey),
+    });
+    const lifecycle = vi.fn();
+    const recovery = vi.fn();
+    const subscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(port, fakeCapability),
+      { now: () => 1_000 },
+      recovery,
+      lifecycle,
+    );
+
+    expect(subscription.receive(encoded({ kind: "refresh", name: "refresh" }))).toBe(
+      "dispatch_failed",
+    );
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(subscription.state()).toBe("degraded");
+    expect(lifecycle).toHaveBeenCalledExactlyOnceWith({
+      kind: "dispatch_failed",
+      reason: "resource_exhausted",
+    });
+    expect(recovery).not.toHaveBeenCalled();
+    record.dispose();
+  });
+
   it("does not commit a partially delivered event sequence", () => {
     const { port } = fakePort({
       dispatchRegisteredEvent: () =>
