@@ -1738,6 +1738,23 @@ mod backend_watch_args_tests {
         );
     }
 
+    #[test]
+    fn a_directory_with_nothing_to_scope_to_falls_back_to_an_unscoped_watch() {
+        // Pinned as a decision rather than left as an accident: with no
+        // candidate present there is nothing to scope to, and a bare
+        // `cargo watch -x` (which watches the project root) beats
+        // refusing to start. `validate_suprnova_project` has already
+        // required `Cargo.toml` before `serve` gets here, so a user does
+        // not meet this.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec!["watch", "-x", RUN],
+            "no candidates means no -w, and no gitignore flag either"
+        );
+    }
+
     /// The argument vector cannot show *why* a path is in the list. These
     /// read the scaffold templates the CLI actually ships, so that if a
     /// scaffold moves its entry point or stops ignoring `.env`, the
