@@ -38,6 +38,8 @@ import {
   type RuntimeFeatureDriverRegistrationHost,
   type RuntimeFeatureDriverValue,
   type RuntimeFeatureRegistrationOutcome,
+  type RegisteredBrowserEventDispatch,
+  type RegisteredBrowserEventDisposition,
 } from "../src/features/host.js";
 import { MAX_PRESENT_DIRECTIVES } from "../src/directives/parser.js";
 import { parseFeatureDirective } from "../src/features/directive-parser.js";
@@ -124,6 +126,9 @@ function feature(
 }
 
 interface DriverIslandSource {
+  readonly dispatchRegisteredEvent: Mock<
+    (event: RegisteredBrowserEventDispatch) => RegisteredBrowserEventDisposition
+  >;
   readonly element: Element;
   readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
   readonly enqueueFreshRender: Mock<(reason: FreshRenderReason) => FreshRenderDisposition>;
@@ -141,6 +146,7 @@ function islandSource(name: string, element?: Element): DriverIslandSource {
   let active = true;
   return {
     active: () => active,
+    dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
     element: element ?? ({ nodeType: 1, setAttribute: vi.fn() } as unknown as Element),
     enqueueFreshRender: vi.fn(() => "queued"),
     identity: Object.freeze({
@@ -267,6 +273,10 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
     const current = (): boolean =>
       this.#current(driver) && island.claimed && island.source.active();
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
+      dispatchRegisteredEvent: (event: RegisteredBrowserEventDispatch) => {
+        if (!current()) return "retired";
+        return island.source.dispatchRegisteredEvent(event);
+      },
       element: island.source.element,
       enqueueFreshRender: (reason: FreshRenderReason) => {
         const candidate: unknown = reason;
@@ -675,7 +685,7 @@ describe("one driver claim and optional owner per island", () => {
     expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
   });
 
-  it("exposes only typed upload, diagnostic, lifecycle, directive, presentation, and fresh-render ports", () => {
+  it("exposes only typed upload, registered-event, diagnostic, lifecycle, directive, presentation, and fresh-render ports", () => {
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
     const source = islandSource("surface");
@@ -687,6 +697,7 @@ describe("one driver claim and optional owner per island", () => {
     const islandPort = uploads.islandPorts[0];
     expect(Object.keys(documentContext ?? {}).sort()).toEqual(["diagnose", "onDispose"]);
     expect(Object.keys(islandPort ?? {}).sort()).toEqual([
+      "dispatchRegisteredEvent",
       "element",
       "enqueueFreshRender",
       "identity",
@@ -719,6 +730,24 @@ describe("one driver claim and optional owner per island", () => {
       "018f47c1-2af0-7cc4-a001-000000000001",
     );
     expect(islandPort?.writePresentationSignal(source.element, "progress", 42)).toBe(42);
+    expect(
+      Reflect.apply(
+        Reflect.get(islandPort ?? {}, "dispatchRegisteredEvent") as (
+          ...values: unknown[]
+        ) => unknown,
+        islandPort,
+        [
+          Object.freeze({
+            event: "orders.updated",
+            maximumFanout: 1,
+            payload: Object.freeze({ count: 1 }),
+            schemaVersion: 1,
+            target: "self",
+          }),
+        ],
+      ),
+    ).toBe("dispatched");
+    expect(source.dispatchRegisteredEvent).toHaveBeenCalledOnce();
   });
 
   it("makes captured ports inert before retirement callbacks and rejects invalid reasons", () => {

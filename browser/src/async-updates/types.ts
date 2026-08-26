@@ -1,0 +1,113 @@
+import type { JsonValue } from "../canonical.js";
+
+export type SubscriptionState =
+  "disconnected" | "connecting" | "current" | "degraded" | "reconnecting" | "closed";
+
+export interface StreamPosition {
+  readonly epoch: bigint;
+  readonly sequence: bigint;
+}
+
+export type AsyncPayloadSchema = "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+
+export interface AsyncRegisteredEventContract {
+  readonly maximumFanout: number;
+  readonly name: string;
+  readonly schema: AsyncPayloadSchema;
+  readonly targets: readonly string[];
+  readonly version: number;
+}
+
+export interface AsyncPresentationSignalContract {
+  readonly name: string;
+  readonly schema: AsyncPayloadSchema;
+}
+
+export type AsyncPayload =
+  | Readonly<{ kind: "refresh"; name: "refresh" }>
+  | Readonly<{
+      event: string;
+      kind: "browser_event";
+      payload: JsonValue;
+      schema_version: number;
+      target: string;
+    }>
+  | Readonly<{ kind: "presentation_signal"; name: string; value: JsonValue }>
+  | Readonly<{ kind: "heartbeat" }>
+  | Readonly<{
+      kind: "complete";
+      reason: "server_shutdown" | "subscription_retired" | "stream_completed";
+    }>
+  | Readonly<{
+      code: "authorization_lost" | "replay_unavailable" | "backpressure" | "stream_unavailable";
+      kind: "error";
+    }>;
+
+export interface AsyncEnvelope {
+  readonly payload: AsyncPayload;
+  readonly position: StreamPosition;
+  readonly protocolVersion: 1;
+  readonly stream: string;
+  readonly subscriptionId: string;
+}
+
+export type AsyncTransportKind = "sse" | "websocket";
+
+export interface DocumentTransportKey {
+  readonly authorizationScope: string;
+  readonly origin: string;
+  readonly transport: AsyncTransportKind;
+}
+
+export type AsyncTransportAuthorization =
+  Readonly<{ kind: "session_cookie" }> | Readonly<{ credential: string; kind: "bearer" }>;
+
+export type AsyncReconnectPolicy =
+  | Readonly<{
+      kind: "refresh_on_reconnect";
+      maximumAttempts: number;
+      maximumDelayMs: number;
+      minimumDelayMs: number;
+    }>
+  | Readonly<{
+      kind: "resume_or_refresh";
+      maximumAttempts: number;
+      maximumDelayMs: number;
+      minimumDelayMs: number;
+    }>;
+
+export interface AuthorizedLogicalSubscription {
+  readonly authorization: AsyncTransportAuthorization;
+  readonly baseline: StreamPosition;
+  readonly descriptorBinding: string;
+  readonly document: DocumentTransportKey;
+  readonly events: readonly AsyncRegisteredEventContract[];
+  readonly expiresAt: number;
+  readonly heartbeatTimeoutMs: number;
+  readonly presentationSignals: readonly AsyncPresentationSignalContract[];
+  readonly reconnect: AsyncReconnectPolicy;
+  readonly stream: string;
+  readonly subscriptionId: string;
+}
+
+export type AsyncReceiveDisposition =
+  "applied" | "duplicate" | "stale" | "gap" | "continuity_required" | "dispatch_failed" | "closed";
+
+export interface AsyncDispatchPort {
+  browserEvent(event: Extract<AsyncPayload, { kind: "browser_event" }>): boolean;
+  presentationSignal(signal: Extract<AsyncPayload, { kind: "presentation_signal" }>): boolean;
+  refresh(refresh: Extract<AsyncPayload, { kind: "refresh" }>): boolean;
+}
+
+export interface AsyncClock {
+  now(): number;
+}
+
+export interface AsyncRandomness {
+  number(): number;
+}
+
+export interface AsyncTimerPort {
+  clearTimeout(handle: number): void;
+  timeout(callback: VoidFunction, milliseconds: number): number;
+}

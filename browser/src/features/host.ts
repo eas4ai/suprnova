@@ -9,6 +9,16 @@ export type RuntimeFeatureDiagnosticDetail =
   "contract_mismatch" | "operation_rejected" | "resource_exhausted";
 export type FreshRenderReason = "poll" | "stream";
 export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
+export type RegisteredBrowserEventDisposition =
+  "dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
+
+export interface RegisteredBrowserEventDispatch {
+  readonly event: string;
+  readonly maximumFanout: number;
+  readonly payload: JsonValue;
+  readonly schemaVersion: number;
+  readonly target: string;
+}
 
 export interface RuntimeFeatureDriverDocumentPort {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
@@ -18,6 +28,7 @@ export interface RuntimeFeatureDriverDocumentPort {
 export interface RuntimeFeatureDriverIslandPort {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
+  dispatchRegisteredEvent(event: RegisteredBrowserEventDispatch): RegisteredBrowserEventDisposition;
   enqueueFreshRender(reason: FreshRenderReason): FreshRenderDisposition;
   proposeUploadHandle(
     field: string,

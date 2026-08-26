@@ -1,0 +1,543 @@
+import {
+  defineAsyncFeature,
+  type FeatureIslandController,
+  type RuntimeFeature,
+  type RuntimeFeatureDefinition,
+  type RuntimeFeatureDocumentContext,
+  type RuntimeFeatureIslandPort,
+} from "../features/contract.js";
+import { parseFeatureDirective } from "../features/directive-parser.js";
+import {
+  DocumentConnectionPool,
+  OriginHandshakeScheduler,
+  type AsyncTransportPorts,
+  type LogicalSubscriptionHandle,
+} from "./connections.js";
+import { AsyncSubscription } from "./subscription.js";
+import type {
+  AsyncClock,
+  AsyncDispatchPort,
+  AsyncPayload,
+  AsyncRandomness,
+  AsyncTimerPort,
+  AuthorizedLogicalSubscription,
+  StreamPosition,
+  SubscriptionState,
+} from "./types.js";
+
+const MAX_STREAMS_PER_ISLAND = 1;
+const MAX_U64 = (1n << 64n) - 1n;
+const MAX_AUTHORIZATION_TEXT = 1_024;
+const MAX_EVENTS = 64;
+const MAX_EVENT_TARGETS = 16;
+const MAX_PRESENTATION_SIGNALS = 64;
+const MAX_RECONNECT_ATTEMPTS = 16;
+const MAX_TRANSPORT_DELAY_MS = 300_000;
+const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
+const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
+
+export interface AsyncAuthorizationRequest {
+  readonly identity: RuntimeFeatureIslandPort["identity"];
+  readonly position: StreamPosition | null;
+  readonly prior: AuthorizedLogicalSubscription | null;
+  readonly signal: AbortSignal;
+  readonly stream: string;
+}
+
+export interface AsyncAuthorityPort {
+  authorize(
+    request: AsyncAuthorizationRequest,
+  ):
+    | AsyncAuthorizationResult
+    | AuthorizedLogicalSubscription
+    | Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+}
+
+export interface AsyncAuthorizationResult {
+  readonly replay: readonly string[];
+  readonly subscription: AuthorizedLogicalSubscription;
+}
+
+export interface AsyncFeatureOptions {
+  readonly authority: AsyncAuthorityPort;
+  readonly clock: AsyncClock;
+  readonly handshakeScheduler?: OriginHandshakeScheduler;
+  readonly randomness: AsyncRandomness;
+  readonly timers: AsyncTimerPort;
+  readonly transports: AsyncTransportPorts;
+}
+
+function report(
+  context: RuntimeFeatureDocumentContext,
+  detail: "operation_rejected" | "resource_exhausted",
+): void {
+  try {
+    context.diagnose(detail);
+  } catch {
+    // Diagnostics are bounded, redaction-safe, and best-effort.
+  }
+}
+
+function validOptions(options: AsyncFeatureOptions): boolean {
+  try {
+    return (
+      typeof options.authority.authorize === "function" &&
+      typeof options.clock.now === "function" &&
+      typeof options.randomness.number === "function" &&
+      typeof options.timers.clearTimeout === "function" &&
+      typeof options.timers.timeout === "function" &&
+      typeof options.transports.eventSource === "function" &&
+      typeof options.transports.webSocket === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validPosition(position: StreamPosition): boolean {
+  return (
+    typeof position.epoch === "bigint" &&
+    position.epoch >= 0n &&
+    position.epoch <= MAX_U64 &&
+    typeof position.sequence === "bigint" &&
+    position.sequence >= 0n &&
+    position.sequence <= MAX_U64
+  );
+}
+
+function validateAuthorization(value: AuthorizedLogicalSubscription): void {
+  let valid: boolean;
+  try {
+    const authorization = value.authorization;
+    const authorizationValid =
+      authorization.kind === "session_cookie" ||
+      (authorization.credential.length >= 16 &&
+        authorization.credential.length <= MAX_AUTHORIZATION_TEXT);
+    const reconnect = value.reconnect;
+    const eventNames = new Set(value.events.map(({ name }) => name));
+    const signalNames = new Set(value.presentationSignals.map(({ name }) => name));
+    valid =
+      authorizationValid &&
+      validPosition(value.baseline) &&
+      value.descriptorBinding.length >= 1 &&
+      value.descriptorBinding.length <= MAX_AUTHORIZATION_TEXT &&
+      value.document.authorizationScope.length >= 1 &&
+      value.document.authorizationScope.length <= 256 &&
+      value.events.length <= MAX_EVENTS &&
+      eventNames.size === value.events.length &&
+      value.events.every(
+        (event) =>
+          OPERATION_NAME.test(event.name) &&
+          Number.isSafeInteger(event.version) &&
+          event.version >= 1 &&
+          event.version <= 65_535 &&
+          Number.isSafeInteger(event.maximumFanout) &&
+          event.maximumFanout >= 1 &&
+          event.maximumFanout <= 256 &&
+          event.targets.length >= 1 &&
+          event.targets.length <= MAX_EVENT_TARGETS,
+      ) &&
+      Number.isSafeInteger(value.expiresAt) &&
+      value.expiresAt >= 0 &&
+      Number.isSafeInteger(value.heartbeatTimeoutMs) &&
+      value.heartbeatTimeoutMs >= 1 &&
+      value.heartbeatTimeoutMs <= MAX_TRANSPORT_DELAY_MS &&
+      value.presentationSignals.length <= MAX_PRESENTATION_SIGNALS &&
+      signalNames.size === value.presentationSignals.length &&
+      value.presentationSignals.every(({ name }) => OPERATION_NAME.test(name)) &&
+      Number.isSafeInteger(reconnect.maximumAttempts) &&
+      reconnect.maximumAttempts >= 1 &&
+      reconnect.maximumAttempts <= MAX_RECONNECT_ATTEMPTS &&
+      Number.isSafeInteger(reconnect.minimumDelayMs) &&
+      reconnect.minimumDelayMs >= 0 &&
+      Number.isSafeInteger(reconnect.maximumDelayMs) &&
+      reconnect.maximumDelayMs >= reconnect.minimumDelayMs &&
+      reconnect.maximumDelayMs <= MAX_TRANSPORT_DELAY_MS &&
+      OPERATION_NAME.test(value.stream) &&
+      SUBSCRIPTION_ID.test(value.subscriptionId);
+  } catch {
+    valid = false;
+  }
+  if (!valid) throw new Error("async_authorization_invalid");
+}
+
+class AsyncIslandController implements FeatureIslandController {
+  readonly #authority: AsyncAuthorityPort;
+  readonly #clock: AsyncClock;
+  readonly #context: RuntimeFeatureDocumentContext;
+  readonly #owner: AsyncDocumentOwner;
+  readonly #port: RuntimeFeatureIslandPort;
+  readonly #stream: string;
+  readonly #timers: AsyncTimerPort;
+  #authorizationAbort: AbortController | null = null;
+  #generation = 0;
+  #heartbeatTimer: number | null = null;
+  #handle: LogicalSubscriptionHandle | null = null;
+  #state: "active" | "disposed" | "resuming" | "suspended" = "active";
+  #subscription: AsyncSubscription | null = null;
+
+  constructor(
+    owner: AsyncDocumentOwner,
+    context: RuntimeFeatureDocumentContext,
+    port: RuntimeFeatureIslandPort,
+    stream: string,
+    options: AsyncFeatureOptions,
+  ) {
+    this.#authority = options.authority;
+    this.#clock = options.clock;
+    this.#context = context;
+    this.#owner = owner;
+    this.#port = port;
+    this.#stream = stream;
+    this.#timers = options.timers;
+  }
+
+  start(): void {
+    void this.#authorize(null).catch(() => {
+      if (this.#state === "active") report(this.#context, "operation_rejected");
+    });
+  }
+
+  authorizationId(): string | null {
+    return this.#authorization()?.subscriptionId ?? null;
+  }
+
+  async resumeAuthorization(
+    prior: AuthorizedLogicalSubscription,
+  ): Promise<AuthorizedLogicalSubscription> {
+    if (this.#state !== "suspended" || this.authorizationId() !== prior.subscriptionId) {
+      throw new Error("async_reauthorization_invalid");
+    }
+    this.#state = "resuming";
+    try {
+      const current = await this.#authorize(prior);
+      if (!this.#resuming()) throw new Error("async_authorization_stale");
+      this.#state = "active";
+      return current;
+    } catch (error: unknown) {
+      if (this.#state === "resuming") this.#state = "suspended";
+      throw error;
+    }
+  }
+
+  suspend(): void {
+    if (this.#state !== "active" && this.#state !== "resuming") return;
+    this.#state = "suspended";
+    this.#generation += 1;
+    this.#authorizationAbort?.abort();
+    this.#authorizationAbort = null;
+    this.#clearHeartbeat();
+    this.#subscription?.transportLost();
+  }
+
+  dispose(): void {
+    if (this.#state === "disposed") return;
+    this.#state = "disposed";
+    this.#generation += 1;
+    this.#authorizationAbort?.abort();
+    this.#authorizationAbort = null;
+    this.#clearHeartbeat();
+    this.#handle?.close();
+    this.#handle = null;
+    this.#subscription?.close();
+    this.#subscription = null;
+    this.#owner.retire(this);
+  }
+
+  async #authorize(
+    prior: AuthorizedLogicalSubscription | null,
+  ): Promise<AuthorizedLogicalSubscription> {
+    const generation = ++this.#generation;
+    this.#authorizationAbort?.abort();
+    const abort = new AbortController();
+    this.#authorizationAbort = abort;
+    const position = this.#subscription?.position() ?? null;
+    const resolved = await this.#authority.authorize(
+      Object.freeze({
+        identity: this.#port.identity,
+        position,
+        prior,
+        signal: abort.signal,
+        stream: this.#stream,
+      }),
+    );
+    const current = "subscription" in resolved ? resolved.subscription : resolved;
+    const replay = "subscription" in resolved ? resolved.replay : Object.freeze([]);
+    validateAuthorization(current);
+    if (
+      abort.signal.aborted ||
+      this.#state === "disposed" ||
+      this.#generation !== generation ||
+      current.stream !== this.#stream
+    ) {
+      throw new Error("async_authorization_stale");
+    }
+    this.#authorizationAbort = null;
+    if (prior === null) this.#install(current);
+    else this.#subscription?.reauthorize(current);
+    if (replay.length !== 0) this.#subscription?.receiveReplay(replay);
+    return current;
+  }
+
+  #authorization(): AuthorizedLogicalSubscription | null {
+    return this.#owner.authorization(this);
+  }
+
+  #resuming(): boolean {
+    return this.#state === "resuming";
+  }
+
+  #install(authorization: AuthorizedLogicalSubscription): void {
+    if (this.#subscription !== null || this.#handle !== null) {
+      throw new Error("async_subscription_duplicate");
+    }
+    const dispatch: AsyncDispatchPort = Object.freeze({
+      browserEvent: (event: Extract<AsyncPayload, { kind: "browser_event" }>) => {
+        const contract = authorization.events.find(({ name }) => name === event.event);
+        return (
+          contract !== undefined &&
+          this.#port.dispatchRegisteredEvent({
+            event: event.event,
+            maximumFanout: contract.maximumFanout,
+            payload: event.payload,
+            schemaVersion: event.schema_version,
+            target: event.target,
+          }) === "dispatched"
+        );
+      },
+      presentationSignal: (signal: Extract<AsyncPayload, { kind: "presentation_signal" }>) => {
+        try {
+          this.#port.writePresentationSignal(this.#port.element, signal.name, signal.value);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      refresh: () => this.#port.enqueueFreshRender("stream") !== "retired",
+    });
+    const subscription = new AsyncSubscription(authorization, dispatch, this.#clock);
+    this.#subscription = subscription;
+    this.#owner.remember(this, authorization);
+    this.#handle = this.#owner.subscribe(authorization, {
+      envelope: (encoded) => {
+        try {
+          subscription.receive(encoded);
+          this.#armHeartbeat(authorization.heartbeatTimeoutMs);
+        } catch {
+          subscription.authorizationUncertain();
+          report(this.#context, "operation_rejected");
+        }
+      },
+      state: (state) => {
+        this.#transportState(state, authorization.heartbeatTimeoutMs);
+      },
+    });
+  }
+
+  #transportState(state: SubscriptionState, heartbeatTimeoutMs: number): void {
+    const subscription = this.#subscription;
+    if (subscription === null || this.#state === "disposed") return;
+    switch (state) {
+      case "connecting":
+        subscription.connected();
+        this.#armHeartbeat(heartbeatTimeoutMs);
+        break;
+      case "reconnecting":
+      case "disconnected":
+        this.#clearHeartbeat();
+        subscription.transportLost();
+        break;
+      case "degraded":
+        this.#clearHeartbeat();
+        subscription.authorizationUncertain();
+        break;
+      case "closed":
+        this.#clearHeartbeat();
+        subscription.close();
+        break;
+      case "current":
+        this.#armHeartbeat(heartbeatTimeoutMs);
+        break;
+    }
+  }
+
+  #armHeartbeat(milliseconds: number): void {
+    if (this.#state !== "active") return;
+    this.#clearHeartbeat();
+    this.#heartbeatTimer = this.#timers.timeout(() => {
+      this.#heartbeatTimer = null;
+      if (this.#state !== "active") return;
+      this.#subscription?.heartbeatLost();
+      this.#handle?.heartbeatLost();
+    }, milliseconds);
+  }
+
+  #clearHeartbeat(): void {
+    if (this.#heartbeatTimer === null) return;
+    this.#timers.clearTimeout(this.#heartbeatTimer);
+    this.#heartbeatTimer = null;
+  }
+}
+
+export class AsyncDocumentOwner {
+  readonly #context: RuntimeFeatureDocumentContext;
+  readonly #controllers = new Set<AsyncIslandController>();
+  readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
+  readonly #options: AsyncFeatureOptions;
+  readonly #pool: DocumentConnectionPool;
+  #state: "active" | "disposed" | "resuming" | "suspended" = "active";
+
+  constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
+    if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
+    this.#context = context;
+    this.#options = options;
+    this.#pool = new DocumentConnectionPool({
+      handshakeScheduler: options.handshakeScheduler ?? new OriginHandshakeScheduler(),
+      randomness: options.randomness,
+      timers: options.timers,
+      transports: options.transports,
+    });
+  }
+
+  connectIsland(port: RuntimeFeatureIslandPort): FeatureIslandController {
+    if (this.#state === "disposed") throw new Error("async_document_retired");
+    const streams = port
+      .queryDirectiveOwnership(parseFeatureDirective)
+      .filter(({ directive }) => directive.name === "stream" && directive.role === null);
+    if (streams.length === 0) return Object.freeze({ dispose: () => undefined });
+    if (streams.length > MAX_STREAMS_PER_ISLAND) {
+      report(this.#context, "resource_exhausted");
+      return Object.freeze({ dispose: () => undefined });
+    }
+    const controller = new AsyncIslandController(
+      this,
+      this.#context,
+      port,
+      streams[0]?.directive.value ?? "",
+      this.#options,
+    );
+    this.#controllers.add(controller);
+    controller.start();
+    return controller;
+  }
+
+  subscribe(
+    authorization: AuthorizedLogicalSubscription,
+    sink: Parameters<DocumentConnectionPool["subscribe"]>[1],
+  ): LogicalSubscriptionHandle {
+    return this.#pool.subscribe(authorization, sink);
+  }
+
+  remember(controller: AsyncIslandController, authorization: AuthorizedLogicalSubscription): void {
+    this.#authorizations.set(controller, authorization);
+  }
+
+  authorization(controller: AsyncIslandController): AuthorizedLogicalSubscription | null {
+    return this.#authorizations.get(controller) ?? null;
+  }
+
+  retire(controller: AsyncIslandController): void {
+    this.#controllers.delete(controller);
+    this.#authorizations.delete(controller);
+  }
+
+  suspend(): void {
+    if (this.#state !== "active" && this.#state !== "resuming") return;
+    this.#state = "suspended";
+    for (const controller of this.#controllers) controller.suspend();
+    this.#pool.suspend();
+  }
+
+  async resume(): Promise<void> {
+    if (this.#state !== "suspended") return;
+    this.#state = "resuming";
+    await this.#pool.resume(async (prior) => {
+      const controller = [...this.#controllers].find(
+        (candidate) => candidate.authorizationId() === prior.subscriptionId,
+      );
+      if (controller === undefined) throw new Error("async_subscription_retired");
+      const current = await controller.resumeAuthorization(prior);
+      this.#authorizations.set(controller, current);
+      return current;
+    });
+    if (this.#resuming()) this.#state = "active";
+  }
+
+  dispose(): void {
+    if (this.#state === "disposed") return;
+    this.#state = "disposed";
+    for (const controller of [...this.#controllers]) controller.dispose();
+    this.#pool.dispose();
+  }
+
+  #resuming(): boolean {
+    return this.#state === "resuming";
+  }
+}
+
+function configuredFeature(options: () => AsyncFeatureOptions | null): RuntimeFeature {
+  const sharedHandshakes = new OriginHandshakeScheduler();
+  const definition: RuntimeFeatureDefinition = Object.freeze({
+    connectDocument(context: RuntimeFeatureDocumentContext) {
+      const configured = options();
+      if (configured === null) {
+        return Object.freeze({
+          connectIsland(port: RuntimeFeatureIslandPort) {
+            if (
+              port
+                .queryDirectiveOwnership(parseFeatureDirective)
+                .some(({ directive }) => directive.name === "stream")
+            ) {
+              report(context, "operation_rejected");
+            }
+            return undefined;
+          },
+          dispose() {
+            // No resources exist before the application supplies async authority and transport ports.
+          },
+        });
+      }
+      const owner = new AsyncDocumentOwner(context, {
+        ...configured,
+        handshakeScheduler: configured.handshakeScheduler ?? sharedHandshakes,
+      });
+      return Object.freeze({
+        connectIsland(port: RuntimeFeatureIslandPort) {
+          return owner.connectIsland(port);
+        },
+        dispose() {
+          owner.dispose();
+        },
+        resume() {
+          void owner.resume().catch(() => {
+            report(context, "operation_rejected");
+          });
+        },
+        suspend() {
+          owner.suspend();
+        },
+      });
+    },
+  });
+  return defineAsyncFeature(definition);
+}
+
+export function createAsyncFeature(options: AsyncFeatureOptions): RuntimeFeature {
+  if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
+  return configuredFeature(() => options);
+}
+
+let defaultConfiguration: AsyncFeatureOptions | null = null;
+let defaultConfigurationLocked = false;
+
+export function configureAsync(options: AsyncFeatureOptions): void {
+  if (defaultConfigurationLocked) throw new Error("async_configuration_locked");
+  if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
+  defaultConfiguration = Object.freeze({ ...options });
+  defaultConfigurationLocked = true;
+}
+
+export const asyncFeature: RuntimeFeature = configuredFeature(() => {
+  defaultConfigurationLocked = true;
+  return defaultConfiguration;
+});

@@ -61,6 +61,8 @@ import {
   type RuntimeFeatureDriverIslandPort,
   type RuntimeFeatureDriverValue,
   type RuntimeFeatureRegistrationOutcome,
+  type RegisteredBrowserEventDispatch,
+  type RegisteredBrowserEventDisposition,
 } from "../features/host.js";
 
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
@@ -877,6 +879,8 @@ export class DocumentRuntime {
     this.#featureDriverClaims.add(record);
     const current = (): boolean => this.#state === "running" && record.active();
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
+      dispatchRegisteredEvent: (event: RegisteredBrowserEventDispatch) =>
+        this.#dispatchRegisteredEvent(record, event, current),
       element: record.element,
       enqueueFreshRender: (reason: FreshRenderReason) => {
         const candidate: unknown = reason;
@@ -898,6 +902,81 @@ export class DocumentRuntime {
       },
     });
     this.#invokeFeatureDriver(driver, 1, port);
+  }
+
+  #dispatchRegisteredEvent(
+    record: IslandRecord,
+    event: RegisteredBrowserEventDispatch,
+    current: () => boolean,
+  ): RegisteredBrowserEventDisposition {
+    if (!current()) return "retired";
+    if (
+      !/^[a-z][a-z0-9._-]{0,63}$/u.test(event.event) ||
+      !Number.isSafeInteger(event.schemaVersion) ||
+      event.schemaVersion < 1 ||
+      event.schemaVersion > 65_535 ||
+      !Number.isSafeInteger(event.maximumFanout) ||
+      event.maximumFanout < 1 ||
+      event.maximumFanout > 256
+    ) {
+      return "rejected";
+    }
+    try {
+      if (new TextEncoder().encode(canonicalize(event.payload)).byteLength > 32 * 1024) {
+        return "rejected";
+      }
+    } catch {
+      return "rejected";
+    }
+    const targets: EventTarget[] = [];
+    if (event.target === "self") {
+      targets.push(record.element);
+    } else if (event.target === "parent") {
+      const parent = record.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
+      const parentRecord = parent === null ? undefined : this.#records.get(parent);
+      if (parentRecord?.active() === true) targets.push(parentRecord.element);
+    } else if (event.target === "child") {
+      for (const candidate of this.#records.values()) {
+        if (!candidate.active() || candidate === record) continue;
+        const parent = candidate.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
+        if (parent === record.element) targets.push(candidate.element);
+        if (targets.length > event.maximumFanout) return "fanout_exceeded";
+      }
+    } else if (event.target === "document") {
+      targets.push(this.#document);
+    } else if (event.target.startsWith("named_island:")) {
+      const slot = event.target.slice("named_island:".length);
+      if (!/^[a-z][a-z0-9._-]{0,63}$/u.test(slot)) return "rejected";
+      for (const candidate of this.#records.values()) {
+        if (candidate.active() && candidate.metadata.slot === slot) targets.push(candidate.element);
+        if (targets.length > event.maximumFanout) return "fanout_exceeded";
+      }
+    } else if (event.target.startsWith("browser:")) {
+      const listener = event.target.slice("browser:".length);
+      if (!/^[a-z][a-z0-9._-]{0,63}$/u.test(listener)) return "rejected";
+      const window = this.#document.defaultView;
+      if (window !== null) targets.push(window);
+    } else {
+      return "rejected";
+    }
+    if (targets.length === 0) return "no_target";
+    if (targets.length > event.maximumFanout) return "fanout_exceeded";
+    const window = this.#document.defaultView;
+    if (window === null) return "retired";
+    try {
+      for (const target of targets) {
+        target.dispatchEvent(
+          new window.CustomEvent(`suprnova:${event.event}`, {
+            bubbles: false,
+            composed: false,
+            detail: event.payload,
+          }),
+        );
+      }
+    } catch {
+      return "rejected";
+    }
+    return "dispatched";
   }
 
   #proposeUploadHandle(
