@@ -303,7 +303,7 @@ assert!(installed, "first install wins");
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7" }
 
 [dev-dependencies]
 # `testing` 通过上面那条依赖传递性地开启了 - 不需要额外写什么。
@@ -315,10 +315,10 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6" }
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7", features = ["testing", "..."] }
 ```
 
 这是一次收紧，不是一次修复 - 不管您选哪种姿态，真正堵住那个可利用点的都是启动校验。

@@ -14,11 +14,11 @@ experience and Tokio's runtime model. Familiar API surfaces - `Auth::login`,
 async-trait stack designed for long-lived connections, in-process workers,
 and concurrent IO. No request-per-process compromise.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.6 release has
+Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.7 release has
 the same Rust 1.94.0 floor.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.7 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -208,7 +208,7 @@ suprnova workflow:work
 ## Distribution model
 
 Suprnova distributes via git, not crates.io. Generated apps depend on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6" }`;
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.7" }`;
 the CLI installs via `cargo install --git`. Adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-web-push`) follow the same model. The tag *is* the release:

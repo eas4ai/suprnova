@@ -146,7 +146,7 @@ et Vue sont tout autant de première classe - prenez ce que votre
 Le CLI lui-même est livré via git, pas crates.io (pré-lancement) :
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.7 suprnova-cli
 ```
 
 `--force` sur la même commande met à jour une installation existante.
