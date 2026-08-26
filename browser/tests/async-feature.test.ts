@@ -11,6 +11,7 @@ import {
   DocumentConnectionPool,
   type AsyncTransportPorts,
   type BrowserAsyncTransportOptions,
+  type DocumentMembershipOutcome,
   type DocumentTransportConnectRequest,
   type EventSourcePort,
 } from "../src/async-updates/connections.js";
@@ -76,14 +77,17 @@ function envelope(sequence: bigint, payload: JsonValue): string {
 
 class FakeSource implements EventSourcePort {
   readonly close = vi.fn();
-  readonly subscribe = vi.fn((subscription: AuthorizedLogicalSubscription) =>
-    Object.freeze({
-      descriptorBinding: subscription.descriptorBinding,
-      kind: "authenticated" as const,
-      stream: subscription.stream,
-      subscriptionId: subscription.subscriptionId,
-      transportGeneration: this.request.transportGeneration,
-    }),
+  readonly subscribe = vi.fn(
+    (
+      subscription: AuthorizedLogicalSubscription,
+    ): DocumentMembershipOutcome | Promise<DocumentMembershipOutcome> =>
+      Object.freeze({
+        descriptorBinding: subscription.descriptorBinding,
+        kind: "authenticated" as const,
+        stream: subscription.stream,
+        subscriptionId: subscription.subscriptionId,
+        transportGeneration: this.request.transportGeneration,
+      }),
   );
   readonly unsubscribe = vi.fn();
 
@@ -511,6 +515,75 @@ describe("async feature lifecycle", () => {
     );
     expect(dispatch.mock.calls[0]?.[0]).toBe(capabilities[1]);
     expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(777);
+    owner.dispose();
+  });
+
+  it("uses the staged successor heartbeat while ordinary reconnect authentication is pending", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const rotated = authorization(0n, {
+      descriptorBinding: "binding-pending-heartbeat",
+      heartbeatTimeoutMs: 777,
+    });
+    let calls = 0;
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize() {
+            calls += 1;
+            return calls === 1
+              ? authorization(0n)
+              : Object.freeze({ replay: Object.freeze([]), subscription: rotated });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            if (sources.length === 1) {
+              source.subscribe.mockImplementation(() => new Promise(() => undefined));
+            }
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: () => "queued",
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-pending-heartbeat",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+    sources[0]?.request.failed("transport_lost");
+    timers.fire(50);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+
+    expect(sources).toHaveLength(2);
+    sources[1]?.open();
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(777);
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).not.toContain(
+      5_000,
+    );
     owner.dispose();
   });
 

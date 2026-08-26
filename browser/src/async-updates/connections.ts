@@ -986,6 +986,7 @@ interface LogicalMembership {
   pendingProofMembershipGeneration: number;
   pendingObservedTransportGeneration: number;
   pendingAuthorization: ReauthorizedLogicalSubscription | null;
+  pendingAuthorizationKind: "initial" | "successor" | null;
   provedTransportGeneration: number;
   recoveryRequestGeneration: number;
 }
@@ -1210,6 +1211,7 @@ export class DocumentConnectionPool {
       pendingProofMembershipGeneration: -1,
       pendingObservedTransportGeneration: -1,
       pendingAuthorization,
+      pendingAuthorizationKind: pendingAuthorization === null ? null : "initial",
       provedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       sink,
@@ -1295,6 +1297,7 @@ export class DocumentConnectionPool {
           return;
         }
         membership.pendingAuthorization = staged;
+        membership.pendingAuthorizationKind = "successor";
         try {
           this.#attach(membership);
         } catch {
@@ -1327,12 +1330,13 @@ export class DocumentConnectionPool {
   }
 
   #attach(membership: LogicalMembership): void {
-    const key = normalizedKey(membership.authorization.document);
+    const effective = this.#effectiveAuthorization(membership);
+    const key = normalizedKey(effective.document);
     const encodedKey = keyValue(key);
     let group = this.#groups.get(encodedKey);
     if (group === undefined) {
       group = {
-        authorization: membership.authorization.authorization,
+        authorization: effective.authorization,
         continuityTransportGeneration: -1,
         generation: 0,
         handshake: null,
@@ -1340,7 +1344,7 @@ export class DocumentConnectionPool {
         key,
         keyValue: encodedKey,
         memberships: new Map(),
-        policy: aggregatePolicy([membership.authorization]),
+        policy: aggregatePolicy([effective]),
         port: null,
         recovering: new Map(),
         recoveryActive: false,
@@ -1360,18 +1364,15 @@ export class DocumentConnectionPool {
         ...[...group.recovering.values()].map((candidate) =>
           this.#effectiveAuthorization(candidate),
         ),
-        membership.authorization,
+        effective,
       ];
       try {
         if (group.recoveryActive && readySubscriptions.length === 0) {
-          if (!sameAuthorization(group.authorization, membership.authorization.authorization)) {
+          if (!sameAuthorization(group.authorization, effective.authorization)) {
             throw new Error("async_transport_authority_conflict");
           }
         } else {
-          group.authorization = commonAuthorization([
-            ...readySubscriptions,
-            membership.authorization,
-          ]);
+          group.authorization = commonAuthorization([...readySubscriptions, effective]);
         }
         group.policy = aggregatePolicy(subscriptions);
       } catch (error: unknown) {
@@ -1380,7 +1381,7 @@ export class DocumentConnectionPool {
       }
     }
     if (group.recoveryActive) {
-      group.recovering.set(membership.authorization.subscriptionId, membership);
+      group.recovering.set(effective.subscriptionId, membership);
       membership.group = group;
       this.#safeState(membership, "connecting");
       if (group.state !== "backoff") {
@@ -1388,7 +1389,7 @@ export class DocumentConnectionPool {
       }
       return;
     }
-    group.memberships.set(membership.authorization.subscriptionId, membership);
+    group.memberships.set(effective.subscriptionId, membership);
     membership.group = group;
     this.#safeState(membership, "connecting");
     if (group.state === "open") {
@@ -1438,10 +1439,19 @@ export class DocumentConnectionPool {
         transportGeneration: generation,
       });
       try {
-        group.port =
+        const port =
           group.key.transport === "sse"
             ? this.#transports.eventSource(request)
             : this.#transports.webSocket(request);
+        if (!this.#groupCurrent(group, generation, "connecting")) {
+          try {
+            port.close("transport_replaced");
+          } catch {
+            // A synchronously failed/opened adapter is never retained.
+          }
+          return;
+        }
+        group.port = port;
       } catch {
         this.#failed(group, generation, "transport_lost");
       }
@@ -1482,21 +1492,33 @@ export class DocumentConnectionPool {
   }
 
   #failed(group: PhysicalGroup, generation: number, reason: DocumentTransportFailure): void {
-    if (!this.#groupCurrent(group, generation)) return;
+    if (
+      !this.#groupCurrent(group, generation) ||
+      (group.state !== "connecting" && group.state !== "open")
+    ) {
+      return;
+    }
+    // Retire this physical callback generation before invoking any adapter
+    // cleanup. A hostile/reentrant close callback is therefore inert.
+    group.state = "backoff";
+    group.generation += 1;
     this.#releaseHandshake(group);
-    group.handshake?.cancel();
+    const handshake = group.handshake;
     group.handshake = null;
+    handshake?.cancel();
     for (const membership of group.memberships.values()) {
       this.#cancelMembershipAttachment(membership);
-      this.#discardPendingAuthorization(membership);
+      if (membership.pendingAuthorizationKind !== "initial") {
+        this.#discardPendingAuthorization(membership);
+      }
     }
+    const port = group.port;
+    group.port = null;
     try {
-      group.port?.close("transport_replaced");
+      port?.close("transport_replaced");
     } catch {
       // A failed adapter cannot keep document ownership alive.
     }
-    group.port = null;
-    group.state = "backoff";
     group.recoveryActive = true;
     group.recoveryGeneration += 1;
     for (const membership of group.memberships.values()) {
@@ -1622,6 +1644,18 @@ export class DocumentConnectionPool {
       return;
     }
     membership.recoveryRequestGeneration = recoveryGeneration;
+    if (
+      membership.pendingAuthorizationKind === "initial" &&
+      membership.pendingAuthorization !== null
+    ) {
+      this.#admitRestoredMembership(
+        group,
+        membership,
+        membership.pendingAuthorization,
+        recoveryGeneration,
+      );
+      return;
+    }
     const poolGeneration = this.#generation;
     void this.#requestReauthorization(membership, poolGeneration).then((current) => {
       if (!this.#recoveryCurrent(group, membership, recoveryGeneration)) return;
@@ -1635,35 +1669,49 @@ export class DocumentConnectionPool {
         this.#finishRecovery(group);
         return;
       }
-      const subscriptions = [
-        ...[...group.memberships.values()].map((candidate) =>
-          this.#effectiveAuthorization(candidate),
-        ),
-        accepted,
-      ];
-      let authorization: AsyncTransportAuthorization;
-      let policy: AsyncReconnectPolicy;
-      try {
-        authorization = commonAuthorization(subscriptions);
-        policy = aggregatePolicy(subscriptions);
-      } catch {
-        discardReauthorization(staged);
-        this.#retireConflictedGroup(group);
-        return;
-      }
-      group.recovering.delete(membership.authorization.subscriptionId);
       membership.pendingAuthorization = staged;
-      membership.provedTransportGeneration = -1;
-      group.memberships.set(accepted.subscriptionId, membership);
-      group.authorization = authorization;
-      group.policy = policy;
-      this.#safeState(membership, "connecting");
-      if (group.state === "restoring") this.#connect(group, "restoring");
-      else if (group.state === "open") {
-        this.#subscribeMembership(group, membership, group.generation);
-      }
-      this.#finishRecovery(group);
+      membership.pendingAuthorizationKind = "successor";
+      this.#admitRestoredMembership(group, membership, staged, recoveryGeneration);
     });
+  }
+
+  #admitRestoredMembership(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    staged: ReauthorizedLogicalSubscription,
+    recoveryGeneration: number,
+  ): void {
+    if (!this.#recoveryCurrent(group, membership, recoveryGeneration)) return;
+    const accepted = staged.subscription;
+    const subscriptions = [
+      ...[...group.memberships.values()].map((candidate) =>
+        this.#effectiveAuthorization(candidate),
+      ),
+      accepted,
+    ];
+    let authorization: AsyncTransportAuthorization;
+    let policy: AsyncReconnectPolicy;
+    try {
+      authorization = commonAuthorization(subscriptions);
+      policy = aggregatePolicy(subscriptions);
+    } catch {
+      if (membership.pendingAuthorizationKind !== "initial") {
+        discardReauthorization(staged);
+      }
+      this.#retireConflictedGroup(group);
+      return;
+    }
+    group.recovering.delete(membership.authorization.subscriptionId);
+    membership.provedTransportGeneration = -1;
+    group.memberships.set(accepted.subscriptionId, membership);
+    group.authorization = authorization;
+    group.policy = policy;
+    this.#safeState(membership, "connecting");
+    if (group.state === "restoring") this.#connect(group, "restoring");
+    else if (group.state === "open") {
+      this.#subscribeMembership(group, membership, group.generation);
+    }
+    this.#finishRecovery(group);
   }
 
   #recoveryCurrent(
@@ -1963,6 +2011,7 @@ export class DocumentConnectionPool {
     const staged = membership.pendingAuthorization;
     if (staged !== null) {
       membership.pendingAuthorization = null;
+      membership.pendingAuthorizationKind = null;
       const outcome: ReturnType<ReauthorizedLogicalSubscription["commit"]> = (() => {
         try {
           return staged.commit();
@@ -2005,6 +2054,7 @@ export class DocumentConnectionPool {
   #discardPendingAuthorization(membership: LogicalMembership): void {
     const staged = membership.pendingAuthorization;
     membership.pendingAuthorization = null;
+    membership.pendingAuthorizationKind = null;
     if (staged === null) return;
     try {
       discardReauthorization(staged);

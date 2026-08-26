@@ -739,3 +739,328 @@ describe("reviewed SSE membership ownership", () => {
     expect(native).toHaveLength(1);
   });
 });
+
+describe("reviewed pre-authentication recovery", () => {
+  it.each([
+    { failure: "pre_open_loss", proof: null, transport: "sse" as const },
+    { failure: "never_open", proof: "authoritative_no_tail" as const, transport: "sse" as const },
+    { failure: "pre_open_loss", proof: "complete_replay" as const, transport: "sse" as const },
+    { failure: "pre_open_loss", proof: null, transport: "websocket" as const },
+    {
+      failure: "never_open",
+      proof: "authoritative_no_tail" as const,
+      transport: "websocket" as const,
+    },
+    {
+      failure: "pre_open_loss",
+      proof: "complete_replay" as const,
+      transport: "websocket" as const,
+    },
+  ])(
+    "preserves an inert $proof initial stage across $transport $failure",
+    async ({ failure, proof, transport }) => {
+      const sources: Source[] = [];
+      const timers = new Timers();
+      const transports: AsyncTransportPorts = {
+        eventSource(request) {
+          if (transport !== "sse") throw new Error("unexpected_sse");
+          const source = new Source(request);
+          sources.push(source);
+          return source;
+        },
+        webSocket(request) {
+          if (transport !== "websocket") throw new Error("unexpected_websocket");
+          const source = new Source(request);
+          sources.push(source);
+          return source;
+        },
+      };
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: new OriginHandshakeScheduler(),
+        handshakeTimeoutMs: 5_000,
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      });
+      const initial = authorization(1, {
+        document: Object.freeze({
+          authorizationScope: "shared-document",
+          origin: "https://app.example.test",
+          transport,
+        }),
+      });
+      const commit = vi.fn(() => "committed" as const);
+      const discard = vi.fn();
+      const logical = sink(() => Promise.reject(new Error("initial_stage_must_survive")));
+      pool.subscribe(
+        initial,
+        logical,
+        Object.freeze({ commit, discard, proof, subscription: initial }),
+      );
+
+      if (failure === "never_open") timers.fire(5_000);
+      else sources[0]?.fail();
+      expect(commit).not.toHaveBeenCalled();
+      expect(discard).not.toHaveBeenCalled();
+      expect(logical.reauthorize).not.toHaveBeenCalled();
+
+      timers.fire(50);
+      await settle();
+      expect(sources).toHaveLength(2);
+      sources[0]?.open();
+      expect(commit).not.toHaveBeenCalled();
+      sources[1]?.open();
+      await settle();
+
+      expect(logical.reauthorize).not.toHaveBeenCalled();
+      expect(commit).toHaveBeenCalledOnce();
+      expect(discard).not.toHaveBeenCalled();
+      if (proof === null) expect(logical.state).not.toHaveBeenCalledWith("current");
+      else expect(logical.state).toHaveBeenCalledWith("current");
+    },
+  );
+
+  it.each([
+    {
+      field: "credential",
+      rotated: authorization(1, {
+        authorization: Object.freeze({ credential: "rotated-credential-1234", kind: "bearer" }),
+      }),
+    },
+    {
+      field: "document key and transport",
+      rotated: authorization(1, {
+        document: Object.freeze({
+          authorizationScope: "rotated-scope",
+          origin: "https://rotated.example.test",
+          transport: "websocket" as const,
+        }),
+      }),
+    },
+    {
+      field: "reconnect policy",
+      rotated: authorization(1, {
+        reconnect: Object.freeze({
+          kind: "resume_or_refresh" as const,
+          maximumAttempts: 3,
+          maximumDelayMs: 1_600,
+          minimumDelayMs: 800,
+        }),
+      }),
+    },
+  ])("attaches bfcache restoration with staged effective $field", async ({ rotated }) => {
+    const timers = new Timers();
+    const sources: Source[] = [];
+    const pool = new DocumentConnectionPool({
+      handshakeScheduler: new OriginHandshakeScheduler(),
+      randomness: { number: () => 0.5 },
+      timers: timers.port,
+      transports: {
+        eventSource(request) {
+          const source = new Source(request);
+          sources.push(source);
+          return source;
+        },
+        webSocket(request) {
+          const source = new Source(request);
+          sources.push(source);
+          return source;
+        },
+      },
+    });
+    const initial = authorization(1);
+    const logical = sink(() => Promise.resolve(rotated));
+    pool.subscribe(initial, logical);
+    sources[0]?.open();
+    pool.suspend();
+    await pool.resume();
+
+    expect(sources).toHaveLength(2);
+    expect(sources[1]?.request.key).toEqual(rotated.document);
+    expect(sources[1]?.request.authorization).toEqual(rotated.authorization);
+    expect(sources[1]?.request.key.transport).toBe(rotated.document.transport);
+    sources[1]?.open();
+    sources[1]?.fail();
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(
+      Math.floor(rotated.reconnect.minimumDelayMs * 0.5),
+    );
+  });
+
+  it("accepts only one terminal transport callback per physical generation", async () => {
+    const timers = new Timers();
+    const sources: Source[] = [];
+    const reconnect = Object.freeze({
+      kind: "resume_or_refresh" as const,
+      maximumAttempts: 2,
+      maximumDelayMs: 400,
+      minimumDelayMs: 100,
+    });
+    const pool = new DocumentConnectionPool({
+      handshakeScheduler: new OriginHandshakeScheduler(),
+      randomness: { number: () => 0.5 },
+      timers: timers.port,
+      transports: {
+        eventSource(request) {
+          const source = new Source(request);
+          source.close.mockImplementation(() => {
+            request.failed("transport_lost");
+            request.failed("transport_lost");
+          });
+          sources.push(source);
+          return source;
+        },
+        webSocket() {
+          throw new Error("unexpected_websocket");
+        },
+      },
+    });
+    const logical = sink();
+    pool.subscribe(authorization(1, { reconnect }), logical);
+    sources[0]?.open();
+    sources[0]?.fail();
+    sources[0]?.fail();
+
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toEqual([50]);
+    timers.fire(50);
+    await settle();
+    expect(sources).toHaveLength(2);
+    expect(logical.reauthorize).toHaveBeenCalledOnce();
+  });
+
+  it("closes and never retains an adapter that fails synchronously during creation", () => {
+    const timers = new Timers();
+    const sources: Source[] = [];
+    const pool = new DocumentConnectionPool({
+      handshakeScheduler: new OriginHandshakeScheduler(),
+      randomness: { number: () => 0.5 },
+      timers: timers.port,
+      transports: {
+        eventSource(request) {
+          const source = new Source(request);
+          sources.push(source);
+          request.failed("transport_lost");
+          return source;
+        },
+        webSocket() {
+          throw new Error("unexpected_websocket");
+        },
+      },
+    });
+    pool.subscribe(authorization(1), sink());
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toEqual([50]);
+    pool.dispose();
+    expect(timers.pending.size).toBe(0);
+  });
+
+  it.each([{ completionOrder: [0, 1] as const }, { completionOrder: [1, 0] as const }] as const)(
+    "groups compatible staged bfcache rotations independently of completion order $completionOrder",
+    async ({ completionOrder }) => {
+      const timers = new Timers();
+      const sources: Source[] = [];
+      const rotatedAuthority = Object.freeze({
+        credential: "rotated-compatible-credential",
+        kind: "bearer" as const,
+      });
+      const releases: (((value: AuthorizedLogicalSubscription) => void) | undefined)[] = [];
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: new OriginHandshakeScheduler(),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new Source(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      });
+      for (const index of [0, 1]) {
+        const current = authorization(index);
+        pool.subscribe(
+          current,
+          sink(
+            () =>
+              new Promise((resolve) => {
+                releases[index] = resolve;
+              }),
+          ),
+        );
+      }
+      sources[0]?.open();
+      pool.suspend();
+      const resumed = pool.resume();
+      await settle();
+      for (const index of completionOrder) {
+        releases[index]?.(
+          authorization(index, {
+            authorization: rotatedAuthority,
+            descriptorBinding: `rotated-binding-${String(index)}`,
+          }),
+        );
+        await settle();
+      }
+      await resumed;
+
+      expect(sources).toHaveLength(2);
+      expect(sources[1]?.request.authorization).toEqual(rotatedAuthority);
+      sources[1]?.open();
+      expect(sources[1]?.subscribe).toHaveBeenCalledTimes(2);
+      pool.dispose();
+    },
+  );
+
+  it.each([
+    { credentials: ["credential-a", "credential-b"] as const },
+    { credentials: ["credential-b", "credential-a"] as const },
+  ] as const)(
+    "rejects incompatible staged bfcache authority independent of completion order $credentials",
+    async ({ credentials }) => {
+      const timers = new Timers();
+      const sources: Source[] = [];
+      const states = [vi.fn(), vi.fn()] as const;
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: new OriginHandshakeScheduler(),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new Source(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      });
+      for (const index of [0, 1] as const) {
+        pool.subscribe(authorization(index), {
+          ...sink(() =>
+            Promise.resolve(
+              authorization(index, {
+                authorization: Object.freeze({
+                  credential: credentials[index],
+                  kind: "bearer" as const,
+                }),
+              }),
+            ),
+          ),
+          state: states[index],
+        });
+      }
+      sources[0]?.open();
+      pool.suspend();
+      await pool.resume();
+
+      expect(states[0]).toHaveBeenCalledWith("degraded");
+      expect(states[1]).toHaveBeenCalledWith("degraded");
+      pool.dispose();
+    },
+  );
+});

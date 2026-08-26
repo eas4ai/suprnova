@@ -23,6 +23,7 @@ payloads and explicit scope. Events coordinate already-owned behavior; they do
 not bypass actions, model permissions, or authorization.
 
 Acceptance criteria:
+
 - Event names, payload schemas, source, target, and propagation scope are
   generated or registered.
 - Scope can target self, parent, child, named island, document, or approved
@@ -38,6 +39,7 @@ Acceptance criteria:
 - Event cycles and fanout are bounded.
 
 UX flow:
+
 1. Accepted component action dispatches an event -> registered targets receive
    it in defined order.
 2. No valid target exists -> the event is ignored or diagnosed according to its
@@ -51,6 +53,7 @@ validation. The server emits a signed bounded subscription descriptor rather
 than allowing directives to construct endpoints or channel names.
 
 Acceptance criteria:
+
 - Channel names and parameters derive from current registered server metadata
   plus bounded validated mount parameters rather than arbitrary directive
   interpolation. Registered topic templates may substitute only an exact
@@ -80,6 +83,7 @@ Acceptance criteria:
 - A push message cannot supply trusted snapshot or replacement HTML directly.
 
 UX flow:
+
 1. Eligible island connects -> runtime establishes its authorized subscription.
 2. Authorization fails or changes -> subscription stops and the island exposes
    degraded freshness or its declared denial state.
@@ -92,6 +96,7 @@ and HTML shall travel through normal Live verification, scheduling, rendering,
 and morph contracts.
 
 Acceptance criteria:
+
 - Push metadata identifies registered response/presentation behavior, not an
   arbitrary method, action, effect, or JavaScript invocation.
 - Push-triggered work enters the owning island scheduler and respects current
@@ -106,6 +111,7 @@ Acceptance criteria:
 - HTTP action transport remains available when push is absent.
 
 UX flow:
+
 1. Relevant server event arrives -> island queues one declared refresh or
    behavior.
 2. Fresh render succeeds -> bounded morph updates the island without rerendering
@@ -119,6 +125,7 @@ reduce work when hidden, offline, disconnected, or superseded by another update
 mechanism according to policy.
 
 Acceptance criteria:
+
 - Interval limits, jitter, visibility behavior, immediate/initial behavior, and
   fresh-render target are explicit. Polling never names or invokes a Live action.
 - Poll requests enter the island scheduler and never overlap unsafely by default.
@@ -133,6 +140,7 @@ Acceptance criteria:
   conflicts with `live:poll`.
 
 UX flow:
+
 1. Poll interval elapses in an eligible document -> runtime requests the
    registered refresh under scheduling policy.
 2. Document hides or network fails -> polling pauses/backs off and resumes
@@ -146,6 +154,7 @@ turn the component into an unbounded persistent server object or introduce a
 second HTML, snapshot, revision, or DOM-patch protocol.
 
 Acceptance criteria:
+
 - Stream setup authenticates and authorizes its principal, tenant, component,
   and topic.
 - Messages carry epoch/sequence, stream identity, size limits, and typed
@@ -153,7 +162,7 @@ Acceptance criteria:
   initial SSR state to the first required event; absent replay from that
   position requires refresh.
 - The browser owns one physical document transport per compatible `(origin,
-  transport, document authorization scope)` and multiplexes island subscriptions
+transport, document authorization scope)` and multiplexes island subscriptions
   through it. The document scope is a compact collision-resistant derivation of
   trusted aggregate scope, principal, session, tenant, and explicit host
   transport-policy identity; it excludes component name and component contract,
@@ -410,11 +419,21 @@ Acceptance criteria:
   is not acknowledgment.
   Rejection, timeout, transport loss, cancellation, or a late/foreign
   acknowledgment cannot consume replay/no-tail proof or reset reconnect state.
+  An uncommitted initial authorization remains inert but recoverable across a
+  bounded pre-acknowledgment transport replacement; recovery never routes it
+  through successor reauthorization against an intentionally absent committed
+  predecessor. Every replacement takes its transport key, credential,
+  transport kind, reconnect policy, and heartbeat policy from the exact staged
+  effective authorization. A physical generation accepts only its first
+  terminal open/failure transition and retires its callback token before
+  invoking adapter cleanup, so reentrant or late callbacks cannot consume an
+  attempt or replace an owned timer.
 - Persisted `pagehide` closes long-lived transports and transport timers before
   bfcache. `pageshow` reauthorizes and establishes a new physical connection
   before currentness may be reclaimed.
 
 UX flow:
+
 1. Application starts a declared stream -> the region exposes connected and
    progress state while ordered typed events arrive.
 2. Sequence gap or disconnect occurs -> runtime pauses application, reconnects
@@ -427,6 +446,7 @@ Features whose correctness depends on pushed freshness shall expose connection
 and staleness state and obtain current server state after uncertain gaps.
 
 Acceptance criteria:
+
 - Reconnect uses bounded exponential backoff and jitter.
 - Resume tokens or sequence positions are used only when the backend proves
   continuity.
@@ -440,6 +460,7 @@ Acceptance criteria:
 - Global outages do not cause synchronized reconnect storms.
 
 UX flow:
+
 1. Push transport disconnects -> HTTP interactions continue and material regions
    show reconnecting/stale state.
 2. Continuity is restored or disproven -> stream resumes from proof or the
@@ -455,6 +476,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Kept uncommitted initial subscription authority inert and
+  generation-owned across bounded pre-acknowledgment transport loss rather than
+  invoking successor reauthorization without a committed predecessor. Bfcache
+  restoration and reconnect grouping use the complete staged effective
+  transport authority, with compatible aggregation independent of completion
+  order and deterministic rejection of incompatible rotations. Each physical
+  generation accepts one terminal callback and fences reentrant adapter cleanup
+  before scheduling exactly one retry. Production ESM and classic artifact
+  scenarios now prove exact membership acknowledgment and persisted lifecycle
+  restoration under CSP in every supported browser.
 - 2026-08-26 -- Staged initial and reconnect authorization, replay, event
   capability rotation, and authoritative-no-tail evidence behind the exact
   physical membership acknowledgment. Preflight cannot mutate island sequence

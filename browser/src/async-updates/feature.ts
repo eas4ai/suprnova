@@ -283,6 +283,10 @@ class AsyncIslandController implements FeatureIslandController {
   #heartbeatTimer: number | null = null;
   #handle: LogicalSubscriptionHandle | null = null;
   #currentAuthorization: AuthorizedLogicalSubscription | null = null;
+  #pendingAuthorization: {
+    readonly authorization: AuthorizedLogicalSubscription;
+    readonly token: object;
+  } | null = null;
   #eventCapability: RegisteredBrowserEventCapability | null = null;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
   #subscription: AsyncSubscription | null = null;
@@ -533,6 +537,11 @@ class AsyncIslandController implements FeatureIslandController {
     const subscription = this.#subscription;
     if (subscription === null) throw new Error("async_subscription_retired");
     let settled = false;
+    const token = Object.freeze({});
+    this.#pendingAuthorization = Object.freeze({ authorization, token });
+    const clearPending = () => {
+      if (this.#pendingAuthorization?.token === token) this.#pendingAuthorization = null;
+    };
     return Object.freeze({
       commit: () => {
         if (
@@ -541,6 +550,7 @@ class AsyncIslandController implements FeatureIslandController {
           this.#generation !== generation ||
           this.#subscription !== subscription
         ) {
+          clearPending();
           return "stale";
         }
         settled = true;
@@ -563,8 +573,10 @@ class AsyncIslandController implements FeatureIslandController {
           } else {
             subscription.receiveReplay(replay);
           }
+          clearPending();
           return "committed";
         } catch {
+          clearPending();
           subscription.authorizationUncertain();
           report(this.#context, "operation_rejected");
           return installed ? "degraded" : "stale";
@@ -572,6 +584,7 @@ class AsyncIslandController implements FeatureIslandController {
       },
       discard: () => {
         settled = true;
+        clearPending();
       },
       proof,
       subscription: authorization,
@@ -623,7 +636,11 @@ class AsyncIslandController implements FeatureIslandController {
   }
 
   #heartbeatTimeout(): number {
-    return this.#currentAuthorization?.heartbeatTimeoutMs ?? 1;
+    return (
+      this.#pendingAuthorization?.authorization.heartbeatTimeoutMs ??
+      this.#currentAuthorization?.heartbeatTimeoutMs ??
+      1
+    );
   }
 }
 

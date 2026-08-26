@@ -377,18 +377,18 @@
   mode-set drift revokes a retained request.
 
 - [x] Run shared conformance against both transports, cross-site WebSocket
-  hijacking cases, membership add/remove/replay cases, ordinary HTTP endpoint
-  regression tests, and controlled shutdown. The complete common semantic suite
-  runs through genuine SSE response/HTTP-control/record paths and genuine
-  WebSocket origin/control/envelope paths; adapter-tagged counters prove both
-  executed every case. Controlled clocks and barriers cover preflight and
-  post-subscribe expiry, revocation, scope/mode drift, once-only disposal, and
-  unauthorized external removal without sleeps. They also prove document
-  delivery and independent controls progress during pending authority/source
-  work, stale one-use commits clean up, active-plus-retiring fences survive key
-  overlap, WebSocket denial reveals no membership oracle, hard pending-control
-  bounds release on drop, and controlled pending reads/closes register and wake
-  exact waiters.
+      hijacking cases, membership add/remove/replay cases, ordinary HTTP endpoint
+      regression tests, and controlled shutdown. The complete common semantic suite
+      runs through genuine SSE response/HTTP-control/record paths and genuine
+      WebSocket origin/control/envelope paths; adapter-tagged counters prove both
+      executed every case. Controlled clocks and barriers cover preflight and
+      post-subscribe expiry, revocation, scope/mode drift, once-only disposal, and
+      unauthorized external removal without sleeps. They also prove document
+      delivery and independent controls progress during pending authority/source
+      work, stale one-use commits clean up, active-plus-retiring fences survive key
+      overlap, WebSocket denial reveals no membership oracle, hard pending-control
+      bounds release on drop, and controlled pending reads/closes register and wake
+      exact waiters.
 - [x] Commit: `feat(async): add SSE and WebSocket transport sessions`.
 
 ## Task 5: Enforce server-side fanout and backpressure bounds
@@ -411,58 +411,58 @@
   ```
 
 - [x] Run `rtk cargo test --test async_backpressure`; record the expected RED
-  because `AsyncBackpressure`, `AsyncBufferEntry`, `AsyncPolicy`, and
-  `BufferDisposition` did not exist. A separate shared-resource RED proved the
-  bounded queue lacked exact newest-item replacement.
+      because `AsyncBackpressure`, `AsyncBufferEntry`, `AsyncPolicy`, and
+      `BufferDisposition` did not exist. A separate shared-resource RED proved the
+      bounded queue lacked exact newest-item replacement.
 - [x] Record the correction REDs after adversarial review: the public buffer
-  still accepted caller fanout, replay could commit a prefix through repeated
-  single pushes, tail identity was inspected outside the queue lock, and Task 4
-  fair fan-in was not composed with one document-owned delivery queue. Shared
-  cloned-handle tests also proved batch admission, predicate removal, and
-  identity-aware tail mutation were absent.
+      still accepted caller fanout, replay could commit a prefix through repeated
+      single pushes, tail identity was inspected outside the queue lock, and Task 4
+      fair fan-in was not composed with one document-owned delivery queue. Shared
+      cloned-handle tests also proved batch admission, predicate removal, and
+      identity-aware tail mutation were absent.
 - [x] Record the second correction REDs: a public sealed entry could outlive its
-  final authority check before `offer`, dequeue exposed a pop-and-forget result,
-  and document dispatch accepted a caller-selected sequence machine. Public API
-  tests failed before the document owner combined final current validation,
-  synchronous queue mutation, exact sequence-lane selection, and registered
-  dispatch.
+      final authority check before `offer`, dequeue exposed a pop-and-forget result,
+      and document dispatch accepted a caller-selected sequence machine. Public API
+      tests failed before the document owner combined final current validation,
+      synchronous queue mutation, exact sequence-lane selection, and registered
+      dispatch.
 - [x] Record the third correction REDs: host `now` callbacks still followed the
-  final registry validation, raw `DocumentTransportSession::next` bypassed the
-  bounded owner, empty EOF retained a detached drain/lane, replay allocated and
-  validated before count rejection, and dequeue flattened an atomic replay into
-  ordinary single-envelope dispatch. Hostile callback, public API, repeated
-  identity reuse, zero-validation over-count, complete recovery, and truthful
-  partial-failure tests failed before correction.
+      final registry validation, raw `DocumentTransportSession::next` bypassed the
+      bounded owner, empty EOF retained a detached drain/lane, replay allocated and
+      validated before count rejection, and dequeue flattened an atomic replay into
+      ordinary single-envelope dispatch. Hostile callback, public API, repeated
+      identity reuse, zero-validation over-count, complete recovery, and truthful
+      partial-failure tests failed before correction.
 - [x] Record the fourth correction REDs: one document-wide degradation flag let
-  a sibling replay erase an unrelated ordered-overflow obligation, and terminal
-  detachment let exact or rotated same-ID admission create another sequence lane
-  while the queued predecessor retained the first. Exact pressure/replay and
-  pending-terminal admission tests failed before correction.
+      a sibling replay erase an unrelated ordered-overflow obligation, and terminal
+      detachment let exact or rotated same-ID admission create another sequence lane
+      while the queued predecessor retained the first. Exact pressure/replay and
+      pending-terminal admission tests failed before correction.
 - [x] Record the independent-review correction REDs: raw Task 3 admission and
-  sequence mutation remained public, replay currentness was validated through
-  multiple host callbacks, replay accepted lifecycle completion, and trusted
-  fanout proof stopped before registered dispatch. Further REDs covered missing
-  document-owned authoritative refresh, panic-time pulled-candidate loss,
-  terminal provider reads, false degradation for a redundant tail,
-  pool-global recovery idleness, untracked degraded replay rejection, and
-  lock-callback/classifier hazards in the shared resource queue.
+      sequence mutation remained public, replay currentness was validated through
+      multiple host callbacks, replay accepted lifecycle completion, and trusted
+      fanout proof stopped before registered dispatch. Further REDs covered missing
+      document-owned authoritative refresh, panic-time pulled-candidate loss,
+      terminal provider reads, false degradation for a redundant tail,
+      pool-global recovery idleness, untracked degraded replay rejection, and
+      lock-callback/classifier hazards in the shared resource queue.
 - [x] Record the final replay/refresh REDs: authoritative refresh installed a
-  baseline after its registry check even when the host callback drifted scope;
-  healthy replay reached host authority; malformed and byte-overflow replay
-  returned `Degraded`; post-prefix authorization loss discarded replay progress;
-  replay closure delayed cleanup; and MAX-tail successor arithmetic rejected
-  redundant equal/lower positions. Each failed before its focused correction.
+      baseline after its registry check even when the host callback drifted scope;
+      healthy replay reached host authority; malformed and byte-overflow replay
+      returned `Degraded`; post-prefix authorization loss discarded replay progress;
+      replay closure delayed cleanup; and MAX-tail successor arithmetic rejected
+      redundant equal/lower positions. Each failed before its focused correction.
 - [x] Record the stored-authority/progress REDs: pressure-only replay failures
-  lost their effective high-water; registry drift was mislabeled as expiry; a
-  reconstructed authorization invoked its substituted clock; local and
-  structural replay rejection stages emitted no `Rejected` telemetry. The
-  focused public suite failed five tests before correction. Post-prefix shared
-  retirement remains an internal lease invariant because the synchronous closed
-  document owner intentionally exposes no concurrent cancellation capability.
+      lost their effective high-water; registry drift was mislabeled as expiry; a
+      reconstructed authorization invoked its substituted clock; local and
+      structural replay rejection stages emitted no `Rejected` telemetry. The
+      focused public suite failed five tests before correction. Post-prefix shared
+      retirement remains an internal lease invariant because the synchronous closed
+      document owner intentionally exposes no concurrent cancellation capability.
 - [x] Record the final authoritative-refresh RED: reconstructed authorization
-  with the same signed facts and a substituted stale clock invoked continuity
-  authority before it failed current validation. The public regression observed
-  one forbidden callback and proved sequence and pressure state stayed unchanged.
+      with the same signed facts and a substituted stale clock invoked continuity
+      authority before it failed current validation. The public regression observed
+      one forbidden callback and proved sequence and pressure state stayed unchanged.
 - [x] Implement typed dispositions:
 
   ```rust
@@ -492,102 +492,102 @@
   continuity.
 
 - [x] Seal admission through the exact active Task 4 document membership. The
-  queued `AuthorizedAsyncBufferEntry` owns Task 3's freshly admitted one-use
-  guard and binds descriptor digest, document scope, component memo,
-  subscription/stream/epoch, complete operation contract, and trusted host
-  target resolution. Remove public `offer(envelope, fanout)` authority; the host
-  supplies actual recipient count and target-set scope, and all drift is
-  rejected before queue mutation or target cloning.
+      queued `AuthorizedAsyncBufferEntry` owns Task 3's freshly admitted one-use
+      guard and binds descriptor digest, document scope, component memo,
+      subscription/stream/epoch, complete operation contract, and trusted host
+      target resolution. Remove public `offer(envelope, fanout)` authority; the host
+      supplies actual recipient count and target-set scope, and all drift is
+      rejected before queue mutation or target cloning.
 - [x] Add shared payload-neutral `try_push_batch`, lock-scoped tail
-  classify/mutate, exact predicate removal, and bounded membership query
-  primitives. Checked replay commits its complete same-scope transcript under
-  one queue critical section, cloned handles cannot create a prefix or redirect
-  replacement, and old/rejected payloads drop only after unlock.
+      classify/mutate, exact predicate removal, and bounded membership query
+      primitives. Checked replay commits its complete same-scope transcript under
+      one queue critical section, cloned handles cannot create a prefix or redirect
+      replacement, and old/rejected payloads drop only after unlock.
 - [x] Compose `DocumentTransportSession` and `AsyncBackpressure` as one
-  `BoundedDocumentTransportSession`. It polls one logical source per pump using
-  Task 4 round-robin fairness, admits directly to one aggregate 64-item/256-KiB
-  queue and shared permits, owns no hidden framework ingress buffer, purges an
-  exact removed/failed binding, and preserves graceful predecessors through one
-  terminal drain without creating another sequence machine.
+      `BoundedDocumentTransportSession`. It polls one logical source per pump using
+      Task 4 round-robin fairness, admits directly to one aggregate 64-item/256-KiB
+      queue and shared permits, owns no hidden framework ingress buffer, purges an
+      exact removed/failed binding, and preserves graceful predecessors through one
+      terminal drain without creating another sequence machine.
 - [x] Close admission and delivery as document-owned operations. Raw authorized
-  entries, offer/replay, and delivery leases are crate-private. Pump and replay
-  prevalidate, then recheck exact host facts/document generation and exclusive
-  expiry immediately before synchronous atomic queue mutation. Dispatch owns a
-  non-cloneable RAII lease and selects the exact binding's one Task 3 sequence
-  lane internally; callers cannot supply a machine or acknowledge success.
-  Post-pop authority loss, cancellation, gap/epoch degradation, dispatcher
-  error, panic, or unresolved drop releases the permit and degrades continuity
-  without false sequence advancement.
+      entries, offer/replay, and delivery leases are crate-private. Pump and replay
+      prevalidate, then recheck exact host facts/document generation and exclusive
+      expiry immediately before synchronous atomic queue mutation. Dispatch owns a
+      non-cloneable RAII lease and selects the exact binding's one Task 3 sequence
+      lane internally; callers cannot supply a machine or acknowledge success.
+      Post-pop authority loss, cancellation, gap/epoch degradation, dispatcher
+      error, panic, or unresolved drop releases the permit and degrades continuity
+      without false sequence advancement.
 - [x] Remove public raw document delivery and keep final host validation last.
-  Capture commit/dispatch time before the final registry callback, pass it into
-  expiry/generation validation, and perform no host callback before synchronous
-  queue mutation or registered dispatch. Empty EOF immediately prunes its
-  detached drain and sequence lane. Replay count/capacity preflight precedes
-  internal allocation and all authority work; lock-scoped contiguous dequeue
-  preserves the atomically admitted transcript in one RAII lease, which invokes
-  Task 3 `recover_from_replay`, and ordinary tail coalescing cannot split that
-  group. Complete recovery clears document pressure only when the aggregate
-  queue is empty and every exact logical lane is current; one membership cannot
-  clear a degraded sibling. Partial dispatch exposes its committed prefix and
-  remains degraded.
+      Capture commit/dispatch time before the final registry callback, pass it into
+      expiry/generation validation, and perform no host callback before synchronous
+      queue mutation or registered dispatch. Empty EOF immediately prunes its
+      detached drain and sequence lane. Replay count/capacity preflight precedes
+      internal allocation and all authority work; lock-scoped contiguous dequeue
+      preserves the atomically admitted transcript in one RAII lease, which invokes
+      Task 3 `recover_from_replay`, and ordinary tail coalescing cannot split that
+      group. Complete recovery clears document pressure only when the aggregate
+      queue is empty and every exact logical lane is current; one membership cannot
+      clear a degraded sibling. Partial dispatch exposes its committed prefix and
+      remains degraded.
 - [x] Track unresolved pressure by finite cause and exact subscription binding,
-  document scope, and component memo. Pressure high-water remains evidence for
-  the existing Task 3 machine, not a second sequence counter; exact replay clears
-  only covered causes for that membership after the queue drains, and explicit
-  authenticated removal discharges only that exact retired binding. Fence exact
-  and rotated same-ID commits while a queued terminal predecessor retains its
-  sole lane; after delivery, re-admission creates exactly one fresh lane. Four
-  finite cause classes cap retained tracker state at four times the existing
-  document membership ceiling; saturation remains conservatively degraded.
+      document scope, and component memo. Pressure high-water remains evidence for
+      the existing Task 3 machine, not a second sequence counter; exact replay clears
+      only covered causes for that membership after the queue drains, and explicit
+      authenticated removal discharges only that exact retired binding. Fence exact
+      and rotated same-ID commits while a queued terminal predecessor retains its
+      sole lane; after delivery, re-admission creates exactly one fresh lane. Four
+      finite cause classes cap retained tracker state at four times the existing
+      document membership ceiling; saturation remains conservatively degraded.
 - [x] Close the public and reentrant authority surface. The bounded document
-  owner alone performs raw admission, sequence mutation, replay, and recovery.
-  Replay obtains one atomic current-membership snapshot, excludes `Complete`,
-  and final-validates each member immediately before registered dispatch while
-  preserving a truthful committed prefix. Dispatch consumes a
-  private-construction resolved-delivery capability with exact trusted target
-  scope/count and policy limit. RAII protects provider candidates extracted
-  across panicking callbacks, closed pressure performs no further source read,
-  redundant tails do not invent loss, document-local activity gates recovery,
-  and invalid replay has a typed non-continuity error unless an obligation
-  already exists. Shared conditional queue operations remain crate-private and
-  classify each member exactly once. The unreachable same-epoch sequence-
-  overflow branch is removed; `u64::MAX` equal/lower positions are duplicates
-  and a newer epoch uses document-owned authoritative refresh.
+      owner alone performs raw admission, sequence mutation, replay, and recovery.
+      Replay obtains one atomic current-membership snapshot, excludes `Complete`,
+      and final-validates each member immediately before registered dispatch while
+      preserving a truthful committed prefix. Dispatch consumes a
+      private-construction resolved-delivery capability with exact trusted target
+      scope/count and policy limit. RAII protects provider candidates extracted
+      across panicking callbacks, closed pressure performs no further source read,
+      redundant tails do not invent loss, document-local activity gates recovery,
+      and invalid replay has a typed non-continuity error unless an obligation
+      already exists. Shared conditional queue operations remain crate-private and
+      classify each member exactly once. The unreachable same-epoch sequence-
+      overflow branch is removed; `u64::MAX` equal/lower positions are duplicates
+      and a newer epoch uses document-owned authoritative refresh.
 - [x] Close replay disposition and refresh commit invariants. Obtain a proposed
-  authoritative baseline first, then capture commit time and perform exact
-  current scope/expiry/registry validation as the final host callback before a
-  callback-free baseline install. Admit replay only for an existing exact lane
-  or pressure obligation; preflight bounded structure, payload, aggregate bytes,
-  queue capacity, and contiguous coverage before authority. Invalid evidence is
-  typed `InvalidEnvelope`, never newly degraded. Preserve applied/current/state/
-  high-water on every post-prefix exit independently of authorization,
-  cancellation, or retirement kind; every replay `Closed` begins once-only
-  transport cleanup. `Coalesced` covers redundant-tail absorption and successor
-  replacement, with only replacement creating pressure loss; compare MAX tails
-  before successor arithmetic and prove resolved delivery is non-cloneable.
+      authoritative baseline first, then capture commit time and perform exact
+      current scope/expiry/registry validation as the final host callback before a
+      callback-free baseline install. Admit replay only for an existing exact lane
+      or pressure obligation; preflight bounded structure, payload, aggregate bytes,
+      queue capacity, and contiguous coverage before authority. Invalid evidence is
+      typed `InvalidEnvelope`, never newly degraded. Preserve applied/current/state/
+      high-water on every post-prefix exit independently of authorization,
+      cancellation, or retirement kind; every replay `Closed` begins once-only
+      transport cleanup. `Coalesced` covers redundant-tail absorption and successor
+      replacement, with only replacement creating pressure loss; compare MAX tails
+      before successor arithmetic and prove resolved delivery is non-cloneable.
 - [x] Bind replay to the exact stored active authorization before host work.
-  Preflight count/resources, then locally validate common document facts,
-  descriptor binding, scope, context, and registered payload/event/signal/target
-  identity before invoking only the stored clock and atomic registry seal.
-  Retain the effective sequence-or-pressure high-water on every post-prepare
-  failure and distinguish delivery retirement, expiry, authorization loss, and
-  dispatcher failure. Count each public typed replay rejection exactly once and
-  successful admission zero times without adding a second cancellation or
-  lifecycle authority.
+      Preflight count/resources, then locally validate common document facts,
+      descriptor binding, scope, context, and registered payload/event/signal/target
+      identity before invoking only the stored clock and atomic registry seal.
+      Retain the effective sequence-or-pressure high-water on every post-prepare
+      failure and distinguish delivery retirement, expiry, authorization loss, and
+      dispatcher failure. Count each public typed replay rejection exactly once and
+      successful admission zero times without adding a second cancellation or
+      lifecycle authority.
 - [x] Bind authoritative refresh to that same stored active authorization
-  closure. Resolve and callback-free compare signed context, origin, document
-  scope, binding, and authority identity before continuity authority; then use
-  only the stored clock and final current-registry validation before
-  callback-free baseline installation and exact pressure recovery.
+      closure. Resolve and callback-free compare signed context, origin, document
+      scope, binding, and authority identity before continuity authority; then use
+      only the stored clock and final current-registry validation before
+      callback-free baseline installation and exact pressure recovery.
 
 - [x] Run fanout, slow-client, outage, memory-bound, and telemetry tests. The
-  implementation reuses the shared owner/queue/permit/cancellation primitives,
-  preflights replay and registered fanout before allocation, preserves required
-  ordered events, and exposes only finite redaction-safe counters. Correction
-  coverage uses one real multi-membership document for chatty/healthy/slow
-  pressure, global outage, removal, provider failure, graceful completion,
-  typed error, aggregate caps, fair polling, cleanup, and exact existing-machine
-  dispatch. Shared upload resource regressions remain green.
+      implementation reuses the shared owner/queue/permit/cancellation primitives,
+      preflights replay and registered fanout before allocation, preserves required
+      ordered events, and exposes only finite redaction-safe counters. Correction
+      coverage uses one real multi-membership document for chatty/healthy/slow
+      pressure, global outage, removal, provider failure, graceful completion,
+      typed error, aggregate caps, fair polling, cleanup, and exact existing-machine
+      dispatch. Shared upload resource regressions remain green.
 - [x] Commit: `feat(async): bound fanout and stream backpressure`.
 
 ## Task 6: Implement browser envelope validation and subscription continuity
@@ -684,6 +684,18 @@
   declarations expose the same asynchronous membership contract, and ordinary
   clean-checkout artifact budgets do not require ignored local benchmark
   candidates; explicit binding/release mode does.
+
+  An uncommitted initial stage remains inert and recoverable across bounded
+  pre-acknowledgment loss without calling successor reauthorization against an
+  absent committed predecessor. Attach and restore use the complete staged
+  effective transport authority for grouping, credential, kind, policy, and
+  heartbeat. Compatible multi-membership rotations aggregate independently of
+  completion order; incompatible rotations fail closed. Each physical
+  generation accepts one terminal callback and retires it before adapter close,
+  preventing reentrant or late failure from consuming another attempt or timer.
+  Exact built ESM and classic artifacts prove acknowledgment-gated continuity
+  and persisted lifecycle restoration under CSP across Chromium, Firefox, and
+  WebKit.
 
 - [x] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
 - [x] Commit: `feat(browser): establish bounded subscription continuity`.
@@ -820,7 +832,11 @@
   );
   await page.goto("/plain");
   await page.goBack();
-  await expect.poll(() => page.evaluate(() => window.__liveScenario.lastPageShowPersisted)).toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__liveScenario.lastPageShowPersisted),
+    )
+    .toBe(true);
   await expect
     .poll(() => connectionCounts(page))
     .toEqual({ streams: 1, polls: 0, timers: 1 });
