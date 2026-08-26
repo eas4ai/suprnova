@@ -800,6 +800,12 @@
   reconnect membership is pending, but apply no pending authorization or poll
   timer. Exact staged SSE/WebSocket acknowledgment applies only the newest
   generation; removal or conflict prevents stale immediate policy activation.
+- [x] When a committed morph changes freshness policy during replacement
+  membership, immediately retire the older degraded fallback generation. Exact
+  acknowledgment applies only the latest intent; failed membership restores
+  only that intent against committed authority, so removal/push-only remains
+  timer-free and a changed hybrid interval cannot revive the old timer or late
+  completion.
 - [x] Run corrected Rust checker, controlled-clock poll, real scheduler,
   connectivity, visibility, bfcache, 100-subscription storm, public declaration,
   deterministic build, drift-budget, and full project gates.

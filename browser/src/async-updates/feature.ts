@@ -318,6 +318,19 @@ function report(
   }
 }
 
+function samePollPolicy(left: PollPolicy | null, right: PollPolicy | null): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      left.initial === right.initial &&
+      left.intervalMs === right.intervalMs &&
+      left.jitterRatio === right.jitterRatio &&
+      left.mode === right.mode &&
+      left.visibility === right.visibility)
+  );
+}
+
 function validOptions(options: AsyncFeatureOptions): boolean {
   try {
     const streamPortsAbsent = options.authority === undefined && options.transports === undefined;
@@ -478,6 +491,7 @@ class AsyncIslandController implements FeatureIslandController {
   } | null = null;
   #eventCapability: RegisteredBrowserEventCapability | null = null;
   #poll: PollTimer | null = null;
+  #pollPolicy: PollPolicy | null = null;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
   #subscription: AsyncSubscription | null = null;
 
@@ -609,8 +623,7 @@ class AsyncIslandController implements FeatureIslandController {
     this.#authorizationAbort?.abort();
     this.#authorizationAbort = null;
     this.#clearHeartbeat();
-    this.#poll?.dispose();
-    this.#poll = null;
+    this.#retirePoll();
     this.#handle?.close();
     this.#handle = null;
     this.#subscription?.close();
@@ -628,9 +641,13 @@ class AsyncIslandController implements FeatureIslandController {
     if (this.#pendingAuthorization !== null) {
       try {
         this.#resolvePollPolicy(this.#pendingAuthorization.authorization);
+        const committedPolicy =
+          this.#currentAuthorization === null
+            ? null
+            : this.#resolvePollPolicy(this.#currentAuthorization);
+        if (!samePollPolicy(committedPolicy, this.#pollPolicy)) this.#retirePoll();
       } catch {
-        this.#poll?.dispose();
-        this.#poll = null;
+        this.#retirePoll();
         report(this.#context, "operation_rejected");
       }
       return;
@@ -641,8 +658,7 @@ class AsyncIslandController implements FeatureIslandController {
     try {
       this.#commitPollPolicy(this.#resolvePollPolicy(authorization), continuity, true);
     } catch {
-      this.#poll?.dispose();
-      this.#poll = null;
+      this.#retirePoll();
       report(this.#context, "operation_rejected");
     }
   }
@@ -817,8 +833,10 @@ class AsyncIslandController implements FeatureIslandController {
     let settled = false;
     const token = Object.freeze({});
     this.#pendingAuthorization = Object.freeze({ authorization, token });
-    const clearPending = () => {
-      if (this.#pendingAuthorization?.token === token) this.#pendingAuthorization = null;
+    const clearPending = (): boolean => {
+      if (this.#pendingAuthorization?.token !== token) return false;
+      this.#pendingAuthorization = null;
+      return true;
     };
     return Object.freeze({
       commit: () => {
@@ -866,8 +884,9 @@ class AsyncIslandController implements FeatureIslandController {
         }
       },
       discard: () => {
+        if (settled) return;
         settled = true;
-        clearPending();
+        if (clearPending()) this.#restoreCommittedPollPolicy();
       },
       proof,
       subscription: authorization,
@@ -945,8 +964,7 @@ class AsyncIslandController implements FeatureIslandController {
     applyInitial = false,
   ): void {
     if (policy === null) {
-      this.#poll?.dispose();
-      this.#poll = null;
+      this.#retirePoll();
       return;
     }
     if (this.#poll === null) {
@@ -966,12 +984,29 @@ class AsyncIslandController implements FeatureIslandController {
       this.#poll.updatePolicy(policy, applyInitial);
       this.#poll.continuity(continuity);
     }
+    this.#pollPolicy = policy;
+  }
+
+  #retirePoll(): void {
+    this.#poll?.dispose();
+    this.#poll = null;
+    this.#pollPolicy = null;
+  }
+
+  #restoreCommittedPollPolicy(): void {
+    const authorization = this.#currentAuthorization;
+    if (authorization === null || this.#state === "disposed") return;
+    try {
+      this.#commitPollPolicy(this.#resolvePollPolicy(authorization), "degraded");
+    } catch {
+      this.#retirePoll();
+    }
   }
 
   #resumeCommittedFallback(): void {
     if (!this.#resuming() || this.#currentAuthorization === null) return;
     this.#state = "active";
-    this.#poll?.continuity("degraded");
+    this.#restoreCommittedPollPolicy();
     this.#poll?.resume();
   }
 }

@@ -457,6 +457,216 @@ describe("async feature lifecycle", () => {
     },
   );
 
+  it.each(
+    (["sse", "websocket"] as const).flatMap((transport) =>
+      (["change", "remove", "push-only"] as const).flatMap((scenario) =>
+        (["authenticate", "reject"] as const).map((ending) => ({
+          ending,
+          scenario,
+          transport,
+        })),
+      ),
+    ),
+  )(
+    "fences the old fallback for $transport replacement membership, $scenario, and $ending",
+    async ({ ending, scenario, transport }) => {
+      const timers = new FakeTimers();
+      const refresh = vi.fn(() => "queued" as const);
+      const root = Object.freeze({}) as Element;
+      let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([
+        ownership(root),
+        pollOwnership(root, ["5s"]),
+      ]);
+      const sources: FakeSource[] = [];
+      const sseControls: {
+        reject(reason?: unknown): void;
+        resolve(): void;
+      }[] = [];
+      const sockets: {
+        close: ReturnType<typeof vi.fn>;
+        onclose?: VoidFunction;
+        onmessage?: (event: Readonly<{ data: string }>) => void;
+        onopen?: VoidFunction;
+        readonly sent: string[];
+        send(data: string): void;
+      }[] = [];
+      const current = authorization(0n, {
+        document: Object.freeze({
+          authorizationScope: "document-scope",
+          origin: "https://app.example.test",
+          transport,
+        }),
+      });
+      const transports: AsyncTransportPorts =
+        transport === "sse"
+          ? {
+              eventSource(request) {
+                const source = new FakeSource(request);
+                if (sources.length > 0) {
+                  source.subscribe.mockImplementation(
+                    (subscription) =>
+                      new Promise((resolve, reject) => {
+                        sseControls.push({
+                          reject,
+                          resolve: () => {
+                            resolve(
+                              Object.freeze({
+                                descriptorBinding: subscription.descriptorBinding,
+                                kind: "authenticated" as const,
+                                stream: subscription.stream,
+                                subscriptionId: subscription.subscriptionId,
+                                transportGeneration: request.transportGeneration,
+                              }),
+                            );
+                          },
+                        });
+                      }),
+                  );
+                }
+                sources.push(source);
+                return source;
+              },
+              webSocket() {
+                throw new Error("unexpected_websocket");
+              },
+            }
+          : new BrowserAsyncTransportPorts({
+              eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+              fetch: vi.fn<typeof globalThis.fetch>(),
+              membershipTimeoutMs: 5_000,
+              sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+              timers: timers.port,
+              webSocket() {
+                const sent: string[] = [];
+                const socket = {
+                  close: vi.fn(),
+                  send(data: string) {
+                    sent.push(data);
+                  },
+                  sent,
+                };
+                sockets.push(socket);
+                return socket;
+              },
+            });
+      const acknowledgeWebSocket = (index: number): void => {
+        const socket = sockets[index];
+        const request = JSON.parse(socket?.sent[0] ?? "null") as Record<string, unknown>;
+        socket?.onmessage?.({
+          data: canonicalize({
+            control_nonce: String(request["control_nonce"]),
+            descriptor_binding: String(request["descriptor_binding"]),
+            kind: "membership_authenticated",
+            stream: String(request["stream"]),
+            subscription: String(request["subscription"]),
+            transport_generation: Number(request["transport_generation"]),
+          }),
+        });
+      };
+      const owner = new AsyncDocumentOwner(
+        { diagnose: vi.fn(), onDispose: vi.fn() },
+        {
+          authority: {
+            authorize(request) {
+              return request.prior === null
+                ? current
+                : Object.freeze({ replay: Object.freeze([]), subscription: current });
+            },
+          },
+          clock: { now: () => 100 },
+          randomness: { number: () => 0.5 },
+          timers: timers.port,
+          transports,
+        },
+      );
+      const controller = owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: root,
+        enqueueFreshRender: refresh,
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `document-replacement-policy-${transport}-${scenario}-${ending}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: () => "accepted",
+        queryDirectiveOwnership: () => ownerships,
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      await flushMicrotasks();
+      if (transport === "sse") sources[0]?.open();
+      else {
+        sockets[0]?.onopen?.();
+        acknowledgeWebSocket(0);
+      }
+      await flushMicrotasks();
+
+      if (transport === "sse") sources[0]?.request.failed("transport_lost");
+      else sockets[0]?.onclose?.();
+      const oldFallback = [...timers.pending.values()].find(
+        ({ milliseconds }) => milliseconds === 5_500,
+      );
+      expect(oldFallback).toBeDefined();
+      timers.fire(50);
+      await flushMicrotasks();
+      if (transport === "sse") sources[1]?.open();
+      else sockets[1]?.onopen?.();
+      await flushMicrotasks();
+
+      controller.beforeMorph?.();
+      ownerships =
+        scenario === "change"
+          ? Object.freeze([ownership(root), pollOwnership(root, ["10s"])])
+          : scenario === "remove"
+            ? Object.freeze([ownership(root)])
+            : Object.freeze([pushOnlyOwnership(root)]);
+      controller.afterMorph?.();
+
+      expect(
+        [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 5_500),
+      ).toHaveLength(0);
+      oldFallback?.callback();
+      expect(refresh).not.toHaveBeenCalled();
+      expect(
+        [...timers.pending.values()].some(
+          ({ milliseconds }) => milliseconds === 11_000 || milliseconds === 33_000,
+        ),
+      ).toBe(false);
+
+      if (ending === "authenticate") {
+        if (transport === "sse") sseControls[0]?.resolve();
+        else acknowledgeWebSocket(1);
+      } else if (transport === "sse") {
+        sseControls[0]?.reject(new Error("membership_rejected"));
+      } else {
+        sockets[1]?.onmessage?.({ data: canonicalize({ kind: "membership_rejected" }) });
+      }
+      await flushMicrotasks();
+      if (ending === "authenticate") {
+        if (transport === "sse") sources[1]?.request.failed("transport_lost");
+        else sockets[1]?.onclose?.();
+      }
+      await flushMicrotasks();
+
+      const expectedFallback = scenario === "change" ? 11_000 : 33_000;
+      const fallbackTimers = [...timers.pending.values()].filter(
+        ({ milliseconds }) => milliseconds === expectedFallback,
+      );
+      if (scenario === "push-only") {
+        expect(fallbackTimers).toHaveLength(0);
+        expect(refresh).not.toHaveBeenCalled();
+      } else {
+        expect(fallbackTimers).toHaveLength(1);
+        timers.fire(expectedFallback);
+        expect(refresh).toHaveBeenCalledOnce();
+      }
+      oldFallback?.callback();
+      expect(refresh).toHaveBeenCalledTimes(scenario === "push-only" ? 0 : 1);
+      owner.dispose();
+    },
+  );
+
   it("falls back from a failed pageshow reauthorization without reusing the old socket", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();

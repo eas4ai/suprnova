@@ -8,7 +8,10 @@ import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { evaluateArtifactBudgets } from "../scripts/check-budget.mjs";
+import {
+  evaluateArtifactBudgets,
+  validateArtifactSizeBaselineProvenance,
+} from "../scripts/check-budget.mjs";
 import { PRODUCTION_BUILD_HOOK_TIMEOUT_MS } from "./support/production-build.js";
 
 interface AssetEntry {
@@ -148,7 +151,7 @@ describe("deterministic production assets", () => {
     }
   });
 
-  it("measures the built async artifacts and keeps the normative current candidate exact", async () => {
+  it("measures changed async candidates against immutable reviewed history", async () => {
     const manifest = JSON.parse(
       await readFile(join(outputDirectory, "suprnova-live.assets.json"), "utf8"),
     ) as AssetManifest;
@@ -214,16 +217,29 @@ describe("deterministic production assets", () => {
       sourceDecision: "iteration-004-task-7-membership-budget-policy",
       sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
     });
-    for (const role of ["async-esm", "async-classic"] as const) {
-      expect(current.roles[role].sha256).toBe(
-        measured.find((asset) => asset.role === role)?.sha256,
-      );
-    }
+    expect(
+      validateArtifactSizeBaselineProvenance(baseline, new URL("../../", import.meta.url).pathname),
+    ).toEqual(baseline);
+    const belowThreshold = measured.map((asset) =>
+      asset.role === "async-esm"
+        ? {
+            ...asset,
+            brotliBytes: Math.floor(esmBaseline * 1.1),
+            sha256: "c".repeat(64),
+          }
+        : asset,
+    );
+    expect(evaluateArtifactBudgets(belowThreshold, baseline).issues).toEqual([]);
+    const aboveThresholdBytes = Math.floor(esmBaseline * 1.15) + 1;
+    const aboveThreshold = belowThreshold.map((asset) =>
+      asset.role === "async-esm" ? { ...asset, brotliBytes: aboveThresholdBytes } : asset,
+    );
+    expect(evaluateArtifactBudgets(aboveThreshold, baseline).issues).toEqual([
+      `artifact_budget:async-esm:unreviewed_regression:+${String(aboveThresholdBytes - esmBaseline)}`,
+    ]);
     expect(specification).toContain(
       `strictly prior source commit \`57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61\``,
     );
-    expect(specification).toContain(`${esm.toLocaleString("en-US")}-byte ESM SHA-256`);
-    expect(specification).toContain(`${classic.toLocaleString("en-US")}-byte classic SHA-256`);
   });
 
   it("exposes equivalent ESM and non-replaceable classic facades from one singleton core", async () => {

@@ -155,9 +155,14 @@ Acceptance criteria:
 - A committed morph that changes owned freshness directives while initial or
   replacement membership proof is pending records only the newest policy
   intent. It cannot apply pending authorization, start polling, or dispatch
-  staged replay/effects. The exact accepted acknowledgment applies that newest
-  intent atomically against committed authorization; removal, replacement, or
-  a fail-closed directive conflict fences every older intent and timer.
+  staged replay/effects. A changed intent immediately retires any active
+  degraded fallback from the older policy. The exact accepted acknowledgment
+  applies the newest intent atomically against committed authorization. If
+  replacement membership fails, the newest intent may resume in degraded mode
+  only against the last committed authorization: removal or push-only stays
+  timer-free, while a changed hybrid policy uses its new interval. Removal,
+  replacement, or a fail-closed directive conflict fences every older intent,
+  timer, and late completion.
 - One optional configured observer receives immutable island identity plus the
   closed `current`, `degraded`, `polling`, `offline`, `suspended`, or `closed`
   semantic freshness state only when it changes. It is presentation/accessibility
@@ -525,6 +530,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Closed the replacement-membership morph race: a changed
+  committed freshness intent immediately retires the older degraded fallback
+  while successor membership proof remains pending. Exact acknowledgment applies
+  only the newest policy; failure resolves that same intent against last
+  committed authority and can never revive the old interval or completion.
 - 2026-08-26 -- Deferred committed-morph freshness changes while exact initial
   or replacement membership proof is pending. The browser retains the latest
   generation-fenced owned directive intent, applies it only with committed
