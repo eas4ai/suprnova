@@ -1,7 +1,7 @@
 # Suprnova Live -- 14 Events and Asynchronous Updates
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-08-26
 
 ## Scope
 
@@ -400,7 +400,13 @@ Acceptance criteria:
   and settle or abort on reconnect and retirement. Native EventSource remains
   cookie-only; bearer SSE uses the bounded fetch stream without a URL secret.
   WebSocket subscribe frames bind the exact subscription, stream, and signed
-  descriptor digest rather than carrying a subscription ID alone.
+  descriptor digest rather than carrying a subscription ID alone. A logical
+  membership becomes authenticated only after its bounded transport control
+  resolves, or after the WebSocket host returns an exact post-commit membership
+  acknowledgment bound to that connection's control nonce and transport
+  generation. Queueing or sending a control frame is not acknowledgment.
+  Rejection, timeout, transport loss, cancellation, or a late/foreign
+  acknowledgment cannot consume replay/no-tail proof or reset reconnect state.
 - Persisted `pagehide` closes long-lived transports and transport timers before
   bfcache. `pageshow` reauthorizes and establishes a new physical connection
   before currentness may be reclaimed.
@@ -446,6 +452,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Required a typed, bounded, generation-fenced transport
+  membership acknowledgment before replay or authoritative-no-tail evidence may
+  prove physical continuity. SSE acknowledges only after its host control
+  settles successfully; WebSocket uses a canonical post-commit frame bound to
+  the exact control nonce, subscription, descriptor binding, and document
+  transport generation. Rejection, timeout, close, and late/foreign/duplicate
+  outcomes remain inert and cannot reset retries.
 - 2026-08-25 -- Hardened the Task 6 browser boundary after adversarial review.
   Document transport groups now own compatible credential and aggregate retry
   authority; ordinary reconnect and bfcache restoration share bounded,

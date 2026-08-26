@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-08-25
+Last revised: 2026-08-26
 
 ## Scope
 
@@ -252,6 +252,15 @@ blob store merely to replay bytes.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Added a canonical bounded WebSocket membership-request and
+  acknowledgment exchange. Subscribe carries a one-connection control nonce,
+  exact subscription, stream, signed-descriptor binding, and positive
+  browser-safe transport generation. The host emits
+  `membership_authenticated` only after that exact logical membership commits;
+  the acknowledgment repeats nonce, subscription, binding, and generation.
+  Queue admission or a successful socket `send` is not membership authority.
+  Stale, duplicate, foreign, unknown-field, noncanonical, and oversized
+  acknowledgments fail closed.
 - 2026-08-25 -- Made WebSocket control decoding purely bounded syntactic and
   canonical validation. It never consults document membership state. After
   strict Origin validation, every well-formed unsubscribe is freshly

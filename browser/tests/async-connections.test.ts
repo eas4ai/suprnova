@@ -60,8 +60,14 @@ class FakeEventSource implements EventSourcePort {
     this.request.failed("transport_lost");
   }
 
-  subscribe(subscription: AuthorizedLogicalSubscription): void {
+  subscribe(subscription: AuthorizedLogicalSubscription) {
     this.subscriptions.push(subscription.subscriptionId);
+    return Object.freeze({
+      descriptorBinding: subscription.descriptorBinding,
+      kind: "authenticated" as const,
+      subscriptionId: subscription.subscriptionId,
+      transportGeneration: this.request.transportGeneration,
+    });
   }
 
   unsubscribe(subscriptionId: string): void {
@@ -276,6 +282,7 @@ describe("browser SSE authorization adapters", () => {
       key: authorized(1).document,
       message: vi.fn(),
       opened: vi.fn(),
+      transportGeneration: 1,
       ...overrides,
     };
   }
@@ -295,7 +302,7 @@ describe("browser SSE authorization adapters", () => {
     const request = connectRequest(Object.freeze({ kind: "session_cookie" as const }));
 
     const port = ports.eventSource(request);
-    port.subscribe(authorized(1));
+    void port.subscribe(authorized(1));
     port.unsubscribe("subscription-001");
 
     expect(native).toHaveBeenCalledOnce();
@@ -410,7 +417,7 @@ describe("browser SSE authorization adapters", () => {
     );
 
     for (let index = 0; index < 65; index += 1) {
-      port.subscribe(authorized(index));
+      void port.subscribe(authorized(index));
     }
     expect(signals).toHaveLength(8);
     expect(failed).not.toHaveBeenCalled();
@@ -438,7 +445,7 @@ describe("browser SSE authorization adapters", () => {
     const port = ports.eventSource(
       connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
     );
-    port.subscribe(authorized(1));
+    void port.subscribe(authorized(1));
 
     timers.flush();
 
@@ -449,28 +456,130 @@ describe("browser SSE authorization adapters", () => {
     port.close("transport_replaced");
   });
 
-  it("binds WebSocket membership controls to the exact signed descriptor", () => {
+  it("binds a WebSocket membership acknowledgment to the exact signed descriptor", async () => {
     const sent: string[] = [];
+    const native: {
+      close(): void;
+      onmessage?: (event: Readonly<{ data: string }>) => void;
+      send(value: string): void;
+    } = {
+      close: vi.fn(),
+      send: (value) => sent.push(value),
+    };
     const ports = new BrowserAsyncTransportPorts({
       eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
       fetch: vi.fn<typeof globalThis.fetch>(),
       membershipTimeoutMs: 5_000,
       sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
       timers: new FakeTimers().port,
-      webSocket: () => ({ close: vi.fn(), send: (value) => sent.push(value) }),
+      webSocket: () => native,
     });
     const port = ports.webSocket({
       ...connectRequest(Object.freeze({ kind: "session_cookie" as const })),
       key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
     });
 
-    port.subscribe(authorized(1));
+    const attached = port.subscribe(authorized(1));
 
     expect(JSON.parse(sent[0] ?? "null")).toEqual({
+      control_nonce: "0000000000000001",
       descriptor_binding: "binding-1",
       kind: "subscribe",
       stream: "stream-1",
       subscription: "subscription-001",
+      transport_generation: 1,
     });
+    native.onmessage?.({
+      data: JSON.stringify({
+        control_nonce: "0000000000000001",
+        descriptor_binding: "binding-1",
+        kind: "membership_authenticated",
+        subscription: "subscription-001",
+        transport_generation: 1,
+      }),
+    });
+    await expect(attached).resolves.toEqual({
+      descriptorBinding: "binding-1",
+      kind: "authenticated",
+      subscriptionId: "subscription-001",
+      transportGeneration: 1,
+    });
+  });
+
+  it("rejects an unsafe browser transport generation before opening a port", () => {
+    const webSocket = vi.fn<BrowserAsyncTransportOptions["webSocket"]>();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: new FakeTimers().port,
+      webSocket,
+    });
+
+    expect(() =>
+      ports.webSocket({
+        ...connectRequest(Object.freeze({ kind: "session_cookie" as const })),
+        key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+        transportGeneration: 0,
+      }),
+    ).toThrow("async_transport_generation_invalid");
+    expect(webSocket).not.toHaveBeenCalled();
+  });
+
+  it("rejects foreign and duplicate WebSocket membership acknowledgments", async () => {
+    const failed = vi.fn();
+    const native: {
+      close(): void;
+      onmessage?: (event: Readonly<{ data: string }>) => void;
+      send(value: string): void;
+    } = { close: vi.fn(), send: vi.fn() };
+    const timers = new FakeTimers();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: timers.port,
+      webSocket: () => native,
+    });
+    const port = ports.webSocket({
+      ...connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed }),
+      key: Object.freeze({ ...authorized(1).document, transport: "websocket" as const }),
+    });
+    const attached = port.subscribe(authorized(1));
+    const acknowledgment = {
+      control_nonce: "0000000000000001",
+      descriptor_binding: "binding-1",
+      kind: "membership_authenticated",
+      subscription: "subscription-001",
+      transport_generation: 1,
+    };
+
+    native.onmessage?.({
+      data: `{"control_nonce":"0000000000000001","descriptor_binding":"binding-1","kind":"membership_authenticated","kind":"membership_authenticated","subscription":"subscription-001","transport_generation":1}`,
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({
+      data: JSON.stringify({ ...acknowledgment, descriptor_binding: "foreign" }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({ data: JSON.stringify(acknowledgment) });
+    await expect(attached).resolves.toMatchObject({ kind: "authenticated" });
+    native.onmessage?.({ data: JSON.stringify(acknowledgment) });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+
+    const timedOut = port.subscribe(authorized(2));
+    timers.flush();
+    await expect(timedOut).resolves.toEqual({ kind: "rejected", reason: "timeout" });
+    native.onmessage?.({
+      data: JSON.stringify({
+        ...acknowledgment,
+        control_nonce: "0000000000000002",
+        descriptor_binding: "binding-2",
+        subscription: "subscription-002",
+      }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
   });
 });

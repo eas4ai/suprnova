@@ -43,7 +43,14 @@ function authorization(
 
 class Source implements EventSourcePort {
   readonly close = vi.fn();
-  readonly subscribe = vi.fn();
+  readonly subscribe = vi.fn((subscription: AuthorizedLogicalSubscription) =>
+    Object.freeze({
+      descriptorBinding: subscription.descriptorBinding,
+      kind: "authenticated" as const,
+      subscriptionId: subscription.subscriptionId,
+      transportGeneration: this.request.transportGeneration,
+    }),
+  );
   readonly unsubscribe = vi.fn();
 
   constructor(readonly request: DocumentTransportConnectRequest) {}
@@ -109,12 +116,13 @@ function sink(
     signal: AbortSignal,
   ) => AuthorizedLogicalSubscription | Promise<AuthorizedLogicalSubscription> = (prior) =>
     Promise.resolve(prior),
+  proof: "authoritative_no_tail" | "complete_replay" = "authoritative_no_tail",
 ) {
   return {
     envelope: vi.fn(),
     reauthorize: vi.fn(async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) =>
       Object.freeze({
-        proof: "authoritative_no_tail" as const,
+        proof,
         subscription: await reauthorize(prior, signal),
       }),
     ),
@@ -508,6 +516,142 @@ describe("reviewed reconnect authority", () => {
 });
 
 describe("reviewed SSE membership ownership", () => {
+  it.each([
+    { lifecycle: "ordinary reconnect", proof: "authoritative_no_tail" as const },
+    { lifecycle: "ordinary reconnect", proof: "complete_replay" as const },
+    { lifecycle: "bfcache resume", proof: "authoritative_no_tail" as const },
+    { lifecycle: "bfcache resume", proof: "complete_replay" as const },
+  ])(
+    "waits for real SSE membership acknowledgment after $lifecycle with $proof",
+    async ({ lifecycle, proof }) => {
+      const timers = new Timers();
+      const native: {
+        close: ReturnType<typeof vi.fn>;
+        onerror?: VoidFunction;
+        onopen?: VoidFunction;
+      }[] = [];
+      const controls: {
+        reject(reason?: unknown): void;
+        resolve(): void;
+        signal: AbortSignal;
+      }[] = [];
+      const transports = new BrowserAsyncTransportPorts({
+        eventSource() {
+          const source = { close: vi.fn() };
+          native.push(source);
+          return source;
+        },
+        fetch: vi.fn<typeof globalThis.fetch>(),
+        membershipTimeoutMs: 5_000,
+        sseMembership(_operation, _subscription, _key, signal) {
+          return new Promise<void>((resolve, reject) => {
+            controls.push({ reject, resolve, signal });
+          });
+        },
+        timers: timers.port,
+        webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+      });
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: new OriginHandshakeScheduler(),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      });
+      const reconnect = Object.freeze({
+        kind: "resume_or_refresh" as const,
+        maximumAttempts: 1,
+        maximumDelayMs: 100,
+        minimumDelayMs: 100,
+      });
+      const logical = sink((prior) => Promise.resolve(prior), proof);
+      pool.subscribe(authorization(1, { reconnect }), logical);
+      native[0]?.onopen?.();
+      controls[0]?.resolve();
+      await settle();
+
+      if (lifecycle === "bfcache resume") {
+        pool.suspend();
+        const resumed = pool.resume();
+        await settle();
+        await resumed;
+      } else {
+        native[0]?.onerror?.();
+        timers.fire(50);
+        await settle();
+      }
+
+      const replacement = native[1];
+      logical.state.mockClear();
+      replacement?.onopen?.();
+      expect(logical.state).not.toHaveBeenCalledWith("current");
+      controls[1]?.resolve();
+      await settle();
+      expect(logical.state.mock.calls.filter(([state]) => state === "current")).toHaveLength(1);
+
+      replacement?.onerror?.();
+      expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(50);
+    },
+  );
+
+  it.each(["reject", "timeout", "transport_lost"] as const)(
+    "never consumes real SSE continuity proof when membership control ends with %s",
+    async (ending) => {
+      const timers = new Timers();
+      const native: {
+        close: ReturnType<typeof vi.fn>;
+        onerror?: VoidFunction;
+        onopen?: VoidFunction;
+      }[] = [];
+      const controls: {
+        reject(reason?: unknown): void;
+        resolve(): void;
+        signal: AbortSignal;
+      }[] = [];
+      const transports = new BrowserAsyncTransportPorts({
+        eventSource() {
+          const source = { close: vi.fn() };
+          native.push(source);
+          return source;
+        },
+        fetch: vi.fn<typeof globalThis.fetch>(),
+        membershipTimeoutMs: 5_000,
+        sseMembership(_operation, _subscription, _key, signal) {
+          return new Promise<void>((resolve, reject) => {
+            controls.push({ reject, resolve, signal });
+          });
+        },
+        timers: timers.port,
+        webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+      });
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: new OriginHandshakeScheduler(),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      });
+      const logical = sink();
+      pool.subscribe(authorization(1), logical);
+      native[0]?.onopen?.();
+      controls[0]?.resolve();
+      await settle();
+      native[0]?.onerror?.();
+      timers.fire(50);
+      await settle();
+      logical.state.mockClear();
+      native[1]?.onopen?.();
+
+      if (ending === "reject") controls[1]?.reject(new Error("membership_rejected"));
+      else if (ending === "timeout") timers.fire(5_000);
+      else native[1]?.onerror?.();
+      await settle();
+      controls[1]?.resolve();
+      await settle();
+
+      expect(logical.state).not.toHaveBeenCalledWith("current");
+      if (ending === "timeout") expect(controls[1]?.signal.aborted).toBe(true);
+    },
+  );
+
   it("admits E100 through one real adapter with bounded membership-control concurrency", async () => {
     const timers = new Timers();
     const native: { close: ReturnType<typeof vi.fn>; onopen?: VoidFunction }[] = [];

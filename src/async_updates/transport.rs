@@ -1196,6 +1196,19 @@ impl DocumentTransportSession {
             .any(|logical| logical.authorization.subscription() == subscription)
     }
 
+    pub(crate) fn contains_exact_membership(
+        &self,
+        subscription: &SubscriptionId,
+        binding: &SubscriptionBinding,
+        stream: &StreamName,
+    ) -> bool {
+        self.memberships.iter().any(|logical| {
+            logical.authorization.subscription() == subscription
+                && logical.authorization.binding() == binding
+                && logical.authorization.context().stream() == stream
+        })
+    }
+
     fn seal_async_delivery(
         &self,
         authorization: &AuthorizedTransportSubscription,

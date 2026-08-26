@@ -74,7 +74,14 @@ function envelope(sequence: bigint, payload: JsonValue): string {
 
 class FakeSource implements EventSourcePort {
   readonly close = vi.fn();
-  readonly subscribe = vi.fn();
+  readonly subscribe = vi.fn((subscription: AuthorizedLogicalSubscription) =>
+    Object.freeze({
+      descriptorBinding: subscription.descriptorBinding,
+      kind: "authenticated" as const,
+      subscriptionId: subscription.subscriptionId,
+      transportGeneration: this.request.transportGeneration,
+    }),
+  );
   readonly unsubscribe = vi.fn();
 
   constructor(readonly request: DocumentTransportConnectRequest) {}

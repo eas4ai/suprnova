@@ -19,7 +19,8 @@ use suprnova_live::async_updates::{
     SequenceDegradation, SequenceDisposition, SseEncoder, SseMembershipControl,
     SseResponseContract, StreamErrorCode, SubscriptionMode, VerifiedOrigin,
     WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
-    WebSocketMembershipControl, WebSocketOriginPolicy, decode_async_envelope,
+    WebSocketMembershipAcknowledgment, WebSocketMembershipControl, WebSocketOriginPolicy,
+    decode_async_envelope,
 };
 use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
@@ -3437,5 +3438,109 @@ async fn websocket_codec_round_trips_envelopes_and_rejects_hostile_frames_and_me
         CloseDisposition::Closed
     );
     assert_eq!(document.membership_count(), 0);
+    document.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn websocket_membership_acknowledgment_requires_the_exact_committed_request() {
+    let fixture = TransportFixture::new(position(13, 40)).await;
+    let origin = VerifiedOrigin::parse("https://app.example.test").expect("origin");
+    let authorization = fixture.request(subscription(19), origin.clone());
+    let binding = authorization.binding().to_base64url();
+    let subscription_wire = authorization.subscription().to_base64url();
+    let stream = authorization.context().stream().as_str().to_owned();
+    let encoded = format!(
+        "{{\"control_nonce\":\"0000000000000001\",\"descriptor_binding\":\"{binding}\",\"kind\":\"subscribe\",\"stream\":\"{stream}\",\"subscription\":\"{subscription_wire}\",\"transport_generation\":7}}"
+    );
+    let codec = WebSocketCodec::v1();
+    let request = codec
+        .decode_membership_request(WebSocketFrame::Text {
+            payload: encoded.as_bytes(),
+            final_fragment: true,
+        })
+        .expect("exact membership request");
+    let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
+    let mut document = DocumentTransportSession::new(
+        origin,
+        DocumentTransportKind::WebSocket,
+        DocumentTransportHandle::from_bytes(&[0x4a; 16]).expect("handle"),
+        DocumentTransportLimits::new(2).expect("limits"),
+        fixture.document_scope.clone(),
+    );
+
+    assert_eq!(request.control_nonce(), "0000000000000001");
+    assert_eq!(request.transport_generation(), 7);
+    assert_eq!(
+        WebSocketMembershipControl::acknowledge_committed(&document, &request)
+            .expect_err("queueing is not authenticated membership")
+            .kind(),
+        AsyncTransportErrorKind::UnknownMembership
+    );
+
+    let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
+        &document,
+        &request,
+        authorization,
+    )
+    .expect("exact membership authorization");
+    let authorized = pending.authorize().await.expect("current authority");
+    let establishing = document
+        .prepare_establish(authorized)
+        .expect("fresh establishment");
+    let ready = establishing.establish(&source).await.expect("source ready");
+    document.commit_add(ready).expect("membership committed");
+
+    let acknowledgment = WebSocketMembershipControl::acknowledge_committed(&document, &request)
+        .expect("post-commit acknowledgment");
+    let encoded_ack = codec
+        .encode_membership_acknowledgment(&acknowledgment)
+        .expect("bounded canonical acknowledgment");
+    assert_eq!(
+        std::str::from_utf8(&encoded_ack).expect("ack UTF-8"),
+        format!(
+            "{{\"control_nonce\":\"0000000000000001\",\"descriptor_binding\":\"{binding}\",\"kind\":\"membership_authenticated\",\"subscription\":\"{subscription_wire}\",\"transport_generation\":7}}"
+        )
+    );
+    for hostile in [
+        encoded.replace("0000000000000001", "foreign-control-1"),
+        encoded.replace("\"transport_generation\":7", "\"transport_generation\":0"),
+        format!(
+            "{{\"control_nonce\":\"0000000000000002\",\"descriptor_binding\":\"{}\",\"kind\":\"subscribe\",\"stream\":\"{stream}\",\"subscription\":\"{subscription_wire}\",\"transport_generation\":7}}",
+            suprnova_live::identity::ContentDigest::from_bytes(&[0x55; 32])
+                .expect("digest")
+                .to_base64url()
+        ),
+    ] {
+        match codec.decode_membership_request(WebSocketFrame::Text {
+            payload: hostile.as_bytes(),
+            final_fragment: true,
+        }) {
+            Err(error) => assert_eq!(error.kind(), AsyncTransportErrorKind::InvalidEnvelope),
+            Ok(foreign) => {
+                assert_eq!(
+                    WebSocketMembershipControl::acknowledge_committed(&document, &foreign)
+                        .expect_err("foreign request cannot acknowledge committed membership")
+                        .kind(),
+                    AsyncTransportErrorKind::UnknownMembership
+                );
+                let authorization = fixture.request(
+                    subscription(19),
+                    VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+                );
+                assert_eq!(
+                    WebSocketMembershipControl::prepare_authenticated_subscribe(
+                        &document,
+                        &foreign,
+                        authorization,
+                    )
+                    .expect_err("foreign binding remains unauthorized")
+                    .kind(),
+                    AsyncTransportErrorKind::RoutingMismatch
+                );
+            }
+        }
+    }
+
+    let _type_surface: Option<WebSocketMembershipAcknowledgment> = None;
     document.close().await.expect("close");
 }

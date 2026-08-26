@@ -8,13 +8,15 @@ use crate::limits::InputLimits;
 use super::{
     AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncTransportError,
     AsyncTransportErrorKind, AuthorizedTransportSubscription, DocumentTransportKind,
-    DocumentTransportSession, PendingTransportAdd, PendingTransportRemove, SubscriptionId,
-    VerifiedOrigin, decode_async_envelope, encode_async_envelope,
+    DocumentTransportSession, PendingTransportAdd, PendingTransportRemove, StreamName,
+    SubscriptionBinding, SubscriptionId, VerifiedOrigin, decode_async_envelope,
+    encode_async_envelope,
 };
 
 const MAX_WEBSOCKET_CONTROL_BYTES: usize = 512;
 const MAX_WEBSOCKET_ENVELOPE_BYTES: usize = 65_536;
 const MAX_WEBSOCKET_ORIGIN_ALLOWLIST: usize = 16;
+const MAX_BROWSER_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// One complete incoming WebSocket message before async protocol decoding.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -64,10 +66,118 @@ pub enum WebSocketControlRecord {
     Unsubscribe(SubscriptionId),
 }
 
+/// Exact authenticated-membership request carried by one WebSocket control frame.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebSocketMembershipRequest {
+    control_nonce: String,
+    descriptor_binding: SubscriptionBinding,
+    stream: StreamName,
+    subscription: SubscriptionId,
+    transport_generation: u64,
+}
+
+impl WebSocketMembershipRequest {
+    /// Returns the one-connection control correlation nonce.
+    #[must_use]
+    pub fn control_nonce(&self) -> &str {
+        &self.control_nonce
+    }
+
+    /// Returns the exact logical subscription identity.
+    #[must_use]
+    pub const fn subscription(&self) -> &SubscriptionId {
+        &self.subscription
+    }
+
+    /// Returns the browser document transport generation.
+    #[must_use]
+    pub const fn transport_generation(&self) -> u64 {
+        self.transport_generation
+    }
+}
+
+impl std::fmt::Debug for WebSocketMembershipRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebSocketMembershipRequest")
+            .field("control_nonce", &self.control_nonce)
+            .field("descriptor_binding", &"<redacted>")
+            .field("stream", &self.stream)
+            .field("subscription", &self.subscription)
+            .field("transport_generation", &self.transport_generation)
+            .finish()
+    }
+}
+
+/// Post-commit proof for one exact WebSocket logical membership.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WebSocketMembershipAcknowledgment {
+    control_nonce: String,
+    descriptor_binding: SubscriptionBinding,
+    subscription: SubscriptionId,
+    transport_generation: u64,
+}
+
+impl std::fmt::Debug for WebSocketMembershipAcknowledgment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebSocketMembershipAcknowledgment")
+            .field("control_nonce", &self.control_nonce)
+            .field("descriptor_binding", &"<redacted>")
+            .field("subscription", &self.subscription)
+            .field("transport_generation", &self.transport_generation)
+            .finish()
+    }
+}
+
 /// Authenticated application of decoded membership controls.
 pub struct WebSocketMembershipControl;
 
 impl WebSocketMembershipControl {
+    /// Prepares an exact descriptor-, stream-, and request-bound subscription.
+    pub fn prepare_authenticated_subscribe(
+        document: &DocumentTransportSession,
+        request: &WebSocketMembershipRequest,
+        authorization: AuthorizedTransportSubscription,
+    ) -> Result<PendingTransportAdd, AsyncTransportError> {
+        if request.subscription != *authorization.subscription()
+            || request.descriptor_binding != *authorization.binding()
+            || request.stream != *authorization.context().stream()
+        {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::RoutingMismatch,
+            ));
+        }
+        Self::prepare_subscribe(
+            document,
+            &WebSocketControlRecord::Subscribe(request.subscription.clone()),
+            authorization,
+        )
+    }
+
+    /// Produces an acknowledgment only after the exact membership is committed.
+    pub fn acknowledge_committed(
+        document: &DocumentTransportSession,
+        request: &WebSocketMembershipRequest,
+    ) -> Result<WebSocketMembershipAcknowledgment, AsyncTransportError> {
+        validate_document_kind(document)?;
+        if !document.contains_exact_membership(
+            &request.subscription,
+            &request.descriptor_binding,
+            &request.stream,
+        ) {
+            return Err(AsyncTransportError::new(
+                AsyncTransportErrorKind::UnknownMembership,
+            ));
+        }
+        Ok(WebSocketMembershipAcknowledgment {
+            control_nonce: request.control_nonce.clone(),
+            descriptor_binding: request.descriptor_binding.clone(),
+            subscription: request.subscription.clone(),
+            transport_generation: request.transport_generation,
+        })
+    }
+
     /// Prepares the exact subscription named by a verified subscribe record.
     pub fn prepare_subscribe(
         document: &DocumentTransportSession,
@@ -307,6 +417,91 @@ impl WebSocketCodec {
         let wire: ControlWire = serde_json::from_value(value).map_err(|_| invalid_envelope())?;
         wire.into_control()
     }
+
+    /// Decodes one canonical exact-membership request without granting authority.
+    pub fn decode_membership_request(
+        &self,
+        frame: WebSocketFrame<'_>,
+    ) -> Result<WebSocketMembershipRequest, AsyncTransportError> {
+        let payload = text_payload(frame, MAX_WEBSOCKET_CONTROL_BYTES)?;
+        let limits = control_limits()?;
+        let canonical = parse_canonical_value(payload, &limits).map_err(|_| invalid_envelope())?;
+        let recoded = to_canonical_bytes(&canonical, &limits).map_err(|_| invalid_envelope())?;
+        if recoded != payload {
+            return Err(invalid_envelope());
+        }
+        let value = canonical.to_serde_value().map_err(|_| invalid_envelope())?;
+        let wire: MembershipRequestWire =
+            serde_json::from_value(value).map_err(|_| invalid_envelope())?;
+        wire.into_request()
+    }
+
+    /// Encodes one post-commit exact-membership acknowledgment.
+    pub fn encode_membership_acknowledgment(
+        &self,
+        acknowledgment: &WebSocketMembershipAcknowledgment,
+    ) -> Result<Vec<u8>, AsyncTransportError> {
+        let value = serde_json::to_value(MembershipAcknowledgmentWire::from_acknowledgment(
+            acknowledgment,
+        ))
+        .map_err(|_| invalid_envelope())?;
+        let canonical = CanonicalValue::from_serde_value(value).map_err(|_| invalid_envelope())?;
+        to_canonical_bytes(&canonical, &control_limits()?).map_err(|_| invalid_envelope())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipRequestWire {
+    control_nonce: String,
+    descriptor_binding: String,
+    kind: String,
+    stream: String,
+    subscription: String,
+    transport_generation: u64,
+}
+
+impl MembershipRequestWire {
+    fn into_request(self) -> Result<WebSocketMembershipRequest, AsyncTransportError> {
+        if self.kind != "subscribe"
+            || !valid_control_nonce(&self.control_nonce)
+            || self.transport_generation == 0
+            || self.transport_generation > MAX_BROWSER_SAFE_INTEGER
+        {
+            return Err(invalid_envelope());
+        }
+        Ok(WebSocketMembershipRequest {
+            control_nonce: self.control_nonce,
+            descriptor_binding: SubscriptionBinding::parse(&self.descriptor_binding)
+                .map_err(|_| invalid_envelope())?,
+            stream: StreamName::parse(&self.stream).map_err(|_| invalid_envelope())?,
+            subscription: SubscriptionId::parse(&self.subscription)
+                .map_err(|_| invalid_envelope())?,
+            transport_generation: self.transport_generation,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipAcknowledgmentWire {
+    control_nonce: String,
+    descriptor_binding: String,
+    kind: String,
+    subscription: String,
+    transport_generation: u64,
+}
+
+impl MembershipAcknowledgmentWire {
+    fn from_acknowledgment(acknowledgment: &WebSocketMembershipAcknowledgment) -> Self {
+        Self {
+            control_nonce: acknowledgment.control_nonce.clone(),
+            descriptor_binding: acknowledgment.descriptor_binding.to_base64url(),
+            kind: "membership_authenticated".to_owned(),
+            subscription: acknowledgment.subscription.to_base64url(),
+            transport_generation: acknowledgment.transport_generation,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -366,8 +561,15 @@ fn text_payload(
 }
 
 fn control_limits() -> Result<InputLimits, AsyncTransportError> {
-    InputLimits::new(MAX_WEBSOCKET_CONTROL_BYTES, 3, 4, 256)
+    InputLimits::new(MAX_WEBSOCKET_CONTROL_BYTES, 3, 8, 256)
         .map_err(|_| AsyncTransportError::new(AsyncTransportErrorKind::InvalidEnvelope))
+}
+
+fn valid_control_nonce(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
 }
 
 fn invalid_envelope() -> AsyncTransportError {

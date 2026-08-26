@@ -627,7 +627,9 @@
   }
 
   export interface DocumentTransportPort {
-    subscribe(subscription: AuthorizedLogicalSubscription): void;
+    subscribe(
+      subscription: AuthorizedLogicalSubscription,
+    ): DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
     unsubscribe(subscriptionId: string): void;
     close(reason: DocumentTransportCloseReason): void;
   }
@@ -660,6 +662,14 @@
   dispatch uses a core-minted opaque current-registration capability; payload
   ceilings count canonical UTF-8 bytes. The exact classic artifact exposes a
   typed preboot async configuration method but remains inert without it.
+
+  Replay/no-tail proof is consumed only after the exact logical membership is
+  authenticated. SSE returns a bounded typed outcome from its membership
+  control; WebSocket returns a canonical post-commit acknowledgment bound to the
+  exact control nonce, subscription, signed-descriptor binding, and document
+  transport generation. Queueing or socket send success is not authentication;
+  rejection, timeout, loss, cancellation, and late/foreign/duplicate outcomes
+  cannot reset retry state.
 
 - [x] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
 - [x] Commit: `feat(browser): establish bounded subscription continuity`.

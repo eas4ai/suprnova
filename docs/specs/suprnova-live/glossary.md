@@ -574,6 +574,13 @@ first island's credential or retry policy as document authority. It multiplexes
 bounded subscription identities; it is not one connection per Live island.
 _Avoid_: island socket, global shared socket, subscription authority, event bus
 
+**Transport membership acknowledgment**:
+Bounded post-commit proof that one exact logical subscription and signed
+descriptor binding were authenticated on the current physical document
+transport generation. WebSocket additionally binds a one-connection control
+nonce; control queueing or socket send success is never this proof.
+_Avoid_: queued control, sent frame, open socket, connection acknowledgment, continuity proof
+
 **Stream continuity**:
 Proof that every required typed event after an authoritative baseline has been
 accounted for through an unbroken sequence or complete validated replay

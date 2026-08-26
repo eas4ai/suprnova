@@ -62,6 +62,13 @@ impl SubscriptionBinding {
             .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))
     }
 
+    /// Parses one canonical non-secret descriptor digest binding.
+    pub fn parse(value: &str) -> Result<Self, SubscriptionError> {
+        ContentDigest::parse(value)
+            .map(Self)
+            .map_err(|_| SubscriptionError::new(SubscriptionErrorKind::InvalidDescriptor))
+    }
+
     /// Returns the non-secret stable binding value for host credential storage.
     #[must_use]
     pub fn to_base64url(&self) -> String {

@@ -1,4 +1,10 @@
 import { inspectAsyncEnvelopeSubscription } from "./envelope.js";
+import {
+  canonicalize,
+  parseCanonicalJson,
+  type CanonicalLimits,
+  type JsonObject,
+} from "../canonical.js";
 import type {
   AsyncRandomness,
   AsyncReconnectPolicy,
@@ -12,7 +18,15 @@ import type {
 const MAX_LOGICAL_SUBSCRIPTIONS = 256;
 const MAX_PENDING_HANDSHAKES_PER_ORIGIN = 1_024;
 const MAX_SSE_RECORD_BYTES = 65_536;
+const MAX_WEBSOCKET_ACK_BYTES = 512;
 const ASYNC_EVENT_PATH = "/__live/async/events";
+const WEBSOCKET_CONTROL_NONCE = /^[0-9a-z]{16}$/u;
+const WEBSOCKET_ACK_LIMITS: CanonicalLimits = Object.freeze({
+  maxBytes: MAX_WEBSOCKET_ACK_BYTES,
+  maxDepth: 2,
+  maxEntries: 5,
+  maxStringBytes: 128,
+});
 
 export type DocumentTransportCloseReason =
   "page_suspended" | "document_retired" | "transport_replaced" | "subscription_empty";
@@ -23,16 +37,34 @@ export type DocumentTransportFailure =
 export interface DocumentTransportConnectRequest {
   readonly authorization: AsyncTransportAuthorization;
   readonly key: DocumentTransportKey;
+  readonly transportGeneration: number;
   failed(reason: DocumentTransportFailure): void;
   message(encoded: string): void;
   opened(): void;
 }
 
 export interface DocumentTransportPort {
-  subscribe(subscription: AuthorizedLogicalSubscription): void;
+  subscribe(
+    subscription: AuthorizedLogicalSubscription,
+  ): DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
   unsubscribe(subscriptionId: string): void;
   close(reason: DocumentTransportCloseReason): void;
 }
+
+export interface DocumentMembershipAcknowledgment {
+  readonly descriptorBinding: string;
+  readonly kind: "authenticated";
+  readonly subscriptionId: string;
+  readonly transportGeneration: number;
+}
+
+export interface DocumentMembershipRejection {
+  readonly kind: "rejected";
+  readonly reason: "authorization_lost" | "capacity" | "closed" | "timeout";
+}
+
+export type DocumentMembershipOutcome =
+  DocumentMembershipAcknowledgment | DocumentMembershipRejection;
 
 export type EventSourcePort = DocumentTransportPort;
 export type WebSocketPort = DocumentTransportPort;
@@ -165,24 +197,57 @@ const MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS = MAX_LOGICAL_SUBSCRIPTIONS * 2;
 interface PendingMembershipControl {
   abort: AbortController | null;
   readonly completion: MembershipControlCompletion;
+  request: QueuedMembershipControl | null;
   settled: boolean;
   timer: number | null;
 }
 
 interface QueuedMembershipControl {
   readonly operation: "subscribe" | "unsubscribe";
+  resolve(outcome: DocumentMembershipOutcome): void;
   readonly subscription: AuthorizedLogicalSubscription;
 }
 
 interface MembershipControlCompletion {
-  settle: ((successful: boolean) => void) | null;
+  settle: ((outcome: MembershipControlSettlement) => void) | null;
 }
+
+type MembershipControlSettlement =
+  | Readonly<{ kind: "authenticated" }>
+  | Readonly<{
+      kind: "rejected";
+      reason: DocumentMembershipRejection["reason"];
+    }>;
 
 function completeMembershipControl(
   completion: MembershipControlCompletion,
-  successful: boolean,
+  outcome: MembershipControlSettlement,
 ): void {
-  completion.settle?.(successful);
+  completion.settle?.(outcome);
+}
+
+function membershipAcknowledgment(
+  subscription: AuthorizedLogicalSubscription,
+  transportGeneration: number,
+): DocumentMembershipAcknowledgment {
+  return Object.freeze({
+    descriptorBinding: subscription.descriptorBinding,
+    kind: "authenticated",
+    subscriptionId: subscription.subscriptionId,
+    transportGeneration,
+  });
+}
+
+function membershipRejection(
+  reason: DocumentMembershipRejection["reason"],
+): DocumentMembershipRejection {
+  return Object.freeze({ kind: "rejected", reason });
+}
+
+function validateTransportGeneration(request: DocumentTransportConnectRequest): void {
+  if (!Number.isSafeInteger(request.transportGeneration) || request.transportGeneration < 1) {
+    throw new Error("async_transport_generation_invalid");
+  }
 }
 
 class SseMembershipControls {
@@ -209,23 +274,31 @@ class SseMembershipControls {
   request(
     operation: "subscribe" | "unsubscribe",
     subscription: AuthorizedLogicalSubscription,
-  ): void {
-    if (this.#closed) return;
-    if (this.#pending.size + this.#queue.length >= MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS) {
-      this.#request.failed("authorization_lost");
-      return;
-    }
-    this.#queue.push({ operation, subscription });
-    this.#pump();
+  ): Promise<DocumentMembershipOutcome> {
+    return new Promise((resolve) => {
+      if (this.#closed) {
+        resolve(membershipRejection("closed"));
+        return;
+      }
+      if (this.#pending.size + this.#queue.length >= MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS) {
+        resolve(membershipRejection("capacity"));
+        this.#request.failed("authorization_lost");
+        return;
+      }
+      this.#queue.push({ operation, resolve, subscription });
+      this.#pump();
+    });
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#queue.splice(0);
+    for (const request of this.#queue.splice(0)) {
+      request.resolve(membershipRejection("closed"));
+    }
     for (const control of [...this.#pending]) {
       control.abort?.abort();
-      this.#settle(control, true);
+      this.#settle(control, { kind: "rejected", reason: "closed" });
     }
   }
 
@@ -234,16 +307,17 @@ class SseMembershipControls {
     const control: PendingMembershipControl = {
       abort: new AbortController(),
       completion,
+      request,
       settled: false,
       timer: null,
     };
-    completion.settle = (successful) => {
-      this.#settle(control, successful);
+    completion.settle = (outcome) => {
+      this.#settle(control, outcome);
     };
     this.#pending.add(control);
     control.timer = this.#timers.timeout(() => {
       control.abort?.abort();
-      completeMembershipControl(completion, false);
+      completeMembershipControl(completion, { kind: "rejected", reason: "timeout" });
     }, this.#timeoutMs);
     let pending: Promise<void> | void;
     try {
@@ -256,15 +330,21 @@ class SseMembershipControls {
         abort.signal,
       );
     } catch {
-      completeMembershipControl(completion, false);
+      completeMembershipControl(completion, {
+        kind: "rejected",
+        reason: "authorization_lost",
+      });
       return;
     }
     void Promise.resolve(pending).then(
       () => {
-        completeMembershipControl(completion, true);
+        completeMembershipControl(completion, { kind: "authenticated" });
       },
       () => {
-        completeMembershipControl(completion, false);
+        completeMembershipControl(completion, {
+          kind: "rejected",
+          reason: "authorization_lost",
+        });
       },
     );
   }
@@ -280,15 +360,26 @@ class SseMembershipControls {
     }
   }
 
-  #settle(control: PendingMembershipControl, successful: boolean): void {
+  #settle(control: PendingMembershipControl, outcome: MembershipControlSettlement): void {
     if (control.settled) return;
     control.settled = true;
     control.completion.settle = null;
     if (control.timer !== null) this.#timers.clearTimeout(control.timer);
     control.timer = null;
     control.abort = null;
+    const request = control.request;
+    control.request = null;
     this.#pending.delete(control);
-    if (!successful && !this.#closed) {
+    if (request !== null) {
+      if (outcome.kind === "authenticated") {
+        request.resolve(
+          membershipAcknowledgment(request.subscription, this.#request.transportGeneration),
+        );
+      } else {
+        request.resolve(membershipRejection(outcome.reason));
+      }
+    }
+    if (outcome.kind === "rejected" && !this.#closed) {
       this.#request.failed("authorization_lost");
       return;
     }
@@ -309,6 +400,7 @@ class NativeEventSourceAdapter implements EventSourcePort {
     timers: AsyncTimerPort,
     membershipTimeoutMs: number,
   ) {
+    validateTransportGeneration(request);
     this.#controls = new SseMembershipControls(request, membership, timers, membershipTimeoutMs);
     const url = new URL(ASYNC_EVENT_PATH, request.key.origin).href;
     this.#native = create(url, Object.freeze({ withCredentials: true }));
@@ -326,10 +418,10 @@ class NativeEventSourceAdapter implements EventSourcePort {
     });
   }
 
-  subscribe(subscription: AuthorizedLogicalSubscription): void {
-    if (this.#closed) return;
+  subscribe(subscription: AuthorizedLogicalSubscription): Promise<DocumentMembershipOutcome> {
+    if (this.#closed) return Promise.resolve(membershipRejection("closed"));
     this.#subscriptions.set(subscription.subscriptionId, subscription);
-    this.#controls.request("subscribe", subscription);
+    return this.#controls.request("subscribe", subscription);
   }
 
   unsubscribe(subscriptionId: string): void {
@@ -337,7 +429,7 @@ class NativeEventSourceAdapter implements EventSourcePort {
     const subscription = this.#subscriptions.get(subscriptionId);
     if (subscription === undefined) return;
     this.#subscriptions.delete(subscriptionId);
-    this.#controls.request("unsubscribe", subscription);
+    void this.#controls.request("unsubscribe", subscription).catch(() => undefined);
   }
 
   close(): void {
@@ -363,6 +455,7 @@ class FetchEventSourceAdapter implements EventSourcePort {
     timers: AsyncTimerPort,
     membershipTimeoutMs: number,
   ) {
+    validateTransportGeneration(request);
     this.#request = request;
     this.#controls = new SseMembershipControls(request, membership, timers, membershipTimeoutMs);
     const authorization = request.authorization;
@@ -377,10 +470,10 @@ class FetchEventSourceAdapter implements EventSourcePort {
     void this.#read(fetchPort, url, headers);
   }
 
-  subscribe(subscription: AuthorizedLogicalSubscription): void {
-    if (this.#closed) return;
+  subscribe(subscription: AuthorizedLogicalSubscription): Promise<DocumentMembershipOutcome> {
+    if (this.#closed) return Promise.resolve(membershipRejection("closed"));
     this.#subscriptions.set(subscription.subscriptionId, subscription);
-    this.#controls.request("subscribe", subscription);
+    return this.#controls.request("subscribe", subscription);
   }
 
   unsubscribe(subscriptionId: string): void {
@@ -388,7 +481,7 @@ class FetchEventSourceAdapter implements EventSourcePort {
     const subscription = this.#subscriptions.get(subscriptionId);
     if (subscription === undefined) return;
     this.#subscriptions.delete(subscriptionId);
-    this.#controls.request("unsubscribe", subscription);
+    void this.#controls.request("unsubscribe", subscription).catch(() => undefined);
   }
 
   close(): void {
@@ -459,15 +552,26 @@ class FetchEventSourceAdapter implements EventSourcePort {
 
 class BrowserWebSocketAdapter implements WebSocketPort {
   readonly #native: NativeWebSocketLike;
+  readonly #pending = new Map<string, PendingWebSocketMembership>();
+  readonly #request: DocumentTransportConnectRequest;
+  readonly #timeoutMs: number;
+  readonly #timers: AsyncTimerPort;
   #closed = false;
+  #nextControl = 0;
 
   constructor(
     request: DocumentTransportConnectRequest,
     create: BrowserAsyncTransportOptions["webSocket"],
+    timers: AsyncTimerPort,
+    timeoutMs: number,
   ) {
+    validateTransportGeneration(request);
     if (request.authorization.kind !== "session_cookie") {
       throw new Error("async_transport_authorization_invalid");
     }
+    this.#request = request;
+    this.#timers = timers;
+    this.#timeoutMs = timeoutMs;
     const url = new URL(ASYNC_EVENT_PATH, request.key.origin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.#native = create(url.href);
@@ -478,7 +582,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
       if (this.#closed) return;
       const data = messageData(event);
       if (data === null) request.failed("protocol_invalid");
-      else request.message(data);
+      else if (!this.#membershipAcknowledged(data)) request.message(data);
     });
     setHandler(this.#native, "onerror", () => {
       if (!this.#closed) request.failed("transport_lost");
@@ -488,16 +592,40 @@ class BrowserWebSocketAdapter implements WebSocketPort {
     });
   }
 
-  subscribe(subscription: AuthorizedLogicalSubscription): void {
-    if (this.#closed) return;
-    this.#native.send(
-      JSON.stringify({
-        descriptor_binding: subscription.descriptorBinding,
-        kind: "subscribe",
-        stream: subscription.stream,
-        subscription: subscription.subscriptionId,
-      }),
-    );
+  subscribe(subscription: AuthorizedLogicalSubscription): Promise<DocumentMembershipOutcome> {
+    return new Promise((resolve) => {
+      if (this.#closed || this.#pending.size >= MAX_LOGICAL_SUBSCRIPTIONS) {
+        resolve(membershipRejection(this.#closed ? "closed" : "capacity"));
+        if (!this.#closed) this.#request.failed("authorization_lost");
+        return;
+      }
+      this.#nextControl += 1;
+      const controlNonce = this.#nextControl.toString(36).padStart(16, "0");
+      const pending: PendingWebSocketMembership = {
+        descriptorBinding: subscription.descriptorBinding,
+        resolve,
+        subscriptionId: subscription.subscriptionId,
+        timer: null,
+      };
+      this.#pending.set(controlNonce, pending);
+      pending.timer = this.#timers.timeout(() => {
+        this.#settleMembership(controlNonce, membershipRejection("timeout"));
+      }, this.#timeoutMs);
+      try {
+        this.#native.send(
+          JSON.stringify({
+            control_nonce: controlNonce,
+            descriptor_binding: subscription.descriptorBinding,
+            kind: "subscribe",
+            stream: subscription.stream,
+            subscription: subscription.subscriptionId,
+            transport_generation: this.#request.transportGeneration,
+          }),
+        );
+      } catch {
+        this.#settleMembership(controlNonce, membershipRejection("authorization_lost"));
+      }
+    });
   }
 
   unsubscribe(subscriptionId: string): void {
@@ -508,8 +636,114 @@ class BrowserWebSocketAdapter implements WebSocketPort {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    for (const controlNonce of [...this.#pending.keys()]) {
+      this.#settleMembership(controlNonce, membershipRejection("closed"));
+    }
     this.#native.close(1000, "suprnova_live_async_closed");
   }
+
+  #membershipAcknowledged(encoded: string): boolean {
+    if (new TextEncoder().encode(encoded).byteLength > MAX_WEBSOCKET_ACK_BYTES) return false;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(encoded);
+    } catch {
+      return false;
+    }
+    if ((typeof candidate !== "object" && typeof candidate !== "function") || candidate === null) {
+      return false;
+    }
+    let kind: unknown;
+    try {
+      kind = Reflect.get(candidate, "kind");
+    } catch {
+      return false;
+    }
+    if (kind !== "membership_authenticated") return false;
+    let value: JsonObject;
+    try {
+      const parsed = parseCanonicalJson(encoded, WEBSOCKET_ACK_LIMITS);
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        canonicalize(parsed) !== encoded
+      ) {
+        throw new Error("async_websocket_membership_ack_invalid");
+      }
+      value = parsed as JsonObject;
+    } catch {
+      this.#request.failed("protocol_invalid");
+      return true;
+    }
+    let controlNonce: unknown;
+    let descriptorBinding: unknown;
+    let subscriptionId: unknown;
+    try {
+      const keys = Object.keys(value).sort();
+      if (
+        keys.length !== 5 ||
+        keys[0] !== "control_nonce" ||
+        keys[1] !== "descriptor_binding" ||
+        keys[2] !== "kind" ||
+        keys[3] !== "subscription" ||
+        keys[4] !== "transport_generation"
+      ) {
+        throw new Error("async_websocket_membership_ack_invalid");
+      }
+      controlNonce = Reflect.get(value, "control_nonce");
+      descriptorBinding = Reflect.get(value, "descriptor_binding");
+      subscriptionId = Reflect.get(value, "subscription");
+    } catch {
+      this.#request.failed("protocol_invalid");
+      return true;
+    }
+    if (typeof controlNonce !== "string" || !WEBSOCKET_CONTROL_NONCE.test(controlNonce)) {
+      this.#request.failed("protocol_invalid");
+      return true;
+    }
+    const pending = this.#pending.get(controlNonce);
+    if (
+      pending === undefined ||
+      pending.descriptorBinding !== descriptorBinding ||
+      pending.subscriptionId !== subscriptionId ||
+      Reflect.get(value, "transport_generation") !== this.#request.transportGeneration
+    ) {
+      this.#request.failed("protocol_invalid");
+      return true;
+    }
+    this.#settleMembership(
+      controlNonce,
+      Object.freeze({
+        descriptorBinding: pending.descriptorBinding,
+        kind: "authenticated",
+        subscriptionId: pending.subscriptionId,
+        transportGeneration: this.#request.transportGeneration,
+      }),
+    );
+    return true;
+  }
+
+  #settleMembership(controlNonce: string, outcome: DocumentMembershipOutcome): void {
+    const pending = this.#pending.get(controlNonce);
+    if (pending === undefined) return;
+    this.#pending.delete(controlNonce);
+    if (pending.timer !== null) this.#timers.clearTimeout(pending.timer);
+    pending.timer = null;
+    if (outcome.kind === "rejected") {
+      pending.resolve(outcome);
+      if (!this.#closed) this.#request.failed("authorization_lost");
+    } else {
+      pending.resolve(outcome);
+    }
+  }
+}
+
+interface PendingWebSocketMembership {
+  readonly descriptorBinding: string;
+  resolve(outcome: DocumentMembershipOutcome): void;
+  readonly subscriptionId: string;
+  timer: number | null;
 }
 
 export class BrowserAsyncTransportPorts implements AsyncTransportPorts {
@@ -551,7 +785,12 @@ export class BrowserAsyncTransportPorts implements AsyncTransportPorts {
   }
 
   webSocket(connect: DocumentTransportConnectRequest): WebSocketPort {
-    return new BrowserWebSocketAdapter(connect, this.#options.webSocket);
+    return new BrowserWebSocketAdapter(
+      connect,
+      this.#options.webSocket,
+      this.#options.timers,
+      this.#options.membershipTimeoutMs,
+    );
   }
 }
 
@@ -639,12 +878,15 @@ export class OriginHandshakeScheduler {
 }
 
 interface LogicalMembership {
+  attachmentCompletion: MembershipAttachmentCompletion | null;
   authorization: AuthorizedLogicalSubscription;
+  authenticatedTransportGeneration: number;
   readonly sink: LogicalSubscriptionSink;
   group: PhysicalGroup | null;
   active: boolean;
   generation: number;
   pendingProofMembershipGeneration: number;
+  pendingObservedTransportGeneration: number;
   provedTransportGeneration: number;
   recoveryRequestGeneration: number;
 }
@@ -683,6 +925,17 @@ interface ReauthorizationRequest {
 
 interface ReauthorizationCompletion {
   settle: ((current: ReauthorizedLogicalSubscription | null) => void) | null;
+}
+
+interface MembershipAttachmentCompletion {
+  settle: ((acknowledgment: unknown) => void) | null;
+}
+
+function completeMembershipAttachment(
+  completion: MembershipAttachmentCompletion,
+  acknowledgment: unknown,
+): void {
+  completion.settle?.(acknowledgment);
 }
 
 function completeReauthorization(
@@ -827,10 +1080,13 @@ export class DocumentConnectionPool {
     }
     const membership: LogicalMembership = {
       active: true,
+      attachmentCompletion: null,
       authorization,
+      authenticatedTransportGeneration: -1,
       generation: 0,
       group: null,
       pendingProofMembershipGeneration: -1,
+      pendingObservedTransportGeneration: -1,
       provedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       sink,
@@ -878,8 +1134,11 @@ export class DocumentConnectionPool {
     for (const group of this.#groups.values()) this.#closeGroup(group, "page_suspended");
     this.#groups.clear();
     for (const membership of this.#memberships.values()) {
+      this.#cancelMembershipAttachment(membership);
       membership.group = null;
+      membership.authenticatedTransportGeneration = -1;
       membership.pendingProofMembershipGeneration = -1;
+      membership.pendingObservedTransportGeneration = -1;
       membership.provedTransportGeneration = -1;
       this.#safeState(membership, "disconnected");
     }
@@ -994,7 +1253,7 @@ export class DocumentConnectionPool {
     membership.group = group;
     this.#safeState(membership, "connecting");
     if (group.state === "open") {
-      this.#safeSubscribe(group.port, membership.authorization);
+      this.#subscribeMembership(group, membership, group.generation);
     } else if (group.state === "idle") {
       this.#connect(group, "idle");
     }
@@ -1034,6 +1293,7 @@ export class DocumentConnectionPool {
         opened: () => {
           this.#opened(group, generation);
         },
+        transportGeneration: generation,
       });
       try {
         group.port =
@@ -1052,9 +1312,8 @@ export class DocumentConnectionPool {
     group.handshake = null;
     group.state = "open";
     for (const membership of group.memberships.values()) {
-      const subscribed = this.#safeSubscribe(group.port, membership.authorization);
       this.#safeState(membership, "connecting");
-      if (subscribed) this.#consumeContinuityProof(group, membership, generation);
+      this.#subscribeMembership(group, membership, generation);
     }
   }
 
@@ -1069,6 +1328,10 @@ export class DocumentConnectionPool {
     }
     const membership = group.memberships.get(subscriptionId);
     if (membership === undefined || !membership.active || membership.group !== group) return;
+    if (membership.authenticatedTransportGeneration !== generation) {
+      this.#failed(group, generation, "authorization_lost");
+      return;
+    }
     try {
       membership.sink.envelope(encoded);
     } catch {
@@ -1081,6 +1344,9 @@ export class DocumentConnectionPool {
     this.#releaseHandshake(group);
     group.handshake?.cancel();
     group.handshake = null;
+    for (const membership of group.memberships.values()) {
+      this.#cancelMembershipAttachment(membership);
+    }
     try {
       group.port?.close("transport_replaced");
     } catch {
@@ -1091,7 +1357,9 @@ export class DocumentConnectionPool {
     group.recoveryActive = true;
     group.recoveryGeneration += 1;
     for (const membership of group.memberships.values()) {
+      membership.authenticatedTransportGeneration = -1;
       membership.pendingProofMembershipGeneration = -1;
+      membership.pendingObservedTransportGeneration = -1;
       membership.recoveryRequestGeneration = -1;
       membership.provedTransportGeneration = -1;
       group.recovering.set(membership.authorization.subscriptionId, membership);
@@ -1142,6 +1410,7 @@ export class DocumentConnectionPool {
     if (!membership.active) return;
     membership.active = false;
     membership.generation += 1;
+    this.#cancelMembershipAttachment(membership);
     this.#memberships.delete(membership.authorization.subscriptionId);
     const group = membership.group;
     membership.group = null;
@@ -1173,6 +1442,16 @@ export class DocumentConnectionPool {
     this.#releaseHandshake(group);
     group.handshake?.cancel();
     group.handshake = null;
+    for (const membership of group.memberships.values()) {
+      this.#cancelMembershipAttachment(membership);
+      membership.authenticatedTransportGeneration = -1;
+      membership.pendingObservedTransportGeneration = -1;
+    }
+    for (const membership of group.recovering.values()) {
+      this.#cancelMembershipAttachment(membership);
+      membership.authenticatedTransportGeneration = -1;
+      membership.pendingObservedTransportGeneration = -1;
+    }
     try {
       group.port?.close(reason);
     } catch {
@@ -1231,9 +1510,7 @@ export class DocumentConnectionPool {
       this.#safeState(membership, "connecting");
       if (group.state === "restoring") this.#connect(group, "restoring");
       else if (group.state === "open") {
-        if (this.#safeSubscribe(group.port, accepted)) {
-          this.#consumeContinuityProof(group, membership, group.generation);
-        }
+        this.#subscribeMembership(group, membership, group.generation);
       }
       this.#finishRecovery(group);
     });
@@ -1445,16 +1722,113 @@ export class DocumentConnectionPool {
     }
   }
 
-  #safeSubscribe(
-    port: DocumentTransportPort | null,
-    subscription: AuthorizedLogicalSubscription,
-  ): boolean {
+  #subscribeMembership(
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    transportGeneration: number,
+  ): void {
+    this.#cancelMembershipAttachment(membership);
+    const port = group.port;
+    if (port === null) {
+      this.#failed(group, transportGeneration, "authorization_lost");
+      return;
+    }
+    const completion: MembershipAttachmentCompletion = { settle: null };
+    completion.settle = (acknowledgment) => {
+      this.#settleMembershipAttachment(
+        completion,
+        group,
+        membership,
+        transportGeneration,
+        membership.generation,
+        acknowledgment,
+      );
+    };
+    membership.attachmentCompletion = completion;
+    let pending: DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
     try {
-      if (port === null) return false;
-      port.subscribe(subscription);
-      return true;
+      pending = port.subscribe(membership.authorization);
     } catch {
-      // Adapter membership failure is handled by its transport failure callback.
+      completeMembershipAttachment(completion, null);
+      return;
+    }
+    if (this.#isMembershipAcknowledgment(pending, membership.authorization, transportGeneration)) {
+      completeMembershipAttachment(completion, pending);
+      return;
+    }
+    void Promise.resolve(pending).then(
+      (acknowledgment) => {
+        completeMembershipAttachment(completion, acknowledgment);
+      },
+      () => {
+        completeMembershipAttachment(completion, null);
+      },
+    );
+  }
+
+  #settleMembershipAttachment(
+    completion: MembershipAttachmentCompletion,
+    group: PhysicalGroup,
+    membership: LogicalMembership,
+    transportGeneration: number,
+    membershipGeneration: number,
+    acknowledgment: unknown,
+  ): void {
+    if (completion.settle === null) return;
+    completion.settle = null;
+    if (membership.attachmentCompletion === completion) membership.attachmentCompletion = null;
+    if (
+      !this.#groupCurrent(group, transportGeneration, "open") ||
+      !membership.active ||
+      membership.group !== group ||
+      membership.generation !== membershipGeneration ||
+      group.memberships.get(membership.authorization.subscriptionId) !== membership
+    ) {
+      return;
+    }
+    if (
+      !this.#isMembershipAcknowledgment(
+        acknowledgment,
+        membership.authorization,
+        transportGeneration,
+      )
+    ) {
+      this.#failed(group, transportGeneration, "authorization_lost");
+      return;
+    }
+    membership.authenticatedTransportGeneration = transportGeneration;
+    this.#consumeContinuityProof(group, membership, transportGeneration);
+    if (membership.pendingObservedTransportGeneration === transportGeneration) {
+      membership.pendingObservedTransportGeneration = -1;
+      this.#proveContinuity(group, membership, transportGeneration);
+    }
+  }
+
+  #cancelMembershipAttachment(membership: LogicalMembership): void {
+    const completion = membership.attachmentCompletion;
+    membership.attachmentCompletion = null;
+    if (completion !== null) completion.settle = null;
+  }
+
+  #isMembershipAcknowledgment(
+    acknowledgment: unknown,
+    subscription: AuthorizedLogicalSubscription,
+    transportGeneration: number,
+  ): acknowledgment is DocumentMembershipAcknowledgment {
+    if (
+      (typeof acknowledgment !== "object" && typeof acknowledgment !== "function") ||
+      acknowledgment === null
+    ) {
+      return false;
+    }
+    try {
+      return (
+        Reflect.get(acknowledgment, "kind") === "authenticated" &&
+        Reflect.get(acknowledgment, "subscriptionId") === subscription.subscriptionId &&
+        Reflect.get(acknowledgment, "descriptorBinding") === subscription.descriptorBinding &&
+        Reflect.get(acknowledgment, "transportGeneration") === transportGeneration
+      );
+    } catch {
       return false;
     }
   }
@@ -1474,6 +1848,10 @@ export class DocumentConnectionPool {
     membership: LogicalMembership,
     transportGeneration: number,
   ): void {
+    if (membership.authenticatedTransportGeneration !== transportGeneration) {
+      membership.pendingObservedTransportGeneration = transportGeneration;
+      return;
+    }
     if (
       !membership.active ||
       group.state !== "open" ||

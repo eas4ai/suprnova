@@ -83,5 +83,6 @@ pub use transport::{
 };
 pub use websocket::{
     AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,
-    WebSocketFrame, WebSocketMembershipControl, WebSocketOriginPolicy,
+    WebSocketFrame, WebSocketMembershipAcknowledgment, WebSocketMembershipControl,
+    WebSocketMembershipRequest, WebSocketOriginPolicy,
 };
