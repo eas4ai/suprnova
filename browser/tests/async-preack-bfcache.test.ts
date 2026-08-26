@@ -396,4 +396,286 @@ describe("pre-authentication bfcache continuity", () => {
     owner.dispose();
     expect(timers.pending.size).toBe(0);
   });
+
+  it.each(
+    (["sse", "websocket"] as const).flatMap((transport) =>
+      (["raw", "replay", "no_tail"] as const).flatMap((evidence) =>
+        (["unresolved", "rejected", "timed_out"] as const).map((ending) => ({
+          ending,
+          evidence,
+          transport,
+        })),
+      ),
+    ),
+  )(
+    "restarts $transport fresh-initial $evidence authority after an orphaned $ending first request",
+    async ({ ending, evidence, transport }) => {
+      const timers = new Timers();
+      const controls: {
+        request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0];
+        resolve(value: unknown): void;
+      }[] = [];
+      const sources: {
+        close: ReturnType<typeof vi.fn>;
+        onmessage?: (event: Readonly<{ data: string }>) => void;
+        onopen?: VoidFunction;
+      }[] = [];
+      const sockets: {
+        close: ReturnType<typeof vi.fn>;
+        onmessage?: (event: Readonly<{ data: string }>) => void;
+        onopen?: VoidFunction;
+        send(data: string): void;
+        readonly sent: string[];
+      }[] = [];
+      const transports = new BrowserAsyncTransportPorts({
+        eventSource() {
+          const source = { close: vi.fn() };
+          sources.push(source);
+          return source;
+        },
+        fetch: vi.fn<typeof globalThis.fetch>(),
+        membershipTimeoutMs: 5_000,
+        sseMembership(request) {
+          return new Promise((resolve) => controls.push({ request, resolve }));
+        },
+        timers: timers.port,
+        webSocket() {
+          const sent: string[] = [];
+          const socket = { close: vi.fn(), send: (data: string) => sent.push(data), sent };
+          sockets.push(socket);
+          return socket;
+        },
+      });
+      const requests: AsyncAuthorizationRequest[] = [];
+      let resolveOld: ((value: AuthorizedLogicalSubscription) => void) | undefined;
+      let rejectOld: ((reason?: unknown) => void) | undefined;
+      let calls = 0;
+      const owner = new AsyncDocumentOwner(
+        { diagnose: vi.fn(), onDispose: vi.fn() },
+        {
+          authority: {
+            authorize(request) {
+              requests.push(request);
+              calls += 1;
+              if (calls === 1) {
+                return new Promise<AuthorizedLogicalSubscription>((resolve, reject) => {
+                  resolveOld = resolve;
+                  rejectOld = reject;
+                });
+              }
+              const current = authorization(2, transport);
+              if (evidence === "raw") return current;
+              return Object.freeze({
+                replay:
+                  evidence === "replay"
+                    ? Object.freeze([
+                        envelope(current.baseline.sequence + 1n, {
+                          kind: "refresh",
+                          name: "refresh",
+                        }),
+                      ])
+                    : Object.freeze([]),
+                subscription: current,
+              });
+            },
+          },
+          clock: { now: () => 100 },
+          randomness: { number: () => 0.5 },
+          timers: timers.port,
+          transports,
+        },
+      );
+      const authorizeEvents = vi.fn(eventCapability);
+      const refresh = vi.fn(() => "queued" as const);
+      const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
+      const root = Object.freeze({}) as Element;
+      owner.connectIsland({
+        authorizeRegisteredEvents: authorizeEvents,
+        dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+        element: root,
+        enqueueFreshRender: refresh,
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `preinstall-${transport}-${evidence}-${ending}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: vi.fn(() => "accepted" as const),
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: signal,
+      });
+      await settle();
+      expect(requests).toHaveLength(1);
+      expect(sources).toHaveLength(0);
+      expect(sockets).toHaveLength(0);
+
+      if (ending === "timed_out") {
+        timers.fireAll(5_000);
+        await settle();
+      }
+      owner.suspend();
+      await settle();
+      if (ending === "rejected") rejectOld?.(new Error("late_initial_rejection"));
+      const resumed = owner.resume();
+      await resumed;
+      await settle();
+
+      expect(requests).toHaveLength(2);
+      expect(
+        requests.map(({ position, prior }) => ({
+          position: position === null ? null : position.sequence,
+          prior: prior?.subscriptionId ?? null,
+        })),
+      ).toEqual([
+        { position: null, prior: null },
+        { position: null, prior: null },
+      ]);
+      expect(transport === "sse" ? sources : sockets).toHaveLength(1);
+      if (transport === "sse") sources[0]?.onopen?.();
+      else sockets[0]?.onopen?.();
+      await settle();
+
+      if (ending !== "rejected") resolveOld?.(authorization(1, transport));
+      await settle();
+      expect(transport === "sse" ? sources : sockets).toHaveLength(1);
+      expect(authorizeEvents).not.toHaveBeenCalled();
+      expect(refresh).not.toHaveBeenCalled();
+      expect(signal).not.toHaveBeenCalled();
+
+      if (transport === "sse") {
+        const fresh = controls[0];
+        if (fresh === undefined) throw new Error("missing_orphan_recovery_sse_control");
+        fresh.resolve({
+          connection: fresh.request.connection,
+          controlNonce: fresh.request.controlNonce,
+          descriptorBinding: fresh.request.subscription.descriptorBinding,
+          kind: "authenticated",
+          operation: fresh.request.operation,
+          stream: fresh.request.subscription.stream,
+          subscriptionId: fresh.request.subscription.subscriptionId,
+          transportGeneration: fresh.request.transportGeneration,
+        });
+      } else {
+        const fresh = sockets[0];
+        if (fresh === undefined) throw new Error("missing_orphan_recovery_websocket");
+        fresh.onmessage?.({ data: websocketAck(fresh) });
+      }
+      await settle();
+
+      expect(authorizeEvents).toHaveBeenCalledOnce();
+      expect(authorizeEvents.mock.calls[0]?.[0]?.descriptorBinding).toBe("binding-2");
+      expect(refresh).toHaveBeenCalledTimes(evidence === "replay" ? 1 : 0);
+      expect(signal).not.toHaveBeenCalled();
+      expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 5_000)).toBe(
+        true,
+      );
+      owner.dispose();
+      expect(timers.pending.size).toBe(0);
+    },
+  );
+
+  it("bounds orphaned pre-install resume authority and cancels queued work across lifecycles", async () => {
+    const timers = new Timers();
+    const sources: { close: ReturnType<typeof vi.fn> }[] = [];
+    const pending: {
+      request: AsyncAuthorizationRequest;
+      resolve(value: AuthorizedLogicalSubscription): void;
+    }[] = [];
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            return new Promise<AuthorizedLogicalSubscription>((resolve) => {
+              pending.push({ request, resolve });
+            });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: new BrowserAsyncTransportPorts({
+          eventSource() {
+            const source = { close: vi.fn() };
+            sources.push(source);
+            return source;
+          },
+          fetch: vi.fn<typeof globalThis.fetch>(),
+          membershipTimeoutMs: 5_000,
+          sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+          timers: timers.port,
+          webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+        }),
+      },
+    );
+    for (let island = 0; island < 9; island += 1) {
+      const root = Object.freeze({}) as Element;
+      owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+        element: root,
+        enqueueFreshRender: vi.fn(() => "queued" as const),
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `orphan-bounded-${String(island)}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: vi.fn(() => "accepted" as const),
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: vi.fn(
+          (_element: Element, _name: string, value: JsonValue) => value,
+        ),
+      });
+    }
+    await settle();
+    expect(pending).toHaveLength(8);
+
+    owner.suspend();
+    expect(pending.every(({ request }) => request.signal.aborted)).toBe(true);
+    const firstResume = owner.resume();
+    await settle();
+    expect(pending).toHaveLength(16);
+    expect(pending.slice(8).every(({ request }) => !request.signal.aborted)).toBe(true);
+
+    const released = pending[8];
+    if (released === undefined) throw new Error("missing_bounded_initial_resume");
+    const releasedAuthorization = authorization(2, "sse");
+    released.resolve(
+      Object.freeze({
+        ...releasedAuthorization,
+        descriptorBinding: "binding-bounded-release",
+        subscriptionId: "subscription-bounded-release",
+      }),
+    );
+    await settle();
+    expect(pending).toHaveLength(17);
+    expect(sources).toHaveLength(1);
+
+    owner.suspend();
+    await firstResume;
+    expect(released.request.signal.aborted).toBe(false);
+    expect(pending.slice(9).every(({ request }) => request.signal.aborted)).toBe(true);
+    const secondResume = owner.resume();
+    await settle();
+    expect(pending).toHaveLength(25);
+    expect(pending.slice(17).every(({ request }) => !request.signal.aborted)).toBe(true);
+
+    owner.dispose();
+    await secondResume;
+    expect(pending.slice(17).every(({ request }) => request.signal.aborted)).toBe(true);
+    for (const [index, request] of pending.entries()) {
+      const late = authorization(2, "sse");
+      request.resolve(
+        Object.freeze({
+          ...late,
+          descriptorBinding: `binding-late-${String(index)}`,
+          subscriptionId: `subscription-late-${String(index)}`,
+        }),
+      );
+    }
+    await settle();
+    expect(sources).toHaveLength(1);
+    expect(timers.pending.size).toBe(0);
+  });
 });

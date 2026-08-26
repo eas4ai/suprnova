@@ -433,6 +433,12 @@ transport, document authorization scope)` and multiplexes island subscriptions
   bfcache. If the first exact membership acknowledgment has not committed yet,
   suspension discards that generation's staged authorization and acknowledgment
   authority while retaining only the fact that no predecessor exists.
+  If the first authorization invocation is itself still pending and the island
+  has not entered the document connection pool, suspension aborts and fences
+  that invocation as well. On restoration, the document owner schedules only
+  those non-pool-owned islands through the same fair, at-most-eight-wide
+  authorization budget; pool-owned islands remain the connection pool's
+  responsibility and are never requested twice.
   `pageshow` then invokes a fresh initial authorization request with `prior: null`
   and no inherited position, stages its raw/replay/no-tail result inertly, and
   establishes a new physical connection. Only that replacement connection's
@@ -485,6 +491,12 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Closed the pre-install bfcache lifecycle gap. A pending first
+  authorization is now abortable before the island enters the connection pool;
+  persisted restoration makes a fresh, generation-fenced initial request with
+  no predecessor or position. The document-wide authorization scheduler is
+  shared by initial connect, pool recovery, and non-pool-owned restoration so
+  mixed cohorts remain fair and at most eight-wide without duplicate requests.
 - 2026-08-26 -- Kept uncommitted initial subscription authority inert and
   generation-owned across bounded pre-acknowledgment transport loss rather than
   invoking successor reauthorization without a committed predecessor. Bfcache

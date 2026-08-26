@@ -4,8 +4,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 type ArtifactKind = "classic" | "esm";
 
-async function installAsyncHarness(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+async function installAsyncHarness(page: Page, delayInitialAuthority = false): Promise<void> {
+  await page.addInitScript((delayInitial) => {
     interface PendingMembership {
       readonly request: Readonly<{ transportGeneration: number }>;
       readonly subscription: Readonly<{
@@ -26,6 +26,7 @@ async function installAsyncHarness(page: Page): Promise<void> {
     const pending: PendingMembership[] = [];
     const connections: PhysicalConnection[] = [];
     const authorizations: { position: string | null; prior: string | null }[] = [];
+    const initialAuthority: ((value: unknown) => void)[] = [];
     const harness = {
       ack(index: number): void {
         const membership = pending[index];
@@ -56,7 +57,41 @@ async function installAsyncHarness(page: Page): Promise<void> {
         );
       },
       pending,
+      resolveInitial(): void {
+        const resolve = initialAuthority.shift();
+        if (resolve === undefined) throw new Error("async_fixture_initial_authority_missing");
+        resolve(
+          Object.freeze({
+            replay: Object.freeze([]),
+            subscription: authorization(1, 0n),
+          }),
+        );
+      },
     };
+    function authorization(call: number, sequence: bigint) {
+      return Object.freeze({
+        authorization: Object.freeze({ kind: "session_cookie" }),
+        baseline: Object.freeze({ epoch: 1n, sequence }),
+        descriptorBinding: `binding-${String(call)}`,
+        document: Object.freeze({
+          authorizationScope: "artifact-document-scope",
+          origin: window.location.origin,
+          transport: "sse",
+        }),
+        events: Object.freeze([]),
+        expiresAt: 20_000,
+        heartbeatTimeoutMs: 5_000,
+        presentationSignals: Object.freeze([Object.freeze({ name: "open", schema: "boolean" })]),
+        reconnect: Object.freeze({
+          kind: "resume_or_refresh",
+          maximumAttempts: 2,
+          maximumDelayMs: 400,
+          minimumDelayMs: 100,
+        }),
+        stream: "orders",
+        subscriptionId: "subscription-001",
+      });
+    }
     const options = Object.freeze({
       authority: Object.freeze({
         authorize(request: {
@@ -68,33 +103,13 @@ async function installAsyncHarness(page: Page): Promise<void> {
             position: request.position === null ? null : String(sequence),
             prior: request.prior?.subscriptionId ?? null,
           });
-          return Object.freeze({
+          const result = Object.freeze({
             replay: Object.freeze([]),
-            subscription: Object.freeze({
-              authorization: Object.freeze({ kind: "session_cookie" }),
-              baseline: Object.freeze({ epoch: 1n, sequence }),
-              descriptorBinding: `binding-${String(authorizations.length)}`,
-              document: Object.freeze({
-                authorizationScope: "artifact-document-scope",
-                origin: window.location.origin,
-                transport: "sse",
-              }),
-              events: Object.freeze([]),
-              expiresAt: 20_000,
-              heartbeatTimeoutMs: 5_000,
-              presentationSignals: Object.freeze([
-                Object.freeze({ name: "open", schema: "boolean" }),
-              ]),
-              reconnect: Object.freeze({
-                kind: "resume_or_refresh",
-                maximumAttempts: 2,
-                maximumDelayMs: 400,
-                minimumDelayMs: 100,
-              }),
-              stream: "orders",
-              subscriptionId: "subscription-001",
-            }),
+            subscription: authorization(authorizations.length, sequence),
           });
+          return delayInitial && authorizations.length === 1
+            ? new Promise((resolve) => initialAuthority.push(resolve))
+            : result;
         },
       }),
       clock: Object.freeze({ now: () => 100 }),
@@ -138,7 +153,7 @@ async function installAsyncHarness(page: Page): Promise<void> {
     });
     Reflect.set(window, "__suprnovaAsyncHarness", harness);
     Reflect.set(window, "__suprnovaAsyncOptions", options);
-  });
+  }, delayInitialAuthority);
 }
 
 async function installArtifactRoutes(page: Page, kind: ArtifactKind): Promise<void> {
@@ -217,7 +232,11 @@ async function harnessCounts(page: Page): Promise<{
   });
 }
 
-async function invokeHarness(page: Page, method: "ack" | "emit", ...args: unknown[]) {
+async function invokeHarness(
+  page: Page,
+  method: "ack" | "emit" | "resolveInitial",
+  ...args: unknown[]
+) {
   await page.evaluate(
     ({ args: values, method: name }) => {
       const harness = Reflect.get(window, "__suprnovaAsyncHarness") as Record<string, unknown>;
@@ -238,6 +257,53 @@ async function persistedTransition(page: Page, type: "pagehide" | "pageshow"): P
 }
 
 for (const kind of ["esm", "classic"] as const) {
+  test(`production async ${kind} artifact restarts authority pending before transport on bfcache under CSP`, async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await installAsyncHarness(page, true);
+    await installArtifactRoutes(page, kind);
+    const scenario = kind === "esm" ? "cspNonce" : "cspClassicNonce";
+    await page.goto(`/scenario/${scenario}?async-artifact=${kind}`);
+
+    await expect
+      .poll(() => harnessCounts(page))
+      .toEqual({
+        authorizations: 1,
+        connections: 0,
+        pending: 0,
+      });
+    await persistedTransition(page, "pagehide");
+    await persistedTransition(page, "pageshow");
+    await expect
+      .poll(() => harnessCounts(page))
+      .toEqual({
+        authorizations: 2,
+        connections: 1,
+        pending: 1,
+      });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const harness = Reflect.get(window, "__suprnovaAsyncHarness") as {
+            authorizations: { position: string | null; prior: string | null }[];
+          };
+          return harness.authorizations;
+        }),
+      )
+      .toEqual([
+        { position: null, prior: null },
+        { position: null, prior: null },
+      ]);
+    await invokeHarness(page, "resolveInitial");
+    await expect(page.locator("#async-panel")).toBeHidden();
+    await invokeHarness(page, "ack", 0);
+    await invokeHarness(page, "emit", 0, 1, true);
+    await expect(page.locator("#async-panel")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
   test(`production async ${kind} artifact reacquires fresh initial authority after pre-ACK bfcache under CSP`, async ({
     page,
   }) => {

@@ -691,7 +691,12 @@
   stage and acknowledgment authority while preserving the no-predecessor fact;
   pageshow performs a bounded fresh initial request with `prior: null`, stages
   raw/replay/no-tail output inertly, and commits only after the replacement's
-  exact acknowledgment. Attach and restore use the complete staged effective
+  exact acknowledgment. When pagehide arrives before the first authority call
+  settles or pool membership exists, it aborts and fences that call; pageshow
+  schedules a fresh initial call only for the non-pool-owned controller. Initial,
+  pool-recovery, and orphan-restoration authority calls share one fair,
+  at-most-eight-wide document scheduler, so no membership is requested twice.
+  Attach and restore use the complete staged effective
   transport authority for grouping, credential, kind, policy, and heartbeat.
   Compatible multi-membership rotations aggregate independently of completion
   order; incompatible rotations fail closed. Each physical generation accepts

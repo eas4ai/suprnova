@@ -35,6 +35,7 @@ const MAX_EVENT_TARGETS = 16;
 const MAX_PRESENTATION_SIGNALS = 64;
 const MAX_RECONNECT_ATTEMPTS = 16;
 const MAX_TRANSPORT_DELAY_MS = 300_000;
+const MAX_CONCURRENT_AUTHORIZATIONS = 8;
 const AUTHORIZATION_TIMEOUT_MS = 5_000;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
@@ -136,6 +137,96 @@ function invokeAuthority(
       },
     );
   });
+}
+
+class AuthorizationInvocationScheduler {
+  #active = 0;
+  #paused = false;
+  readonly #queue: VoidFunction[] = [];
+
+  pause(): void {
+    this.#paused = true;
+  }
+
+  resume(): void {
+    if (!this.#paused) return;
+    this.#paused = false;
+    this.#pump();
+  }
+
+  invoke(
+    signal: AbortSignal,
+    operation: () => Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>,
+  ): Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription> {
+    if (!this.#paused && !signal.aborted && this.#active < MAX_CONCURRENT_AUTHORIZATIONS) {
+      return this.#run(operation);
+    }
+    return new Promise((resolve, reject) => {
+      let queued: typeof operation | null = operation;
+      let queuedSignal: AbortSignal | null = signal;
+      const abort = () => {
+        queued = null;
+        queuedSignal?.removeEventListener("abort", abort);
+        queuedSignal = null;
+        reject(new Error("async_authorization_aborted"));
+      };
+      const start = () => {
+        const current = queued;
+        queued = null;
+        queuedSignal?.removeEventListener("abort", abort);
+        const aborted = queuedSignal?.aborted === true;
+        queuedSignal = null;
+        if (current === null) return;
+        if (aborted) {
+          reject(new Error("async_authorization_aborted"));
+          return;
+        }
+        void this.#run(current).then(resolve, reject);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      this.#queue.push(start);
+      this.#pump();
+    });
+  }
+
+  #pump(): void {
+    while (
+      !this.#paused &&
+      this.#active < MAX_CONCURRENT_AUTHORIZATIONS &&
+      this.#queue.length !== 0
+    ) {
+      this.#queue.shift()?.();
+    }
+  }
+
+  #run(
+    operation: () => Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>,
+  ): Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription> {
+    this.#active += 1;
+    let pending: Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+    try {
+      pending = operation();
+    } catch (error: unknown) {
+      this.#release();
+      return Promise.reject(
+        error instanceof Error ? error : new Error("async_authorization_rejected"),
+      );
+    }
+    void pending.then(
+      () => {
+        this.#release();
+      },
+      () => {
+        this.#release();
+      },
+    );
+    return pending;
+  }
+
+  #release(): void {
+    this.#active -= 1;
+    this.#pump();
+  }
 }
 
 export interface AsyncFeatureOptions {
@@ -271,6 +362,7 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
 }
 
 class AsyncIslandController implements FeatureIslandController {
+  readonly #authorizationScheduler: AuthorizationInvocationScheduler;
   readonly #authority: AsyncAuthorityPort;
   readonly #clock: AsyncClock;
   readonly #context: RuntimeFeatureDocumentContext;
@@ -297,7 +389,9 @@ class AsyncIslandController implements FeatureIslandController {
     port: RuntimeFeatureIslandPort,
     stream: string,
     options: AsyncFeatureOptions,
+    authorizationScheduler: AuthorizationInvocationScheduler,
   ) {
+    this.#authorizationScheduler = authorizationScheduler;
     this.#authority = options.authority;
     this.#clock = options.clock;
     this.#context = context;
@@ -315,6 +409,31 @@ class AsyncIslandController implements FeatureIslandController {
 
   authorizationId(): string | null {
     return this.#authorization()?.subscriptionId ?? null;
+  }
+
+  needsInitialResume(): boolean {
+    return (
+      this.#state === "suspended" &&
+      this.#handle === null &&
+      this.#subscription === null &&
+      this.#authorization() === null
+    );
+  }
+
+  async resumeInitial(signal: AbortSignal): Promise<void> {
+    if (!this.needsInitialResume()) return;
+    this.#state = "resuming";
+    try {
+      await this.#authorize(null, signal);
+      if (this.#resuming()) {
+        this.#state = "active";
+        this.#armHeartbeat(this.#heartbeatTimeout());
+      }
+    } catch (error: unknown) {
+      if (this.#state === "resuming") this.#state = "suspended";
+      if (!signal.aborted) report(this.#context, "operation_rejected");
+      throw error;
+    }
   }
 
   async reauthorize(
@@ -399,17 +518,15 @@ class AsyncIslandController implements FeatureIslandController {
     const position = prior === null ? null : (this.#subscription?.position() ?? null);
     let resolved: AsyncAuthorizationResult | AuthorizedLogicalSubscription;
     try {
-      resolved = await invokeAuthority(
-        this.#authority,
-        this.#timers,
-        abort,
-        Object.freeze({
-          identity: this.#port.identity,
-          position,
-          prior,
-          signal: abort.signal,
-          stream: this.#stream,
-        }),
+      const request = Object.freeze({
+        identity: this.#port.identity,
+        position,
+        prior,
+        signal: abort.signal,
+        stream: this.#stream,
+      });
+      resolved = await this.#authorizationScheduler.invoke(abort.signal, () =>
+        invokeAuthority(this.#authority, this.#timers, abort, request),
       );
     } finally {
       externalSignal?.removeEventListener("abort", externallyAbort);
@@ -656,9 +773,32 @@ class AsyncIslandController implements FeatureIslandController {
   }
 }
 
+class InitialResumeScheduler {
+  readonly #active = new Set<AbortController>();
+
+  async schedule(controller: AsyncIslandController): Promise<void> {
+    const abort = new AbortController();
+    this.#active.add(abort);
+    try {
+      await controller.resumeInitial(abort.signal);
+    } catch {
+      // The controller reports typed failures; the document can finish restoration.
+    } finally {
+      this.#active.delete(abort);
+    }
+  }
+
+  cancelAll(): void {
+    for (const abort of this.#active) abort.abort();
+    this.#active.clear();
+  }
+}
+
 export class AsyncDocumentOwner {
+  readonly #authorizationScheduler = new AuthorizationInvocationScheduler();
   readonly #context: RuntimeFeatureDocumentContext;
   readonly #controllers = new Set<AsyncIslandController>();
+  readonly #initialResumes = new InitialResumeScheduler();
   readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool;
@@ -692,6 +832,7 @@ export class AsyncDocumentOwner {
       port,
       streams[0]?.directive.value ?? "",
       this.#options,
+      this.#authorizationScheduler,
     );
     this.#controllers.add(controller);
     controller.start();
@@ -722,6 +863,8 @@ export class AsyncDocumentOwner {
   suspend(): void {
     if (this.#state !== "active" && this.#state !== "resuming") return;
     this.#state = "suspended";
+    this.#authorizationScheduler.pause();
+    this.#initialResumes.cancelAll();
     for (const controller of this.#controllers) controller.suspend();
     this.#pool.suspend();
   }
@@ -729,13 +872,19 @@ export class AsyncDocumentOwner {
   async resume(): Promise<void> {
     if (this.#state !== "suspended") return;
     this.#state = "resuming";
-    await this.#pool.resume();
+    this.#authorizationScheduler.resume();
+    const initial = [...this.#controllers]
+      .filter((controller) => controller.needsInitialResume())
+      .map((controller) => this.#initialResumes.schedule(controller));
+    await Promise.all([this.#pool.resume(), ...initial]);
     if (this.#resuming()) this.#state = "active";
   }
 
   dispose(): void {
     if (this.#state === "disposed") return;
     this.#state = "disposed";
+    this.#authorizationScheduler.pause();
+    this.#initialResumes.cancelAll();
     for (const controller of [...this.#controllers]) controller.dispose();
     this.#pool.dispose();
   }
