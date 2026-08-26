@@ -4,6 +4,37 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.5 - 2026-08-26
+
+### Fixed
+
+- **`suprnova serve` no longer rebuilds a project nobody has touched.** The type
+  watcher classified a filesystem event by its path alone, and the generator reads
+  every `.rs` file under the same `src/` tree that watcher is watching - so on
+  Linux, where the kernel reports those reads, each regeneration scheduled the
+  next one. A freshly scaffolded project regenerated its types and restarted its
+  backend every half second, forever, without a single source edit. Only events
+  that mean the bytes on disk actually changed count now. The generator also
+  compares before it writes, so a regeneration whose output is byte-identical
+  leaves the file, and its mtime, alone.
+
+- **The backend watcher is scoped to the paths the server is built from.**
+  `cargo watch` ran with no `-w`, so it watched the whole non-gitignored project:
+  saving a Svelte component, or regenerating
+  `frontend/src/types/inertia-props.ts`, rebuilt the framework and restarted the
+  server. It now watches `src/`, `Cargo.toml`, `Cargo.lock`, `.env`, and `lang/` -
+  the build inputs plus the two trees read once at boot - each included only when
+  it exists, since cargo-watch refuses a `-w` path that does not. Frontend edits
+  and generated `.ts` files no longer restart the backend.
+
+- **`serde_json::Value` generates as `JsonValue` instead of `unknown`.** It used to
+  degrade to `unknown` and warn that it "isn't a struct this project defines",
+  advice that is wrong for a JSON document - and the scaffold's own login and
+  register pages tripped it twice on every regeneration, so every fresh project
+  warned out of the box. It now emits a recursive `JsonValue` alias, declared once
+  at the top of the generated file and only when something references it. A bare
+  `Value` maps there too, unless the project defines a `Value` struct of its own.
+
 ## 1.3.4 - 2026-08-25
 
 ### Added
