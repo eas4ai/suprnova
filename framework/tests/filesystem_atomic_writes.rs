@@ -1072,3 +1072,43 @@ async fn an_append_through_a_dangling_symlink_creates_nothing_outside_the_root()
         "append",
     );
 }
+
+/// The two shapes the guard's ancestor walk has to tell apart once it refuses a
+/// node it cannot resolve: a symlinked directory that resolves inside the root
+/// is a legitimate layout and must keep working, while a dangling symlink at an
+/// *intermediate* component is the same escape as one at the leaf.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_directory_still_writes_but_a_dangling_one_never_does() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    std::fs::create_dir_all(tmp.path().join("real")).expect("create the real directory");
+    std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("dir_link"))
+        .expect("plant a legitimate directory symlink");
+
+    disk.write("dir_link/new.txt", "through the link")
+        .await
+        .expect("a new leaf under a resolvable symlinked directory still writes");
+    assert_eq!(
+        std::fs::read(tmp.path().join("real/new.txt"))
+            .expect("the object landed in the real directory"),
+        b"through the link",
+        "a write through a symlinked directory must land inside the root"
+    );
+
+    std::fs::create_dir_all(tmp.path().join("a")).expect("create an intermediate directory");
+    let dangling_target = tmp.path().join("gone");
+    std::os::unix::fs::symlink(&dangling_target, tmp.path().join("a/link"))
+        .expect("plant a dangling symlink at an intermediate component");
+
+    let err = disk
+        .write("a/link/b.txt", "through a broken link")
+        .await
+        .expect_err("a write under a dangling intermediate symlink must be refused");
+    assert!(
+        std::fs::symlink_metadata(&dangling_target).is_err(),
+        "nothing may be created at the dangling target {dangling_target:?}"
+    );
+    assert_symlink_escape(&err, "write under a dangling intermediate symlink");
+}

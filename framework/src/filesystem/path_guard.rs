@@ -139,13 +139,16 @@ fn reaches_staging_directory(path: &str) -> bool {
         .is_some_and(|first| first == ATOMIC_STAGING_DIR)
 }
 
-/// Build the `PermissionDenied` error returned when a path resolves outside the
-/// disk root via a symlink (or any other on-disk indirection).
+/// Build the `PermissionDenied` error returned when a path goes through a
+/// symlink this disk cannot confine: one that resolves outside the disk root, or
+/// a dangling one, whose target cannot be resolved at all and so cannot be shown
+/// to be inside it.
 fn symlink_escape_error(path: &str) -> Error {
     tracing::warn!(
         path = %path,
-        "rejected storage path that resolves outside the disk root (symlink escape) \
-         on local-filesystem disk"
+        "rejected storage path that goes through a symlink this disk cannot \
+         confine - it resolves outside the disk root, or at a target that does \
+         not exist - on local-filesystem disk"
     );
     Error::new(
         ErrorKind::PermissionDenied,
@@ -353,27 +356,33 @@ async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
 /// consistent rather than one of them being quietly atomic.
 async fn ensure_target_exists(root: &str, path: &str) -> Result<()> {
     let target = on_disk_path(root, path);
-    // Materialize only what genuinely is not there. `OpenOptions::open` follows
-    // symlinks, and `O_CREAT` on a dangling one creates the link's target - the
-    // only symlink-following create in this layer, so it gets its own lock even
-    // though `validate_resolved_path` has already refused that case above.
-    // `symlink_metadata` does not follow the link, so a dangling symlink reports
-    // as a node that exists rather than as a missing target, and anything that
-    // already exists is left for opendal to open exactly as it would have.
-    if !matches!(
-        tokio::fs::symlink_metadata(&target).await,
-        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
-    ) {
-        return Ok(());
-    }
     ensure_parent_dir(&target, path).await?;
-    tokio::fs::OpenOptions::new()
-        .create(true)
+    // `create_new` is `O_CREAT | O_EXCL`, and POSIX requires that combination to
+    // fail when the final component is a symlink - dangling or not. That matters
+    // because this is the only create in this layer that would otherwise follow
+    // one: plain `O_CREAT` on a dangling link creates the link's *target*, so a
+    // link planted in the root becomes a write at an arbitrary path.
+    // `validate_resolved_path` already refuses that path above, but a check
+    // followed by a create is a race, and `O_EXCL` closes it in the kernel
+    // instead of narrowing it - with no extra dependency and nothing
+    // platform-specific.
+    match tokio::fs::OpenOptions::new()
         .append(true)
+        .create_new(true)
         .open(&target)
         .await
-        .map(|_| ())
-        .map_err(|e| publish_error("creating the append target failed", path, e))
+    {
+        Ok(_) => Ok(()),
+        // Something is already at the path: an ordinary object, or a symlink
+        // `O_EXCL` refused to follow. Either way this function has nothing left
+        // to do - it exists only to materialize a target that is genuinely
+        // missing - so the write proceeds into opendal exactly as it would have
+        // without this call. For an existing object that is the in-place append
+        // this function is here to guarantee; for a symlink it is opendal's own
+        // staged write, which publishes by `rename(2)` and stays in the root.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(publish_error("creating the append target failed", path, e)),
+    }
 }
 
 /// Publish `staged` at `target` with `link(2)`.
@@ -847,7 +856,7 @@ impl<D: oio::Delete> oio::Delete for PathGuardDeleter<D> {
 mod tests {
     use super::{
         ATOMIC_STAGING_DIR, PathGuardCopier, PathGuardLister, PathGuardWriter,
-        validate_resolved_path, validate_storage_path,
+        ensure_target_exists, validate_resolved_path, validate_storage_path,
     };
     use opendal::raw::oio::{self, Copy as _, List as _, Write as _};
     use opendal::{Buffer, EntryMode, ErrorKind, Metadata, Result};
@@ -1219,6 +1228,110 @@ mod tests {
                 .await
                 .is_ok(),
             "a name that only shares a prefix with the reservation is an ordinary object"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_symlink_at_an_intermediate_component_is_rejected() {
+        // Both new integration tests put the dangling link at the *leaf*. This
+        // is the other shape the walk has to handle, and the one whose
+        // correctness is least obvious: the leaf cannot be lstat'd either,
+        // because its parent does not resolve, so the walk has to climb one
+        // more level before it finds the node that exists but cannot be
+        // canonicalized.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("a")).expect("create the intermediate directory");
+        let dangling_target = tmp.path().join("gone");
+        std::os::unix::fs::symlink(&dangling_target, root.join("a/link"))
+            .expect("plant a dangling symlink one level above the leaf");
+
+        let root_str = canonical_root(&root);
+        let err = match validate_resolved_path(&root_str, "a/link/b.txt").await {
+            Ok(()) => panic!("a path under a dangling intermediate symlink must be refused"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            ErrorKind::PermissionDenied,
+            "the refusal must be PermissionDenied, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal must name the symlink, got: {err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&dangling_target).is_err(),
+            "validating a path must never create anything"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_leaf_under_a_symlinked_directory_inside_root_is_allowed() {
+        // The half `symlink_pointing_inside_root_is_allowed` does not cover: a
+        // leaf that does not exist yet. That is the case the append pre-create
+        // touches, and refusing it would break every legitimate layout that
+        // symlinks a directory inside the root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("create the real directory");
+        std::os::unix::fs::symlink(&real, root.join("dir_link"))
+            .expect("plant a legitimate directory symlink");
+
+        let root_str = canonical_root(&root);
+        assert!(
+            validate_resolved_path(&root_str, "dir_link/new.txt")
+                .await
+                .is_ok(),
+            "a new leaf under a symlinked directory that resolves inside the \
+             root must be allowed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_target_exists_creates_nothing_through_a_dangling_symlink() {
+        // The second lock on the append pre-create, tested on its own terms:
+        // `validate_resolved_path` refuses this path before the pre-create ever
+        // runs, so nothing else in the suite can observe what the pre-create
+        // does when handed one.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        let victim = tmp.path().join("victim-outside-the-root");
+        std::os::unix::fs::symlink(&victim, root.join("innocent.txt"))
+            .expect("plant a dangling symlink aimed out of the root");
+
+        let root_str = canonical_root(&root);
+        ensure_target_exists(&root_str, "innocent.txt")
+            .await
+            .expect("an occupied path is left for opendal rather than erroring");
+        assert!(
+            std::fs::symlink_metadata(&victim).is_err(),
+            "the pre-create must never create the symlink's target at {victim:?}"
+        );
+
+        // The ordinary case it exists for still works.
+        ensure_target_exists(&root_str, "fresh.txt")
+            .await
+            .expect("a genuinely missing path is materialized");
+        assert!(
+            root.join("fresh.txt").is_file(),
+            "a missing append target must be created"
+        );
+
+        // And it is idempotent, without truncating what it finds.
+        std::fs::write(root.join("fresh.txt"), b"kept").expect("give it content");
+        ensure_target_exists(&root_str, "fresh.txt")
+            .await
+            .expect("an existing object is left alone");
+        assert_eq!(
+            std::fs::read(root.join("fresh.txt")).expect("read it back"),
+            b"kept",
+            "the pre-create must never truncate"
         );
     }
 
