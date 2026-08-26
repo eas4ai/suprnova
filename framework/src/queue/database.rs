@@ -13,6 +13,7 @@ use crate::database::validate_identifier;
 use crate::error::FrameworkError;
 use crate::queue::driver::{QueueDriver, Reservation, ReservationToken, Settled};
 use crate::queue::envelope::{DEFAULT_QUEUE, Envelope};
+use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
@@ -285,6 +286,67 @@ impl QueueDriver for DatabaseQueueDriver {
         Ok(r.rows_affected())
     }
 
+    /// Rows matching [`pending_size`](Self::pending_size)'s exact predicate,
+    /// decoded and ordered by `available_at`. See
+    /// the `list_jobs` helper for the poison-row contract.
+    async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let (queue_clause, queue_params) = self.queue_filter_clause(queue, 3)?;
+        let mut params = vec![sea_orm::Value::from(now), sea_orm::Value::from(now)];
+        params.extend(queue_params);
+        let sql = format!(
+            "SELECT job_name, envelope_json FROM {} \
+             WHERE available_at <= {} \
+               AND (reserved_until IS NULL OR reserved_until <= {}){} \
+             ORDER BY available_at ASC",
+            self.table,
+            placeholder(self.backend(), 1)?,
+            placeholder(self.backend(), 2)?,
+            queue_clause,
+        );
+        self.list_jobs(sql, params).await
+    }
+
+    /// Rows matching [`delayed_size`](Self::delayed_size)'s exact predicate,
+    /// decoded and ordered by `available_at`. See
+    /// the `list_jobs` helper for the poison-row contract.
+    async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let (queue_clause, queue_params) = self.queue_filter_clause(queue, 2)?;
+        let mut params = vec![sea_orm::Value::from(now)];
+        params.extend(queue_params);
+        let sql = format!(
+            "SELECT job_name, envelope_json FROM {} WHERE available_at > {}{} \
+             ORDER BY available_at ASC",
+            self.table,
+            placeholder(self.backend(), 1)?,
+            queue_clause,
+        );
+        self.list_jobs(sql, params).await
+    }
+
+    /// Rows matching [`reserved_size`](Self::reserved_size)'s exact
+    /// predicate, decoded and ordered by `available_at`. See
+    /// the `list_jobs` helper for the poison-row contract.
+    async fn reserved_jobs(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let now = Utc::now().timestamp();
+        let (queue_clause, queue_params) = self.queue_filter_clause(queue, 2)?;
+        let mut params = vec![sea_orm::Value::from(now)];
+        params.extend(queue_params);
+        let sql = format!(
+            "SELECT job_name, envelope_json FROM {} \
+             WHERE reserved_until IS NOT NULL AND reserved_until > {}{} \
+             ORDER BY available_at ASC",
+            self.table,
+            placeholder(self.backend(), 1)?,
+            queue_clause,
+        );
+        self.list_jobs(sql, params).await
+    }
+
     fn name(&self) -> &'static str {
         "database"
     }
@@ -439,6 +501,86 @@ impl DatabaseQueueDriver {
             .await
             .map_err(|e| FrameworkError::internal(format!("queue {op} txn commit: {e}")))?;
         Ok(())
+    }
+
+    /// `AND (queue = ? [OR queue IS NULL])` clause for a listing method's
+    /// optional single-queue filter, mirroring `pop_filtered`'s NULL-means-
+    /// default handling so a filter of [`DEFAULT_QUEUE`] also
+    /// matches rows written before the `queue` column existed.
+    ///
+    /// Bound as a parameter at `ordinal`, never interpolated: `queue`
+    /// reaches these listing methods from operator input (an admin
+    /// dashboard, a CLI flag), the same trust boundary `pop_filtered`
+    /// already treats as untrusted.
+    fn queue_filter_clause(
+        &self,
+        queue: Option<&str>,
+        ordinal: usize,
+    ) -> Result<(String, Vec<sea_orm::Value>), FrameworkError> {
+        match queue {
+            None => Ok((String::new(), Vec::new())),
+            Some(q) => {
+                let ph = placeholder(self.backend(), ordinal)?;
+                let null_clause = if q == DEFAULT_QUEUE {
+                    " OR queue IS NULL"
+                } else {
+                    ""
+                };
+                Ok((
+                    format!(" AND (queue = {ph}{null_clause})"),
+                    vec![sea_orm::Value::from(q.to_string())],
+                ))
+            }
+        }
+    }
+
+    /// Shared row-decoding for `pending_jobs`/`delayed_jobs`/`reserved_jobs`:
+    /// run `sql`/`params` (which must select `job_name, envelope_json` in
+    /// that order) and decode each row into an [`InspectedJob`].
+    ///
+    /// A row whose `envelope_json` fails to parse becomes a poison-marked
+    /// entry (`id: None`, `payload: {"unparseable": true}`) instead of
+    /// failing the whole listing - one corrupt row must not blind an
+    /// operator to every other job on the queue.
+    async fn list_jobs(
+        &self,
+        sql: String,
+        params: Vec<sea_orm::Value>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(self.backend(), sql, params))
+            .await
+            .map_err(|e| FrameworkError::internal(format!("queue listing: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let job_name: String = row.try_get_by_index(0).map_err(|e| {
+                FrameworkError::internal(format!("queue listing job_name col: {e}"))
+            })?;
+            let envelope_json: String = row.try_get_by_index(1).map_err(|e| {
+                FrameworkError::internal(format!("queue listing envelope col: {e}"))
+            })?;
+            out.push(match Envelope::from_json(&envelope_json) {
+                Ok(env) => InspectedJob::from_envelope(&env),
+                Err(e) => {
+                    tracing::warn!(
+                        job_name = %job_name,
+                        error = %e,
+                        "queue listing: envelope_json failed to parse; \
+                         reporting the row as unparseable instead of dropping it"
+                    );
+                    InspectedJob {
+                        id: None,
+                        queue: None,
+                        name: job_name,
+                        attempts: 0,
+                        payload: serde_json::json!({ "unparseable": true }),
+                        created_at: None,
+                    }
+                }
+            });
+        }
+        Ok(out)
     }
 
     /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].

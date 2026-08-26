@@ -3,7 +3,7 @@
 //! Dogfoods the framework's new multipart + storage surface:
 //!
 //! - `#[derive(MultipartRequest)]` extracts the request body into a
-//!   strongly-typed struct, running the `Image` magic-byte validator and
+//!   strongly-typed struct, running the `ImageFile` magic-byte validator and
 //!   the `MaxSize<N>` byte-boundary short-circuit during parsing.
 //! - `Auth::user_as::<User>()` resolves the session-authenticated user
 //!   through the registered `UserProvider`, so the storage path is
@@ -19,7 +19,7 @@
 //! happy path explicit.
 
 use suprnova::{
-    Auth, FrameworkError, Image, MaxSize, MultipartRequest, Response, Storage, UploadedFile,
+    Auth, FrameworkError, ImageFile, MaxSize, MultipartRequest, Response, Storage, UploadedFile,
     handler, json_response,
 };
 
@@ -31,14 +31,14 @@ const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
 
 /// Multipart request body for the avatar upload endpoint.
 ///
-/// Validators compose left-to-right: `Image` rejects non-image magic bytes
+/// Validators compose left-to-right: `ImageFile` rejects non-image magic bytes
 /// (422), `MaxSize` short-circuits past 5 MiB (413). Both run inside the
 /// derived `FromRequest::from_request` impl before the handler body is
 /// entered.
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<MAX_AVATAR_BYTES>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<MAX_AVATAR_BYTES>)>,
     #[field("caption")]
     pub caption: Option<String>,
 }

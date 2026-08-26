@@ -67,22 +67,27 @@ para las inserciones provenientes de un handler de cola.
 
 ## Drivers
 
-Cinco drivers vienen incluidos en el árbol del framework. Configúralos
-mediante la variable de entorno `QUEUE_DRIVER` o llamando a
-`Queue::set_driver(...)` programáticamente.
+Se incluyen cinco drivers en el árbol. Se configuran mediante la variable
+de entorno `QUEUE_DRIVER` o llamando a `Queue::set_driver(...)` de forma
+programática.
 
 | Driver | Úsalo para | Puntos fuertes |
 | --- | --- | --- |
-| `MemoryQueueDriver` | tests, apps de un solo proceso | `tokio::time::DelayQueue` para `available_at`, compatible con reloj virtual |
-| `RedisQueueDriver` | dispersión en producción | grupos de consumidores + `XAUTOCLAIM` + jobs retrasados respaldados por ZSET |
-| `DatabaseQueueDriver` | apps de una sola base de datos | `FOR UPDATE SKIP LOCKED` en Postgres/MySQL, serializado con `BEGIN` en SQLite |
-| `SyncQueueDriver` | desarrollo, CI | ejecuta el handler en línea en `push`, sin worker |
-| `NullQueueDriver` | envoltorios de test | descarta cada push sin ejecutarlo |
+| `MemoryQueueDriver` | pruebas, aplicaciones de un solo proceso | `tokio::time::DelayQueue` para `available_at`, compatible con el reloj virtual |
+| `RedisQueueDriver` | dispersión en producción | grupos de consumidores + `XAUTOCLAIM` + jobs retardados respaldados por ZSET |
+| `DatabaseQueueDriver` | aplicaciones con una sola base de datos | `FOR UPDATE SKIP LOCKED` en Postgres/MySQL, serializado con `BEGIN` en SQLite |
+| `SyncQueueDriver` | desarrollo, CI | ejecuta el handler en línea en el `push`, sin worker |
+| `NullQueueDriver` | envoltorios de pruebas | descarta todos los push sin ejecutarlos |
 
 `Queue::bootstrap_from_env()` lee `QUEUE_DRIVER` y conecta el driver
-correspondiente; `Queue::bootstrap_default()` siempre conecta el driver
-de memoria. La ruta de arranque del servidor llama a uno de estos por
-ti - la mayoría de las apps solo se configuran vía entorno.
+correspondiente; `Queue::bootstrap_default()` conecta siempre el driver de
+memoria. La ruta de arranque del servidor llama a una de las dos por ti;
+la mayoría de las aplicaciones solo configuran mediante variables de
+entorno.
+
+`FailoverQueueDriver` no es un sexto backend. Envuelve una lista ordenada
+de los drivers de arriba para que un push que una conexión rechaza recaiga
+en la siguiente. Consulta [Conexiones con failover](#conexiones-con-failover).
 
 ### Configuración del entorno
 
@@ -94,76 +99,311 @@ QUEUE_REDIS_GROUP=default
 QUEUE_REDIS_CONSUMER=consumer-1
 QUEUE_VISIBILITY_TIMEOUT_SECS=60
 
-# Driver de base de datos - DB::init() debe ejecutarse primero
+# Driver de base de datos - DB::init() tiene que ejecutarse antes
 QUEUE_DRIVER=database
 QUEUE_DB_TABLE=jobs
 ```
 
-El driver de base de datos valida `QUEUE_DB_TABLE` como un identificador
-SQL en el momento de construirse, así que un valor de entorno malformado
-hace fallar el arranque en lugar de llegar a la composición SQL. Redis
-usa sea-streamer-redis por debajo con `AutoCommit::Disabled`; el timeout
-de visibilidad queda fijado en el momento de construir el grupo de
-consumidores, así que el argumento `visibility_timeout` de cada pop se
-ignora en Redis (una divergencia documentada respecto al contrato del
-trait, impuesta por Redis Streams).
+El driver de base de datos valida `QUEUE_DB_TABLE` como identificador SQL
+en el momento de construirse, así que un valor de entorno malformado hace
+fallar el arranque en lugar de llegar a la composición del SQL. Redis usa
+sea-streamer-redis por debajo con `AutoCommit::Disabled`; el tiempo de
+espera de visibilidad se fija al construir el grupo de consumidores, así
+que el argumento `visibility_timeout` de cada `pop` se ignora en Redis
+(una divergencia documentada del contrato del trait, impuesta por Redis
+Streams).
 
 ### Por qué Suprnova diverge
 
-Laravel enruta todo lo encolable a través del Bus, distinguiendo los
-jobs `ShouldQueue` en el momento del despacho. Suprnova separa los dos:
-`Bus` para trabajo síncrono que devuelve un resultado tipado, `Queue`
-para trabajo asíncrono que sobrevive a una caída del proceso. PHP
-necesita el enrutamiento implícito porque su modelo de un proceso por
-solicitud hace difícil modelar de otro modo "hacer esto después, en otro
-proceso". Tokio no - `Bus::dispatch` frente a `Queue::push` de forma
-explícita es más claro, más rápido, y hace visible la elección de
-durabilidad en el sitio de la llamada. Consulta [`bus.md`](bus.md) para
-la comparación en paralelo.
+Laravel enruta todo lo encolable a través del Bus, distinguiendo los jobs
+`ShouldQueue` en el momento del despacho. Suprnova separa los dos: `Bus`
+para el trabajo síncrono que devuelve un resultado tipado, `Queue` para el
+trabajo asíncrono que sobrevive a la caída de un proceso. PHP necesita el
+enrutamiento implícito porque su modelo de un proceso por solicitud hace
+difícil modelar de otro modo "haz esto luego, en otro proceso". Tokio no:
+la elección explícita entre `Bus::dispatch` y `Queue::push` es más clara,
+más rápida y expone la decisión de durabilidad en el sitio de la llamada.
+Consulta [`bus.md`](bus.md) para verlos uno al lado del otro.
+
+## Conexiones con failover
+
+`FailoverQueueDriver` envuelve una lista ordenada de conexiones. Un push
+que la primera conexión rechaza se reintenta en la siguiente, y así
+sucesivamente hacia abajo de la lista, de modo que una caída de Redis no
+convierte cada despacho en un job perdido.
+
+Configúralo desde el entorno:
+
+```bash
+QUEUE_DRIVER=failover
+QUEUE_FAILOVER_CONNECTIONS=redis,database
+
+# Cada conexión lee sus propias variables, exactamente igual que si
+# fuera QUEUE_DRIVER por sí sola.
+QUEUE_REDIS_URL=redis://127.0.0.1:6379
+QUEUE_DB_TABLE=jobs
+```
+
+O conéctalo tú mismo, cuando las conexiones necesiten una configuración
+en tiempo de ejecución que el entorno no puede expresar:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::queue::{
+    DatabaseQueueDriver, FailoverQueueDriver, Queue, QueueDriver, RedisQueueDriver,
+};
+use suprnova::{DB, FrameworkError};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    let redis = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        "suprnova-queue",
+        "default",
+        "consumer-1",
+        Duration::from_secs(60),
+    )
+    .await?;
+    let database =
+        DatabaseQueueDriver::new(DB::connection()?.inner().clone(), "jobs".to_string())?;
+
+    let failover = FailoverQueueDriver::new(vec![
+        ("redis".to_string(), Arc::new(redis) as Arc<dyn QueueDriver>),
+        ("database".to_string(), Arc::new(database) as Arc<dyn QueueDriver>),
+    ])?;
+    Queue::set_driver(Arc::new(failover));
+    Ok(())
+}
+```
+
+El `String` de cada entrada es la etiqueta de conexión que se reporta en
+el evento `QueueFailedOver`. No se deriva del tipo de driver, porque dos
+conexiones pueden usar el mismo driver.
+
+`QUEUE_FAILOVER_CONNECTIONS` es obligatoria cuando
+`QUEUE_DRIVER=failover`, y la lista no puede contener `failover` en sí. Una
+entrada que nombre un driver que no existe es un error de arranque, y no
+el respaldo de avisar y usar memoria que `QUEUE_DRIVER` se aplica a sí
+mismo: dentro de una cadena de failover, una errata que se convirtiera en
+silencio en una conexión en memoria pondría un backend efímero en una
+lista durable.
+
+### Las escrituras conmutan, las lecturas no
+
+Solo `push` y `bulk_push` recorren la lista de conexiones. Todas las demás
+operaciones - `pop`, `ack`, `nack`, `release`, `settle`, `clear`, los
+cuatro contadores y los tres listados de inspección - van a la **primera**
+conexión y a ninguna otra.
+
+Esa asimetría es el contrato, no un olvido. Un token de reserva solo tiene
+sentido para el driver que lo emitió, así que hacer ack contra otra
+conexión no resolvería nada y corrompería ambas. Los contadores y los
+listados siguen la misma regla para que lo que inspeccionas sea lo que
+drena el worker de esta conexión, y no una suma entre backends que no
+coincide con la vista de ningún worker.
+
+**Un worker sobre la conexión de failover drena únicamente la primaria.**
+Los jobs que conmutaron a un respaldo necesitan un worker ejecutándose
+contra esa conexión de respaldo directamente:
+
+```bash
+# Drena la primaria de la cadena de failover.
+QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
+
+# Drena lo que conmutó a la base de datos. Ejecuta esto también.
+QUEUE_DRIVER=database ./app queue:work
+```
+
+La documentación de Laravel lleva la misma advertencia por la misma razón.
+
+Esto alcanza a las cadenas, pero solo por una puerta. Un worker resuelve
+un job y encola el siguiente eslabón de una [cadena
+encolada](#cadenas-encoladas) en una sola llamada, `settle`, y el
+decorador delega esa llamada únicamente en la primaria. Así que, con una
+primaria transaccional como el driver de base de datos, una primaria caída
+hace fallar la resolución y nada conmuta: el worker deja la reserva
+intacta y la expiración de la visibilidad reentrega el job. La caída hacia
+la siguiente conexión ocurre cuando la primaria responde
+`Settled::Unsupported`, como hacen los drivers de memoria y de Redis,
+porque entonces el worker empuja el siguiente eslabón a través del driver
+vinculado como cualquier otro push - y ese push sí conmuta. El resto de
+esa cadena espera entonces a un worker en la conexión de respaldo. Sin él,
+la cadena se atasca: el eslabón es durable y no se pierde nada, pero
+tampoco hay nada que lo ejecute.
+
+### El evento `QueueFailedOver`
+
+Cada conexión que rechaza un push despacha
+`queue::events::QueueFailedOver { connection, job_name, exception }`, pero
+solo en el push que lleva a esa conexión *al* estado de fallo. Una
+conexión que ya se sabe que está fallando se mantiene callada hasta que un
+push posterior tiene éxito en ella, lo que la rearma. Una caída de cuatro
+horas produce un evento, no uno por despacho, que es lo que lo hace
+utilizable como alerta.
+
+`connection` es la etiqueta de la conexión que falló, no la de la que
+aceptó el job.
+
+Cuando todas las conexiones rechazan un push, el push devuelve el error de
+la última conexión. `bulk_push` empuja cada sobre por separado, así que
+cada uno recorre la lista por su cuenta: un lote que la primaria aceptó a
+medias nunca se vuelve a empujar entero al respaldo, y cada sobre conserva
+el `available_at` con el que se construyó. Un lote no es atómico. Si todas
+las conexiones rechazan un sobre, `bulk_push` devuelve el error de ese
+sobre con los sobres anteriores ya encolados.
+
+Conmutar no es deduplicar. El decorador nunca reintenta un sobre que una
+conexión aceptó, pero una conexión que escribe el sobre y *luego* informa
+de un fallo produce un duplicado en la siguiente conexión, porque "lo
+escribió y perdió el acuse de recibo" es indistinguible de "nunca lo
+tomó". Ambas copias llevan el mismo id de job. Ese es el contrato de
+entrega al menos una vez del framework, el mismo que hace de la
+idempotencia del handler un requisito en todas partes - consulta [La
+idempotencia es el contrato del worker
+contigo](#la-idempotencia-es-el-contrato-del-worker-contigo).
+
+### Por qué Suprnova diverge
+
+La conexión de failover de Laravel es un array `connections` en
+`config/queue.php`, resuelto a través del registro de conexiones. Suprnova
+no tiene un registro de drivers por conexión - hay un solo driver
+vinculado para todo el proceso -, así que las etiquetas vienen de
+`QUEUE_FAILOVER_CONNECTIONS` (o del `String` que pases a
+`FailoverQueueDriver::new`) y las lecturas delegan en el primer *driver*
+en lugar de en una conexión con nombre.
+
+El `FailoverQueue::bulk` de Laravel recorre los jobs uno a uno para que el
+retardo de cada uno sobreviva. Suprnova resuelve el retardo sobre el sobre
+antes de que ningún driver lo vea, así que el bucle por sobre lo conserva
+gratis - pero el bucle sigue siendo lo que evita que un lote aterrizado a
+medias se empuje dos veces, así que se queda.
 
 ## Variantes de push
 
-Toda variante de push toma un valor tipado `J: Job` y retorna cuando el
-sobre queda confirmado en el driver - no cuando se ejecuta el handler.
+Cada variante de push toma un valor tipado `J: Job` y retorna cuando el
+sobre queda confirmado en el driver, no cuando se ejecuta el handler.
 
 | Método | Comportamiento |
 | --- | --- |
 | `Queue::push(job)` | encola de inmediato |
 | `Queue::push_later(job, at)` | disponible en un `DateTime<Utc>` concreto |
-| `Queue::later(delay, job)` | disponible después de `delay` desde ahora |
+| `Queue::later(delay, job)` | disponible tras `delay` a partir de ahora |
 | `Queue::push_with(job, overrides)` | encola de inmediato con `EnvelopeOverrides` por push |
-| `Queue::later_with(delay, job, overrides)` | disponible después de `delay` desde ahora, con `EnvelopeOverrides` por push |
-| `Queue::push_unique(job)` | deduplica por `J::unique_id` dentro de `J::unique_for`, devuelve `Ok(true)` cuando se empujó el sobre, `Ok(false)` cuando una clave de deduplicación activa lo suprimió |
+| `Queue::push_after_commit(job)` | encola cuando confirma el `DB::transaction` circundante |
+| `Queue::later_with(delay, job, overrides)` | disponible tras `delay` a partir de ahora, con `EnvelopeOverrides` por push |
+| `Queue::push_unique(job)` | deduplica por `J::unique_id` dentro de `J::unique_for`; devuelve `Ok(true)` cuando el sobre se empujó y `Ok(false)` cuando una clave de deduplicación viva lo suprimió |
 | `Queue::push_unique_later(job, at)` | único + programado |
-| `Queue::later_unique(delay, job)` | único + retrasado |
-| `Queue::bulk(vec![job1, job2, ...])` | empuja todos los jobs (el driver puede usar una ruta masiva nativa) |
+| `Queue::later_unique(delay, job)` | único + retardado |
+| `Queue::bulk(vec![job1, job2, ...])` | empuja todos los jobs (el driver puede usar una ruta bulk nativa) |
 
-`push_unique` requiere que la capa de caché esté arrancada - el bloqueo
-de deduplicación vive en [`Cache`](cache.md) vía
-[`Idempotency::commit_on_success`](idempotency.md). Un push fallido
-libera la clave de deduplicación para que quien llama pueda reintentar;
-un push con éxito la retiene durante `J::unique_for` segundos. El job
-debe sobrescribir `Job::unique_id(&self)` para devolver `Some(id)` -
-`None` devuelve un error interno.
+`push_unique` exige que la capa de caché esté arrancada: el bloqueo de
+deduplicación vive en [`Cache`](cache.md) mediante
+[`Idempotency::commit_on_success`](idempotency.md). Un push fallido libera
+la clave de deduplicación para que quien llama pueda reintentar; un push
+correcto la retiene durante `J::unique_for` segundos. El job tiene que
+sobrescribir `Job::unique_id(&self)` para devolver `Some(id)`; con `None`
+se devuelve un error interno.
 
 El booleano responde a una sola pregunta - "¿está este job en la cola?" -
 y detrás de ella hay un tercer caso. Si el lease del bloqueo de
 deduplicación se pierde mientras el push está en vuelo, el push se
 completa igualmente (la capa de idempotencia nunca cancela un cuerpo que
-puede haber tenido ya un efecto) y sigues obteniendo `Ok(true)`, con un
-log de nivel `warn` que nombra el job y su clave única. El job está
-encolado; lo que no queda demostrado es que nadie más encolara el mismo
-de forma concurrente. Tu handler ya tiene que tolerar la reentrega, así
-que esto no necesita ningún manejo extra - pero el log está ahí porque
-una ráfaga de ellos significa que la caché que respalda tu bloqueo de
-deduplicación está sufriendo.
+quizá ya haya tenido efecto) y sigues obteniendo `Ok(true)`, con un log de
+nivel `warn` que nombra el job y su clave única. El job está encolado; lo
+que queda sin demostrar es que nadie más encoló el mismo en paralelo. Tu
+handler ya tiene que tolerar la reentrega, así que esto no necesita ningún
+tratamiento extra, pero el log está ahí porque una ráfaga de estos avisos
+significa que la caché que respalda tu bloqueo de deduplicación va justa.
+
+### Único hasta el procesamiento
+
+Un bloqueo de unicidad dura normalmente toda la ventana `unique_for`,
+incluso después de que el job se haya ejecutado. Cuando el bloqueo existe
+para fusionar duplicados *encolados* y no para serializar la ejecución,
+súmate a liberarlo en el momento en que empieza el procesamiento:
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebuildSearchIndex {
+    index: String,
+}
+
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "rebuild-search-index" }
+    fn unique_id(&self) -> Option<String> { Some(self.index.clone()) }
+    fn unique_until_processing() -> bool { true }
+    fn unique_for() -> Duration { Duration::from_secs(3600) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // Una reconstrucción que dura 20 minutos ya no se traga el
+        // redespacho que llega en el minuto 2.
+        Ok(())
+    }
+}
+```
+
+El worker libera el bloqueo tras la pasada de middleware del job y justo
+antes de que se ejecute el handler. De ahí se siguen cuatro consecuencias:
+
+- Un job que un middleware libera de vuelta a la cola conserva su bloqueo.
+  No ha empezado a procesarse, así que para un duplicado no ha cambiado
+  nada.
+- Un job que un middleware cortocircuita de cualquier otra forma cede su
+  bloqueo, porque no va a procesarse en absoluto. Eso cubre eliminar el
+  job, enviarlo a fallidos y darlo por completado sin llegar a llamar al
+  handler.
+- Un job que falla libera su bloqueo y aun así se reintenta. El bloqueo se
+  fue en el momento en que empezó el procesamiento, así que un duplicado
+  puede encolarse mientras el intento fallido espera su backoff, y acabas
+  con dos sobres para el mismo id único. Ese es el intercambio que hace
+  esta opción. Si un reintento tiene que seguir ocupando la plaza, deja
+  `unique_until_processing` desactivado y que el TTL de `unique_for` cubra
+  toda la cadena de intentos.
+- La liberación está acotada al propietario. `push_unique` registra el
+  token de propietario del bloqueo en el sobre, y el worker libera con ese
+  token, así que un intento reentregado nunca puede liberar un bloqueo que
+  un despacho más nuevo haya adquirido entretanto.
+
+`unique_until_processing` necesita las dos mismas cosas que necesita
+`push_unique`: un `unique_id` que devuelva `Some(id)` y una capa de caché
+arrancada.
+
+Bajo el driver `sync` el handler se ejecuta en línea dentro de la misma
+llamada a `push_unique` que tomó el bloqueo, así que el job libera un
+bloqueo que quien lo llamó sigue reteniendo nominalmente. Si ese handler
+tarda más de un tercio de `unique_for`, el renovador del lease de
+deduplicación nota que el bloqueo ya no está y registra un aviso de lease
+perdido, y `push_unique` registra encima su propio aviso de "no se pudo
+demostrar la exclusividad". Aquí ambos son esperables y no un fallo: el
+job se ejecutó, el push devuelve `Ok(true)` y el bloqueo ya no está porque
+el propio job lo liberó.
+
+### Por qué Suprnova diverge
+
+Laravel libera el bloqueo de un job único *ordinario* en cuanto retorna el
+handler. Suprnova deja en cambio que ese bloqueo caduque con el TTL de
+`unique_for`, lo que mantiene honesta la ventana de deduplicación cuando
+un worker muere a mitad del job: la ventana que configuraste es la ventana
+que obtienes, haya retornado el handler o no.
+`unique_until_processing` se comporta igual en los dos frameworks.
+
+Suprnova tampoco fuerza nunca la liberación de un bloqueo de unicidad.
+Laravel recurre a una liberación forzada para un primer intento que no
+lleva token de propietario. Los únicos sobres que llegan a un worker de
+Suprnova sin token son los sobres encolados antes de que el token
+existiera, y esos se quedan con la caducidad por TTL en lugar de arriesgar
+una liberación que borre el bloqueo de un despacho más nuevo.
 
 ### Anulaciones por push con `EnvelopeOverrides`
 
-`Queue::push_with` y `Queue::later_with` reciben un `EnvelopeOverrides`
-junto con el job, para el único despacho que necesita un comportamiento de
-cola, conexión, timeout o reintento diferente de los propios valores
-predeterminados del job:
+`Queue::push_with` y `Queue::later_with` toman un `EnvelopeOverrides`
+junto al job, para ese despacho concreto que necesita un comportamiento de
+cola, conexión, tiempo de espera o reintentos distinto de los valores por
+defecto del propio job:
 
 ```rust
 use std::time::Duration;
@@ -178,17 +418,17 @@ let overrides = EnvelopeOverrides {
 
 Queue::push_with(SendWelcomeEmail { user_id: 42 }, overrides.clone()).await?;
 
-// The delayed counterpart, mirroring `Queue::later`'s relationship to `Queue::push`.
+// La contraparte retardada, que refleja la relación de `Queue::later` con `Queue::push`.
 Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, overrides).await?;
 ```
 
-Cada campo tiene como predeterminado `None` y difiere a la resolución normal
-que ya ejecuta `Queue::push`; un campo `Some` gana sobre todo ello para este
-único push, superando tanto una ruta registrada con
-[`Queue::route`](#enrutamiento-de-colas) como la declaración `Job::*` del propio job
-para ese campo:
+Todos los campos valen `None` por defecto y ceden a la resolución normal
+que `Queue::push` ya ejecuta; un campo `Some` gana sobre todo eso para
+este único push, mandando tanto sobre una ruta registrada con
+[`Queue::route`](#enrutamiento-de-colas) como sobre la propia declaración
+`Job::*` del job para ese campo:
 
-| Campo | Supera a |
+| Campo | Manda sobre |
 | --- | --- |
 | `queue` | `Queue::route`, `Job::queue()` |
 | `connection` | `Queue::route`, `Job::connection()` |
@@ -196,16 +436,17 @@ para ese campo:
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
+| `after_commit` | `Job::after_commit()` |
 
-`EnvelopeOverrides` es la primitiva sobre la que se construyen
-`Mail::on_queue`/`.on_connection()` y el ajuste de cola por notificación de
-`Notify::queue`: consulta [Correo](mail.md#queueing) y
+`EnvelopeOverrides` es la primitiva sobre la que están construidos tanto
+`Mail::on_queue`/`.on_connection()` como el ajuste de cola por
+notificación de `Notify::queue` - consulta [Correo](mail.md#queueing) y
 [Notificaciones](notifications.md).
 
-### Retraso declarado por el job
+### Retardo declarado por el job
 
-Un job puede llevar su propio retraso predeterminado en lugar de que cada sitio
-de llamada repita `Queue::later(Duration::from_secs(60), job)`:
+Un job puede llevar su propio retardo por defecto en lugar de que cada
+sitio de llamada repita `Queue::later(Duration::from_secs(60), job)`:
 
 ```rust
 impl Job for SendDigest {
@@ -214,45 +455,197 @@ impl Job for SendDigest {
 }
 ```
 
-`Queue::push(job)`, `Queue::push_with(job, overrides)`, `Queue::push_unique(job)`
-y `Queue::bulk(vec![job1, job2])` lo respetan: `available_at` pasa a ser
-`now + J::delay()` en lugar de `now`. `Queue::bulk` resuelve el retraso una
-vez por llamada, ya que cada job del vector comparte el mismo `J` concreto y,
-por lo tanto, el mismo `Job::delay()`.
+`Queue::push(job)`, `Queue::push_with(job, overrides)`,
+`Queue::push_unique(job)` y `Queue::bulk(vec![job1, job2])` lo respetan
+todos: `available_at` pasa a ser `now + J::delay()` en lugar de `now`.
+`Queue::bulk` resuelve el retardo una sola vez por llamada, ya que todos
+los jobs del vector comparten el mismo `J` concreto y, por tanto, el mismo
+`Job::delay()`.
 
-Un retraso explícito en el sitio de llamada siempre gana:
+Un retardo explícito en el sitio de la llamada siempre gana:
 `Queue::push_later(job, at)`, `Queue::later(delay, job)`,
 `Queue::later_with(delay, job, overrides)`,
 `Queue::push_unique_later(job, at)` y `Queue::later_unique(delay, job)`
-usan todos literalmente el timestamp o retraso que pasó quien llama:
-`Job::delay()` no se consulta para ninguno. Usa el método del trait cuando
-cualquier despacho de un tipo de job deba comenzar retrasado por defecto; usa
-una de las variantes `later`/`push_later` para un retraso que necesita un
-despacho específico, pero que el tipo no declara de otro modo.
+usan todos, literalmente, la marca de tiempo o el retardo que pasó quien
+llamó; `Job::delay()` no se consulta en ninguno de ellos. Echa mano del
+método del trait cuando todo despacho de un tipo de job deba arrancar
+retardado por defecto; echa mano de una de las variantes
+`later`/`push_later` para un retardo que necesita un despacho concreto
+pero que el tipo no declara por su cuenta.
 
-Los lotes y las cadenas tampoco lo consultan:
-`Queue::batch()...add(job)` y `Queue::chain()...add(job)?` construyen sus
-envelopes con `available_at` establecido en el momento en que llamaste a
-`add`, de modo que un job con `Job::delay()` declarado se despacha de inmediato
-como parte de un lote o una cadena aunque un `Queue::push(job)` simple del
-mismo job esperaría. Da al job un retraso explícito de otra forma  - un campo en
-el propio job, aplicado en `handle()` -  si un paso en lote o encadenado necesita
-uno.
+Los lotes y las cadenas tampoco lo consultan: `Queue::batch()...add(job)` y
+`Queue::chain()...add(job)?` construyen sus sobres con `available_at`
+fijado al momento en que llamaste a `add`, así que un job con un
+`Job::delay()` declarado se despacha de inmediato como parte de un lote o
+de una cadena aunque un `Queue::push(job)` a secas del mismo job
+esperaría. Dale al job un retardo explícito por otra vía - un campo en el
+propio job, aplicado en `handle()` - si un paso por lote o en cadena
+necesita uno.
 
 ### Por qué Suprnova diverge
 
-El `$job->delay` de Laravel es una propiedad de instancia, establecida por
-despacho (`SendDigest::dispatch($user)->delay(60)`), por lo que dos despachos
-de la misma clase pueden llevar retrasos distintos. Aquí `Job::delay()` es en
-cambio un valor predeterminado a nivel de clase, como `Job::queue()` o
-`Job::max_tries()`: un despacho que necesita un retraso calculado a partir de
-sus propios datos usa `Queue::later`/`push_later`, que ya supera el
-predeterminado declarado.
+El `$job->delay` de Laravel es una propiedad de instancia, fijada por
+despacho (`SendDigest::dispatch($user)->delay(60)`), así que dos despachos
+de la misma clase pueden llevar retardos distintos. Aquí `Job::delay()` es
+en cambio un valor por defecto a nivel de clase, como `Job::queue()` o
+`Job::max_tries()`: un despacho que necesite un retardo calculado a partir
+de sus propios datos usa `Queue::later`/`push_later`, que ya manda sobre
+el valor por defecto declarado.
 
-## Configuración del job
+### Despacho posterior al commit
 
-Anula las funciones asociadas de `Job` para ajustar el comportamiento por
-cada impl:
+Un job empujado dentro de un [`DB::transaction`](database.md#transactions)
+compite con esa transacción. Un worker en otro proceso puede sacar el
+sobre, buscar la fila que la transacción todavía mantiene abierta y
+fallar - o, peor aún, la transacción revierte y el job se ejecuta contra
+datos que ya no existen.
+
+Haz que el job se sume a esperar a la confirmación:
+
+```rust
+use suprnova::{DB, FrameworkError, Job, Queue, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    order_id: i64,
+}
+
+#[async_trait]
+impl Job for SendReceipt {
+    fn job_name() -> &'static str { "send-receipt" }
+    fn after_commit() -> bool { true }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // Está garantizado que la fila del pedido es durable cuando esto se ejecuta.
+        Ok(())
+    }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Aquí no llega nada al driver.
+        Queue::push(SendReceipt { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// El sobre está en la cola ahora, y solo ahora.
+```
+
+Tres reglas cubren todos los casos:
+
+- **Dentro de una transacción, el push entero espera a la confirmación.**
+  No solo la escritura en el driver: la construcción del sobre, el evento
+  `JobQueueing` y el evento `JobQueued` ocurren también en el momento de
+  la confirmación, así que a un oyente nunca se le habla de un job que un
+  rollback descarta después.
+- **Un rollback lo descarta.** El push sencillamente no ocurre nunca. Si
+  tomó un bloqueo de unicidad, el rollback devuelve ese bloqueo.
+- **Fuera de una transacción el push ocurre de inmediato.** Eso es lo que
+  hace seguro declarar esta opción en el tipo del job: un sitio de
+  despacho no tiene que saber si la ruta de código en la que está es
+  transaccional.
+
+El rollback a un [savepoint](database.md#savepoints) cuenta como un
+rollback para todo lo registrado dentro de él. `tx.rollback_to("name")`
+descarta los push diferidos desde `tx.savepoint("name")` y libera los
+bloqueos que tomaron, justo en ese momento, así que un redespacho dentro
+de la misma transacción vuelve a ganar la clave. Los push hechos antes del
+savepoint quedan intactos, y un savepoint que nunca reviertes conserva
+todo lo registrado dentro de él.
+
+Por despacho, en lugar de por tipo de job, usa
+`EnvelopeOverrides::after_commit`. `Some(true)` es el `afterCommit()` de
+Laravel y tiene el atajo `Queue::push_after_commit(job)`; `Some(false)` es
+el `beforeCommit()` de Laravel, para ese despacho concreto que tiene que
+ser visible para un worker antes de que aterrice la confirmación:
+
+```rust
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+// Difiere un job cuyo tipo no se suma.
+Queue::push_after_commit(SendWelcomeEmail { user_id: 42 }).await?;
+
+// Empuja de inmediato aunque el tipo del job sí se sume.
+Queue::push_with(
+    SendReceipt { order_id: 7 },
+    EnvelopeOverrides { after_commit: Some(false), ..Default::default() },
+)
+.await?;
+```
+
+Un `Queue::push` diferido vuelve a resolver
+[`Job::delay()`](#retardo-declarado-por-el-job) contra la confirmación y no
+contra el push, porque el retardo significa "espera este tiempo tras el
+despacho" y, para un job diferido, el despacho *es* la confirmación. Una
+marca de tiempo explícita es la intención de quien llama sobre un momento
+concreto, así que `Queue::push_later`, `Queue::later` y
+`Queue::later_with` llevan la suya a través del aplazamiento sin cambios.
+
+`Queue::push_unique` se difiere con una asimetría deliberada: el bloqueo
+de deduplicación se toma de inmediato, así que un segundo `push_unique`
+para el mismo id único dentro de la misma transacción sigue suprimiéndose
+y sigue informando `Ok(false)`. Solo espera el sobre. El ganador informa
+`Ok(true)` aunque su push esté pendiente, porque el push va a ocurrir. Un
+rollback libera el bloqueo que tomó, acotado al propietario, así que la
+ventana `unique_for` nunca queda bloqueada por un despacho que nunca
+ocurrió - y lo mismo hace cualquier otro final en el que la confirmación
+no aterrice, incluido un `COMMIT` rechazado. El único límite de esa
+garantía es el propio TTL: una transacción que permanece abierta más
+tiempo que `unique_for` puede ver caducar su bloqueo y que otro despacho
+lo tome en pleno vuelo, así que dale a `unique_for` margen por encima de
+tu transacción más larga si la deduplicación importa. La familia
+`push_unique*` no toma `EnvelopeOverrides`, así que `Job::after_commit()`
+es lo único que decide si un push único se difiere: no hay una anulación
+por push para ello.
+
+Los lotes y las cadenas no se difieren, igual que no consultan
+`Job::delay()`: `Queue::batch()` y `Queue::chain()` construyen y empujan
+sus sobres directamente. Envuelve la llamada a `.dispatch()` para que se
+ejecute después de que retorne la transacción si un lote tiene que esperar
+a una confirmación.
+
+El [correo](mail.md#queueing) y las
+[notificaciones](notifications.md) encolados tampoco se difieren. Cada uno
+viaja sobre un único tipo de job compartido (`SendMailJob` /
+`SendNotificationJob`), y todavía no hay un equivalente de
+`ShouldQueueAfterCommit` en `Mailable` ni en `Notification`, así que una
+llamada a `Mail::queue` o `Notify::queue` dentro de una transacción llega
+al driver de inmediato. Envía esos después de que retorne la transacción.
+
+Bajo `Queue::fake()` un push se registra de inmediato, aplazamiento
+incluido, así que una prueba puede afirmar sobre él sin confirmar nada.
+Esto coincide con el `Bus::fake` de Laravel, y es lo que permite que una
+prueba ejecute un handler transaccional y afirme sus despachos de una sola
+vez.
+
+### Por qué Suprnova diverge
+
+`Queue::bulk` es monomórfico - todos los elementos comparten un mismo `J`
+concreto -, así que su partición posterior al commit es todo o nada para
+la llamada. Laravel parte un array heterogéneo en mitades diferida e
+inmediata; aquí no hay nada que partir.
+
+El aplazamiento está ligado a la forma con closure. Un push dentro de un
+[`DB::begin_transaction`](database.md#manual-form) manual ocurre **de
+inmediato**, porque el modo manual no instala ninguna transacción
+ambiental y, por tanto, no tiene ninguna confirmación de la que colgar un
+callback. Diferir ahí encolaría un callback que nada ejecutaría nunca, y
+un despacho que desaparece en silencio es peor que uno que ocurre
+demasiado pronto. Echa mano de `DB::transaction` cuando un despacho tenga
+que esperar a la confirmación.
+
+Laravel lee además una clave de configuración `after_commit` a nivel de
+conexión como último respaldo de su cadena de precedencia. Suprnova se
+detiene en la anulación por push y luego en el propio `Job::after_commit()`
+del job: aquí las conexiones de cola no llevan su propia política de
+despacho.
+
+## Configuración de job
+
+Sobrescribe las funciones asociadas de `Job` para ajustar el
+comportamiento por impl:
 
 ```rust
 use std::time::Duration;
@@ -264,8 +657,7 @@ impl Job for SendWelcomeEmail {
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
 
-    fn delay() -> Option<Duration> { None }                // default: no delay
-
+    fn delay() -> Option<Duration> { None }                // por defecto: sin retardo
     fn max_tries() -> u32 { 5 }                            // por defecto: 3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
     fn fail_on_timeout() -> bool { false }                 // por defecto: false (el timeout reintenta)
@@ -276,8 +668,9 @@ impl Job for SendWelcomeEmail {
         Some(format!("welcome:{}", self.user_id))
     }
     fn unique_for() -> Duration { Duration::from_secs(600) }  // por defecto: 5 minutos
+    fn unique_until_processing() -> bool { true }          // por defecto: false (el TTL es la ventana)
     fn middleware() -> Vec<std::sync::Arc<dyn JobMiddleware>> {
-        vec![/* ver "Middleware de job" más abajo */]
+        vec![/* consulta "Middleware de job" más abajo */]
     }
 }
 ```
@@ -898,18 +1291,102 @@ esto existiera siguen funcionando sin cambios.
 
 ```rust
 Queue::size().await?;            // total
-Queue::pending_size().await?;    // available_at <= ahora, sin reservar
-Queue::delayed_size().await?;    // available_at > ahora
-Queue::reserved_size().await?;   // extraído actualmente, sin ack todavía
-Queue::clear().await?;           // descarta cada sobre, devuelve el conteo
+Queue::pending_size().await?;    // available_at <= now, sin reservar
+Queue::delayed_size().await?;    // available_at > now
+Queue::reserved_size().await?;   // sacados ahora mismo, todavía sin ack
+Queue::clear().await?;           // descarta todos los sobres, devuelve el recuento
 Queue::driver_name()?;           // nombre del driver configurado, para logs / administración
 ```
 
 El trait `QueueDriver` declara valores por defecto para `size` /
 `pending_size` / `reserved_size` / `delayed_size` / `clear`;
-`MemoryQueueDriver` y `DatabaseQueueDriver` los implementan de forma
-nativa. `RedisQueueDriver` devuelve un error de "no soportado" para
-`size` / `clear` - usa el redis-cli de administración para esos casos.
+`MemoryQueueDriver`, `DatabaseQueueDriver` y `RedisQueueDriver` los
+implementan todos de forma nativa.
+
+### Inspeccionar colas
+
+Los recuentos te dicen cuánto hay encolado; a veces necesitas ver los
+sobres reales: un panel de administración, una sesión de depuración, la
+pregunta de "qué es exactamente lo que está atascado".
+`Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` devuelven la
+misma información que cuentan los contadores de tamaño, como un listado de
+DTOs `InspectedJob`:
+
+```rust
+use suprnova::queue::{InspectedJob, Queue};
+
+let pending: Vec<InspectedJob> = Queue::pending_jobs(None).await?;
+let billing_only: Vec<InspectedJob> = Queue::pending_jobs(Some("billing")).await?;
+let delayed = Queue::delayed_jobs(None).await?;
+let reserved = Queue::reserved_jobs(None).await?;
+
+for job in &pending {
+    println!(
+        "{} attempts={} queue={:?} payload={}",
+        job.name, job.attempts, job.queue, job.payload
+    );
+}
+```
+
+`InspectedJob` lleva `id`, `queue`, `name`, `attempts`, `payload` y
+`created_at`. `id` y `created_at` son `Option`: los listados del driver de
+base de datos siguen reportando una fila cuyo `envelope_json` no se pudo
+decodificar - como `id: None` y `payload: {"unparseable": true}` - en
+lugar de descartarla y ocultar un trabajo envenenado a quien esté mirando;
+la proyección de `Queue::fake()` nunca registra una marca de tiempo de
+despacho distinta de `available_at`, así que ahí `created_at` es siempre
+`None`.
+
+En el driver de memoria, `delayed_size()` lee directamente la longitud del
+almacén de retardados, mientras que `delayed_jobs()` y `pending_jobs()`
+promueven primero cualquier entrada cuyo `available_at` ya haya pasado. En
+la estrecha ventana entre que un job vence y el siguiente tick de 50 ms
+del recolector en segundo plano, `delayed_size()` todavía puede contar un
+job que `delayed_jobs()` ya ha promovido a `pending_jobs()`: los listados
+son la vista más actual, y una discrepancia ahí es esperable, no un bug.
+
+Una reserva cuyo tiempo de espera de visibilidad ha vencido sigue
+apareciendo en `reserved_jobs()` hasta que un `pop` o el recolector en
+segundo plano la reclama. Solo esos dos reclaman, y reclamar es lo que
+gasta un intento, así que una llamada de listado nunca cambia el contador
+de intentos de un job por muchas veces que la llames.
+
+#### Por qué Suprnova diverge
+
+- **Un método con `Option<&str>`, no un par por listado.** Laravel
+  distribuye `pendingJobs($queue)` junto a un `allPendingJobs()` aparte;
+  aquí `queue: None` colapsa los dos en una sola llamada. La misma forma
+  para `delayedJobs`/`allDelayedJobs` y `reservedJobs`/`allReservedJobs`.
+- **El valor por defecto del trait es un `Err` honesto, no una colección
+  vacía.** Los drivers de Beanstalkd y SQS de Laravel devuelven `[]` desde
+  estos métodos incluso para una cola que a todas luces tiene jobs: una
+  mentira por omisión que quien escriba un driver de terceros podría
+  copiar sin darse cuenta. Un driver de Suprnova que no ha implementado la
+  inspección lo dice; `sync` y `null` la sobrescriben con `Ok(vec![])`
+  porque para ellos "nunca hay nada que listar" es la verdad literal, no
+  un método sin implementar.
+- **El `reserved_jobs` de Redis es por consumidor.** El driver solo conoce
+  las reservas que ha entregado personalmente dentro del proceso; las
+  entradas en vuelo de otro consumidor solo son visibles a través del
+  propio `XPENDING` de Redis, no a través de esta llamada.
+- **El `pending_jobs` de Redis significa "nunca entregado a ningún
+  consumidor de este grupo".** Escanea `XRANGE (<last-delivered-id> +` -
+  todo lo que hay más allá del cursor de entrega del grupo (`XINFO
+  GROUPS`) - en lugar del stream entero, porque `ack` solo hace `XACK`
+  sobre una entrada (este driver nunca hace `XDEL` ni `XTRIM` sobre el
+  stream), así que un escaneo que se limitara a excluir las reservas en
+  memoria de un consumidor reportaría todos los jobs con ack como
+  pendientes para siempre. Un job liberado o con nack se vuelve a publicar
+  bajo un id nuevo por encima del cursor, así que reaparece en cuanto su
+  reintento está vivo. El mismo registro de "cota superior" que
+  `pending_size`: el cursor se lee una sola vez, así que un `pop`
+  concurrente puede reclamar una entrada entre esa lectura y el escaneo.
+  En la práctica, la tarea de lectura anticipada en segundo plano de un
+  consumidor en marcha tiende a reclamar una entrada recién empujada a los
+  pocos milisegundos del push, mucho antes de que una aplicación llame a
+  `pop`, así que `pending_jobs` refleja sobre todo el trabajo empujado
+  mientras ningún consumidor de ese stream está sondeando activamente, y
+  no "cualquier sobre que nadie ha sacado explícitamente todavía".
 
 ## Señal de reinicio del worker
 

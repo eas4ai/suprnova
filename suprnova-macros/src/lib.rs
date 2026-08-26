@@ -645,7 +645,7 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The validator `V` defaults to `()` (accept anything). Built-in
 /// validators live in `suprnova::http::upload::validators` and can be
-/// composed via tuples: `UploadedFile<(Image, MaxSize<5_000_000>)>`.
+/// composed via tuples: `UploadedFile<(ImageFile, MaxSize<5_000_000>)>`.
 ///
 /// `#[multipart(custom_hooks)]` on the struct suppresses the
 /// auto-generated `impl MultipartRequestHooks for Self {}`, letting
@@ -654,13 +654,13 @@ pub fn policy(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```rust,ignore
-/// use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+/// use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 /// use suprnova::MultipartRequest;
 ///
 /// #[derive(MultipartRequest)]
 /// pub struct AvatarUpload {
 ///     #[field("avatar")]
-///     pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+///     pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 ///
 ///     #[field("caption")]
 ///     pub caption: Option<String>,

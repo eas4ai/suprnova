@@ -139,7 +139,7 @@ impl Idempotency {
         Fut: Future<Output = Result<T, FrameworkError>>,
     {
         let h = hashed(key);
-        let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
+        let guard = Cache::lock(&lock_key(&h), ttl).await?;
         match guard {
             Some(g) => {
                 let (v, lease) = run_under_lease(&g, ttl, &h, body()).await?;
@@ -179,20 +179,82 @@ impl Idempotency {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, FrameworkError>>,
     {
+        Self::commit_on_success_owned(key, ttl, |_owner| body())
+            .await
+            .map(|(outcome, _owner)| outcome)
+    }
+
+    /// Like [`commit_on_success`](Self::commit_on_success), but hands `body`
+    /// the cache-lock owner token and returns it alongside the outcome.
+    ///
+    /// Callers that must release the lock *later, from another task* - the
+    /// queue worker releasing a
+    /// [`Job::unique_until_processing`](crate::queue::Job::unique_until_processing)
+    /// lock once the handler starts - need the owner token, because a
+    /// [`LockGuard`](crate::cache::LockGuard) cannot cross that boundary: its
+    /// lifetime is this call's. Persist the token (on a queue envelope, a row,
+    /// a message header) and release with
+    /// [`release_owned`](Self::release_owned).
+    ///
+    /// `body` receives `Some(owner)` whenever a lock was taken, which is every
+    /// call that runs it at all. The *returned* owner is `Some` only for
+    /// [`Idempotent::Fresh`]: on
+    /// [`FreshUnfenced`](Idempotent::FreshUnfenced) the lease was lost, so the
+    /// token can no longer be claimed to be held and handing it back would
+    /// invite a release that must fail.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`FrameworkError`] from the cache layer or from `body`.
+    pub async fn commit_on_success_owned<F, Fut, T>(
+        key: &str,
+        ttl: Duration,
+        body: F,
+    ) -> Result<(Idempotent<T>, Option<String>), FrameworkError>
+    where
+        F: FnOnce(Option<&str>) -> Fut,
+        Fut: Future<Output = Result<T, FrameworkError>>,
+    {
         let h = hashed(key);
-        let guard = Cache::lock(&format!("idem:{h}"), ttl).await?;
+        let guard = Cache::lock(&lock_key(&h), ttl).await?;
         match guard {
-            Some(g) => match run_under_lease(&g, ttl, &h, body()).await {
-                Ok((v, LeaseState::Held)) => Ok(Idempotent::Fresh(v)),
-                Ok((v, LeaseState::Lost)) => Ok(Idempotent::FreshUnfenced(v)),
-                Err(e) => {
-                    // Release the lock so a retry within the window can re-enter.
-                    release_and_log(g, &h).await;
-                    Err(e)
+            Some(g) => {
+                let owner = g.owner().to_string();
+                let fut = body(Some(&owner));
+                match run_under_lease(&g, ttl, &h, fut).await {
+                    Ok((v, LeaseState::Held)) => Ok((Idempotent::Fresh(v), Some(owner))),
+                    Ok((v, LeaseState::Lost)) => Ok((Idempotent::FreshUnfenced(v), None)),
+                    Err(e) => {
+                        // Release the lock so a retry within the window can re-enter.
+                        release_and_log(g, &h).await;
+                        Err(e)
+                    }
                 }
-            },
-            None => Ok(Idempotent::Duplicate),
+            }
+            None => Ok((Idempotent::Duplicate, None)),
         }
+    }
+
+    /// Release an idempotency lock owner-scoped, using a token recorded by
+    /// [`commit_on_success_owned`](Self::commit_on_success_owned).
+    ///
+    /// Lives here rather than at the call site so the `idem:<hash>` key scheme
+    /// stays in one file: an acquire path and a deferred release path that
+    /// derive the backend key separately are one edit away from silently
+    /// releasing nothing.
+    ///
+    /// Returns `Ok(true)` when the store released a lock this owner held, and
+    /// `Ok(false)` when the lock was absent or is held by a different owner.
+    /// Both are success cases: either way this owner no longer holds the lock,
+    /// and a newer holder is never disturbed - which is the whole point of
+    /// scoping the release to an owner instead of forcing it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`FrameworkError`] from the cache layer.
+    pub async fn release_owned(key: &str, owner: &str) -> Result<bool, FrameworkError> {
+        let store = Cache::store()?;
+        store.release_lock(&lock_key(&hashed(key)), owner).await
     }
 
     /// Run `body` once per `key` and replay its recorded result to duplicate
@@ -268,7 +330,7 @@ impl Idempotency {
         T: Serialize + DeserializeOwned,
     {
         let h = hashed(key);
-        let lock_key = format!("idem:{h}");
+        let lock = lock_key(&h);
         let result_key = format!("idem:{h}:result");
 
         // 1. Fast path: a result is already recorded - replay it without locking.
@@ -277,7 +339,7 @@ impl Idempotency {
         }
 
         // 2. Try to claim the lock so we are the only caller running `body`.
-        match Cache::lock(&lock_key, ttl).await? {
+        match Cache::lock(&lock, ttl).await? {
             Some(guard) => {
                 // 2a. Re-check after acquiring: a result may have been stored
                 //     between the step-1 read and the lock acquisition.
@@ -449,6 +511,17 @@ async fn release_and_log(guard: crate::cache::LockGuard, hashed_key: &str) {
 /// and strips any characters that could collide with backend key conventions.
 fn hashed(key: &str) -> String {
     crate::hashing::sha256_hex(key)
+}
+
+/// The backend key an idempotency lock lives under, given already-[`hashed`]
+/// key material.
+///
+/// One definition of the namespace so every acquire path and the deferred
+/// [`Idempotency::release_owned`] path address the same cell. A release that
+/// derives a different key does not fail loudly - it reports "nothing to
+/// release" and the lock lingers until its TTL.
+fn lock_key(hashed_key: &str) -> String {
+    format!("idem:{hashed_key}")
 }
 
 #[cfg(test)]

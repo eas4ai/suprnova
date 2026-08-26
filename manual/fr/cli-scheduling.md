@@ -186,29 +186,45 @@ parent).
 
 ## schedule:list
 
-Affiche chaque tâche enregistrée avec son expression cron et sa
-description.
+Affiche chaque tâche enregistrée avec son expression cron, sa prochaine
+exécution et sa description.
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### Exemple de sortie
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
-Les tâches avec un `.description(...)` chaîné sur le builder incluent
-la description après l'expression cron ; les tâches sans description
-montrent seulement le cron.
+Les tâches qui portent un `.description(...)` enchaîné sur le builder
+affichent la description après l'heure de la prochaine exécution ; celles
+qui n'ont pas de description ne montrent que le cron et la prochaine
+exécution.
 
-Quand rien n'est enregistré (l'appel builder `.schedule(...)` est
-manquant, ou `schedule::register` est sans effet) :
+`next:` est la première minute après maintenant à laquelle l'expression
+correspond ; une expression qui ne peut jamais correspondre affiche
+`next: never`. Les heures sont données en UTC, sauf si `--timezone` nomme
+une autre zone IANA, et un nom de zone inconnu quitte en erreur avant que
+quoi que ce soit ne soit affiché.
+
+Une tâche qui a épinglé sa propre zone avec `.timezone(...)` voit son
+expression réécrite dans la zone du listing et étiquetée avec celle-ci -
+`report:generate` ci-dessus demandait `02:00 America/New_York`. Les tâches
+sans zone épinglée sont affichées telles qu'elles ont été écrites et ne
+portent aucune étiquette. Voir [Planification](scheduling.md) pour les
+règles de fuseau horaire au complet, y compris les cas où une réécriture
+est refusée et où une tâche peut occuper plusieurs lignes.
+
+Quand rien n'est enregistré (l'appel de builder `.schedule(...)` est
+absent, ou `schedule::register` est sans effet) :
 
 ```
 No scheduled tasks registered.

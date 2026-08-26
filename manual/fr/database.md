@@ -221,9 +221,9 @@ frontière d'E/S avant que la chaîne SQL ne soit rendue.
 
 Trois points d'entrée, chacun avec les hooks d'observation
 `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` /
-`TransactionRolledBack` câblés.
+`TransactionRolledBack` déjà câblés.
 
-### Forme closure
+### Forme par fermeture
 
 ```rust
 use suprnova::DB;
@@ -242,18 +242,35 @@ DB::transaction(|_tx| {
 }).await?;
 ```
 
-Commit sur `Ok(_)`. Rollback + propage l'erreur sur `Err(_)`.
+Commit sur `Ok(_)`. Rollback et propagation de l'erreur sur `Err(_)`.
 
-Les opérations à l'intérieur de la closure récupèrent automatiquement
+Un `Err` n'est pas toujours un rollback. Si un callback
+[après commit](queues.md#after-commit-dispatch) échoue, le commit a déjà
+eu lieu et il est durable ; `DB::transaction` retourne quand même `Err`,
+et le message dit `after-commit callback failed (the transaction itself
+committed): <the callback's error>`. La valeur de retour de la fermeture
+est perdue, ses écritures ne le sont pas, et seul un dispatch différé a
+échoué. Chaque callback enregistré s'exécute quand même, et la première
+erreur est celle que vous obtenez. `DB::transaction_with_attempts` ne
+réessaie jamais cette erreur, quelle que soit son allure d'interblocage :
+réexécuter une fermeture dont les écritures sont déjà durables les
+appliquerait deux fois.
+
+Les opérations à l'intérieur de la fermeture récupèrent automatiquement
 la transaction active via un `tokio::task_local` - vous n'avez PAS à
-faire circuler un handle `&tx` à travers chaque appel de modèle. Un
+faire passer un handle `&tx` à travers chaque appel de modèle. Un
 `DB::transaction` imbriqué retourne une erreur de base de données ;
-utilisez `tx.savepoint(...)` pour un comportement de rollback
-imbriqué.
+utilisez `tx.savepoint(...)` pour un comportement de rollback imbriqué.
+
+La forme par fermeture est aussi la seule qui puisse différer du travail
+jusqu'au commit. Un job dont le type déclare `Job::after_commit()` (ou un
+dispatch fait avec `Queue::push_after_commit`) attend à l'intérieur de
+cette fermeture et n'atteint le driver de queue qu'une fois le commit
+réussi ; un rollback le jette. Voir [Dispatch après
+commit](queues.md#after-commit-dispatch).
 
 Pour un agrégat typé ou du SQL personnalisé qui doit s'exécuter sur la
-même connexion épinglée, utilisez directement le handle de
-transaction :
+même connexion épinglée, utilisez directement le handle de transaction :
 
 ```rust
 use sea_orm::{DbBackend, Statement};
@@ -271,19 +288,19 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-`query_all` émet des observations `QueryExecuted` normales et
-retourne des lignes `QueryResult` SeaORM typées. Utilisez
-`Statement::from_sql_and_values` liée pour les valeurs dynamiques ;
-n'interpolez pas d'entrée non fiable.
+`query_all` émet les observations `QueryExecuted` normales et retourne
+des lignes `QueryResult` SeaORM typées. Utilisez
+`Statement::from_sql_and_values` avec des valeurs liées pour les valeurs
+dynamiques ; n'interpolez pas d'entrée non fiable.
 
-### Réessai sur deadlock
+### Réessai en cas d'interblocage
 
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // Même corps de closure que ci-dessus. Relance depuis zéro
-        // sur SQLSTATE 40001 / 40P01 / toute erreur contenant
-        // « deadlock » (insensible à la casse).
+        // Même corps de fermeture que ci-dessus. Réexécuté depuis le
+        // début sur SQLSTATE 40001 / 40P01 / toute erreur contenant
+        // "deadlock" (insensible à la casse).
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
@@ -296,13 +313,11 @@ use suprnova::{DB, attrs};
 
 let tx = DB::begin_transaction().await?;
 
-// Par modèle : les shims `*_with_tx` épinglent une opération CRUD
-// à la tx manuelle.
+// Par modèle : les shims `*_with_tx` épinglent une opération CRUD à la tx manuelle.
 User::create_with_tx(&tx, attrs! { name: "alice" }).await?;
 Order::create_with_tx(&tx, attrs! { user_id: 1, total: 30 }).await?;
 
-// Par requête : `Builder::with_tx(&tx)` épingle une chaîne de
-// builder.
+// Par requête : `Builder::with_tx(&tx)` épingle une chaîne de builder.
 let stale = Order::query()
     .filter("status", "pending")
     .with_tx(&tx)
@@ -316,18 +331,24 @@ if some_condition() {
 }
 ```
 
-Le mode manuel n'installe PAS le task-local - chaque opération qui
-devrait s'exécuter à l'intérieur de la transaction doit y adhérer
-explicitement, soit via `Builder::with_tx(&tx)` sur une requête
-chaînée, soit via l'un des shims `Model::*_with_tx` (`create_with_tx`,
-`save_with_tx`, `delete_with_tx`, etc.). Les opérations qui oublient
-d'y adhérer s'exécutent contre le pool global et NE font PAS partie de
-la transaction.
+Le mode manuel n'installe PAS le task-local - chaque opération qui doit
+s'exécuter à l'intérieur de la transaction doit y adhérer
+explicitement, soit via `Builder::with_tx(&tx)` sur une requête chaînée,
+soit via l'un des shims `Model::*_with_tx` (`create_with_tx`,
+`save_with_tx`, `delete_with_tx`, etc.). Les opérations qui oublient d'y
+adhérer s'exécutent contre le pool global et ne font PAS partie de la
+transaction.
 
-Détenir un handle `Transaction` épingle une connexion du pool pour
-toute sa durée de vie ; préchargez toute ligne dont vous avez besoin
-AVANT l'appel à `begin_transaction()`, en particulier sur SQLite
-(connexion unique partagée).
+Détenir un handle `Transaction` épingle une connexion du pool pour toute
+sa durée de vie ; préchargez les lignes que vous devez lire AVANT
+l'appel à `begin_transaction()`, en particulier sur SQLite (connexion
+unique partagée).
+
+Comme le mode manuel n'installe aucun task-local, il n'a pas non plus de
+commit auquel un dispatch différé puisse s'accrocher : un job
+[après commit](queues.md#after-commit-dispatch) poussé à l'intérieur
+d'une transaction manuelle est poussé immédiatement. Utilisez la forme
+par fermeture quand un dispatch doit attendre le commit.
 
 ### Savepoints
 
@@ -338,8 +359,7 @@ DB::transaction(|tx| {
 
         tx.savepoint("after_order").await?;
         if let Err(e) = Payment::charge().await {
-            // Abandonne la tentative de paiement mais garde la
-            // commande.
+            // Abandonne la tentative de paiement mais garde la commande.
             tx.rollback_to("after_order").await?;
         }
         Ok::<(), suprnova::FrameworkError>(())
@@ -347,8 +367,32 @@ DB::transaction(|tx| {
 }).await?;
 ```
 
-Les trois backends de premier rang prennent en charge `SAVEPOINT` /
+Les trois backends de première classe gèrent `SAVEPOINT` /
 `ROLLBACK TO SAVEPOINT` - SQLite compris.
+
+Un rollback vers un savepoint déroule aussi le [registre après
+commit](queues.md#after-commit-dispatch). Un push en file d'attente
+différé jusqu'au commit à l'intérieur du savepoint est jeté en même temps
+que les lignes qu'il décrivait, et la compensation enregistrée avec lui
+s'exécute immédiatement, si bien que le verrou de déduplication d'un
+`push_unique` différé est rendu et qu'un nouveau dispatch dans la même
+transaction peut le remporter. Tout ce qui a été enregistré avant le
+savepoint est intact, et un savepoint que vous relâchez ou que vous
+n'annulez tout simplement jamais conserve tout ce qui a été enregistré à
+l'intérieur.
+
+Répéter un nom de savepoint est autorisé, et le registre suit la base de
+données : `ROLLBACK TO SAVEPOINT x` déroule jusqu'au `x` le plus récent et
+détruit les savepoints établis après lui. Les transactions manuelles n'ont
+pas de registre après commit, donc leurs savepoints annulent des lignes et
+rien d'autre.
+
+Seul `Transaction::savepoint` marque le registre. Un savepoint que vous
+créez en SQL brut lui est invisible : `rollback_to` annule bien ces
+lignes, journalise un avertissement et laisse en place chaque dispatch
+différé enregistré à l'intérieur - en jeter un au jugé serait la pire des
+deux défaillances. Utilisez `Transaction::savepoint` quand les dispatches
+différés doivent se dérouler avec les lignes.
 
 ## Observabilité
 

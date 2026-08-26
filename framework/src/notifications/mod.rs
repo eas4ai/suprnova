@@ -541,6 +541,10 @@ impl Notify {
             fail_on_timeout: Some(notification.fail_on_timeout()),
             max_tries: Some(notification.max_tries()),
             backoff: Some(notification.backoff()),
+            // Left to `SendNotificationJob::after_commit()` (false): there is
+            // no per-notification opt-in on the `Notification` trait yet, and
+            // `None` is what "defer to the job" spells.
+            after_commit: None,
         };
 
         for channel in &channels {

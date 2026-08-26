@@ -217,6 +217,35 @@ async fn fake_intercepts_and_records() {
 }
 
 #[tokio::test]
+async fn fake_response_text_round_trips_verbatim() {
+    // `fake_response` always JSON-encodes its `body` argument, which would
+    // wrap a plain-text HIBP-shaped body in quotes and escape its `\r\n`.
+    // `fake_response_text` is the raw-body sibling: what goes in comes back
+    // out of `ClientResponse::text()` byte-for-byte, and the content-type
+    // is `text/plain`, not `application/json`.
+    let raw_body =
+        "ABCDEF0123456789ABCDEF0123456789ABCD:5\r\nFFFFFF0123456789ABCDEF0123456789ABCD:1\r\n";
+    Http::fake(|| async {
+        Http::fake_response_text("GET", "example.com/range/ABCDE", 200, raw_body);
+
+        let resp = Http::get("https://example.com/range/ABCDE")
+            .send()
+            .await
+            .expect("send");
+
+        assert_eq!(
+            resp.header("content-type").as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+        let body = resp.text().await.expect("text body");
+        assert_eq!(body, raw_body);
+
+        assert_sent(|r| r.method == "GET" && r.url.contains("/range/ABCDE"));
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn fake_assert_not_sent_passes_when_clean() {
     Http::fake(|| async {
         // No requests sent - assert_not_sent must not panic.

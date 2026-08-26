@@ -41,7 +41,7 @@ routes! {
 
 ### `#[handler]`
 
-改写一个控制器函数，让它能直接从传入的请求中提取类型化的参数（通过 `FromRequest`）- 您不再需要手动从 `Request` 上取出各个字段，而是声明处理程序需要什么，宏会负责把它接好。
+改写一个控制器函数，让它能够直接从进来的请求里提取带类型的参数（通过 `FromRequest`）- 您不必手工从 `Request` 上把字段一个个抠出来，而是声明这个处理程序需要什么，再由这个宏把它接起来。
 
 ```rust
 use suprnova::{handler, Response, json_response, request};
@@ -57,38 +57,38 @@ pub struct CreateUserRequest {
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` 已经通过验证 - 失败时会自动返回 422
+    // `form` 已经校验过了 - 失败时会自动返回 422
     json_response!({ "email": form.email })
 }
 ```
 
-一个 `Request` 形状的首个参数仍然被接受，作为恒等情形。参见[控制器](controllers.md)。
+一个形如 `Request` 的首个参数，仍然作为那个平凡情形被接受。参见[控制器](controllers.md)。
 
 ### `#[request]` 和 `#[derive(FormRequest)]`
 
-`#[request]` 是声明一个经过验证的请求类型的推荐方式。它会自动派生 `Deserialize`、`Validate` 和 `FormRequest`，所以这个结构体既能处理 `application/json`，也能处理 `application/x-www-form-urlencoded` 的请求体。
+`#[request]` 是声明一个带校验的请求类型的推荐方式。它会自动派生 `Deserialize`、`Validate` 和 `FormRequest`，所以这个结构体对 `application/json` 和 `application/x-www-form-urlencoded` 两种请求体都能用。
 
-如果您想不使用这个属性宏，`#[derive(FormRequestDerive)]` 是底层的派生宏（您需要自己派生 `Deserialize` 和 `Validate`）。我们推荐使用属性宏；派生宏是为边缘情形而存在的。参见[请求](requests.md)和[验证](validation.md)。
+`#[derive(FormRequestDerive)]` 是底下那个派生宏，供您在想绕开这个属性宏时使用（那样您得自己派生 `Deserialize` 和 `Validate`）。我们推荐的是那个属性宏；这个派生宏是为边缘情况准备的。参见[请求](requests.md)和[验证](validation.md)。
 
 ### `#[derive(MultipartRequest)]`
 
-针对 `multipart/form-data` 的强类型提取器 - 在一个结构体里绑定文本字段和上传的文件，并为每个字段提供类型级别的校验器。
+面向 `multipart/form-data` 的强类型提取器 - 在一个结构体里把文本字段和上传的文件绑到一起，并带有逐字段的、类型层面的校验器。
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-内置的校验器（`Image`、`MimeAllowlist<…>`、`MaxSize<…>`、`MimeType<…>`）通过元组组合。参见[请求](requests.md)。
+内置的校验器（`ImageFile`、`MimeAllowlist<…>`、`MaxSize<…>`、`MimeType<…>`）通过元组来组合。参见[请求](requests.md)。
 
 ## 响应
 

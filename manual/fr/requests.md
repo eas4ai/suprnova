@@ -464,25 +464,24 @@ pub async fn store(form: CreateUserRequest) -> Response {
 
 ## Téléversements de fichiers (`MultipartRequest`)
 
-`multipart/form-data` a son propre extracteur -
-`#[derive(MultipartRequest)]` diffuse le corps partie par partie, en
-déversant les grosses parties de fichier dans un fichier temporaire
-au-delà du seuil configuré, de sorte qu'un téléversement de 200 Mio ne
-tient jamais entièrement en RAM. Chaque champ porte une annotation
-`#[field("name")]` qui nomme le champ tel qu'il est transmis ; les
-champs de type fichier utilisent `UploadedFile<V>`, où `V` est un
-validateur (ou un tuple de validateurs) de
+`multipart/form-data` a son propre extracteur : `#[derive(MultipartRequest)]`
+lit le corps en streaming, partie par partie, en déversant les grosses
+parties de fichier dans un fichier temporaire au-delà du seuil configuré,
+si bien qu'un téléversement de 200 Mio ne réside jamais entièrement en
+RAM. Chaque champ porte une annotation `#[field("name")]` qui nomme le
+champ tel qu'il circule sur le réseau ; les champs de fichier utilisent `UploadedFile<V>`,
+où `V` est un validateur (ou un tuple de validateurs) de
 `suprnova::http::upload::validators`.
 
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // plafond de 5 Mio
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // plafond de 5 Mio
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -490,7 +489,7 @@ pub struct AvatarUpload {
 #[handler]
 pub async fn upload_avatar(form: AvatarUpload) -> Response {
     // `avatar` est en mémoire ou dans un fichier temporaire selon sa taille.
-    // `.bytes()` lit l'un comme l'autre ; `.store_as(...)` diffuse vers un disque.
+    // `.bytes()` lit l'un comme l'autre ; `.store_as(...)` streame vers un disque.
     let bytes = form.avatar.bytes().await?;
     json_response!({ "size": bytes.len(), "caption": form.caption })
 }
@@ -498,36 +497,38 @@ pub async fn upload_avatar(form: AvatarUpload) -> Response {
 
 Formes de champ :
 
-| Déclaration | Forme transmise |
+| Déclaration | Forme sur le réseau |
 |---|---|
 | `UploadedFile<V>` | fichier requis |
-| `Option<UploadedFile<V>>` | fichier facultatif |
+| `Option<UploadedFile<V>>` | fichier optionnel |
 | `Vec<UploadedFile<V>>` | téléversements en tableau (`photos[]`) |
 | `String` / `u32` / tout `FromStr` | champ texte (requis) |
-| `Option<String>` / `Option<T: FromStr>` | champ texte facultatif |
+| `Option<String>` / `Option<T: FromStr>` | champ texte optionnel |
 | `Vec<String>` / `Vec<T: FromStr>` | champs texte répétés |
 
 Validateurs intégrés dans `suprnova::http::upload::validators` :
 
-- `MaxSize<N>` - court-circuite à la limite d'octet quand le total
+- `MaxSize<N>` - court-circuite à la frontière d'octet dès que le total
   courant dépasse `N` octets (HTTP 413).
-- `Image` - rejette les parties dont les octets magiques ne se déclarent
-  pas `image/*`.
-- `MimeType<L>` - accepte une allowlist fixe fournie par votre propre
-  type `MimeAllowlist`.
+- `ImageFile` - rejette les parties dont les octets magiques ne
+  revendiquent pas `image/*`. (Nommé d'après la règle éponyme de Laravel ;
+  le nom simple `Image` appartient au pipeline de manipulation d'images -
+  voir [Images](images.md).)
+- `MimeType<L>` - accepte une liste blanche fixe fournie par votre
+  propre type `MimeAllowlist`.
 - `()` - sans effet ; `UploadedFile<()>` accepte n'importe quels octets.
 
-Les validateurs se composent en tuples : `(Image, MaxSize<5_242_880>)`
+Les validateurs se composent en tuples : `(ImageFile, MaxSize<5_242_880>)`
 exécute les deux, en court-circuitant au premier échec.
 
 ### Plafonds par champ et bornes de tableau
 
-Le plafond d'octets sur le corps total est global (8 Mio par défaut pour
+Le plafond d'octets sur le corps entier est global (8 Mio par défaut pour
 le multipart, configurable via
 `suprnova::http::upload::set_global_max_multipart_body_bytes`). Les
-plafonds par champ empêchent l'abus consistant à faire croître un
-`Vec<UploadedFile<_>>` sans borne, à l'intérieur du budget d'octets, au
-moyen d'un corps constitué de nombreuses petites parties :
+plafonds par champ empêchent l'abus où un corps fait de nombreuses petites
+parties fait croître un `Vec<UploadedFile<_>>` sans borne à l'intérieur du
+budget d'octets :
 
 ```rust
 #[derive(MultipartRequest)]
@@ -537,15 +538,15 @@ pub struct Gallery {
 }
 ```
 
-La (`max_count` + 1)-ième partie portant ce nom retourne un HTTP 422
-avant toute allocation, donc la partie surnuméraire n'atteint jamais la
+La (`max_count` + 1)-ième partie portant ce nom retourne un HTTP 422 avant
+toute allocation, si bien que la partie surnuméraire n'atteint jamais la
 croissance du `Vec`.
 
 ### Hooks d'autorisation et de post-validation
 
 `MultipartRequest` reflète les hooks de `FormRequest` via le trait
 `MultipartRequestHooks`. Par défaut, le derive émet une impl vide ;
-optez pour la vôtre avec `#[multipart(custom_hooks)]` :
+fournissez la vôtre avec `#[multipart(custom_hooks)]` :
 
 ```rust
 use suprnova::{MultipartRequest, Request, ValidationErrors};
@@ -577,11 +578,12 @@ impl MultipartRequestHooks for GuardedUpload {
 ### Streaming vers le stockage
 
 `UploadedFile::store_as` écrit la partie sur un disque de stockage
-enregistré. Pour les parties adossées au disque, le chemin est
-entièrement en flux (blocs de 64 Kio via `opendal::Operator::writer`) ;
-les parties en mémoire utilisent un unique appel d'écriture. Utilisez
-l'extension dérivée du contenu quand le chemin de stockage est adressé
-par contenu - l'en-tête de nom de fichier n'est pas digne de confiance :
+enregistré. Pour les parties adossées à un fichier, le chemin est
+entièrement en streaming (par blocs de 64 Kio via
+`opendal::Operator::writer`) ; les parties en mémoire utilisent un unique
+appel d'écriture. Utilisez l'extension dérivée du contenu quand le chemin
+de stockage est adressé par contenu - l'en-tête de nom de fichier n'est
+pas fiable :
 
 ```rust
 use suprnova::Storage;
@@ -591,8 +593,8 @@ let path = format!("{}.{}", user.id, form.avatar.extension_from_magic());
 form.avatar.store_as(&disk, &path).await?;
 ```
 
-Voir [Système de fichiers et stockage](filesystem.md) pour le registre
-des disques de stockage.
+Voir [Système de fichiers et stockage](filesystem.md) pour le registre des
+disques de stockage.
 
 ## Organisation des fichiers
 

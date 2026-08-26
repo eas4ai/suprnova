@@ -190,7 +190,8 @@ framework.
 
 | Var | Padrão | Tipo | Propósito |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`) | Backend de fila ativo. Valores desconhecidos registram um `warn!` e recaem para `memory`. |
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `redis`, `database`, `failover`) | Backend de fila ativo. Valores desconhecidos registram um `warn!` e recaem para `memory`. `failover` embrulha uma lista ordenada dos outros - veja `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (separado por vírgula, ex.: `redis,database`) | Lista de conexões ordenada por prioridade para `QUEUE_DRIVER=failover`. Obrigatória quando esse driver é selecionado; um valor ausente ou em branco é um erro de boot, assim como uma entrada que nomeie `failover` (sem aninhamento) ou um driver que não existe. Cada entrada lê as variáveis do próprio driver. Só os pushes caem pela lista; toda leitura e todo reconhecimento vão para a primeira conexão, então cada fallback precisa do próprio worker. |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL do Redis (obrigatória pelo driver quando `QUEUE_DRIVER=redis`). |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Chave do Redis Stream usada para fan-out. |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | Nome do consumer group. |
@@ -301,6 +302,25 @@ para `log`.
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL do Redis (obrigatória pelo driver quando `RATE_LIMIT_DRIVER=redis`). |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Prefixo de chave no Redis. |
 
+## Imagens
+
+Seleção do driver de imagens e os limites de decodificação que contêm
+entrada hostil. Limites fora do intervalo são limitados com um `warn!` em
+vez de falhar o boot: um limite de zero rejeitaria toda imagem da
+aplicação. Um `IMAGE_DRIVER` desconhecido falha no primeiro uso, nomeando
+os valores válidos.
+
+| Var | Padrão | Tipo | Propósito |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Seleciona o backend de imagens. `oxideav` é Rust puro, sem dependência do host; `magick` chama um ImageMagick 7 instalado no host para um suporte mais amplo de entrada. Insensível a maiúsculas/minúsculas. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Limite de largura e altura de uma imagem decodificada, conferido contra o cabeçalho da própria entrada antes de qualquer coisa ser alocada. Também limita os alvos de redimensionamento. Mínimo `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456` (256 MiB) | `u64` | Limite da pegada RGBA decodificada (`width * height * 4`). Também limita o tamanho do próprio arquivo de origem, venha ele de um caminho, de um disco ou de `Image::from_stream` (que confere enquanto coleta). Mínimo `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binário que o driver `magick` invoca. Somente ImageMagick 7; o nome `convert` do ImageMagick 6 não é aceito. Um binário ausente é um erro claro no primeiro uso. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Teto de tempo de relógio para uma única invocação do ImageMagick. É ao mesmo tempo o argumento `-limit time` do próprio ImageMagick e o prazo do lado Rust que mata o grupo de processos inteiro do filho dois segundos depois, porque `-limit time` é aplicado por um monitor que um filho travado dentro de um delegate nunca aciona. Limita um delegate travado que de outra forma seguraria um worker bloqueante pela vida do processo. Somente driver `magick`. Mínimo `1`. |
+
+Veja [Imagens](images.md) para a aplicação de limites em duas camadas e
+para saber como escolher entre os drivers.
+
 ## Hashing
 
 Driver de hashing de senha e parâmetros por algoritmo. Valores
@@ -316,6 +336,12 @@ recair silenciosamente para o padrão.
 | `HASH_TIME` | `4` | `u32` | Tempo / iterações do Argon2. Mínimo `1`. Somente Argon. |
 | `HASH_THREADS` | `1` | `u32` | Paralelismo do Argon2 (corresponde a OWASP / libsodium). Mínimo `1`. Somente Argon. |
 | `HASH_VERIFY` | `false` | `bool` | Quando `true`, `verify()` rejeita hashes de um algoritmo diferente de `HASH_DRIVER` (retorna `Ok(false)`). O padrão é `false` para que hashes bcrypt legados ainda verifiquem depois de uma troca de driver, até serem rotacionados. |
+
+## Validação
+
+| Var | Padrão | Tipo | Propósito |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (segundos) | `u64` | Timeout de solicitação para a verificação de intervalo do Have I Been Pwned de `Password::uncompromised()`, lido de novo a cada vez que um `HibpVerifier` padrão é construído. Um HIBP lento ou inalcançável ainda falha aberto - veja [Validação](validation.md). |
 
 ## Fluxos de autenticação
 

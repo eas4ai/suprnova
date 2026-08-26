@@ -12,7 +12,7 @@ those, you'll feel at home.
 ## Languages
 
 The manual ships in six languages besides English, each a complete
-translation of all 104 chapters plus the table of contents and the
+translation of all 105 chapters plus the table of contents and the
 changelog. English is canonical - structure, code, identifiers and
 commands are byte-identical across languages; only the prose differs.
 

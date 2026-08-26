@@ -130,14 +130,15 @@ HTTP 监听器和请求体的限制。
 
 | 变量 | 默认值 | 类型 | 用途 |
 |---|---|---|---|
-| `QUEUE_DRIVER` | `memory` | `String`（`memory`、`redis`、`database`） | 活跃的队列后端。未知的值会记一条 `warn!`，并回退到 memory。 |
+| `QUEUE_DRIVER` | `memory` | `String`（`memory`、`redis`、`database`、`failover`） | 当前生效的队列后端。未知的值会记一条 `warn!` 并回退到内存。`failover` 会包住其余几种的一个有序列表 - 参见 `QUEUE_FAILOVER_CONNECTIONS`。 |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String`（逗号分隔，例如 `redis,database`） | 供 `QUEUE_DRIVER=failover` 使用的、按优先级排序的连接列表。选中那个驱动程序时必须给出；缺失或为空白的值是一个启动错误，一个点名 `failover` 的条目（不允许嵌套）或者点名一个并不存在的驱动程序的条目也是。每一项都读它自己那个驱动程序的变量。只有推送会沿着这个列表往下穿；每一次读取和每一次确认都走第一个连接，所以每一个后备连接都需要它自己的工作进程。 |
 | `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL（当 `QUEUE_DRIVER=redis` 时，由驱动程序要求必需）。 |
 | `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | 用于扇出的 Redis Stream 键。 |
 | `QUEUE_REDIS_GROUP` | `"default"` | `String` | 消费者组的名字。 |
-| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | 组内的消费者名字。为并行的工作进程逐个设置。 |
-| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | 一个被认领的作业在另一个消费者能够重新认领它之前，会保持不可见多久。请把它匹配到您最慢的作业。 |
-| `QUEUE_DB_TABLE` | `"jobs"` | `String` | database 驱动程序所用的表名。会被校验成一个 SQL 标识符 - 一个格式错误的值会在启动时失败，而不是在 SQL 组装时才失败。当 `QUEUE_DRIVER=database` 时由驱动程序要求必需；这个驱动程序还要求 `DB::init()` 先运行过。 |
-| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | 死信存储写入的表。当 `QUEUE_DRIVER=database` 时会自动绑定 - `queue:retry` 会读取它，`Queue::retry_failed` 也需要它，所以这个表是那个驱动程序契约的一部分。不会被 `memory`（构造上就是短暂的）或 `redis`（没有表可写）使用。和 `QUEUE_DB_TABLE` 不同，这里一个格式错误的标识符**不会**让启动失败：它会在 `error!` 级别记录下来，并且不绑定任何存储，所以转入死信的作业会被完整地记入日志，而不是被持久化。可以手动恢复，但不能通过 `queue:retry` 恢复。 |
+| `QUEUE_REDIS_CONSUMER` | `"consumer-1"` | `String` | 组内的消费者名字。并行的工作进程请逐个设置。 |
+| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | 一个已被认领的作业在另一个消费者可以重新认领它之前，保持不可见的时长。请把它对齐到您最慢的那个作业。 |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | 数据库驱动程序所用的表名。会作为一个 SQL 标识符被校验 - 一个格式错误的值会在启动时失败，而不是在 SQL 拼装的时候。当 `QUEUE_DRIVER=database` 时，由驱动程序要求必需；这个驱动程序还要求 `DB::init()` 已经先跑过。 |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | 死信存储写入的那张表。当 `QUEUE_DRIVER=database` 时会自动绑定 - `queue:retry` 会读它，`Queue::retry_failed` 需要它，所以这张表是那个驱动程序契约的一部分。`memory`（按构造就是易失的）和 `redis`（没有表可写）都不用它。和 `QUEUE_DB_TABLE` 不同，这里一个格式错误的标识符**不会**让启动失败：它会以 `error!` 记进日志，并且不绑定任何存储，于是被死信的作业会被完整地记进日志，而不是被持久化。可以手工恢复，但没法通过 `queue:retry` 恢复。 |
 
 ## 调度
 
@@ -230,6 +231,20 @@ HTTP 监听器和请求体的限制。
 | `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL（当 `RATE_LIMIT_DRIVER=redis` 时，由驱动程序要求必需）。 |
 | `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Redis 里的键前缀。 |
 
+## 图像
+
+图像驱动程序的选择，以及那些为敌意输入设界的解码限制。超出范围的限制会带一条 `warn!` 被夹紧，而不是让启动失败：一个为零的限制会拒绝掉这个应用里的每一张图像。一个未知的 `IMAGE_DRIVER` 会在第一次使用时失败，并点名那些合法的值。
+
+| 变量 | 默认值 | 类型 | 用途 |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String`（`oxideav`、`magick`） | 选择图像后端。`oxideav` 是纯 Rust 的，没有宿主依赖；`magick` 会去调用一个宿主上安装好的 ImageMagick 7，以换取更宽的输入支持。不区分大小写。 |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | 一张被解码图像的宽和高的上限，会在分配任何东西之前，对着输入自己的文件头做检查。它同样也给缩放目标设上限。最小值 `1`。 |
+| `IMAGE_MAX_ALLOC_BYTES` | `268435456`（256 MiB） | `u64` | 解码后 RGBA 占用（`width * height * 4`）的上限。它同样也给源文件本身的大小设上限，不管它来自一个路径、一个磁盘，还是 `Image::from_stream`（后者会在收集的过程中就检查）。最小值 `4`。 |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | `magick` 驱动程序调用的那个二进制文件。只支持 ImageMagick 7；不接受 ImageMagick 6 的 `convert` 这个名字。二进制文件缺失会在第一次使用时给出一个明确的错误。 |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | 一次 ImageMagick 调用的挂钟时间上限。它既是 ImageMagick 自己的 `-limit time` 参数，也是 Rust 这一侧的截止时间 - 后者会在两秒之后杀掉子进程的整个进程组，因为 `-limit time` 是由一个监视器来执行的，而一个卡死在某个委托里的子进程永远不会让它介入。它给一个卡住的委托设了界，否则那个委托会在整个进程的生命周期里一直占着一个阻塞工作线程。仅 `magick` 驱动程序。最小值 `1`。 |
+
+关于这两层限制是怎么执行的，以及该如何在两个驱动程序之间做选择，请参见[图像](images.md)。
+
 ## 哈希
 
 密码哈希驱动程序和逐算法的参数。无效的值会在第一次哈希时返回一个 `FrameworkError::param`，让配置错误立刻暴露出来，而不是静默地取默认值。
@@ -242,6 +257,12 @@ HTTP 监听器和请求体的限制。
 | `HASH_TIME` | `4` | `u32` | Argon2 的时间/迭代次数。最小值 `1`。仅限 Argon。 |
 | `HASH_THREADS` | `1` | `u32` | Argon2 的并行度（匹配 OWASP / libsodium）。最小值 `1`。仅限 Argon。 |
 | `HASH_VERIFY` | `false` | `bool` | 为 true 时，`verify()` 会拒绝来自一个与 `HASH_DRIVER` 不同算法的哈希（返回 `Ok(false)`）。默认为 `false`，这样遗留的 bcrypt 哈希在驱动程序翻转之后，直到被轮换之前，依然能通过校验。 |
+
+## 验证
+
+| 变量 | 默认值 | 类型 | 用途 |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30`（秒） | `u64` | `Password::uncompromised()` 那次 Have I Been Pwned range 检查的请求超时时间，每次构造一个默认的 `HibpVerifier` 时都会重新读取。一个缓慢或者不可达的 HIBP 仍然会失败开放 - 参见[验证](validation.md)。 |
 
 ## 认证流程
 

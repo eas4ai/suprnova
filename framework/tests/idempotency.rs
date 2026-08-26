@@ -637,3 +637,123 @@ async fn an_unbroken_lease_is_still_reported_as_fresh() {
         "a healthy lease must stay Fresh. Got {outcome:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Owner-scoped locking: `commit_on_success_owned` / `release_owned`
+//
+// The queue worker releases a `unique_until_processing` lock from a different
+// task than the one that took it, so the owner token has to survive the trip
+// and the release has to be scoped to it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn commit_on_success_owned_reports_the_owner_and_hands_it_to_the_body() {
+    install_memory_cache();
+    let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let seen_in_body = Arc::clone(&seen);
+
+    let (outcome, owner) =
+        Idempotency::commit_on_success_owned("owned-1", Duration::from_secs(60), move |owner| {
+            *seen_in_body.lock().expect("seen mutex") = owner.map(str::to_owned);
+            async { Ok::<(), suprnova::FrameworkError>(()) }
+        })
+        .await
+        .expect("first call succeeds");
+
+    assert!(matches!(outcome, Idempotent::Fresh(())));
+    let owner = owner.expect("a held lease must report its owner token");
+    assert!(!owner.is_empty());
+    assert_eq!(
+        seen.lock().expect("seen mutex").as_deref(),
+        Some(owner.as_str()),
+        "the body must see the same token the caller gets back"
+    );
+
+    let (dup, dup_owner) = Idempotency::commit_on_success_owned::<_, _, ()>(
+        "owned-1",
+        Duration::from_secs(60),
+        |_owner| async { Ok(()) },
+    )
+    .await
+    .expect("duplicate call succeeds");
+    assert!(matches!(dup, Idempotent::Duplicate));
+    assert!(
+        dup_owner.is_none(),
+        "a duplicate never took a lock, so it has no owner token to report"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn release_owned_is_scoped_to_the_owner_that_took_the_lock() {
+    install_memory_cache();
+    let (_, owner) = Idempotency::commit_on_success_owned::<_, _, ()>(
+        "owned-2",
+        Duration::from_secs(60),
+        |_owner| async { Ok(()) },
+    )
+    .await
+    .expect("first call succeeds");
+    let owner = owner.expect("owner token");
+
+    assert!(
+        !Idempotency::release_owned("owned-2", "somebody-elses-token")
+            .await
+            .expect("release is not an error"),
+        "a stale owner must not release a lock it does not hold"
+    );
+    let (still_held, _) = Idempotency::commit_on_success_owned::<_, _, ()>(
+        "owned-2",
+        Duration::from_secs(60),
+        |_owner| async { Ok(()) },
+    )
+    .await
+    .expect("call succeeds");
+    assert!(
+        matches!(still_held, Idempotent::Duplicate),
+        "the mismatched release must have left the lock in place"
+    );
+
+    assert!(
+        Idempotency::release_owned("owned-2", &owner)
+            .await
+            .expect("release succeeds"),
+        "the owner that took the lock releases it"
+    );
+    let (after_release, new_owner) = Idempotency::commit_on_success_owned::<_, _, ()>(
+        "owned-2",
+        Duration::from_secs(60),
+        |_owner| async { Ok(()) },
+    )
+    .await
+    .expect("call succeeds");
+    assert!(
+        matches!(after_release, Idempotent::Fresh(())),
+        "the key is free once its owner released it"
+    );
+    assert_ne!(
+        new_owner.expect("new owner token"),
+        owner,
+        "a second acquisition mints a fresh token"
+    );
+
+    assert!(
+        !Idempotency::release_owned("owned-2", &owner)
+            .await
+            .expect("release is not an error"),
+        "replaying the first release must not disturb the newer holder"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn release_owned_reports_false_for_a_key_that_was_never_locked() {
+    install_memory_cache();
+    assert!(
+        !Idempotency::release_owned("owned-never-taken", "any-token")
+            .await
+            .expect("release is not an error"),
+        "releasing an absent lock is a success case, not an error"
+    );
+}

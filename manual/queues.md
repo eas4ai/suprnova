@@ -80,6 +80,10 @@ driver; `Queue::bootstrap_default()` always wires the memory driver. The
 server boot path calls one of these for you - most apps only configure via
 env.
 
+`FailoverQueueDriver` isn't a sixth backend. It wraps an ordered list of
+the drivers above so a push one connection refuses falls through to the
+next. See [Failover connections](#failover-connections).
+
 ### Environment configuration
 
 ```bash
@@ -114,6 +118,152 @@ process" hard to model otherwise. Tokio doesn't - explicit `Bus::dispatch`
 vs `Queue::push` is clearer, faster, and surfaces the durability choice
 at the call site. See [`bus.md`](bus.md) for the side-by-side.
 
+## Failover connections
+
+`FailoverQueueDriver` wraps an ordered list of connections. A push that
+the first connection refuses is retried on the next, and so on down the
+list, so a Redis outage doesn't turn every dispatch into a lost job.
+
+Configure it from env:
+
+```bash
+QUEUE_DRIVER=failover
+QUEUE_FAILOVER_CONNECTIONS=redis,database
+
+# Each connection reads its own variables, exactly as it would if it
+# were QUEUE_DRIVER on its own.
+QUEUE_REDIS_URL=redis://127.0.0.1:6379
+QUEUE_DB_TABLE=jobs
+```
+
+Or wire it yourself, when the connections need runtime configuration
+that env can't express:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::queue::{
+    DatabaseQueueDriver, FailoverQueueDriver, Queue, QueueDriver, RedisQueueDriver,
+};
+use suprnova::{DB, FrameworkError};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    let redis = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        "suprnova-queue",
+        "default",
+        "consumer-1",
+        Duration::from_secs(60),
+    )
+    .await?;
+    let database =
+        DatabaseQueueDriver::new(DB::connection()?.inner().clone(), "jobs".to_string())?;
+
+    let failover = FailoverQueueDriver::new(vec![
+        ("redis".to_string(), Arc::new(redis) as Arc<dyn QueueDriver>),
+        ("database".to_string(), Arc::new(database) as Arc<dyn QueueDriver>),
+    ])?;
+    Queue::set_driver(Arc::new(failover));
+    Ok(())
+}
+```
+
+The `String` on each entry is the connection label reported on the
+`QueueFailedOver` event. It isn't derived from the driver type, because
+two connections can run the same driver.
+
+`QUEUE_FAILOVER_CONNECTIONS` is required when `QUEUE_DRIVER=failover`,
+and the list can't contain `failover` itself. An entry naming a driver
+that doesn't exist is a boot error rather than the warn-and-use-memory
+fallback `QUEUE_DRIVER` applies to itself: inside a failover chain, a
+typo that quietly became an in-memory connection would put an ephemeral
+backend in a durable list.
+
+### Writes fail over, reads don't
+
+Only `push` and `bulk_push` walk the connection list. Every other
+operation - `pop`, `ack`, `nack`, `release`, `settle`, `clear`, the four
+counters and the three inspection listings - goes to the **first**
+connection and no other.
+
+That asymmetry is the contract, not an omission. A reservation token is
+meaningful only to the driver that issued it, so acking against a
+different connection would settle nothing and corrupt both. The counters
+and listings follow the same rule so that what you inspect is what the
+worker on this connection drains, rather than a sum across backends that
+matches no worker's view.
+
+**A worker on the failover connection drains the primary only.** Jobs
+that failed over to a fallback need a worker running against that
+fallback connection directly:
+
+```bash
+# Drains the primary of the failover chain.
+QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
+
+# Drains what failed over to the database. Run this too.
+QUEUE_DRIVER=database ./app queue:work
+```
+
+Laravel's documentation carries the same warning for the same reason.
+
+This reaches chains, but only through one door. A worker settles a job and
+enqueues the next link of a [queued chain](#queued-chains) in one call,
+`settle`, and the decorator delegates that call to the primary alone. So
+with a transactional primary such as the database driver, a primary that is
+down fails the settle and nothing falls over: the worker leaves the
+reservation intact and visibility expiry redelivers the job. The
+fall-through happens when the primary answers `Settled::Unsupported`, which
+the memory and Redis drivers do, because the worker then pushes the next
+link through the bound driver like any other push - and that push falls
+over. The rest of that chain then waits for a worker on the fallback
+connection. Without one, the chain stalls - the link is durable and nothing
+is lost, but nothing runs it either.
+
+### The `QueueFailedOver` event
+
+Each connection that refuses a push dispatches
+`queue::events::QueueFailedOver { connection, job_name, exception }`, but
+only on the push that moves that connection *into* failure. A connection
+already known to be failing stays quiet until a later push succeeds on
+it, which re-arms it. A four-hour outage produces one event, not one per
+dispatch, which is what makes it usable as an alert.
+
+`connection` is the label of the connection that failed, not the one that
+accepted the job.
+
+When every connection refuses a push, the push returns the last
+connection's error. `bulk_push` pushes each envelope separately, so each
+one falls through on its own: a batch the primary half-accepted is never
+re-pushed wholesale onto the fallback, and each envelope keeps the
+`available_at` it was built with. A batch is not atomic. If one envelope
+is refused by every connection, `bulk_push` returns that envelope's error
+with the earlier envelopes already enqueued.
+
+Falling over is not deduplication. The decorator never re-attempts an
+envelope a connection accepted, but a connection that writes the envelope
+and *then* reports failure produces a duplicate on the next connection,
+because "wrote it and lost the acknowledgement" is indistinguishable from
+"never took it". Both copies carry the same job id. That is the
+framework's at-least-once delivery contract, the same one that makes
+handler idempotency a requirement everywhere else - see
+[Idempotency is the contract between the worker and you](#idempotency-is-the-contract-between-the-worker-and-you).
+
+### Why Suprnova diverges
+
+Laravel's failover connection is a `connections` array in
+`config/queue.php`, resolved through the connection registry. Suprnova
+has no per-connection driver registry - one driver is bound
+process-wide - so the labels come from `QUEUE_FAILOVER_CONNECTIONS` (or
+from the `String` you pass to `FailoverQueueDriver::new`) and reads
+delegate to the first *driver* rather than to a named connection.
+
+Laravel's `FailoverQueue::bulk` loops the jobs individually so each one's
+delay survives. Suprnova resolves the delay onto the envelope before any
+driver sees it, so the per-envelope loop preserves it for free - but the
+loop is still what keeps a half-landed batch from being double-pushed, so
+it stays.
+
 ## Push variants
 
 Every push variant takes a typed `J: Job` value and returns when the
@@ -125,6 +275,7 @@ envelope is committed to the driver - not when the handler runs.
 | `Queue::push_later(job, at)` | available at a specific `DateTime<Utc>` |
 | `Queue::later(delay, job)` | available after `delay` from now |
 | `Queue::push_with(job, overrides)` | enqueue immediately with per-push `EnvelopeOverrides` |
+| `Queue::push_after_commit(job)` | enqueue when the surrounding `DB::transaction` commits |
 | `Queue::later_with(delay, job, overrides)` | available after `delay` from now, with per-push `EnvelopeOverrides` |
 | `Queue::push_unique(job)` | dedupe by `J::unique_id` within `J::unique_for`, returns `Ok(true)` when the envelope was pushed, `Ok(false)` when a live dedupe key suppressed it |
 | `Queue::push_unique_later(job, at)` | unique + scheduled |
@@ -147,6 +298,81 @@ is unproven is that nobody else queued the same one concurrently. Your
 handler already has to tolerate redelivery, so this needs no extra handling -
 but the log is there because a burst of them means the cache backing your
 dedupe lock is struggling.
+
+### Unique until processing
+
+A uniqueness lock normally lasts the whole `unique_for` window, even after the
+job has run. When the lock exists to coalesce *queued* duplicates rather than
+to serialize execution, opt in to releasing it the moment processing begins:
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebuildSearchIndex {
+    index: String,
+}
+
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "rebuild-search-index" }
+    fn unique_id(&self) -> Option<String> { Some(self.index.clone()) }
+    fn unique_until_processing() -> bool { true }
+    fn unique_for() -> Duration { Duration::from_secs(3600) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // A rebuild that runs for 20 minutes no longer swallows the
+        // re-dispatch that arrives at minute 2.
+        Ok(())
+    }
+}
+```
+
+The worker releases the lock after the job's middleware pass and immediately
+before the handler runs. Four consequences follow:
+
+- A job that a middleware releases back onto the queue keeps its lock. It has
+  not started processing, so nothing has changed for a duplicate.
+- A job that a middleware short-circuits any other way gives up its lock,
+  because it is never going to process at all. That covers deleting the job,
+  dead-lettering it, and reporting it complete without ever calling the
+  handler.
+- A job that fails releases its lock and is still retried. The lock went the
+  moment processing began, so a duplicate can enqueue while the failed attempt
+  waits out its backoff, and you end up with two envelopes for the same unique
+  id. That is the trade this opt-in makes. If a retry has to keep holding the
+  slot, leave `unique_until_processing` off and let the `unique_for` TTL cover
+  the whole attempt chain.
+- The release is owner-scoped. `push_unique` records the lock's owner token on
+  the envelope, and the worker releases with that token, so a redelivered
+  attempt can never release a lock that a newer dispatch has since acquired.
+
+`unique_until_processing` needs the same two things `push_unique` needs: a
+`unique_id` that returns `Some(id)`, and a bootstrapped cache layer.
+
+Under the `sync` driver the handler runs inline inside the `push_unique` call
+that took the lock, so the job releases a lock its own caller is still
+nominally holding. If that handler runs for longer than a third of
+`unique_for`, the dedupe lease renewer notices the lock is gone and logs a
+lost-lease warning, and `push_unique` logs its own "exclusivity could not be
+proven" warning on top. Both are expected here rather than a fault: the job
+ran, the push returns `Ok(true)`, and the lock is gone because the job itself
+released it.
+
+### Why Suprnova diverges
+
+Laravel releases an *ordinary* unique job's lock once the handler returns.
+Suprnova lets that lock expire with the `unique_for` TTL instead, which keeps
+the dedupe window honest when a worker dies mid-job: the window you configured
+is the window you get, whether or not the handler ever returned.
+`unique_until_processing` behaves the same in both frameworks.
+
+Suprnova also never force-releases a uniqueness lock. Laravel falls back to a
+forced release for a first attempt that carries no owner token. The only
+envelopes that reach a Suprnova worker without one are envelopes queued before
+the token existed, and those keep TTL expiry rather than risking a release that
+deletes a newer dispatch's lock.
 
 ### Per-push overrides with `EnvelopeOverrides`
 
@@ -184,6 +410,7 @@ and the job's own `Job::*` declaration for that field:
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
+| `after_commit` | `Job::after_commit()` |
 
 `EnvelopeOverrides` is the primitive `Mail::on_queue`/`.on_connection()` and
 `Notify::queue`'s per-notification queue tuning are both built on - see
@@ -233,6 +460,144 @@ default instead, like `Job::queue()` or `Job::max_tries()` - a dispatch
 needing a delay computed from its own data uses `Queue::later`/`push_later`,
 which already outranks the declared default.
 
+### After-commit dispatch
+
+A job pushed inside a [`DB::transaction`](database.md#transactions) is racing
+that transaction. A worker on another process can pop the envelope, look for
+the row the transaction is still holding open, and fail - or worse, the
+transaction rolls back and the job runs against data that no longer exists.
+
+Opt the job into waiting for the commit:
+
+```rust
+use suprnova::{DB, FrameworkError, Job, Queue, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    order_id: i64,
+}
+
+#[async_trait]
+impl Job for SendReceipt {
+    fn job_name() -> &'static str { "send-receipt" }
+    fn after_commit() -> bool { true }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // The order row is guaranteed to be durable by the time this runs.
+        Ok(())
+    }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // Nothing reaches the driver here.
+        Queue::push(SendReceipt { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// The envelope is on the queue now, and only now.
+```
+
+Three rules cover every case:
+
+- **Inside a transaction, the whole push waits for the commit.** Not just the
+  driver write: the envelope build, the `JobQueueing` event and the
+  `JobQueued` event all happen at commit time too, so a listener is never told
+  about a job that a rollback then discards.
+- **A rollback discards it.** The push simply never happens. If it took a
+  uniqueness lock, the rollback gives that lock back.
+- **Outside a transaction the push happens immediately.** That is what makes
+  the opt-in safe to declare on the job type: a dispatch site does not have to
+  know whether the code path it sits on is transactional.
+
+A [savepoint](database.md#savepoints) rollback counts as a rollback for
+everything registered inside it. `tx.rollback_to("name")` discards the pushes
+deferred since `tx.savepoint("name")` and releases the locks they took, right
+then, so a re-dispatch inside the same transaction wins the key again. Pushes
+made before the savepoint are untouched, and a savepoint you never roll back
+keeps everything registered inside it.
+
+Per dispatch rather than per job type, use `EnvelopeOverrides::after_commit`.
+`Some(true)` is Laravel's `afterCommit()` and has the shorthand
+`Queue::push_after_commit(job)`; `Some(false)` is Laravel's `beforeCommit()`,
+for the one dispatch that has to be visible to a worker before the commit
+lands:
+
+```rust
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+// Defer a job whose type does not opt in.
+Queue::push_after_commit(SendWelcomeEmail { user_id: 42 }).await?;
+
+// Push immediately even though the job type opts in.
+Queue::push_with(
+    SendReceipt { order_id: 7 },
+    EnvelopeOverrides { after_commit: Some(false), ..Default::default() },
+)
+.await?;
+```
+
+A deferred `Queue::push` re-resolves [`Job::delay()`](#job-declared-delay)
+against the commit, not against the push, because the delay means "wait this
+long after dispatch" and for a deferred job dispatch *is* the commit. An
+explicit timestamp is the caller's intent about a moment in time, so
+`Queue::push_later`, `Queue::later` and `Queue::later_with` carry theirs
+through the deferral unchanged.
+
+`Queue::push_unique` defers with one deliberate asymmetry: the dedupe lock is
+taken immediately, so a second `push_unique` for the same unique id inside the
+same transaction is still suppressed and still reports `Ok(false)`. Only the
+envelope waits. The winner reports `Ok(true)` even though its push is pending,
+because the push is going to happen. A rollback releases the lock it took,
+owner-scoped, so the `unique_for` window is never blocked by a dispatch that
+never happened - and so does any other ending where the commit does not land,
+including a refused `COMMIT`. The one bound on that guarantee is the TTL
+itself: a transaction that stays open longer than `unique_for` can have its
+lock expire and be re-taken by another dispatch mid-flight, so give
+`unique_for` room above your longest transaction if the dedupe matters. The
+`push_unique*` family takes no `EnvelopeOverrides`, so `Job::after_commit()` is
+the only thing that decides whether a unique push defers - there is no per-push
+override for it.
+
+Batches and chains do not defer, the same way they do not consult
+`Job::delay()`: `Queue::batch()` and `Queue::chain()` build and push their
+envelopes directly. Wrap the `.dispatch()` call so it runs after the
+transaction returns if a batch has to wait for a commit.
+
+Queued [mail](mail.md#queueing) and [notifications](notifications.md) do not
+defer either. Each rides a single shared job type (`SendMailJob` /
+`SendNotificationJob`), and there is no
+`ShouldQueueAfterCommit` equivalent on `Mailable` or `Notification` yet, so a
+`Mail::queue` or `Notify::queue` call inside a transaction reaches the driver
+immediately. Send those after the transaction returns.
+
+Under `Queue::fake()` a push is recorded immediately, deferral and all, so a
+test can assert on it without committing anything. This matches Laravel's
+`Bus::fake`, and it is what lets a test drive one transactional handler and
+assert its dispatches in the same breath.
+
+### Why Suprnova diverges
+
+`Queue::bulk` is monomorphic - every element shares one concrete `J` - so its
+after-commit partition is all or nothing for the call. Laravel partitions a
+heterogeneous array into deferred and immediate halves; there is nothing here
+to partition.
+
+Deferral is tied to the closure form. A push inside a manual
+[`DB::begin_transaction`](database.md#manual-form) happens **immediately**,
+because manual mode installs no ambient transaction and therefore has no
+commit to hang a callback on. Deferring there would queue a callback that
+nothing ever runs, and a dispatch that silently disappears is worse than one
+that happens too early. Reach for `DB::transaction` when a dispatch has to
+wait for the commit.
+
+Laravel also reads a connection-level `after_commit` config key as the last
+fallback in its precedence chain. Suprnova stops at the per-push override and
+then the job's own `Job::after_commit()`: queue connections here do not carry
+their own dispatch policy.
+
 ## Job configuration
 
 Override `Job`'s associated functions to tune behavior per impl:
@@ -258,6 +623,7 @@ impl Job for SendWelcomeEmail {
         Some(format!("welcome:{}", self.user_id))
     }
     fn unique_for() -> Duration { Duration::from_secs(600) }  // default: 5 minutes
+    fn unique_until_processing() -> bool { true }          // default: false (TTL is the window)
     fn middleware() -> Vec<std::sync::Arc<dyn JobMiddleware>> {
         vec![/* see "Job middleware" below */]
     }
@@ -852,10 +1218,86 @@ Queue::driver_name()?;           // configured driver name for logs / admin
 ```
 
 The `QueueDriver` trait declares defaults for `size` / `pending_size` /
-`reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver` and
-`DatabaseQueueDriver` implement them natively. `RedisQueueDriver`
-returns an "unsupported" error for `size` / `clear` - use the admin
-redis-cli for those.
+`reserved_size` / `delayed_size` / `clear`; `MemoryQueueDriver`,
+`DatabaseQueueDriver`, and `RedisQueueDriver` all implement them natively.
+
+### Inspecting queues
+
+Counts tell you how much is queued; sometimes you need to see the actual
+envelopes - an admin dashboard, a debugging session, a "what exactly is
+stuck" question. `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs`
+return the same information the size counters count, as a listing of
+`InspectedJob` DTOs:
+
+```rust
+use suprnova::queue::{InspectedJob, Queue};
+
+let pending: Vec<InspectedJob> = Queue::pending_jobs(None).await?;
+let billing_only: Vec<InspectedJob> = Queue::pending_jobs(Some("billing")).await?;
+let delayed = Queue::delayed_jobs(None).await?;
+let reserved = Queue::reserved_jobs(None).await?;
+
+for job in &pending {
+    println!(
+        "{} attempts={} queue={:?} payload={}",
+        job.name, job.attempts, job.queue, job.payload
+    );
+}
+```
+
+`InspectedJob` carries `id`, `queue`, `name`, `attempts`, `payload`, and
+`created_at`. `id` and `created_at` are `Option`: the database driver's
+listings still report a row whose `envelope_json` failed to decode - as
+`id: None` and `payload: {"unparseable": true}` - rather than dropping it
+and hiding a poison job from whoever is looking; `Queue::fake()`'s
+projection never records a dispatch timestamp separate from
+`available_at`, so `created_at` is always `None` there.
+
+On the memory driver, `delayed_size()` reads the delayed store's length
+directly, while `delayed_jobs()` and `pending_jobs()` first promote any
+entry whose `available_at` has already passed. In the narrow window
+between a job coming due and the background reaper's next 50ms tick,
+`delayed_size()` can still count a job that `delayed_jobs()` has already
+promoted into `pending_jobs()` - the listings are the more current view;
+a mismatch there is expected, not a bug.
+
+A reservation whose visibility timeout has lapsed keeps appearing in
+`reserved_jobs()` until a `pop` or the background reaper reclaims it. Only
+those two reclaim, and reclaiming is what spends an attempt, so a listing call
+never changes a job's attempt count however often you call it.
+
+#### Why Suprnova diverges
+
+- **One method with `Option<&str>`, not a pair per listing.** Laravel ships
+  `pendingJobs($queue)` alongside a separate `allPendingJobs()`; here
+  `queue: None` collapses the two into one call. Same shape for
+  `delayedJobs`/`allDelayedJobs` and `reservedJobs`/`allReservedJobs`.
+- **The trait default is an honest `Err`, not an empty collection.**
+  Laravel's Beanstalkd and SQS drivers return `[]` from these methods even
+  for a queue that plainly has jobs - a lie of omission a third-party
+  driver author could copy without noticing. A Suprnova driver that has
+  not implemented inspection says so; `sync` and `null` override with
+  `Ok(vec![])` because for them "there is never anything to list" is the
+  literal truth, not an unimplemented method.
+- **Redis's `reserved_jobs` is per-consumer.** The driver only knows the
+  reservations it has personally handed out in-process; another
+  consumer's in-flight entries are visible only through Redis's own
+  `XPENDING`, not through this call.
+- **Redis's `pending_jobs` means "never delivered to any consumer in this
+  group."** It scans `XRANGE (<last-delivered-id> +` - everything past the
+  group's delivery cursor (`XINFO GROUPS`) - rather than the whole stream,
+  because `ack` only `XACK`s an entry (this driver never `XDEL`/`XTRIM`s
+  the stream), so a scan that merely excluded one consumer's in-memory
+  reservations would report every acked job as pending forever. A
+  released or nacked job is re-published under a fresh id above the
+  cursor, so it reappears once its retry is live. Same "upper bound"
+  register as `pending_size`: the cursor is read once, so a concurrent
+  `pop` can claim an entry between that read and the scan. In practice, a
+  running consumer's background read-ahead task tends to claim a newly
+  pushed entry within milliseconds of the push, well before an
+  application ever calls `pop` - so `pending_jobs` mostly reflects work
+  pushed while no consumer for that stream is actively polling, not "any
+  envelope nobody has explicitly popped yet".
 
 ## Worker restart signal
 
@@ -1005,7 +1447,7 @@ every entry point except `push_with`/`later_with` - see
 `push_unique` always records the push as fresh - dedupe is irrelevant
 when no driver is wired.
 
-## Idempotency is the worker's contract with you
+## Idempotency is the contract between the worker and you
 
 Redis-backed queue drivers can't make `nack` atomic - `XADD` and `XACK`
 are separate commands. A crash between them re-delivers the message via

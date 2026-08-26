@@ -31,10 +31,14 @@ Una regla es un valor que implementa uno de cuatro traits:
 
 `Rule`s integradas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
 `NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`. `ValueRule`s integradas: `ArrayKeys`,
-`Distinct`. `ContextualRule`s integradas: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule` integrada:
-[`Unique`](#la-regla-unique).
+`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#fortaleza-de-la-contraseña)
+(solo las comprobaciones de fortaleza). `ValueRule`s integradas:
+`ArrayKeys`, `Distinct`. `ContextualRule`s integradas: `RequiredIf`,
+`RequiredWith`, `RequiredUnless`, `Same`, `Different`, `Confirmed`.
+`AsyncRule`s integradas: [`Unique`](#la-regla-unique) y
+[`Password`](#fortaleza-de-la-contraseña) (la fortaleza más su
+comprobación HIBP `uncompromised()` - la única regla integrada que
+implementa a la vez `Rule` y `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -42,35 +46,35 @@ use suprnova::{Rule, rules::Email};
 Email.passes("user@example.com")?; // Ok(())
 ```
 
-> **Nota:** `Numeric` acepta un número **finito** - `NaN`, `inf`, y las magnitudes que
-> desbordan a infinito se rechazan, aunque el parser de Rust aceptaría
-> las cadenas.
+> **Nota:** `Numeric` acepta un número **finito** - `NaN`, `inf` y las
+> magnitudes que desbordan a infinito se rechazan, aunque el parser de
+> Rust aceptaría esas cadenas.
 
 ### Esquemas de URL
 
-`Url` acepta un valor que se analiza como URL, cuyo esquema está en la
+`Url` acepta un valor que se parsea como URL, cuyo esquema está en la
 lista de permitidos de Laravel - la misma lista que usa
 `Illuminate\Support\Str::isUrl` -, va seguido de `://` **y** va seguido a
-su vez de un host no vacío, replicando la forma del patrón
-`^(PROTOCOLS)://HOST` de Laravel (el grupo de host de Laravel no lleva
-`?` - un host ausente o vacío nunca coincide). La lista de esquemas y el
-requisito de `://` más host son literalmente los de Laravel; el host lo
-analiza el crate `url` en vez de la regex de Laravel, así que aquí se
-rechaza un puerto fuera de rango que Laravel aceptaría. Las tres
-condiciones deben cumplirse: `mailto:`, `tel:` y `data:` están en la
-lista de permitidos por su nombre pero no llevan ningún componente de
-autoridad, así que `Url` los rechaza; y `file:///etc/passwd` falla por la
-tercera razón - tiene `://`, pero entre la tercera y la cuarta `/` no hay
-nada, y nada no es un host. `javascript:` y `vbscript:` se rechazan de
-plano; ni siquiera están en la lista de permitidos.
+su vez de un host no vacío, con la misma forma que el patrón
+`^(PROTOCOLS)://HOST` de Laravel (el grupo del host de Laravel no lleva
+`?`: un host ausente o vacío nunca casa). La lista de esquemas y la
+exigencia de `://` más host son literalmente las de Laravel; el host lo
+parsea el crate `url` en lugar de la expresión regular de Laravel, así
+que aquí se rechaza un puerto fuera de rango que Laravel aceptaría. Las
+tres condiciones tienen que cumplirse: `mailto:`, `tel:` y `data:` están
+en la lista de permitidos por nombre, pero no llevan componente de
+autoridad alguno, así que `Url` los rechaza; y `file:///etc/passwd` falla
+por la tercera razón: tiene `://`, pero entre la tercera y la cuarta `/`
+no hay nada, y nada no es un host. `javascript:` y `vbscript:` se
+rechazan de plano; ni siquiera están en la lista de permitidos.
 
 `ftp://host/x` y `ssh://host` - hosts reales, solo que no son esquemas
 web - siguen pasando, así que `Url` no es una comprobación de "esto es
-una página web", y no dice nada sobre dónde resuelve la URL. Rechazar
-`javascript:` hace que un valor validado sea seguro para poner en un
-`href`, no seguro para solicitarlo. Un destino de webhook o de callback
-sigue necesitando `HttpUrl` (o tus propias comprobaciones de esquema y
-de SSRF); `Url` por sí sola no cubre eso.
+una página web", y no dice nada sobre adónde resuelve la URL. Rechazar
+`javascript:` hace que un valor validado sea seguro de poner en un
+`href`, no seguro de descargar. Un destino de webhook o de callback sigue
+necesitando `HttpUrl` (o tus propias comprobaciones de esquema y de
+SSRF); `Url` por sí sola no cubre eso.
 
 Para un conjunto más estrecho, nombra los esquemas que quieras:
 
@@ -81,27 +85,141 @@ use suprnova::{Rule, rules::Url};
 Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
 Url::protocols(&["https"]).passes("http://example.com");     // Err
 
-// Lo mismo, bajo un nombre
+// Lo mismo, con nombre propio
 use suprnova::rules::HttpUrl;
 HttpUrl.passes("https://example.com")?;
 ```
 
-`Url::protocols(...)` **reemplaza** la lista de permitidos en vez de
-acotarla, así que una aplicación puede aceptar su propio esquema de
-deep link (`myapp://…`) sin que el framework tenga una opinión al
-respecto - el requisito de `://` más host se sigue aplicando también a
-ese esquema propio. Usa `HttpUrl` (o `Url::protocols(&["https"])`) para
-las entradas de callback, webhook y avatar - un destino de webhook que
-resuelve a `ftp://internal-host/` sigue analizándose como un `Url`, y un
-destino `ftp:` no es un destino de webhook.
+`Url::protocols(...)` **sustituye** la lista de permitidos en lugar de
+estrecharla, de modo que una aplicación puede aceptar su propio esquema
+de enlace profundo (`myapp://…`) sin que el framework opine al respecto:
+la exigencia de `://` más host también sigue aplicándose a ese esquema
+propio. Usa `HttpUrl` (o `Url::protocols(&["https"])`) para las entradas
+de callback, de webhook y de avatar - un destino de webhook que resuelve
+a `ftp://internal-host/` sigue parseándose como `Url`, y un destino
+`ftp:` no es un destino de webhook.
+
+### Fortaleza de la contraseña
+
+`Password` comprueba la longitud y la fortaleza por clases de caracteres,
+más una comprobación opcional `uncompromised()` contra Have I Been
+Pwned - el objeto de regla `Password` de Laravel, portado. Constrúyelo
+con `Password::min(n)` y encadena los constructores de fortaleza:
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - demasiado corta, sin dígito, sin símbolo
+```
+
+| Constructor | Exige | Expresión regular de Laravel |
+|---|---|---|
+| `.min(n)` (vía `Password::min`) | al menos `n` caracteres (con suelo en 1) | comprobación de longitud |
+| `.max(n)` | como mucho `n` caracteres | comprobación de longitud |
+| `.letters()` | al menos una letra Unicode | `/\pL/u` |
+| `.mixed_case()` | una letra mayúscula y una minúscula, en cualquier orden | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | al menos un dígito Unicode | `/\pN/u` |
+| `.symbols()` | al menos un separador, símbolo o signo de puntuación - **un espacio simple cuenta** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())`,
+llamado una sola vez desde `bootstrap::register()`, fija la política por
+defecto de todo el proceso que `Password::defaults()` devuelve en
+cualquier otro sitio - el `Password::defaults(fn () => ...)` de Laravel.
+Una segunda llamada se ignora (con un `tracing::warn!`) en lugar de
+reemplazar en silencio la política que ya eligió la primera aplicación.
+
+#### `uncompromised()` - porque la fortaleza por sí sola no basta
+
+`.uncompromised()` (o `.uncompromised_with_threshold(n)`) añade una
+comprobación contra el corpus de filtraciones de Have I Been Pwned,
+usando su API de rangos con k-anonimato: del hash SHA-1 en mayúsculas de
+la contraseña solo salen del proceso los **5 primeros caracteres** - `GET
+https://api.pwnedpasswords.com/range/{prefix}` - y la comparación con el
+hash completo ocurre localmente, contra las líneas `SUFFIX:COUNT` que la
+API devuelve para ese prefijo. El servicio nunca ve la contraseña, ni
+siquiera su hash completo. La comparación con el umbral es estricta
+(`count > threshold`), así que el `uncompromised()` por defecto (umbral
+`0`) falla ante cualquier aparición, y un fallo de red, un tiempo de
+espera agotado o una respuesta que no sea 2xx **falla abierto**: la
+contraseña se trata como limpia en lugar de bloquear todos los registros
+durante una caída de Have I Been Pwned. Esto coincide exactamente con el
+`NotPwnedVerifier` de Laravel.
+
+Como esa comprobación es una ida y vuelta HTTP, `uncompromised()`
+necesita `AsyncRule`, no el `Rule` síncrono que basta para las
+comprobaciones de fortaleza por sí solas. Conéctala a través de
+`after_validation_async`, la misma receta que usa
+[`Unique`](#la-regla-unique):
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+Llamar al `Rule::passes` síncrono sobre un `Password` que tiene
+`uncompromised()` puesto es un **error estrepitoso**, no una omisión
+silenciosa: una comprobación de seguridad que no hace nada en silencio es
+peor que una que nunca existió. El mensaje de error nombra
+`after_validation_async` como solución.
+
+`HIBP_TIMEOUT_SECS` (por defecto `30`) controla el tiempo de espera de la
+solicitud - véanse las [Variables de entorno](env-vars.md).
+
+Un verificador propio que devuelve `Err` es un caso distinto de una
+comprobación fallida: su texto de error se registra a nivel `error` y
+nunca llega al cliente, y la respuesta lleva en su lugar la clave de
+catálogo `validation-password-unverifiable` ("The { $field } could not be
+checked against known data leaks. Please try again."). Añade esa clave si
+publicas tu propio catálogo de validación.
+
+### Por qué Suprnova diverge: Password
+
+- El `Password` de Laravel reúne todas las comprobaciones de fortaleza
+  fallidas en un único array. El contrato `Rule` de Suprnova devuelve un
+  único `ValidationMessage`, así que `Rule::passes` informa de la PRIMERA
+  comprobación que falla, en el orden mínimo, máximo, mayúsculas y
+  minúsculas, letras, símbolos, números - se corrige de una en una en
+  lugar de ver la lista entera de golpe.
+- El validador síncrono de Laravel puede llamar a `uncompromised()`
+  directamente; una solicitud PHP ya está dentro de un bucle de eventos
+  que tolera una llamada HTTP bloqueante. El `Rule::passes` de Suprnova
+  es síncrono por contrato, así que no hay un sitio seguro desde el que
+  lanzar la solicitud a HIBP. En lugar de omitir la comprobación en
+  silencio - el único desenlace inaceptable para una regla relevante para
+  la seguridad -, el `Rule::passes` de Suprnova devuelve un error
+  estrepitoso, dirigido al desarrollador, que nombra
+  `after_validation_async` como solución.
+- `Password::defaults_with` toma un puntero a `fn` simple, no un closure,
+  de modo que el valor por defecto configurado sigue siendo `Copy` y no
+  necesita reservar memoria en el heap - un estrechamiento deliberado
+  respecto del `Closure` de Laravel.
 
 ### Escribir tu propia regla
 
-Una regla propia es un struct unitario (o portador de datos) con un solo
-impl. El trait te da `check()` gratis - empuja cualquier mensaje de
-fallo a una bolsa `ValidationErrors` bajo el campo nombrado - de modo
-que la regla encaja sin cambios en `validate!` y en los ganchos
-`after_validation`:
+Una regla propia es un struct unitario (o portador de datos) con una sola
+impl. El trait te da `check()` gratis - empuja cualquier mensaje de fallo
+a una bolsa `ValidationErrors` bajo el campo nombrado -, así que la regla
+encaja sin cambios en `validate!` y en los ganchos `after_validation`:
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -118,61 +236,63 @@ impl Rule for StartsWith {
     }
 }
 
-// Ahora se puede usar en todas partes:
+// Ya se puede usar en cualquier parte:
 StartsWith("acct_").passes("acct_1234")?;
-// o, en una fila de validate!:
+// o, en una fila de `validate!`:
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
 Un `String` se convierte en un `ValidationMessage` que se renderiza tal
-cual, que es todo lo que necesita una aplicación de un solo idioma. Para
-que el mensaje se traduzca por locale, devuelve en su lugar un mensaje
-*con clave* -
+cual, que es cuanto necesita una aplicación monolingüe. Para que el
+mensaje se traduzca por locale, devuelve en su lugar un mensaje *con
+clave* -
 `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` -
-y define el id en `lang/<locale>/validation.ftl`. Consulta
-[Localización](localization.md), que también cubre cómo sobrescribir los
+y define el id en `lang/<locale>/validation.ftl`. Véase
+[Localización](localization.md), que también cubre cómo anular los
 mensajes de las reglas integradas y la convención de nombres
 `field-<name>`.
 
 Para la lógica entre campos, implementa [`ContextualRule`] en su lugar -
 el método `passes` recibe un `&FormContext` (un `HashMap<String, String>`
-de valores de campos hermanos) junto al valor bajo prueba. Para las
-comprobaciones respaldadas por base de datos, implementa [`AsyncRule`] y
-úsala desde `after_validation_async`.
+con los valores de los campos hermanos) junto al valor bajo prueba. Para
+las comprobaciones respaldadas por la base de datos, implementa
+[`AsyncRule`] y úsala desde `after_validation_async`.
 
 ### Reglas con forma de valor
 
-`Rule` solo recibe `&str`. Dos reglas integradas necesitan más estructura de
-la que lleva un string, por lo que implementan `ValueRule` en su lugar, sobre
-`&serde_json::Value`:
+`Rule` solo llega a ver `&str`. Dos reglas integradas necesitan más
+estructura de la que lleva una cadena, así que implementan `ValueRule` en
+su lugar, sobre `&serde_json::Value`:
 
 ```rust
 use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
 
-// Laravel's array:keys - reject keys outside the allowed set. Listed
-// keys need not all be present; an empty allowed list is a programming
-// error, reported as a keyless message.
+// El array:keys de Laravel - rechaza las claves fuera del conjunto
+// permitido. No hace falta que estén presentes todas las claves
+// listadas; una lista permitida vacía es un error de programación, y se
+// informa como un mensaje sin clave.
 ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
 
-// Laravel's distinct / distinct:ignore_case / distinct:strict.
+// El distinct / distinct:ignore_case / distinct:strict de Laravel.
 Distinct { ignore_case: false, strict: false }
     .passes(&serde_json::json!(["a", "b", "c"]))?;
 ```
 
-Un campo validado por una `ValueRule` debe contener el propio
-`serde_json::Value` (u `Option<serde_json::Value>` para una fila `?:`/`?=>`):
-normalmente un campo de solicitud extraído directamente del cuerpo JSON. Las
-filas de `validate!` aceptan `Rule`s y `ValueRule`s en la misma lista de
-campos; qué trait se ejecuta se resuelve por el trait que implementa el tipo
-de la regla, no por nada que escribas en la fila.
+Un campo validado por una `ValueRule` tiene que contener el propio
+`serde_json::Value` (u `Option<serde_json::Value>` para una fila `?:` o
+`?=>`) - normalmente un campo de la solicitud sacado directamente del
+cuerpo JSON. Las filas de `validate!` aceptan `Rule`s y `ValueRule`s en
+la misma lista de campos; qué trait se ejecuta lo resuelve cuál de los
+dos implementa el tipo de la regla, no nada que escribas en la fila.
 
 ### Por qué Suprnova diverge
 
-El `distinct:strict` de Laravel se apoya en el `==` coercitivo de PHP. Los
-valores JSON ya tienen tipo, por lo que el `strict` de Suprnova solo cambia si
-dos *números* con representaciones internas distintas (`1` frente a `1.0`)
-cuentan como iguales: nunca hace que un string y un número sean «lo mismo»,
-en ninguno de los modos.
+El `distinct:strict` de Laravel se apoya en el `==` coercitivo de PHP.
+Los valores JSON ya vienen tipados, así que el `strict` de Suprnova solo
+cambia si dos *números* con representaciones internas distintas (`1`
+frente a `1.0`) cuentan como iguales - nunca hace que una cadena y un
+número sean "lo mismo", en ninguno de los dos modos.
+
 
 ## La macro `validate!`
 

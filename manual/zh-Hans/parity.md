@@ -72,8 +72,8 @@
 | URL 生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 已实现 | [URL 生成](urls.md) |
 | 会话 | `session()`、`session_mut()`，flash bag 通过 `req.flash()` | 已实现 | 默认通过 `DatabaseSessionDriver` 由数据库支撑；加密的浏览器 cookie 只携带会话标识符和活动触碰元数据，不携带会话数据包。[会话](session.md) |
 | Cookie 队列（`Cookie::queue`） | `Cookie::queue`/`queued`/`unqueue`/`expire` - 一个由 `SessionMiddleware` 排到响应上的任务本地 jar | 已实现 | 需要链中包含 `SessionMiddleware`；按名称排队，不像 Laravel 的 `CookieJar` 那样按名称+路径 |
-| 验证 | `#[derive(Validate)]` + 27 条内置规则 + `Rule`/`ValueRule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（如 `Unique`）会访问数据库。`ArrayKeys`/`Distinct` 是作用于 `serde_json::Value` 的 `ValueRule`，对应 Laravel 的 `array:keys` 和 `distinct`。[验证](validation.md) |
-| `Password` 规则（`Password::defaults()`、`uncompromised()`） | 没有密码强度规则家族；请把 `Min`、`Regex` 和一条自定义 `Rule` 组合起来 | 尚未实现 | 它包含 Have I Been Pwned 的 `uncompromised()` 检查，今天还没有对应物 |
+| 验证 | `#[derive(Validate)]` + 28 条内置规则 + `Rule`/`ValueRule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（如 `Unique`）会访问数据库。`ArrayKeys`/`Distinct` 是作用于 `serde_json::Value` 的 `ValueRule`，对应 Laravel 的 `array:keys` 和 `distinct`。[验证](validation.md) |
+| `Password` 规则（`Password::defaults()`、`uncompromised()`） | `Password::min(n)` + 强度构建器（`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`）+ `.uncompromised()` | 已实现 | Have I Been Pwned 的 k-匿名检查；网络出错时失败开放，与 Laravel 的 `NotPwnedVerifier` 一致。[验证](validation.md#password-strength) |
 | 错误处理 | `FrameworkError`、`AppError`、`HttpError` trait，`execute_chain_safely` 里的 panic 边界 | 已实现 | [错误处理](errors.md)、[错误模型](error-model.md) |
 | 日志 | 带结构化字段的 `tracing` 订阅者，`LogFormat`（json / pretty / compact） | 路径不同 | 一行日志就是一个 JSON 文档；`request_id` 始终存在。[日志](logging.md) |
 | 日志通道 / 文件驱动程序（`single`、`daily`、`monthly`、`stack`） | `tracing` 把结构化的行写到 stdout；由平台去轮转和转运它们 | 刻意不做 | 容器、systemd 以及每一个日志转运工具都已经在做轮转和留存了。在进程内重新实现一遍，既重复了平台的工作，又把日志藏了起来。[日志](logging.md) |
@@ -95,7 +95,8 @@
 | 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。[文件存储](filesystem.md) |
 | 辅助函数 | 对应物都在各自的所属模块里（没有厨房水槽式的 `helpers.md`） | 路径不同 | 比如 URL 辅助函数在 [urls.md](urls.md) 里，字符串辅助函数在 `std`/`heck` 里，数组辅助函数在 `std::collections` 里 - Rust 是用 crate 而不是一个全局命名空间来做这件事的 |
 | HTTP 客户端 | `Http::get/post/...` 构建器 + 供测试用的 `Http::fake(...)` | 已实现 | 自动记录请求；`assert_sent` / `assert_not_sent`；`.retry_when(predicate)` 以 `RetryContext` 收窄内置重试策略。[HTTP 客户端](http-client.md) |
-| 图像（`Illuminate\Image`） | 没有图像处理表面 | 尚未实现 | 一个架在 `image` crate 之上的 `ImageDriver` trait（缩放 / 裁剪 / 转换 / 主色调）已在计划中；在它实现之前请直接使用 `image` crate |
+| 图像（`Illuminate\Image`） | `Image::from_bytes/from_path/from_disk/from_upload/from_stream` + 同样的一套操作与终结方法表面 | 已实现 | 住在 `suprnova::media` 里。像 Laravel 的 `gd`/`imagick` 那样有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认，纯 Rust）或者 `magick`。读写 PNG、JPEG、WebP、GIF、BMP；AVIF 输出推迟到那个自研 AV1 编码器发布之后。解码限制会对着文件头做检查。[图像](images.md) |
+| 默认驱动程序里的 HEIC 解码 | 在一台带 libheif 委托的宿主上用 `IMAGE_DRIVER=magick` | 刻意不做 | HEVC 有专利负担，而唯一一个可信的纯 Rust 解码器是 AGPL / 商业双许可的，所以不提供内置解码器。形态和 Laravel 一样：在那边 GD 根本读不了 HEIC，而 Imagick 需要把这个委托同时编译进二进制文件和那个 PHP 扩展。[图像](images.md#why-suprnova-diverges) |
 | 本地化 | `Lang::get` / `get_with` / `try_get` / `has`，以及架在 `lang/<locale>/` 里 Fluent `.ftl` 语料表之上的 `__!("key", name: value)` 宏、`LocaleMiddleware` 检测、翻译过的验证消息、ICU4X 格式化 | 已实现 | 同一份语料表会在 `/_suprnova/lang/<locale>.ftl` 提供给浏览器，并由 `generate-types` 赋予类型。[本地化](localization.md) |
 | 邮件 | `Mail::to(...).send(MyMail { ... }).await?` + `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory/file` 驱动程序 | 已实现 | `Mailable` trait + 由 Tera 渲染的 HTML/文本正文；SES 发送携带 `TenantName` / `ConfigurationSetName` / `ListManagementOptions`；队列分发经由 `.on_queue(...)` / `.on_connection(...)` 路由，优先于 `Queue::route`。[邮件](mail.md) |
 | 通知 | `Notify::send(&user, notif).await?` + `mail/database/broadcast/webpush` 通道 | 已实现 | `Notifiable` trait + 逐通道的 `Notification`；排队分发（`Notify::queue`）通过 Mail 使用的同一 `EnvelopeOverrides` 原语，将逐通知的 `queue`/`timeout`/`fail_on_timeout`/`max_tries`/`backoff` 携带到每个通道作业上。[通知](notifications.md)、[Web 推送](web-push.md) |
@@ -105,11 +106,11 @@
 | 作业声明的延迟 | `Job` 上的 `fn delay() -> Option<Duration>`，由 `Queue::push` 和 `Queue::bulk` 遵守 | 已实现 | 显式 `Queue::push_later` / `Queue::later(delay, job)` 调用始终优先于作业自身默认值。[队列](queues.md) |
 | 唯一作业跳过事件 | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | 已实现 | 在推送端 `push_unique` 去重时触发；调用仍返回 `Ok(false)` |
 | 队列暂停（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`，由缓存支撑，带 `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 事件 | 已实现 | 逐队列暂停仅对使用明确 `--queue=...` 列表启动的工作进程生效；`resume_all` 不会清除逐队列暂停。[队列](queues.md) |
-| 提交后派发（`afterCommit()`） | 在一个事务内部推送的作业，对驱动程序立即可见 | 尚未实现 | 今天一次回滚会把作业留在队列里。在事务作用域的派发实现之前，请把推送放到事务外面 |
-| 故障转移队列连接 | 没有 `failover` 驱动程序 | 尚未实现 | 在 `FailoverQueueDriver` 实现之前，请逐次推送时显式挑选连接，或者绑定您自己的、包住两个驱动程序的 `QueueDriver` |
-| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` 会在整个作业期间持有这把锁 | 尚未实现 | 在认领时（而不是完成时）释放唯一性锁是另一套语义，目前还没有接上 |
-| 队列检查（`pendingJobs` / `delayedJobs` / `reservedJobs`） | 没有驱动程序层面的检查 API | 尚未实现 | 在检查表面实现之前，请直接查询驱动程序背后的存储（`jobs` 表、Redis 键） |
-| 逐任务时区的调度 | 计划是在一个进程级的时区里被求值的 | 尚未实现 | 逐任务的 `timezone(...)`，外加一个能感知时区的 `schedule:list`，已在计划中。[任务调度](scheduling.md) |
+| 提交后分发（`afterCommit()`） | `Job` 上的 `fn after_commit() -> bool`、逐次推送的 `EnvelopeOverrides::after_commit`、`Queue::push_after_commit` | 已实现 | 整个推送都会等待提交，事件也包括在内，而一次回滚会把它丢弃；一次被推迟的 `push_unique` 仍然会立即取走它的锁，所以去重在事务内部照样有效。手写的 `DB::begin_transaction` 从不推迟。[队列](queues.md) |
+| 故障转移队列连接 | 架在一个有序连接列表之上的 `FailoverQueueDriver`，经由 `QUEUE_DRIVER=failover` + `QUEUE_FAILOVER_CONNECTIONS` 启用 | 已实现 | 写操作会沿着这个列表往下穿；`pop`、那些计数器和那些列举都留在第一个连接上，所以每一个后备连接都需要它自己的工作进程。`QueueFailedOver` 是边沿触发的，而 `bulk_push` 是逐个信封往下穿的，所以每个信封都保住自己的延迟。[队列](queues.md) |
+| `ShouldBeUniqueUntilProcessing` | `Job` 上的 `fn unique_until_processing() -> bool`，在中间件走完之后、处理程序运行之前释放 | 已实现 | 按所有者范围释放，所以一次被重投的尝试永远不会释放掉一次更新的分发所持有的锁。一个被中间件释放回队列的作业会保住它的锁。[队列](queues.md) |
+| 队列检查（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`，用一个 `Option<&str>` 把 Laravel 的 `all*Jobs()` 孪生方法收拢成一次调用 | 已实现 | `InspectedJob` DTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）；trait 的默认实现是一个诚实的 `Err`，而不是一个空集合；`sync`/`null` 用 `Ok(vec![])` 覆盖它；Redis 的 `reserved_jobs` 是逐消费者的。[队列](queues.md) |
+| 逐任务时区的调度 | 逐任务的 `.timezone(chrono_tz::Tz)` / `.try_timezone("name")`、`Schedule::timezone` 默认值、`schedule:list --timezone` | 已实现 | 用的是带类型的 `chrono_tz::Tz`，而不是 Laravel 的字符串；整份调度表的默认值是 `schedule::register` 里的 `Schedule::timezone`，而不是一个 `app.schedule_timezone` 配置键，而一个没有钉住时区的任务保持进程本地时区。[任务调度](scheduling.md) |
 | 速率限制 | `RateLimiter::for_signature(...)`、`ThrottleRequestsMiddleware`、`RateLimitMiddleware` | 已实现 | 通过 `SlidingWindowConfig` 实现的滑动窗口。[速率限制](rate-limiting.md) |
 | 搜索（Scout） | 没有官方的全文搜索适配器 | 尚未实现 | 向量搜索今天已经通过[向量搜索](vector.md)实现了；关键词版的 Scout 对应物已在计划中 |
 | 字符串（辅助函数） | `heck` crate（大小写转换）、`std::str`、`regex` | 路径不同 | 和 Rust 生态其余部分用的是同一批 crate；没有 `Str::camel($x)` 这种全局函数 |
@@ -150,7 +151,7 @@
 | Sanctum（API 令牌） | `BearerTokenMiddleware` 作用于 Magnetar bearer session | 路径不同 | 认证 bearer session；没有单独的 Sanctum 令牌管理 API |
 | Passport（OAuth 服务端） | Magnetar 协议和插件引擎 | 路径不同 | 引擎原语已实现；没有 Laravel Passport 兼容的应用外观 |
 | Fortify（认证后端） | 框架 `Auth`/`auth_flows` 外观作用于 Magnetar 引擎 | 已实现 | 框架拥有 HTTP、邮件、事件、cookie 和应用绑定 |
-| 授权（Policies / Gates） | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + 宏注册 | 已实现 | [授权](authorization.md) |
+| 授权（Policies / Gates） | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + 宏注册 + `Gate::default_denial_response` | 已实现 | [授权](authorization.md) |
 | 角色与权限（spatie/laravel-permission） | `HasRoles` trait + `roles` / `permissions` / `role_has_permissions` 表（`CreateRbacTables`）+ `RoleMiddleware` / `PermissionMiddleware`（失败即关闭） | 已实现 | 官方自带，不是社区包。`create_role` / `give_permission_to_role` / `assign_role_to_model` 这些辅助函数；叠加在 Gate/Policy 之上。[授权](authorization.md) |
 | 加密 | `Crypt::encrypt/decrypt` + `CryptPurpose` 的 AAD 绑定 | 已实现 | AES-256-GCM，通过 `APP_KEY_PREVIOUS` 实现密钥轮换。[加密](encryption.md) |
 | 哈希 | `hash::*` + `BcryptHasher`、`Argon2idHasher`、`Argon2iHasher`、`needs_rehash`、`is_hashed`、`verify` | 已实现 | 默认 Bcrypt；argon2id 可选。[哈希](hashing.md) |
@@ -394,13 +395,6 @@ Laravel 提供了数百个小型全局函数（`str_replace_first`、`array_flat
 | Telescope（调试面板） | 呈现请求 / 查询 / 事件 / 缓存命中的 Web 界面 | 使用 OTel + tracing 的输出（[可观测性](observability.md)） |
 | Pulse（性能面板） | 呈现慢查询 / 错误 / 热点路由的 Web 界面 | 同上：今天是 OTel 表面，面板以后再说 |
 | Horizon（队列面板） | 呈现队列深度 / 失败作业 / 吞吐量的 Web 界面 | `cargo run --bin console queue:failed` 加上 OTel 指标 |
-| 图像处理 | `Illuminate\Image` 的对应物（缩放 / 裁剪 / 转换） | 在您自己的 `App::bind` 背后直接使用 `image` crate |
-| `Password` 验证规则 | 强度规则 + `uncompromised()` 的 HIBP 检查 | 把 `Min` + `Regex` + 一条自定义 `Rule` 组合起来 |
-| 提交后派发 | 事务作用域的作业派发 | 在事务返回之后再推送 |
-| 故障转移队列连接 | 架在一个有序驱动程序列表之上的 `failover` 驱动程序 | 逐次推送时挑选连接 |
-| `ShouldBeUniqueUntilProcessing` | 在认领时就释放的锁 | `push_unique` 会在整个作业期间持有这把锁 |
-| 队列检查 | `pendingJobs` / `delayedJobs` / `reservedJobs` | 查询驱动程序背后的存储 |
-| 逐任务时区的调度 | 逐个计划任务的 `timezone(...)` | 每个时区跑一个调度器进程 |
 
 ## 我们不会做的功能（以及原因）
 

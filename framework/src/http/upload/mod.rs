@@ -604,7 +604,7 @@ where
 
         // Validator callback. Streaming-aware signature: bounded sniff
         // buffer + total accumulated size. Validators that care about
-        // content (Image) consult sniff; validators that care about
+        // content (ImageFile) consult sniff; validators that care about
         // size (MaxSize) consult size. Fires AFTER the body cap so a
         // 413 from the cap takes precedence.
         per_field_validator(name, &sniff, size)?;

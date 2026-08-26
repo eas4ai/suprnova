@@ -2,6 +2,7 @@
 
 use crate::error::FrameworkError;
 use crate::queue::envelope::Envelope;
+use crate::queue::inspect::InspectedJob;
 use async_trait::async_trait;
 use chrono::Utc;
 use std::time::Duration;
@@ -239,6 +240,58 @@ pub trait QueueDriver: Send + Sync {
     /// Mirrors `reservedSize($queue)`.
     async fn reserved_size(&self) -> Result<u64, FrameworkError> {
         Ok(0)
+    }
+
+    /// Every envelope whose `available_at <= now` and which is not
+    /// currently reserved, optionally filtered to one `queue`. Mirrors
+    /// Laravel's `pendingJobs($queue)`; `queue: None` collapses that with
+    /// Laravel's separate `allPendingJobs()` into one call - see the
+    /// "Inspecting queues" section of the queue manual chapter.
+    ///
+    /// Defaults to an honest `Err` describing the unsupported operation,
+    /// mirroring [`size`](Self::size)'s default. This is a deliberate
+    /// divergence from Laravel, whose Beanstalkd/SQS drivers return an
+    /// **empty collection** here even for a queue that plainly has jobs - a
+    /// lie of omission a third-party driver author could copy without
+    /// noticing. A driver that has not implemented inspection should say
+    /// so; [`SyncQueueDriver`](crate::queue::sync::SyncQueueDriver) and
+    /// [`NullQueueDriver`](crate::queue::null::NullQueueDriver) override
+    /// with `Ok(vec![])` because for them "nothing to list" is the literal
+    /// truth, not an unimplemented method.
+    async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let _ = queue;
+        Err(FrameworkError::internal(format!(
+            "queue driver '{}' does not implement pending_jobs()",
+            self.name()
+        )))
+    }
+
+    /// Every envelope whose `available_at > now`, optionally filtered to
+    /// one `queue`. Mirrors Laravel's `delayedJobs($queue)` /
+    /// `allDelayedJobs()`. See [`pending_jobs`](Self::pending_jobs) for why
+    /// the default is an honest `Err` rather than an empty collection.
+    async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let _ = queue;
+        Err(FrameworkError::internal(format!(
+            "queue driver '{}' does not implement delayed_jobs()",
+            self.name()
+        )))
+    }
+
+    /// Every envelope currently held by an unfinished reservation,
+    /// optionally filtered to one `queue`. Mirrors Laravel's
+    /// `reservedJobs($queue)` / `allReservedJobs()`. See
+    /// [`pending_jobs`](Self::pending_jobs) for why the default is an
+    /// honest `Err` rather than an empty collection.
+    async fn reserved_jobs(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        let _ = queue;
+        Err(FrameworkError::internal(format!(
+            "queue driver '{}' does not implement reserved_jobs()",
+            self.name()
+        )))
     }
 
     /// Drop every envelope, returning the number removed. Mirrors

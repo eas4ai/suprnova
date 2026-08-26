@@ -44,6 +44,29 @@ impl QueueDriver for BogusDriver {
     }
 }
 
+/// A minimal immediately-available envelope, for the boot paths that prove a
+/// wired driver actually accepts a push rather than only reporting a name.
+fn bootstrap_env() -> Envelope {
+    Envelope {
+        schema_version: suprnova::queue::CURRENT_SCHEMA_VERSION,
+        id: uuid::Uuid::new_v4(),
+        job_name: "queue-bootstrap-probe".into(),
+        queue: None,
+        payload: serde_json::json!({}),
+        dispatched_at: chrono::Utc::now(),
+        available_at: chrono::Utc::now(),
+        attempts: 0,
+        max_tries: 1,
+        backoff: suprnova::queue::BackoffSchedule::default(),
+        timeout_secs: None,
+        fail_on_timeout: false,
+        idempotency_key: None,
+        unique_lock_owner: None,
+        batch_id: None,
+        chain_remaining: Vec::new(),
+    }
+}
+
 /// SAFETY: env mutation is process-global; `#[serial]` keeps queue tests from
 /// racing with each other.
 fn set_env(key: &str, value: Option<&str>) {
@@ -135,5 +158,107 @@ async fn the_database_driver_binds_a_failed_jobs_store() {
         suprnova::Queue::failed_store().is_some(),
         "a database-backed queue must dead-letter somewhere durable; without this \
          binding every exhausted job vanishes with only a log line behind it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// QUEUE_DRIVER=failover
+// ---------------------------------------------------------------------------
+
+/// The env path has to build every inner connection and install the decorator,
+/// not just parse the list.
+#[tokio::test]
+#[serial]
+async fn failover_wires_a_driver_over_the_listed_connections() {
+    Queue::set_driver(Arc::new(BogusDriver));
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory, memory"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("QUEUE_FAILOVER_CONNECTIONS", None);
+    result.expect("failover bootstraps over two memory connections");
+
+    assert_eq!(Queue::driver_name().unwrap(), "failover");
+
+    // The whole point is that pushes reach a real backend, so prove one does
+    // rather than stopping at the driver's name.
+    let driver = Queue::driver().expect("driver");
+    driver
+        .push(bootstrap_env())
+        .await
+        .expect("push through the failover connection");
+    assert!(
+        driver
+            .pop(Duration::from_secs(1))
+            .await
+            .expect("pop")
+            .is_some(),
+        "the primary connection accepted the push, so the primary must pop it back"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn failover_without_a_connection_list_is_a_boot_error() {
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", None);
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+
+    let err = result.expect_err("a failover connection with no list cannot boot");
+    assert!(
+        err.to_string().contains("QUEUE_FAILOVER_CONNECTIONS"),
+        "the error must name the missing variable, got {err}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn failover_with_a_blank_connection_list_is_a_boot_error() {
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", Some("   "));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("QUEUE_FAILOVER_CONNECTIONS", None);
+
+    let err = result.expect_err("a blank list is a half-finished edit, not a queue");
+    assert!(
+        err.to_string().contains("QUEUE_FAILOVER_CONNECTIONS"),
+        "the error must name the variable, got {err}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn failover_rejects_a_nested_failover_connection() {
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,failover"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("QUEUE_FAILOVER_CONNECTIONS", None);
+
+    let err = result.expect_err("nesting must be rejected");
+    assert!(
+        err.to_string().contains("no nesting"),
+        "the error must say why, got {err}"
+    );
+}
+
+/// The warn-and-fall-back-to-memory behaviour belongs to `QUEUE_DRIVER` alone.
+/// Inside a failover chain a typo would silently splice an ephemeral in-memory
+/// connection into a durable list, so it has to be a boot error instead.
+#[tokio::test]
+#[serial]
+async fn failover_rejects_an_unknown_inner_connection_instead_of_falling_back() {
+    set_env("QUEUE_DRIVER", Some("failover"));
+    set_env("QUEUE_FAILOVER_CONNECTIONS", Some("memory,redsi"));
+    let result = bootstrap_from_env().await;
+    set_env("QUEUE_DRIVER", None);
+    set_env("QUEUE_FAILOVER_CONNECTIONS", None);
+
+    let err = result.expect_err("an unknown inner connection must not become memory");
+    assert!(
+        err.to_string().contains("redsi"),
+        "the error must name the offending entry, got {err}"
     );
 }

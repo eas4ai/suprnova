@@ -45,6 +45,7 @@
     - [Events](events.md)
     - [File Storage](filesystem.md)
     - [HTTP Client](http-client.md)
+    - [Images](images.md)
     - [Localization](localization.md)
     - [Mail](mail.md)
     - [Notifications](notifications.md)

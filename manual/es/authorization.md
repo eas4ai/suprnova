@@ -340,13 +340,14 @@ bloqueo envenenado nunca aborta el proceso.
 
 ## Decisiones enriquecidas: `Response`, `inspect`, `raw`
 
-Una compuerta `bool` desnuda solo responde permitir/denegar. Para una
-denegación que lleve un *message*, un *code* de máquina, o un *status*
-HTTP distinto de 403, registra la compuerta con `define_with` (o
-`define_async_with`) y devuelve un `Response`:
+Una compuerta que devuelve un `bool` desnudo solo responde
+permitir/denegar. Para una denegación que lleve un *mensaje*, un *code*
+legible por máquina o un *status* HTTP distinto de 403, registra la
+compuerta con `define_with` (o `define_async_with`) y devuelve un
+`Response`:
 
 ```rust
-use suprnova::authorization::Response;  // re-exportado en la raíz del crate como `GateResponse`
+use suprnova::authorization::Response;  // reexportado en la raíz del crate como `GateResponse`
 
 Gate::define_with::<User, Post>("update", |user, post| {
     if post.author_id == user.id {
@@ -378,83 +379,127 @@ decision.status();    // Option<u16> - None aquí; Some(404) tras deny_as_not_fo
 
 Los constructores de `Response` reflejan los de Laravel: `allow()`,
 `deny()`, `deny_with(msg)`, `deny_with_status(status, msg)`,
-`deny_as_not_found()`, además de los builders `with_message` /
-`with_code` / `with_status` / `as_not_found`.
+`deny_as_not_found()`, más los builders `with_message` / `with_code` /
+`with_status` / `as_not_found`.
 
 ### Cómo una denegación se convierte en un error
 
-`Gate::authorize` colapsa la decisión a través de
-`Response::authorize()`:
+`Gate::authorize` colapsa la decisión a través de `Response::authorize()`:
 
 | Decisión | Resultado de `authorize` |
 |---|---|
 | permitida | `Ok(())` |
-| `deny()` desnudo (sin message/code/status) | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
-| denegación enriquecida (con message y/o status establecidos) | `FrameworkError::Domain { message, status_code }` |
+| `deny()` desnudo (sin message, code ni status) - aquello a lo que recurre una respuesta de denegación por defecto sin configurar | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
+| denegación enriquecida (con message y/o status fijados) - incluida una respuesta de denegación por defecto configurada que lleve alguno | `FrameworkError::Domain { message, status_code }` |
 
 Así, `deny_as_not_found()` emerge como un 404, `deny_with_status(422,
 "…")` como un 422, y `deny_with("…")` como un 403 que lleva tu mensaje.
-El `code` se puede leer en el `Response` inspeccionado, pero **no**
-viaja a través de `authorize` - `FrameworkError` no tiene campo `code`;
-léelo desde `inspect()` si lo necesitas.
+El `code` se puede leer en el `Response` inspeccionado, pero **no** viaja
+a través de `authorize` - `FrameworkError` no tiene campo de code; léelo
+desde `inspect()` si lo necesitas.
 
 ### `raw`: "denegado" frente a "indefinido"
 
-`Gate::raw` (y `raw_async`) devuelve `Option<Response>`: `None`
-significa *no se aplicó ninguna regla* - no se disparó ningún hook
-`before`, no hay compuerta registrada, ningún hook `after` la rellenó -
-a diferencia de un `Some(deny)` explícito. `inspect` normaliza ese
-`None` a una denegación por defecto; `raw` lo preserva para
-diagnóstico ("¿esta acción está gobernada siquiera?").
+`Gate::raw` (y `raw_async`) devuelve `Option<Response>`: `None` significa
+*no se aplicó ninguna regla* - no se disparó ningún gancho `before`, no
+hay ninguna compuerta registrada, ningún gancho `after` rellenó nada -,
+a diferencia de un `Some(deny)` explícito. `inspect` normaliza ese `None`
+a la respuesta de denegación por defecto configurada (un deny desnudo
+salvo que `Gate::default_denial_response` haya fijado otra cosa); `raw`
+conserva el `None` para diagnóstico ("¿está esta acción gobernada
+siquiera?").
 
-## Hooks `before` / `after`
+### Respuesta de denegación por defecto
 
-`Gate::before` registra una comprobación que corre *antes* que
-cualquier compuerta; el primer hook que devuelva `Some(decision)` hace
-cortocircuito con todo. El uso canónico es una anulación global:
+El `Gate::defaultDenialResponse($response)` de Laravel reconfigura qué
+aspecto tiene una denegación *sin decidir* - no toda denegación, solo las
+que de otro modo recurrirían al `Response::deny()` desnudo. Fíjala una
+sola vez, típicamente en `bootstrap::register()`:
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+Tras esa llamada, dos clases de desenlace adoptan la nueva forma: un
+`false` desnudo - de una compuerta de bool (`define`/`define_async`, incluido un método
+`#[policy]` que devuelve `bool`), o de un gancho `before`/`after` que
+decidió `false` - y una evaluación que nada más decidió en absoluto: una
+habilidad indefinida sobre la que ningún gancho opinó. Todo eso emergía
+antes como un `Response::deny()` desnudo (un 403); ahora emerge como lo
+que se le haya dado a `default_denial_response` - un 404 en el ejemplo de
+arriba. Esa es la jugada estándar de "ocultar la existencia del recurso a
+un usuario que quizá no pueda verlo" (consulta el ejemplo de `Secret` más
+arriba en este capítulo), aplicada una vez para toda la aplicación en
+lugar de compuerta a compuerta.
+
+El valor por defecto se aplica **solo al `false` desnudo**. Una compuerta
+registrada con `define_with` (o `define_async_with`) ya devolvió el
+`Response` que quería - `Response::deny_with("…")`,
+`Response::deny_as_not_found()`, incluso un `Response::deny()` desnudo y
+explícito - y todos ellos pasan por `inspect` sin tocarse. Esto refleja
+la propia regla de Laravel: `Gate::inspect` solo sustituye el valor por
+defecto ante un resultado de callback realmente falsy, nunca ante un
+objeto `Response` que el callback construyó por sí mismo.
+
+## Ganchos `before` / `after`
+
+`Gate::before` registra una comprobación que se ejecuta *antes* de
+cualquier compuerta; el primer gancho que devuelve `Some(decision)` hace
+cortocircuito con todo lo demás. El uso canónico es un override global:
 
 ```rust
 // Los administradores pueden hacer cualquier cosa.
 Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
 ```
 
-`Gate::after` corre *después* de la compuerta. Siguiendo la semántica
-`??=` de Laravel, un hook after solo puede **rellenar** un resultado
-indeciso (ninguna compuerta coincidió y ningún hook before se
-disparó) - nunca puede sobrescribir un permitir/denegar ya producido.
-Cada hook after igual se ejecuta, así que también sirve como el punto
-de enganche para el registro de auditoría:
+`Gate::after` se ejecuta *después* de la compuerta. Siguiendo la
+semántica `??=` de Laravel, un gancho after solo puede **rellenar** un
+resultado sin decidir (ninguna compuerta casó y ningún gancho before se
+disparó); nunca puede sobrescribir un permitir/denegar ya producido.
+Todos los ganchos after se ejecutan igualmente, así que valen además como
+costura para el registro de auditoría:
 
 ```rust
 Gate::after::<User>(|user, action, decided| {
     audit_log(user.id, action, decided);   // observa cada evaluación
-    None                                    // solo registra; no cambia el resultado
+    None                                    // solo registro; no cambia el resultado
 });
 ```
 
-Los hooks se indexan por el **tipo de usuario** `U`, no por recurso -
-un hook se dispara para cada `(action, U, R)`. Pon la lógica específica
-de recurso en la compuerta. Los hooks son predicados síncronos y
-también se aplican a la ruta de evaluación async; para lógica de
-autorización async, usa `define_async` / `define_async_with`.
+Los ganchos se indexan por el **tipo de usuario** `U`, no por recurso: un
+gancho se dispara para cada `(action, U, R)`. Pon la lógica específica
+del recurso en la compuerta. Los ganchos son predicados síncronos y se
+aplican también a la ruta de evaluación async; para lógica de
+autorización asíncrona, usa `define_async` / `define_async_with`.
 
 ### Por qué Suprnova diverge
 
-El `Gate::forUser($user)->allows(...)` de Laravel revincula el resolver
-*implícito* del usuario actual de la compuerta, de modo que la
-siguiente comprobación se evalúa como ese usuario. La compuerta de
-Suprnova toma el usuario de forma **explícita** en cada llamada, así
-que "comprobar como un usuario distinto" es solo
-`Gate::allows(action, &other_user, &resource)`. No hay ningún resolver
-implícito que revincular - la API explícita es estrictamente más
-general, lo que hace que `forUser` sea redundante en lugar de faltante.
+El `Gate::forUser($user)->allows(...)` de Laravel revincula el resolutor
+*implícito* de usuario actual de la compuerta, de modo que la siguiente
+comprobación se evalúa como ese usuario. La compuerta de Suprnova toma el
+usuario **explícitamente** en cada llamada, así que "comprobar como otro
+usuario" es sencillamente `Gate::allows(action, &other_user, &resource)`.
+No hay ningún resolutor implícito que revincular - la API explícita es
+estrictamente más general, lo que hace que `forUser` sea redundante en
+lugar de faltar.
 
-El mismo razonamiento aplica al auto-descubrimiento de políticas de
-Laravel por nombre de clase. Suprnova ata los métodos de política a la
-clave de tipo borrado `(action, U, R)` en el momento del registro, así
-que una política de `Post` y una política de `Comment` con el mismo
-nombre de método registran dos compuertas distintas sin necesitar una
-convención de nombres ni un escaneo de descubrimiento.
+El mismo razonamiento se aplica al autodescubrimiento de políticas por
+nombre de clase de Laravel. Suprnova ata los métodos de política a la
+clave con tipo borrado `(action, U, R)` en el momento del registro, así
+que una política de `Post` y una de `Comment` con el mismo nombre de
+método registran dos compuertas distintas sin necesidad de una convención
+de nombres ni de un escaneo de descubrimiento.
+
+`Gate::default_denial_response` también diverge de Laravel en un aspecto:
+pasarle un `Response::allow()`, con forma de permiso, se registra en el
+log y se ignora en lugar de aceptarse. El `defaultDenialResponse` de
+Laravel no tiene esa salvaguarda, pero este es un valor por defecto de
+*denegación* - aceptar uno con forma de permiso invertiría en silencio a
+"permitido" el resultado de toda compuerta con un `false` desnudo, la
+única dirección de fallo abierto en esta superficie.
 
 ## Siguiente
 

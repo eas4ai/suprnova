@@ -45,6 +45,7 @@
     - [Ereignisse](events.md)
     - [Dateispeicher](filesystem.md)
     - [HTTP-Client](http-client.md)
+    - [Bilder](images.md)
     - [Lokalisierung](localization.md)
     - [Mail](mail.md)
     - [Benachrichtigungen](notifications.md)
@@ -122,5 +123,5 @@
     - [Glossar](glossary.md)
 
 ---
-
 *[API-Dokumentation (rustdoc)](https://docs.rs/suprnova) - sobald veröffentlicht.*
+

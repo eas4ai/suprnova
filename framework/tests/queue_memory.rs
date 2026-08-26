@@ -20,6 +20,7 @@ fn env(name: &str, payload: serde_json::Value) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     }
@@ -113,6 +114,7 @@ async fn delayed_jobs_become_visible_after_available_at() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };

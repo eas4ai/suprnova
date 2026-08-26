@@ -45,6 +45,7 @@
     - [事件](events.md)
     - [文件存储](filesystem.md)
     - [HTTP 客户端](http-client.md)
+    - [图像](images.md)
     - [本地化](localization.md)
     - [邮件](mail.md)
     - [通知](notifications.md)
@@ -122,5 +123,5 @@
     - [词汇表](glossary.md)
 
 ---
-
 *[API 文档（rustdoc）](https://docs.rs/suprnova) - 即将发布。*
+

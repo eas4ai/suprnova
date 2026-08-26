@@ -139,25 +139,30 @@ sudo systemctl start myapp-scheduler
 
 ## schedule:list
 
-打印每一个已注册的任务，带上它的 cron 表达式和描述。
+打印每一个已注册的任务，连同它的 cron 表达式、下一次运行时间和描述。
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### 示例输出
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
-在构造器上链了 `.description(...)` 的任务，会在 cron 表达式之后带上这条描述；没有描述的任务只显示 cron。
+在构建器上链了 `.description(...)` 的任务，会在下一次运行时间之后带上这段描述；没有描述的任务则只显示 cron 和下一次运行。
 
-当什么都没注册时（`.schedule(...)` 这个构造器调用缺失了，或者 `schedule::register` 是个空操作）：
+`next:` 是从此刻起这个表达式第一次匹配上的那一分钟；一个永远不可能匹配的表达式会打印 `next: never`。时间以 UTC 显示，除非 `--timezone` 点名了另一个 IANA 时区；而一个未知的时区名会在任何东西被打印出来之前就带着错误退出。
+
+一个用 `.timezone(...)` 钉住了自己时区的任务，它的表达式会被改写进这份列举所用的时区里，并且会被标注出来 - 上面那个 `report:generate` 要的是 `02:00 America/New_York`。没有钉住时区的任务会按写下的样子打印，也不带标注。完整的时区规则请参见[任务调度](scheduling.md)，包括一次改写在什么情况下会被拒绝，以及一个任务什么时候会占上好几行。
+
+当什么都没注册时（缺了那个 `.schedule(...)` 构建器调用，或者 `schedule::register` 是个空操作）：
 
 ```
 No scheduled tasks registered.

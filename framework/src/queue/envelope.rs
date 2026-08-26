@@ -33,6 +33,20 @@ pub fn queue_matches(envelope_queue: Option<&str>, queues: &[String]) -> bool {
     queues.iter().any(|wanted| wanted == name)
 }
 
+/// One-element slice for [`queue_matches`] when `queue` names a filter, or
+/// empty ("any queue") when it doesn't.
+///
+/// Shared by every driver's `pending_jobs`/`delayed_jobs`/`reserved_jobs`
+/// listing so a single-queue filter reuses exactly the semantics
+/// [`queue_matches`] already established for `pop_from`, rather than a
+/// second implementation that can drift from it.
+pub(crate) fn queue_filter(queue: Option<&str>) -> Vec<String> {
+    match queue {
+        Some(q) => vec![q.to_string()],
+        None => Vec::new(),
+    }
+}
+
 /// Wire-format envelope every queue driver round-trips on push and pop.
 ///
 /// Bumping fields requires a `schema_version` increment and a dual-read
@@ -92,6 +106,27 @@ pub struct Envelope {
     /// and `retry_all_failed` so a retried envelope re-enters the queue
     /// without occupying the unique slot of the original dispatch.
     pub idempotency_key: Option<String>,
+    /// The cache-lock owner token recorded when
+    /// [`Queue::push_unique`](crate::queue::Queue::push_unique) won the
+    /// uniqueness lock. `None` for non-unique pushes and for envelopes written
+    /// before this field existed.
+    ///
+    /// Carried on the wire because the worker releases the lock from a
+    /// different task than the one that took it (see
+    /// [`Job::unique_until_processing`](crate::queue::Job::unique_until_processing)),
+    /// and a [`LockGuard`](crate::cache::LockGuard) cannot cross that boundary
+    /// - its lifetime is the acquiring closure's.
+    ///
+    /// The release is owner-scoped: a release carrying a stale token is a
+    /// no-op, so a redelivered attempt can never force-release a lock that a
+    /// newer dispatch now holds.
+    ///
+    /// Additive under `#[serde(default)]`, and `skip_serializing_if` keeps a
+    /// non-unique push byte-identical on the wire, so
+    /// [`CURRENT_SCHEMA_VERSION`] stays at 2 - see the `queue` field above for
+    /// the same promise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_lock_owner: Option<String>,
     /// Owning batch id when this envelope was dispatched as part of a
     /// [`PendingBatch`](crate::queue::batch::PendingBatch). `None` for
     /// non-batched jobs.

@@ -8,12 +8,227 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Failover queue connection.** `FailoverQueueDriver` wraps an ordered list of
+  connections: a push the first one refuses is retried on the next, and so on
+  down the list. Wire it from env with `QUEUE_DRIVER=failover` plus
+  `QUEUE_FAILOVER_CONNECTIONS=redis,database` (each entry reads its own
+  driver's variables, so a `database` entry still needs `DB::init()` first and
+  still brings its failed-jobs store), or build it directly with
+  `FailoverQueueDriver::new(vec![(label, driver), ...])`. Only writes fall
+  through: `push` and `bulk_push` walk the list, while `pop`, `pop_from`,
+  `ack`, `nack`, `release`, `settle`, `clear`, all four counters and all three
+  inspection listings delegate to the first connection and no other, because a
+  reservation token is meaningful only to the driver that issued it. The
+  operational consequence is documented rather than papered over: a worker on
+  the failover connection drains the primary only, so whatever failed over to a
+  fallback needs its own worker. `bulk_push` pushes each envelope separately
+  rather than forwarding a batch, which both preserves each envelope's own
+  `available_at` (Laravel #60950) and keeps a batch the primary half-accepted
+  from being re-pushed wholesale onto the fallback. A refusal dispatches
+  `queue::events::QueueFailedOver { connection, job_name, exception }`,
+  edge-triggered: a connection reports itself once when it enters failure and
+  stays quiet until a later push succeeds on it and re-arms it, so an outage
+  produces one alert instead of one per dispatch. When every connection
+  refuses, the push returns the last connection's error. An empty connection
+  list, a missing or blank `QUEUE_FAILOVER_CONNECTIONS`, a nested `failover`
+  entry, and an entry naming a driver that doesn't exist are all boot errors -
+  the warn-and-fall-back-to-memory behaviour stays on `QUEUE_DRIVER` itself,
+  where a typo can't splice an ephemeral backend into a durable chain.
+- **Queue inspection API.** `Queue::pending_jobs(queue)` / `delayed_jobs` /
+  `reserved_jobs` list the actual envelopes behind the existing
+  `pending_size`/`delayed_size`/`reserved_size` counters, as `InspectedJob`
+  DTOs (`id`, `queue`, `name`, `attempts`, `payload`, `created_at`) - mirrors
+  Laravel's `InspectedJob`. A single `Option<&str>` queue filter collapses
+  Laravel's `pendingJobs($queue)` / `allPendingJobs()` pair (and the
+  `delayedJobs`/`reservedJobs` equivalents) into one call each. The
+  `QueueDriver` trait default is an honest `Err` - not Laravel's
+  Beanstalkd/SQS empty-collection default, which reads as "nothing queued"
+  even when there plainly is - so a driver that has not implemented
+  inspection says so; `sync`/`null` override with `Ok(vec![])` because for
+  them that really is the truth. The memory, database, and Redis drivers all
+  implement the full listing: the memory driver's delayed storage moved from
+  a bare `DelayQueue<Envelope>` (which cannot be iterated) to a
+  `DelayQueue<Uuid>` plus an id-keyed map; the database driver reuses the
+  size counters' exact predicates plus `ORDER BY available_at`, and a row
+  whose `envelope_json` fails to decode is still listed (`id: None`,
+  `payload: {"unparseable": true}`) rather than dropped, so one poison row
+  can't blind an operator to the rest of the queue; Redis's `reserved_jobs`
+  is scoped to this consumer's in-process reservations (documented), and
+  `pending_jobs` scans the stream via `XRANGE` in batches. `Queue::fake()`
+  gained matching `pending_jobs()`/`delayed_jobs()` helpers, projecting
+  recorded pushes with `attempts` always `0` and `created_at` always `None`.
+- **After-commit dispatch.** `Job::after_commit()` holds a push until the
+  surrounding `DB::transaction` commits, so a worker on another process can
+  never pop an envelope that describes rows the transaction has not made
+  durable yet. The whole push waits, not just the driver write: the envelope
+  build, `JobQueueing` and `JobQueued` all happen at commit time, so no
+  listener is ever told about a job a rollback then discards. A rollback
+  discards the push entirely; outside a transaction the push happens
+  immediately, which is what lets a job type declare the opt-in without every
+  dispatch site knowing whether its code path is transactional. Per dispatch,
+  `EnvelopeOverrides::after_commit` outranks the job: `Some(true)` (with the
+  shorthand `Queue::push_after_commit(job)`) defers a job that did not opt in,
+  and `Some(false)` is Laravel's `beforeCommit()`. A deferred `Queue::push`
+  re-resolves `Job::delay()` against the commit rather than the push, while
+  `Queue::push_later` / `later` / `later_with` carry the caller's absolute
+  timestamp through unchanged. `Queue::push_unique` takes its dedupe lock
+  immediately even when the envelope is deferred, so a duplicate inside the
+  same transaction is still suppressed, and a rollback releases that lock
+  owner-scoped. `Queue::bulk` defers as a unit. `Queue::fake()` records a push
+  immediately, deferral and all, matching Laravel's `Bus::fake`. Manual
+  `DB::begin_transaction` never defers - it installs no ambient transaction, so
+  there is no commit to hang a callback on. Every ending that leaves the commit
+  unlanded compensates identically, including a `COMMIT` the database refuses
+  and a leaked `TxHandle` that blocks one, and `Transaction::rollback_to` counts
+  as one for the scope it unwinds: a push deferred inside a savepoint is
+  discarded when that savepoint rolls back and its lock is released right then,
+  while anything registered before the savepoint is untouched. Queued mail,
+  notifications, batches and chains do not defer yet.
+- **Unique-until-processing jobs.** `Job::unique_until_processing()` releases the
+  uniqueness lock when processing begins - after the job's middleware pass,
+  immediately before the handler runs - instead of holding it for the full
+  `unique_for` window, which is what you want when the lock exists to coalesce
+  queued duplicates rather than to serialize execution. A job that a middleware
+  releases back onto the queue keeps its lock, because it has not started
+  processing; a job a middleware deletes or dead-letters gives its lock up.
+  Release is owner-scoped: `Queue::push_unique` records the cache lock's owner
+  token on the envelope (`Envelope::unique_lock_owner`, an additive field that
+  leaves the frozen wire format byte-identical for every non-unique push), and
+  the worker releases with that token, so a redelivered attempt can never
+  force-release a lock a newer dispatch now holds. The supporting idempotency
+  surface is public too: `Idempotency::commit_on_success_owned` hands the body
+  the lock owner and returns it, and `Idempotency::release_owned(key, owner)`
+  releases owner-scoped, reporting `Ok(false)` rather than an error when the
+  lock is absent or held by somebody else. Plain `unique_id` jobs are unchanged
+  and still let the `unique_for` TTL be the dedupe window.
+- **`Gate::default_denial_response` customizes the default shape of a bare denial.** Mirrors
+  Laravel's `Gate::defaultDenialResponse($response)`. Set once - typically in
+  `bootstrap::register()` - it reshapes exactly two outcomes: a bare `false` (a bool gate -
+  `Gate::define` / `Gate::define_async`, including a `#[policy]` method returning `bool` - or a
+  `before`/`after` hook that decided `false`) and an evaluation nothing else decided at all (an
+  undefined ability with no hook opinion either). All of those used to collapse to a bare
+  `Response::deny()` (a 403); now they surface as whatever `Response` the default carries, e.g.
+  `Response::deny_as_not_found()` for a 404 that hides a resource's existence application-wide
+  instead of gate by gate. The default applies to bare `false` only - a gate registered with
+  `define_with` / `define_async_with` already returned the `Response` it wanted, and that always
+  passes through `Gate::inspect` untouched, matching Laravel's own rule that the default never
+  substitutes for a returned `Response` object. A default shaped as `Response::allow()` is
+  rejected (logged, ignored) rather than silently inverting every bool gate to allowed - see
+  `Gate::default_denial_response`'s doc comment for the one place this deliberately diverges from
+  Laravel, which has no such guard.
+- **The `Password` validation rule family ships, including the Have I Been Pwned
+  `uncompromised()` check.** `Password::min(n)` plus the strength builders
+  (`.max()`, `.letters()`, `.mixed_case()`, `.numbers()`, `.symbols()`) port
+  Laravel's `Password` rule regexes verbatim - a plain space satisfies
+  `.symbols()`, matching Laravel's `\p{Z}` separator class. `.uncompromised()`
+  (or `.uncompromised_with_threshold(n)`) checks the password against Have I
+  Been Pwned's k-anonymity range API: only the first 5 characters of the
+  password's SHA-1 hash ever leave the process, and a network failure,
+  timeout, or non-2xx response fails open rather than blocking signups,
+  exactly like Laravel's `NotPwnedVerifier`. Because that check is an HTTP
+  round trip, `Password` is the one built-in rule implementing both `Rule`
+  (strength only, for sync `validate!` rows) and `AsyncRule` (strength, then
+  the HIBP check, for `after_validation_async`) - calling the sync path on a
+  `Password` configured with `uncompromised()` is a loud, developer-facing
+  error rather than a silent skip. `Password::defaults_with(...)` sets the
+  process-wide default `Password::defaults()` returns. New `HIBP_TIMEOUT_SECS`
+  env var (default 30s). `Http::fake_response_text(...)` is the new raw-body
+  sibling of `fake_response(...)` for tests against `text/plain` upstream
+  APIs like HIBP's.
+- **A scheduled task can now name the timezone its cron expression is read
+  in, and `schedule:list` can render the whole schedule in any zone.**
+  `.timezone(chrono_tz::Tz)` pins one task, `.try_timezone("Area/City")` is
+  the fallible sibling for a zone name that only exists at runtime, and
+  `Schedule::timezone(tz)` sets a default for every task registered after
+  it. Nothing changes for a task that pins no zone: it is still evaluated
+  against the process's local zone. A pinned zone affects due-ness only -
+  the scheduler still ticks once per process minute and the same-minute
+  dedup gate is untouched. Note that a zone observing daylight saving makes
+  some wall-clock minutes happen twice and others not at all, so a task
+  pinned to such a minute can run twice or be skipped; the scheduling
+  chapter carries the full warning. `schedule:list` gained a `--timezone`
+  option and two columns: the zone a printed expression is written in, and
+  the next minute the task fires. A pinned task's expression is rewritten
+  into the listing's zone, splitting into several lines when it straddles
+  midnight there, and is left exactly as written when a faithful rewrite is
+  impossible - across a daylight-saving transition, when a day rollover
+  would have to move a restricted day-of-month and day-of-week together, or
+  when it would have to decide how long February is. `chrono_tz::Tz` is
+  re-exported from the crate root, so consuming apps do not add `chrono-tz`
+  to their own `Cargo.toml`.
+- **A Laravel-shaped image subsystem, in `suprnova::media` behind the default-on
+  `media` feature.**
+  `Image::from_bytes/from_path/from_disk/from_upload/from_stream` builds a lazy
+  pipeline - `resize`, `scale`, `crop`, `cover`, `contain`, `rotate` at any
+  angle, `flip_vertically`/`flip_horizontally`, `blur`, `sharpen`, `grayscale`,
+  `to_format`, `quality` - finished with `to_bytes`, `to_response`, `save`,
+  `store`, `dimensions`, `mime_type`, or `dominant_color`. Reads and writes
+  PNG, JPEG, WebP, GIF, and BMP; AVIF output is deferred until the in-house
+  AV1 encoder publishes, at which point it is one new `OutputFormat` variant
+  and no other change. Like Laravel's `gd`/`imagick` split there are two
+  drivers: `IMAGE_DRIVER=oxideav` (the default) runs on the pure-Rust
+  [OxideAV](https://github.com/OxideAV) codec family with no native library
+  and nothing to install, and `IMAGE_DRIVER=magick` shells out to a
+  host-installed ImageMagick 7 for wider input support including HEIC.
+  Decode limits (`IMAGE_MAX_DIMENSION`, `IMAGE_MAX_ALLOC_BYTES`) are checked
+  against the input's own header before anything is allocated - including the
+  inner bitstream of an extended WebP, whose advisory canvas size cannot be
+  used to smuggle a larger frame past the gate - and all pixel work runs on a
+  blocking thread. The `magick` driver pins the input coder by name rather
+  than letting ImageMagick pick one from the bytes, and bounds every
+  invocation with `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver` is the trait
+  boundary for anything else. The module is named `media` because the
+  OxideAV-backed audio and video surfaces will live beside it.
+  [Images](manual/images.md)
+- **The WebP gate carries one fixed, non-configurable bound.** A WebP declares
+  its real decoded size in its innermost bitstream chunk, so the framework
+  walks the container to find it; that walk visits at most 4096 chunks per
+  level and follows two levels of nesting, and a file past either is refused
+  rather than measured. Reporting a number from an unfinished walk would be a
+  gate that enough filler chunks could step around. No `IMAGE_MAX_*` variable
+  affects it and the error says as much. A 300-frame animation is unaffected;
+  a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
+
 - **OAuth can now be installed without replacing an application's existing
   password and session authority.** `MagnetarOAuthOnlyConfig` and
   `init_magnetar_oauth_only` install the default ceremony and provider engine
   while leaving the password and passkey slots empty. Applications with an
   existing `users` table can call `verify_oauth_identity`, map the verified
   provider subject themselves, and establish their normal framework session.
+
+### Changed
+
+- **`DB::transaction` can now return `Err` after a successful commit**, when an
+  after-commit callback fails: the message reads `after-commit callback failed
+  (the transaction itself committed): …`, the closure's return value is lost and
+  its writes are not. `DB::transaction_with_attempts` never retries that error,
+  however deadlock-shaped the callback's own message reads - re-running a closure
+  whose writes are already durable would apply them twice.
+- **New validation catalog key: `validation-password-unverifiable`.** A custom
+  `UncompromisedVerifier` that returns `Err` no longer puts its own error text
+  in the 422 body verbatim. That text is logged at `error` instead, and the
+  response carries this key, rendering as "The { $field } could not be checked
+  against known data leaks. Please try again." - the check did not run, which is
+  not the same as the password being bad, and infrastructure detail does not
+  belong in a client response. An app shipping its own validation catalog has to
+  add the key, or its users see the built-in English fallback.
+- **The `Image` upload validator is now `ImageFile`.** `suprnova::Image` is the
+  new image-manipulation pipeline type, matching `Illuminate\Image\Image`,
+  and the magic-byte upload rule takes the name Laravel gives the same rule
+  class, `Illuminate\Validation\Rules\ImageFile`. Migration is one line per
+  use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. Pre-1.0 churn absorbed by the
+  git-tag distribution model.
+
+### Removed
+
+- **The unused direct `image` dependency is gone.** It had been a base
+  dependency with zero use sites anywhere in the workspace, pulling JPEG, PNG,
+  WebP, and GIF codecs in for nothing; dropping it removes `gif`, `image-webp`,
+  `zune-jpeg`, `color_quant`, and `weezl` from the tree. The crate itself still
+  appears transitively, with only its `png` feature, behind `totp-rs`'s
+  QR-code rendering. The new image subsystem is built on the OxideAV crates
+  behind the `media` feature instead.
 
 ### Fixed
 
@@ -24,6 +239,28 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   authentication authorities.
 
 ### Upgrading
+
+- **`Image` is a different type now; the upload validator is `ImageFile`.**
+  Source-breaking for anyone using the magic-byte upload rule. Rename it at
+  every use site: `UploadedFile<(Image, MaxSize<N>)>` becomes
+  `UploadedFile<(ImageFile, MaxSize<N>)>`. `suprnova::Image` still resolves, but
+  it is now the image-manipulation pipeline type, so a missed rename fails to
+  compile rather than changing behaviour silently.
+- **`EnvelopeOverrides` gained a public `after_commit: Option<bool>` field.**
+  Every construction in this repo and in the scaffolded templates uses
+  `..Default::default()`, which needs no change. Code that builds an
+  `EnvelopeOverrides` with an exhaustive struct literal has to name the new
+  field; `after_commit: None` keeps today's behaviour, which is to defer to
+  `Job::after_commit()`. Nothing else changes: `after_commit()` defaults to
+  `false`, so no existing job starts waiting for a commit it did not before.
+- **`Envelope` gained a public `unique_lock_owner: Option<String>` field.** The
+  wire format is unchanged - the field is `#[serde(default)]` and skipped when
+  `None`, so envelopes round-trip byte-identically in both directions and
+  `schema_version` stays at 2 - but any code that builds an `Envelope` with a
+  struct literal now has to name it. Add `unique_lock_owner: None` unless you
+  are deliberately carrying a uniqueness lock across the push. Code that only
+  reads envelopes, or builds them through `Queue::push` and its siblings, needs
+  no change.
 
 - Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application
   already owns users, passwords, framework sessions, and remember-me state.

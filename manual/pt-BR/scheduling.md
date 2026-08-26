@@ -297,6 +297,116 @@ específico:
 .monthly().at("00:00")         // Primeiro dia do mês à meia-noite
 ```
 
+### Fusos horários
+
+Por padrão, o agendador lê toda expressão cron contra o fuso local do
+processo, qualquer que seja o `TZ` com que o contêiner foi iniciado. Fixe
+uma tarefa em um fuso IANA nomeado quando o agendamento dela pertencer a um
+lugar, e não a um servidor:
+
+```rust
+use suprnova::chrono_tz;
+
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .timezone(chrono_tz::America::New_York)
+        .name("report:generate")
+);
+```
+
+O `timezone` recebe um `chrono_tz::Tz` tipado, então um fuso escrito errado
+é um erro de compilação, e não uma tarefa que roda em silêncio na hora
+errada. As constantes de fuso vivem sob `suprnova::chrono_tz`
+(`chrono_tz::Asia::Tokyo`, `chrono_tz::Europe::Berlin` e assim por diante),
+reexportadas para que você não precise de `chrono-tz` no seu próprio
+`Cargo.toml`.
+
+Quando o nome do fuso só existe em runtime - um valor de configuração, uma
+coluna de tenant -, use o irmão falível:
+
+```rust
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .try_timezone(&tenant.timezone)?   // Err(String) em um fuso desconhecido
+        .name("report:generate")
+);
+```
+
+Um fuso fixado muda exatamente uma coisa: contra qual relógio de parede os
+cinco campos do cron são lidos. O agendador ainda dá um tick por minuto de
+processo, e o gate de deduplicação do mesmo minuto não é afetado.
+
+#### Um padrão para todo o agendamento
+
+Se a maioria das suas tarefas pertence a um fuso de negócio, defina-o uma
+vez no agendamento em vez de repeti-lo em toda tarefa:
+
+```rust
+pub fn register(schedule: &mut Schedule) {
+    schedule.timezone(chrono_tz::America::Chicago);
+
+    // Lido como 02:00 America/Chicago
+    let nightly = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("02:00")
+        .name("nightly");
+    schedule.add(nightly);
+
+    // Um fuso explícito por tarefa sempre ganha
+    let tokyo = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("09:00")
+        .timezone(chrono_tz::Asia::Tokyo)
+        .name("tokyo-open");
+    schedule.add(tokyo);
+}
+```
+
+O padrão é aplicado quando uma tarefa é adicionada, então ele cobre as
+tarefas registradas depois da chamada e deixa as anteriores em paz.
+
+#### Horário de verão
+
+Alguns fusos observam horário de verão. Quando os relógios mudam, uma
+tarefa fixada em um fuso desses pode rodar duas vezes ou não rodar nenhuma:
+
+- Ao atrasar o relógio, uma hora de relógio de parede acontece duas vezes.
+  Uma tarefa às `01:30` casa nas duas passagens. São dois minutos
+  diferentes de tempo real, então o gate de deduplicação do mesmo minuto
+  não os funde e a tarefa roda duas vezes.
+- Ao adiantar o relógio, uma hora de relógio de parede nunca acontece. Uma
+  tarefa às `02:30` é pulada inteiramente naquele dia.
+
+Evite agendamento com fuso horário onde puder, e prefira um fuso sem
+horário de verão (`chrono_tz::UTC`) para qualquer coisa que precise rodar
+exatamente uma vez.
+
+#### Lendo a listagem em outro fuso
+
+O `schedule:list` recebe `--timezone` e mostra tanto a expressão cron
+quanto o próximo horário de execução como eles se leem naquele fuso. Veja
+[Listar tarefas](#listar-tarefas) para uma saída trabalhada.
+
+### Por que Suprnova diverge: fusos horários
+
+O `timezone()` do Laravel recebe uma string e o padrão para todo o
+agendamento vem de uma chave de configuração `app.schedule_timezone`. O
+Suprnova recebe um `chrono_tz::Tz` tipado e não tem chave de configuração:
+o `Schedule::timezone` na sua função `schedule::register` é o único lugar
+em que um padrão é definido, então o agendamento se lê de cima a baixo sem
+um segundo arquivo a consultar.
+
+O padrão do Suprnova quando nada está fixado é o fuso local do processo, e
+não um fuso horário de aplicação configurado. Esse é o comportamento que o
+agendador sempre teve, e ele continua sendo o padrão para que acrescentar
+este recurso não mude nada para agendamentos que não o usam.
+
 ### Expressões cron customizadas
 
 Para controle total, use a sintaxe cron:
@@ -562,10 +672,59 @@ suprnova schedule:list
 Saída:
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
+
+Cada linha traz o nome da tarefa, a expressão cron, um rótulo de fuso
+opcional, o próximo horário em que a tarefa dispara e a descrição da tarefa
+se ela tiver uma.
+
+O `next:` é o primeiro minuto depois de agora em que a expressão casa,
+calculado no fuso em que a tarefa é avaliada e então mostrado no fuso da
+listagem. Uma expressão que nunca pode casar (`0 0 30 2 *` nomeia uma data
+que não existe) imprime `next: never`.
+
+O fuso da listagem é UTC, a menos que você passe `--timezone`. O
+`cleanup:logs` e o `send:reminders` acima não fixaram fuso, então as
+expressões deles são impressas como escritas - o agendador as lê contra o
+fuso local do processo, que não tem nome IANA de onde converter - e não
+carregam rótulo de fuso. O `report:generate` fixou `America/New_York` e
+pediu `02:00`, então a expressão dele é reescrita para o fuso da listagem e
+rotulada com ele.
+
+```bash
+suprnova schedule:list --timezone=Asia/Tokyo
+```
+
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 12:00 JST
+  send:reminders [0 9 * * *] next: 2026-05-28 18:00 JST
+  report:generate [0 15 * * *] (Asia/Tokyo) next: 2026-05-29 15:00 JST
+```
+
+Uma tarefa pode ocupar várias linhas. Uma expressão que atravessa a
+meia-noite no fuso da listagem precisa de uma linha de cron por lado,
+porque nenhuma expressão de cinco campos sozinha descreve as duas:
+
+```
+  monday-digest [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+  monday-digest [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+```
+
+O `next:` pertence à tarefa, não à linha, então ele se repete: as duas
+linhas descrevem a mesma tarefa e a mesma execução por vir.
+
+Algumas conversões são recusadas em vez de aproximadas, e a expressão
+recusada é impressa exatamente como escrita, rotulada com o fuso da própria
+tarefa. Uma conversão é recusada quando uma transição de horário de verão
+cai entre as duas próximas execuções (nenhuma expressão única está certa
+dos dois lados), quando uma virada de dia teria de mover juntos um dia do
+mês restrito e um dia da semana restrito (o cron faz OR desses dois campos,
+então deslocar os dois mudaria quais dias casam), ou quando uma virada
+teria de decidir quantos dias tem fevereiro.
 
 ## Configuração de produção
 

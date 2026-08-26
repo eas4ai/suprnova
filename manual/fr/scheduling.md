@@ -254,24 +254,24 @@ s'exécuter :
 | `.hourly_at(30)` | S'exécute chaque heure à la minute 30 |
 | `.every_two_hours()` / `.every_three_hours()` / `.every_four_hours()` / `.every_six_hours()` | S'exécute à l'heure pile toutes les N heures |
 | `.daily()` | S'exécute chaque jour à minuit |
-| `.daily_at("03:00")` | S'exécute chaque jour à 3h00 |
-| `.twice_daily(1, 13)` | S'exécute deux fois par jour (par ex. 1h00 et 13h00) |
+| `.daily_at("03:00")` | S'exécute chaque jour à 3 h |
+| `.twice_daily(1, 13)` | S'exécute deux fois par jour (p. ex. 1 h et 13 h) |
 | `.weekly()` | S'exécute chaque semaine le dimanche à minuit |
 | `.monthly()` | S'exécute chaque mois le 1er à minuit |
-| `.monthly_on(15)` | S'exécute chaque mois à un jour spécifique |
-| `.quarterly()` | S'exécute le 1er de janvier/avril/juillet/octobre à minuit |
+| `.monthly_on(15)` | S'exécute chaque mois un jour précis |
+| `.quarterly()` | S'exécute le 1er janvier, avril, juillet et octobre à minuit |
 | `.yearly()` | S'exécute le 1er janvier à minuit |
 
-### Planifications pour des jours spécifiques
+### Planifications par jour
 
 ```rust
 use suprnova::DayOfWeek;
 
-// S'exécute à des jours spécifiques
+// S'exécute à des jours précis
 .weekly_on(DayOfWeek::Monday)
 .weekly_on(DayOfWeek::Friday)
 
-// Méthodes raccourcies par jour
+// Méthodes de jour abrégées
 .sundays()
 .mondays()
 .tuesdays()
@@ -283,22 +283,139 @@ use suprnova::DayOfWeek;
 // Plusieurs jours
 .days(&[DayOfWeek::Monday, DayOfWeek::Wednesday, DayOfWeek::Friday])
 
-// Jours de semaine/Week-ends
-.weekdays()  // Lundi-vendredi
-.weekends()  // Samedi-dimanche
+// Jours ouvrés / week-ends
+.weekdays()  // Du lundi au vendredi
+.weekends()  // Samedi et dimanche
 ```
 
 ### Modificateurs d'heure
 
-Chaînez `.at()` avec n'importe quelle planification pour définir une heure
-spécifique :
+Enchaînez `.at()` sur n'importe quelle planification pour fixer une heure
+précise :
 
 ```rust
-.daily().at("14:30")           // Chaque jour à 14h30
-.weekly().at("09:00")          // Chaque semaine à 9h00
-.mondays().at("08:00")         // Chaque lundi à 8h00
-.monthly().at("00:00")         // Premier du mois à minuit
+.daily().at("14:30")           // Chaque jour à 14 h 30
+.weekly().at("09:00")          // Chaque semaine à 9 h
+.mondays().at("08:00")         // Chaque lundi à 8 h
+.monthly().at("00:00")         // Le 1er du mois à minuit
 ```
+
+### Fuseaux horaires
+
+Par défaut, le planificateur lit chaque expression cron par rapport à la
+zone locale du processus, quel que soit le `TZ` avec lequel le conteneur a
+démarré. Épinglez une tâche à une zone IANA nommée quand sa planification
+appartient à un lieu plutôt qu'à un serveur :
+
+```rust
+use suprnova::chrono_tz;
+
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .timezone(chrono_tz::America::New_York)
+        .name("report:generate")
+);
+```
+
+`timezone` prend un `chrono_tz::Tz` typé, si bien qu'une zone mal
+orthographiée est une erreur de compilation plutôt qu'une tâche qui tourne
+discrètement à la mauvaise heure. Les constantes de zone vivent sous
+`suprnova::chrono_tz` (`chrono_tz::Asia::Tokyo`,
+`chrono_tz::Europe::Berlin`, et ainsi de suite), réexportées pour que vous
+n'ayez pas besoin de `chrono-tz` dans votre propre `Cargo.toml`.
+
+Quand le nom de zone n'existe qu'à l'exécution - une valeur de
+configuration, une colonne de locataire -, utilisez l'homologue faillible :
+
+```rust
+schedule.add(
+    schedule.task(GenerateReportTask::new())
+        .daily()
+        .at("02:00")
+        .try_timezone(&tenant.timezone)?   // Err(String) si la zone est inconnue
+        .name("report:generate")
+);
+```
+
+Une zone épinglée ne change qu'une seule chose : l'horloge murale par
+rapport à laquelle les cinq champs cron sont lus. Le planificateur bat
+toujours une fois par minute de processus, et la barrière de
+dédoublonnage à la même minute n'est pas affectée.
+
+#### Un défaut pour toute la planification
+
+Si la plupart de vos tâches appartiennent à une même zone métier,
+définissez-la une fois sur la planification plutôt que de la répéter sur
+chaque tâche :
+
+```rust
+pub fn register(schedule: &mut Schedule) {
+    schedule.timezone(chrono_tz::America::Chicago);
+
+    // Lu comme 02:00 America/Chicago
+    let nightly = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("02:00")
+        .name("nightly");
+    schedule.add(nightly);
+
+    // Une zone explicite par tâche l'emporte toujours
+    let tokyo = schedule
+        .call(|| async { Ok(()) })
+        .daily()
+        .at("09:00")
+        .timezone(chrono_tz::Asia::Tokyo)
+        .name("tokyo-open");
+    schedule.add(tokyo);
+}
+```
+
+Le défaut est appliqué au moment où une tâche est ajoutée : il couvre donc
+les tâches enregistrées après l'appel et laisse les précédentes
+tranquilles.
+
+#### Heure d'été
+
+Certaines zones observent l'heure d'été. Quand les horloges changent, une
+tâche épinglée à une telle zone peut s'exécuter deux fois ou ne pas
+s'exécuter du tout :
+
+- Au passage à l'heure d'hiver, une heure d'horloge murale se produit deux
+  fois. Une tâche à `01:30` correspond aux deux passages. Ce sont deux
+  minutes différentes de temps réel, donc la barrière de dédoublonnage à
+  la même minute ne les fusionne pas et la tâche s'exécute deux fois.
+- Au passage à l'heure d'été, une heure d'horloge murale n'a jamais lieu.
+  Une tâche à `02:30` est entièrement sautée ce jour-là.
+
+Évitez la planification par fuseau horaire quand vous le pouvez, et
+préférez une zone sans heure d'été (`chrono_tz::UTC`) pour tout ce qui
+doit s'exécuter exactement une fois.
+
+#### Lire le listing dans une autre zone
+
+`schedule:list` prend `--timezone` et affiche à la fois l'expression cron
+et l'heure de la prochaine exécution telles qu'elles se lisent dans cette
+zone. Voir [Lister les tâches](#lister-les-tâches) pour une sortie
+détaillée.
+
+### Pourquoi Suprnova diverge : fuseaux horaires
+
+Le `timezone()` de Laravel prend une chaîne, et son défaut valable pour
+toute la planification vient d'une clé de configuration
+`app.schedule_timezone`. Suprnova prend un `chrono_tz::Tz` typé et n'a pas
+de clé de configuration : `Schedule::timezone` dans votre fonction
+`schedule::register` est le seul endroit où un défaut est posé, si bien
+que la planification se lit de haut en bas sans second fichier à
+consulter.
+
+Le défaut de Suprnova, quand rien n'est épinglé, est la zone locale du
+processus plutôt qu'un fuseau horaire d'application configuré. C'est le
+comportement que le planificateur a toujours eu, et il reste le défaut,
+pour que l'ajout de cette fonctionnalité ne change rien aux planifications
+qui ne s'en servent pas.
 
 ### Expressions cron personnalisées
 
@@ -307,19 +424,19 @@ Pour un contrôle total, utilisez la syntaxe cron :
 ```rust
 // Format cron standard : minute heure jour-du-mois mois jour-de-la-semaine
 .cron("0 */2 * * *")    // Toutes les 2 heures
-.cron("30 4 * * 1-5")   // 4h30 les jours de semaine
-.cron("0 0 1,15 * *")   // Le 1er et le 15 de chaque mois
+.cron("30 4 * * 1-5")   // 4 h 30 les jours ouvrés
+.cron("0 0 1,15 * *")   // Les 1er et 15 de chaque mois
 ```
 
 `.cron(...)` **panique** si l'expression est malformée (mauvais nombre de
-champs, step/range/list non analysable). Utilisez `.try_cron(expr)` quand
-l'expression est fournie à l'exécution (configuration, saisie utilisateur)
-et que vous préférez propager l'erreur d'analyse :
+champs, pas/plage/liste non analysables). Utilisez `.try_cron(expr)` quand
+l'expression est fournie à l'exécution (configuration, saisie
+utilisateur) et que vous préférez propager l'erreur d'analyse :
 
 ```rust
 schedule.add(
     schedule.task(MyTask::new())
-        .try_cron(env_expr)?   // retourne Err(String) sur une expression invalide
+        .try_cron(env_expr)?   // retourne Err(String) sur une mauvaise expression
         .name("from-config")
 );
 ```
@@ -327,8 +444,8 @@ schedule.add(
 La même paire `panic` / `try_*` existe sur chaque méthode de builder à
 plage numérique : `try_hourly_at`, `try_daily_at`, `try_twice_daily`,
 `try_monthly_on`. Les variantes infaillibles paniquent sur des valeurs
-numériques hors limites (par ex. `daily_at("25:00")` ou `monthly_on(40)`)
-; leurs homologues faillibles retournent `Err(String)`.
+numériques hors plage (p. ex. `daily_at("25:00")` ou `monthly_on(40)`) ;
+les homologues faillibles retournent `Err(String)`.
 
 ## Configuration des tâches
 
@@ -531,14 +648,13 @@ processus a son propre état par tâche). Si vous avez besoin d'une
 coordination inter-processus à la même minute, superposez + `without_overlapping` + un backend Cache configuré - ensemble, ils
 couvrent les deux directions.
 
-
 ## Exécuter le planificateur
 
 suprnova fournit des commandes CLI pour exécuter les tâches planifiées :
 
-### Exécuter une fois
+### Exécution unique
 
-Exécute une fois toutes les tâches échues (typiquement appelée par cron
+Exécute une fois toutes les tâches échues (généralement appelée par cron
 chaque minute) :
 
 ```bash
@@ -547,13 +663,13 @@ suprnova schedule:run
 
 ### Mode daemon
 
-Tourne en continu, en vérifiant les tâches échues chaque minute :
+S'exécute en continu, en cherchant les tâches échues chaque minute :
 
 ```bash
 suprnova schedule:work
 ```
 
-C'est idéal pour le développement ou quand vous utilisez un
+C'est l'idéal pour le développement, ou lorsque vous utilisez un
 gestionnaire de processus comme systemd.
 
 ### Lister les tâches
@@ -567,10 +683,61 @@ suprnova schedule:list
 Sortie :
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
+
+Chaque ligne donne le nom de la tâche, l'expression cron, une étiquette de
+zone optionnelle, la prochaine fois où la tâche se déclenche, et la
+description de la tâche si elle en a une.
+
+`next:` est la première minute après maintenant à laquelle l'expression
+correspond, calculée dans la zone où la tâche est évaluée puis affichée
+dans la zone du listing. Une expression qui ne peut jamais correspondre
+(`0 0 30 2 *` nomme une date qui n'existe pas) affiche `next: never`.
+
+La zone du listing est UTC sauf si vous passez `--timezone`. Ci-dessus,
+`cleanup:logs` et `send:reminders` n'ont épinglé aucune zone : leurs
+expressions sont donc affichées telles qu'elles ont été écrites - le
+planificateur les lit par rapport à la zone locale du processus, qui n'a
+aucun nom IANA depuis lequel convertir - et elles ne portent aucune
+étiquette de zone. `report:generate` a épinglé `America/New_York` et
+demandé `02:00` : son expression est donc réécrite dans la zone du listing
+et étiquetée avec celle-ci.
+
+```bash
+suprnova schedule:list --timezone=Asia/Tokyo
+```
+
+```
+Registered scheduled tasks:
+  cleanup:logs [0 3 * * *] next: 2026-05-29 12:00 JST
+  send:reminders [0 9 * * *] next: 2026-05-28 18:00 JST
+  report:generate [0 15 * * *] (Asia/Tokyo) next: 2026-05-29 15:00 JST
+```
+
+Une tâche peut occuper plusieurs lignes. Une expression qui chevauche
+minuit dans la zone du listing a besoin d'une ligne cron par côté, parce
+qu'aucune expression unique à cinq champs ne décrit les deux :
+
+```
+  monday-digest [0 23 * * 1] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+  monday-digest [0 5 * * 2] (Asia/Tokyo) next: 2026-06-01 23:00 JST
+```
+
+`next:` appartient à la tâche, pas à la ligne, et il se répète donc : les
+deux lignes décrivent la même tâche et la même exécution à venir.
+
+Certaines conversions sont refusées plutôt qu'approximées, et l'expression
+refusée est affichée exactement telle qu'elle a été écrite, étiquetée avec
+la zone propre à la tâche. Une conversion est refusée quand une transition
+d'heure d'été tombe entre les deux prochaines exécutions (aucune
+expression n'est juste des deux côtés), quand un passage de jour devrait
+déplacer ensemble un jour-du-mois restreint et un jour-de-la-semaine
+restreint (cron fait un OU entre ces deux champs, donc décaler les deux
+changerait les jours qui correspondent), ou quand un passage de jour
+devrait décider de la longueur de février.
 
 ## Configuration en production
 

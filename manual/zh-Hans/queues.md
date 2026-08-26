@@ -67,6 +67,8 @@ run_worker(driver, cfg, shutdown).await;
 
 `Queue::bootstrap_from_env()` 会读取 `QUEUE_DRIVER`，接上匹配的驱动程序；`Queue::bootstrap_default()` 总是接上内存驱动程序。服务器的启动路径会替您调用这两者之一 - 大多数应用只需要通过环境变量来配置。
 
+`FailoverQueueDriver` 不是第六个后端。它包住上面这些驱动程序的一个有序列表，好让一个连接拒绝掉的推送能往下穿到下一个。参见[故障转移连接](#故障转移连接)。
+
 ### 环境配置
 
 ```bash
@@ -88,6 +90,93 @@ QUEUE_DB_TABLE=jobs
 
 Laravel 把每一个可排队的东西都路由经过总线，在分发时区分 `ShouldQueue` 作业。Suprnova 把两者拆开了：`Bus` 用于会返回一个类型化结果的同步工作，`Queue` 用于能在进程崩溃后存活下来的异步工作。PHP 需要这种隐式路由，因为它的每请求一个进程模型，让“晚一点、在另一个进程里做这件事”这种事很难用别的方式建模。Tokio 不需要 - 显式的 `Bus::dispatch` 对 `Queue::push`，更清晰、更快，并且在调用点就把持久性的选择摆出来了。并排对比请参见 [`bus.md`](bus.md)。
 
+## 故障转移连接
+
+`FailoverQueueDriver` 包住一个有序的连接列表。第一个连接拒绝掉的推送会在下一个上重试，依此类推沿着这个列表往下走，这样一次 Redis 故障就不会把每一次分发都变成一个丢失的作业。
+
+从环境变量配置它：
+
+```bash
+QUEUE_DRIVER=failover
+QUEUE_FAILOVER_CONNECTIONS=redis,database
+
+# 每一个连接都读它自己的变量，就和它单独作为
+# QUEUE_DRIVER 时完全一样。
+QUEUE_REDIS_URL=redis://127.0.0.1:6379
+QUEUE_DB_TABLE=jobs
+```
+
+或者当这些连接需要环境变量表达不了的运行时配置时，自己把它接起来：
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::queue::{
+    DatabaseQueueDriver, FailoverQueueDriver, Queue, QueueDriver, RedisQueueDriver,
+};
+use suprnova::{DB, FrameworkError};
+
+pub async fn register() -> Result<(), FrameworkError> {
+    let redis = RedisQueueDriver::connect(
+        "redis://127.0.0.1:6379",
+        "suprnova-queue",
+        "default",
+        "consumer-1",
+        Duration::from_secs(60),
+    )
+    .await?;
+    let database =
+        DatabaseQueueDriver::new(DB::connection()?.inner().clone(), "jobs".to_string())?;
+
+    let failover = FailoverQueueDriver::new(vec![
+        ("redis".to_string(), Arc::new(redis) as Arc<dyn QueueDriver>),
+        ("database".to_string(), Arc::new(database) as Arc<dyn QueueDriver>),
+    ])?;
+    Queue::set_driver(Arc::new(failover));
+    Ok(())
+}
+```
+
+每一项上的那个 `String` 是这个连接的标签，会在 `QueueFailedOver` 事件上被报告出来。它不是从驱动程序类型推导出来的，因为两个连接可以跑同一个驱动程序。
+
+当 `QUEUE_DRIVER=failover` 时，`QUEUE_FAILOVER_CONNECTIONS` 是必需的，而且这个列表里不能包含 `failover` 自己。一个点名了并不存在的驱动程序的条目是一个启动错误，而不是 `QUEUE_DRIVER` 对它自己施加的那种“警告并改用内存”的回退：在一条故障转移链里，一个悄悄变成了内存连接的笔误，会把一个易失的后端塞进一份持久的列表里。
+
+### 写操作会故障转移，读操作不会
+
+只有 `push` 和 `bulk_push` 会走这个连接列表。其他每一个操作 - `pop`、`ack`、`nack`、`release`、`settle`、`clear`、那四个计数器和那三个检查列举 - 都走**第一个**连接，绝不走别的。
+
+这种不对称是契约，不是遗漏。一个预留令牌只对签发它的那个驱动程序有意义，所以拿另一个连接去 ack，什么都结算不了，还会把两边都搞坏。计数器和列举遵循同样的规则，好让您检查到的东西，就是这个连接上的工作进程会排空的东西，而不是一个跨后端的、和任何工作进程的视角都对不上的总和。
+
+**跑在故障转移连接上的工作进程只排空主连接。** 那些转移到了后备连接上的作业，需要一个直接针对那个后备连接运行的工作进程：
+
+```bash
+# 排空这条故障转移链的主连接。
+QUEUE_DRIVER=failover QUEUE_FAILOVER_CONNECTIONS=redis,database ./app queue:work
+
+# 排空那些转移到了数据库上的作业。这个也要跑。
+QUEUE_DRIVER=database ./app queue:work
+```
+
+Laravel 的文档出于同样的原因带着同样的警告。
+
+这件事会波及到链，但只经由一扇门。工作进程会在一次调用里结算一个作业、并把一条[已排队的链](#已排队的链)的下一环入队，那次调用就是 `settle`，而这个装饰器只把那次调用委托给主连接。所以在一个事务性的主连接（比如数据库驱动程序）上，一个宕机的主连接会让这次结算失败，什么都不会转移出去：工作进程会把预留原样留着，靠可见性过期来重投这个作业。往下穿只发生在主连接回答 `Settled::Unsupported` 的时候 - 内存驱动程序和 Redis 驱动程序就是这么答的 - 因为那时工作进程会像任何一次普通推送那样，通过绑定的驱动程序把下一环推出去，而那次推送会往下穿。那条链剩下的部分接着就要等一个跑在后备连接上的工作进程。没有这样一个工作进程，这条链就停住了 - 那一环是持久的，什么都没丢，但也没有任何东西去跑它。
+
+### `QueueFailedOver` 事件
+
+每一个拒绝了一次推送的连接都会分发 `queue::events::QueueFailedOver { connection, job_name, exception }`，但只在那次把这个连接推*入*失败状态的推送上分发。一个已经被认为正在失败的连接会保持安静，直到后来有一次推送在它上面成功、把它重新武装起来。一次四小时的故障只产生一个事件，而不是每分发一次就来一个，这正是它能被当作告警来用的原因。
+
+`connection` 是那个失败了的连接的标签，不是那个接下了这个作业的连接的标签。
+
+当每一个连接都拒绝一次推送时，这次推送返回最后一个连接的错误。`bulk_push` 会把每一个信封分别推送，所以每一个都各自往下穿：一批被主连接接受了一半的作业绝不会被整批重新推到后备连接上，而且每个信封都保住它被构建时带的那个 `available_at`。一批不是原子的。如果有一个信封被每一个连接都拒绝了，`bulk_push` 会返回那个信封的错误，而在它之前的那些信封已经入队了。
+
+转移不是去重。这个装饰器绝不会对一个已被某个连接接受的信封再试一次，但一个写下了这个信封、*然后*才报告失败的连接，会在下一个连接上产生一个重复项，因为“写下了它但把确认弄丢了”和“根本没接下它”是没法区分的。两份副本携带同一个作业 id。这就是框架的至少一次投递契约，也正是那个在别处让处理程序幂等成为一项要求的契约 - 参见[幂等性是工作进程和您之间的契约](#幂等性是工作进程和您之间的契约)。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 的故障转移连接，是 `config/queue.php` 里的一个 `connections` 数组，通过连接注册表来解析。Suprnova 没有逐连接的驱动程序注册表 - 只有一个驱动程序被绑定在进程范围内 - 所以这些标签来自 `QUEUE_FAILOVER_CONNECTIONS`（或者来自您传给 `FailoverQueueDriver::new` 的那个 `String`），而读操作委托给的是第一个*驱动程序*，而不是一个具名连接。
+
+Laravel 的 `FailoverQueue::bulk` 会逐个循环这些作业，好让每一个的延迟都能存活下来。Suprnova 在任何驱动程序看到之前，就已经把延迟解析到了信封上，所以那个逐信封的循环白得了这一点 - 但这个循环仍然是让一批只落地一半的作业不被重复推送的关键，所以它留着。
+
 ## 推送的各种变体
 
 每一个推送变体都接受一个类型化的 `J: Job` 值，并在信封被提交给驱动程序时返回 - 而不是在处理程序运行时返回。
@@ -98,6 +187,7 @@ Laravel 把每一个可排队的东西都路由经过总线，在分发时区分
 | `Queue::push_later(job, at)` | 在某个特定的 `DateTime<Utc>` 时可用 |
 | `Queue::later(delay, job)` | 在从现在起 `delay` 之后可用 |
 | `Queue::push_with(job, overrides)` | 使用逐次推送 `EnvelopeOverrides` 立即入队 |
+| `Queue::push_after_commit(job)` | 在外围的 `DB::transaction` 提交时入队 |
 | `Queue::later_with(delay, job, overrides)` | 从现在起 `delay` 后可用，并使用逐次推送 `EnvelopeOverrides` |
 | `Queue::push_unique(job)` | 在 `J::unique_for` 期间内按 `J::unique_id` 去重；信封被推送时返回 `Ok(true)`，被一个仍然生效的去重键压制时返回 `Ok(false)` |
 | `Queue::push_unique_later(job, at)` | 唯一 + 定时 |
@@ -107,6 +197,51 @@ Laravel 把每一个可排队的东西都路由经过总线，在分发时区分
 `push_unique` 要求缓存层已经完成启动 - 这把去重锁住在 [`Cache`](cache.md) 里，由 [`Idempotency::commit_on_success`](idempotency.md) 实现。一次失败的推送会释放这个去重键，好让调用方重试；一次成功的推送则会把它持有 `J::unique_for` 秒。这个作业必须重写 `Job::unique_id(&self)` 让它返回 `Some(id)` - 返回 `None` 会得到一个内部错误。
 
 这个布尔值回答的是一个问题 - “这个作业在队列上吗？” - 而它背后还有第三种情形。如果这把去重锁的租约在推送飞行途中丢失了，推送仍然会完成（幂等层从不取消一个可能已经产生了效果的主体），您拿到的仍然是 `Ok(true)`，同时附带一条 `warn` 级别、点名这个作业和它唯一键的日志。作业确实入队了；未被证明的是，没有别人在并发地把同一个作业也入了队。您的处理程序本来就必须容忍重新投递，所以这不需要额外处理 - 但这条日志之所以在那里，是因为一大批这样的日志意味着支撑您那把去重锁的缓存正在吃紧。
+
+### 处理开始即释放唯一性
+
+一把唯一性锁通常会持续整个 `unique_for` 窗口，哪怕作业已经跑完了。当这把锁的存在是为了合并*排队中的*重复项、而不是为了把执行串行化时，请选择加入，让它在处理开始的那一刻就被释放：
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebuildSearchIndex {
+    index: String,
+}
+
+#[async_trait]
+impl Job for RebuildSearchIndex {
+    fn job_name() -> &'static str { "rebuild-search-index" }
+    fn unique_id(&self) -> Option<String> { Some(self.index.clone()) }
+    fn unique_until_processing() -> bool { true }
+    fn unique_for() -> Duration { Duration::from_secs(3600) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // 一次跑 20 分钟的重建，不会再把第 2 分钟到达的那次
+        // 重新分发吞掉了。
+        Ok(())
+    }
+}
+```
+
+工作进程会在这个作业的中间件走完之后、处理程序运行之前的那一刻释放这把锁。由此有四个后果：
+
+- 一个被中间件释放回队列的作业会保住它的锁。它还没有开始处理，所以对一个重复项来说什么都没变。
+- 一个被中间件以任何其他方式短路掉的作业会交出它的锁，因为它根本就不会去处理了。这涵盖了删除这个作业、把它送进死信，以及在从未调用处理程序的情况下报告它已完成。
+- 一个失败的作业会释放它的锁，并且仍然会被重试。这把锁在处理开始的那一刻就没了，所以在这次失败的尝试等完它的退避之前，一个重复项可以入队，于是您就有了同一个唯一 id 的两个信封。这就是这项选择加入所做的取舍。如果一次重试必须继续占住这个位置，请让 `unique_until_processing` 保持关闭，让 `unique_for` 的 TTL 覆盖整条尝试链。
+- 这次释放是按所有者范围来的。`push_unique` 会把这把锁的所有者令牌记在信封上，工作进程再用那个令牌来释放，所以一次被重投的尝试永远不可能释放掉一把此后由更新的一次分发获取到的锁。
+
+`unique_until_processing` 需要的和 `push_unique` 需要的是同样两件东西：一个返回 `Some(id)` 的 `unique_id`，以及一个已经完成启动的缓存层。
+
+在 `sync` 驱动程序下，处理程序是在那次取走了锁的 `push_unique` 调用内部内联运行的，所以这个作业释放的是一把名义上仍由它自己的调用方持有的锁。如果那个处理程序运行的时间超过了 `unique_for` 的三分之一，去重租约的续约器会注意到这把锁没了，并记一条租约丢失的警告，而 `push_unique` 还会在上面再叠一条它自己的“无法证明排他性”的警告。这两条在这里都是预期之中的，而不是故障：作业跑了，推送返回 `Ok(true)`，而锁没了是因为这个作业自己把它释放了。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 会在处理程序返回之后，就释放一个*普通*唯一作业的锁。Suprnova 则让那把锁随着 `unique_for` 的 TTL 过期，这在一个工作进程死在作业中途时，能让去重窗口保持诚实：您配置的那个窗口就是您得到的那个窗口，不管处理程序有没有返回过。`unique_until_processing` 在两个框架里的行为是一样的。
+
+Suprnova 还从不强行释放一把唯一性锁。对于一次不携带所有者令牌的首次尝试，Laravel 会回退到强行释放。在 Suprnova 里，唯一那些不带令牌就到达工作进程的信封，是在这个令牌存在之前就已入队的信封，而它们保持 TTL 过期，而不是去冒一个删掉更新那次分发的锁的风险。
 
 ### 使用 `EnvelopeOverrides` 的逐次推送覆盖
 
@@ -139,8 +274,9 @@ Queue::later_with(Duration::from_secs(60), SendWelcomeEmail { user_id: 42 }, ove
 | `fail_on_timeout` | `Job::fail_on_timeout()` |
 | `max_tries` | `Job::max_tries()` |
 | `backoff` | `Job::backoff()` |
+| `after_commit` | `Job::after_commit()` |
 
-`EnvelopeOverrides` 是 `Mail::on_queue`/`.on_connection()` 和 `Notify::queue` 的逐通知队列调优共同构建所基于的原语 - 参见 [Mail](mail.md#queueing) 和 [通知](notifications.md)。
+`EnvelopeOverrides` 是 `Mail::on_queue`/`.on_connection()` 和 `Notify::queue` 的逐通知队列调优共同构建所基于的原语 - 参见[邮件](mail.md#queueing)和[通知](notifications.md)。
 
 ### 作业声明的延迟
 
@@ -163,6 +299,85 @@ impl Job for SendDigest {
 
 Laravel 的 `$job->delay` 是实例属性，逐次分发设置（`SendDigest::dispatch($user)->delay(60)`），因此同一类的两次分发可携带不同的延迟。这里的 `Job::delay()` 则是类级默认值，和 `Job::queue()` 或 `Job::max_tries()` 一样 - 需要依据自身数据计算延迟的分发使用 `Queue::later`/`push_later`，它们本来就优先于声明的默认值。
 
+### 提交后分发
+
+一个在 [`DB::transaction`](database.md#transactions) 内部推送的作业，正在和那个事务赛跑。另一个进程上的工作进程可能会弹出这个信封、去找那个事务还开着不放的那一行，然后失败 - 或者更糟：事务回滚了，而这个作业针对一份已经不存在的数据跑了起来。
+
+让这个作业选择加入，去等待这次提交：
+
+```rust
+use suprnova::{DB, FrameworkError, Job, Queue, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SendReceipt {
+    order_id: i64,
+}
+
+#[async_trait]
+impl Job for SendReceipt {
+    fn job_name() -> &'static str { "send-receipt" }
+    fn after_commit() -> bool { true }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        // 等到这里运行的时候，订单那一行保证已经是持久的了。
+        Ok(())
+    }
+}
+
+DB::transaction(|_tx| {
+    Box::pin(async move {
+        let order = Order::create(suprnova::attrs! { total: 4999i64 }).await?;
+        // 这里什么都不会到达驱动程序。
+        Queue::push(SendReceipt { order_id: order.id }).await?;
+        Ok::<(), FrameworkError>(())
+    })
+})
+.await?;
+// 信封现在才上队列，而且只在现在。
+```
+
+三条规则覆盖了每一种情况：
+
+- **在一个事务内部，整个推送都会等待这次提交。** 不只是驱动程序那一次写：信封的构建、`JobQueueing` 事件和 `JobQueued` 事件也全都发生在提交时刻，所以绝不会有监听器被告知一个随后被回滚丢弃掉的作业。
+- **一次回滚会把它丢弃。** 这次推送干脆就没发生过。如果它取走过一把唯一性锁，回滚会把那把锁还回去。
+- **在事务之外，推送立即发生。** 正是这一点让这项选择加入可以安全地声明在作业类型上：一个分发点不必知道自己所处的那条代码路径是不是事务性的。
+
+一次[保存点](database.md#savepoints)回滚，对登记在它内部的一切来说都算一次回滚。`tx.rollback_to("name")` 会丢弃自 `tx.savepoint("name")` 以来被推迟的那些推送，并且就在那一刻释放它们取走的锁，于是同一个事务里的一次重新分发能再次赢得这个键。在这个保存点之前做出的推送不受影响，而一个您从不回滚的保存点，会把登记在它内部的一切都保留下来。
+
+如果要按单次分发、而不是按作业类型来控制，请用 `EnvelopeOverrides::after_commit`。`Some(true)` 就是 Laravel 的 `afterCommit()`，并带有简写 `Queue::push_after_commit(job)`；`Some(false)` 就是 Laravel 的 `beforeCommit()`，供那一次必须在提交落地之前就对工作进程可见的分发使用：
+
+```rust
+use suprnova::queue::{EnvelopeOverrides, Queue};
+
+// 推迟一个类型上并没有选择加入的作业。
+Queue::push_after_commit(SendWelcomeEmail { user_id: 42 }).await?;
+
+// 即使作业类型选择了加入，也立即推送。
+Queue::push_with(
+    SendReceipt { order_id: 7 },
+    EnvelopeOverrides { after_commit: Some(false), ..Default::default() },
+)
+.await?;
+```
+
+一次被推迟的 `Queue::push` 会以提交、而不是以推送为基准来重新解析 [`Job::delay()`](#作业声明的延迟)，因为这个延迟的意思是“在分发之后等这么久”，而对一个被推迟的作业来说，分发*就是*提交。一个显式的时间戳是调用方关于某个时刻的意图，所以 `Queue::push_later`、`Queue::later` 和 `Queue::later_with` 会原封不动地把自己那个时间戳带过这次推迟。
+
+`Queue::push_unique` 在推迟时带着一处刻意的不对称：去重锁是立即取走的，所以同一个事务里对同一个唯一 id 的第二次 `push_unique` 仍然会被压制，也仍然报告 `Ok(false)`。等待的只有信封。赢家会报告 `Ok(true)`，哪怕它的推送还悬着，因为这次推送是一定会发生的。一次回滚会按所有者范围释放它取走的那把锁，所以 `unique_for` 窗口绝不会被一次根本没发生过的分发挡住 - 任何其他让提交没能落地的结局也一样，包括一次被拒绝的 `COMMIT`。这项保证唯一的界限就是 TTL 本身：一个开着的时间超过 `unique_for` 的事务，可能会让它的锁过期、并在飞行途中被另一次分发重新取走，所以如果去重要紧，请给 `unique_for` 留出超过您最长事务的余量。`push_unique*` 这一家子不接受 `EnvelopeOverrides`，所以决定一次唯一推送是否推迟的只有 `Job::after_commit()` - 它没有逐次推送的覆盖。
+
+批次和链不会推迟，就像它们不会查询 `Job::delay()` 一样：`Queue::batch()` 和 `Queue::chain()` 会直接构建并推送它们的信封。如果一个批次必须等待一次提交，请把那次 `.dispatch()` 调用包起来，让它在事务返回之后再运行。
+
+已排队的[邮件](mail.md#queueing)和[通知](notifications.md)也不会推迟。它们各自搭在一个共享的作业类型上（`SendMailJob` / `SendNotificationJob`），而 `Mailable` 或 `Notification` 上目前还没有 `ShouldQueueAfterCommit` 的对应物，所以一次在事务内部的 `Mail::queue` 或 `Notify::queue` 调用会立即到达驱动程序。请在事务返回之后再发送它们。
+
+在 `Queue::fake()` 之下，一次推送会被立即记录下来，连同推迟与否一起，所以一个测试不必提交任何东西就能对它断言。这与 Laravel 的 `Bus::fake` 一致，也正是它让一个测试能够一边驱动一个事务性的处理程序，一边就地对它的那些分发做断言。
+
+### 为什么 Suprnova 有所不同
+
+`Queue::bulk` 是单态的 - 每一个元素共享同一个具体的 `J` - 所以它的提交后划分对这次调用来说是全有或全无的。Laravel 会把一个异构数组划分成推迟的和立即的两半；这里没有什么可划分的。
+
+推迟是绑在闭包形式上的。一次在手动 [`DB::begin_transaction`](database.md#manual-form) 内部的推送会**立即**发生，因为手动模式不安装任何环境事务，因此也没有一次提交可以把回调挂上去。在那里推迟，等于排上一个永远不会有人去跑的回调，而一次悄无声息消失掉的分发，比一次发生得太早的分发更糟。当一次分发必须等待提交时，请伸手去拿 `DB::transaction`。
+
+Laravel 还会把一个连接级的 `after_commit` 配置键，当作它优先级链上的最后一层回退来读。Suprnova 到逐次推送的覆盖、再到作业自己的 `Job::after_commit()` 就停下了：这里的队列连接不携带它们自己的分发策略。
+
 ## 作业配置
 
 覆盖 `Job` 的关联函数，逐个实现地去调优行为：
@@ -176,8 +391,8 @@ impl Job for SendWelcomeEmail {
     fn job_name() -> &'static str { "SendWelcomeEmail" }
 
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
-    fn delay() -> Option<Duration> { None }                // 默认：不延迟
 
+    fn delay() -> Option<Duration> { None }                // 默认值：不延迟
     fn max_tries() -> u32 { 5 }                            // 默认值：3
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
     fn fail_on_timeout() -> bool { false }                 // 默认值：false（超时会重试）
@@ -188,8 +403,9 @@ impl Job for SendWelcomeEmail {
         Some(format!("welcome:{}", self.user_id))
     }
     fn unique_for() -> Duration { Duration::from_secs(600) }  // 默认值：5 分钟
+    fn unique_until_processing() -> bool { true }          // 默认值：false（TTL 就是那个窗口）
     fn middleware() -> Vec<std::sync::Arc<dyn JobMiddleware>> {
-        vec![/* 参见下面的"作业中间件" */]
+        vec![/* 参见下面的“作业中间件” */]
     }
 }
 ```
@@ -620,7 +836,40 @@ Queue::clear().await?;           // 丢弃每一个信封，返回这个数量
 Queue::driver_name()?;           // 已配置的驱动程序名字，用于日志/管理
 ```
 
-`QueueDriver` trait 为 `size` / `pending_size` / `reserved_size` / `delayed_size` / `clear` 声明了默认实现；`MemoryQueueDriver` 和 `DatabaseQueueDriver` 原生实现了它们。`RedisQueueDriver` 对 `size` / `clear` 会返回一个“unsupported”错误 - 这些请使用管理用的 redis-cli。
+`QueueDriver` trait 为 `size` / `pending_size` / `reserved_size` / `delayed_size` / `clear` 声明了默认实现；`MemoryQueueDriver`、`DatabaseQueueDriver` 和 `RedisQueueDriver` 全都原生实现了它们。
+
+### 检查队列
+
+计数告诉您排了多少东西；有时候您需要看到那些真正的信封 - 一块管理面板、一次调试会话，或者一个“到底是什么卡住了”的问题。`Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` 会把那些尺寸计数器所计的同一批信息返回给您，形式是一份 `InspectedJob` DTO 的列举：
+
+```rust
+use suprnova::queue::{InspectedJob, Queue};
+
+let pending: Vec<InspectedJob> = Queue::pending_jobs(None).await?;
+let billing_only: Vec<InspectedJob> = Queue::pending_jobs(Some("billing")).await?;
+let delayed = Queue::delayed_jobs(None).await?;
+let reserved = Queue::reserved_jobs(None).await?;
+
+for job in &pending {
+    println!(
+        "{} attempts={} queue={:?} payload={}",
+        job.name, job.attempts, job.queue, job.payload
+    );
+}
+```
+
+`InspectedJob` 携带 `id`、`queue`、`name`、`attempts`、`payload` 和 `created_at`。`id` 和 `created_at` 是 `Option`：数据库驱动程序的列举，对于一行 `envelope_json` 解码失败的记录仍然会报告出来 - 以 `id: None` 和 `payload: {"unparseable": true}` 的形式 - 而不是把它丢掉，从而把一个毒丸作业藏起来不让查看的人看见；`Queue::fake()` 的投影从不记录一个独立于 `available_at` 的分发时间戳，所以在那里 `created_at` 永远是 `None`。
+
+在内存驱动程序上，`delayed_size()` 直接读延迟存储的长度，而 `delayed_jobs()` 和 `pending_jobs()` 会先把任何一个 `available_at` 已经过去的条目提升上来。在一个作业到期、和后台回收器下一次 50 毫秒节拍之间那个很窄的窗口里，`delayed_size()` 仍然可能数进一个 `delayed_jobs()` 已经提升进 `pending_jobs()` 的作业 - 这些列举是更当下的那份视图；那里对不上是预期之中的，不是缺陷。
+
+一个可见性超时已经失效的预留，会一直出现在 `reserved_jobs()` 里，直到一次 `pop` 或者后台回收器把它收回。只有这两者会收回，而收回才是消耗一次尝试的动作，所以一次列举调用永远不会改变一个作业的尝试次数，不管您调用它多少次。
+
+#### 为什么 Suprnova 有所不同
+
+- **一个带 `Option<&str>` 的方法，而不是每种列举配一对方法。** Laravel 在 `pendingJobs($queue)` 之外还另发了一个 `allPendingJobs()`；在这里 `queue: None` 把这两者收拢成一次调用。`delayedJobs`/`allDelayedJobs` 和 `reservedJobs`/`allReservedJobs` 也是同样的形态。
+- **trait 的默认实现是一个诚实的 `Err`，而不是一个空集合。** Laravel 的 Beanstalkd 和 SQS 驱动程序，即使对一个明明有作业的队列，也会从这些方法返回 `[]` - 这是一种隐瞒式的谎言，一个第三方驱动程序作者可能不知不觉就照抄了。一个还没实现检查的 Suprnova 驱动程序会明说；`sync` 和 `null` 用 `Ok(vec![])` 覆盖它，因为对它们来说，“永远没有什么可列举的”就是字面上的事实，而不是一个未实现的方法。
+- **Redis 的 `reserved_jobs` 是逐消费者的。** 这个驱动程序只知道它自己在进程内亲手发出去的那些预留；另一个消费者飞行中的那些条目，只能通过 Redis 自己的 `XPENDING` 看到，而不是通过这个调用。
+- **Redis 的 `pending_jobs` 意思是“从未被投递给这个组里的任何消费者”。** 它扫描的是 `XRANGE (<last-delivered-id> +` - 也就是这个组的投递游标（`XINFO GROUPS`）之后的一切 - 而不是整个流，因为 `ack` 只会对一个条目做 `XACK`（这个驱动程序从不对流做 `XDEL`/`XTRIM`），所以一次仅仅排除掉某个消费者内存中那些预留的扫描，会把每一个已确认的作业永远报告成待处理。一个被释放或被 nack 的作业，会以一个高于游标的全新 id 重新发布出来，所以一旦它的重试生效，它就会重新出现。和 `pending_size` 处在同样的“上界”这一档：这个游标只被读一次，所以一次并发的 `pop` 可以在那次读取和那次扫描之间认领掉一个条目。实践中，一个正在运行的消费者的后台预读任务，往往会在推送之后的几毫秒内就认领掉一个新推送的条目，远早于任何应用去调用 `pop` - 所以 `pending_jobs` 反映的多半是那些在没有消费者主动轮询这个流的时候推送进来的工作，而不是“任何还没有人显式弹出过的信封”。
 
 ## 工作进程重启信号
 

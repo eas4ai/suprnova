@@ -45,6 +45,7 @@
 //! DB_LOGGING=false
 //! ```
 
+pub(crate) mod after_commit;
 pub mod config;
 pub mod connection;
 pub mod connection_registry;

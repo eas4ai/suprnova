@@ -154,6 +154,31 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         false
     }
 
+    /// Whether pushes of this job wait for the surrounding
+    /// [`DB::transaction`](crate::DB::transaction) to commit.
+    ///
+    /// Mirrors Laravel's `ShouldQueueAfterCommit` / `$afterCommit`. Inside a
+    /// transaction the *entire* push waits for the commit - envelope build,
+    /// `JobQueueing`, the driver write and `JobQueued` alike - and a rollback
+    /// discards it. Outside a transaction the push happens immediately, so a
+    /// job can opt in without its callers having to know which of their code
+    /// paths are transactional.
+    ///
+    /// Turn this on for any job that reads rows the surrounding transaction
+    /// wrote: a worker on another process can pop the envelope before the
+    /// transaction commits, find nothing, and fail.
+    ///
+    /// Per-push override:
+    /// [`EnvelopeOverrides::after_commit`](crate::queue::EnvelopeOverrides),
+    /// with the sugar [`Queue::push_after_commit`](crate::queue::Queue::push_after_commit)
+    /// for opting one dispatch in. Default: `false`.
+    fn after_commit() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     /// Per-instance unique key for dedupe. Return `Some(id)` to make this job
     /// eligible for [`Queue::push_unique`](crate::queue::Queue::push_unique);
     /// the framework gates the enqueue on the composed key
@@ -181,6 +206,27 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         Self: Sized,
     {
         Duration::from_secs(300)
+    }
+
+    /// Whether this job's uniqueness lock is released when processing begins
+    /// rather than expiring with [`Self::unique_for`]'s TTL.
+    ///
+    /// Laravel's `ShouldBeUniqueUntilProcessing`: the lock stops blocking
+    /// re-dispatch the moment the worker starts executing the handler, which is
+    /// what you want when the lock exists to coalesce *queued* duplicates
+    /// rather than to serialize execution. A long-running rebuild can then be
+    /// re-queued while the previous run is still finishing, instead of the
+    /// re-dispatch being silently swallowed for the rest of the TTL.
+    ///
+    /// Requires [`Self::unique_id`] to return `Some` and dispatch through the
+    /// [`Queue::push_unique`](crate::queue::Queue::push_unique) family: the
+    /// owner token the worker releases with is recorded at push time.
+    /// Default: `false` (the TTL is the dedupe window).
+    fn unique_until_processing() -> bool
+    where
+        Self: Sized,
+    {
+        false
     }
 
     /// Middleware pipeline wrapping the handler. Returned in order, outermost

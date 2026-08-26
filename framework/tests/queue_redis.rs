@@ -36,6 +36,7 @@ fn env(name: &str) -> Envelope {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     }
@@ -225,5 +226,91 @@ async fn redis_driver_size_introspection_round_trip() {
         d.delayed_size().await.unwrap(),
         0,
         "delayed key must be empty after clear"
+    );
+}
+
+/// Queue inspection (#60966): `pending_jobs` / `delayed_jobs` /
+/// `reserved_jobs` listings on the live Redis driver.
+///
+/// This does **not** assert that a freshly pushed, never-popped envelope
+/// shows up as pending. `pending_jobs` scans past the consumer group's
+/// `last-delivered-id` cursor (`XINFO GROUPS`); against a real Redis,
+/// sea-streamer's consumer runs a background read-ahead task that claims a
+/// newly pushed entry into the group's PEL - advancing the cursor past it
+/// - within milliseconds of the `XADD`, before this test's own code ever
+/// calls `pop`. That is the same background-prefetch characteristic
+/// `redis_driver_size_introspection_round_trip` documents for
+/// `reserved_size`. In practice `pending_jobs` on this driver mostly
+/// reflects work pushed while no consumer is actively polling the stream,
+/// not "any envelope nobody has explicitly popped yet".
+///
+/// What this test asserts instead is the actual regression this task
+/// fixed: `ack` only `XACK`s an entry (this driver never `XDEL`/`XTRIM`s
+/// the stream), so the old whole-stream-scan implementation - which
+/// excluded only this process's in-memory `pending` map - reported every
+/// acked job as pending forever. The cursor-based scan must not, because
+/// an acked entry's id sits at or below the group's `last-delivered-id`
+/// regardless of ack state.
+#[ignore = "requires a real Redis"]
+#[tokio::test]
+async fn redis_driver_inspection_listings_round_trip() {
+    let stream = format!("test-{}", uuid::Uuid::new_v4());
+    let d = RedisQueueDriver::connect(
+        &redis_url(),
+        &stream,
+        "g-inspect",
+        "c-inspect",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+
+    // Pre-pop the empty stream so the consumer group exists.
+    let _ = d.pop(Duration::from_millis(50)).await.unwrap();
+
+    d.push(env("pending-one")).await.unwrap();
+    let mut delayed = env("delayed-one");
+    delayed.available_at = Utc::now() + chrono::Duration::milliseconds(3_000);
+    d.push(delayed).await.unwrap();
+
+    let delayed_list = d.delayed_jobs(None).await.unwrap();
+    assert_eq!(delayed_list.len(), 1, "one envelope parked on the ZSET");
+    assert_eq!(delayed_list[0].name, "delayed-one");
+
+    // The delayed envelope never reaches the stream until its deadline, so
+    // it must never show as pending regardless of any prefetch race.
+    let pending_list = d.pending_jobs(None).await.unwrap();
+    assert!(
+        !pending_list.iter().any(|j| j.name == "delayed-one"),
+        "the delayed envelope must not show as pending"
+    );
+
+    // Reserve the pushed envelope.
+    let r1 = d.pop(Duration::from_secs(5)).await.unwrap().unwrap();
+    assert_eq!(r1.envelope.job_name, "pending-one");
+
+    let reserved_list = d.reserved_jobs(None).await.unwrap();
+    assert!(
+        reserved_list.iter().any(|j| j.name == "pending-one"),
+        "the popped-but-unacked envelope must appear in reserved_jobs"
+    );
+    let pending_after_pop = d.pending_jobs(None).await.unwrap();
+    assert!(
+        !pending_after_pop.iter().any(|j| j.name == "pending-one"),
+        "a reserved envelope must not also show as pending"
+    );
+
+    d.ack(&r1.token).await.unwrap();
+
+    let pending_after_ack = d.pending_jobs(None).await.unwrap();
+    assert!(
+        !pending_after_ack.iter().any(|j| j.name == "pending-one"),
+        "an acked job must never reappear as pending - the regression this \
+         task's cursor-based scan fixes"
+    );
+    let reserved_after_ack = d.reserved_jobs(None).await.unwrap();
+    assert!(
+        !reserved_after_ack.iter().any(|j| j.name == "pending-one"),
+        "an acked job must no longer be reserved either"
     );
 }

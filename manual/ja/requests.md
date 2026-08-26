@@ -410,25 +410,25 @@ pub async fn store(form: CreateUserRequest) -> Response {
 
 ## ファイルアップロード（`MultipartRequest`）
 
-`multipart/form-data` には専用のエクストラクターがあります - `#[derive(MultipartRequest)]` はボディをパートごとにストリーミングし、設定された閾値を超える大きなファイルのパートを一時ファイルへ退避させるため、200 MiBのアップロードがRAMに丸ごと居座ることはありません。各フィールドには、通信上のフィールド名を指定する `#[field("name")]` という注釈を付けます。ファイルのフィールドには `UploadedFile<V>` を使い、`V` は `suprnova::http::upload::validators` にあるバリデータ（またはバリデータのタプル）です。
+`multipart/form-data` は、それ自身のエクストラクターを持ちます - `#[derive(MultipartRequest)]` はボディをパートごとにストリーミングし、設定された閾値を超える大きなファイルのパートを一時ファイルへ退避させるため、200 MiBのアップロードがRAMに丸ごと居座ることは決してありません。各フィールドは、ワイヤ上のフィールド名を指定する `#[field("name")]` の注釈を持ちます。ファイルのフィールドは `UploadedFile<V>` を使い、`V` は `suprnova::http::upload::validators` のバリデーター（またはバリデーターのタプル）です。
 
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // 5 MiB の上限
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // 5 MiBの上限
     #[field("caption")]
     pub caption: Option<String>,
 }
 
 #[handler]
 pub async fn upload_avatar(form: AvatarUpload) -> Response {
-    // `avatar` は、サイズに応じてメモリ上か一時ファイル上に置かれます。
-    // `.bytes()` はどちらも読み取り、`.store_as(...)` はディスクへストリーミングします。
+    // `avatar` は、サイズに応じてメモリ内か一時ファイルのどちらかにあります。
+    // `.bytes()` はどちらでも読めます。`.store_as(...)` はディスクへストリーミングします。
     let bytes = form.avatar.bytes().await?;
     json_response!({ "size": bytes.len(), "caption": form.caption })
 }
@@ -436,27 +436,27 @@ pub async fn upload_avatar(form: AvatarUpload) -> Response {
 
 フィールドの形:
 
-| 宣言 | 通信上の形 |
+| 宣言 | ワイヤ上の形 |
 |---|---|
 | `UploadedFile<V>` | 必須のファイル |
 | `Option<UploadedFile<V>>` | 省略可能なファイル |
 | `Vec<UploadedFile<V>>` | 配列でのアップロード（`photos[]`） |
-| `String` / `u32` / `FromStr` を実装するあらゆる型 | テキストフィールド（必須） |
-| `Option<String>` / `Option<T: FromStr>` | 省略可能なテキストフィールド |
-| `Vec<String>` / `Vec<T: FromStr>` | 繰り返されるテキストフィールド |
+| `String` / `u32` / 任意の `FromStr` | テキストのフィールド（必須） |
+| `Option<String>` / `Option<T: FromStr>` | 省略可能なテキストのフィールド |
+| `Vec<String>` / `Vec<T: FromStr>` | 繰り返されるテキストのフィールド |
 
-`suprnova::http::upload::validators` にある組み込みのバリデータ:
+`suprnova::http::upload::validators` の組み込みバリデーター:
 
-- `MaxSize<N>` - 累積の合計が `N` バイトを超えた時点で、そのバイト境界でショートサーキットします（HTTP 413）。
-- `Image` - マジックバイトが `image/*` を名乗っていないパートを拒否します。
+- `MaxSize<N>` - 累計が `N` バイトを超えた時点で、そのバイト境界でショートサーキットします（HTTP 413）。
+- `ImageFile` - マジックバイトが `image/*` を主張しないパートを拒否します。（Laravel自身のルールにちなんだ名前です。素の `Image` という名前は、画像処理のパイプラインのものです - [画像](images.md)を参照してください。）
 - `MimeType<L>` - あなた自身の `MimeAllowlist` 型が提供する、固定の許可リストを受け付けます。
-- `()` - 何もしません。`UploadedFile<()>` はどんなバイト列でも受け付けます。
+- `()` - 何もしません。`UploadedFile<()>` はあらゆるバイト列を受け付けます。
 
-バリデータはタプルとして組み合わせられます: `(Image, MaxSize<5_242_880>)` は両方を実行し、最初の失敗でショートサーキットします。
+バリデーターはタプルとして合成されます: `(ImageFile, MaxSize<5_242_880>)` は両方を走らせ、最初の失敗でショートサーキットします。
 
 ### フィールドごとの上限と配列の境界
 
-ボディ全体に対するバイト数の上限はグローバルです（マルチパートではデフォルトで8 MiB、`suprnova::http::upload::set_global_max_multipart_body_bytes` で設定できます）。フィールドごとの上限は、小さなパートを大量に詰めたボディが、バイト数の予算に収まったまま `Vec<UploadedFile<_>>` を無制限に成長させる、という悪用を防ぎます:
+ボディ全体に対するバイト数の上限はグローバルです（multipartではデフォルトで8 MiB。`suprnova::http::upload::set_global_max_multipart_body_bytes` で設定できます）。フィールドごとの上限は、小さなパートを多数含むボディが、バイト数の予算の内側で `Vec<UploadedFile<_>>` を際限なく成長させるという濫用を防ぎます:
 
 ```rust
 #[derive(MultipartRequest)]
@@ -466,11 +466,11 @@ pub struct Gallery {
 }
 ```
 
-その名前を持つ（`max_count` + 1）番目のパートは、メモリを確保する前にHTTP 422を返します。そのため、余分なパートが `Vec` の成長に到達することはありません。
+その名前を持つ（`max_count` + 1）番目のパートは、割り当ての前にHTTP 422を返すため、余分なパートが `Vec` の成長に届くことはありません。
 
 ### 認可とバリデーション後のフック
 
-`MultipartRequest` は、`MultipartRequestHooks` トレイトを通じて `FormRequest` のフックを反映します。deriveがデフォルトで出力するのは空の実装です。自分の実装を使うには、`#[multipart(custom_hooks)]` でオプトインしてください:
+`MultipartRequest` は、`MultipartRequestHooks` トレイトを介して `FormRequest` のフックを写します。デフォルトでは、このderiveは空のimplを出力します。自分自身のものを使うには `#[multipart(custom_hooks)]` でオプトインしてください:
 
 ```rust
 use suprnova::{MultipartRequest, Request, ValidationErrors};
@@ -501,7 +501,7 @@ impl MultipartRequestHooks for GuardedUpload {
 
 ### ストレージへのストリーミング
 
-`UploadedFile::store_as` は、そのパートを登録済みのストレージディスクへ書き込みます。ディスクを裏付けとするパートについては、経路は完全にストリーミングです（`opendal::Operator::writer` による64 KiBのチャンク）。メモリ上のパートは、1回の書き込み呼び出しで済ませます。ストレージのパスがコンテンツアドレス方式である場合は、内容から導かれる拡張子を使ってください - ファイル名のヘッダーは信頼できません:
+`UploadedFile::store_as` は、そのパートを登録済みのストレージディスクへ書き込みます。ディスクに退避されたパートについては、経路は完全にストリーミングです（`opendal::Operator::writer` を介した64 KiBのチャンクです）。メモリ内のパートは、1回の書き込み呼び出しを使います。ストレージのパスがコンテンツアドレスされている場合は、内容から導かれる拡張子を使ってください - ファイル名のヘッダーは信頼できません:
 
 ```rust
 use suprnova::Storage;

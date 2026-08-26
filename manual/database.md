@@ -232,11 +232,28 @@ DB::transaction(|_tx| {
 
 Commit on `Ok(_)`. Rollback + propagate the error on `Err(_)`.
 
+An `Err` is not always a rollback. If an
+[after-commit](queues.md#after-commit-dispatch) callback fails, the commit has
+already landed and is durable; `DB::transaction` still returns `Err`, and the
+message reads `after-commit callback failed (the transaction itself
+committed): <the callback's error>`. The closure's return value is lost, its
+writes are not, and only a deferred dispatch failed. Every registered callback
+still runs and the first error is the one you get.
+`DB::transaction_with_attempts` never retries that error, however
+deadlock-shaped it reads: re-running a closure whose writes are already durable
+would apply them twice.
+
 Operations inside the closure automatically pick up the active
 transaction via a `tokio::task_local` - you do NOT have to thread a
 `&tx` handle through every model call. Nested `DB::transaction`
 returns a database error; use `tx.savepoint(...)` for nested-rollback
 behaviour.
+
+The closure form is also the only form that can defer work to the commit. A
+job whose type declares `Job::after_commit()` (or a dispatch made with
+`Queue::push_after_commit`) waits inside this closure and only reaches the
+queue driver once the commit succeeds; a rollback discards it. See
+[After-commit dispatch](queues.md#after-commit-dispatch).
 
 For typed aggregate or custom SQL that must execute on the same pinned
 connection, use the transaction handle directly:
@@ -311,6 +328,12 @@ lifetime; pre-load any rows you need to read BEFORE the
 `begin_transaction()` call, especially on SQLite (single shared
 connection).
 
+Because manual mode installs no task-local, it has no commit for a deferred
+dispatch to hang on either: an
+[after-commit](queues.md#after-commit-dispatch) job pushed inside a manual
+transaction is pushed immediately. Use the closure form when a dispatch has to
+wait for the commit.
+
 ### Savepoints
 
 ```rust
@@ -330,6 +353,27 @@ DB::transaction(|tx| {
 
 All three first-class backends support `SAVEPOINT` / `ROLLBACK TO
 SAVEPOINT` - SQLite included.
+
+A savepoint rollback also unwinds the
+[after-commit registry](queues.md#after-commit-dispatch). A queue push deferred
+to the commit inside the savepoint is discarded along with the rows it
+described, and the compensation registered with it runs immediately, so a
+deferred `push_unique`'s dedupe lock goes back and a re-dispatch inside the same
+transaction can win it. Anything registered before the savepoint is untouched,
+and a savepoint you release or simply never roll back keeps everything
+registered inside it.
+
+Repeating a savepoint name is allowed, and the registry follows the database:
+`ROLLBACK TO SAVEPOINT x` unwinds to the most recent `x` and destroys the
+savepoints established after it. Manual transactions have no after-commit
+registry, so their savepoints roll back rows and nothing else.
+
+Only `Transaction::savepoint` marks the registry. A savepoint you create with
+raw SQL is invisible to it, so `rollback_to` rolls those rows back, logs a
+warning, and leaves every deferred dispatch registered inside it in place -
+discarding one on a guess would be the worse failure. Use
+`Transaction::savepoint` when the deferred dispatches are meant to unwind with
+the rows.
 
 ## Observability
 

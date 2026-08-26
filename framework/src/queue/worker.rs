@@ -72,6 +72,13 @@ type MiddlewareFactory = Arc<dyn Fn() -> Vec<Arc<dyn JobMiddleware>> + Send + Sy
 struct Registration {
     dispatcher: Dispatcher,
     middleware: MiddlewareFactory,
+    /// Snapshot of [`Job::unique_until_processing`] taken at registration.
+    ///
+    /// Registry metadata rather than payload sniffing: the worker has to know
+    /// this before it decides to release the lock, and deserializing the job
+    /// just to ask would put a decode on the path of every popped envelope -
+    /// including the ones whose decode is the thing that fails.
+    unique_until_processing: bool,
 }
 
 static REGISTRY: RwLock<Option<HashMap<String, Registration>>> = RwLock::new(None);
@@ -88,6 +95,7 @@ pub fn register_job<J: Job>() {
         })
     });
     let middleware: MiddlewareFactory = Arc::new(|| J::middleware());
+    let unique_until_processing = J::unique_until_processing();
     // Hot-path registry: recover in place on poison so a panic in any
     // other job's registration doesn't kill the inventory-drain at
     // process boot. The critical section is a single HashMap insert.
@@ -100,6 +108,7 @@ pub fn register_job<J: Job>() {
             Registration {
                 dispatcher,
                 middleware,
+                unique_until_processing,
             },
         )
         .is_some()
@@ -147,6 +156,59 @@ fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
         .unwrap_or_default()
 }
 
+/// Whether the job registered under `name` opted into
+/// [`Job::unique_until_processing`].
+///
+/// `false` for an unregistered name: the dispatcher is about to fail that
+/// envelope anyway, and releasing a uniqueness lock for a job nobody can run
+/// would let duplicates pile in behind a job that never executes.
+pub(crate) fn job_is_unique_until_processing(name: &str) -> bool {
+    let Ok(g) = lock::read(&REGISTRY, "queue job registry") else {
+        return false;
+    };
+    g.as_ref()
+        .and_then(|m| m.get(name).map(|r| r.unique_until_processing))
+        .unwrap_or(false)
+}
+
+/// Release a unique-until-processing lock, owner-scoped, best-effort.
+///
+/// `Ok(false)` - owner mismatch, or the lock already expired - is not an
+/// error: either a newer dispatch holds the lock and must keep it, or the TTL
+/// beat us. A store failure is logged and swallowed, because a lock that
+/// outlives its job by at most `unique_for` is the documented degradation,
+/// while failing the job over it would turn a cache hiccup into a retry storm.
+///
+/// ### Why there is no ownerless fallback
+///
+/// Laravel releases an ownerless unique lock with `forceRelease()` when the
+/// job is on its first attempt (`UniqueLock::release`). Suprnova does not: a
+/// forced release deletes whichever lock is there, including one a newer
+/// dispatch acquired seconds ago, and the only envelopes that reach here
+/// without an owner token are ones serialized before the token existed. Those
+/// keep exactly the TTL-expiry behaviour they shipped with.
+async fn release_unique_lock_if_held(env: &Envelope) {
+    let Some(id) = env.idempotency_key.as_deref() else {
+        return;
+    };
+    let Some(owner) = env
+        .unique_lock_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+    else {
+        return;
+    };
+    let key = crate::queue::unique_key(&env.job_name, id);
+    if let Err(e) = crate::idempotency::Idempotency::release_owned(&key, owner).await {
+        tracing::warn!(
+            job = %env.job_name,
+            id = %env.id,
+            error = %e,
+            "unique-until-processing lock release failed; the lock now expires by TTL"
+        );
+    }
+}
+
 /// Run the middleware pipeline ending in the raw dispatcher. Returns the
 /// terminal [`JobOutcome`] OR a handler error (which the worker translates
 /// into retry / dead-letter).
@@ -157,10 +219,27 @@ fn middleware_for(name: &str) -> Vec<Arc<dyn JobMiddleware>> {
 pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, FrameworkError> {
     let job_name = env.job_name.clone();
     let mw_stack = middleware_for(&job_name);
+    let unique_until_processing = job_is_unique_until_processing(&job_name);
     // Build the innermost layer: actually dispatch the job, lift result
     // into JobOutcome::Completed.
     let innermost: Next = Box::new(move |env: Envelope| {
         Box::pin(async move {
+            // Processing begins here, and this is the last point at which
+            // every middleware has passed the job through - Laravel releases
+            // the uniqueness lock in exactly this position (the pipeline's
+            // `->then(...)`), so a middleware that sends the job back to the
+            // queue never gets its lock released out from under it.
+            //
+            // Under the sync driver this runs inline inside the very
+            // `push_unique` call that took the lock, so the job releases a lock
+            // its own caller still holds a guard for. That is the correct
+            // outcome - processing HAS begun - but the caller's lease renewer
+            // then reports a lost lease, and `push_unique` reports
+            // `FreshUnfenced`. Both warnings are expected on that path; the
+            // queues chapter says so.
+            if unique_until_processing {
+                release_unique_lock_if_held(&env).await;
+            }
             let payload = env.payload.clone();
             dispatch_by_name(&env.job_name, payload).await?;
             Ok(JobOutcome::Completed)
@@ -527,14 +606,47 @@ pub async fn run_worker(
         // settlement helpers with explicit fakes instead of mutating globals.
         let deps = SettlementDeps::current();
 
+        // Laravel's `finally` sweep (`CallQueuedHandler::dispatchThroughMiddleware`).
+        // A middleware that short-circuits means the pipeline core never ran,
+        // so the release at processing start never happened either, and the job
+        // would sit on its uniqueness lock for the rest of the TTL despite
+        // being dropped, dead-lettered, or reported complete by the middleware
+        // itself.
+        //
+        // The guard is Laravel's, and it is about the job's state, not the
+        // outcome's severity: sweep everything except `Released`, because a job
+        // put back on the queue has not started processing
+        // (`! $job->isReleased()`). `TimedOut` splits on that same rule rather
+        // than being exempt from it. The timeout above wraps
+        // `run_through_middleware`, which is the whole pipeline and not just its
+        // core, so a middleware that stalls reaches `TimedOut` with the core
+        // never run and the release at dispatch time never issued: the
+        // dead-letter sub-arm sweeps, and the retry sub-arm does not, because
+        // the envelope is going back on the queue unstarted.
+        //
+        // Arms reachable with the core already run sweep too. That second
+        // release finds no lock this envelope owns and reports `false`, which
+        // is what makes it safe to sweep without tracking whether the core ran.
+        //
+        // The owner-token check comes first so the registry read is skipped
+        // entirely for the ordinary job, which never carries one.
+        let sweep_unique_lock =
+            env.unique_lock_owner.is_some() && job_is_unique_until_processing(&env.job_name);
+
         match outcome {
             DispatchOutcome::Settled(JobOutcome::Completed) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
             }
             DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
                 handle_released(&*driver, &res.token, &env, delay, &connection, "middleware").await;
             }
             DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 handle_dead_letter(
                     &*driver,
                     &res.token,
@@ -547,6 +659,9 @@ pub async fn run_worker(
                 .await;
             }
             DispatchOutcome::Settled(JobOutcome::Deleted) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 // Middleware decided to drop the job without dead-letter.
                 //
                 // If this envelope belonged to a batch, the batch's
@@ -582,6 +697,9 @@ pub async fn run_worker(
                 tracing::debug!(job = %env.job_name, id = %env.id, "queue job dropped by middleware");
             }
             DispatchOutcome::Failed(e) => {
+                if sweep_unique_lock {
+                    release_unique_lock_if_held(&env).await;
+                }
                 if env.attempts >= env.max_tries {
                     handle_dead_letter(
                         &*driver,
@@ -628,6 +746,16 @@ pub async fn run_worker(
                 .await;
                 let exhausted = env.fail_on_timeout || env.attempts >= env.max_tries;
                 if exhausted {
+                    // A stalled middleware times out the whole pipeline, so the
+                    // core may never have run and the release at processing
+                    // start may never have happened. This envelope is
+                    // dead-lettered and will not come back, so a held lock would
+                    // block re-dispatch for the rest of `unique_for` on a job
+                    // that no longer exists. Owner-scoped, so it costs one
+                    // no-op release when the core did run and already released.
+                    if sweep_unique_lock {
+                        release_unique_lock_if_held(&env).await;
+                    }
                     let reason = format!(
                         "job exceeded per-attempt timeout of {} seconds",
                         t.as_secs()
@@ -1038,11 +1166,19 @@ async fn handle_dead_letter(
             //
             // The job still has to leave the queue: it is out of attempts,
             // and putting it back is how a poison job becomes immortal. So
-            // the envelope goes to the log at ERROR, in full, because a
-            // serialised envelope is what `queue:retry` re-pushes - this
-            // line is the difference between work that can be recovered by
-            // hand and work that silently ceased to exist.
-            let payload = env
+            // the envelope goes to the log at ERROR, because a serialised
+            // envelope is what `queue:retry` re-pushes - this line is the
+            // difference between work that can be recovered by hand and work
+            // that silently ceased to exist.
+            //
+            // `unique_lock_owner` is cleared first. It is the bearer token for
+            // an owner-scoped lock release, and a log is readable by a wider
+            // audience than the queue store - anyone holding the token can free
+            // a dedupe lock a newer dispatch already owns. Re-pushing does not
+            // need it: a fresh push takes a fresh lock.
+            let mut redacted = env.clone();
+            redacted.unique_lock_owner = None;
+            let payload = redacted
                 .to_json()
                 .unwrap_or_else(|e| format!("<envelope could not be serialised: {e}>"));
             tracing::error!(
@@ -1556,6 +1692,7 @@ mod tests {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            unique_lock_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }

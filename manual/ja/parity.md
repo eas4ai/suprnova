@@ -72,8 +72,8 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | URL生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 実装済み | [URL 生成](urls.md) |
 | セッション | `session()`、`session_mut()`、`req.flash()` 経由のフラッシュバッグ | 実装済み | デフォルトでは `DatabaseSessionDriver` によるデータベースバックエンドです。暗号化されたブラウザークッキーが運ぶのはセッション識別子とアクティビティタッチのメタデータだけであり、セッションデータバッグではありません。[セッション](session.md) |
 | クッキーのキュー（`Cookie::queue`） | `Cookie::queue`/`queued`/`unqueue`/`expire` - `SessionMiddleware` がレスポンスへドレインするタスクローカルのジャー | 実装済み | チェーンに `SessionMiddleware` が必要です。Laravelの `CookieJar` のように名前+パスではなく、名前でキューに入ります |
-| バリデーション | `#[derive(Validate)]` + 27個の組み込みルール + `Rule`/`ValueRule`/`AsyncRule` トレイト | 実装済み | `Url` はLaravelのスキームの許可リストを使い、`Url::protocols([...])` は `url:http,https` をミラーします。非同期のルール（例えば `Unique`）はDBを叩きます。`ArrayKeys`/`Distinct` は `serde_json::Value` 上の `ValueRule` であり、Laravelの `array:keys` と `distinct` に対応します。[バリデーション](validation.md) |
-| `Password` ルール（`Password::defaults()`、`uncompromised()`） | パスワード強度のルールファミリーはありません。`Min`、`Regex`、そしてカスタムの `Rule` を組み合わせてください | 未実装 | Have I Been Pwned の `uncompromised()` チェックを含みますが、これに相当するものは今日ありません |
+| バリデーション | `#[derive(Validate)]` + 28個の組み込みルール + `Rule`/`ValueRule`/`AsyncRule` トレイト | 実装済み | `Url` はLaravelのスキームの許可リストを使い、`Url::protocols([...])` は `url:http,https` をミラーします。非同期のルール（例えば `Unique`）はDBを叩きます。`ArrayKeys`/`Distinct` は `serde_json::Value` 上の `ValueRule` であり、Laravelの `array:keys` と `distinct` に対応します。[バリデーション](validation.md) |
+| `Password` ルール（`Password::defaults()`、`uncompromised()`） | `Password::min(n)` + 強度のビルダー（`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`） + `.uncompromised()` | 実装済み | Have I Been Pwned のk匿名性のチェックです。ネットワークエラーではフェイルオープンし、Laravelの `NotPwnedVerifier` と一致します。[バリデーション](validation.md#password-strength) |
 | エラーハンドリング | `FrameworkError`、`AppError`、`HttpError` トレイト、`execute_chain_safely` のパニック境界 | 実装済み | [エラーハンドリング](errors.md)、[エラー モデル](error-model.md) |
 | ロギング | 構造化されたフィールドを持つ `tracing` のサブスクライバー、`LogFormat`（json / pretty / compact） | 差異あり | 1つのログ行が1つのJSONドキュメントです。`request_id` は常に存在します。[ロギング](logging.md) |
 | ログチャネル / ファイルドライバー（`single`、`daily`、`monthly`、`stack`） | `tracing` が構造化された行を標準出力へ書き出し、プラットフォームがそれをローテートして送り出します | 意図的に非対応 | コンテナ、systemd、そしてあらゆるログシッパーが、すでにローテーションと保持を行っています。それをプロセス内で再実装することは、プラットフォームを重複させ、そこからログを隠してしまいます。[ロギング](logging.md) |
@@ -95,7 +95,8 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | ファイルストレージ | OpenDAL の上の `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 実装済み | 同じ `put/get/delete/copy/move/exists/url` の表面です。パストラバーサル保護が組み込まれています。[ファイルシステム](filesystem.md) |
 | ヘルパー | 相当するものは、それぞれの本拠地のモジュールにあります（何でも入りの `helpers.md` はありません） | 差異あり | 例えば、URLのヘルパーは[urls.md](urls.md)に、文字列のヘルパーは `std`/`heck` に、配列のヘルパーは `std::collections` にあります - Rustはこれを、グローバルな名前空間ではなくクレートで行います |
 | HTTPクライアント | `Http::get/post/...` のビルダー + テスト用の `Http::fake(...)` | 実装済み | リクエストを自動記録します。`assert_sent` / `assert_not_sent`。組み込みリトライポリシーを `RetryContext` で狭める `.retry_when(predicate)` もあります。[HTTP クライアント](http-client.md) |
-| 画像（`Illuminate\Image`） | 画像処理の表面はありません | 未実装 | `image` クレートの上の `ImageDriver` トレイト（リサイズ / クロップ / 変換 / 主要色）が計画中です。それが出荷されるまでは、`image` クレートを直接使ってください |
+| 画像（`Illuminate\Image`） | `Image::from_bytes/from_path/from_disk/from_upload/from_stream` + 同じ操作とターミナルの表面 | 実装済み | `suprnova::media` にあります。Laravelの `gd`/`imagick` と同じく、2つのドライバーがあります: `IMAGE_DRIVER=oxideav`（デフォルト、純粋なRust）か `magick` です。PNG、JPEG、WebP、GIF、BMPを読み書きします。AVIFの出力は、自社製のAV1エンコーダーの公開を待って先送りされています。ヘッダーに対して検査されるデコードの上限があります。[画像](images.md) |
+| デフォルトのドライバーでのHEICのデコード | libheifのデリゲートを備えたホスト上での `IMAGE_DRIVER=magick` | 意図的に非対応 | HEVCは特許に縛られており、信頼できる唯一の純粋なRustのデコーダーはAGPL/商用のデュアルライセンスであるため、組み込みのデコーダーは出荷しません。Laravelと同じ形です - GDはHEICをまったく読めず、Imagickはバイナリとphp拡張の両方にデリゲートがコンパイルされていることを必要とします。[画像](images.md#why-suprnova-diverges) |
 | ローカライゼーション | `lang/<locale>/` の Fluent `.ftl` カタログの上の `Lang::get` / `get_with` / `try_get` / `has` と `__!("key", name: value)` マクロ、`LocaleMiddleware` による検出、翻訳されたバリデーションメッセージ、ICU4Xによるフォーマット | 実装済み | 同じカタログが `/_suprnova/lang/<locale>.ftl` でブラウザへ配信され、`generate-types` によって型付けされます。[ローカライゼーション](localization.md) |
 | メール | `Mail::to(...).send(MyMail { ... }).await?` + ドライバー `smtp/ses/mailgun/postmark/sendgrid/resend/log/memory/file` | 実装済み | `Mailable` トレイト + TeraでレンダリングされるHTML/text本文。SES送信は `TenantName` / `ConfigurationSetName` / `ListManagementOptions` を運び、キューに入れられたディスパッチは `.on_queue(...)` / `.on_connection(...)` を通じてルーティングされ、`Queue::route` より優先されます。[メール](mail.md) |
 | 通知 | `Notify::send(&user, notif).await?` + チャネル `mail/database/broadcast/webpush` | 実装済み | `Notifiable` トレイト + チャネルごとの `Notification`。キューに入れられたディスパッチ（`Notify::queue`）は、Mailが使うのと同じ `EnvelopeOverrides` プリミティブを通じて、通知ごとの `queue`/`timeout`/`fail_on_timeout`/`max_tries`/`backoff` を各チャネルのジョブへ運びます。[通知](notifications.md)、[Web プッシュ](web-push.md) |
@@ -105,11 +106,11 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | ジョブが宣言する遅延 | `Job` 上の `fn delay() -> Option<Duration>`。`Queue::push` と `Queue::bulk` が尊重します | 実装済み | 明示的な `Queue::push_later` / `Queue::later(delay, job)` 呼び出しは、ジョブ自身の既定値より常に優先されます。[キュー](queues.md) |
 | 一意なジョブの抑制イベント | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | 実装済み | `push_unique` が重複排除したときプッシュ側で発火します。呼び出しはなお `Ok(false)` を返します |
 | キューの一時停止（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`。キャッシュに支えられ、`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` イベントを伴います | 実装済み | キューごとの停止は、明示的な `--queue=...` リストで起動したワーカーでのみ有効です。`resume_all` はキューごとの停止を解除しません。[キュー](queues.md) |
-| コミット後のディスパッチ（`afterCommit()`） | トランザクションの内側でプッシュされたジョブは、ただちにドライバーから見えます | 未実装 | 今日のところ、ロールバックしてもジョブはキューに残ります。トランザクションスコープのディスパッチが出荷されるまでは、プッシュをトランザクションの外側で行ってください |
-| キュー接続のフェイルオーバー | `failover` ドライバーはありません | 未実装 | `FailoverQueueDriver` が出荷されるまでは、プッシュごとに接続を明示的に選ぶか、2つをラップする自前の `QueueDriver` をバインドしてください |
-| `ShouldBeUniqueUntilProcessing` | `Queue::push_unique` は、ジョブ全体の間ロックを保持します | 未実装 | （完了時ではなく）クレーム時に一意性のロックを解放することは、まだ配線されていない別のセマンティクスです |
-| キューの検査（`pendingJobs` / `delayedJobs` / `reservedJobs`） | ドライバーレベルの検査APIはありません | 未実装 | 検査の表面が出荷されるまでは、ドライバーの背後のストア（`jobs` テーブル、Redisのキー）を直接クエリしてください |
-| タスクごとのスケジュールのタイムゾーン | スケジュールは、プロセス全体で1つのタイムゾーンで評価されます | 未実装 | タスクごとの `timezone(...)` と、タイムゾーンを意識した `schedule:list` が計画中です。[タスク スケジューリング](scheduling.md) |
+| コミット後のディスパッチ（`afterCommit()`） | `Job` の `fn after_commit() -> bool`、プッシュごとの `EnvelopeOverrides::after_commit`、`Queue::push_after_commit` | 実装済み | イベントも含めてプッシュ全体がコミットを待ち、ロールバックはそれを捨てます。先送りされた `push_unique` もロックだけは即座に取るため、トランザクションの内側でも重複排除は機能します。手動の `DB::begin_transaction` は決して先送りしません。[キュー](queues.md) |
+| キュー接続のフェイルオーバー | `QUEUE_DRIVER=failover` + `QUEUE_FAILOVER_CONNECTIONS` を介した、順序付きの接続リストの上の `FailoverQueueDriver` | 実装済み | 書き込みはリストを落ちていきます。`pop`、カウンター、一覧は最初の接続に留まるため、それぞれのフォールバックには自身のワーカーが必要です。`QueueFailedOver` はエッジトリガーであり、`bulk_push` はエンベロープごとに落ちていくため、それぞれが自身の遅延を保ちます。[キュー](queues.md) |
+| `ShouldBeUniqueUntilProcessing` | `Job` の `fn unique_until_processing() -> bool`。ミドルウェアの通過の後、ハンドラの前に解放されます | 実装済み | 所有者スコープでの解放であるため、再配送された試行が、より新しいディスパッチのロックを解放することは決してありません。ミドルウェアがキューへ戻したジョブは、そのロックを保ちます。[キュー](queues.md) |
+| キューの検査（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`。`Option<&str>` が、Laravelの `all*Jobs()` という双子を1回の呼び出しへ畳み込みます | 実装済み | `InspectedJob` のDTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）です。トレイトのデフォルトは、空のコレクションではなく誠実な `Err` です。`sync`/`null` は `Ok(vec![])` で上書きします。Redisの `reserved_jobs` はコンシューマーごとです。[キュー](queues.md) |
+| タスクごとのスケジュールのタイムゾーン | タスクごとの `.timezone(chrono_tz::Tz)` / `.try_timezone("name")`、`Schedule::timezone` のデフォルト、`schedule:list --timezone` | 実装済み | Laravelの文字列ではなく、型付きの `chrono_tz::Tz` です。スケジュール全体のデフォルトは、`app.schedule_timezone` という設定キーではなく `schedule::register` の中の `Schedule::timezone` であり、固定されていないタスクはプロセスのローカルゾーンを保ちます。[タスク スケジューリング](scheduling.md) |
 | レート制限 | `RateLimiter::for_signature(...)`、`ThrottleRequestsMiddleware`、`RateLimitMiddleware` | 実装済み | `SlidingWindowConfig` によるスライディングウィンドウです。[レート リミット](rate-limiting.md) |
 | 検索（Scout） | ファーストパーティの全文検索アダプターはありません | 未実装 | ベクトル検索は今日[ベクトル](vector.md)経由で出荷されています。キーワード検索のScout相当は計画中です |
 | 文字列（ヘルパー） | `heck` クレート（ケース変換）、`std::str`、`regex` | 差異あり | Rustのエコシステムの他の部分が使うのと同じクレートです。グローバルな `Str::camel($x)` はありません |
@@ -150,7 +151,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | Sanctum（APIトークン） | Magnetarのbearerセッション上の `BearerTokenMiddleware` | 差異あり | bearerセッションを認証します。独立したSanctumのトークン管理APIはありません |
 | Passport（OAuthサーバー） | Magnetarのプロトコルおよびプラグインエンジン | 差異あり | エンジンのプリミティブは出荷されます。Laravel Passport互換のアプリケーションファサードはありません |
 | Fortify（認証バックエンド） | Magnetarエンジン上のフレームワークの `Auth` / `auth_flows` ファサード | 実装済み | フレームワークがHTTP、メール、イベント、クッキー、アプリケーションバインディングを所有します |
-| 認可（Policies / Gates） | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` トレイト + マクロ登録 | 実装済み | [認可](authorization.md) |
+| 認可（Policies / Gates） | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` トレイト + マクロ登録 + `Gate::default_denial_response` | 実装済み | [認可](authorization.md) |
 | ロールと権限（spatie/laravel-permission） | `HasRoles` トレイト + `roles` / `permissions` / `role_has_permissions` テーブル（`CreateRbacTables`） + `RoleMiddleware` / `PermissionMiddleware`（フェイルクローズ） | 実装済み | コミュニティパッケージではなく、ファーストパーティです。`create_role` / `give_permission_to_role` / `assign_role_to_model` ヘルパーは、Gate/Policyの上に積み重なります。[認可](authorization.md) |
 | 暗号化 | `Crypt::encrypt/decrypt` + `CryptPurpose` によるAADバインディング | 実装済み | AES-256-GCM、`APP_KEY_PREVIOUS` によるキーローテーション。[暗号化](encryption.md) |
 | ハッシング | `hash::*` + `BcryptHasher`, `Argon2idHasher`, `Argon2iHasher`, `needs_rehash`, `is_hashed`, `verify` | 実装済み | デフォルトは Bcrypt、argon2id も利用可能です。[ハッシング](hashing.md) |
@@ -394,13 +395,6 @@ Laravel は、何百もの小さなグローバル関数（`str_replace_first`�
 | Telescope（デバッグダッシュボード） | リクエスト / クエリ / イベント / キャッシュヒットのWeb UI | OTel + tracing の出力を使ってください（[可観測性](observability.md)） |
 | Pulse（性能ダッシュボード） | 遅いクエリ / エラー / ホットなルートのWeb UI | 同じです。今日はOTelの表面、ダッシュボードは後日です |
 | Horizon（キューのダッシュボード） | キューの深さ / 失敗したジョブ / スループットのWeb UI | `cargo run --bin console queue:failed` とOTelのメトリクスです |
-| 画像処理 | `Illuminate\Image` 相当（リサイズ / クロップ / 変換） | 自分自身の `App::bind` の背後で `image` クレートを直接使ってください |
-| `Password` のバリデーションルール | 強度ルール + `uncompromised()` のHIBPチェック | `Min` + `Regex` + カスタムの `Rule` を組み合わせてください |
-| コミット後のディスパッチ | トランザクションスコープのジョブのディスパッチ | トランザクションが返った後にプッシュしてください |
-| キュー接続のフェイルオーバー | 順序付きのドライバーのリストの上の `failover` ドライバー | プッシュごとに接続を選んでください |
-| `ShouldBeUniqueUntilProcessing` | クレーム時に解放されるロック | `push_unique` は、ジョブ全体の間ロックを保持します |
-| キューの検査 | `pendingJobs` / `delayedJobs` / `reservedJobs` | ドライバーの背後のストアをクエリしてください |
-| タスクごとのスケジュールのタイムゾーン | スケジュールされたタスクごとの `timezone(...)` | タイムゾーンごとにスケジューラーのプロセスを1つ走らせてください |
 
 ## 私たちが出荷しないもの（そしてその理由）
 

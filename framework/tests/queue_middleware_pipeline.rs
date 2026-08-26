@@ -101,6 +101,7 @@ async fn skip_middleware_drops_job_without_running_handler() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };
@@ -128,6 +129,7 @@ async fn middleware_runs_outermost_first() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };
@@ -250,6 +252,7 @@ async fn fail_on_exception_dead_letters_without_retries() {
         timeout_secs: None,
         fail_on_timeout: false,
         idempotency_key: None,
+        unique_lock_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     };

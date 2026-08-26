@@ -185,6 +185,7 @@ async fn a_filtered_worker_takes_only_its_own_queue() {
             timeout_secs: None,
             fail_on_timeout: false,
             idempotency_key: None,
+            unique_lock_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }
