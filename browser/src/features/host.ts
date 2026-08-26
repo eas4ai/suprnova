@@ -1,5 +1,5 @@
 import type { JsonValue } from "../canonical.js";
-import type { AsyncRegisteredEventContract } from "../async-updates/types.js";
+import type { AsyncRegisteredEventContract, SubscriptionState } from "../async-updates/types.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
@@ -68,6 +68,7 @@ export interface RuntimeFeatureDriverIslandPort {
     field: string,
     proposal: UploadHandleProposal,
   ): UploadHandleProposalDisposition;
+  projectAsyncStatus?(state: SubscriptionState): void;
   writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
 }
 

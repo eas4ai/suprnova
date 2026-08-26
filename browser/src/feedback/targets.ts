@@ -1,6 +1,8 @@
 import type { OwnedDirective } from "../directives/ownership.js";
+import type { SubscriptionState } from "../async-updates/types.js";
 import type { RecoveryState } from "../application/recovery.js";
 import type { IslandRecord } from "../islands/record.js";
+import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { ModelState } from "../models/state.js";
 import type { RuntimeClock, RuntimeScheduler } from "../runtime/ports.js";
 import {
@@ -317,7 +319,56 @@ interface RecordFeedback {
   readonly presentations: Map<Element, FeedbackElementPresentation>;
   readonly unsubscribeModel: VoidFunction | null;
   readonly unsubscribeScheduler: VoidFunction;
+  readonly streamAnnouncer: FeedbackAnnouncer;
+  readonly streamBaselines: Map<Element, StreamTargetBaseline>;
+  readonly streamRootBaseline: StreamRootBaseline;
+  streamAnnouncementGeneration: number;
+  streamState: SubscriptionState | null;
   recovery: RecoveryState;
+}
+
+interface StreamTargetBaseline {
+  readonly atomic: string | null;
+  readonly live: string | null;
+  readonly role: string | null;
+  readonly text: string | null;
+}
+
+interface StreamRootBaseline {
+  readonly busy: string | null;
+  readonly motion: string | null;
+  readonly state: string | null;
+}
+
+const STREAM_STATUS_SELECTOR = "[data-live-stream-status]";
+const MAX_STREAM_STATUS_TARGETS = 16;
+
+function streamAnnouncementKind(state: SubscriptionState): FeedbackAnnouncementKind {
+  return `stream_${state}`;
+}
+
+function prefersReducedMotion(): boolean {
+  const matchMedia: unknown = Reflect.get(globalThis, "matchMedia");
+  if (typeof matchMedia !== "function") return false;
+  try {
+    const result: unknown = Reflect.apply(matchMedia, globalThis, [
+      "(prefers-reduced-motion: reduce)",
+    ]);
+    return (
+      (typeof result === "object" || typeof result === "function") &&
+      result !== null &&
+      Reflect.get(result, "matches") === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function restoreStreamTarget(target: Element, baseline: StreamTargetBaseline): void {
+  restoreAttribute(target, "aria-atomic", baseline.atomic);
+  restoreAttribute(target, "aria-live", baseline.live);
+  restoreAttribute(target, "role", baseline.role);
+  target.textContent = baseline.text;
 }
 
 interface ManagedBinding {
@@ -391,11 +442,37 @@ export class FeedbackRuntime {
     model: ModelState | null,
   ): void {
     if (this.#records.has(record)) return;
+    const streamAnnouncer = new FeedbackAnnouncer((announcement) => {
+      state.streamAnnouncementGeneration += 1;
+      const generation = state.streamAnnouncementGeneration;
+      const targets = this.#streamTargets(record, state);
+      for (const target of targets) target.textContent = "";
+      this.#scheduler.microtask(() => {
+        if (
+          this.#records.get(record) !== state ||
+          generation !== state.streamAnnouncementGeneration
+        ) {
+          return;
+        }
+        for (const target of this.#streamTargets(record, state)) {
+          target.textContent = announcement.message;
+        }
+      });
+    });
     const state: RecordFeedback = {
       bindings: new Set(),
       model,
       presentations: new Map(),
       recovery: "none",
+      streamAnnouncementGeneration: 0,
+      streamAnnouncer,
+      streamBaselines: new Map(),
+      streamRootBaseline: {
+        busy: record.element.getAttribute("aria-busy"),
+        motion: record.element.getAttribute("data-live-stream-motion"),
+        state: record.element.getAttribute("data-live-stream-state"),
+      },
+      streamState: null,
       unsubscribeModel:
         model?.subscribe(() => {
           this.#update(record);
@@ -416,6 +493,22 @@ export class FeedbackRuntime {
     if (state === undefined || state.recovery === recovery) return;
     state.recovery = recovery;
     this.#update(record);
+  }
+
+  setAsyncStatus(record: IslandRecord, status: SubscriptionState): void {
+    const state = this.#records.get(record);
+    if (state === undefined) return;
+    const changed = state.streamState !== status;
+    state.streamState = status;
+    this.#renderAsyncStatus(record, state);
+    if (changed) {
+      state.streamAnnouncer.announce(
+        `stream:${record.metadata.documentKey}`,
+        streamAnnouncementKind(status),
+        status,
+        "polite",
+      );
+    }
   }
 
   scanInsertion(record: IslandRecord, directives: readonly OwnedDirective[]): void {
@@ -454,6 +547,7 @@ export class FeedbackRuntime {
         state: feedbackState,
       });
     }
+    if (state.streamState !== null) this.#renderAsyncStatus(record, state);
     this.#update(record);
   }
 
@@ -481,10 +575,70 @@ export class FeedbackRuntime {
     if (state === undefined) return;
     state.unsubscribeModel?.();
     state.unsubscribeScheduler();
+    state.streamAnnouncementGeneration += 1;
+    this.#restoreAsyncStatus(record, state);
     for (const managed of state.bindings) managed.binding.dispose();
     state.bindings.clear();
     state.presentations.clear();
     this.#records.delete(record);
+  }
+
+  #streamTargets(record: IslandRecord, state: RecordFeedback): Element[] {
+    for (const [target, baseline] of state.streamBaselines) {
+      if (
+        target.matches(STREAM_STATUS_SELECTOR) &&
+        record.element.contains(target) &&
+        target.closest(ISLAND_ROOT_SELECTOR) === record.element
+      ) {
+        continue;
+      }
+      restoreStreamTarget(target, baseline);
+      state.streamBaselines.delete(target);
+    }
+    const targets: Element[] = [];
+    for (const target of record.element.querySelectorAll(STREAM_STATUS_SELECTOR)) {
+      if (target.closest(ISLAND_ROOT_SELECTOR) !== record.element) continue;
+      if (!state.streamBaselines.has(target)) {
+        state.streamBaselines.set(target, {
+          atomic: target.getAttribute("aria-atomic"),
+          live: target.getAttribute("aria-live"),
+          role: target.getAttribute("role"),
+          text: target.textContent,
+        });
+      }
+      targets.push(target);
+      if (targets.length >= MAX_STREAM_STATUS_TARGETS) break;
+    }
+    return targets;
+  }
+
+  #renderAsyncStatus(record: IslandRecord, state: RecordFeedback): void {
+    const status = state.streamState;
+    if (status === null) return;
+    record.element.setAttribute("data-live-stream-state", status);
+    record.element.setAttribute(
+      "data-live-stream-motion",
+      prefersReducedMotion() ? "reduced" : "allowed",
+    );
+    record.element.setAttribute(
+      "aria-busy",
+      status === "connecting" || status === "reconnecting" ? "true" : "false",
+    );
+    for (const target of this.#streamTargets(record, state)) {
+      target.setAttribute("aria-atomic", "true");
+      target.setAttribute("aria-live", "polite");
+      target.setAttribute("role", "status");
+    }
+  }
+
+  #restoreAsyncStatus(record: IslandRecord, state: RecordFeedback): void {
+    restoreAttribute(record.element, "aria-busy", state.streamRootBaseline.busy);
+    restoreAttribute(record.element, "data-live-stream-motion", state.streamRootBaseline.motion);
+    restoreAttribute(record.element, "data-live-stream-state", state.streamRootBaseline.state);
+    for (const [target, baseline] of state.streamBaselines) {
+      restoreStreamTarget(target, baseline);
+    }
+    state.streamBaselines.clear();
   }
 
   #update(record: IslandRecord): void {

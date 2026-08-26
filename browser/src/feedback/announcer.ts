@@ -9,7 +9,13 @@ export type FeedbackAnnouncementKind =
   | "offline"
   | "retry"
   | "failure"
-  | "success";
+  | "success"
+  | "stream_disconnected"
+  | "stream_connecting"
+  | "stream_current"
+  | "stream_degraded"
+  | "stream_reconnecting"
+  | "stream_closed";
 
 export type FeedbackPoliteness = "polite" | "assertive";
 
@@ -32,6 +38,12 @@ const MESSAGES: Readonly<Record<FeedbackAnnouncementKind, string>> = Object.free
   queued: "Queued",
   retry: "Retrying",
   success: "Completed",
+  stream_closed: "Updates closed",
+  stream_connecting: "Connecting to updates",
+  stream_current: "Updates current",
+  stream_degraded: "Updates degraded",
+  stream_disconnected: "Updates disconnected",
+  stream_reconnecting: "Reconnecting to updates",
   validation: "Validation failed",
   validating: "Validating",
 });

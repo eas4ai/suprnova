@@ -537,11 +537,16 @@ class AsyncIslandController implements FeatureIslandController {
     this.#stream = stream;
     this.#streamModifiers = streamModifiers;
     this.#timers = options.timers;
+    this.#projectStatus("disconnected");
   }
 
   start(): void {
+    this.#projectStatus("connecting");
     void this.#authorize(null).catch(() => {
-      if (this.#state === "active") report(this.#context, "operation_rejected");
+      if (this.#state === "active") {
+        this.#projectStatus("degraded");
+        report(this.#context, "operation_rejected");
+      }
     });
   }
 
@@ -565,6 +570,7 @@ class AsyncIslandController implements FeatureIslandController {
   async resumeInitial(): Promise<void> {
     if (!this.needsInitialResume()) return;
     this.#state = "resuming";
+    this.#projectStatus("connecting");
     try {
       await this.#authorize(null);
       if (this.#resuming()) {
@@ -575,6 +581,7 @@ class AsyncIslandController implements FeatureIslandController {
     } catch (error: unknown) {
       if (this.#state === "resuming") {
         this.#state = "suspended";
+        this.#projectStatus("degraded");
         report(this.#context, "operation_rejected");
       }
       throw error;
@@ -594,6 +601,7 @@ class AsyncIslandController implements FeatureIslandController {
     }
     const resume = this.#state === "suspended";
     if (resume) this.#state = "resuming";
+    this.#projectStatus(resume ? "connecting" : "reconnecting");
     try {
       const current = await this.#authorize(prior, signal, true);
       let settled = false;
@@ -620,6 +628,7 @@ class AsyncIslandController implements FeatureIslandController {
       });
     } catch (error: unknown) {
       if (resume) this.#resumeCommittedFallback();
+      this.#projectStatus("degraded");
       throw error;
     }
   }
@@ -633,6 +642,7 @@ class AsyncIslandController implements FeatureIslandController {
     this.#clearHeartbeat();
     this.#poll?.suspend();
     this.#subscription?.transportLost();
+    this.#projectStatus("disconnected");
   }
 
   dispose(): void {
@@ -647,6 +657,7 @@ class AsyncIslandController implements FeatureIslandController {
     this.#handle = null;
     this.#subscription?.close();
     this.#subscription = null;
+    this.#projectStatus("closed");
     this.#owner.retire(this);
   }
 
@@ -778,12 +789,14 @@ class AsyncIslandController implements FeatureIslandController {
         if (completion === "succeeded" && subscription.state() === "current") {
           this.#handle?.continuityProved();
           this.#poll?.continuity("current");
+          this.#projectStatus("current");
         }
       },
       (outcome) => {
         if (this.#state === "disposed" || this.#subscription !== subscription) return;
         this.#clearHeartbeat();
         if (outcome.kind === "complete") {
+          this.#projectStatus("closed");
           this.#retirePoll();
           const handle = this.#handle;
           this.#handle = null;
@@ -792,6 +805,7 @@ class AsyncIslandController implements FeatureIslandController {
         }
         this.#handle?.presentationFailed();
         this.#poll?.continuity("degraded");
+        this.#projectStatus("degraded");
         report(
           this.#context,
           outcome.kind === "dispatch_failed" && outcome.reason === "resource_exhausted"
@@ -817,9 +831,11 @@ class AsyncIslandController implements FeatureIslandController {
               ) {
                 this.#handle?.continuityProved();
                 this.#poll?.continuity("current");
+                this.#projectStatus("current");
               } else if (disposition === "gap" || disposition === "continuity_required") {
                 this.#handle?.continuityLost();
                 this.#poll?.continuity("degraded");
+                this.#projectStatus("degraded");
               }
               if (
                 subscription.state() === "closed" ||
@@ -833,6 +849,7 @@ class AsyncIslandController implements FeatureIslandController {
             } catch {
               subscription.authorizationUncertain();
               this.#poll?.continuity("degraded");
+              this.#projectStatus("degraded");
               report(this.#context, "operation_rejected");
             }
           },
@@ -902,12 +919,14 @@ class AsyncIslandController implements FeatureIslandController {
           const continuity = subscription.state() === "current" ? "current" : "degraded";
           this.#owner.remember(this, authorization);
           this.#commitPollPolicy(pollPolicy, continuity);
+          this.#projectStatus(continuity);
           clearPending();
           return replayPending ? "pending" : "committed";
         } catch {
           clearPending();
           subscription.authorizationUncertain();
           this.#poll?.continuity("degraded");
+          this.#projectStatus("degraded");
           report(this.#context, "operation_rejected");
           return installed ? "degraded" : "stale";
         }
@@ -927,29 +946,52 @@ class AsyncIslandController implements FeatureIslandController {
     if (subscription === null || this.#state === "disposed") return;
     switch (state) {
       case "connecting":
+        this.#projectStatus("connecting");
         subscription.connected();
         this.#armHeartbeat(this.#heartbeatTimeout());
         break;
       case "reconnecting":
+        this.#projectStatus("degraded");
+        this.#projectStatus("reconnecting");
+        this.#clearHeartbeat();
+        subscription.transportLost();
+        this.#poll?.continuity("degraded");
+        break;
       case "disconnected":
+        this.#projectStatus(state);
         this.#clearHeartbeat();
         subscription.transportLost();
         this.#poll?.continuity("degraded");
         break;
       case "degraded":
+        this.#projectStatus("degraded");
         this.#clearHeartbeat();
         subscription.authorizationUncertain();
         this.#poll?.continuity("degraded");
         break;
       case "closed":
+        this.#projectStatus("closed");
         this.#clearHeartbeat();
         subscription.close();
         this.#poll?.continuity("degraded");
         break;
       case "current":
         this.#armHeartbeat(this.#heartbeatTimeout());
-        if (subscription.state() === "current") this.#poll?.continuity("current");
+        if (subscription.state() === "current") {
+          this.#poll?.continuity("current");
+          this.#projectStatus("current");
+        } else {
+          this.#projectStatus("degraded");
+        }
         break;
+    }
+  }
+
+  #projectStatus(state: SubscriptionState): void {
+    try {
+      this.#port.projectAsyncStatus?.(state);
+    } catch {
+      report(this.#context, "operation_rejected");
     }
   }
 
@@ -962,6 +1004,7 @@ class AsyncIslandController implements FeatureIslandController {
       this.#subscription?.heartbeatLost();
       this.#handle?.heartbeatLost();
       this.#poll?.continuity("degraded");
+      this.#projectStatus("degraded");
     }, milliseconds);
   }
 

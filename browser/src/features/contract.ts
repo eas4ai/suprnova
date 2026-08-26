@@ -1,5 +1,5 @@
 import type { JsonValue } from "../canonical.js";
-import type { AuthorizedLogicalSubscription } from "../async-updates/types.js";
+import type { AuthorizedLogicalSubscription, SubscriptionState } from "../async-updates/types.js";
 import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
@@ -96,6 +96,7 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
     completion?: FreshRenderCompletionObserver,
     completionKey?: string,
   ): FreshRenderDisposition;
+  projectAsyncStatus?(state: SubscriptionState): void;
   writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
 }
 
@@ -547,6 +548,7 @@ function defineFeature(
                   ? port.enqueueFreshRender(reason, completion)
                   : port.enqueueFreshRender(reason, completion, completionKey);
               },
+              projectAsyncStatus: (state: SubscriptionState) => port.projectAsyncStatus?.(state),
               writePresentationSignal: (scope: string, name: string, signalValue: JsonValue) =>
                 port.writePresentationSignal(scope, name, signalValue),
             });

@@ -293,6 +293,18 @@ const server = createServer(async (request, response) => {
     });
     return;
   }
+  if (target.pathname === "/test-async/lifecycle.js") {
+    try {
+      const body = await readFile(new URL("test-host/async-lifecycle.mjs", browserRoot));
+      respond(response, 200, body, {
+        "cache-control": "public, max-age=31536000, immutable",
+        "content-type": "text/javascript; charset=utf-8",
+      });
+    } catch {
+      respond(response, 404, "async lifecycle asset unavailable");
+    }
+    return;
+  }
   if (target.pathname === "/navigation/download") {
     respond(response, 200, "downloaded report", {
       "content-disposition": 'attachment; filename="report.txt"',
@@ -337,6 +349,7 @@ const server = createServer(async (request, response) => {
         "suprnova-live.classic.js",
         "suprnova-live.esm.js",
         "suprnova-live.uploads.esm.js",
+        "suprnova-live.async.esm.js",
         "suprnova-live.assets.json",
       ].includes(file)
     ) {

@@ -863,6 +863,7 @@ name = "suprnova-live-test-support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "sha2",
  "suprnova-live",
  "tokio",

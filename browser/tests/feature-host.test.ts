@@ -776,6 +776,7 @@ describe("one driver claim and optional owner per island", () => {
       "enqueueFreshRender",
       "identity",
       "onDispose",
+      "projectAsyncStatus",
       "queryDirectiveOwnership",
       "writePresentationSignal",
     ]);

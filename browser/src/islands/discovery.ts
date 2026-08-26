@@ -1,4 +1,5 @@
 import { EventRouter } from "../directives/events.js";
+import type { SubscriptionState } from "../async-updates/types.js";
 import { DirectiveOwnership } from "../directives/ownership.js";
 import { canonicalize, type JsonValue } from "../canonical.js";
 import { queueChildDeliveries } from "../application/children.js";
@@ -929,6 +930,10 @@ export class DocumentRuntime {
       }),
       proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
         this.#proposeUploadHandle(record, field, proposal, current),
+      projectAsyncStatus: (status: SubscriptionState) => {
+        if (!current()) return;
+        this.#feedback.setAsyncStatus(record, status);
+      },
       writePresentationSignal: (scope: string, name: string, value: JsonValue) => {
         if (!current()) {
           throw new Error("feature_signal_context_invalid");

@@ -790,6 +790,30 @@ function lifecycleScenario() {
   );
 }
 
+function asyncLifecycleScenario() {
+  return document(
+    `${island({
+      protocolMinimum: "2",
+      rootAttributes:
+        ' live:stream="orders" live:signal="open:false" aria-busy="false" data-live-stream-state="disconnected" data-live-stream-motion="allowed"',
+      body: `<h1>Async order updates</h1>
+        <p data-live-stream-status aria-label="Order updates">Updates disconnected</p>
+        <p id="async-content">Server-rendered async content</p>
+        <button id="keep-focus" type="button">Keep focus</button>
+        <button id="degrade-stream" type="button">Degrade stream</button>
+        <button id="reconnect-stream" type="button">Reconnect stream</button>
+        <button id="close-stream" type="button">Close stream</button>
+        <button id="replace-island" type="button">Replace island contents</button>
+        <button id="local-toggle" type="button" live:toggle="open">Local details</button>
+        <p id="local-panel" hidden aria-hidden="true" inert live:show="open">Local signal remains available</p>`,
+    })}
+      <button id="remove-island" type="button">Remove island</button>
+      <form action="/navigation/post" method="post"><label>Native value <input name="value"></label><button type="submit">Submit normally</button></form>
+      <a href="/scenario/lifecycleDestination">Native destination</a>`,
+    '<script type="module" nonce="suprnova-async-test" src="/test-async/lifecycle.js"></script>',
+  );
+}
+
 export function uploadBody(replacement = false) {
   const suffix = replacement ? "-replacement" : "";
   const keySuffix = replacement ? "-replacement" : "-stable";
@@ -907,6 +931,14 @@ function uploadsScenario() {
 
 export const scenarios = Object.freeze({
   accessibility: { html: accessibilityScenario() },
+  asyncLifecycle: {
+    headers: {
+      "cache-control": "private, max-age=60",
+      "content-security-policy":
+        "default-src 'none'; script-src 'self' 'nonce-suprnova-async-test'; connect-src 'self' http://127.0.0.1:4174; style-src 'self' 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    },
+    html: asyncLifecycleScenario(),
+  },
   fullFlow: { html: fullFlowScenario() },
   hostileMalformedUtf8: { html: hostileScenario("hostile-malformed-utf8") },
   hostileHugeJson: { html: hostileScenario("hostile-huge-json") },
