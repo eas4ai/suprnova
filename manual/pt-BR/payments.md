@@ -909,7 +909,7 @@ PaymentProviderRegistry::bind("stripe", Arc::new(stripe_provider));
 PaymentProviderRegistry::bind("paddle", Arc::new(paddle_provider));
 
 // Depois, por requisição:
-let provider_name = user.payment_provider.as_str(); // "stripe" or "paddle"
+let provider_name = user.payment_provider.as_str(); // "stripe" ou "paddle"
 let provider = PaymentProviderRegistry::get(provider_name).expect("unknown provider");
 let sub = provider.cancel(&sub_id, true).await?;
 ```

@@ -199,7 +199,7 @@ possa falhar.
 ```rust
 use suprnova::DB;
 
-// In bootstrap.rs:
+// Em bootstrap.rs:
 DB::listen(|q| {
     if q.time > std::time::Duration::from_millis(100) {
         tracing::warn!(

@@ -56,7 +56,7 @@ use suprnova::{injectable, FrameworkError};
 
 #[injectable]
 pub struct CreateUserAction {
-    // 注入する依存関係をフィールドとしてここに追加する。例:
+    // Add injected dependencies as fields here, e.g.
     // db: suprnova::DbConnection,
 }
 

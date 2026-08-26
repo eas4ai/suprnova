@@ -130,7 +130,7 @@ Suprnovaの `to_wire()` は、2つの層で防御します。
 use suprnova::{Response, sse::SseEvent};
 
 let evt = SseEvent::data("hello")
-    .try_with_event(&user_supplied_event)?     // returns Err on CR/LF/NUL
+    .try_with_event(&user_supplied_event)?     // CR/LF/NUL があればErrを返す
     .try_with_id(&user_supplied_id)?;
 ```
 
@@ -270,7 +270,7 @@ pub async fn progress(_req: Request) -> Response {
         for pct in [25, 50, 75, 100] {
             let evt = StreamedEvent::message(pct).unwrap();
             if tx.send(evt).await.is_err() {
-                break; // client disconnected
+                break; // クライアントが切断した
             }
         }
     });
@@ -296,8 +296,8 @@ pub async fn progress(_req: Request) -> Response {
 ```tsx
 import { useEventStream, useJsonStream } from "@laravel/stream-react";
 
-const { message } = useEventStream("/progress");          // against an event_stream endpoint
-const { data, send } = useJsonStream<Order[]>("/export"); // against a stream_json endpoint
+const { message } = useEventStream("/progress");          // event_stream のエンドポイントに対して
+const { data, send } = useJsonStream<Order[]>("/export"); // stream_json のエンドポイントに対して
 ```
 
 `useStream`/`useJsonStream` は、Suprnovaが他のリクエストヘッダーと同じように読む二つのヘッダーを伴ってPOSTします。`X-STREAM-ID`（hookがクライアント側で生成する、認証を行わない素の相関ID）と、[CSRF保護](csrf.md)がすでに期待するのと同じく `<meta name="csrf-token">` から読む `X-CSRF-TOKEN` です。`useEventStream` はどちらも送りません。`EventSource` はカスタムリクエストヘッダーをまったく設定できず、素のブラウザGETだからです。

@@ -418,15 +418,15 @@ let assertable = TestResponse::new(status, headers, body)
         }
     });
 
-// Requests only `users`, and asserts the reload landed on the same
-// component/url/version and that `users` came back.
+// Solicita apenas `users`, e afirma que a recarga chegou ao mesmo
+// component/url/version e que `users` voltou.
 assertable.reload_only(["users"]).await;
 
-// Requests everything except `stats`, and asserts `stats` is absent.
+// Solicita tudo exceto `stats`, e afirma que `stats` está ausente.
 assertable.reload_except(["stats"]).await;
 
-// Reads `deferredProps` off the original page, requests every deferred
-// key in one partial reload, and asserts they all came back.
+// Lê `deferredProps` da página original, solicita todas as chaves
+// deferred em uma única recarga parcial, e afirma que todas voltaram.
 assertable.load_deferred_props().await;
 ```
 

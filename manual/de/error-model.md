@@ -112,7 +112,7 @@ pub enum FrameworkError {
     UnsupportedMediaType,                                // 415
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
-    AlreadyReported,                                     // CLI-only
+    AlreadyReported,                                     // nur CLI
     RateLimited { retry_after: Option<Duration>, message: String }, // 429
     External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }

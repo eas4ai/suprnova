@@ -986,7 +986,7 @@ Queue::resume_all().await?;
 ./app queue:pause billing
 ./app queue:pause --all
 ./app queue:resume billing
-./app queue:resume --all      # alias: queue:continue
+./app queue:resume --all      # エイリアス: queue:continue
 ```
 
 停止されたワーカーは、すでにpopしたものを完了します - 停止は実行中のジョブを中断しません - その後、再開されるまで新しい作業の取得を止めます。`pause_all` / `resume_all` はグローバルスイッチです。名前付きキューの停止（または再開）は、そのキューだけに影響します。**`resume_all` はキューごとの停止を解除しません** - 個別に停止したキューはグローバル再開後も停止したままです。Laravelと同じ動作であり、`Queue::resume(&connection, "billing")` で明示的に解除してください。

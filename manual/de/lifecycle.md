@@ -51,7 +51,7 @@ dem `Application::run()`-Switch.
 `.env` ist zu diesem Zeitpunkt bereits geladen. `#[suprnova::main]` lädt es
 *vor* dem Aufbau der Tokio-Runtime, weil das Schreiben in die Prozessumgebung
 nur sicher ist, solange der Prozess single-threaded ist - siehe
-[Bootstrap](bootstrap.md#suprnovamain-not-tokiomain). `Application::run`
+[Application Bootstrap](bootstrap.md#suprnovamain-not-tokiomain). `Application::run`
 verweigert den Start, wenn dieser Schritt übersprungen wurde.
 
 Für `serve` geschieht dann Folgendes:

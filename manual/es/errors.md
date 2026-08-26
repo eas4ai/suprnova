@@ -259,7 +259,7 @@ Para inspeccionar el original, usa `external_source()` en lugar de
 ```rust
 if let Some(src) = err.external_source() {
     if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
-        // decide whether this is worth retrying
+        // decide si merece la pena reintentar
     }
 }
 ```

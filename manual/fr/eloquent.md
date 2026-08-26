@@ -4287,8 +4287,8 @@ que les propriétaires de tout autre type continuent d'avancer :
 use suprnova::eloquent::without_touching_on;
 
 without_touching_on::<Post, _, _>(async {
-    // Comment saves in here leave their Post owners alone; a Video
-    // owner on the same comment still bumps.
+    // Les sauvegardes de Comment ici laissent tranquilles leurs propriétaires
+    // Post ; un propriétaire Video sur le même commentaire avance quand même.
     comment.save().await
 }).await?;
 ```

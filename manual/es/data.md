@@ -143,9 +143,9 @@ let set = RequestIncludeSet::default()
     .only(["id", "name"])
     .except(["secret"]);
 
-assert!(set.is_visible("name"));   // on `only`, not in `except`
-assert!(!set.is_visible("secret"));// `except` always wins
-assert!(set.includes("author"));   // request for the `author` relation
+assert!(set.is_visible("name"));   // en `only`, no en `except`
+assert!(!set.is_visible("secret"));// `except` siempre gana
+assert!(set.includes("author"));   // se solicita la relación `author`
 ```
 
 | Método | Efecto | Equivalente en Laravel |
@@ -192,8 +192,8 @@ async fn show_album(req: Request, user: User) -> Response {
             .include_when(user.is_admin(), ["audit_log"])
             .exclude_when(!user.is_admin(), ["price_cost"]),
         async move {
-            // Inside this scope, the lazy-prop resolver and JSON:API
-            // include resolver see the merged set.
+            // Dentro de este ámbito, el resolver de props perezosos y el
+            // resolver de include de JSON:API ven el conjunto fusionado.
             Inertia::data("Album/Show", album_dto).into_response()
         },
     ).await
@@ -300,8 +300,8 @@ use suprnova::inertia::Prop;
 #[data(auto_lazy)]
 pub struct AlbumDto {
     pub id: i64,
-    pub songs: Prop,    // auto-registered as ?include=songs
-    pub artist: Prop,   // auto-registered as ?include=artist
+    pub songs: Prop,    // registrado automáticamente como ?include=songs
+    pub artist: Prop,   // registrado automáticamente como ?include=artist
 }
 ```
 

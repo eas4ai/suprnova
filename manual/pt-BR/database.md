@@ -601,7 +601,7 @@ pousa no módulo Eloquent.
 ## Metadados de conexão
 
 ```rust
-let name = DB::database_name()?;        // "myapp" for postgres://.../myapp
+let name = DB::database_name()?;        // "myapp" para postgres://.../myapp
 let driver = DB::driver_name()?;        // "postgres" | "mysql" | "sqlite"
 let title = DB::driver_title()?;        // "Postgres" | "MySQL" | "SQLite"
 let version = DB::server_version().await?;  // "15.5" | "8.0.36" | "3.42.0"

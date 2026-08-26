@@ -79,11 +79,12 @@ Les signatures des deux fonctions sont fixées par `Application::bootstrap` et
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // base de données, bindings, observers, écouteurs, supervisors, enregistrement des jobs worker
+    // base de données, bindings, observateurs, écouteurs, superviseurs,
+    // enregistrement des jobs worker
 }
 
 pub fn register_http_stack() {
-    // global middleware, Inertia::install
+    // middleware global, Inertia::install
 }
 ```
 
@@ -185,16 +186,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → singleton (wraps in Arc):
+    // Trait → singleton (enveloppé dans un Arc) :
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Concrete singleton:
+    // Singleton concret :
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Factory (constructed per resolve):
+    // Fabrique (construite à chaque résolution) :
     factory!(|| RequestLogger::new());
 
-    // Or call the facade directly for finer control:
+    // Ou appelez directement la façade pour un contrôle plus fin :
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -334,14 +335,14 @@ use crate::middleware;
 use crate::models::users::User;
 
 pub async fn register() {
-    // ── Database
+    // ── Base de données
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Auth provider
+    // ── Fournisseur d'authentification
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
 
-    // ── Broadcasting hub + channel registry
+    // ── Hub de diffusion + registre de canaux
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -355,37 +356,39 @@ pub async fn register() {
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Storage disks (env-gated S3 in production)
+    // ── Disques de stockage (S3 conditionné à l'env en production)
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Worker job registration
+    // ── Enregistrement des jobs worker
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observers + supervisors
+    // ── Observateurs + superviseurs
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Feature flags
+    // ── Flags de fonctionnalité
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Global middleware (outside-in in registration order)
+    // ── Middleware global (dans l'ordre d'enregistrement, de l'extérieur
+    // vers l'intérieur)
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia protocol layer (no version pin: the default hashes the
-    // Vite build manifest, so a frontend build bumps the asset version
-    // on its own - see "Version detection" in frontend-inertia-responses.md)
+    // ── Couche protocole Inertia (aucun épinglage de version : par défaut,
+    // le hachage du manifeste de build Vite sert de version, si bien qu'un
+    // build du frontend fait évoluer la version d'assets tout seul - voir
+    // "Détection de version" dans frontend-inertia-responses.md)
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

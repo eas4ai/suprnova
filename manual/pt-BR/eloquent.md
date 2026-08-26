@@ -1818,7 +1818,7 @@ impl User {
     pub async fn posts_touched(&self) -> Result<Vec<Post>, FrameworkError> {
         let authored: Vec<Post> = self.posts().get().await?;
         let tagged:   Vec<Post> = /* ...consulta customizada... */;
-        // ...merge + dedupe...
+        // ...mesclagem + deduplicação...
         Ok(/* ... */)
     }
 }
@@ -4187,8 +4187,8 @@ bump:
 use suprnova::eloquent::without_touching_on;
 
 without_touching_on::<Post, _, _>(async {
-    // Comment saves in here leave their Post owners alone; a Video
-    // owner on the same comment still bumps.
+    // Salvar um Comment aqui dentro deixa seus donos Post em paz; um
+    // dono Video no mesmo comentário ainda recebe bump.
     comment.save().await
 }).await?;
 ```

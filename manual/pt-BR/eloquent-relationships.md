@@ -90,7 +90,7 @@ ainda.
 ```rust
 use suprnova::Direction;
 
-// No SQL.
+// Sem SQL.
 let posts_q = user.posts();
 
 // SQL: SELECT * FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT 5

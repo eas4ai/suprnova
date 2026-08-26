@@ -43,11 +43,11 @@ async fn main() {
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // database, bindings, observers, listeners, supervisors, worker job registration
+    // 数据库、绑定、观察者、监听器、监督程序、工作进程作业注册
 }
 
 pub fn register_http_stack() {
-    // global middleware, Inertia::install
+    // 全局中间件、Inertia::install
 }
 ```
 
@@ -123,16 +123,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → singleton (wraps in Arc):
+    // trait → 单例（包装进 Arc）：
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Concrete singleton:
+    // 具体类型单例：
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Factory (constructed per resolve):
+    // 工厂（每次解析时构造）：
     factory!(|| RequestLogger::new());
 
-    // Or call the facade directly for finer control:
+    // 或者直接调用门面，以获得更精细的控制：
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -224,8 +224,8 @@ Application::new()
 这个代表性组合并不是示例应用的逐字摘录。它把进程范围的注册放在 `register`，把只用于 HTTP 的设置放在 `register_http_stack`。上面的 Magnetar 初始化是单独展示的，因为它的应用用户 schema 必须和框架用户提供者匹配。
 
 ```rust
-//! Application bootstrap - register services, listeners, global
-//! middleware, and the Inertia layer.
+//! 应用 bootstrap - 注册服务、监听器、全局中间件，
+//! 以及 Inertia 层。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,14 +246,14 @@ use crate::middleware;
 use crate::models::users::User;
 
 pub async fn register() {
-    // ── Database
+    // ── 数据库
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Auth provider
+    // ── 认证提供者
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
 
-    // ── Broadcasting hub + channel registry
+    // ── 广播中枢 + 频道注册表
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -261,43 +261,43 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── Event listeners + bridges
+    // ── 事件监听器 + 桥接
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Storage disks (env-gated S3 in production)
+    // ── 存储磁盘（生产环境中由环境变量控制的 S3）
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Worker job registration
+    // ── 工作进程作业注册
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observers + supervisors
+    // ── 观察者 + 监督程序
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Feature flags
+    // ── 功能标志
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Global middleware (outside-in in registration order)
+    // ── 全局中间件（按注册顺序由外向内）
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia protocol layer (no version pin: the default hashes the
-    // Vite build manifest, so a frontend build bumps the asset version
-    // on its own - see "Version detection" in frontend-inertia-responses.md)
+    // ── Inertia 协议层（不固定版本：默认实现会对 Vite 构建清单做哈希，
+    // 所以一次前端构建会自行提升资源版本 - 参见
+    // frontend-inertia-responses.md 中的“版本检测”）
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

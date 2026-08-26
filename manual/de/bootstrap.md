@@ -82,11 +82,11 @@ Die Signaturen beider Funktionen werden durch `Application::bootstrap` und
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // database, bindings, observers, listeners, supervisors, worker job registration
+    // Datenbank, Bindings, Observer, Listener, Supervisoren, Job-Registrierung der Worker
 }
 
 pub fn register_http_stack() {
-    // global middleware, Inertia::install
+    // globale Middleware, Inertia::install
 }
 ```
 
@@ -208,16 +208,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → singleton (wraps in Arc):
+    // Trait → Singleton (wird in Arc gehüllt):
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Concrete singleton:
+    // Konkretes Singleton:
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Factory (constructed per resolve):
+    // Factory (bei jeder Auflösung neu konstruiert):
     factory!(|| RequestLogger::new());
 
-    // Or call the facade directly for finer control:
+    // Oder die Facade direkt aufrufen, für feinere Kontrolle:
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -341,8 +341,8 @@ oben separat dargestellt, weil ihr Anwendungsschema für Benutzer zum
 Framework-UserProvider passen muss.
 
 ```rust
-//! Application bootstrap - register services, listeners, global
-//! middleware, and the Inertia layer.
+//! Bootstrap der Anwendung - registriert Services, Listener, globale
+//! Middleware und die Inertia-Schicht.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -366,11 +366,11 @@ pub async fn register() {
     // ── Database
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Auth provider
+    // ── Auth-Provider
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
 
-    // ── Broadcasting hub + channel registry
+    // ── Broadcasting-Hub + Kanal-Registry
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -378,43 +378,43 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── Event listeners + bridges
+    // ── Event-Listener + Brücken
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Storage disks (env-gated S3 in production)
+    // ── Storage-Disks (env-gesteuertes S3 in der Produktion)
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Worker job registration
+    // ── Job-Registrierung der Worker
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observers + supervisors
+    // ── Observer + Supervisoren
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Feature flags
+    // ── Feature-Flags
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Global middleware (outside-in in registration order)
+    // ── Globale Middleware (von außen nach innen in Registrierungsreihenfolge)
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia protocol layer (no version pin: the default hashes the
-    // Vite build manifest, so a frontend build bumps the asset version
-    // on its own - see "Version detection" in frontend-inertia-responses.md)
+    // ── Inertia-Protokollschicht (kein Version-Pin: der Standard hasht das
+    // Vite-Build-Manifest, sodass ein Frontend-Build die Asset-Version von
+    // selbst erhöht - siehe „Versionserkennung“ in frontend-inertia-responses.md)
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

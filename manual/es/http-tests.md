@@ -172,21 +172,21 @@ La respuesta que regresa de `handle_request` es un `hyper::Response<BoxBody<Byte
 ```rust
 let (parts, body) = resp.into_parts();
 
-// 1. Status.
+// 1. Estado.
 assert_eq!(parts.status.as_u16(), 200);
 
-// 2. Headers - case-insensitive lookup.
+// 2. Encabezados - búsqueda sin distinguir mayúsculas.
 let location = parts.headers.get("location").and_then(|v| v.to_str().ok());
 assert_eq!(location, Some("/login"));
 
-// 3. Body - collect into bytes, then parse.
+// 3. Cuerpo - recopílalo en bytes y luego parséalo.
 use http_body_util::BodyExt;
 let bytes = body.collect().await.unwrap().to_bytes();
 
-// As text:
+// Como texto:
 let text = String::from_utf8_lossy(&bytes);
 
-// As JSON:
+// Como JSON:
 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 assert_eq!(value["message"], "ok");
 ```
@@ -224,7 +224,7 @@ TestResponse::new(parts.status.as_u16(), headers, bytes)
 
 `new()` acepta cualquier iterable como pares de encabezados `(String, String)` - un `HashMap<String, String>` (que varios harnesses existentes ya colectan), un `Vec<(String, String)>`, o `HeaderMap::iter()` mapeado a strings propios - así que ningún harness tiene que cambiar cómo conduce una solicitud.
 
-Cada aserción devuelve `&Self`, así que se encadenan: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (coincidencia de subconjunto - las claves extra en el cuerpo están bien), `assert_json_path` (notación de punto, un segmento numérico indexa un array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Los fallos de aserción entran en pánico con un fragmento esperado/actual, el mismo contrato que `expect!` ([Testing](testing.md)) - esta es una superficie de testing, no código de biblioteca, así que la regla de no-pánico de la casa no aplica.
+Cada aserción devuelve `&Self`, así que se encadenan: `assert_status`, `assert_ok`, `assert_redirect(target: Option<&str>)`, `assert_json` (coincidencia de subconjunto - las claves extra en el cuerpo están bien), `assert_json_path` (notación de punto, un segmento numérico indexa un array), `assert_json_count`, `assert_see`, `assert_header`, `assert_cookie`. Los fallos de aserción entran en pánico con un fragmento esperado/actual, el mismo contrato que `expect!` ([Pruebas](testing.md)) - esta es una superficie de testing, no código de biblioteca, así que la regla de no-pánico de la casa no aplica.
 
 ### `assert_session_has` necesita un almacén de sesión
 
@@ -316,15 +316,15 @@ let assertable = TestResponse::new(status, headers, body)
         }
     });
 
-// Requests only `users`, and asserts the reload landed on the same
-// component/url/version and that `users` came back.
+// Solicita solo `users` y comprueba que la recarga aterrizó en el mismo
+// componente/url/versión y que `users` volvió.
 assertable.reload_only(["users"]).await;
 
-// Requests everything except `stats`, and asserts `stats` is absent.
+// Solicita todo excepto `stats` y comprueba que `stats` no está.
 assertable.reload_except(["stats"]).await;
 
-// Reads `deferredProps` off the original page, requests every deferred
-// key in one partial reload, and asserts they all came back.
+// Lee `deferredProps` de la página original, solicita todas las claves
+// deferred en una única recarga parcial y comprueba que todas volvieron.
 assertable.load_deferred_props().await;
 ```
 
@@ -332,7 +332,7 @@ Llamar a cualquiera sin `with_reload` primero entra en pánico con una instrucci
 
 ### Por qué Suprnova diverge
 
-El `ReloadRequest` de Laravel reemite la solicitud a través del mismo kernel PHP en proceso que el test original utilizó - un cliente de test, siempre disponible. Los tests HTTP de Suprnova conducen un loopback hyper/TCP real y cada archivo de test define su propio par `spawn_server` / `request` (ver [Dónde vive cada pieza](#dónde-vive-cada-pieza) abajo), así que no hay un cliente único al que `AssertableInertia` podría alcanzar - `with_reload` hace que sea explícito en lugar de hardcodificar un harness que un archivo de test de forma diferente no podría usar. `component()` también omite la comprobación de existencia de archivo de componente de página de Laravel (`view-finder`) - un componente alcanzado a través de `Router::inertia` o un `InertiaResponse::new(name)` manual es un string de tiempo de ejecución sin archivo a comprobar; el equivalente de tiempo de compilación de Suprnova es la macro `inertia_response!` (ver [Inertia Responses](frontend-inertia-responses.md)). Sus nombres de método también divergen del `TestResponse`: `component`, `has`, `missing`, `where_`, `count`, y `has_flash` descartan el prefijo `assert_` completamente, emparejando el `Inertia\Testing\AssertableInertia` de Laravel, cuyos métodos equivalentes son desnudos del mismo modo - el contrato panic-on-failure es idéntico de cualquier forma, sin la pista visual `assert_`.
+El `ReloadRequest` de Laravel reemite la solicitud a través del mismo kernel PHP en proceso que el test original utilizó - un cliente de test, siempre disponible. Los tests HTTP de Suprnova conducen un loopback hyper/TCP real y cada archivo de test define su propio par `spawn_server` / `request` (ver [Dónde vive cada pieza](#dónde-vive-cada-pieza) abajo), así que no hay un cliente único al que `AssertableInertia` podría alcanzar - `with_reload` hace que sea explícito en lugar de hardcodificar un harness que un archivo de test de forma diferente no podría usar. `component()` también omite la comprobación de existencia de archivo de componente de página de Laravel (`view-finder`) - un componente alcanzado a través de `Router::inertia` o un `InertiaResponse::new(name)` manual es un string de tiempo de ejecución sin archivo a comprobar; el equivalente de tiempo de compilación de Suprnova es la macro `inertia_response!` (ver [Respuestas de Inertia](frontend-inertia-responses.md)). Sus nombres de método también divergen del `TestResponse`: `component`, `has`, `missing`, `where_`, `count`, y `has_flash` descartan el prefijo `assert_` completamente, emparejando el `Inertia\Testing\AssertableInertia` de Laravel, cuyos métodos equivalentes son desnudos del mismo modo - el contrato panic-on-failure es idéntico de cualquier forma, sin la pista visual `assert_`.
 
 ## Probar middleware
 
@@ -387,7 +387,7 @@ let router = Router::new()
     .middleware(RequireRole::new("admin"));
 
 let (status, _) = send_get(addr, "/admin/dashboard").await;
-assert_eq!(status, 403); // unauthenticated request
+assert_eq!(status, 403); // solicitud sin autenticar
 ```
 
 ### Preestablecer el usuario autenticado
@@ -451,14 +451,15 @@ async fn show(RouteParam(user): RouteParam<User>) -> Response {
 
 #[tokio::test]
 async fn show_user_binds_from_route_param() {
-    // Insert a test user via the model. Database setup omitted -
-    // see the testing chapter for `TestDatabase` patterns.
+    // Inserta un usuario de prueba mediante el modelo. Se omite la
+    // preparación de la base de datos - consulta el capítulo de pruebas
+    // para los patrones de `TestDatabase`.
     let user = User::create(suprnova::attrs! {
         email: "bound@example.com"
     }).await.unwrap();
 
-    // A destructured RouteParam currently uses `param` as the handler
-    // macro's route-parameter name.
+    // Un RouteParam desestructurado usa por ahora `param` como nombre
+    // del parámetro de ruta de la macro del handler.
     let router: Router = Router::new()
         .get("/users/{param}", show)
         .into();
@@ -494,12 +495,12 @@ tiene éxito:
 ```rust
 #[tokio::test]
 async fn login_flow_issues_session_cookie() {
-    // 1. Bootstrap: create the user.
+    // 1. Bootstrap: crea el usuario.
     Auth::password()
         .register("alice@example.com", "longpassword123")
         .await.expect("register");
 
-    // 2. Mount a protected route and the stateful session middleware.
+    // 2. Monta una ruta protegida y el middleware de sesión con estado.
     let router: Router = Router::new()
         .post("/login", login_handler)
         .get("/dashboard", |_req: Request| async { text("dashboard") })
@@ -509,11 +510,11 @@ async fn login_flow_issues_session_cookie() {
         .append(SessionMiddleware::new(SessionConfig::from_env()));
     let addr = spawn_server(router, registry, 3).await;
 
-    // 3. Prove the route is protected before authenticating.
+    // 3. Demuestra que la ruta está protegida antes de autenticar.
     let (guest_status, _) = send_get(addr, "/dashboard").await;
     assert_eq!(guest_status, 401);
 
-    // 4. Drive login and capture the Set-Cookie header.
+    // 4. Ejecuta el login y captura el encabezado Set-Cookie.
     let login = post_json(addr, "/login", serde_json::json!({
         "email": "alice@example.com",
         "password": "longpassword123",
@@ -521,7 +522,7 @@ async fn login_flow_issues_session_cookie() {
     assert_eq!(login.status, 200);
     let cookie = extract_session_cookie(&login.headers);
 
-    // 5. Replay the cookie against the protected route.
+    // 5. Reenvía la cookie contra la ruta protegida.
     let (status, body) = get_with_cookie(addr, "/dashboard", &cookie).await;
     assert_eq!(status, 200);
     assert_eq!(&body[..], b"dashboard");
@@ -553,14 +554,14 @@ async fn panicking_handler_yields_500_and_server_survives() {
 
     let addr = spawn_server(router.into(), MiddlewareRegistry::new(), 4).await;
 
-    // First: the panic translates to a sanitised 500.
+    // Primero: el pánico se traduce en un 500 saneado.
     let (s1, body) = send_get(addr, "/panic").await;
     assert_eq!(s1, 500);
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["message"], "Internal Server Error");
     assert!(parsed.get("request_id").is_some());
 
-    // Second: the server survives. The next request is normal.
+    // Segundo: el servidor sobrevive. La siguiente solicitud es normal.
     let (s2, body2) = send_get(addr, "/ok").await;
     assert_eq!(s2, 200);
     assert_eq!(&body2[..], b"ok");
@@ -573,10 +574,10 @@ A veces quieres probar un accesor de `Request` (`bearer_token`, `is_method`, `ip
 
 ```rust
 let (req_tx, req_rx) = tokio::sync::oneshot::channel::<suprnova::Request>();
-// ... loopback hyper service whose service_fn does:
+// ... servicio hyper de loopback cuyo service_fn hace:
 //     let req = suprnova::Request::new(hyper_req);
 //     let _  = req_tx.send(req);
-//     return a 200 with an empty body
+//     devuelve un 200 con un cuerpo vacío
 let req = req_rx.await.unwrap();
 ```
 
@@ -627,7 +628,7 @@ assert_eq!(req.ip(), Some("192.168.1.10".parse().unwrap()));
 Una lista corta de trampas que atrapan a los autores primerizos:
 
 - **`Incoming` es solo del lado del servidor.** No puedes construir uno en tu test. El loopback TCP (o captura de servicio dentro del proceso) es el único camino - no hay un constructor "construye un `Request` desde un `Vec<u8>` body".
-- **No compartas estado entre tests.** Cada `#[tokio::test]` obtiene su propio runtime; la contaminación cruzada de tests suele significar que estás compartiendo un global (`once_cell`, `lazy_static`, variable de entorno). Para estado de BD ver `TestDatabase` en [Testing](testing.md).
+- **No compartas estado entre tests.** Cada `#[tokio::test]` obtiene su propio runtime; la contaminación cruzada de tests suele significar que estás compartiendo un global (`once_cell`, `lazy_static`, variable de entorno). Para estado de BD ver `TestDatabase` en [Pruebas](testing.md).
 - **Las cookies necesitan un cliente real.** Sin jar de cookies automático - hila `Set-Cookie` de una respuesta dentro de `Cookie` en la siguiente. Ver `framework/tests/auth_http_middleware.rs` para el patrón.
 - **El spawn de terminación posterior a la respuesta no bloquea.** Si quieres hacer aserciones sobre efectos secundarios que se ejecutan vía `Terminable`, sondea por ellos - la respuesta regresa al cliente antes de que el hook se ejecute.
 

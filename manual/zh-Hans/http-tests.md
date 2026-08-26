@@ -332,15 +332,15 @@ let assertable = TestResponse::new(status, headers, body)
         }
     });
 
-// Requests only `users`, and asserts the reload landed on the same
-// component/url/version and that `users` came back.
+// 只请求 `users`，并断言这次重新加载落在同一个
+// component/url/version 上，并且 `users` 回来了。
 assertable.reload_only(["users"]).await;
 
-// Requests everything except `stats`, and asserts `stats` is absent.
+// 请求除 `stats` 以外的一切，并断言 `stats` 不存在。
 assertable.reload_except(["stats"]).await;
 
-// Reads `deferredProps` off the original page, requests every deferred
-// key in one partial reload, and asserts they all came back.
+// 从原始页面上读取 `deferredProps`，在一次部分重新加载里请求
+// 每一个 deferred 键，并断言它们全都回来了。
 assertable.load_deferred_props().await;
 ```
 

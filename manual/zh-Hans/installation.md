@@ -82,13 +82,13 @@ API 起步没有前端或 Inertia 层。它会在应用数据库上初始化 Mag
 ```bash
 cd my-app
 
-# Run migrations (users, sessions, etc.)
+# 运行迁移（users、sessions 等等）
 suprnova migrate
 
-# Install frontend dependencies
-npm install              # in the project root
+# 安装前端依赖
+npm install              # 在项目根目录下
 
-# Start the backend + Vite together
+# 同时启动后端和 Vite
 suprnova serve
 ```
 
@@ -100,25 +100,25 @@ suprnova serve
 
 ```
 my-app/
-├── Cargo.toml          # crate manifest, two [[bin]] targets
-├── .env                # local config (DB URL, app key, ports)
-├── .env.example        # template for ops/CI
+├── Cargo.toml          # crate 清单，两个 [[bin]] 目标
+├── .env                # 本地配置 - 数据库 URL、应用密钥、端口
+├── .env.example        # 用于运维/CI 的模板
 ├── .gitignore
 ├── cmd/
-│   └── main.rs         # the binary entry; calls Application::new().run()
+│   └── main.rs         # 二进制入口；调用 Application::new().run()
 ├── src/
-│   ├── lib.rs          # module wiring
-│   ├── bootstrap.rs    # service registration (the Suprnova analogue of providers)
-│   ├── routes.rs       # the routes! macro tree
+│   ├── lib.rs          # 模块连接
+│   ├── bootstrap.rs    # 服务注册（Laravel 服务提供者的 Suprnova 类似物）
+│   ├── routes.rs       # `routes!` 宏树
 │   ├── bin/
 │   │   └── console.rs  # `cargo run --bin console <subcommand>`
-│   ├── actions/        # single-method invokable controllers
-│   ├── commands/       # `#[command]`-annotated handlers
-│   ├── config/         # typed config sections (database, mail)
+│   ├── actions/        # 单方法可调用控制器
+│   ├── commands/       # `#[command]` 注解的处理程序
+│   ├── config/         # 类型化配置小节（database、mail）
 │   ├── controllers/    # home, auth, dashboard
 │   ├── middleware/     # logging, authenticate
-│   ├── migrations/     # SeaORM migrators (users, sessions, etc.)
-│   └── models/         # `#[suprnova::model]` structs (user)
+│   ├── migrations/     # SeaORM 迁移器（users、sessions 等等）
+│   └── models/         # `#[suprnova::model]` 结构体（user）
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
@@ -133,7 +133,7 @@ my-app/
 │       └── types/
 │           └── inertia-props.ts
 └── public/
-    └── assets/         # Vite production build output
+    └── assets/         # Vite 生产构建输出
 ```
 
 完整的目录详览在[目录结构](structure.md)中。

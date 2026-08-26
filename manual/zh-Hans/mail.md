@@ -117,15 +117,15 @@ mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
 如果您设置了 `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true`，在一个已部署的环境里运行 `log` 驱动程序，您就是在选择把一次性的 bearer 链接放进您的日志里。任何能读到那些文件的人 - 运维人员、日志转发工具、留存存储桶、聚合器 - 都能使用它们，而链接过期帮不上忙，因为日志转运比一个人去读自己的收件箱要快。请按这个风险来设定您的留存和访问策略，或者用一个不打印的驱动程序：
 
 ```env
-# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+# 进程内捕获 - suprnova::mail::boot::captured_in_memory()，或者测试里的 Mail::fake()
 MAIL_DRIVER=memory
 
-# Or write one .eml per send instead of a log line - see "Previewing mail as
-# .eml files" below for the access-control trade this makes
+# 或者每次发送写一个 .eml 文件，而不是一行日志 - 关于这样做在访问控制上的
+# 取舍，参见下文的“以 .eml 文件预览邮件”
 MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 
-# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
+# 或者一个本地捕获器（mailpit / maildev / mailhog），它会在一个 UI 里渲染真实的邮件
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025

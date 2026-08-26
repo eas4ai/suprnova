@@ -26,8 +26,8 @@ pub async fn examples() -> Response {
     // text/html; charset=utf-8
     let _ = HttpResponse::html("<h1>Hello</h1>");
 
-    // Raw bytes with an explicit content type - used by JSON:API
-    // serialization and any other non-JSON byte body.
+    // 带显式内容类型的原始字节 - 用于 JSON:API 序列化，
+    // 以及任何其他非 JSON 的字节响应体。
     let _ = HttpResponse::bytes_body(b"PNG...".to_vec(), "image/png");
 
     Ok(HttpResponse::text("done"))
@@ -36,17 +36,17 @@ pub async fn examples() -> Response {
 
 针对长期存活的响应，有两个流式构造函数：
 
-- `HttpResponse::sse(stream)` - Server-Sent Events。它包装一个由
+- `HttpResponse::sse(stream)` - Server-Sent 事件。它包装一个由
   `SseEvent` 值构成的 `Stream`，设置四个必需的响应头（`Content-Type: text/event-stream`、`Cache-Control: no-cache`、
-  `Connection: keep-alive`、`X-Accel-Buffering: no`），并且在生产数据的那个流结束之前一直保持连接打开。参见 [Server-Sent Events](sse.md)。
+  `Connection: keep-alive`、`X-Accel-Buffering: no`），并且在生产数据的那个流结束之前一直保持连接打开。参见 [Server-Sent 事件](sse.md)。
 - `HttpResponse::stream_bytes(stream)` - 通用的分块响应。它接受一个 `Stream<Item = Result<Bytes, Infallible>>`。错误类型是
   `Infallible`，这是有意为之：框架里的每一个生产者都会在流结束之前，把自己的错误变成流上的一条终止消息，因为在响应进行到一半时，根本没有办法把传输层面的错误呈现给客户端。
 - `HttpResponse::event_stream(stream, end)` - Laravel 的
   `ResponseFactory::eventStream`。它包装一个由 `sse::StreamedEvent` 值构成的
-  `Stream`，将每个事件构造成 `event: update`（或事件自身的名称），并附加一个可配置的终止帧。参见 [Server-Sent Events](sse.md)。
+  `Stream`，将每个事件构造成 `event: update`（或事件自身的名称），并附加一个可配置的终止帧。参见 [Server-Sent 事件](sse.md)。
 - `HttpResponse::stream_json(stream)` - Laravel 的
   `ResponseFactory::streamJson`。它包装任意 `Serialize` 值的 `Stream`，并将其作为逐步构建的 JSON 数组刷新，而不是先缓冲整个集合。参见
-  [Server-Sent Events](sse.md#event-stream-and-stream-json)。
+  [Server-Sent 事件](sse.md#event-stream-and-stream-json)。
 
 ### 状态码、响应头、cookie
 
@@ -178,13 +178,13 @@ use suprnova::Cookie;
 
 Cookie::queue(Cookie::new("theme", "dark"));
 
-// Look up what's queued.
+// 查看排队中的内容。
 let queued = Cookie::queued("theme");
 
-// Remove it before the response goes out.
+// 在响应发出去之前把它移除。
 Cookie::unqueue("theme");
 
-// Queue a deletion instead of a value - composes with `forget_with`.
+// 排入一次删除，而不是一个值 - 可以和 `forget_with` 组合。
 Cookie::expire("theme", Some("/app"), None);
 ```
 
@@ -210,34 +210,34 @@ Suprnova 的 jar 只按名称建立键：如果某个名称已经排队，再为
 ```rust
 use suprnova::{Redirect, redirect_to};
 
-// Explicit URL or path
+// 显式的 URL 或路径
 let _ = Redirect::to("/dashboard");
 
-// Same thing, slightly shorter free function
+// 同样的事情，一个稍短一点的自由函数
 let _ = redirect_to("/dashboard");
 
-// Named route (returns RedirectRouteBuilder)
+// 具名路由（返回 RedirectRouteBuilder）
 let _ = Redirect::route("users.show").with("id", "42");
 
-// Explicit external URL - same as `to`, but the name signals
-// "this is going off-site" for open-redirect audits
+// 显式的外部 URL - 和 `to` 相同，但这个名字向开放重定向审计
+// 表明“这是要跳出站点的”
 let _ = Redirect::away("https://external.example.com");
 
-// Refresh the page (reads previous URL from the session; falls back
-// to "/" if no session scope is active)
+// 刷新页面（从会话里读取上一个 URL；没有活跃的会话作用域时，
+// 回退到 "/"）
 let _ = Redirect::refresh();
 
-// Same, but taking an explicit Request when no scope is active
+// 同上，但在没有活跃作用域时接收一个显式的 Request
 // let _ = Redirect::refresh_for(&request);
 
-// Session previous_url, with fallback when no session is in scope
+// 会话里的 previous_url，作用域中没有会话时使用回退值
 let _ = Redirect::back("/login");
 
-// Session-stored intended URL, consumed on read, with fallback
+// 会话里存下的原定 URL，读取时被消耗，并带一个回退值
 let _ = Redirect::intended("/home");
 
-// Guest redirect: stashes the current request URL as "intended" and
-// sends the user to a login page
+// 访客重定向：把当前请求的 URL 存为“原定”目标，
+// 并把用户送到一个登录页面
 // let _ = Redirect::guest(&request, "/login");
 ```
 
@@ -253,8 +253,8 @@ let _ = Redirect::intended("/home");
 use suprnova::{redirect, Response};
 
 pub async fn store() -> Response {
-    // Compile fails if "users.index" is not a registered route name;
-    // the error message lists available routes and suggests close matches.
+    // 如果 "users.index" 不是一个已注册的路由名，编译就会失败；
+    // 错误消息会列出可用的路由，并给出相近的候选。
     redirect!("users.index").into()
 }
 ```
@@ -278,8 +278,8 @@ let _ = Redirect::to("/x").status(303);      // 303, 307, 308, ...
 use suprnova::Redirect;
 
 let _ = Redirect::back("/users/new")
-    .with("status", "User created")            // single key/value
-    .with_input([                              // repopulate form
+    .with("status", "User created")            // 单个键/值
+    .with_input([                              // 重新填充表单
         ("email", "shawn@example.com"),
         ("name", "Shawn"),
     ])
@@ -305,8 +305,8 @@ let _ = Redirect::back("/users/new")
 use suprnova::redirect;
 
 let _ = redirect!("users.show")
-    .with("id", "42")                          // route param
-    .flash("status", "Updated");               // session flash
+    .with("id", "42")                          // 路由参数
+    .flash("status", "Updated");               // 会话 flash
 ```
 
 ### Cookie、响应头、片段
@@ -317,8 +317,8 @@ use suprnova::{Cookie, Redirect};
 let _ = Redirect::route("billing.show")
     .with_cookies([Cookie::new("welcome", "yes")])
     .with_headers([("X-Trace", "abc")])
-    .with_fragment("invoices")                 // append #invoices
-    .without_fragment();                       // OR strip any prior fragment
+    .with_fragment("invoices")                 // 追加 #invoices
+    .without_fragment();                       // 或者剥掉之前任何的片段
 ```
 
 `with_fragment` 既接受带前导 `#` 的片段，也接受不带的。在 `without_fragment` 之后再调用 `with_fragment`，会重新挂上一个。
@@ -407,7 +407,7 @@ pub async fn legacy_lookup() -> Response {
 | 文本响应 | `HttpResponse::text(s)` 或 `text_response!(s)` |
 | HTML 响应 | `HttpResponse::html(s)` |
 | 原始字节 + 内容类型 | `HttpResponse::bytes_body(b, "image/png")` |
-| Server-Sent Events | `HttpResponse::sse(stream)` - 参见 [SSE](sse.md) |
+| Server-Sent 事件 | `HttpResponse::sse(stream)` - 参见 [SSE](sse.md) |
 | 分块流 | `HttpResponse::stream_bytes(stream)` |
 | 设置状态码 | `.status(code)` |
 | 添加响应头 | `.header(k, v)` / `.with_headers([...])` |
@@ -446,7 +446,7 @@ pub async fn legacy_lookup() -> Response {
 - [错误模型](error-model.md) - `FrameworkError`、`AppError`、
   `HttpError`，以及把每一个错误渲染成 `HttpResponse` 的那唯一一次转换
 - [错误处理](errors.md) - 针对 `?`、`AppError` 和自定义领域错误的实用处理程序模式
-- [Server-Sent Events](sse.md) - 构建并消费 `sse(...)` 响应
+- [Server-Sent 事件](sse.md) - 构建并消费 `sse(...)` 响应
 - [URL 生成](urls.md) - 签名 URL、命名路由解析，以及
   `Redirect::signed_route` 背后的那套接口
 - [会话](session.md) - flash 数据、原定 URL，以及

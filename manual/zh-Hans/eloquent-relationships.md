@@ -259,7 +259,7 @@ Laravel 的中间表是一个不透明的逐属性包（`$role->pivot->note`）�
 })]
 pub struct Country { /* ... */ }
 
-// Single INNER JOIN: SELECT posts.* FROM posts
+// 单次 INNER JOIN：SELECT posts.* FROM posts
 //   INNER JOIN users ON posts.user_id = users.id
 //   WHERE users.country_id = ?
 let posts: Collection<Post> = country.posts().get().await?;

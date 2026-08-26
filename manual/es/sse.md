@@ -346,7 +346,7 @@ pub async fn progress(_req: Request) -> Response {
         for pct in [25, 50, 75, 100] {
             let evt = StreamedEvent::message(pct).unwrap();
             if tx.send(evt).await.is_err() {
-                break; // client disconnected
+                break; // el cliente se desconectó
             }
         }
     });
@@ -392,8 +392,8 @@ suyos en lugar de entregar uno propio:
 ```tsx
 import { useEventStream, useJsonStream } from "@laravel/stream-react";
 
-const { message } = useEventStream("/progress");          // against an event_stream endpoint
-const { data, send } = useJsonStream<Order[]>("/export"); // against a stream_json endpoint
+const { message } = useEventStream("/progress");          // contra un endpoint event_stream
+const { data, send } = useJsonStream<Order[]>("/export"); // contra un endpoint stream_json
 ```
 
 `useStream`/`useJsonStream` hacen POST con dos encabezados que Suprnova lee

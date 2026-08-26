@@ -43,11 +43,12 @@ async fn main() {
 ```rust
 // src/bootstrap.rs
 pub async fn register() {
-    // database, bindings, observers, listeners, supervisors, worker job registration
+    // データベース、バインディング、オブザーバー、リスナー、
+    // スーパーバイザー、ワーカージョブの登録
 }
 
 pub fn register_http_stack() {
-    // global middleware, Inertia::install
+    // グローバルミドルウェア、Inertia::install
 }
 ```
 
@@ -123,16 +124,16 @@ use suprnova::{App, bind, singleton, factory};
 use crate::providers::DatabaseUserProvider;
 
 pub async fn register() {
-    // Trait → singleton (wraps in Arc):
+    // トレイト → シングルトン（Arcで包む）:
     bind!(dyn UserProvider, DatabaseUserProvider);
 
-    // Concrete singleton:
+    // 具体型のシングルトン:
     singleton!(MyConfig { max_uploads_per_user: 100 });
 
-    // Factory (constructed per resolve):
+    // ファクトリー（解決のたびに構築される）:
     factory!(|| RequestLogger::new());
 
-    // Or call the facade directly for finer control:
+    // あるいは、より細かく制御するためにファサードを直接呼び出す:
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(hub);
 }
@@ -224,8 +225,8 @@ Application::new()
 これは例アプリからの逐語的な抜粋ではない、代表的な構成です。プロセス全体の登録は `register` に、HTTP専用のセットアップは `register_http_stack` に置きます。Magnetarの初期化は、アプリケーションユーザースキーマがフレームワークのユーザープロバイダーと一致しなければならないため、上で別に示しています。
 
 ```rust
-//! Application bootstrap - register services, listeners, global
-//! middleware, and the Inertia layer.
+//! アプリケーションのbootstrap - サービス、リスナー、グローバルミドルウェア、
+//! そしてInertia層を登録する。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,14 +247,14 @@ use crate::middleware;
 use crate::models::users::User;
 
 pub async fn register() {
-    // ── Database
+    // ── データベース
     DB::init().await.expect("Failed to connect to database");
 
-    // ── Auth provider
+    // ── 認証プロバイダー
     bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
 
 
-    // ── Broadcasting hub + channel registry
+    // ── ブロードキャストhub + チャネルレジストリ
     let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
     App::bind::<dyn BroadcastHub>(Arc::clone(&hub));
 
@@ -261,43 +262,44 @@ pub async fn register() {
     registry.register(ChatChannel);
     App::singleton(Arc::new(registry));
 
-    // ── Event listeners + bridges
+    // ── イベントリスナー + ブリッジ
     EventFacade::listen::<UserRegistered, _>(
         Arc::new(SendWelcomeEmailListener),
     ).await;
     EventFacade::broadcast::<UserRegistered>(Arc::clone(&hub)).await;
 
-    // ── Storage disks (env-gated S3 in production)
+    // ── ストレージディスク（本番では環境変数でゲートしたS3）
     Storage::register_fs("public", "./storage/public")
         .expect("register public disk");
 
-    // ── Worker job registration
+    // ── ワーカージョブの登録
     register_job::<crate::jobs::welcome_log::WelcomeLog>();
     suprnova::mail::register_mailable_factory::<crate::mail::welcome::WelcomeEmail>()
         .expect("register at boot");
     register_job::<suprnova::mail::send_job::SendMailJob>();
 
-    // ── Observers + supervisors
+    // ── オブザーバー + スーパーバイザー
     suprnova::eloquent::observers::bootstrap_observers()
         .await
         .expect("observer install failed");
     SupervisorRegistry::start_all().await;
 
-    // ── Feature flags
+    // ── フィーチャーフラグ
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
 }
 
 pub fn register_http_stack() {
-    // ── Global middleware (outside-in in registration order)
+    // ── グローバルミドルウェア（登録順に外側から内側へ）
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    // ── Inertia protocol layer (no version pin: the default hashes the
-    // Vite build manifest, so a frontend build bumps the asset version
-    // on its own - see "Version detection" in frontend-inertia-responses.md)
+    // ── Inertiaプロトコル層（バージョンのピン留めなし: デフォルトはViteの
+    // ビルドマニフェストをハッシュするため、フロントエンドのビルドが
+    // アセットバージョンを自分で上げる - frontend-inertia-responses.md の
+    // 「バージョン検出」を参照）
     Inertia::install(&InertiaConfig::new()).expect("Inertia install failed");
 
     global_middleware!(FeatureMiddleware::new());

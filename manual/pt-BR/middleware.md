@@ -506,7 +506,7 @@ src/
 │   ├── logging.rs      # LoggingMiddleware
 │   └── audit.rs        # AuditLogTerminator
 ├── bootstrap.rs        # global_middleware! + register_terminable
-├── routes.rs           # .middleware(M) per-route
+├── routes.rs           # .middleware(M) por rota
 └── main.rs
 ```
 

@@ -166,15 +166,16 @@ ist, als eine Person ihr Postfach liest. Bemessen Sie Retention und
 Zugriffsrichtlinie dafür, oder verwenden Sie einen Treiber, der
 nicht druckt:
 ```env
-# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+# In-Process-Erfassung - suprnova::mail::boot::captured_in_memory(), oder Mail::fake() in Tests
 MAIL_DRIVER=memory
 
-# Or write one .eml per send instead of a log line - see "Previewing mail as
-# .eml files" below for the access-control trade this makes
+# Oder statt einer Log-Zeile eine .eml-Datei pro Versand schreiben - siehe
+# „Mail als .eml-Dateien vorschauen“ unten dazu, welchen Kompromiss das
+# bei der Zugriffskontrolle eingeht
 MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 
-# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
+# Oder ein lokaler Catcher (mailpit / maildev / mailhog), der die echte Mail in einer UI rendert
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025

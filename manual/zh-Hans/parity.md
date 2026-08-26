@@ -281,7 +281,7 @@
 | 部分重新加载 | `#[derive(Data)]` + `req.includes("subset")` + Inertia 的部分重新加载协议 | 已实现 | 类型安全的 include 集合。`?include=` 会门控每种 lazy 形式（包括 `lazy(deferred)`），且先于 `X-Inertia-Partial-Data` 运行，因此不允许的 include 仍返回 400。`errors` 不受 `only`/`except` 影响，与 Laravel 的 `Inertia::always` share 相同 |
 | 延迟 prop | `.defer(…)` / `.defer_with(…, DeferOptions)`，或 `Prop::…defer()` | 已实现 | Inertia v3 deferred-props 协议；`DeferOptions` 包含 group 和 rescue flag。`deferredProps` 仅在初始访问时发送 - `resolveDeferredProps` 对任何匹配的 partial 返回 `[]` |
 | 合并 prop | `.merge` / `.merge_prepend` / `.deep_merge` / `.merge_with(MergeStrategy)` / `.merge_lazy` / `.merge_lazy_with`，或 `Prop::…merge().merge_with_path(...)` | 已实现 | Inertia v3 merge 协议；`match_on` 接受一个或多个字段；`merge_with_path` 合并嵌套字段而非 prop 根 |
-| Prop 组合（`defer()->merge()`、`merge()->once()`、`optional()->once()`） | `Prop` flag builder + `InertiaResponse::prop(key, prop)` | 已实现 | `Prop` 是具有正交 flag 的 struct，映照 PHP adapter 的 `Deferrable` / `Mergeable` / `Onceable` interface |
+| Prop 组合（`defer()->merge()`、`merge()->once()`、`optional()->once()`） | `Prop` 标志构建器 + `InertiaResponse::prop(key, prop)` | 已实现 | `Prop` 是具有正交 flag 的 struct，映照 PHP adapter 的 `Deferrable` / `Mergeable` / `Onceable` interface |
 | 加密历史记录 | `EncryptHistoryMiddleware` | 已实现 | 历史记录在客户端静态加密 |
 | 滚动位置 | `.scroll` / `.scroll_with` / `.scroll_wrapped` / `.paginate` + `ScrollMetadata` / `ProvidesScrollMetadata` | 已实现 | 导航时自动恢复；`reset` 读取 `X-Inertia-Reset`，对应 `resolveScrollProps` |
 | TypeScript 类型 | `suprnova generate-types` 会读取 `#[derive(InertiaProps)]` 并产出 `.d.ts` | 已实现 | [TypeScript 类型](frontend-typescript-types.md) |
@@ -357,7 +357,7 @@ Suprnova 提供了一大批 Laravel 没有对应物的 proc-macro，因为 Larav
 | `#[policy]` | Policy 类 | 通过 `inventory` 注册一个 `Policy` 实现 |
 | `#[service(T)]` | 服务提供者的 `register` | 把 `T` 绑定进容器 |
 | `#[injectable]` | 构造函数注入 | 生成一个由 `App::make` 支撑的构造函数 |
-| `#[derive(InertiaProps)]` | Inertia props | TypeScript 代码生成 + Inertia 序列化 |
+| `#[derive(InertiaProps)]` | Inertia 的 props | TypeScript 代码生成 + Inertia 序列化 |
 | `#[derive(Data)]` | 请求 DTO | 可以带着 include 集合支持从 `Request` 里提取 |
 | `#[derive(FormRequest)]` | `FormRequest` 类 | 验证 + 认证门 + 转换 |
 | `#[derive(Factory)]` | 模型工厂 | 由 Faker 支撑的测试数据生成 |

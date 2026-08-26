@@ -117,15 +117,17 @@ mail (log driver): would send from=noreply@app.test to=["alice@example.org"]
 デプロイされた環境で `log` ドライバーを動かすために `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` を設定するなら、あなたは1回限りのbearerリンクをログに置くことを選んでいます。それらのファイルを読める者 - 運用担当者、ログシッパー、保持用バケット、アグリゲーター - は誰でもそれらを使えます。リンクの有効期限は助けになりません。ログの転送は、人が受信箱を読むより速いからです。それを踏まえて保持期間とアクセスポリシーを決めるか、出力しないドライバーを使ってください:
 
 ```env
-# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+# プロセス内でのキャプチャ - suprnova::mail::boot::captured_in_memory()、
+# またはテストでは Mail::fake()
 MAIL_DRIVER=memory
 
-# Or write one .eml per send instead of a log line - see "Previewing mail as
-# .eml files" below for the access-control trade this makes
+# ログ行の代わりに、送信ごとに .eml を1つ書き出す - これが引き換えにする
+# アクセス制御については、下の「`.eml`ファイルとしてメールをプレビューする」を参照
 MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 
-# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
+# あるいはローカルのメールキャッチャー（mailpit / maildev / mailhog）。
+# 本物のメールをUIでレンダリングする
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025

@@ -38,8 +38,8 @@ Le framework n'a pas besoin de savoir si votre handler a « réussi » ou « éc
 use suprnova::{Request, Response, json_response};
 
 pub async fn show(req: Request) -> Response {
-    // `?` short-circuits on Err. Each conversion below produces an
-    // HttpResponse via a From impl - the chain collapses both arms.
+    // `?` court-circuite sur Err. Chaque conversion ci-dessous produit une
+    // HttpResponse via une impl From - la chaîne réduit les deux branches.
     let id: i64 = req.param("id")?.parse().map_err(|_| {
         suprnova::FrameworkError::param_parse("id", "i64")
     })?;
@@ -75,7 +75,7 @@ pub enum FrameworkError {
     UnsupportedMediaType,                                // 415
     PrecognitionSuccess,                                 // 204
     PrecognitionFailure(ValidationErrors),               // 422
-    AlreadyReported,                                     // CLI-only
+    AlreadyReported,                                     // CLI uniquement
     RateLimited { retry_after: Option<Duration>, message: String }, // 429
     External { message: String, source: Arc<dyn Error + Send + Sync> }, // 500
 }
@@ -86,7 +86,7 @@ Vous faites rarement un `match` sur la variante. Vous en construisez une via un 
 ```rust
 use suprnova::FrameworkError;
 
-// All of these produce a FrameworkError with the right status:
+// Tous ces constructeurs produisent une FrameworkError avec le bon statut :
 FrameworkError::not_found("User");                    // → ModelNotFound, 404
 FrameworkError::bad_request("Bad input");             // → Domain, 400
 FrameworkError::param("user_id");                     // → ParamError, 400
@@ -108,9 +108,9 @@ use suprnova::{DB, FrameworkError};
 use sea_orm::ActiveModelTrait;
 
 pub async fn create_user(new_user: ActiveModel) -> Result<Model, FrameworkError> {
-    // Both `?` calls here convert into FrameworkError automatically:
-    // - DB::get returns Result<_, FrameworkError>
-    // - insert returns Result<_, DbErr>, which has From<DbErr> for FrameworkError
+    // Les deux appels `?` ici se convertissent automatiquement en FrameworkError :
+    // - DB::get retourne Result<_, FrameworkError>
+    // - insert retourne Result<_, DbErr>, qui a From<DbErr> pour FrameworkError
     let user = new_user.insert(&*DB::get()?).await?;
     Ok(user)
 }
@@ -149,7 +149,7 @@ Pour inspecter l'original, utilisez `external_source()` plutôt que `source()` :
 ```rust
 if let Some(src) = err.external_source() {
     if let Some(db) = src.downcast_ref::<sea_orm::DbErr>() {
-        // decide whether this is worth retrying
+        // décider si cela vaut la peine de réessayer
     }
 }
 ```

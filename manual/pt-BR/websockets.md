@@ -131,7 +131,7 @@ semântica de erro que `send_text`.
 while let Some(text) = socket.recv_text().await? {
     // text: String
 }
-// Ok(None) means the peer closed.
+// Ok(None) significa que o peer fechou.
 ```
 
 Retorna a próxima mensagem de texto, descartando silenciosamente

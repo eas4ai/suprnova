@@ -609,7 +609,7 @@ use std::time::Duration;
 ws!("/ws/internal/firehose", FirehoseHandler::new())
     .config(WsConfig {
         ping_interval: Duration::from_secs(10),
-        ..WsConfig::generous() // 64 MiB message / 16 MiB frame
+        ..WsConfig::generous() // mensagem de 64 MiB / frame de 16 MiB
     })
 ```
 

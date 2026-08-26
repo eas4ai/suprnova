@@ -421,11 +421,11 @@ WHERE-Klauseln der Kette).
 
 ```php
 // Laravel
-$user->refresh();                          // reload from DB
-$user->refreshForUpdate();                 // reload under a row lock
-$copy = $user->fresh();                    // fetch + return copy
-$replica = $user->replicate();             // unsaved clone with fresh PK
-$replica = $user->replicate(['email']);    // skip a field
+$user->refresh();                          // aus der DB neu laden
+$user->refreshForUpdate();                 // unter einer Zeilensperre neu laden
+$copy = $user->fresh();                    // holen + Kopie zurückgeben
+$replica = $user->replicate();             // ungespeicherter Klon mit frischem PK
+$replica = $user->replicate(['email']);    // ein Feld überspringen
 ```
 
 ```rust

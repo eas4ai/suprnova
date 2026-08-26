@@ -386,7 +386,7 @@ pub async fn register() {
 }
 ```
 
-Os capítulos [Contêiner](container.md) e [Bootstrap](bootstrap.md)
+Os capítulos [Contêiner](container.md) e [Inicialização da aplicação](bootstrap.md)
 têm o detalhe.
 
 ### Configuração é tipada

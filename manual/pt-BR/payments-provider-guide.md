@@ -611,7 +611,7 @@ prova de solidez - se esse teste passa, o provedor se conecta a
 qualquer app Suprnova sem surpresas.
 
 ```rust,ignore
-// tests/discriminator.rs (inside crates/suprnova-payments-mollie/)
+// tests/discriminator.rs (dentro de crates/suprnova-payments-mollie/)
 
 use suprnova::payments::*;
 use suprnova_payments_mollie::MollieProvider;

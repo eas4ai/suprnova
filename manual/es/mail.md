@@ -117,15 +117,15 @@ Es seguro aquí porque el driver no puede llegar a producción: el arranque se n
 Si estableces `MAIL_ALLOW_NON_DELIVERING_IN_PRODUCTION=true` para ejecutar el driver `log` en un entorno desplegado, eliges colocar enlaces de portador de un solo uso en tus registros. Cualquiera que pueda leer esos archivos  - operadores, el agente de envío de registros, el bucket de retención o el agregador -  puede usarlos, y la caducidad del enlace no ayuda porque el envío de registros es más rápido que una persona leyendo su bandeja de entrada. Dimensiona para ello tu política de retención y acceso, o usa un driver que no imprima:
 
 ```env
-# In-process capture - suprnova::mail::boot::captured_in_memory(), or Mail::fake() in tests
+# Captura en proceso - suprnova::mail::boot::captured_in_memory(), o Mail::fake() en los tests
 MAIL_DRIVER=memory
 
-# Or write one .eml per send instead of a log line - see "Previewing mail as
-# .eml files" below for the access-control trade this makes
+# O escribe un .eml por envío en vez de una línea de log - mira más abajo
+# "Previsualizar correo como archivos .eml" para el compromiso de control de acceso
 MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 
-# Or a local catcher (mailpit / maildev / mailhog), which renders the real mail in a UI
+# O un capturador local (mailpit / maildev / mailhog), que renderiza el correo real en una UI
 MAIL_DRIVER=smtp
 MAIL_SMTP_HOST=127.0.0.1
 MAIL_SMTP_PORT=1025
@@ -140,7 +140,7 @@ MAIL_SMTP_HOST=smtp.mailtrap.io
 MAIL_SMTP_PORT=587
 MAIL_SMTP_USER=...
 MAIL_SMTP_PASS=...
-MAIL_SMTP_ENCRYPTION=starttls   # or `tls` for implicit TLS on 465, or `none`
+MAIL_SMTP_ENCRYPTION=starttls   # o `tls` para TLS implícito en el 465, o `none`
 
 # Postmark
 MAIL_DRIVER=postmark
@@ -173,8 +173,8 @@ Cada proveedor HTTP también respeta una anulación `MAIL_<PROVIDER>_ENDPOINT` c
 Los mailables incorporados de los flujos de autenticación  - verificación de correo, restablecimiento de contraseña y la notificación de contraseña cambiada -  resuelven el `From` de su sobre desde el entorno, en vez de mediante un `from()` codificado de forma fija:
 
 ```env
-MAIL_FROM=no-reply@example.com        # bare address (required by the auth flows; fails closed if unset)
-MAIL_FROM_NAME=Acme Support           # optional display name (since 0.5.9)
+MAIL_FROM=no-reply@example.com        # solo la dirección (auth la exige; falla cerrado si falta)
+MAIL_FROM_NAME=Acme Support           # nombre visible opcional (desde 0.5.9)
 ```
 
 - `MAIL_FROM` **debe ser una dirección sin nombre visible.** Se eleva directamente al `From` del mensaje, por lo que un valor `"Name <addr>"` se trataría como la dirección completa y el transporte lo rechazaría.
@@ -258,7 +258,7 @@ Mail::to("alice@example.org")
     .cc("manager@example.com")
     .bcc("audit@example.com")
     .reply_to("support@example.com")
-    .from(("Operations", "ops@example.com"))   // (display name, email)
+    .from(("Operations", "ops@example.com"))   // (nombre visible, email)
     .send(OrderShipped { order_id: 42, /* ... */ })
     .await?;
 ```
@@ -284,13 +284,13 @@ Los adjuntos viajan mediante el método `Mailable::attachments`. Los cinco prove
 `Mail::queue(...)` construye un `SendMailJob` y lo inserta en la cola del framework. El worker reconstruye el mailable desde la fábrica registrada y lo despacha mediante el transporte vinculado:
 
 ```rust
-// One-time: register every Mailable type the worker will see.
+// Una sola vez: registra cada tipo Mailable que verá el worker.
 suprnova::mail::register_mailable_factory::<Welcome>()?;
 
-// At send time:
+// En el momento del envío:
 Mail::to("alice@example.org").queue(Welcome { name: "Alice".into() }).await?;
 
-// Delayed:
+// Retardado:
 use std::time::Duration;
 Mail::to("alice@example.org")
     .later(Duration::from_secs(60), Welcome { name: "Alice".into() })
@@ -405,11 +405,11 @@ Un `Mail::queue` para un mailable no registrado llega a la cola, se ejecuta una 
 Enviar correo en un handler de solicitud acopla la latencia de respuesta del usuario a tu servidor SMTP (o a la API HTTP de cualquier proveedor). Usa `Mail::queue` para cualquier cosa que supere un renderizado local síncrono de desarrollo, y `Mail::later` cuando quieras diferir el despacho: seguimientos de incorporación, correos de recordatorio o resúmenes programados.
 
 ```rust
-// Bad: ties response time to the mail provider
+// Mal: ata el tiempo de respuesta al proveedor de correo
 Mail::to(&user.email).send(Welcome { ... }).await?;
 return json_response!({ "ok": true });
 
-// Good: 200 OK returns immediately; the worker delivers the mail.
+// Bien: el 200 OK vuelve de inmediato; el worker entrega el correo.
 Mail::to(&user.email).queue(Welcome { ... }).await?;
 return json_response!({ "ok": true });
 ```
@@ -445,7 +445,7 @@ Cuando el correo es un único mensaje transaccional que no justifica un struct `
 ```rust
 use suprnova::mail::Mail;
 
-// Plain text
+// Texto plano
 Mail::raw("Your code is 12345", |b| {
     b.to("alice@example.org")
         .subject("Verification code")
@@ -469,15 +469,15 @@ Como `Mailer::alwaysFrom` / `alwaysReplyTo` / `alwaysTo` / `alwaysReturnPath` de
 ```rust
 use suprnova::mail::{Address, Mail};
 
-// At boot:
+// En el arranque:
 Mail::always_from(Address::new("noreply@example.com").with_name("Acme"))?;
 Mail::always_reply_to(Address::new("support@example.com"))?;
 Mail::always_return_path(Address::new("bounce@example.com"))?;
 
-// Local-dev "single inbox" - route ALL mail to one address, drop CC/BCC:
+// "Buzón único" de desarrollo local - todo el correo a una dirección, sin CC/BCC:
 Mail::always_to(Address::new("dev-inbox@example.com"))?;
 
-// Roll everything back (tests typically call this at teardown):
+// Deshace todo (los tests suelen llamarlo en el teardown):
 Mail::forget_always()?;
 ```
 
@@ -525,7 +525,8 @@ impl Mailable for OrderShipped {
 ```
 
 ```rust
-// Per-message on the builder. Builder wins on metadata-key collisions; tags + headers union.
+// Por mensaje en el builder. El builder gana en las colisiones de claves de
+// metadata; los tags y los encabezados se fusionan.
 Mail::to(&user.email)
     .tag("campaign-spring")
     .metadata("ab_variant", "B")
@@ -601,19 +602,19 @@ async fn boot_dispatches_welcome() {
 
     onboard_user("alice@example.org").await.unwrap();
 
-    // Sent-side
+    // Lado de enviados
     fake.assert_sent_count(1);
     fake.assert_sent(|m| m.has_to("alice@example.org") && m.subject.starts_with("Welcome"));
     fake.assert_sent_to("alice@example.org");
     fake.assert_not_sent(|m| m.subject.contains("Password reset"));
 
-    // Queued-side (for delayed mails)
+    // Lado de encolados (para correos retardados)
     fake.assert_queued("WelcomeFollowup");
     fake.assert_queued_to("alice@example.org");
     fake.assert_queued_count(1);
 
-    // Composite
-    fake.assert_outgoing_count(2);   // sent + queued
+    // Compuesto
+    fake.assert_outgoing_count(2);   // enviados + encolados
     fake.assert_not_outgoing("PasswordReset");
 }
 ```

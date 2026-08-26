@@ -43,10 +43,10 @@ impl Listener<UserRegistered> for SendWelcomeEmail {
     }
 }
 
-// In bootstrap.rs:
+// Em bootstrap.rs:
 EventFacade::listen::<UserRegistered, SendWelcomeEmail>(Arc::new(SendWelcomeEmail)).await;
 
-// In a controller:
+// Em um controlador:
 EventFacade::dispatch(UserRegistered { user_id: 42 }).await?;
 ```
 

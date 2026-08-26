@@ -185,8 +185,9 @@ que não imprime:
 MAIL_DRIVER=memory
 
 
-# Or write one .eml per send instead of a log line - see "Previewing mail as
-# .eml files" below for the access-control trade this makes
+# Ou escreva um .eml por envio em vez de uma linha de log - veja
+# "Visualizando e-mails como arquivos .eml" abaixo para a troca de
+# controle de acesso que isso implica
 MAIL_DRIVER=file
 MAIL_FILE_PATH=storage/mail
 

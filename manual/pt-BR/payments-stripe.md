@@ -84,7 +84,7 @@ use suprnova::payments::PaymentProviderRegistry;
 let stripe = StripeProvider::from_env()
     .expect("STRIPE_SECRET_KEY / PUBLISHABLE_KEY / WEBHOOK_SIGNING_SECRET");
 
-// Tests / explicit config:
+// Testes / config explícita:
 let stripe = StripeProvider::new(
     "sk_test_...",
     "pk_test_...",

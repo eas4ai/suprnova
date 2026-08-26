@@ -85,7 +85,7 @@ InertiaのuseFormは、同じvisitパイプラインを使用するため、こ�
 import { useForm } from '@inertiajs/react';
 
 const form = useForm({ title: '', content: '' });
-form.post('/posts');  // X-CSRF-TOKEN comes from the router hook
+form.post('/posts');  // X-CSRF-TOKEN はルーターのフックから来る
 ```
 
 生の `fetch` 呼び出しの場合は、同じようにmeta タグからトークンを読み取ってください:

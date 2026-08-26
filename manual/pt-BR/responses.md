@@ -215,13 +215,13 @@ use suprnova::Cookie;
 
 Cookie::queue(Cookie::new("theme", "dark"));
 
-// Look up what's queued.
+// Consulta o que está enfileirado.
 let queued = Cookie::queued("theme");
 
-// Remove it before the response goes out.
+// Remove antes de a resposta sair.
 Cookie::unqueue("theme");
 
-// Queue a deletion instead of a value - composes with `forget_with`.
+// Enfileira uma exclusão em vez de um valor - compõe com `forget_with`.
 Cookie::expire("theme", Some("/app"), None);
 ```
 

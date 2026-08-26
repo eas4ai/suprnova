@@ -507,7 +507,7 @@ vários subformulários que não podem compartilhar um namespace plano:
 let mut errs = ValidationErrors::new();
 errs.add_to_bag("profile", "bio", "must be under 280 characters");
 errs.add_to_bag("billing", "card", "expired");
-// errors map: { "profile.bio": [...], "billing.card": [...] }
+// mapa de erros: { "profile.bio": [...], "billing.card": [...] }
 ```
 
 `from_validator(ve)` converte um `validator::ValidationErrors`;

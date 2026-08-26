@@ -280,7 +280,7 @@ pub struct UserDto {
 Gibt beide aus:
 
 ```typescript
-export interface UserDto {              // server -> client
+export interface UserDto {              // Server -> Client
   id: number;
   name: string;
   computed_handle: string;
@@ -288,7 +288,7 @@ export interface UserDto {              // server -> client
   favorite_song?: string;
 }
 
-export interface UserDtoInput {         // client -> server
+export interface UserDtoInput {         // Client -> Server
   id: number;
   name: string;
   password: string;

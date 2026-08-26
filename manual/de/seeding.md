@@ -648,7 +648,7 @@ ein klares Signal statt eines stillen Überspringens. Die Helfer
 dafür, damit ein Test assertieren kann, dass bootstrap jeden erwarteten
 Seeder registriert hat.
 
-Siehe [Bootstrap](bootstrap.md) für die vollständige Struktur der
+Siehe [Application Bootstrap](bootstrap.md) für die vollständige Struktur der
 Datei und die Reihenfolge, in der das Framework erwartet, dass jedes
 Subsystem verdrahtet wird.
 
