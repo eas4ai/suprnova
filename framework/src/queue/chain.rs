@@ -118,23 +118,21 @@ impl ChainLink {
         // fallback, `Job::queue()` was silently dropped for every chained
         // job - routed to a dedicated pool when pushed directly, dumped on
         // `default` when dispatched as part of a chain.
-        let route = crate::queue::routing::route_for(&self.job_name);
-        let mut queue = route
-            .as_ref()
-            .and_then(|r| r.queue.clone())
+        let mut queue = crate::queue::routing::route_for(&self.job_name)
+            .and_then(|r| r.queue)
             .or_else(|| self.queue.clone());
         // A chain reifies its own envelopes rather than going through
         // `build_envelope`, so the forwards map has to be applied here as well.
         // Without it a chained job is pushed to the source queue while every
         // worker started on that source queue is already claiming the
-        // destination - work stranded on a queue nobody drains. A chain link
-        // captures no `Job::connection`, so a connection-gated forward is
-        // evaluated against the route's connection, then this process's.
+        // destination - work stranded on a queue nobody drains. The gate is the
+        // process connection name, the same value the push path and the
+        // worker's claim list use, so the two halves cannot disagree.
         if crate::queue::routing::has_forwards() {
-            let connection = route
-                .and_then(|r| r.connection)
-                .unwrap_or_else(crate::queue::Queue::connection_name);
-            queue = crate::queue::routing::forwarded_queue(queue.as_deref(), &connection);
+            queue = crate::queue::routing::forwarded_queue(
+                queue.as_deref(),
+                &crate::queue::Queue::connection_name(),
+            );
         }
         Envelope {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,

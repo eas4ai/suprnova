@@ -153,8 +153,13 @@ fn forms_cycle(map: &HashMap<String, QueueRoute>, from: &str, to: &str) -> bool 
 
 /// Register (or replace) the forward for the queue named `from`.
 ///
-/// `connection` gates the forward: `None` applies it on every connection,
-/// `Some(name)` only when the push (or the worker) is on that connection.
+/// `connection` gates the forward: `None` applies it everywhere, `Some(name)`
+/// only when `name` equals the *process* connection name
+/// ([`Queue::connection_name`](crate::queue::Queue::connection_name)), never
+/// the connection a route or a job declared. Every half of the redirect - the
+/// push, a per-push queue override, a chain link, and the worker's claim list -
+/// gates on that one value, because a worker has nothing else to gate on and a
+/// forward that moves the push without moving the claim strands work.
 /// Registering the same source twice replaces the earlier forward.
 ///
 /// A forward that would close a loop (`a -> b` with `b -> a` already
@@ -207,6 +212,9 @@ pub(crate) fn has_forwards() -> bool {
 }
 
 /// Apply the registered forwards to one queue name.
+///
+/// `connection` is the process connection name, which is the only value a
+/// connection-scoped forward is ever gated against - see [`try_set_forward`].
 ///
 /// `None` means "the driver's default queue", so it is looked up as
 /// [`DEFAULT_QUEUE`](crate::queue::envelope::DEFAULT_QUEUE) - Laravel resolves
@@ -433,6 +441,21 @@ mod tests {
             "an unfiltered worker drains everything; there is nothing to rewrite"
         );
 
+        // The claim list is gated exactly like the push, on the same process
+        // connection name: `c -> c-dest` is scoped to `redis`, so a worker
+        // anywhere else keeps claiming the source. The two halves agreeing is
+        // what stops a scoped forward from stranding work.
+        assert_eq!(
+            forward_active_queues("redis", vec!["c".into()]),
+            vec!["c-dest".to_string()],
+            "a worker on the gated connection must follow the forward"
+        );
+        assert_eq!(
+            forward_active_queues("database", vec!["c".into()]),
+            vec!["c".to_string()],
+            "and a worker on any other connection must not"
+        );
+
         // A loop is what an operator writes when they expect forwards to
         // chain. They never do, so the configuration cannot mean what it looks
         // like and is refused at registration rather than resolving to
@@ -450,7 +473,7 @@ mod tests {
         );
 
         // One hop onto the queue's own name is the identity, not a loop: it
-        // stays legal, because it is the only way to neutralise a forward that
+        // stays legal, because it is the only way to neutralize a forward that
         // is already registered.
         try_set_forward("default", "default", None).expect("set");
         assert_eq!(

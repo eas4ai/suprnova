@@ -703,6 +703,15 @@ Queue::forward("default", "high");
 Queue::forward_on("exports", "heavy", "redis");   // only on the `redis` connection
 ```
 
+The connection in `forward_on` is a gate, and it is compared against this
+process's connection name - `Queue::set_connection_name` if you set one, the
+driver's own name otherwise. It is not compared against the job's
+`Job::connection`, a `Queue::route`'s connection, or a per-push
+`EnvelopeOverrides` connection: those name what the lifecycle events report, and
+a worker has only the process name to gate its claim list on. Both halves of the
+redirect gate on that one value, so a forward can never move the push without
+moving the claim.
+
 The redirect applies on both sides, which is what keeps it from stranding work:
 
 - **On the push side**, the name is rewritten after routing and the job's own
@@ -719,7 +728,7 @@ A forward is a single lookup, never a chain. With `a -> b` and `b -> c`
 registered, a push that resolved to `a` lands on `b`. Registering a forward that
 closes a loop is an error rather than a redirect, because a loop can only mean
 the chaining that forwards never do. Forwarding a queue onto its own name is the
-identity - no redirect at all - which is how you neutralise a forward you
+identity - no redirect at all - which is how you neutralize a forward you
 already registered.
 
 Only future pushes move. Envelopes already sitting on the source queue stay
@@ -730,6 +739,11 @@ so drain the source pool before you forward it. The same applies to
 Pausing is evaluated before the redirect, on the names the worker was started
 with. `Queue::pause(&connection, "default")` still stops a worker started on
 `--queue=default`, even while `default` is forwarded to `high`.
+
+The inspection calls are deliberately not forwarded: `Queue::pending_jobs(
+Some("default"))` lists what is literally on `default`, not what is on `high`,
+which is how you see the backlog stranded on a source queue you have just
+forwarded. Laravel resolves the forward there too; see the divergence note below.
 
 Read a registered forward back with `Queue::forward_for("default")`, which
 returns the destination in `queue` and the connection gate in `connection`.
@@ -759,6 +773,14 @@ applies - and never as a destination. For the same reason `to` is required here,
 while Laravel's is optional: an omitted `to` in Laravel means "move only the
 connection", which is precisely the dimension Suprnova cannot honor, so a
 `forward(from, None)` would be a no-op dressed as a configuration change.
+
+Laravel's inspection calls follow a forward, because `pendingJobs($queue)` and
+its siblings run through the same driver-level `getQueue()` the push and the pop
+do. Suprnova's `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` report
+the literal queue you name instead. With one process-global driver, the literal
+view is the only way to see the envelopes that stayed behind on a queue you have
+just forwarded away - the backlog this section tells you to drain first. Ask for
+the destination queue by name to see where new work is landing.
 
 ### The `jobs` table
 

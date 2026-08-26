@@ -210,7 +210,7 @@ impl Queue {
     /// registered, a push that resolved to `a` lands on `b`. A forward that
     /// would close a loop is refused for that reason. Forwarding a queue onto
     /// its own name is the identity - no redirect at all - which is how a
-    /// registered forward is neutralised.
+    /// registered forward is neutralized.
     ///
     /// Only future pushes are redirected. Envelopes already sitting on `from`
     /// stay there, and the worker that used to drain them is now claiming `to`,
@@ -232,9 +232,17 @@ impl Queue {
 
     /// [`Queue::forward`], restricted to one connection name.
     ///
-    /// The forward fires only when the push (or the worker) is on
-    /// `connection`; on any other connection it is inert and the queue name
-    /// passes through unchanged.
+    /// The forward fires only when `connection` equals this process's
+    /// connection name - [`Queue::connection_name`], which is
+    /// [`Queue::set_connection_name`] if it was set and the driver's own name
+    /// otherwise. It is **not** compared against the job's
+    /// [`Job::connection`], against a [`Queue::route`]'s connection, or against
+    /// a per-push [`EnvelopeOverrides::connection`]; those name what the
+    /// lifecycle events report, and a worker has only the process name to gate
+    /// its claim list on. Gating the two halves on different values would let a
+    /// forward move the push without moving the claim, which strands work. On
+    /// any other connection name the forward is inert and the queue name passes
+    /// through unchanged.
     ///
     /// # What this cannot do
     ///
@@ -466,7 +474,10 @@ impl Queue {
             .clone()
             .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
         let mut env = envelope_for::<J>(&job, available_at)?;
-        apply_overrides::<J>(&mut env, &overrides, &connection);
+        // The forward gate is the process connection name; `connection` above is
+        // the resolved name the lifecycle events report, and the two are
+        // deliberately different values.
+        apply_overrides(&mut env, &overrides, &Self::connection_name());
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
             connection: connection.clone(),
@@ -1370,24 +1381,15 @@ fn envelope_for<J: Job>(
 /// `envelope_for` - see [`EnvelopeOverrides`]. No schema change: every
 /// touched field already exists on the frozen envelope.
 ///
-/// `connection` is the name this push resolved to, needed because an explicit
-/// queue override replaces the name `build_envelope` already forwarded, so the
-/// override has to be forwarded in its place. Forwarding the same envelope
-/// twice would make forwards transitive, which they are not - so both branches
-/// below re-run the redirect from the *pre-forward* name and overwrite, rather
-/// than forwarding what `build_envelope` produced.
-///
-/// The second branch is the one that is easy to miss. `build_envelope` gates a
-/// connection-scoped forward on the connection *routing* resolved, but a
-/// per-push `EnvelopeOverrides::connection` outranks routing, so the gate it
-/// applied was evaluated against the wrong name. Re-running it here is what
-/// stops `Queue::forward_on` from being applied to the worker's claim list and
-/// not to the push - the half-applied forward that strands work.
-fn apply_overrides<J: Job>(env: &mut Envelope, overrides: &EnvelopeOverrides, connection: &str) {
-    let regate = overrides.connection.is_some() && routing::has_forwards();
-    if overrides.queue.is_some() || regate {
-        let resolved = overrides.queue.clone().or_else(routing::resolve_queue::<J>);
-        env.queue = routing::forwarded_queue(resolved.as_deref(), connection);
+/// `connection` is the **process** connection name, not the one this push
+/// resolved to: an explicit queue override replaces the name `build_envelope`
+/// already forwarded, so the override has to be forwarded in its place, and it
+/// has to be gated on the same value every other half of the redirect uses.
+/// Forwarding the already-forwarded envelope instead would make forwards
+/// transitive, which they are not.
+fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection: &str) {
+    if let Some(queue) = &overrides.queue {
+        env.queue = routing::forwarded_queue(Some(queue.as_str()), connection);
     }
     if let Some(max_tries) = overrides.max_tries {
         env.max_tries = max_tries;
@@ -1414,13 +1416,18 @@ pub(crate) fn build_envelope<J: Job>(
         .map_err(|e| FrameworkError::internal(format!("encode job: {e}")))?;
     let timeout_secs = J::timeout().map(|d| d.as_secs());
     // Routing decides the name; the forwards map then redirects it, exactly
-    // where Laravel's driver-level `getQueue()` calls `resolveQueue()`. Gated
-    // on `has_forwards` so a deployment that never forwards does not pay a
-    // connection resolution on every push.
+    // where Laravel's driver-level `getQueue()` calls `resolveQueue()`.
+    //
+    // The gate is the *process* connection name, never the one routing or the
+    // job resolved. The worker has only `Queue::connection_name()` to gate its
+    // claim list on, so any other value here would let `forward_on` move one
+    // half of the pair and strand work on the other. That is sound because the
+    // connection dimension is a label rather than a driver selector (see the
+    // `routing` module docs). Gated on `has_forwards` so a deployment that
+    // never forwards does not pay the lookup on every push.
     let mut queue = routing::resolve_queue::<J>();
     if routing::has_forwards() {
-        let connection = routing::resolve_connection::<J>(Queue::connection_name());
-        queue = routing::forwarded_queue(queue.as_deref(), &connection);
+        queue = routing::forwarded_queue(queue.as_deref(), &Queue::connection_name());
     }
     Ok(Envelope {
         schema_version: CURRENT_SCHEMA_VERSION,

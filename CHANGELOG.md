@@ -19,8 +19,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   refused. Pausing is still evaluated on the names a worker was started with, so
   `Queue::pause(&connection, "default")` stops that worker even while `default` is
   forwarded. `Queue::forward_on(from, to, connection)` restricts a forward to one
-  connection name, and `Queue::forward_for(from)` reads one back.
-  `Queue::try_forward` is the fallible sibling.
+  connection name, compared against this process's connection name rather than a
+  job's declared connection, so both halves of the redirect gate on the same
+  value. `Queue::forward_for(from)` reads a forward back, and `Queue::try_forward`
+  is the fallible sibling. The inspection calls (`Queue::pending_jobs` and its
+  siblings) deliberately do not follow a forward, so a backlog left behind on a
+  forwarded queue stays visible.
 
 - **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
 - **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
