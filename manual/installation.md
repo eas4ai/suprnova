@@ -212,7 +212,7 @@ A few VS Code extensions make the experience smoother:
 - **Tailwind CSS IntelliSense**
 - **Even Better TOML**
 
-`rust-analyzer` will index the project on first open; expect 1–2
+`rust-analyzer` will index the project on first open; expect 1-2
 minutes the first time, then incremental.
 
 ## Next

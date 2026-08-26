@@ -238,7 +238,7 @@ This:
 5. Adds `.schedule(<crate>::schedule::register)` to the `Application`
    chain in `cmd/main.rs` (or `src/main.rs` for the API starter)
 
-Steps 2–5 are idempotent, so re-running `make:task` repairs wiring that
+Steps 2-5 are idempotent, so re-running `make:task` repairs wiring that
 was removed by hand. See [Generators](cli-generators.md) for the broader
 `make:*` family.
 

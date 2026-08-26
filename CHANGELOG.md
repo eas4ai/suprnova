@@ -2134,7 +2134,7 @@ that driver, not just ones using `--queue`. 0.7.1 itself needs no migration.
   every `X-Inertia-*` header the 3.6.1 client sends was already handled.
 - `scripts/release.sh` now publishes the GitHub release itself, with notes taken
   from the version's `CHANGELOG.md` section. Previously this was a manual
-  "next step" that got skipped, which is why v0.5.10 and v0.6.1–v0.6.3 are
+  "next step" that got skipped, which is why v0.5.10 and v0.6.1-v0.6.3 are
   tag-only and the Releases page sat on a stale version. Preflight runs before
   the gate so a missing `gh` or changelog section fails in seconds, and
   publishing is skipped automatically unless `origin` is GitHub.

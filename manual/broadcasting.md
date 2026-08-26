@@ -579,7 +579,7 @@ The five configurable fields and where each one matters:
 
 | Field | Default | Use case |
 |-------|---------|----------|
-| `ping_interval` | 30s | Chat / presence: shorten to 5–10s to detect dead mobile connections quickly. Bulk-data streaming: lengthen to reduce overhead. |
+| `ping_interval` | 30s | Chat / presence: shorten to 5-10s to detect dead mobile connections quickly. Bulk-data streaming: lengthen to reduce overhead. |
 | `max_missed_pings` | 2 | Set to `1` for chat where one missed Pong should close immediately. Set to `3+` for flaky mobile networks. Set to `usize::MAX` to disable close-on-no-pong. |
 | `max_message_size` | 1 MiB | Public-endpoint-safe default. Start from `WsConfig::generous()` (64 MiB) for trusted internal feeds. |
 | `max_frame_size` | 64 KiB | Sized for chat / notification frames with headroom. Start from `WsConfig::generous()` (16 MiB) for large unfragmented frames. |

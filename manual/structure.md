@@ -78,7 +78,7 @@ The API starter (`suprnova new my-api --api`) is slimmer: no
 
 ### `cmd/main.rs`
 
-The binary entry point. A short file - typically 10–20 lines - that
+The binary entry point. A short file - typically 10-20 lines - that
 calls the standard boot pipeline:
 
 ```rust

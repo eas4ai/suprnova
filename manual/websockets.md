@@ -284,7 +284,7 @@ Laravel authorizes broadcast channels over a separate HTTP endpoint (`/broadcast
 
 Recommended overrides by use case:
 
-- **Chat / notifications / cursor positions** - defaults are fine. Drop `ping_interval` to 5–10s if your LB has an aggressive idle timeout.
+- **Chat / notifications / cursor positions** - defaults are fine. Drop `ping_interval` to 5-10s if your LB has an aggressive idle timeout.
 - **Trusted internal feeds** (server-to-server fan-out, bulk export, large binary transfers) - start from `WsConfig::generous()`, which raises `max_message_size` to 64 MiB and `max_frame_size` to 16 MiB while keeping other defaults.
 - **Specific oversize payload** (one route that uploads 256 MiB audio files) - set the fields directly; don't apply the larger limit to routes that don't need it.
 

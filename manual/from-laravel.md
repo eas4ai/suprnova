@@ -424,7 +424,7 @@ Same surface, no global aliasing needed.
 ### Compile times are real
 
 Rust compile times are not PHP. A clean build of a fresh Suprnova app
-takes 1–2 minutes; incremental builds during development are a few
+takes 1-2 minutes; incremental builds during development are a few
 seconds. The dev workflow is the same - `suprnova serve` watches for
 changes and rebuilds - but you'll feel it the first time you change a
 macro and recompile a downstream crate. Caching pays for itself fast.

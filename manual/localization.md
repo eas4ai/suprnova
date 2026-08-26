@@ -172,8 +172,8 @@ unread-messages =
     }
 ```
 
-CLDR assigns `1`, `21`, `31` to `one`; `2`–`4`, `22`–`24` to `few`;
-`0`, `5`–`20`, `25`–`30` to `many`; and fractions to `other`. The same
+CLDR assigns `1`, `21`, `31` to `one`; `2`-`4`, `22`-`24` to `few`;
+`0`, `5`-`20`, `25`-`30` to `many`; and fractions to `other`. The same
 `__!("unread-messages", count: 22)` call renders correctly in English,
 Russian, Polish, and Arabic, because the category selection is data, not
 code.
@@ -1083,8 +1083,8 @@ files =
     }
 ```
 
-`one` is 1; `few` is 2–4, 22–24, 32–34, 102–104; `many` is 0, 5–21,
-25–31; `other` catches the fractions (`1,5 pliku`) and carries the
+`one` is 1; `few` is 2-4, 22-24, 32-34, 102-104; `many` is 0, 5-21,
+25-31; `other` catches the fractions (`1,5 pliku`) and carries the
 default marker, per the rule above.
 
 Laravel's rangeless form (`plik|pliki|plików`) does better - it consults

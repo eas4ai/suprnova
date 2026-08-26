@@ -182,7 +182,7 @@ connections to free resources:
 * AWS ALB default: 60 seconds
 * Cloudflare default: 100 seconds
 
-A `keep_alive()` comment every 15–30 seconds keeps the connection alive
+A `keep_alive()` comment every 15-30 seconds keeps the connection alive
 through all of those without dispatching a `message` event to the
 browser. The minimum-bytes form (`:\n\n`) is enough to flush proxy write
 buffers without sending any payload.
@@ -410,7 +410,7 @@ let preamble = SseEvent::data("ready").with_retry(Duration::from_secs(5));
 ```
 
 `Duration::ZERO` is valid per the spec ("reconnect immediately") and is
-emitted verbatim - no coercion. For production streams a 5–15 second
+emitted verbatim - no coercion. For production streams a 5-15 second
 retry strikes a balance between fast recovery and not hammering the
 server during a regional outage.
 

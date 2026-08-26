@@ -512,7 +512,7 @@ Pick a VPS based on workload, not on a marketing tier name. Hetzner's lineup cha
 |---|---|
 | Small site, low traffic, SQLite or shared DB | Smallest shared-vCPU instance (1 vCPU / 2 GB) |
 | Moderate traffic with Postgres + Redis on the same box | 2 vCPU / 4 GB |
-| Heavier API + scheduler + queue workers + Postgres | 2–4 vCPU / 8 GB |
+| Heavier API + scheduler + queue workers + Postgres | 2-4 vCPU / 8 GB |
 | Production at scale | Dedicated CPU instance, or split DB onto its own node |
 
 Check Hetzner's [current pricing](https://www.hetzner.com/cloud) for the live catalogue. Suprnova's idle memory footprint is small (single-digit MB), so RAM is mostly database working set plus your domain code.

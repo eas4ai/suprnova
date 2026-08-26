@@ -18,7 +18,7 @@ This command will:
 5. Wire `.schedule(<crate>::schedule::register)` into your application
    builder in `cmd/main.rs` (or `src/main.rs` for the API starter)
 
-Steps 2–5 are idempotent, so re-running `make:task` repairs wiring that was
+Steps 2-5 are idempotent, so re-running `make:task` repairs wiring that was
 removed by hand. The scheduler runs inside your application binary - there is
 no separate scheduler executable to build or deploy.
 
