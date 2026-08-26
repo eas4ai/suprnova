@@ -298,12 +298,12 @@ pub use http_client::{
 pub use idempotency::{Idempotency, Idempotent, Replay};
 pub use inertia::{
     DeferOptions, EncryptHistoryMiddleware, Frontend, Inertia, Inertia303Middleware, InertiaConfig,
-    InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt, InertiaResponse,
-    InertiaSharedData, InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
-    IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry, MatchOnFields, MergeMode,
-    MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
-    ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig, SsrResponse,
-    VersionResolver, Visibility, ViteManifest,
+    InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaRegistry, InertiaRequestExt,
+    InertiaResponse, InertiaSharedData, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware, IntoInertiaData, MANIFEST_VERSION_FALLBACK, ManifestEntry,
+    MatchOnFields, MergeMode, MergeStrategy, OnceOptions, PartialFilter, Prop, PropEntry,
+    PropFuture, PropResolver, ProvidesScrollMetadata, ResolvedAssets, ScrollMetadata, SsrConfig,
+    SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
 #[cfg(feature = "localization")]
 pub use localization::{

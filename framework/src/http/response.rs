@@ -55,6 +55,16 @@ pub struct HttpResponse {
 /// meets a handler.
 pub type Response = Result<HttpResponse, HttpResponse>;
 
+/// Body of the framework's own "nothing matched" response.
+///
+/// Shared by the router's terminal `404` (`server.rs`) and the
+/// static-file handler, and read back by
+/// `InertiaErrorPageMiddleware` - which has to tell the framework's own
+/// fixed 404 apart from a plain-text body a handler wrote on purpose. A
+/// literal in three places would let the middleware silently stop
+/// recognizing the 404 the day someone reworded it.
+pub(crate) const NOT_FOUND_BODY: &str = "404 Not Found";
+
 impl HttpResponse {
     /// Construct an empty `200 OK` response with no body and no headers.
     pub fn new() -> Self {

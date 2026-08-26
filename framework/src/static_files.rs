@@ -143,7 +143,7 @@ impl StaticFiles {
 }
 
 fn not_found() -> Response {
-    Ok(HttpResponse::text("404 Not Found").status(404))
+    Ok(HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404))
 }
 
 fn safe_relative_path(path: &str) -> Option<PathBuf> {

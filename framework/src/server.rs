@@ -1020,7 +1020,9 @@ async fn handle_request_inner(
 
                 let not_found: Arc<crate::routing::BoxedHandler> =
                     Arc::new(Box::new(|_req: Request| {
-                        Box::pin(async { Ok(HttpResponse::text("404 Not Found").status(404)) })
+                        Box::pin(async {
+                            Ok(HttpResponse::text(crate::http::NOT_FOUND_BODY).status(404))
+                        })
                             as std::pin::Pin<
                                 Box<dyn std::future::Future<Output = crate::http::Response> + Send>,
                             >
