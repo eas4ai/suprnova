@@ -622,7 +622,7 @@ async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
 }
 
 // ---------------------------------------------------------------------
-// The app chooses where the middleware sits
+// The boundary the app-chosen placement exists to cross
 // ---------------------------------------------------------------------
 
 /// Stands in for `CsrfMiddleware` registered *above* `Inertia::install` -
@@ -638,97 +638,18 @@ impl Middleware for RejectsLikeCsrf {
     }
 }
 
-/// The chain an app builds when its CSRF middleware sits outside the
-/// Inertia layer: session, then the error page, then CSRF, then whatever
-/// `Inertia::install` registered.
+/// With only the default placement, a middleware registered *outside*
+/// `Inertia::install` answers before the error-page middleware exists in
+/// the chain, and its JSON reaches the client exactly as it did before.
+/// This is the whole reason an app ever registers the middleware itself.
 ///
-/// The Inertia layer at the bottom still carries an error-page middleware
-/// of its own, because `install` put one there before this file's first
-/// test ran. In a real app `install` sees the app's registration and skips
-/// its own; here the inner one is simply never reached, since the 419 is
-/// answered above it.
-fn app_placed_stack() -> MiddlewareRegistry {
-    stack()
-        .prepend(RejectsLikeCsrf)
-        .prepend(suprnova::InertiaErrorPageMiddleware::new(ERROR_PAGE))
-        .prepend(SeededSessionScope(
-            suprnova::session::new_session_slot_for_test(),
-        ))
-}
-
+/// The other side of this boundary - the same `419` becoming a page once
+/// the app places the middleware outside it - lives in
+/// `framework/tests/inertia_error_page_placement.rs`, which needs a global
+/// middleware registry that starts empty and therefore needs its own test
+/// binary.
 #[tokio::test]
-async fn an_app_placed_error_page_covers_a_419_answered_before_the_inertia_layer() {
-    let addr = spawn_server(router(), app_placed_stack(), 2).await;
-
-    let (status, headers, body) = request(
-        addr,
-        "POST",
-        "/register",
-        &[
-            ("X-Inertia", "true"),
-            ("X-Inertia-Version", ASSET_VERSION),
-            ("Accept", "text/html, application/xhtml+xml"),
-        ],
-    )
-    .await;
-
-    assert_eq!(status, 419, "the lapsed session keeps its status");
-    assert_eq!(
-        headers.get("x-inertia").map(String::as_str),
-        Some("true"),
-        "without this the client shows the crash modal this feature exists to \
-         remove; got {headers:?}"
-    );
-    let page = page_object(&body);
-    assert_eq!(page["component"], ERROR_PAGE);
-    assert_eq!(page["props"]["status"], 419);
-    assert_eq!(page["props"]["message"], "CSRF token mismatch.");
-}
-
-#[tokio::test]
-async fn the_same_419_renders_the_html_shell_for_a_browser_navigation() {
-    let addr = spawn_server(router(), app_placed_stack(), 2).await;
-
-    let (status, headers, body) = request(addr, "POST", "/register", &browser_navigation()).await;
-
-    assert_eq!(status, 419);
-    assert!(
-        headers
-            .get("content-type")
-            .is_some_and(|c| c.starts_with("text/html")),
-        "got {headers:?}"
-    );
-    assert_eq!(embedded_page_object(&body)["component"], ERROR_PAGE);
-    assert_eq!(embedded_page_object(&body)["props"]["status"], 419);
-}
-
-#[tokio::test]
-async fn an_api_client_still_gets_the_419_json_untouched() {
-    let addr = spawn_server(router(), app_placed_stack(), 2).await;
-
-    let (status, headers, body) =
-        request(addr, "POST", "/register", &[("Accept", "application/json")]).await;
-
-    assert_eq!(status, 419);
-    assert!(
-        !headers.contains_key("x-inertia"),
-        "an API client never asked for a page; got {headers:?}"
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
-    assert_eq!(parsed["message"], "CSRF token mismatch.");
-    assert!(
-        parsed.get("component").is_none(),
-        "the body is the middleware's own, not a page object; got {body}"
-    );
-}
-
-/// The boundary, in the other direction: with only the default placement,
-/// a middleware registered *outside* `Inertia::install` answers before the
-/// error-page middleware exists in the chain, and its JSON reaches the
-/// client exactly as it did before. This is the whole reason the explicit
-/// registration above is worth having.
-#[tokio::test]
-async fn with_the_default_placement_the_same_419_is_still_raw_json() {
+async fn with_the_default_placement_a_419_answered_first_is_still_raw_json() {
     let registry = stack().prepend(RejectsLikeCsrf).prepend(SeededSessionScope(
         suprnova::session::new_session_slot_for_test(),
     ));

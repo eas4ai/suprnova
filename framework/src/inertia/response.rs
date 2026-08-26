@@ -12,6 +12,7 @@ use crate::http::HttpResponse;
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -182,6 +183,15 @@ impl InertiaResponse {
     /// On Inertia XHR responses the title is ignored - `<Head>` on the
     /// client manages document title for SPA visits. The configured title
     /// is only used for the initial HTML render.
+    ///
+    /// Under [SSR](InertiaConfig::ssr) it may not reach the document at
+    /// all: when the worker's head carries a `<title>` - which it does for
+    /// every page rendering one through Inertia's `Head` component - the
+    /// page's own title is the document's only one, and this value and
+    /// [`InertiaConfig::default_title`] are both left out. A document with
+    /// two titles shows the first, so the framework's would win over the
+    /// page's real one; set the title in `Head` rather than here when SSR
+    /// is on.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
@@ -2113,7 +2123,7 @@ fn build_html_response(
          {mount_block}\n\
          </body>\n\
          </html>",
-        lang = escape_html_attr(&document_language()),
+        lang = document_language_attr(),
         csrf = csrf_attr,
         title_line = title_line,
         ssr_head = ssr_head,
@@ -2129,18 +2139,65 @@ fn build_html_response(
 /// A substring test rather than a parse, deliberately: the head is
 /// injected into the document verbatim either way, and the only decision
 /// it feeds is whether the framework adds its own default title on top.
-/// The opening tag has to be followed by `>` or whitespace so a custom
-/// element - `<title-bar>` - is not mistaken for a title and does not
-/// leave the document with none.
+/// Two narrowings keep the cheap test from costing the document its only
+/// title:
+///
+/// - The opening tag has to be followed by `>` or whitespace, so a custom
+///   element - `<title-bar>` - is not mistaken for a title.
+/// - HTML comments are removed first, so a `<title>` somebody commented
+///   out cannot suppress the default and leave the document with none.
+///
+/// One false positive remains by construction: a literal `<title>` inside
+/// an attribute value, as in `<meta content="&lt;title&gt;">` written
+/// unescaped. Inertia's `Head` escapes attribute content, so reaching it
+/// means hand-building a head string that is already invalid markup, and
+/// the cost is a missing default title rather than a broken document. A
+/// real parse is not worth carrying for that.
 fn contains_title_element(head: &str) -> bool {
     const TAG: &str = "<title";
-    let lower = head.to_ascii_lowercase();
+    let lower = strip_html_comments(&head.to_ascii_lowercase());
     lower.match_indices(TAG).any(|(at, _)| {
         lower[at + TAG.len()..]
             .chars()
             .next()
             .is_some_and(|c| c == '>' || c.is_whitespace())
     })
+}
+
+/// `head` with every `<!-- ... -->` run removed. An unterminated comment
+/// swallows the rest of the input, which is what a browser does with one
+/// too.
+fn strip_html_comments(head: &str) -> String {
+    let mut out = String::with_capacity(head.len());
+    let mut rest = head;
+    while let Some(open) = rest.find("<!--") {
+        out.push_str(&rest[..open]);
+        match rest[open + 4..].find("-->") {
+            Some(close) => rest = &rest[open + 4 + close + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `<html lang>` attribute value, HTML-escaped only if it needs to be.
+///
+/// A BCP 47 tag is letters, digits and hyphens, so the escape is a no-op
+/// for every value that reaches here from a parsed
+/// [`Locale`](crate::Locale). The check is still made rather than assumed:
+/// with the `localization` feature off this is a constant, but with it on
+/// the value comes from whatever the request negotiated, and an attribute
+/// written into the shell unescaped on the strength of an assumption is
+/// how injection bugs are shaped. Escaping costs an allocation, so it is
+/// paid only when a character actually needs it.
+fn document_language_attr() -> Cow<'static, str> {
+    let lang = document_language();
+    if lang.contains(['&', '<', '>', '"', '\'']) {
+        Cow::Owned(escape_html_attr(&lang))
+    } else {
+        lang
+    }
 }
 
 /// The BCP 47 language the document shell declares in `<html lang>`.
@@ -2157,16 +2214,23 @@ fn contains_title_element(head: &str) -> bool {
 /// The value keeps the casing [`Locale`](crate::Locale) renders
 /// (`pt-BR`, `zh-Hans`) rather than being lowercased: `:lang()` selectors
 /// and font stacks are written in that form.
+///
+/// `Lang::locale()` is one allocation for the rendered tag, plus - only
+/// when no locale scope and no global override are in play - a clone of
+/// the resolved `LocalizationConfig` that it takes `default_locale` out
+/// of. Avoiding that clone would mean a new cheaper entry point on the
+/// localization module rather than anything this shell can do, so it is
+/// left alone here.
 #[cfg(feature = "localization")]
-fn document_language() -> String {
-    crate::localization::Lang::locale().as_str()
+fn document_language() -> Cow<'static, str> {
+    Cow::Owned(crate::localization::Lang::locale().as_str())
 }
 
 /// Without the `localization` feature there is no per-request locale to
 /// follow, so the shell keeps the `en` it has always declared.
 #[cfg(not(feature = "localization"))]
-fn document_language() -> String {
-    "en".to_string()
+fn document_language() -> Cow<'static, str> {
+    Cow::Borrowed("en")
 }
 
 fn render_dev_head(config: &InertiaConfig) -> String {
@@ -2273,6 +2337,31 @@ fn escape_html_text(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_commented_out_title_does_not_pass_for_one() {
+        // The consequence of getting this wrong is a document with no
+        // title at all: the framework stands its default down, and the
+        // element it stood down for is inside a comment.
+        assert!(!contains_title_element("<!-- <title>Old</title> -->"));
+        assert!(!contains_title_element(
+            "<meta name=\"a\" content=\"b\">\n<!--\n<title>Old</title>\n-->"
+        ));
+        // An unterminated comment swallows the rest, the way a browser
+        // parses one.
+        assert!(!contains_title_element("<!-- <title>Old</title>"));
+        // A real title beside a commented-out one still counts.
+        assert!(contains_title_element(
+            "<!-- <title>Old</title> --><title>New</title>"
+        ));
+        // And the plain cases are unmoved.
+        assert!(contains_title_element("<title>Hi</title>"));
+        assert!(contains_title_element("<TITLE lang=\"en\">Hi</TITLE>"));
+        assert!(!contains_title_element(
+            "<title-bar data-x=\"1\"></title-bar>"
+        ));
+        assert!(!contains_title_element(""));
+    }
 
     #[tokio::test]
     async fn build_page_object_eager_only() {

@@ -1070,7 +1070,11 @@ they are most likely to hit. An outer rate limiter's `429` and an auth
 guard's `401` behave the same way.
 
 Register the middleware yourself when that is your shape, outside the
-middleware whose rejections it should cover:
+middleware whose rejections it should cover. This worked in 1.3.6 as a
+side effect - the type was public and global registration is idempotent
+per type, so an earlier registration kept its place - but nothing said so.
+It is a documented contract from 1.3.7: `install` checks for your
+registration, logs at `debug`, and skips its own.
 
 ```rust
 use suprnova::{
@@ -1324,11 +1328,13 @@ overrides with a `.with_config(...)` which doesn't set it. When enabled,
 the framework posts the page
 object to `<url>/render` and inlines `{ head, body }` in the HTML
 shell. A worker head that carries its own `<title>` - which is every page
-using Inertia's `Head` component - **replaces** the shell's
-`.default_title(...)` rather than joining it: a document with two titles
-shows the first one, and the framework's generic default would win over
-the page's real one in the tab, in search results, and in every link
-preview. A head with no title leaves the default exactly where it was. On
+using Inertia's `Head` component - **replaces** the shell's title rather
+than joining it, and that means both `.default_title(...)` on the config
+and a per-response `.title(...)`: a document with two titles shows the
+first one, so the shell's would win over the page's real one in the tab,
+in search results, and in every link preview. With SSR on, set the title
+in `Head` rather than on the response. A head with no title leaves the
+shell's title exactly where it was. On
 worker error or timeout the response falls back to CSR
 (an empty `<div id="app">` the client hydrates) and the
 `on_ssr_error(...)` hook fires; flip `ssr_throw_on_error(true)` in CI
@@ -1403,11 +1409,16 @@ Frontend-specific defaults:
 | React | `src/main.tsx` | `.tsx`, `.jsx` |
 | Vue | `src/main.ts` | `.vue` |
 
-Two attributes of the HTML shell are not configurable, because the right
-value is already known. `<title>` is `.default_title(...)`, unless the
-page supplied its own through [SSR](#ssr), in which case the page's wins.
-And `<html lang="...">` is the locale in effect for the request - what
-`LocaleMiddleware` detected, or the configured `APP_LOCALE` when nothing
+Two attributes of the HTML shell are worth calling out.
+
+`<title>` comes from `.title(...)` on the response, or from
+`.default_title(...)` when the response set none. Under [SSR](#ssr) the
+page's own head wins over **both**: a worker head carrying a `<title>` is
+the document's only one, and the shell leaves its title out entirely.
+
+`<html lang="...">` is the one attribute you cannot set, because the right
+value is already known - it is the locale in effect for the request, what
+`LocaleMiddleware` detected or the configured `APP_LOCALE` when nothing
 did. See [Localization](localization.md); a screen reader takes its voice
 from that attribute and a search engine reads it as the page's language,
 so an app serving more than one language no longer has to rewrite the
