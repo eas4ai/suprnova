@@ -283,7 +283,7 @@ otro consumidor JSON orientado a líneas. Cada línea tiene un campo `type`:
 |---|---|---|
 | `started` | `ts`, `name`, `pid` | Se inició por primera vez un proceso (backend, frontend o una entrada de `Suprnova.toml`). |
 | `output` | `ts`, `name`, `stream` (`"stdout"` o `"stderr"`), `line` | Una línea de salida de un hijo, transportada como campo en lugar de pasarla sin procesar. |
-| `exited` | `ts`, `name`, `code` (nullable) | Un proceso terminó. `code` es `null` si una señal lo mató en lugar de devolver un estado. |
+| `exited` | `ts`, `name`, `code` (anulable) | Un proceso terminó. `code` es `null` si una señal lo mató en lugar de devolver un estado. |
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | Un proceso caído se volverá a iniciar después de `delay_ms` (consulta el esquema de espera anterior). |
 | `restart_succeeded` | `ts`, `name`, `pid` | La recreación programada tuvo éxito; el proceso vuelve a ejecutarse con un PID nuevo. |
 | `gave_up` | `ts`, `name`, `tries` | El proceso se cayó `tries` veces consecutivas (`--restart-tries`) y `serve` dejó de reintentarlo. La sesión y los demás procesos siguen ejecutándose. |

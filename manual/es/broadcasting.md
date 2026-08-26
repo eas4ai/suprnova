@@ -493,7 +493,7 @@ cliente, y la forma de denegar por defecto refleja esa intención.
 | `unsubscribed` | `channel` | Cancelación de suscripción confirmada. |
 | `event` | `channel`, `event`, `data` | Se difundió un evento en `channel`. |
 | `lagged` | `channel`, `skipped` | El suscriptor se quedó atrás respecto al ring buffer por canal del servidor y se descartaron `skipped` sobres en esta conexión. El estado local del cliente sobre `channel` está obsoleto; vuelve a consultar antes de procesar más eventos. |
-| `error` | `channel` (nullable), `reason` | La última acción falló. `channel` es `null` para errores a nivel de sobre que no están ligados a un canal. |
+| `error` | `channel` (anulable), `reason` | La última acción falló. `channel` es `null` para errores a nivel de sobre que no están ligados a un canal. |
 
 ```json
 {"action":"connected","socket_id":"6f1a3c2e-…"}

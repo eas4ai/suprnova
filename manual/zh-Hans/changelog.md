@@ -36,6 +36,7 @@
 - **本次发布之前签发的绕过 cookie 会失效。** 这个 cookie 的载荷从光秃秃的密钥，变成了一个封好的 `{ secret, expires_at }` 对象，而一个没有截止时间的载荷会被拒绝。升级之后请访问一次那个密钥 URL，拿一个新的 cookie。别的都没变：`down`、`up`、`--secret` 和 `--with-secret` 的行为都和以前一样。
 - **一条长于五段的 include 路径，现在返回它前五个关系，而不是全部。** 资源允许列表之外的东西从来就够不着，所以没有哪个响应会因此多出数据；只是一条很深的路径会丢掉它的尾巴。有一个状态码会随之改变：一条过深的尾巴点了一个这个资源并不允许的关系的路径，会在任何东西开始校验之前就被截断，所以它现在会带着活下来的那几段返回 `200`，而完整路径以前返回的是 `400` - 请调整任何对那次拒绝做断言的客户端或者测试。如果您的 API 有文档写明的路径比那还长，请用 `suprnova::max_relationship_depth(n)` 把上限抬高。
 - **`DatabaseConfig` 多了五个公开字段。** 用结构体字面量来构建它的代码不再能编译。请用 `DatabaseConfig::from_env()` 或者 `DatabaseConfig::builder()`，两者都会用那些保持今天连接池行为的默认值把新字段填上。
+
 ## 1.3.3 - 2026-08-25
 
 ### 新增
@@ -47,10 +48,10 @@
 - **`Gate::default_denial_response` 定制一次朴素拒绝的默认形状。** 对应 Laravel 的 `Gate::defaultDenialResponse($response)`。设置一次 - 通常在 `bootstrap::register()` 里 - 它就会重塑恰好两种结果：一个朴素的 `false`（一个 bool 门 - `Gate::define` / `Gate::define_async`，包括一个返回 `bool` 的 `#[policy]` 方法 - 或者一个判定为 `false` 的 `before`/`after` 钩子），以及一次根本没有任何东西做出过判定的求值（一个未定义的能力，钩子也没有意见）。这些以前全都会坍缩成一个朴素的 `Response::deny()`（一个 403）；现在它们会浮现为这个默认值所携带的那个 `Response`，例如用 `Response::deny_as_not_found()` 得到一个 404，从而在整个应用范围内隐藏一个资源的存在，而不是一个门一个门地改。这个默认值只作用于朴素的 `false` - 一个用 `define_with` / `define_async_with` 注册的门已经返回了它想要的那个 `Response`，而那个 `Response` 总是原封不动地穿过 `Gate::inspect`，这与 Laravel 自己的规则一致：默认值绝不替代一个被返回的 `Response` 对象。一个形状为 `Response::allow()` 的默认值会被拒绝（记日志、忽略），而不是悄悄把每一个 bool 门都反转成允许 - 关于这一处刻意与 Laravel 分歧的地方（Laravel 没有这样一道防护），请参见 `Gate::default_denial_response` 的文档注释。
 - **`Password` 校验规则家族随本版发布，包括 Have I Been Pwned 的 `uncompromised()` 检查。** `Password::min(n)` 加上那几个强度构建器（`.max()`、`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`）逐字移植了 Laravel `Password` 规则的那些正则 - 一个普通空格就能满足 `.symbols()`，与 Laravel 的 `\p{Z}` 分隔符类一致。`.uncompromised()`（或者 `.uncompromised_with_threshold(n)`）会拿这个密码去对 Have I Been Pwned 的 k-匿名 range API 做检查：只有密码 SHA-1 哈希的前 5 个字符会离开进程，而一次网络故障、超时或者非 2xx 响应会失败开放，而不是把注册挡住，与 Laravel 的 `NotPwnedVerifier` 完全一样。因为那次检查是一次 HTTP 往返，`Password` 是唯一一个同时实现 `Rule`（只做强度，供同步的 `validate!` 行使用）和 `AsyncRule`（先强度、再 HIBP 检查，供 `after_validation_async` 使用）的内置规则 - 对一个配置了 `uncompromised()` 的 `Password` 调用同步那条路径，会得到一个醒目的、面向开发者的错误，而不是被悄悄跳过。`Password::defaults_with(...)` 设置 `Password::defaults()` 所返回的那个进程级默认值。新增 `HIBP_TIMEOUT_SECS` 环境变量（默认 30 秒）。`Http::fake_response_text(...)` 是 `fake_response(...)` 的原始响应体兄弟方法，用于针对像 HIBP 这样的 `text/plain` 上游 API 做测试。
 - **一个已调度的任务现在可以点名它的 cron 表达式是在哪个时区里读的，而且 `schedule:list` 可以用任意时区渲染整份调度表。** `.timezone(chrono_tz::Tz)` 钉住一个任务，`.try_timezone("Area/City")` 是那个可失败的兄弟方法，用于一个只在运行时才存在的时区名，而 `Schedule::timezone(tz)` 为它之后注册的每一个任务设定一个默认值。对一个没有钉住时区的任务来说什么都没变：它仍然是按进程的本地时区来求值的。钉住的时区只影响是否到期 - 调度器仍然每个进程分钟节拍一次，同一分钟的那道去重关卡也没有动过。请注意，一个实行夏令时的时区会让某些挂钟分钟发生两次、另一些一次都不发生，所以一个钉在这种分钟上的任务可能跑两次、也可能被跳过；调度那一章带有完整的警告。`schedule:list` 获得了一个 `--timezone` 选项和两个新列：打印出来的表达式是写在哪个时区里的，以及这个任务下一次触发的分钟。一个钉住了时区的任务，它的表达式会被改写进这份列举所用的时区里，当它在那个时区里跨越午夜时会拆成好几行；而当一次忠实的改写不可能做到时，它会被原封不动地保留下来 - 跨越一次夏令时切换时、当一次跨日翻转不得不把一个受限的“月中某日”和“周中某日”一起挪动时，或者当它不得不判定二月有多长时。`chrono_tz::Tz` 从 crate 根部被重导出，所以消费它的应用不必往自己的 `Cargo.toml` 里加 `chrono-tz`。
-- **一套 Laravel 形状的图像子系统，位于 `suprnova::media` 里、默认开启的 `media` feature 之后。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` 构建出一条惰性管道 - `resize`、`scale`、`crop`、`cover`、`contain`、任意角度的 `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - 最后用 `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type` 或者 `dominant_color` 收尾。它读写 PNG、JPEG、WebP、GIF 和 BMP；AVIF 输出推迟到那个自研的 AV1 编码器发布之后，到那时它就是一个新的 `OutputFormat` 变体，除此之外别无改动。和 Laravel 的 `gd`/`imagick` 分野一样，这里有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认）跑在纯 Rust 的 [OxideAV](https://github.com/OxideAV) 编解码器家族之上，没有原生库，也没有东西要装；而 `IMAGE_DRIVER=magick` 会去调用一个宿主上安装好的 ImageMagick 7，以换取更宽的输入支持，包括 HEIC。解码限制（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）会在分配任何东西之前，对着输入自己的文件头做检查 - 包括一个扩展 WebP 的内层比特流，它那个仅供参考的画布尺寸没法被用来把一个更大的帧偷运过这道关卡 - 而且所有像素工作都跑在一个阻塞线程上。`magick` 驱动程序会按名字钉死输入的编解码器，而不是让 ImageMagick 从字节里自己挑一个，并且用 `IMAGE_MAGICK_TIMEOUT_SECS` 给每一次调用设界。`ImageDriver` 是通往其他一切的 trait 边界。这个模块之所以叫 `media`，是因为由 OxideAV 支撑的音频和视频表面将来会挨着它住。[图像](../images.md)
-- **WebP 那道关卡带着一个固定的、不可配置的界限。** 一个 WebP 会把它真正的解码尺寸声明在最内层的比特流 chunk 里，所以框架会走一遍这个容器去把它找出来；那次遍历每层最多访问 4096 个 chunk，并且只跟进两层嵌套，超出其中任何一条的文件都会被拒绝，而不是被测量。从一次没走完的遍历里报出一个数字，会造就一道只要堆上足够多的填充 chunk 就能绕过去的关卡。没有任何 `IMAGE_MAX_*` 变量会影响它，错误信息里也是这么说的。一段 300 帧的动画不受影响；一段 4100 帧的会被拒绝。[图像](../images.md#one-bound-is-not-configurable)
+- **一套 Laravel 形状的图像子系统，位于 `suprnova::media` 里、默认开启的 `media` feature 之后。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` 构建出一条惰性管道 - `resize`、`scale`、`crop`、`cover`、`contain`、任意角度的 `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - 最后用 `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type` 或者 `dominant_color` 收尾。它读写 PNG、JPEG、WebP、GIF 和 BMP；AVIF 输出推迟到那个自研的 AV1 编码器发布之后，到那时它就是一个新的 `OutputFormat` 变体，除此之外别无改动。和 Laravel 的 `gd`/`imagick` 分野一样，这里有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认）跑在纯 Rust 的 [OxideAV](https://github.com/OxideAV) 编解码器家族之上，没有原生库，也没有东西要装；而 `IMAGE_DRIVER=magick` 会去调用一个宿主上安装好的 ImageMagick 7，以换取更宽的输入支持，包括 HEIC。解码限制（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）会在分配任何东西之前，对着输入自己的文件头做检查 - 包括一个扩展 WebP 的内层比特流，它那个仅供参考的画布尺寸没法被用来把一个更大的帧偷运过这道关卡 - 而且所有像素工作都跑在一个阻塞线程上。`magick` 驱动程序会按名字钉死输入的编解码器，而不是让 ImageMagick 从字节里自己挑一个，并且用 `IMAGE_MAGICK_TIMEOUT_SECS` 给每一次调用设界。`ImageDriver` 是通往其他一切的 trait 边界。这个模块之所以叫 `media`，是因为由 OxideAV 支撑的音频和视频表面将来会挨着它住。[图像](images.md)
+- **WebP 那道关卡带着一个固定的、不可配置的界限。** 一个 WebP 会把它真正的解码尺寸声明在最内层的比特流 chunk 里，所以框架会走一遍这个容器去把它找出来；那次遍历每层最多访问 4096 个 chunk，并且只跟进两层嵌套，超出其中任何一条的文件都会被拒绝，而不是被测量。从一次没走完的遍历里报出一个数字，会造就一道只要堆上足够多的填充 chunk 就能绕过去的关卡。没有任何 `IMAGE_MAX_*` 变量会影响它，错误信息里也是这么说的。一段 300 帧的动画不受影响；一段 4100 帧的会被拒绝。[图像](images.md#one-bound-is-not-configurable)
 
-- **现在可以安装 OAuth，而不必取代一个应用已有的密码与会话权威。** `MagnetarOAuthOnlyConfig` 和 `init_magnetar_oauth_only` 会安装默认的认证仪式引擎和提供方引擎，同时把密码和 passkey 的槽位留空。已经有一张 `users` 表的应用，可以调用 `verify_oauth_identity`，自己把已验证的提供方 subject 映射过去，然后建立它自己平常的那个框架会话。
+- **现在可以安装 OAuth，而不必取代一个应用已有的密码与会话权威。** `MagnetarOAuthOnlyConfig` 和 `init_magnetar_oauth_only` 会安装默认的认证握手引擎和提供方引擎，同时把密码和 passkey 的槽位留空。已经有一张 `users` 表的应用，可以调用 `verify_oauth_identity`，自己把已验证的提供方 subject 映射过去，然后建立它自己平常的那个框架会话。
 
 ### 变更
 
@@ -76,43 +77,39 @@
 
 ## 1.3.2 - 2026-08-25
 
-> The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### 新增
 
-- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+- **现在可以通过 `MagnetarConfig::oauth` 注册 OAuth 提供者。** Suprnova 重新导出了 `OAuthProvider` 契约、全部五个第一方提供者与配置类型，以及一个应用所需要的 HTTP、撤销、滥用限流器、授权和自动关联类型。自定义提供者不再需要直接依赖 `suprnova-magnetar`，也不再需要手工保留一个 `MagnetarHostEngine`。
 
-- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+- **一个生产可用的 OAuth 传输和一个框架限流器适配器现在随框架发布，并从 crate 根部导出。** `ReqwestOAuthTransport` 实现了令牌、userinfo 和撤销 I/O：默认禁用重定向，超时 30 秒，带一个默认的 `User-Agent`，响应体上限 1 MiB。`FrameworkAbuseLimiter` 复用应用配置好的 `RateLimiterDriver`；应用不必再手写这两个适配器中的任何一个。
 
 ### 修复
 
-- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+- **`init_magnetar` 现在会把 OAuth 与密码、passkey 服务作为一次预留的安装一起发布。** OAuth 服务在发布之前就构建好，而在这次预留生效期间，三个引擎槽位全都保持隐藏。一次失败的或者重复的 OAuth 配置，不可能在缺少配置好的 OAuth 注册表的情况下，就让密码和 passkey 状态可见。
 
-- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+- **自定义提供者可以提供 userinfo 请求头。** `OAuthProvider::userinfo_headers` 会与宿主拥有的 bearer 请求头合并，从而满足像 GitHub 的 `User-Agent` 和媒体类型 `Accept` 请求头这样的要求，同时又不让一个提供者替换掉 `Authorization`。
 
 ### 升级
 
-- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+- **`4faaa933` 那次切换到 Magnetar，移除了 Torii 的 OAuth 安装路径，却没有把它的替代品接进默认初始化器里。** 旧的变通做法要求构造一个自定义宿主引擎、调用 `oauth_service`，再单独安装那个适配器。请把这个变通做法换成 `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` 加上一次 `init_magnetar` 调用。
 
-- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+- **GitHub 社区提供者必须显式处理已验证邮箱。** GitHub 的 `/user` 通常不会给出非公开的电子邮件，而已验证的主地址需要 `/user/emails`。请返回 `email: None` 以使用电子邮件补全握手，或者把 `userinfo_endpoint` 指向一个把两个响应合并起来的宿主适配器；绝不要把一个公开但未经验证的地址当作所有权。
 
 ## 1.3.1 - 2026-08-24
 
-> The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### 修复
 
-- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
-- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
-- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+- **由提供者支撑的应用又可以重置已验证用户了。** 在没有安装 Magnetar 引擎时，`PasswordReset` 会对已经验证过的账户，使用一个明确具备重置能力的 `UserProvider` 和框架的 `auth_flow_tokens`。当 `M` 实现了 `MustVerifyEmail + CanResetPassword` 时，`EloquentUserProvider<M>` 就选择加入；不需要任何 `app_users` 迁移。
+- **已发布的那条框架版本线现在包含了两套发布后的修复。** 翻译版 1.3.0 更新日志的排版与标题、CJK 换行、本地化锚点、术语表词条和正文标点都已经对齐，而不再分散在互相分叉的本地分支和远程分支上。
+- **打标签之后的 CLI 与 Magnetar 加固也包含在内。** 开发进程的清理用的是那套已经补全的进程组回退，而本地的资格校验契约覆盖了已发布的 ref 以及 plugin-SDK 的 SQLite 通道。
 
 ### 安全
 
-- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+- **提供者回退绝不会把密码重置当作首次邮箱证明。** 未知地址和未验证地址收到的是同一个不发邮件的响应。当一个未验证账户必须通过重置来证明邮箱所有权时，请安装 Magnetar，这样凭据清理、认证 epoch 的推进和吊销才会保持原子。提供者回退的完成会通过 `PasswordResetOutcome` 报告框架会话和记住我凭据的吊销失败。
 
 ### 升级
 
-- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+- **请把每一处 `v1.3.0` 的 Git 依赖挪到 `v1.3.1`。** 有自己 `users` 表的应用保留它们配置好的 `UserProvider`；它们不会仅仅为了重置一个已经验证过的账户，就去初始化默认的 `app_users` 引擎。使用 Magnetar 凭据或者未验证账户首次证明的应用，继续初始化 Magnetar。
 
 ## 1.3.0 - 2026-08-24
 
@@ -272,7 +269,7 @@
 
 ### 变更
 
-- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](../parity.md) 里有一行标着 `not yet` 或 `by design no`。
+- **对等基线已挪到 Laravel 13.25.0。** 13.23.0、13.24.0 和 13.25.0 的发布说明被逐条追溯到了框架自己的接口上。每一件触及了 Suprnova 代码路径的事情，要么已经在这个版本里修复，要么在 [`manual/parity.md`](parity.md) 里有一行标着 `not yet` 或 `by design no`。
 
 ### 升级
 
@@ -593,7 +590,7 @@
 - `WorkerConfig` 新增了一个 `queues: Vec<String>` 字段（为空 = 排空一切，也就是此前的行为）。
 - 移除了 `ROADMAP.md`。它的设计原则活在 `manual/introduction.md` 里，工作约定活在 `manual/contributions.md` 里，部署和横向扩展的材料活在 `manual/deployment.md` 里；那份已发布/计划中的清单已经过时了。`README.md` 里指向它、用来说明“与上游的关系”的那个指针，此前就已经是悬空的了 - 那份归属声明活在 `LICENSE` 里。
 - 脚手架前端现在把 `@inertiajs/{svelte,react,vue3}` 钉在 `^3.6.1`（此前是 `^3.4.0`）。3.4.0 → 3.6.1 这个区间只涉及客户端 - 对照上游的更新日志，以及 `packages/core/src/types.ts` 里的 `Page` 契约审查过，3.6.1 客户端会发送的每一个 `X-Inertia-*` 请求头，都已经被处理了。
-- `scripts/release.sh` 现在会自己发布 GitHub release，说明取自这个版本 `CHANGELOG.md` 里的那个小节。此前这是一个会被漏掉的手动“下一步”，这正是 v0.5.10 和 v0.6.1–v0.6.3 只有标签、Releases 页面停在一个过时版本上的原因。预检会在这个关卡之前运行，所以一个缺失的 `gh` 或者缺失的更新日志小节，会在几秒内就失败，而且除非 `origin` 是 GitHub，否则发布会被自动跳过。
+- `scripts/release.sh` 现在会自己发布 GitHub release，说明取自这个版本 `CHANGELOG.md` 里的那个小节。此前这是一个会被漏掉的手动“下一步”，这正是 v0.5.10 和 v0.6.1-v0.6.3 只有标签、Releases 页面停在一个过时版本上的原因。预检会在这个关卡之前运行，所以一个缺失的 `gh` 或者缺失的更新日志小节，会在几秒内就失败，而且除非 `origin` 是 GitHub，否则发布会被自动跳过。
 
 ### 升级
 

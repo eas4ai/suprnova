@@ -208,10 +208,10 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | ミューテータ / アクセッサー | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | 実装済み | [ミューテータ](eloquent-mutators.md) |
 | キャスト（22種類組み込み） | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | 実装済み | カスタムのためには `Cast` を実装してください |
 | コレクション | `pluck`、`filter`、`map`、`each`、`chunk`、`groupBy`、`keyBy`、`sort_by`、`where_`、`first`、`last`、`count`、`is_empty`、`to_array` などLaravel系のメソッドを持つ `Collection<M>`。`Deref<Target = Vec<M>>` のため、あらゆる `Vec` のイディオムがそのまま動きます | 実装済み | [コレクション](eloquent-collections.md) |
+| `modelKeys()` | `Builder::model_keys().await?`（ハイドレーションなし、修飾されたキー）と `Collection::model_keys()` | 実装済み | どちらも `Vec<M::Key>` を返します。ビルダーの終端は `users.id` を射影するため、joinをまたいでも保持されます |
 | APIリソース | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + フィールドセット + インクルード | 実装済み | JSON:API の形と Laravelスタイルのリソースの形、両方が利用できます。`?include=` のパスは `max_relationship_depth`（デフォルトは5）で上限が定められ、`JsonApiResource::$maxRelationshipDepth` に対応します。[API リソース](eloquent-resources.md) |
 | シリアライゼーション | `#[model(hidden = [...], visible = [...], appends = [...])]` | 実装済み | どの属性がシリアライズされるかを、同じように制御できます。[シリアライゼーション](eloquent-serialization.md) |
 | ファクトリー | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?`（または `UserFactory::times(5).create_many().await?`） | 実装済み | 値を循環させる `Sequence`。[ファクトリー](eloquent-factories.md) |
-| `modelKeys()` | `Builder::model_keys().await?`（ハイドレーションなし、修飾されたキー）と `Collection::model_keys()` | 実装済み | どちらも `Vec<M::Key>` を返します。ビルダーの終端は `users.id` を射影するため、joinをまたいでも保持されます |
 | ライフサイクル: chunking / lazy / cursor | `Builder::chunk(n, \|page\| async { ... })`, `lazy()`, `cursor()` | 実装済み | 大きなテーブルに対する、メモリに上限のあるイテレーション |
 | 悲観的ロック | `Builder::lock_for_update()`, `shared_lock()` | 実装済み | トランザクションの内側で |
 | `refreshForUpdate()` | `model.refresh_for_update().await?` | 実装済み | `SELECT ... FOR UPDATE` による再読み込みです。SQLiteではロックはno-opです。[行ロック](eloquent.md#row-locking) |

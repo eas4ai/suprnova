@@ -209,9 +209,9 @@ impl TypedCommand for UsersPurge {
 }
 ```
 
-Attributes:
+Atributos:
 
-| Attribute    | Obrigatório | Propósito                                       |
+| Atributo     | Obrigatório | Propósito                                       |
 |--------------|----------|-----------------------------------------------|
 | `#[console(name = "...")]` | sim | O nome de invocação na CLI (`"users:purge"`, `"mail:send"`, `"greet"`). |
 | `#[console(description = "...")]` | não | Descrição de uma linha mostrada no help de nível superior. |

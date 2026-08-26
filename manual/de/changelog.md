@@ -456,7 +456,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   und begrenzt jeden Aufruf mit `IMAGE_MAGICK_TIMEOUT_SECS`. `ImageDriver`
   ist die Trait-Grenze für alles Weitere. Das Modul heißt `media`, weil die
   OxideAV-gestützten Audio- und Video-Oberflächen daneben leben werden.
-  [Bilder](../images.md)
+  [Bilder](images.md)
 - **Das WebP-Gate trägt eine feste, nicht konfigurierbare Grenze.** Ein WebP
   deklariert seine echte dekodierte Größe in seinem innersten
   Bitstream-Chunk, also durchläuft das Framework den Container, um sie zu
@@ -466,7 +466,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Durchlauf zu melden wäre ein Gate, um das genug Füll-Chunks herumgehen
   könnten. Keine `IMAGE_MAX_*`-Variable wirkt darauf, und der Fehler sagt das
   auch so. Eine Animation mit 300 Frames ist nicht betroffen; eine mit 4100
-  wird abgelehnt. [Bilder](../images.md#one-bound-is-not-configurable)
+  wird abgelehnt. [Bilder](images.md#one-bound-is-not-configurable)
 
 - **OAuth lässt sich jetzt installieren, ohne die bestehende Passwort- und
   Session-Autorität einer Anwendung zu ersetzen.** `MagnetarOAuthOnlyConfig`
@@ -565,43 +565,99 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
 ## 1.3.2 - 2026-08-25
 
-> The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### Hinzugefügt
 
-- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+- **OAuth-Provider lassen sich jetzt über `MagnetarConfig::oauth`
+  registrieren.** Suprnova re-exportiert den `OAuthProvider`-Contract, alle
+  fünf First-Party-Provider- und Konfigurationstypen sowie die Typen für
+  HTTP, Widerruf, Abuse-Limiter, Autorisierung und Auto-Link, die eine
+  Anwendung benötigt. Benutzerdefinierte Provider benötigen dafür nicht
+  länger eine direkte `suprnova-magnetar`-Abhängigkeit oder eine von Hand
+  gehaltene `MagnetarHostEngine`.
 
-- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+- **Ein produktionsreifer OAuth-Transport und ein Framework-Limiter-Adapter
+  werden jetzt an der Crate-Wurzel ausgeliefert.** `ReqwestOAuthTransport`
+  implementiert die I/O für Token, Userinfo und Widerruf, standardmäßig mit
+  deaktivierten Weiterleitungen, einem Timeout von 30 Sekunden, einem
+  Standard-`User-Agent` und einer Antwortobergrenze von 1 MiB.
+  `FrameworkAbuseLimiter` greift auf den konfigurierten `RateLimiterDriver`
+  zurück; Anwendungen schreiben keinen der beiden Adapter mehr von Hand.
 
 ### Behoben
 
-- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+- **`init_magnetar` veröffentlicht OAuth jetzt zusammen mit den Passwort- und
+  Passkey-Services als eine einzige reservierte Installation.** Der
+  OAuth-Service wird vor der Veröffentlichung gebaut, und alle drei
+  Engine-Slots bleiben verborgen, solange die Reservierung aktiv ist. Eine
+  fehlgeschlagene oder doppelte OAuth-Konfiguration kann Passwort- und
+  Passkey-Zustand nicht ohne die konfigurierte OAuth-Registry sichtbar
+  zurücklassen.
 
-- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+- **Benutzerdefinierte Provider können Userinfo-Header beisteuern.**
+  `OAuthProvider::userinfo_headers` wird mit dem host-eigenen Bearer-Header
+  zusammengeführt und erfüllt damit Anforderungen wie den `User-Agent` von
+  GitHub und Media-Type-`Accept`-Header, ohne dass ein Provider
+  `Authorization` ersetzen kann.
 
 ### Upgrade
 
-- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+- **Die Magnetar-Umstellung in `4faaa933` entfernte Toriis
+  OAuth-Installationspfad, ohne dessen Ersatz im Standard-Initialisierer zu
+  verdrahten.** Der alte Workaround verlangte, eine eigene Host-Engine zu
+  konstruieren, `oauth_service` aufzurufen und den Adapter separat zu
+  installieren. Ersetzen Sie diesen Workaround durch
+  `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` und einen
+  einzigen `init_magnetar`-Aufruf.
 
-- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+- **Community-Provider für GitHub müssen die verifizierte E-Mail explizit
+  behandeln.** `/user` von GitHub lässt eine nicht öffentliche E-Mail
+  üblicherweise weg, während die verifizierte primäre Adresse `/user/emails`
+  erfordert. Geben Sie `email: None` zurück, um die Zeremonie zur
+  E-Mail-Vervollständigung zu verwenden, oder verweisen Sie
+  `userinfo_endpoint` auf einen Host-Adapter, der beide Antworten kombiniert;
+  behandeln Sie eine öffentliche, aber unverifizierte Adresse niemals als
+  Kontoinhaberschaft.
 
 ## 1.3.1 - 2026-08-24
 
-> The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### Behoben
 
-- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
-- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
-- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+- **Provider-gestützte Anwendungen können verifizierte Benutzer wieder
+  zurücksetzen.** Ist keine Magnetar-Engine installiert, verwendet
+  `PasswordReset` für bereits verifizierte Konten einen explizit zum
+  Zurücksetzen befähigten `UserProvider` und die Framework-eigenen
+  `auth_flow_tokens`. `EloquentUserProvider<M>` meldet sich dafür an, wenn
+  `M` `MustVerifyEmail + CanResetPassword` implementiert; eine
+  `app_users`-Migration ist nicht erforderlich.
+- **Der veröffentlichte Framework-Stand enthält jetzt beide Reparatursätze
+  aus der Zeit nach dem Release.** Layout und Überschriften des übersetzten
+  1.3.0-Changelogs, CJK-Umbruch, lokalisierte Anker, Glossarbegriffe und die
+  Interpunktion der Prosa sind abgeglichen, statt über auseinanderlaufende
+  lokale und entfernte Branches verteilt zu sein.
+- **Die Härtung von CLI und Magnetar nach dem Tag ist enthalten.** Das
+  Aufräumen der Entwicklungsprozesse verwendet den fertiggestellten
+  Prozessgruppen-Fallback, und die lokalen Qualifizierungsverträge decken die
+  veröffentlichten Refs und die SQLite-Lanes des Plugin-SDK ab.
 
 ### Sicherheit
 
-- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+- **Der Provider-Fallback behandelt den Passwort-Reset niemals als
+  erstmaligen Postfachnachweis.** Unbekannte und unverifizierte Adressen
+  erhalten dieselbe Antwort ohne Mailversand. Installieren Sie Magnetar, wenn
+  ein nicht verifiziertes Konto den Besitz seines Postfachs über den Reset
+  nachweisen muss, damit die Bereinigung der Anmeldedaten, das Erhöhen der
+  Auth-Epoche und der Widerruf atomar bleiben. Der Abschluss über den
+  Provider-Fallback meldet fehlgeschlagene Widerrufe von Framework-Session
+  und Remember-Zustand über `PasswordResetOutcome`.
 
 ### Upgrade
 
-- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+- **Ziehen Sie jede `v1.3.0`-Git-Abhängigkeit auf `v1.3.1` nach.**
+  Anwendungen mit einer eigenen `users`-Tabelle behalten ihren konfigurierten
+  `UserProvider`; sie initialisieren nicht die Standard-Engine `app_users`,
+  nur um ein bereits verifiziertes Konto zurückzusetzen. Anwendungen, die
+  Magnetar-Anmeldedaten oder den erstmaligen Nachweis für nicht verifizierte
+  Konten verwenden, initialisieren Magnetar weiterhin.
 
 ## 1.3.0 - 2026-08-24
 
@@ -978,7 +1034,7 @@ der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
   Notes zu 13.23.0, 13.24.0 und 13.25.0 wurden Punkt für Punkt auf die
   eigene Oberfläche des Frameworks zurückverfolgt. Alles, was einen
   Suprnova-Codepfad erreichte, ist in diesem Release entweder behoben
-  oder hat in [`manual/parity.md`](../parity.md) eine Zeile, die mit
+  oder hat in [`manual/parity.md`](parity.md) eine Zeile, die mit
   `not yet` oder `by design no` markiert ist.
 
 ### Upgrade

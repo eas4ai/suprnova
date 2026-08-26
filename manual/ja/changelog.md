@@ -46,8 +46,8 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 - **`Gate::default_denial_response` が、素の拒否のデフォルトの形をカスタマイズします。** Laravelの `Gate::defaultDenialResponse($response)` を映しています。一度だけ設定すれば - 通常は `bootstrap::register()` で - ちょうど2つの結果を作り変えます: 素の `false`（boolのゲート - `Gate::define` / `Gate::define_async`。`bool` を返す `#[policy]` のメソッドを含みます - あるいは `false` と判定した `before`/`after` フック）と、ほかに何も判定しなかった評価（フックの意見もない未定義の権限）です。これらはすべて、以前は素の `Response::deny()`（403）へ収束していました。今は、そのデフォルトが運ぶ `Response` が何であれ、それとして表面化します。例えば `Response::deny_as_not_found()` なら、ゲートごとにではなくアプリケーション全体でリソースの存在を隠す404です。デフォルトが適用されるのは素の `false` だけです - `define_with` / `define_async_with` で登録されたゲートは、望む `Response` をすでに返しており、それは常に `Gate::inspect` を手つかずで通過します。これは、デフォルトが返された `Response` オブジェクトの代わりになることは決してないという、Laravel自身の規則と一致します。allowの形をした `Response::allow()` をデフォルトにすると、boolのゲートをすべて黙って許可へ反転させるのではなく、拒否されます（ログに記録され、無視されます） - これが意図的にLaravelから分岐する唯一の点については、`Gate::default_denial_response` のドキュメントコメントを参照してください。Laravelにはそうした保護機構がありません。
 - **`Password` のバリデーションルールのファミリーが、Have I Been Pwned の `uncompromised()` チェックを含めて出荷されます。** `Password::min(n)` と強度のビルダー（`.max()`、`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`）は、Laravelの `Password` ルールの正規表現をそのまま移植しています - 素の空白は `.symbols()` を満たし、Laravelの `\p{Z}` の区切り文字クラスと一致します。`.uncompromised()`（または `.uncompromised_with_threshold(n)`）は、Have I Been Pwned のk匿名性のレンジAPIに対してパスワードを照合します: プロセスの外へ出るのはパスワードのSHA-1ハッシュの最初の5文字だけであり、ネットワークの失敗、タイムアウト、2xx以外のレスポンスは、Laravelの `NotPwnedVerifier` とまったく同じく、サインアップを止めるのではなくフェイルオープンします。このチェックはHTTPの往復であるため、`Password` は `Rule`（強度のみ。同期の `validate!` の行のため）と `AsyncRule`（強度に続いてHIBPのチェック。`after_validation_async` のため）の両方を実装する唯一の組み込みルールです - `uncompromised()` が設定された `Password` に対して同期の経路を呼び出すことは、黙って飛ばされるのではなく、はっきりとした開発者向けのエラーになります。`Password::defaults_with(...)` は、`Password::defaults()` が返すプロセス全体のデフォルトを設定します。新しい `HIBP_TIMEOUT_SECS` 環境変数（デフォルトは30秒）。`Http::fake_response_text(...)` は、HIBPのような `text/plain` の上流APIに対するテストのための、`fake_response(...)` の生ボディ版の兄弟です。
 - **スケジュールされたタスクが、自身のcron式を読むタイムゾーンを名指しできるようになり、`schedule:list` がスケジュール全体を任意のゾーンでレンダリングできるようになりました。** `.timezone(chrono_tz::Tz)` は1つのタスクを固定し、`.try_timezone("Area/City")` は実行時にしか存在しないゾーン名のための失敗し得る兄弟であり、`Schedule::timezone(tz)` はそれ以降に登録されるすべてのタスクのデフォルトを設定します。ゾーンを固定しないタスクについては何も変わりません: 今もプロセスのローカルゾーンに対して評価されます。固定されたゾーンが影響するのは実行予定かどうかだけです - スケジューラーは今もプロセスの1分に一度ティックし、同一分の重複排除ゲートは手つかずです。なお、夏時間を採用するゾーンでは、壁時計上のある分が2回起こったり、まったく起こらなかったりするため、そうした分に固定されたタスクは2回走ったり、飛ばされたりすることがあります。スケジューリングの章が、完全な警告を載せています。`schedule:list` は `--timezone` オプションと2つのカラムを得ました: 出力される式が書かれているゾーンと、そのタスクが次に発火する分です。固定されたタスクの式は一覧のゾーンへ書き換えられ、そこで真夜中をまたぐ場合は複数行に分かれます。そして、忠実な書き換えが不可能なとき - 夏時間の切り替わりをまたぐとき、日付のまたぎが、制限された日と制限された曜日を一緒に動かさなければならなくなるとき、あるいは2月の長さを決めなければならなくなるとき - は、書かれたとおりに残されます。`chrono_tz::Tz` はクレートルートから再エクスポートされているため、消費するアプリが自身の `Cargo.toml` に `chrono-tz` を加えることはありません。
-- **Laravelの形をした画像サブシステム。デフォルトで有効な `media` フィーチャーの背後、`suprnova::media` にあります。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` がレイジーなパイプラインを組み立て - `resize`、`scale`、`crop`、`cover`、`contain`、任意の角度の `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type`、`dominant_color` で仕上げます。PNG、JPEG、WebP、GIF、BMPを読み書きします。AVIFの出力は、自社製のAV1エンコーダーが公開されるまで先送りされており、その時点で新しい `OutputFormat` のバリアントが1つ増えるだけで、ほかには何も変わりません。Laravelの `gd`/`imagick` の分かれ方と同じく、2つのドライバーがあります: `IMAGE_DRIVER=oxideav`（デフォルト）は、ネイティブライブラリもインストールするものもない純粋なRustの [OxideAV](https://github.com/OxideAV) のコーデックファミリーの上で走り、`IMAGE_DRIVER=magick` は、HEICを含むより広い入力サポートのために、ホストにインストールされたImageMagick 7へシェルアウトします。デコードの上限（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）は、何かが割り当てられる前に入力自身のヘッダーに対して検査されます - 拡張WebPの内側のビットストリームも含みます。その助言的なキャンバスのサイズを使って、より大きなフレームを密輸してゲートを通すことはできません - そして、ピクセルの作業はすべてブロッキングスレッドの上で走ります。`magick` ドライバーは、ImageMagickにバイト列からコーダーを選ばせるのではなく、入力のコーダーを名前で固定し、すべての起動を `IMAGE_MAGICK_TIMEOUT_SECS` で境界付けます。`ImageDriver` が、それ以外のあらゆるもののためのトレイトの境界です。モジュールが `media` という名前なのは、OxideAVに支えられた音声と動画の表面が、その隣に置かれることになるからです。[画像](../images.md)
-- **WebPのゲートは、1つの固定された、設定できない境界を運びます。** WebPは、実際のデコード後のサイズを最も内側のビットストリームのチャンクの中で宣言するため、フレームワークはそれを見つけるためにコンテナを歩きます。その歩みはレベルあたり最大4096チャンクを訪れ、2レベルのネストをたどり、そのどちらかを超えるファイルは測られるのではなく拒否されます。終えられなかった歩みから数字を報告することは、十分な量の詰め物のチャンクを積めば回り込めるゲートになってしまいます。どの `IMAGE_MAX_*` 変数もそれに影響せず、エラーメッセージもそう述べます。300フレームのアニメーションは影響を受けず、4100フレームのものは拒否されます。[画像](../images.md#one-bound-is-not-configurable)
+- **Laravelの形をした画像サブシステム。デフォルトで有効な `media` フィーチャーの背後、`suprnova::media` にあります。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` がレイジーなパイプラインを組み立て - `resize`、`scale`、`crop`、`cover`、`contain`、任意の角度の `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type`、`dominant_color` で仕上げます。PNG、JPEG、WebP、GIF、BMPを読み書きします。AVIFの出力は、自社製のAV1エンコーダーが公開されるまで先送りされており、その時点で新しい `OutputFormat` のバリアントが1つ増えるだけで、ほかには何も変わりません。Laravelの `gd`/`imagick` の分かれ方と同じく、2つのドライバーがあります: `IMAGE_DRIVER=oxideav`（デフォルト）は、ネイティブライブラリもインストールするものもない純粋なRustの [OxideAV](https://github.com/OxideAV) のコーデックファミリーの上で走り、`IMAGE_DRIVER=magick` は、HEICを含むより広い入力サポートのために、ホストにインストールされたImageMagick 7へシェルアウトします。デコードの上限（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）は、何かが割り当てられる前に入力自身のヘッダーに対して検査されます - 拡張WebPの内側のビットストリームも含みます。その助言的なキャンバスのサイズを使って、より大きなフレームを密輸してゲートを通すことはできません - そして、ピクセルの作業はすべてブロッキングスレッドの上で走ります。`magick` ドライバーは、ImageMagickにバイト列からコーダーを選ばせるのではなく、入力のコーダーを名前で固定し、すべての起動を `IMAGE_MAGICK_TIMEOUT_SECS` で境界付けます。`ImageDriver` が、それ以外のあらゆるもののためのトレイトの境界です。モジュールが `media` という名前なのは、OxideAVに支えられた音声と動画の表面が、その隣に置かれることになるからです。[画像](images.md)
+- **WebPのゲートは、1つの固定された、設定できない境界を運びます。** WebPは、実際のデコード後のサイズを最も内側のビットストリームのチャンクの中で宣言するため、フレームワークはそれを見つけるためにコンテナを歩きます。その歩みはレベルあたり最大4096チャンクを訪れ、2レベルのネストをたどり、そのどちらかを超えるファイルは測られるのではなく拒否されます。終えられなかった歩みから数字を報告することは、十分な量の詰め物のチャンクを積めば回り込めるゲートになってしまいます。どの `IMAGE_MAX_*` 変数もそれに影響せず、エラーメッセージもそう述べます。300フレームのアニメーションは影響を受けず、4100フレームのものは拒否されます。[画像](images.md#one-bound-is-not-configurable)
 
 - **OAuthを、アプリケーションの既存のパスワードとセッションの権限元を置き換えることなくインストールできるようになりました。** `MagnetarOAuthOnlyConfig` と `init_magnetar_oauth_only` は、デフォルトのセレモニーとプロバイダーのエンジンをインストールし、パスワードとパスキーのスロットは空のままにします。既存の `users` テーブルを持つアプリケーションは、`verify_oauth_identity` を呼び、検証済みのプロバイダー subject を自分で対応付け、通常のフレームワークセッションを確立できます。
 
@@ -75,43 +75,39 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 
 ## 1.3.2 - 2026-08-25
 
-> The v1.3.2 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### 追加
 
-- **OAuth providers can now be registered through `MagnetarConfig::oauth`.** Suprnova re-exports the `OAuthProvider` contract, all five first-party provider and configuration types, and the HTTP, revocation, abuse-limiter, authorization, and auto-link types an application needs. Custom providers no longer require a direct `suprnova-magnetar` dependency or a hand-retained `MagnetarHostEngine`.
+- **OAuth のプロバイダーを `MagnetarConfig::oauth` を通じて登録できるようになりました。** Suprnova は、`OAuthProvider` のコントラクト、5つのファーストパーティプロバイダーと設定型のすべて、そしてアプリケーションが必要とする HTTP、失効、濫用リミッター、認可、自動リンクの各型を再エクスポートします。カスタムのプロバイダーは、`suprnova-magnetar` への直接の依存関係も、手で保持する `MagnetarHostEngine` も、もはや必要としません。
 
-- **A production OAuth transport and framework limiter adapter now ship at the crate root.** `ReqwestOAuthTransport` implements token, userinfo, and revocation I/O with redirects disabled by default, a 30-second timeout, a default `User-Agent`, and a 1 MiB response cap. `FrameworkAbuseLimiter` reuses the configured `RateLimiterDriver`; apps no longer hand-write either adapter.
+- **本番環境向けの OAuth トランスポートと、フレームワークのリミッターアダプターが、クレートルートから出荷されるようになりました。** `ReqwestOAuthTransport` は、トークン、userinfo、失効処理の I/O を実装します。リダイレクトはデフォルトで無効、タイムアウトは30秒、デフォルトの `User-Agent` を持ち、レスポンスの上限は 1 MiB です。`FrameworkAbuseLimiter` は、設定済みの `RateLimiterDriver` を再利用します。アプリケーションは、どちらのアダプターも手書きする必要がなくなりました。
 
 ### 修正
 
-- **`init_magnetar` now publishes OAuth with password and passkey services as one reserved installation.** The OAuth service is built before publication, and all three engine slots remain hidden while the reservation is active. A failed or duplicate OAuth configuration cannot leave password and passkey state visible without the configured OAuth registry.
+- **`init_magnetar` は、OAuth をパスワードおよびパスキーのサービスとともに、1つの予約されたインストールとして公開するようになりました。** OAuth のサービスは公開の前に構築され、予約が有効な間は3つのエンジンスロットすべてが隠されたままです。OAuth の設定が失敗したり重複したりしても、設定された OAuth のレジストリがないまま、パスワードとパスキーの状態が外から見えてしまうことはあり得ません。
 
-- **Custom providers can supply userinfo headers.** `OAuthProvider::userinfo_headers` is merged with the host-owned bearer header, enabling requirements such as GitHub's `User-Agent` and media-type `Accept` headers without allowing a provider to replace `Authorization`.
+- **カスタムのプロバイダーが userinfo のヘッダーを供給できます。** `OAuthProvider::userinfo_headers` はホストが所有する bearer ヘッダーとマージされるため、GitHub の `User-Agent` やメディアタイプの `Accept` ヘッダーといった要件を、プロバイダーに `Authorization` を置き換えさせることなく満たせます。
 
 ### アップグレード
 
-- **The Magnetar cutover in `4faaa933` removed Torii's OAuth installation path without wiring its replacement into the default initializer.** The old workaround required constructing a custom host engine, calling `oauth_service`, and installing the adapter separately. Replace that workaround with `MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` and one `init_magnetar` call.
+- **`4faaa933` での Magnetar への切り替えは、Torii の OAuth インストール経路を取り除きながら、その置き換えをデフォルトの初期化関数へ配線していませんでした。** 従来の回避策は、カスタムのホストエンジンを構築し、`oauth_service` を呼び、アダプターを別途インストールすることを必要としていました。その回避策は、`MagnetarConfig::from_sea_orm(database).oauth(oauth_config)` と1回の `init_magnetar` の呼び出しへ置き換えてください。
 
-- **GitHub community providers must handle verified email explicitly.** GitHub `/user` usually omits non-public email, while the verified primary address requires `/user/emails`. Return `email: None` to use the email-completion ceremony, or point `userinfo_endpoint` at a host adapter that combines both responses; never treat a public but unverified address as ownership.
+- **GitHub のコミュニティプロバイダーは、検証済みのメールアドレスを明示的に扱う必要があります。** GitHub の `/user` は通常、非公開のメールアドレスを省きますが、検証済みのプライマリアドレスには `/user/emails` が必要です。`email: None` を返してメール補完のセレモニーを使うか、`userinfo_endpoint` を、両方のレスポンスを組み合わせるホストアダプターへ向けてください。公開されているだけの未検証のアドレスを、アカウント所有権として扱ってはいけません。
 
 ## 1.3.1 - 2026-08-24
 
-> The v1.3.1 release notes are intentionally kept in English to preserve the complete normative record.
-
 ### 修正
 
-- **Provider-backed applications can reset verified users again.** When no Magnetar engine is installed, `PasswordReset` uses an explicitly reset-capable `UserProvider` and framework `auth_flow_tokens` for already verified accounts. `EloquentUserProvider<M>` opts in when `M` implements `MustVerifyEmail + CanResetPassword`; no `app_users` migration is required.
-- **The published framework line now contains both post-release repair sets.** The translated 1.3.0 changelog layout and headings, CJK wrapping, localized anchors, glossary terms, and prose punctuation are reconciled instead of split across divergent local and remote branches.
-- **Post-tag CLI and Magnetar hardening is included.** Development-process cleanup uses the completed process-group fallback, and the local qualification contracts cover the released refs and plugin-SDK SQLite lanes.
+- **プロバイダーに支えられたアプリケーションが、検証済みのユーザーを再びリセットできるようになりました。** Magnetar のエンジンがインストールされていない場合、`PasswordReset` は、すでに検証済みのアカウントについては、リセット機能が明示された `UserProvider` とフレームワークの `auth_flow_tokens` を使います。`EloquentUserProvider<M>` は、`M` が `MustVerifyEmail + CanResetPassword` を実装しているときにオプトインします。`app_users` のマイグレーションは必要ありません。
+- **公開されたフレームワークの系列は、リリース後の2組の修復をどちらも含むようになりました。** 翻訳された 1.3.0 の変更履歴のレイアウトと見出し、CJK の折り返し、ローカライズされたアンカー、用語集の用語、そして散文の句読点は、分岐したローカルブランチとリモートブランチに分かれるのではなく、整合が取られています。
+- **タグ付け後の CLI と Magnetar の堅牢化も含まれています。** 開発プロセスの後始末は、完成したプロセスグループのフォールバックを使い、ローカルの品質確認コントラクトは、リリースされた ref と plugin-SDK の SQLite レーンを対象にします。
 
 ### セキュリティ
 
-- **The provider fallback never treats password reset as first mailbox proof.** Unknown and unverified addresses receive the same no-mail response. Install Magnetar when an unverified account must prove mailbox ownership through reset so credential cleanup, auth-epoch advancement, and revocation remain atomic. Provider fallback completion reports framework session and remember revocation failures through `PasswordResetOutcome`.
+- **プロバイダーのフォールバックは、パスワードリセットを最初のメールボックス証明として扱うことは決してありません。** 未知のアドレスも未検証のアドレスも、メールを送らない同一のレスポンスを受け取ります。未検証のアカウントがリセットを通じてメールボックスの所有権を証明しなければならない場合は、認証情報のクリーンアップ、認証エポックの前進、失効が原子的なままであるように、Magnetar をインストールしてください。プロバイダーのフォールバックの完了処理は、フレームワークセッションと remember の失効の失敗を `PasswordResetOutcome` を通じて報告します。
 
 ### アップグレード
 
-- **Move every `v1.3.0` Git dependency to `v1.3.1`.** Applications with their own `users` table keep their configured `UserProvider`; they do not initialize the default `app_users` engine merely to reset an already verified account. Applications that use Magnetar credentials or unverified-account first proof continue to initialize Magnetar.
+- **`v1.3.0` の Git 依存関係をすべて `v1.3.1` へ移してください。** 自前の `users` テーブルを持つアプリケーションは、設定済みの `UserProvider` をそのまま使います。すでに検証済みのアカウントをリセットするためだけに、デフォルトの `app_users` エンジンを初期化することはありません。Magnetar の認証情報や、未検証アカウントの初回証明を使うアプリケーションは、引き続き Magnetar を初期化します。
 
 ## 1.3.0 - 2026-08-24
 
@@ -265,7 +261,7 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 
 ### 変更
 
-- **パリティの基準が、Laravel 13.25.0へ移りました。**13.23.0、13.24.0、13.25.0のリリースノートを、項目ごとにフレームワーク自身の表面まで追跡しました。Suprnovaのコード経路に届いたものはすべて、このリリースで修正されているか、[`parity.md`](../parity.md)の中に`not yet`または`by design no`と印の付いた行を持っています。
+- **パリティの基準が、Laravel 13.25.0へ移りました。**13.23.0、13.24.0、13.25.0のリリースノートを、項目ごとにフレームワーク自身の表面まで追跡しました。Suprnovaのコード経路に届いたものはすべて、このリリースで修正されているか、[`parity.md`](parity.md)の中に`not yet`または`by design no`と印の付いた行を持っています。
 
 ### アップグレード
 
@@ -588,7 +584,7 @@ Toriiのセッション、パスワード、OAuth、パスキーの各パスを�
 - `WorkerConfig`に`queues: Vec<String>`フィールドが追加されました（空の場合はすべてをドレインする、以前の挙動のままです）。
 - `ROADMAP.md`を削除しました。その設計原則は`manual/introduction.md`に、作業の取り決めは`manual/contributions.md`に、デプロイとスケールアウトの資料は`manual/deployment.md`に、それぞれ住んでいます。出荷済み/計画中のチェックリストは、古くなっていました。`README.md`が「上流との関係」のために指し示していたリンクは、すでに宙に浮いていました - その帰属表示は`LICENSE`に住んでいます。
 - スキャフォルドのフロントエンドは今では、`@inertiajs/{svelte,react,vue3}`を（`^3.4.0`から）`^3.6.1`に固定します。3.4.0 → 3.6.1の範囲はクライアントサイドのみです - 上流のchangelogと`packages/core/src/types.ts`の`Page`契約に照らして監査したところ、3.6.1のクライアントが送るあらゆる`X-Inertia-*`ヘッダーは、すでに処理済みでした。
-- `scripts/release.sh`は今では、そのバージョンの`CHANGELOG.md`セクションから取られたノートを添えて、GitHubリリース自体を公開します。以前はこれが、スキップされがちな手作業の「次のステップ」だったため、v0.5.10とv0.6.1–v0.6.3はタグのみで、Releasesページは古いバージョンのまま止まっていました。プリフライトはゲートの前に実行されるため、`gh`やchangelogセクションの欠落は数秒で失敗し、`origin`がGitHubでない限り、公開は自動的にスキップされます。
+- `scripts/release.sh`は今では、そのバージョンの`CHANGELOG.md`セクションから取られたノートを添えて、GitHubリリース自体を公開します。以前はこれが、スキップされがちな手作業の「次のステップ」だったため、v0.5.10とv0.6.1-v0.6.3はタグのみで、Releasesページは古いバージョンのまま止まっていました。プリフライトはゲートの前に実行されるため、`gh`やchangelogセクションの欠落は数秒で失敗し、`origin`がGitHubでない限り、公開は自動的にスキップされます。
 
 ### アップグレード
 

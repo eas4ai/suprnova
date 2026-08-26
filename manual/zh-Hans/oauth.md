@@ -1,6 +1,6 @@
 # OAuth、Apple 和魔法链接登录
 
-Suprnova 通过框架自有的 `Auth` 门面，提供 OAuth、使用 Apple 登录以及无密码的魔法链接。Magnetar 为该门面提供凭据、认证仪式、身份、因子门控和会话引擎。
+Suprnova 通过框架自有的 `Auth` 门面，提供 OAuth、使用 Apple 登录以及无密码的魔法链接。Magnetar 为该门面提供凭据、认证握手、身份、因子门控和会话引擎。
 
 公开入口点是：
 
@@ -83,7 +83,7 @@ pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
 
 ### 保留现有用户和会话体系
 
-应用可以只使用 Magnetar 处理 OAuth 认证仪式和提供方证明，而不让 Magnetar
+应用可以只使用 Magnetar 处理 OAuth 认证握手和提供方证明，而不让 Magnetar
 接管密码、passkey、框架会话或记住我状态。构建相同的
 `MagnetarOAuthHostConfig`，然后通过仅 OAuth 初始化器进行安装：
 
@@ -102,7 +102,7 @@ init_magnetar_oauth_only(
 .await?;
 ```
 
-照常使用 `Auth::oauth(provider).begin()` 启动认证仪式。在回调中调用
+照常使用 `Auth::oauth(provider).begin()` 启动认证握手。在回调中调用
 `verify_oauth_identity(code, state)`，把已验证的提供方 subject 映射到应用自己的用户表，然后通过 `Auth::login` 建立现有的框架会话。此模式下不要调用
 `complete`：`complete` 会应用 Magnetar 默认的账户和会话映射，而仅 OAuth
 初始化的目的正是把这些决定留给应用。
@@ -113,11 +113,11 @@ init_magnetar_oauth_only(
 
 GitHub 的 REST 用户端点需要 `User-Agent`；社区提供方会通过 `OAuthProvider::userinfo_headers` 添加它，以及所需的任何媒体类型 `Accept` 值。Suprnova 会单独添加 bearer `Authorization` 标头，并拒绝提供方覆盖它的尝试。
 
-只有当用户将电子邮件公开时，GitHub 的 `/user` 响应才会包含电子邮件。已验证的主地址需要第二次 `/user/emails` 请求，而 `resolve_identity` 会刻意不执行 I/O，并接收一个 userinfo 响应。GitHub 提供方可以返回 `email: None` 并使用 Suprnova 的电子邮件补全仪式，或者将 `userinfo_endpoint` 指向一个主机适配器，由它把 `/user` 与已验证的主电子邮件结合起来。不要将未验证或仅仅公开的地址视为账户所有权。
+只有当用户将电子邮件公开时，GitHub 的 `/user` 响应才会包含电子邮件。已验证的主地址需要第二次 `/user/emails` 请求，而 `resolve_identity` 会刻意不执行 I/O，并接收一个 userinfo 响应。GitHub 提供方可以返回 `email: None` 并使用 Suprnova 的电子邮件补全握手，或者将 `userinfo_endpoint` 指向一个主机适配器，由它把 `/user` 与已验证的主电子邮件结合起来。不要将未验证或仅仅公开的地址视为账户所有权。
 
 ## 绑定会话
 
-OAuth begin 需要 `SessionMiddleware`。Magnetar 会把认证仪式绑定到发起方框架会话的摘要，因此回调不能被移动到另一个浏览器会话。
+OAuth begin 需要 `SessionMiddleware`。Magnetar 会把认证握手绑定到发起方框架会话的摘要，因此回调不能被移动到另一个浏览器会话。
 
 成功的密码、魔法链接、passkey 和 OAuth 登录会轮换框架会话 ID 与 CSRF 令牌，记录应用用户 ID，并存储不透明的 Magnetar Web 绑定。记住我功能的 hydration 会同时轮换 Magnetar 凭据和框架会话绑定。
 
@@ -137,7 +137,7 @@ let kickoff = Auth::oauth("google").begin().await?;
 - `authorization_url`，要发送给浏览器的 URL。
 - `state`，绑定到发起会话的一次性选择器。
 
-Magnetar 负责 state 生成、PKCE 策略、认证仪式持久化、提供者交换、身份验证和滥用限制。宿主控制器负责 HTTP 重定向和回调路由。
+Magnetar 负责 state 生成、PKCE 策略、认证握手持久化、提供者交换、身份验证和滥用限制。宿主控制器负责 HTTP 重定向和回调路由。
 
 ## 验证或完成回调
 
@@ -166,7 +166,7 @@ OAuth 完成不会把拥有一个未经验证的邮箱字符串视为调用方�
 
 完成结果可能要求先做更多工作，而不是签发会话：
 
-- **需要完成邮箱**：当提供者身份需要单独的已验证邮箱认证仪式时，返回 HTTP 409。
+- **需要完成邮箱**：当提供者身份需要单独的已验证邮箱认证握手时，返回 HTTP 409。
 - **需要显式链接**：当现有的已验证账户必须授权链接时，返回 HTTP 409。
 - **需要因子**：当账户策略要求在签发会话前提供第二个因子时，返回 HTTP 401。
 
@@ -225,7 +225,7 @@ post!("/auth/magic", controllers::magic_link::send),
 get!("/auth/magic/callback", controllers::magic_link::consume),
 ```
 
-为每一条 OAuth 和 passkey 起始/回调路由应用 `SessionMiddleware`。会话携带认证仪式选择器，并把整个往返绑定到发起它的浏览器。
+为每一条 OAuth 和 passkey 起始/回调路由应用 `SessionMiddleware`。会话携带认证握手选择器，并把整个往返绑定到发起它的浏览器。
 
 ## 认证迁移
 
@@ -261,4 +261,4 @@ cargo run -p suprnova-magnetar \
 - [认证](authentication.md)涵盖密码、passkey、守卫、框架会话和引擎初始化。
 - [认证流程](auth-flows.md)涵盖邮箱验证、密码重置、锁定和双因素认证。
 - [邮件](mail.md)涵盖由应用负责的魔法链接投递。
-- [会话](session.md)涵盖绑定 OAuth 和 passkey 认证仪式的浏览器会话。
+- [会话](session.md)涵盖绑定 OAuth 和 passkey 认证握手的浏览器会话。
