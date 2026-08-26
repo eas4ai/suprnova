@@ -1112,3 +1112,168 @@ async fn a_symlinked_directory_still_writes_but_a_dangling_one_never_does() {
     );
     assert_symlink_escape(&err, "write under a dangling intermediate symlink");
 }
+
+/// The conditional-write race has to survive neighbours, not just itself.
+///
+/// The guard resolves a path by walking it, and a walk is a sequence of
+/// observations of a filesystem other tasks are changing underneath it. If any
+/// single component is observed twice and the two observations are combined into
+/// one verdict, ordinary concurrent activity - another racer publishing the very
+/// key these racers are contending for, an unrelated sibling appearing and
+/// vanishing, a staging directory full of other writers' temp files - can be
+/// read as an escape and refuse a legitimate path. That failure is invisible in
+/// isolation and shows up as a flake under a loaded suite, so the neighbours are
+/// part of the test rather than something it hopes for.
+///
+/// Every loser must be refused by the *condition*. A loser refused by the guard
+/// is the bug, and it is asserted separately from the winner count so the two
+/// failures never get confused for one another.
+///
+/// Every assertion runs after the neighbours have been stopped and joined. A
+/// panic between spawning them and stopping them would leave two blocking tasks
+/// looping forever, and dropping the runtime waits for those - so the test would
+/// hang instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn conditional_writes_claim_the_key_exactly_once_under_a_hostile_neighbour() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How long a neighbour keeps going even if nothing ever stops it. Belt and
+    /// braces against the hang described above.
+    const NEIGHBOUR_BUDGET: Duration = Duration::from_secs(60);
+
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Neighbour one: an unrelated sibling in the same directory the racers'
+    // target lives in, appearing and vanishing throughout.
+    let churn_root = tmp.path().to_path_buf();
+    let churn_stop = stop.clone();
+    let churn = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + NEIGHBOUR_BUDGET;
+        let mut round = 0u64;
+        while !churn_stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            let sibling = churn_root.join(format!("neighbour-{}.bin", round % 8));
+            let _ = std::fs::write(&sibling, b"noise");
+            let _ = std::fs::remove_file(&sibling);
+            round = round.wrapping_add(1);
+            // Throttled on purpose. An unthrottled loop here is a denial of
+            // service on the directory rather than a neighbour, and it starves
+            // the racers this test is actually about.
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    });
+
+    // Neighbour two: the staging directory under the load a dozen other writers
+    // would put it under, since that is where every conditional write stages.
+    let staging = tmp.path().join(ATOMIC_STAGING_DIR);
+    let hammer_stop = stop.clone();
+    let hammer = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + NEIGHBOUR_BUDGET;
+        let mut round = 0u64;
+        while !hammer_stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            let temp = staging.join(format!("hostile-{}.stage", round % 8));
+            let _ = std::fs::write(&temp, b"another writer's in-flight bytes");
+            let _ = std::fs::remove_file(&temp);
+            round = round.wrapping_add(1);
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    });
+
+    const ROUNDS: usize = 24;
+    const RACERS: usize = 16;
+
+    /// What one round produced, collected before the neighbours are stopped so
+    /// no assertion can fire while they are still looping.
+    struct RoundOutcome {
+        round: usize,
+        winners: Vec<String>,
+        guard_refusals: Vec<String>,
+        stored: Vec<u8>,
+    }
+
+    let mut results: Vec<RoundOutcome> = Vec::new();
+
+    for round in 0..ROUNDS {
+        let key = format!("claim-{round}.txt");
+        let barrier = Arc::new(tokio::sync::Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|racer| {
+                let disk = disk.clone();
+                let barrier = barrier.clone();
+                let key = key.clone();
+                tokio::spawn(async move {
+                    let payload = format!("round-{round}-racer-{racer:02}");
+                    barrier.wait().await;
+                    // Half go together, half arrive spread out. The simultaneous
+                    // half contends for the publish; the staggered half arrives
+                    // while an earlier racer is mid-publish, which is when a
+                    // walk sees the key appear between two observations.
+                    if racer % 2 == 1 {
+                        tokio::time::sleep(Duration::from_micros(20 * racer as u64)).await;
+                    }
+                    let outcome = disk
+                        .write_with(key.as_str(), payload.clone())
+                        .if_not_exists(true)
+                        .await;
+                    (payload, outcome)
+                })
+            })
+            .collect();
+
+        let mut winners = Vec::new();
+        let mut guard_refusals = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok((payload, Ok(_))) => winners.push(payload),
+                Ok((_, Err(err))) if err.kind() == ErrorKind::ConditionNotMatch => {}
+                Ok((_, Err(err))) => guard_refusals.push(format!("{err}")),
+                Err(e) => guard_refusals.push(format!("a racing task panicked: {e}")),
+            }
+        }
+        let stored = disk
+            .read(key.as_str())
+            .await
+            .map(|bytes| bytes.to_vec())
+            .unwrap_or_default();
+        results.push(RoundOutcome {
+            round,
+            winners,
+            guard_refusals,
+            stored,
+        });
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    churn.await.expect("the churn neighbour did not panic");
+    hammer.await.expect("the staging neighbour did not panic");
+
+    for RoundOutcome {
+        round,
+        winners,
+        guard_refusals,
+        stored,
+    } in &results
+    {
+        assert!(
+            guard_refusals.is_empty(),
+            "round {round}: {} loser(s) were refused by the path guard rather \
+             than by the condition; concurrent activity on a path made of \
+             ordinary files must never look like an escape: {guard_refusals:#?}",
+            guard_refusals.len()
+        );
+        assert_eq!(
+            winners.len(),
+            1,
+            "round {round}: exactly one racer may claim the key, got: {winners:?}"
+        );
+        assert_eq!(
+            stored,
+            winners[0].as_bytes(),
+            "round {round}: the object must hold the winner's payload"
+        );
+    }
+}
