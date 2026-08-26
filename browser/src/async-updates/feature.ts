@@ -12,6 +12,8 @@ import {
   DocumentConnectionPool,
   OriginHandshakeScheduler,
   type AsyncTransportPorts,
+  type DocumentAuthorizationScheduler,
+  type DocumentAuthorizationSource,
   type LogicalSubscriptionHandle,
   type ReauthorizedLogicalSubscription,
 } from "./connections.js";
@@ -139,10 +141,11 @@ function invokeAuthority(
   });
 }
 
-class AuthorizationInvocationScheduler {
+class AuthorizationInvocationScheduler implements DocumentAuthorizationScheduler {
   #active = 0;
+  #next: DocumentAuthorizationSource = 0;
   #paused = false;
-  readonly #queue: VoidFunction[] = [];
+  readonly #queues: [VoidFunction[], VoidFunction[]] = [[], []];
 
   pause(): void {
     this.#paused = true;
@@ -154,11 +157,19 @@ class AuthorizationInvocationScheduler {
     this.#pump();
   }
 
-  invoke(
+  schedule<T>(
+    source: DocumentAuthorizationSource,
     signal: AbortSignal,
-    operation: () => Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>,
-  ): Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription> {
-    if (!this.#paused && !signal.aborted && this.#active < MAX_CONCURRENT_AUTHORIZATIONS) {
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (
+      !this.#paused &&
+      !signal.aborted &&
+      this.#active < MAX_CONCURRENT_AUTHORIZATIONS &&
+      this.#queues[0].length === 0 &&
+      this.#queues[1].length === 0
+    ) {
+      this.#next = source === 0 ? 1 : 0;
       return this.#run(operation);
     }
     return new Promise((resolve, reject) => {
@@ -184,26 +195,25 @@ class AuthorizationInvocationScheduler {
         void this.#run(current).then(resolve, reject);
       };
       signal.addEventListener("abort", abort, { once: true });
-      this.#queue.push(start);
+      this.#queues[source].push(start);
       this.#pump();
     });
   }
 
   #pump(): void {
-    while (
-      !this.#paused &&
-      this.#active < MAX_CONCURRENT_AUTHORIZATIONS &&
-      this.#queue.length !== 0
-    ) {
-      this.#queue.shift()?.();
+    while (!this.#paused && this.#active < MAX_CONCURRENT_AUTHORIZATIONS) {
+      const preferred = this.#queues[this.#next];
+      const source = preferred.length === 0 ? (this.#next === 0 ? 1 : 0) : this.#next;
+      const start = this.#queues[source].shift();
+      if (start === undefined) return;
+      this.#next = source === 0 ? 1 : 0;
+      start();
     }
   }
 
-  #run(
-    operation: () => Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>,
-  ): Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription> {
+  #run<T>(operation: () => Promise<T>): Promise<T> {
     this.#active += 1;
-    let pending: Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+    let pending: Promise<T>;
     try {
       pending = operation();
     } catch (error: unknown) {
@@ -420,18 +430,20 @@ class AsyncIslandController implements FeatureIslandController {
     );
   }
 
-  async resumeInitial(signal: AbortSignal): Promise<void> {
+  async resumeInitial(): Promise<void> {
     if (!this.needsInitialResume()) return;
     this.#state = "resuming";
     try {
-      await this.#authorize(null, signal);
+      await this.#authorize(null);
       if (this.#resuming()) {
         this.#state = "active";
         this.#armHeartbeat(this.#heartbeatTimeout());
       }
     } catch (error: unknown) {
-      if (this.#state === "resuming") this.#state = "suspended";
-      if (!signal.aborted) report(this.#context, "operation_rejected");
+      if (this.#state === "resuming") {
+        this.#state = "suspended";
+        report(this.#context, "operation_rejected");
+      }
       throw error;
     }
   }
@@ -450,7 +462,7 @@ class AsyncIslandController implements FeatureIslandController {
     const resume = this.#state === "suspended";
     if (resume) this.#state = "resuming";
     try {
-      const current = await this.#authorize(prior, signal);
+      const current = await this.#authorize(prior, signal, true);
       let settled = false;
       return Object.freeze({
         commit: () => {
@@ -505,6 +517,7 @@ class AsyncIslandController implements FeatureIslandController {
   async #authorize(
     prior: AuthorizedLogicalSubscription | null,
     externalSignal?: AbortSignal,
+    admitted = false,
   ): Promise<ReauthorizedLogicalSubscription> {
     const generation = ++this.#generation;
     this.#authorizationAbort?.abort();
@@ -525,9 +538,10 @@ class AsyncIslandController implements FeatureIslandController {
         signal: abort.signal,
         stream: this.#stream,
       });
-      resolved = await this.#authorizationScheduler.invoke(abort.signal, () =>
-        invokeAuthority(this.#authority, this.#timers, abort, request),
-      );
+      const operation = () => invokeAuthority(this.#authority, this.#timers, abort, request);
+      resolved = admitted
+        ? await operation()
+        : await this.#authorizationScheduler.schedule(0, abort.signal, operation);
     } finally {
       externalSignal?.removeEventListener("abort", externallyAbort);
       if (this.#authorizationAbort === abort) this.#authorizationAbort = null;
@@ -773,32 +787,10 @@ class AsyncIslandController implements FeatureIslandController {
   }
 }
 
-class InitialResumeScheduler {
-  readonly #active = new Set<AbortController>();
-
-  async schedule(controller: AsyncIslandController): Promise<void> {
-    const abort = new AbortController();
-    this.#active.add(abort);
-    try {
-      await controller.resumeInitial(abort.signal);
-    } catch {
-      // The controller reports typed failures; the document can finish restoration.
-    } finally {
-      this.#active.delete(abort);
-    }
-  }
-
-  cancelAll(): void {
-    for (const abort of this.#active) abort.abort();
-    this.#active.clear();
-  }
-}
-
 export class AsyncDocumentOwner {
   readonly #authorizationScheduler = new AuthorizationInvocationScheduler();
   readonly #context: RuntimeFeatureDocumentContext;
   readonly #controllers = new Set<AsyncIslandController>();
-  readonly #initialResumes = new InitialResumeScheduler();
   readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool;
@@ -809,6 +801,7 @@ export class AsyncDocumentOwner {
     this.#context = context;
     this.#options = options;
     this.#pool = new DocumentConnectionPool({
+      authorizationScheduler: this.#authorizationScheduler,
       handshakeScheduler: options.handshakeScheduler ?? new OriginHandshakeScheduler(),
       randomness: options.randomness,
       timers: options.timers,
@@ -864,7 +857,6 @@ export class AsyncDocumentOwner {
     if (this.#state !== "active" && this.#state !== "resuming") return;
     this.#state = "suspended";
     this.#authorizationScheduler.pause();
-    this.#initialResumes.cancelAll();
     for (const controller of this.#controllers) controller.suspend();
     this.#pool.suspend();
   }
@@ -875,7 +867,13 @@ export class AsyncDocumentOwner {
     this.#authorizationScheduler.resume();
     const initial = [...this.#controllers]
       .filter((controller) => controller.needsInitialResume())
-      .map((controller) => this.#initialResumes.schedule(controller));
+      .map(async (controller) => {
+        try {
+          await controller.resumeInitial();
+        } catch {
+          // The controller already reports the typed authorization failure.
+        }
+      });
     await Promise.all([this.#pool.resume(), ...initial]);
     if (this.#resuming()) this.#state = "active";
   }
@@ -884,7 +882,6 @@ export class AsyncDocumentOwner {
     if (this.#state === "disposed") return;
     this.#state = "disposed";
     this.#authorizationScheduler.pause();
-    this.#initialResumes.cancelAll();
     for (const controller of [...this.#controllers]) controller.dispose();
     this.#pool.dispose();
   }

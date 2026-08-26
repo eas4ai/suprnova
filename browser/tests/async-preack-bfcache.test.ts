@@ -40,6 +40,13 @@ class Timers {
       timer.callback();
     }
   }
+
+  fireOne(milliseconds: number): void {
+    const ready = [...this.pending].find(([, timer]) => timer.milliseconds === milliseconds);
+    if (ready === undefined) throw new Error(`timer_not_found:${String(milliseconds)}`);
+    this.pending.delete(ready[0]);
+    ready[1].callback();
+  }
 }
 
 function authorization(call: number, transport: Transport): AuthorizedLogicalSubscription {
@@ -101,7 +108,7 @@ function eventCapability(
 }
 
 async function settle(): Promise<void> {
-  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+  for (let turn = 0; turn < 32; turn += 1) await Promise.resolve();
 }
 
 function websocketAck(socket: { readonly sent: string[] }): string {
@@ -676,6 +683,201 @@ describe("pre-authentication bfcache continuity", () => {
     }
     await settle();
     expect(sources).toHaveLength(1);
+    expect(timers.pending.size).toBe(0);
+  });
+
+  it("admits committed recovery fairly before its deadline behind eight orphan resumes", async () => {
+    const timers = new Timers();
+    const sources: {
+      close: ReturnType<typeof vi.fn>;
+      onopen?: VoidFunction;
+    }[] = [];
+    const controls: {
+      request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0];
+      resolve(value: unknown): void;
+    }[] = [];
+    const transports = new BrowserAsyncTransportPorts({
+      eventSource() {
+        const source = { close: vi.fn() };
+        sources.push(source);
+        return source;
+      },
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        return new Promise((resolve) => controls.push({ request, resolve }));
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const lateOrphans: ((value: AuthorizedLogicalSubscription) => void)[] = [];
+    const orphanSignals: AbortSignal[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    let poolCalls = 0;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            if (request.identity.documentKey === "fair-pool") {
+              active += 1;
+              maximumActive = Math.max(maximumActive, active);
+              poolCalls += 1;
+              const current = Object.freeze({
+                ...authorization(poolCalls, "sse"),
+                baseline: authorization(1, "sse").baseline,
+                document: authorization(1, "sse").document,
+              });
+              const result =
+                poolCalls === 1
+                  ? current
+                  : Object.freeze({ replay: Object.freeze([]), subscription: current });
+              active -= 1;
+              return result;
+            }
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            orphanSignals.push(request.signal);
+            let activeCall = true;
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                if (!activeCall) return;
+                activeCall = false;
+                active -= 1;
+              },
+              { once: true },
+            );
+            return new Promise<AuthorizedLogicalSubscription>((resolve) => {
+              lateOrphans.push((value) => {
+                if (activeCall) {
+                  activeCall = false;
+                  active -= 1;
+                }
+                resolve(value);
+              });
+            });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      },
+    );
+    const poolRoot = Object.freeze({}) as Element;
+    const authorizeEvents = vi.fn(eventCapability);
+    owner.connectIsland({
+      authorizeRegisteredEvents: authorizeEvents,
+      dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+      element: poolRoot,
+      enqueueFreshRender: vi.fn(() => "queued" as const),
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "fair-pool",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: vi.fn(() => "accepted" as const),
+      queryDirectiveOwnership: () => [ownership(poolRoot)],
+      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    });
+    await settle();
+    sources[0]?.onopen?.();
+    await settle();
+    const initialControl = controls[0];
+    if (initialControl === undefined) throw new Error("missing_fair_initial_control");
+    initialControl.resolve({
+      connection: initialControl.request.connection,
+      controlNonce: initialControl.request.controlNonce,
+      descriptorBinding: initialControl.request.subscription.descriptorBinding,
+      kind: "authenticated",
+      operation: initialControl.request.operation,
+      stream: initialControl.request.subscription.stream,
+      subscriptionId: initialControl.request.subscription.subscriptionId,
+      transportGeneration: initialControl.request.transportGeneration,
+    });
+    await settle();
+    expect(authorizeEvents).toHaveBeenCalledOnce();
+
+    for (let island = 0; island < 9; island += 1) {
+      const root = Object.freeze({}) as Element;
+      owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
+        element: root,
+        enqueueFreshRender: vi.fn(() => "queued" as const),
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `fair-orphan-${String(island)}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: vi.fn(() => "accepted" as const),
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: vi.fn(
+          (_element: Element, _name: string, value: JsonValue) => value,
+        ),
+      });
+    }
+    await settle();
+    expect(active).toBe(8);
+    expect(maximumActive).toBe(8);
+
+    owner.suspend();
+    expect(active).toBe(0);
+    await settle();
+    const resumed = owner.resume();
+    await settle();
+    expect(active).toBe(8);
+    expect(poolCalls).toBe(1);
+    expect(
+      [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 5_000),
+    ).toHaveLength(8);
+
+    timers.fireOne(5_000);
+    await settle();
+    await settle();
+
+    expect(poolCalls).toBe(2);
+    expect(maximumActive).toBe(8);
+    expect(sources).toHaveLength(2);
+    sources[1]?.onopen?.();
+    await settle();
+    const restoredControl = controls[1];
+    if (restoredControl === undefined) throw new Error("missing_fair_restored_control");
+    restoredControl.resolve({
+      connection: restoredControl.request.connection,
+      controlNonce: restoredControl.request.controlNonce,
+      descriptorBinding: restoredControl.request.subscription.descriptorBinding,
+      kind: "authenticated",
+      operation: restoredControl.request.operation,
+      stream: restoredControl.request.subscription.stream,
+      subscriptionId: restoredControl.request.subscription.subscriptionId,
+      transportGeneration: restoredControl.request.transportGeneration,
+    });
+    await settle();
+    expect(authorizeEvents).toHaveBeenCalledTimes(2);
+    expect(authorizeEvents.mock.calls[1]?.[0]?.descriptorBinding).toBe("binding-2");
+
+    owner.suspend();
+    await resumed;
+    expect(active).toBe(0);
+    expect(orphanSignals.every((signal) => signal.aborted)).toBe(true);
+    for (const [index, resolve] of lateOrphans.entries()) {
+      const late = authorization(2, "sse");
+      resolve(
+        Object.freeze({
+          ...late,
+          descriptorBinding: `binding-fair-late-${String(index)}`,
+          subscriptionId: `subscription-fair-late-${String(index)}`,
+        }),
+      );
+    }
+    await settle();
+    expect(sources).toHaveLength(2);
+    owner.dispose();
     expect(timers.pending.size).toBe(0);
   });
 });

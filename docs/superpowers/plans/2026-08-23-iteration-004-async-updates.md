@@ -696,6 +696,10 @@
   schedules a fresh initial call only for the non-pool-owned controller. Initial,
   pool-recovery, and orphan-restoration authority calls share one fair,
   at-most-eight-wide document scheduler, so no membership is requested twice.
+  Scheduler admission precedes the individual authority deadline, queued time
+  never consumes that execution budget, and initial versus committed-recovery
+  sources alternate while both are pending. Suspend/dispose cancels queued work
+  immediately and aborts admitted work with late completion fenced inert.
   Attach and restore use the complete staged effective
   transport authority for grouping, credential, kind, policy, and heartbeat.
   Compatible multi-membership rotations aggregate independently of completion

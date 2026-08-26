@@ -403,6 +403,11 @@ transport, document authorization scope)` and multiplexes island subscriptions
   current. Document-owned
   reauthorization uses at most eight fair concurrent calls, gives each call an
   owned abortable deadline, and generation-fences late noncooperative results.
+  A call's execution deadline starts only after document-scheduler admission;
+  queued time cannot spend that deadline. Initial and committed-recovery work
+  alternate when both are pending, so neither source can continually front-load
+  the other. Suspension or retirement cancels queued work and aborts admitted
+  work before any later source result can regain authority.
   Raw socket open never resets the retry counter; only authenticated transport
   membership plus later continuity evidence does. Reconnect policy therefore
   has a positive exponential base and terminally degrades after its attempt cap.
@@ -491,6 +496,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Moved each authorization execution deadline after admission to
+  the shared document scheduler. Initial and committed-recovery sources now
+  receive alternating admission when both are pending, total admitted work
+  remains at most eight, and suspend/dispose cancels queued work without letting
+  queue wait consume a membership's execution budget.
 - 2026-08-26 -- Closed the pre-install bfcache lifecycle gap. A pending first
   authorization is now abortable before the island enters the connection pool;
   persisted restoration makes a fresh, generation-fenced initial request with

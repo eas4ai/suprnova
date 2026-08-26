@@ -121,7 +121,18 @@ export interface LogicalSubscriptionHandle {
   heartbeatLost(): void;
 }
 
+export type DocumentAuthorizationSource = 0 | 1;
+
+export interface DocumentAuthorizationScheduler {
+  schedule<T>(
+    source: DocumentAuthorizationSource,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<T>;
+}
+
 export interface DocumentConnectionPoolOptions {
+  readonly authorizationScheduler?: DocumentAuthorizationScheduler;
   readonly handshakeScheduler: OriginHandshakeScheduler;
   readonly handshakeTimeoutMs?: number;
   readonly randomness: AsyncRandomness;
@@ -1014,12 +1025,12 @@ interface PhysicalGroup {
 
 interface ReauthorizationRequest {
   abort: AbortController | null;
-  active: boolean;
   readonly completion: ReauthorizationCompletion;
   generation: number;
   membership: LogicalMembership | null;
   membershipGeneration: number;
   prior: AuthorizedLogicalSubscription | null;
+  readonly result: Promise<ReauthorizedLogicalSubscription | null>;
   resolve(value: ReauthorizedLogicalSubscription | null): void;
   settled: boolean;
   timer: number | null;
@@ -1147,6 +1158,7 @@ function commonAuthorization(
 }
 
 export class DocumentConnectionPool {
+  readonly #authorizationScheduler: DocumentAuthorizationScheduler | null;
   readonly #handshakes: OriginHandshakeScheduler;
   readonly #handshakeTimeoutMs: number;
   readonly #randomness: AsyncRandomness;
@@ -1178,6 +1190,7 @@ export class DocumentConnectionPool {
     ) {
       throw new RangeError("async_handshake_timeout_invalid");
     }
+    this.#authorizationScheduler = options.authorizationScheduler ?? null;
     this.#handshakes = options.handshakeScheduler;
     this.#handshakeTimeoutMs = handshakeTimeout;
     this.#randomness = options.randomness;
@@ -1782,35 +1795,38 @@ export class DocumentConnectionPool {
     generation: number,
     initial = false,
   ): Promise<ReauthorizedLogicalSubscription | null> {
-    return new Promise((resolve) => {
-      const completion: ReauthorizationCompletion = { settle: null };
-      const request: ReauthorizationRequest = {
-        abort: null,
-        active: false,
-        completion,
-        generation,
-        membership,
-        membershipGeneration: ++membership.generation,
-        prior: initial ? null : membership.authorization,
-        resolve,
-        settled: false,
-        timer: null,
-      };
-      completion.settle = (current) => {
-        const activeMembership = request.membership;
-        this.#settleReauthorization(
-          request,
-          activeMembership !== null &&
-            activeMembership.active &&
-            activeMembership.generation === request.membershipGeneration &&
-            this.#generation === request.generation
-            ? current
-            : null,
-        );
-      };
-      this.#reauthorizationQueue.push(request);
-      this.#pumpReauthorizations();
+    let resolveResult!: ReauthorizationRequest["resolve"];
+    const result = new Promise<ReauthorizedLogicalSubscription | null>((resolve) => {
+      resolveResult = resolve;
     });
+    const completion: ReauthorizationCompletion = { settle: null };
+    const request: ReauthorizationRequest = {
+      abort: null,
+      completion,
+      generation,
+      membership,
+      membershipGeneration: ++membership.generation,
+      prior: initial ? null : membership.authorization,
+      resolve: resolveResult,
+      result,
+      settled: false,
+      timer: null,
+    };
+    completion.settle = (current) => {
+      const activeMembership = request.membership;
+      this.#settleReauthorization(
+        request,
+        activeMembership !== null &&
+          activeMembership.active &&
+          activeMembership.generation === request.membershipGeneration &&
+          this.#generation === request.generation
+          ? current
+          : null,
+      );
+    };
+    this.#reauthorizationQueue.push(request);
+    this.#pumpReauthorizations();
+    return result;
   }
 
   #pumpReauthorizations(): void {
@@ -1831,29 +1847,43 @@ export class DocumentConnectionPool {
         this.#settleReauthorization(request, null);
         continue;
       }
-      request.active = true;
       request.abort = new AbortController();
       this.#activeReauthorizations.add(request);
-      request.timer = this.#timers.timeout(() => {
-        request.abort?.abort();
-        this.#settleReauthorization(request, null);
-      }, this.#reauthorizationTimeoutMs);
-      let pending: ReauthorizedLogicalSubscription | Promise<ReauthorizedLogicalSubscription>;
-      try {
-        pending = membership.sink.reauthorize(prior, request.abort.signal);
-      } catch {
-        this.#settleReauthorization(request, null);
-        continue;
-      }
       const completion = request.completion;
-      void Promise.resolve(pending).then(
-        (current) => {
-          completeReauthorization(completion, current);
-        },
-        () => {
-          completeReauthorization(completion, null);
-        },
-      );
+      const signal = request.abort.signal;
+      const operation = () => {
+        if (!membership.active || request.settled) {
+          this.#settleReauthorization(request, null);
+          return request.result;
+        }
+        request.timer = this.#timers.timeout(() => {
+          request.abort?.abort();
+          this.#settleReauthorization(request, null);
+        }, this.#reauthorizationTimeoutMs);
+        let pending: ReauthorizedLogicalSubscription | Promise<ReauthorizedLogicalSubscription>;
+        try {
+          pending = membership.sink.reauthorize(prior, signal);
+        } catch {
+          this.#settleReauthorization(request, null);
+          return request.result;
+        }
+        void Promise.resolve(pending).then(
+          (current) => {
+            completeReauthorization(completion, current);
+          },
+          () => {
+            completeReauthorization(completion, null);
+          },
+        );
+        return request.result;
+      };
+      const pending =
+        this.#authorizationScheduler === null
+          ? operation()
+          : this.#authorizationScheduler.schedule(1, signal, operation);
+      void pending.catch(() => {
+        this.#settleReauthorization(request, null);
+      });
     }
   }
 
