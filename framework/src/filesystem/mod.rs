@@ -48,6 +48,45 @@ use crate::FrameworkError;
 use opendal::{Operator, services};
 use std::path::Path;
 
+/// Directory name reserved inside every local-filesystem disk root.
+///
+/// A local-filesystem disk stages every non-append write as a temp file under
+/// `<root>/.suprnova-atomic/` and `rename(2)`s it onto the target, so a reader
+/// never observes a half-written object and a crash never leaves a truncated
+/// one. The staging directory has to live *inside* the root: a sibling of the
+/// root can sit on a different filesystem when the root is a mount point, and
+/// then every rename fails with `EXDEV`.
+///
+/// Living inside the root is why the name is reserved rather than merely
+/// conventional. `Storage::disk(..)` refuses any path whose first component is
+/// this name - read, write, delete, stat, list alike - so a caller can neither
+/// reach into another writer's staging file nor collide with the name, and the
+/// entry is filtered out of listings so it never shows up as an object.
+///
+/// Exported because backup and sync tooling needs to name it: the directory
+/// holds only in-flight temp files, so exclude it the way you would exclude a
+/// lock directory.
+pub const ATOMIC_STAGING_DIR: &str = ".suprnova-atomic";
+
+/// Build the `opendal` local-filesystem service for `root` with atomic writes
+/// configured.
+///
+/// Shared by [`Storage::register_fs_with`] and the `read_through` tests so both
+/// exercise the same staging configuration; a disk built any other way takes
+/// opendal's non-atomic quick path and writes in place.
+///
+/// `root` must already be valid UTF-8. The staging path is `root` joined with
+/// [`ATOMIC_STAGING_DIR`], which is pure ASCII, so the re-encode only fails if
+/// the caller broke that contract - reported rather than lossily converted,
+/// since a mangled staging path would silently stage somewhere else.
+pub(crate) fn atomic_fs_service(root: &str) -> Result<services::Fs, FrameworkError> {
+    let staging = Path::new(root).join(ATOMIC_STAGING_DIR);
+    let staging = staging.to_str().ok_or_else(|| {
+        FrameworkError::internal("storage fs atomic staging directory path is not valid UTF-8")
+    })?;
+    Ok(services::Fs::default().root(root).atomic_write_dir(staging))
+}
+
 /// Static facade for the named-disk storage system.
 ///
 /// `Storage` itself holds no state; all disks live in a process-global
@@ -333,6 +372,16 @@ impl Storage {
     /// passed to subsequent `disk.write(...)`, `disk.read(...)`, etc. are
     /// resolved relative to this root.
     ///
+    /// # Atomic writes
+    ///
+    /// Every non-`append` write is staged as a temp file under
+    /// [`ATOMIC_STAGING_DIR`] inside the root and `rename(2)`d onto the target,
+    /// so a concurrent reader sees either the previous object or the new one -
+    /// never a partial length - and a crash mid-write leaves no truncated
+    /// object at the live path. `append` writes in place by design; staging one
+    /// would mean copying the whole object first. The staging directory is
+    /// created at registration, reserved, and hidden from listings.
+    ///
     /// Equivalent to [`Storage::register_fs_with`] with an identity closure.
     ///
     /// # Testing
@@ -350,6 +399,9 @@ impl Storage {
 
     /// Register a local filesystem disk with a custom layer stack applied to
     /// the underlying [`Operator`] before it lands in the registry.
+    ///
+    /// Writes are atomic and [`ATOMIC_STAGING_DIR`] is reserved; see
+    /// [`Storage::register_fs`].
     ///
     /// # Available layers
     ///
@@ -401,7 +453,7 @@ impl Storage {
             .as_ref()
             .to_str()
             .ok_or_else(|| FrameworkError::internal("storage fs root path is not valid UTF-8"))?;
-        let builder = services::Fs::default().root(root_str);
+        let builder = atomic_fs_service(root_str)?;
         // `PathGuardLayer` is applied to the raw FS operator before the user's
         // `layer_fn` runs, so the traversal guard sits closest to the backend
         // and the caller's own layers (retry, logging, tracing) wrap it. The

@@ -26,7 +26,25 @@
 //! parent directory is canonicalized instead, so the destination directory
 //! cannot itself be a symlink leading out of the root. Anything that resolves
 //! outside the root is rejected.
+//!
+//! # The reserved staging directory
+//!
+//! A local-filesystem disk stages every non-append write under
+//! [`ATOMIC_STAGING_DIR`] inside its own root and renames the result onto the
+//! target. That directory therefore sits in the caller's namespace, where it
+//! would otherwise be an ordinary object: readable, writable, deletable, and
+//! visible in a listing. None of that is acceptable - reading another writer's
+//! temp file exposes a half-written object, writing into the directory can
+//! collide with a name opendal is about to rename away, and deleting it breaks
+//! every subsequent write. So the guard reserves the name: any path whose first
+//! component is [`ATOMIC_STAGING_DIR`] is refused, and the entry is filtered out
+//! of listings ([`PathGuardLister`]) so it never appears as an object.
+//!
+//! The staging writes themselves are unaffected: opendal opens the temp file
+//! inside the FS backend, below this layer, so they never pass through the
+//! reservation check.
 
+use super::ATOMIC_STAGING_DIR;
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
     OpWrite, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
@@ -78,7 +96,39 @@ fn validate_storage_path(path: &str) -> Result<()> {
             ),
         ));
     }
+
+    if reaches_staging_directory(path) {
+        tracing::warn!(
+            path = %path,
+            "rejected storage path targeting the reserved atomic-write staging \
+             directory on local-filesystem disk"
+        );
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "path '{path}' is not allowed on a local-filesystem disk: \
+                 '{ATOMIC_STAGING_DIR}' at the disk root is reserved for staging \
+                 atomic writes"
+            ),
+        ));
+    }
+
     Ok(())
+}
+
+/// True when `path`'s first meaningful component is the reserved staging
+/// directory - the directory itself or anything under it.
+///
+/// Only the *first* component is reserved: the staging directory exists at the
+/// disk root and nowhere else, so `reports/.suprnova-atomic/june.csv` is an
+/// ordinary object and must stay reachable. Empty segments (from a leading or
+/// doubled separator) and `.` segments are skipped so `./.suprnova-atomic/x`
+/// and `//.suprnova-atomic` cannot slip past by punctuation alone. The split is
+/// separator-agnostic for the same reason [`validate_storage_path`]'s is.
+fn reaches_staging_directory(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .find(|segment| !segment.is_empty() && *segment != ".")
+        .is_some_and(|first| first == ATOMIC_STAGING_DIR)
 }
 
 /// Build the `PermissionDenied` error returned when a path resolves outside the
@@ -413,7 +463,19 @@ impl<L: oio::List> oio::List for PathGuardLister<L> {
         // root and does not follow each entry's symlink target. The caller's
         // requested list root is the confinement boundary to validate once.
         self.validate_once().await?;
-        self.inner.next().await
+
+        // Drop the reserved staging directory before it reaches the caller.
+        // Entry paths are relative to the disk root, not to the requested list
+        // prefix, so the same first-component test works at every depth. This
+        // is also what stops a recursive listing from descending into staging:
+        // opendal's FS lister is not recursive, so the recursion happens above
+        // this layer and only follows directory entries it is handed.
+        loop {
+            match self.inner.next().await? {
+                Some(entry) if reaches_staging_directory(entry.path()) => continue,
+                other => return Ok(other),
+            }
+        }
     }
 }
 
@@ -476,11 +538,11 @@ impl<D: oio::Delete> oio::Delete for PathGuardDeleter<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathGuardCopier, PathGuardLister, PathGuardWriter, validate_resolved_path,
-        validate_storage_path,
+        ATOMIC_STAGING_DIR, PathGuardCopier, PathGuardLister, PathGuardWriter,
+        validate_resolved_path, validate_storage_path,
     };
     use opendal::raw::oio::{self, Copy as _, List as _, Write as _};
-    use opendal::{Buffer, EntryMode, Metadata, Result};
+    use opendal::{Buffer, EntryMode, ErrorKind, Metadata, Result};
 
     #[derive(Default)]
     struct RecordingWriter {
@@ -590,6 +652,126 @@ mod tests {
                 "must allow legitimate path {ok:?}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The reserved atomic-write staging directory.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn rejects_every_spelling_of_the_reserved_staging_directory() {
+        for bad in [
+            ATOMIC_STAGING_DIR,
+            ".suprnova-atomic/",
+            ".suprnova-atomic/leaked.tmp",
+            ".suprnova-atomic/nested/leaked.tmp",
+            // Punctuation that opendal's own normalization may or may not have
+            // collapsed by the time the path reaches this layer.
+            "./.suprnova-atomic/leaked.tmp",
+            ".suprnova-atomic\\leaked.tmp",
+        ] {
+            let err = validate_storage_path(bad)
+                .expect_err("the reserved staging directory must be refused: {bad:?}");
+            assert_eq!(
+                err.kind(),
+                ErrorKind::PermissionDenied,
+                "the refusal for {bad:?} must be PermissionDenied, got: {err}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+                "the refusal for {bad:?} must name the reservation, got: {message}"
+            );
+        }
+
+        // A leading separator is refused a step earlier, by the absolute-path
+        // gate, so it never reaches the reservation branch. Still refused.
+        assert!(
+            validate_storage_path("//.suprnova-atomic").is_err(),
+            "a leading-separator spelling must still be refused"
+        );
+    }
+
+    #[test]
+    fn allows_the_reserved_name_anywhere_but_the_first_component() {
+        // The staging directory exists at the disk root and nowhere else, so
+        // reserving the name deeper down would refuse ordinary objects.
+        for ok in [
+            "reports/.suprnova-atomic",
+            "reports/.suprnova-atomic/june.csv",
+            ".suprnova-atomic-backup.txt",
+            ".suprnova-atomicx/file.txt",
+            "a/b/.suprnova-atomic/c",
+        ] {
+            assert!(
+                validate_storage_path(ok).is_ok(),
+                "must allow the reserved name below the root: {ok:?}"
+            );
+        }
+    }
+
+    /// A lister that replays a fixed sequence of entry paths, so the filter can
+    /// be observed without a real filesystem.
+    struct SequenceLister {
+        entries: std::vec::IntoIter<&'static str>,
+    }
+
+    impl SequenceLister {
+        fn new(entries: Vec<&'static str>) -> Self {
+            Self {
+                entries: entries.into_iter(),
+            }
+        }
+    }
+
+    impl oio::List for SequenceLister {
+        async fn next(&mut self) -> Result<Option<oio::Entry>> {
+            Ok(self.entries.next().map(|path| {
+                let mode = if path.ends_with('/') {
+                    EntryMode::DIR
+                } else {
+                    EntryMode::FILE
+                };
+                oio::Entry::new(path, Metadata::new(mode))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn lister_drops_the_reserved_staging_directory_at_every_depth() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let mut lister = PathGuardLister {
+            inner: SequenceLister::new(vec![
+                ".suprnova-atomic/",
+                "visible.txt",
+                ".suprnova-atomic/big.bin.a1b2c3d4",
+                "reports/.suprnova-atomic/june.csv",
+                "real-dir/",
+            ]),
+            root: canonical_root(&root),
+            path: "/".to_owned(),
+            validated: false,
+        };
+
+        let mut seen = Vec::new();
+        while let Some(entry) = lister.next().await.expect("the listing advances") {
+            seen.push(entry.path().to_owned());
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                "visible.txt".to_string(),
+                // Only the *first* component is reserved, so this one is an
+                // ordinary object and must survive the filter.
+                "reports/.suprnova-atomic/june.csv".to_string(),
+                "real-dir/".to_string(),
+            ],
+            "the staging directory and its contents must never reach the caller"
+        );
     }
 
     // ------------------------------------------------------------------
