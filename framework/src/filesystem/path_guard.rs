@@ -160,6 +160,69 @@ fn symlink_escape_error(path: &str) -> Error {
     )
 }
 
+/// What one component of a path turned out to be, from a single pass of probes.
+enum NodeState {
+    /// Nothing is there. The backend may create it, and the walk moves up to
+    /// confine the parent instead.
+    Free,
+    /// It exists and resolves; this is its canonical path.
+    Resolved(PathBuf),
+    /// It exists as a symlink whose target cannot be resolved. Nothing here can
+    /// prove where it leads, so it is refused.
+    Unresolvable,
+}
+
+/// Classify one on-disk node from a single, self-consistent pass of probes.
+///
+/// `symlink_metadata` runs first and shapes everything after it. It is the only
+/// probe that separates "nothing is here" from "a symlink whose target is
+/// missing", and it does not follow the final component, so what it reports is
+/// what is actually at this path rather than what the path leads to.
+///
+/// Only a symlink can produce [`NodeState::Unresolvable`]. A regular file or
+/// directory is canonicalized purely to get the resolved path the confinement
+/// checks need; if that canonicalization comes back `NotFound`, the node was
+/// deleted between the two probes, which is a concurrent delete and never an
+/// escape. That returns `None` so the caller can take one fresh look rather than
+/// turn another task's ordinary activity into a refusal.
+///
+/// The ordering is the point. The previous version canonicalized first and, on
+/// `NotFound`, asked `symlink_metadata` whether *anything* was there - combining
+/// two observations of a moving filesystem into one verdict. Under concurrency
+/// the second answer could be an ordinary file another task had just created, so
+/// a plain regular file was reported as a symlink escape: exactly what a losing
+/// `if_not_exists` racer saw when the winner published the contended key between
+/// its two probes.
+async fn classify_node(node: &Path) -> Result<Option<NodeState>> {
+    let metadata = match tokio::fs::symlink_metadata(node).await {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(NodeState::Free)),
+        Err(e) => {
+            return Err(
+                Error::new(ErrorKind::Unexpected, "stat of storage path failed").set_source(e),
+            );
+        }
+    };
+
+    match tokio::fs::canonicalize(node).await {
+        Ok(resolved) => Ok(Some(NodeState::Resolved(resolved))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if metadata.is_symlink() {
+                // A symlink that was here a moment ago and still cannot be
+                // resolved. `open(.., O_CREAT)` through one creates the link's
+                // *target*, anywhere on the host, so it is refused.
+                Ok(Some(NodeState::Unresolvable))
+            } else {
+                // A regular file or directory that has since been deleted.
+                Ok(None)
+            }
+        }
+        Err(e) => Err(
+            Error::new(ErrorKind::Unexpected, "canonicalize of storage path failed").set_source(e),
+        ),
+    }
+}
+
 /// Second-stage guard: after the lexical [`validate_storage_path`] check passes,
 /// resolve the on-disk target and confirm it is still inside the disk root.
 ///
@@ -177,6 +240,12 @@ fn symlink_escape_error(path: &str) -> Error {
 /// exist nowhere on disk are the only ones safe to create under the root; an
 /// existing ancestor that resolves (or traverses a symlink) outside the root is
 /// an escape and is rejected.
+///
+/// Every component is observed once, through [`classify_node`], because this
+/// walk runs against a filesystem other tasks are writing to. Assembling a
+/// verdict from two probes of the same component lets ordinary concurrent
+/// activity - a sibling appearing, a key being published by whoever won the
+/// race for it - masquerade as an escape and refuse a legitimate path.
 ///
 /// Canonicalization uses `tokio::fs` so it never blocks the async executor,
 /// matching the FS backend's own `tokio::fs`-based IO.
@@ -215,38 +284,31 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     // exist nowhere on disk - `newdir`, `payload` - are the only ones genuinely
     // safe to create under the root, since the kernel can only follow links that
     // already exist.
+    //
+    // Each component is classified once, by [`classify_node`], so a verdict is
+    // never assembled out of two observations of a filesystem other tasks are
+    // changing. A component that is an ordinary file, or that is not there at
+    // all, can never be an escape whatever it was a microsecond earlier.
     let mut resolved: Option<std::path::PathBuf> = None;
     for ancestor in target.ancestors() {
-        match tokio::fs::canonicalize(ancestor).await {
-            Ok(resolved_ancestor) => {
+        let state = match classify_node(ancestor).await? {
+            Some(state) => state,
+            // The node changed between the two probes. One fresh look settles
+            // it, and no more than one: a node still flickering after that is,
+            // by construction, an ordinary file or directory rather than a
+            // symlink that cannot be resolved, so reading it as free space is
+            // both safe and correct - the walk moves up and confines the parent
+            // instead of skipping a check.
+            None => classify_node(ancestor).await?.unwrap_or(NodeState::Free),
+        };
+
+        match state {
+            NodeState::Free => continue,
+            NodeState::Resolved(resolved_ancestor) => {
                 resolved = Some(resolved_ancestor);
                 break;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // `canonicalize` also reports `NotFound` for a *dangling*
-                // symlink - the link is there, its target is not - and treating
-                // that as "nothing here yet, safe to create" is an escape, not a
-                // gap. `open(.., O_CREAT)` follows the link and creates the
-                // link's *target*, so a planted `link -> /outside/anything`
-                // turns a write into a write at an arbitrary path; `rename(2)`
-                // does not follow it, but nothing in this layer may depend on
-                // which publish mechanism a given operation happens to use.
-                // `symlink_metadata` does not follow the link, so it tells the
-                // two cases apart: a node that exists here but cannot be
-                // resolved is refused like any other escape, because nothing at
-                // this point can prove where it leads.
-                if tokio::fs::symlink_metadata(ancestor).await.is_ok() {
-                    return Err(symlink_escape_error(path));
-                }
-                continue;
-            }
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "canonicalize of storage path failed",
-                )
-                .set_source(e));
-            }
+            NodeState::Unresolvable => return Err(symlink_escape_error(path)),
         }
     }
 
@@ -1353,6 +1415,48 @@ mod tests {
                 .await
                 .is_ok(),
             "a symlink that stays inside the root must be allowed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_ordinary_activity_on_a_path_is_never_an_escape() {
+        // The walk observes each component of a filesystem other tasks are
+        // changing underneath it. A component that is an ordinary file - or that
+        // is not there at all - can never be an escape, whatever it was a
+        // microsecond earlier, so no interleaving of an ordinary create and an
+        // ordinary delete may produce a refusal. Two tight loops on the same
+        // path is the direct way to say that: one flips the node, the other
+        // validates, and every validation has to come back `Ok`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        let root_str = canonical_root(&root);
+
+        let contended = root.join("contended.txt");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flipper_stop = stop.clone();
+        let flipper = tokio::task::spawn_blocking(move || {
+            while !flipper_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::fs::write(&contended, b"here");
+                let _ = std::fs::remove_file(&contended);
+            }
+        });
+
+        let mut refusals = Vec::new();
+        for _ in 0..20_000 {
+            if let Err(err) = validate_resolved_path(&root_str, "contended.txt").await
+                && refusals.len() < 4
+            {
+                refusals.push(format!("{err}"));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        flipper.await.expect("the flipper task did not panic");
+
+        assert!(
+            refusals.is_empty(),
+            "validating a path made of ordinary files must never be refused \
+             because another task touched it: {refusals:#?}"
         );
     }
 

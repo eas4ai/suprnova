@@ -4,6 +4,12 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.6 - 2026-08-26
+
+### Fixed
+
+- **A local disk no longer refuses a legitimate path because another task touched it.** The path guard resolved each component of a path with two probes and combined them into one verdict, so ordinary concurrent activity could be read as a symlink escape: a component that `canonicalize` had just reported missing, and that another task then created as an ordinary file, came back as `PermissionDenied` naming a symlink that was never there. It bit hardest where writers contend by design - a losing `write_with(..).if_not_exists(true)` racer got that refusal instead of `ConditionNotMatch` whenever the winner published the key between the two probes, which under a loaded test suite was roughly a third of runs. Each component is now classified from a single pass, `symlink_metadata` first: nothing there is free space, an ordinary file or directory is resolved and confined as before, and only a symlink that still cannot be resolved is refused. A component that vanishes mid-classification is looked at once more rather than refused. Every symlink refusal is unchanged.
+
 ## 1.3.5 - 2026-08-26
 
 ### Changed
