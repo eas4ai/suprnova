@@ -792,6 +792,22 @@ impl InertiaConfig {
     /// middleware that does the work only when this is set, so an app
     /// that never calls it pays nothing and behaves exactly as before.
     ///
+    /// **Name the page once.** An app that registers
+    /// [`InertiaErrorPageMiddleware`](crate::InertiaErrorPageMiddleware)
+    /// itself - to place it outside a `CsrfMiddleware` or rate limiter
+    /// that answers before the Inertia layer is reached - named the
+    /// component at that registration, and that instance is the one in the
+    /// chain, so its component is the one rendered. `install` sees the
+    /// registration and skips its own. This setter is then optional:
+    /// harmless to keep, and still what makes `install` register a
+    /// middleware for an app that does not place one itself.
+    ///
+    /// Register **before** calling `install`, not after. Global middleware
+    /// registration is idempotent per type, so an `install` that has
+    /// already put one innermost keeps it and a later registration of your
+    /// own is dropped - along with the position and the component it
+    /// named.
+    ///
     /// ```rust,no_run
     /// use suprnova::InertiaConfig;
     ///

@@ -556,6 +556,13 @@ Inertia layer is already gone by then, and every error page would render
 in the default locale. Session outside locale outside Inertia is the
 order the scaffold uses.
 
+Once it is wired, the Inertia document shell declares the active locale
+itself: `<html lang="ja">` for a visitor negotiated to Japanese, in the
+same BCP 47 form `Locale` renders (`pt-BR`, `zh-Hans`). Screen readers
+take their voice from that attribute and search engines read it as the
+page's language, so an app serving more than one language no longer needs
+a middleware of its own to rewrite the finished document.
+
 ### Changing the locale mid-request
 
 `Lang::set_locale` is Laravel's `App::setLocale` - it rewrites the

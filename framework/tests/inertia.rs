@@ -549,6 +549,66 @@ async fn html_shell_uses_config_default_title_when_no_override() {
     assert!(body.contains("<title>Acme App</title>"));
 }
 
+/// With no locale scope open, the document declares the configured
+/// default - `en` in a test process that sets no `APP_LOCALE`. This is
+/// also the whole behaviour when the `localization` feature is off, which
+/// is why the test is not gated on it.
+#[tokio::test]
+async fn html_shell_declares_english_outside_any_locale_scope() {
+    let req = MockReq::new("/home");
+    let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+
+    let body = body_to_string(resp.into_hyper().into_body());
+    assert!(
+        body.contains("<html lang=\"en\">"),
+        "the shell must declare a language; got:\n{body}"
+    );
+}
+
+/// A reader who switched to Japanese must not be handed a document that
+/// declares itself English: a screen reader picks its voice from this
+/// attribute and a search engine takes it as the language signal.
+#[cfg(feature = "localization")]
+#[tokio::test]
+async fn html_shell_declares_the_active_locale() {
+    let req = MockReq::new("/home");
+    let body = suprnova::scope_locale(suprnova::Locale::parse("ja").unwrap(), async {
+        let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+        body_to_string(resp.into_hyper().into_body())
+    })
+    .await;
+
+    assert!(
+        body.contains("<html lang=\"ja\">"),
+        "the shell must follow the locale in effect for the request; got:\n{body}"
+    );
+    assert!(
+        !body.contains("<html lang=\"en\">"),
+        "and it must not still claim English; got:\n{body}"
+    );
+}
+
+/// The attribute carries the BCP 47 form the `Locale` type renders, region
+/// subtag and script included. Lowercasing it (`pt-br`) would still parse,
+/// but `zh-Hans` and `zh-hant` are the pair that stops matching CSS
+/// `:lang()` selectors and font stacks written the conventional way.
+#[cfg(feature = "localization")]
+#[tokio::test]
+async fn html_shell_keeps_the_bcp47_casing_of_the_locale() {
+    let req = MockReq::new("/home");
+    for locale in ["pt-BR", "zh-Hans"] {
+        let body = suprnova::scope_locale(suprnova::Locale::parse(locale).unwrap(), async {
+            let resp = InertiaResponse::new("Home").resolve(&req).await.unwrap();
+            body_to_string(resp.into_hyper().into_body())
+        })
+        .await;
+        assert!(
+            body.contains(&format!("<html lang=\"{locale}\">")),
+            "expected lang=\"{locale}\"; got:\n{body}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn html_shell_for_react_includes_refresh_preamble() {
     let cfg = InertiaConfig::new().frontend(Frontend::React);
@@ -2184,6 +2244,23 @@ mod ssr_tests {
     /// id="app">…prerendered…</div>`. The framework injects this raw
     /// (no wrapping div of its own). Returns the listening address.
     async fn spawn_mock_ssr() -> SocketAddr {
+        spawn_mock_ssr_with_head(&[
+            "<title>SSR Title</title>",
+            "<meta name=\"ssr\" content=\"yes\">",
+        ])
+        .await
+    }
+
+    /// [`spawn_mock_ssr`] with the worker's `head` array chosen by the
+    /// caller - what the page's own `Head` component rendered, which is
+    /// the thing the framework has to reconcile its default `<title>`
+    /// against.
+    async fn spawn_mock_ssr_with_head(head: &[&str]) -> SocketAddr {
+        let body = serde_json::json!({
+            "head": head,
+            "body": "<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\"}</script><div data-server-rendered=\"true\" id=\"app\"><main id=\"ssr\">SSR rendered content</main></div>",
+        });
+        let payload = Bytes::from(serde_json::to_vec(&body).unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -2192,24 +2269,21 @@ mod ssr_tests {
                     Ok(p) => p,
                     Err(_) => break,
                 };
+                let payload = payload.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
-                    let svc = service_fn(
-                        |_req: hyper::Request<hyper::body::Incoming>| async move {
-                            let body = serde_json::json!({
-                                "head": ["<title>SSR Title</title>", "<meta name=\"ssr\" content=\"yes\">"],
-                                "body": "<script type=\"application/json\" data-page=\"app\">{\"component\":\"Home\"}</script><div data-server-rendered=\"true\" id=\"app\"><main id=\"ssr\">SSR rendered content</main></div>",
-                            });
-                            let payload = serde_json::to_vec(&body).unwrap();
+                    let svc = service_fn(move |_req: hyper::Request<hyper::body::Incoming>| {
+                        let payload = payload.clone();
+                        async move {
                             Ok::<_, Infallible>(
                                 hyper::Response::builder()
                                     .status(200)
                                     .header("content-type", "application/json")
-                                    .body(Full::new(Bytes::from(payload)))
+                                    .body(Full::new(payload))
                                     .unwrap(),
                             )
-                        },
-                    );
+                        }
+                    });
                     let _ = http1::Builder::new().serve_connection(io, svc).await;
                 });
             }
@@ -2260,6 +2334,103 @@ mod ssr_tests {
             "framework must not wrap the SSR body in a second mount div; body:\n{}",
             body
         );
+    }
+
+    /// A page that renders its own `<title>` through Inertia's `Head`
+    /// component sends it back in the SSR head. The framework's default
+    /// title must stand down: emitted as well it would be the *first*
+    /// `<title>` in the document, and first is the one browsers, crawlers
+    /// and the pre-hydration tab read.
+    #[tokio::test]
+    async fn an_ssr_head_that_carries_a_title_replaces_the_frameworks_default() {
+        let addr = spawn_mock_ssr().await;
+        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let req = MockReq::new("/");
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+
+        assert_eq!(
+            body.matches("<title").count(),
+            1,
+            "a document must carry exactly one title; body:\n{body}"
+        );
+        assert!(body.contains("<title>SSR Title</title>"));
+        assert!(
+            !body.contains("<title>Suprnova</title>"),
+            "the page's own head wins over the config default; body:\n{body}"
+        );
+    }
+
+    /// The mirror: a worker whose head carries no title leaves the
+    /// framework's default in place, exactly as before.
+    #[tokio::test]
+    async fn an_ssr_head_without_a_title_keeps_the_frameworks_default() {
+        let addr = spawn_mock_ssr_with_head(&["<meta name=\"ssr\" content=\"yes\">"]).await;
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .default_title("Acme App");
+        let req = MockReq::new("/");
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+
+        assert_eq!(
+            body.matches("<title").count(),
+            1,
+            "the default is still the document's only title; body:\n{body}"
+        );
+        assert!(body.contains("<title>Acme App</title>"));
+    }
+
+    /// The title rule matches the element, not the string: a custom
+    /// element whose name merely starts with `title` must not be mistaken
+    /// for one, or the document ends up with no title at all.
+    #[tokio::test]
+    async fn a_head_element_that_merely_starts_with_title_is_not_a_title() {
+        let addr = spawn_mock_ssr_with_head(&["<title-bar data-x=\"1\"></title-bar>"]).await;
+        let cfg = InertiaConfig::new()
+            .ssr(format!("http://{}", addr))
+            .default_title("Acme App");
+        let req = MockReq::new("/");
+        let resp = InertiaResponse::new("Home")
+            .with_config(cfg)
+            .resolve(&req)
+            .await
+            .unwrap();
+        let body = body_to_string(resp.into_hyper().into_body());
+
+        assert!(
+            body.contains("<title>Acme App</title>"),
+            "`<title-bar>` is not a title; body:\n{body}"
+        );
+    }
+
+    /// The SSR path shares the shell with the non-SSR path, so it must
+    /// declare the active locale too.
+    #[cfg(feature = "localization")]
+    #[tokio::test]
+    async fn the_ssr_shell_declares_the_active_locale() {
+        let addr = spawn_mock_ssr().await;
+        let cfg = InertiaConfig::new().ssr(format!("http://{}", addr));
+        let req = MockReq::new("/");
+        let body = suprnova::scope_locale(suprnova::Locale::parse("ja").unwrap(), async {
+            let resp = InertiaResponse::new("Home")
+                .with_config(cfg)
+                .resolve(&req)
+                .await
+                .unwrap();
+            body_to_string(resp.into_hyper().into_body())
+        })
+        .await;
+
+        assert!(body.contains("<html lang=\"ja\">"), "got:\n{body}");
     }
 
     #[tokio::test]

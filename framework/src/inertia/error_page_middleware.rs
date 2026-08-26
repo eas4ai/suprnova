@@ -25,7 +25,10 @@
 //! [`Inertia::install`](crate::Inertia::install) registers this only when
 //! [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names a
 //! component, so an app that has not opted in runs exactly the code it
-//! ran before.
+//! ran before. An app whose stack answers before the Inertia layer is
+//! reached - CSRF, a rate limiter, an auth guard registered above
+//! `install` - registers the middleware itself, further out; see
+//! [`InertiaErrorPageMiddleware`] for where it may sit.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -41,6 +44,62 @@ use super::InertiaResponse;
 ///
 /// See the module documentation for why this is a middleware and not a
 /// branch inside the error-to-response conversion.
+///
+/// # Registering it yourself
+///
+/// [`Inertia::install`](crate::Inertia::install) registers this
+/// **innermost** of the Inertia layer when
+/// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) names a
+/// component, which is the right place for almost every app: the scaffold
+/// registers `CsrfMiddleware` and the rest of its stack *after* that call,
+/// so their responses pass back out through it.
+///
+/// It is the wrong place for an app that registers a middleware which
+/// answers **before** the Inertia layer is reached - a `CsrfMiddleware`
+/// registered above `Inertia::install`, an outer rate limiter, an auth
+/// guard - because a middleware that returns without calling `next` never
+/// hands its response to anything registered inside it. A lapsed session
+/// posting a form is the case that bites: `CsrfMiddleware` answers `419`
+/// with `{"message":"CSRF token mismatch."}`, that response never reaches
+/// the Inertia layer, and the client shows the crash modal this exists to
+/// remove. Register the middleware yourself, outside the one whose
+/// rejections it should cover:
+///
+/// ```rust,no_run
+/// use suprnova::{
+///     global_middleware, CsrfMiddleware, Inertia, InertiaConfig,
+///     InertiaErrorPageMiddleware, SessionConfig, SessionMiddleware,
+/// };
+///
+/// pub fn register_http_stack() -> Result<(), suprnova::FrameworkError> {
+///     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
+///     // `LocaleMiddleware::from_env()?` belongs here too, if the app is
+///     // localized - the error page reads the locale share.
+///     //
+///     // Outside CSRF, so it sees the 419 that never reaches the layer below.
+///     global_middleware!(InertiaErrorPageMiddleware::new("Error"));
+///     global_middleware!(CsrfMiddleware::new());
+///     Inertia::install(&InertiaConfig::new().error_page("Error"))
+/// }
+/// ```
+///
+/// `Inertia::install` sees the registration and skips its own, so the
+/// position you chose is the one that stands - and so does the component
+/// you named here, since this instance is the one in the chain. The page
+/// is therefore named **once**, at your own registration, and
+/// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) becomes
+/// optional: harmless to keep (nothing else reads it), and still what
+/// makes `install` register a middleware for an app that does not place
+/// one itself.
+///
+/// **Where it must sit.** After
+/// [`SessionMiddleware`](crate::SessionMiddleware) and `LocaleMiddleware`,
+/// always. The page it renders carries the app's shared props - `auth`,
+/// the locale share, flash - and it renders on the way *out*, once every
+/// middleware registered inside it has returned and popped whatever
+/// request scope it opened. Registered above those two, every error page
+/// loses the visitor's session and locale. Then: before the middleware
+/// whose rejections it should cover, and nowhere further out than that.
 pub struct InertiaErrorPageMiddleware {
     component: String,
 }
@@ -48,10 +107,11 @@ pub struct InertiaErrorPageMiddleware {
 impl InertiaErrorPageMiddleware {
     /// Build the middleware for a page component name (e.g. `"Error"`).
     ///
-    /// Prefer [`InertiaConfig::error_page`](crate::InertiaConfig::error_page)
-    /// plus [`Inertia::install`](crate::Inertia::install) - that wires this
-    /// into the chain in the right place. Construct it directly only when
-    /// assembling the Inertia layer by hand.
+    /// Reach for this only to register the middleware at a position of
+    /// your own choosing - see [the type's docs](Self) for when that is
+    /// needed and where it may sit. Otherwise name the component with
+    /// [`InertiaConfig::error_page`](crate::InertiaConfig::error_page) and
+    /// let [`Inertia::install`](crate::Inertia::install) place it.
     pub fn new(component: impl Into<String>) -> Self {
         Self {
             component: component.into(),

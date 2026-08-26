@@ -103,6 +103,16 @@ impl Inertia {
     /// `error_page` nothing is registered and error responses are
     /// untouched.
     ///
+    /// Innermost is the wrong place for an app whose stack answers
+    /// *before* the Inertia layer is reached - a `CsrfMiddleware`, rate
+    /// limiter, or auth guard registered above this call never hands its
+    /// rejection to anything registered inside it. Such an app registers
+    /// [`InertiaErrorPageMiddleware`] itself, at the position it needs;
+    /// `install` sees that registration, logs at `debug`, and skips its
+    /// own, leaving both the app's placement and the component the app
+    /// named intact. `error_page` on the config is then optional. See that
+    /// type's documentation for where it may sit.
+    ///
     /// One call wires all four, so an app cannot end up carrying two of
     /// them and silently missing the third - each closes a failure mode
     /// that surfaces only in production: cache poisoning across the two
@@ -206,10 +216,56 @@ impl Inertia {
         // produced - a `403` from `PermissionMiddleware` never reaches
         // the handler at all - and it deliberately declines the `422`
         // the validation middleware above it is about to bounce.
-        if let Some(component) = config.error_page.clone() {
-            register_global_middleware(InertiaErrorPageMiddleware::new(component));
+        match error_page_action(
+            config.error_page.as_deref(),
+            crate::middleware::has_global_middleware::<InertiaErrorPageMiddleware>(),
+        ) {
+            ErrorPageAction::Register(component) => {
+                register_global_middleware(InertiaErrorPageMiddleware::new(component));
+            }
+            ErrorPageAction::KeepExisting => {
+                tracing::debug!(
+                    "an InertiaErrorPageMiddleware is already registered; keeping its position \
+                     in the chain and the component it names, and skipping the one \
+                     Inertia::install would add"
+                );
+            }
+            ErrorPageAction::None => {}
         }
         Ok(())
+    }
+}
+
+/// What [`Inertia::install`] does about the error-page middleware.
+#[derive(Debug, PartialEq, Eq)]
+enum ErrorPageAction {
+    /// No `error_page` on the config: register nothing, as before.
+    None,
+    /// Register one innermost of the Inertia layer, for this component.
+    Register(String),
+    /// One is already in the chain. Leave it exactly where the app put
+    /// it, rendering the component the app named.
+    KeepExisting,
+}
+
+/// The whole decision, as a pure function of the two facts it reads.
+///
+/// Split out from [`Inertia::install`] because one of those facts is the
+/// process-global middleware registry, shared by every test in the binary,
+/// so the rule set itself would otherwise only be testable through
+/// whatever registrations the rest of the suite happened to have made
+/// first.
+///
+/// An app that registered the middleware itself named its component
+/// there, and that instance is the one in the chain - so `install` has
+/// nothing left to decide beyond staying out of the way. Registration is
+/// idempotent per middleware type, so this only makes explicit what the
+/// registry would have done anyway.
+fn error_page_action(configured: Option<&str>, already_registered: bool) -> ErrorPageAction {
+    match configured {
+        None => ErrorPageAction::None,
+        Some(_) if already_registered => ErrorPageAction::KeepExisting,
+        Some(component) => ErrorPageAction::Register(component.to_string()),
     }
 }
 
@@ -217,6 +273,34 @@ impl Inertia {
 mod tests {
     use super::*;
     use crate::middleware::get_global_middleware;
+
+    /// The rule set on its own, away from the process-global registry the
+    /// live call reads it from.
+    #[test]
+    fn error_page_registration_keeps_what_the_app_placed() {
+        // Nothing configured: unchanged behaviour for an app that never
+        // opted in.
+        assert_eq!(
+            error_page_action(None, false),
+            ErrorPageAction::None,
+            "no error_page means no middleware, whatever else is registered"
+        );
+        assert_eq!(error_page_action(None, true), ErrorPageAction::None);
+
+        // The default: install places it.
+        assert_eq!(
+            error_page_action(Some("Error"), false),
+            ErrorPageAction::Register("Error".to_string())
+        );
+
+        // The app placed it further out, ahead of a middleware that
+        // answers before the Inertia layer is reached. Its position - and
+        // the component it names - is what stands.
+        assert_eq!(
+            error_page_action(Some("Error"), true),
+            ErrorPageAction::KeepExisting
+        );
+    }
 
     #[test]
     fn install_registers_the_protocol_middlewares() {
@@ -282,10 +366,28 @@ mod tests {
                 .error_page("Error"),
         )
         .expect("dev-mode install must not require a manifest");
+        let with_error_page = get_global_middleware().len();
         assert_eq!(
-            get_global_middleware().len() - after,
+            with_error_page - after,
             1,
             "naming an error page adds exactly one middleware on top of the four"
+        );
+
+        // An error page already in the chain keeps its position - which is
+        // the whole point of letting an app register it further out, ahead
+        // of a CSRF middleware or a rate limiter that answers before the
+        // Inertia layer is reached. `install` must not append a second.
+        Inertia::install(
+            &InertiaConfig::new()
+                .version("test-version")
+                .development(true)
+                .error_page("Error"),
+        )
+        .expect("dev-mode install must not require a manifest");
+        assert_eq!(
+            get_global_middleware().len(),
+            with_error_page,
+            "an error page already registered must not be joined by a second"
         );
     }
 
