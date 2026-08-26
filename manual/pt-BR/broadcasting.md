@@ -659,7 +659,7 @@ feature Cargo `broadcasting-fanout` e troque para o
 `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.5", features = ["broadcasting-fanout"] }
 ```
 
 `src/bootstrap.rs`:

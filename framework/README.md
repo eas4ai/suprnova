@@ -2,7 +2,7 @@
 
 A Laravel-inspired web framework for Rust.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.4 release has
+Current `main` requires Rust 1.94.0 or newer. The tagged v1.3.5 release has
 the same Rust 1.94.0 floor. Suprnova is distributed from Git rather than crates.io.
 
 ## Installation
@@ -11,7 +11,7 @@ Add suprnova to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.5" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -39,7 +39,7 @@ exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.4", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.5", default-features = false, features = [
     "database-sqlite",
     "database-postgres",
     "broadcasting-fanout",
@@ -97,7 +97,7 @@ async fn show_user(req: Request) -> Response {
 Use the suprnova CLI to scaffold new projects:
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
 suprnova new myapp
 ```
 

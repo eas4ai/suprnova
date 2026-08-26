@@ -7,14 +7,14 @@ Suprnovaは、異なる役割を持つ2つのバイナリを出荷します。�
 CLIは `cargo install --git` 経由で配布されます。Suprnovaはまだcrates.ioにはありません - その理由については、[インストールのプレローンチの注記](installation.md#pre-launch-note)を参照してください。
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
 suprnova --version
 ```
 
 後でアップグレードするには、`--force` を渡してください:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.4 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
 ```
 
 ## 2つのバイナリ
@@ -130,7 +130,7 @@ Laravelはこれを、プロジェクトごとの単一のスクリプト - `php
 
 ```bash
 # 1. CLIをインストールする
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.4 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
 
 # 2. プロジェクトをスキャフォルドする（インタラクティブ - デフォルトではSvelteを選ぶ）
 suprnova new my-app
@@ -189,7 +189,7 @@ cargo run --bin console -- <your-command> --help
 
 ```bash
 suprnova --version
-# suprnova 1.3.4
+# suprnova 1.3.5
 ```
 
 `-v` と `-V` の両方が受け付けられます。clapが生成するフラグは `-V` しか提供しません。こちらは手作業で宣言されているため、小文字の綴り - ほとんどの人が最初に試すもの - も動作します。バージョンは `--help` のバナーにも現れます。フラグが存在するようになる前は、そこに置かれていました。
