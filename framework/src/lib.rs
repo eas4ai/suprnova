@@ -250,8 +250,8 @@ pub use console::{CommandEntry, CommandHandler, TypedCommand, dispatch_argv, two
 pub use cors::{AllowedHeaders, AllowedOrigins, CorsConfig, CorsMiddleware};
 pub use error::{AppError, FrameworkError, HttpError, ValidationErrors, render_error_chain};
 pub use events::{
-    ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard, Listener, QueuedListener,
-    Subscriber,
+    DebouncedListener, ErrorOccurred, Event, EventDispatcher, EventFacade, EventFakeGuard,
+    Listener, QueuedListener, Subscriber,
 };
 pub use factory::{Factory, FactoryBuilder, Persistable, Sequence, persist_via_seaorm};
 #[cfg(feature = "filesystem-azure")]
@@ -326,14 +326,14 @@ pub use pagination::{
 pub use queue::{
     BackoffSchedule, Batch, BatchCallback, BatchOptions, BatchRepository, ChainLink,
     DEFAULT_BATCH_SETTLEMENTS_TABLE, DEFAULT_BATCHES_TABLE, DatabaseBatchRepository,
-    DatabaseFailedJobStore, DatabaseQueueDriver, Envelope, EnvelopeError, EnvelopeOverrides,
-    FailOnException, FailedJob, FailedJobStore, FailoverQueueDriver, InspectedJob, Job,
-    JobMiddleware, JobMiddlewareNext, JobOutcome, ManuallyFailed, MaxAttemptsExceeded,
-    MemoryBatchRepository, MemoryFailedJobStore, MemoryQueueDriver, NullFailedJobStore,
-    NullQueueDriver, PendingBatch, PendingChain, Queue, QueueDriver, QueueRoute, RateLimited,
-    RedisQueueDriver, Reservation, ReservationToken, Settled, Skip, SkipIfBatchCancelled,
-    SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded, UpdatedBatchJobCounts,
-    WithoutOverlapping,
+    DatabaseFailedJobStore, DatabaseQueueDriver, DebounceOptions, Debounced, Envelope,
+    EnvelopeError, EnvelopeOverrides, FailOnException, FailedJob, FailedJobStore,
+    FailoverQueueDriver, InspectedJob, Job, JobMiddleware, JobMiddlewareNext, JobOutcome,
+    ManuallyFailed, MaxAttemptsExceeded, MemoryBatchRepository, MemoryFailedJobStore,
+    MemoryQueueDriver, NullFailedJobStore, NullQueueDriver, PendingBatch, PendingChain, Queue,
+    QueueDriver, QueueRoute, RateLimited, RedisQueueDriver, Reservation, ReservationToken, Settled,
+    Skip, SkipIfBatchCancelled, SyncQueueDriver, ThrottlesExceptions, TimeoutExceeded,
+    UpdatedBatchJobCounts, WithoutOverlapping,
 };
 pub use rate_limit::{
     BackendErrorPolicy, GlobalLimit, Limit, LimitResult, RateLimitMiddleware, RateLimiter,

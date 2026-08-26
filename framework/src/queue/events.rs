@@ -437,3 +437,21 @@ impl Event for WorkerQueueResumed {
         "queue::WorkerQueueResumed"
     }
 }
+
+/// Fired when the worker drops a popped envelope because a newer dispatch owns
+/// its debounce window.
+///
+/// Not a failure: the job was superseded, its payload is stale, and the newer
+/// envelope behind it carries the work. The envelope is acknowledged and never
+/// retried. Mirrors Laravel's `Illuminate\Queue\Events\JobDebounced`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobDebounced {
+    /// Identity of the superseded envelope.
+    pub job: JobIdentity,
+}
+
+impl Event for JobDebounced {
+    fn event_name() -> &'static str {
+        "queue::JobDebounced"
+    }
+}

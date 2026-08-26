@@ -37,7 +37,7 @@ pub mod testing;
 
 pub use builtins::ErrorOccurred;
 pub use dispatcher::{Event as EventFacade, EventDispatcher};
-pub use queued_listener::QueuedListener;
+pub use queued_listener::{DebouncedListener, QueuedListener};
 pub use testing::{
     EventFakeGuard, assert_dispatched, assert_dispatched_once, assert_dispatched_times,
     assert_listening, assert_not_dispatched, assert_nothing_dispatched, dispatched,

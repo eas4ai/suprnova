@@ -229,6 +229,65 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
         false
     }
 
+    /// Collapse a burst of dispatches into one run, `debounce_for` after the
+    /// most recent one. `None` (default) disables debouncing.
+    ///
+    /// The opposite of [`Self::unique_id`], and the two cannot both be
+    /// declared: uniqueness keeps the **first** dispatch and suppresses the
+    /// rest, debouncing keeps the **last** and drops the rest. A job declaring
+    /// both is refused at push time with a `FrameworkError` naming both
+    /// methods, because there is no sensible reading of "keep the first and
+    /// keep the last".
+    ///
+    /// Every dispatch is still enqueued; the collapse is settled at the worker,
+    /// which drops an envelope whose debounce token a newer dispatch has since
+    /// overwritten. That is what makes the surviving run carry the *newest*
+    /// payload rather than the oldest.
+    ///
+    /// Not honored inside a [`PendingChain`](crate::queue::PendingChain) or a
+    /// [`PendingBatch`](crate::queue::PendingBatch) - both refuse a debounced
+    /// job instead, since a dropped link strands the rest of its chain and a
+    /// dropped batch job leaves the batch's pending count above zero forever.
+    fn debounce_for() -> Option<Duration>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Longest a continuous burst may defer this job. `None` (default) means no
+    /// bound, so a burst arriving faster than [`Self::debounce_for`] can defer
+    /// the work indefinitely.
+    ///
+    /// When the burst has been deferring the run for at least this long, the
+    /// next dispatch is queued with no delay at all. The window restarts at the
+    /// start of every actual run, so each burst measures its maximum wait from
+    /// its own first dispatch.
+    fn max_debounce_wait() -> Option<Duration>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Per-instance debounce key, so bursts for different entities collapse
+    /// independently. `None` (default) debounces every dispatch of this job
+    /// together.
+    ///
+    /// Returning `Some(self.order_id.to_string())` gives one window per order:
+    /// twenty updates to order 7 become one run, and an update to order 8 is
+    /// untouched by them.
+    ///
+    /// Per-instance rather than class-level (unlike [`Self::debounce_for`]) for
+    /// the same reason [`Self::unique_id`] is: the key comes from the job's own
+    /// data.
+    fn debounce_id(&self) -> Option<String>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     /// Middleware pipeline wrapping the handler. Returned in order, outermost
     /// first - i.e. `vec![Throttle, RateLimit]` runs `Throttle` first, then
     /// `RateLimit`, then the handler. Mirrors Laravel's `$job->middleware()`.

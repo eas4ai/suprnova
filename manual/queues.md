@@ -374,6 +374,76 @@ envelopes that reach a Suprnova worker without one are envelopes queued before
 the token existed, and those keep TTL expiry rather than risking a release that
 deletes a newer dispatch's lock.
 
+### Debouncing - keep the last dispatch, not the first
+
+`push_unique` suppresses a duplicate and keeps the **first** dispatch.
+Debouncing is the opposite: it keeps the **last**. A burst of twenty "this
+order changed" events becomes one reindex, one window after the twentieth,
+carrying the newest payload.
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReindexOrder {
+    order_id: u32,
+}
+
+#[async_trait]
+impl Job for ReindexOrder {
+    fn job_name() -> &'static str { "reindex-order" }
+    fn debounce_for() -> Option<Duration> { Some(Duration::from_secs(30)) }
+    fn max_debounce_wait() -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn debounce_id(&self) -> Option<String> { Some(self.order_id.to_string()) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+- `debounce_for` is the window: each dispatch re-arms it, so the run happens
+  30 seconds after the *most recent* one.
+- `max_debounce_wait` stops a continuous burst from deferring the work forever.
+  Once the burst has been deferring for five minutes, the next dispatch is
+  queued with no delay. The window then restarts, so each burst measures its
+  maximum wait from its own first dispatch.
+- `debounce_id` scopes the window. Twenty updates to order 7 become one run;
+  an update to order 8 is untouched by them. Omit it and every dispatch of the
+  job shares one window.
+
+Every dispatch is still enqueued. The collapse is settled at the worker: each
+push overwrites a cache token, and the worker drops any envelope whose token a
+newer dispatch has replaced, acknowledging it and emitting `JobDebounced`. That
+is what makes the surviving run carry the newest payload rather than the oldest.
+If the token has expired or been evicted, the job runs - debouncing fails open,
+because a lost token is not evidence that somebody else owns the window.
+
+The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
+and nothing is ever collapsed. Laravel's sync driver behaves the same way.
+
+Set the window at the call site instead when it belongs to the caller:
+
+```rust
+use suprnova::queue::DebounceOptions;
+
+Queue::push_debounced(
+    ReindexOrder { order_id: 7 },
+    DebounceOptions::new(Duration::from_secs(30))
+        .max_wait(Duration::from_secs(300))
+        .id("7"),
+)
+.await?;
+```
+
+A job cannot declare both `debounce_for` and `unique_id`: uniqueness keeps the
+first dispatch of a burst and debouncing keeps the last, so the push returns an
+error naming both. Chains and batches refuse a debounced job for a related
+reason - a superseded link is dropped, which would strand the rest of a chain,
+and a dropped batch job leaves the batch's pending count above zero so its
+callbacks never fire.
+
 ### Per-push overrides with `EnvelopeOverrides`
 
 `Queue::push_with` and `Queue::later_with` take an `EnvelopeOverrides`
@@ -890,6 +960,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobQueueing` | before the envelope hits the driver |
 | `JobQueued` | after the driver accepts |
 | `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
+| `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
 | `JobProcessing` | worker popped, about to dispatch |
 | `JobProcessed` | handler returned `Ok` |
 | `JobAttempted` | every terminal settlement (success, fail, timeout) |
