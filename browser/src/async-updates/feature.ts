@@ -1,11 +1,12 @@
 import {
   defineAsyncFeature,
+  type AsyncRuntimeFeatureDefinition,
+  type AsyncRuntimeIslandPort,
   type FeatureIslandController,
   type RuntimeFeature,
-  type RuntimeFeatureDefinition,
   type RuntimeFeatureDocumentContext,
-  type RuntimeFeatureIslandPort,
   type RegisteredBrowserEventCapability,
+  sealValidatedAsyncDescriptor,
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import {
@@ -47,10 +48,11 @@ const MAX_CONCURRENT_AUTHORIZATIONS = 8;
 const AUTHORIZATION_TIMEOUT_MS = 5_000;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
+const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 
 export interface AsyncAuthorizationRequest {
-  readonly identity: RuntimeFeatureIslandPort["identity"];
+  readonly identity: AsyncRuntimeIslandPort["identity"];
   readonly position: StreamPosition | null;
   readonly prior: AuthorizedLogicalSubscription | null;
   readonly signal: AbortSignal;
@@ -395,7 +397,9 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
     const fallbackInitial: unknown = Reflect.get(value.fallbackPoll, "initial");
     const fallbackVisibility: unknown = Reflect.get(value.fallbackPoll, "visibility");
     const eventNames = new Set(value.events.map(({ name }) => name));
-    const signalNames = new Set(value.presentationSignals.map(({ name }) => name));
+    const signalNames = new Set(
+      value.presentationSignals.map(({ name, scope }) => `${scope}\0${name}`),
+    );
     valid =
       authorizationValid &&
       validPosition(value.baseline) &&
@@ -448,7 +452,9 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       (fallbackVisibility === "visible" || fallbackVisibility === "always") &&
       value.presentationSignals.length <= MAX_PRESENTATION_SIGNALS &&
       signalNames.size === value.presentationSignals.length &&
-      value.presentationSignals.every(({ name }) => OPERATION_NAME.test(name)) &&
+      value.presentationSignals.every(
+        ({ name, scope }) => OPERATION_NAME.test(name) && SIGNAL_SCOPE.test(scope),
+      ) &&
       Number.isSafeInteger(reconnect.maximumAttempts) &&
       reconnect.maximumAttempts >= 1 &&
       reconnect.maximumAttempts <= MAX_RECONNECT_ATTEMPTS &&
@@ -474,7 +480,7 @@ class AsyncIslandController implements FeatureIslandController {
   readonly #owner: AsyncDocumentOwner;
   readonly #pollEnvironment: PollEnvironment;
   #pollModifiers: readonly string[] | null;
-  readonly #port: RuntimeFeatureIslandPort;
+  readonly #port: AsyncRuntimeIslandPort;
   readonly #randomness: AsyncRandomness;
   readonly #stream: string;
   #streamModifiers: readonly string[];
@@ -497,7 +503,7 @@ class AsyncIslandController implements FeatureIslandController {
   constructor(
     owner: AsyncDocumentOwner,
     context: RuntimeFeatureDocumentContext,
-    port: RuntimeFeatureIslandPort,
+    port: AsyncRuntimeIslandPort,
     stream: string,
     pollModifiers: readonly string[] | null,
     streamModifiers: readonly string[],
@@ -749,7 +755,32 @@ class AsyncIslandController implements FeatureIslandController {
       throw new Error("async_subscription_duplicate");
     }
     const dispatcher = new AsyncDispatcher(this.#port, () => this.#eventCapability);
-    const subscription = new AsyncSubscription(authorization, dispatcher, this.#clock);
+    const subscription = new AsyncSubscription(
+      authorization,
+      dispatcher,
+      this.#clock,
+      (completion) => {
+        if (this.#state === "disposed" || this.#subscription !== subscription) return;
+        if (completion === "succeeded" && subscription.state() === "current") {
+          this.#handle?.continuityProved();
+          this.#poll?.continuity("current");
+        }
+      },
+      (outcome) => {
+        if (this.#state === "disposed" || this.#subscription !== subscription) return;
+        this.#clearHeartbeat();
+        if (outcome.kind === "complete") {
+          this.#retirePoll();
+          const handle = this.#handle;
+          this.#handle = null;
+          handle?.close();
+          return;
+        }
+        this.#handle?.continuityLost();
+        this.#poll?.continuity("degraded");
+        report(this.#context, "operation_rejected");
+      },
+    );
     this.#subscription = subscription;
     const preflight = subscription.preflightInitialReplay(replay);
     const proof = carriesContinuityEvidence ? preflight : null;
@@ -771,7 +802,15 @@ class AsyncIslandController implements FeatureIslandController {
                 this.#handle?.continuityLost();
                 this.#poll?.continuity("degraded");
               }
-              this.#armHeartbeat(this.#heartbeatTimeout());
+              if (
+                subscription.state() === "closed" ||
+                disposition === "dispatch_failed" ||
+                (disposition === "applied" && subscription.state() === "degraded")
+              ) {
+                this.#clearHeartbeat();
+              } else {
+                this.#armHeartbeat(this.#heartbeatTimeout());
+              }
             } catch {
               subscription.authorizationUncertain();
               this.#poll?.continuity("degraded");
@@ -827,11 +866,8 @@ class AsyncIslandController implements FeatureIslandController {
         let installed = false;
         try {
           const pollPolicy = this.#resolvePollPolicy(authorization);
-          capability = this.#port.authorizeRegisteredEvents(
-            Object.freeze({
-              descriptorBinding: authorization.descriptorBinding,
-              events: authorization.events,
-            }),
+          capability = this.#port.consumeRegisteredEventCapability(
+            sealValidatedAsyncDescriptor(this.#port, authorization),
           );
           if (freshInitial) subscription.replaceUncommittedInitial(authorization);
           else if (!initial) subscription.reauthorize(authorization);
@@ -991,7 +1027,7 @@ class PollingIslandController implements FeatureIslandController {
 
   constructor(
     owner: AsyncDocumentOwner,
-    port: RuntimeFeatureIslandPort,
+    port: AsyncRuntimeIslandPort,
     policy: PollPolicy,
     options: AsyncFeatureOptions,
   ) {
@@ -1046,7 +1082,7 @@ type AsyncIslandDirectiveState =
       streamModifiers: readonly string[];
     }>;
 
-function directiveState(port: RuntimeFeatureIslandPort): AsyncIslandDirectiveState {
+function directiveState(port: AsyncRuntimeIslandPort): AsyncIslandDirectiveState {
   const ownership = port.queryDirectiveOwnership(parseFeatureDirective);
   const streams = ownership.filter(
     ({ directive }) => directive.name === "stream" && directive.role === null,
@@ -1089,7 +1125,7 @@ function directiveState(port: RuntimeFeatureIslandPort): AsyncIslandDirectiveSta
 function createAsyncIslandLifecycleController(
   owner: AsyncDocumentOwner,
   context: RuntimeFeatureDocumentContext,
-  port: RuntimeFeatureIslandPort,
+  port: AsyncRuntimeIslandPort,
 ): FeatureIslandController {
   let active: ActiveAsyncIslandController | null = null;
   let disposed = false;
@@ -1153,7 +1189,7 @@ function createAsyncIslandLifecycleController(
 
 function freshnessObserver(
   options: AsyncFeatureOptions,
-  port: RuntimeFeatureIslandPort,
+  port: AsyncRuntimeIslandPort,
 ): ((state: PollStatus) => void) | undefined {
   const observer = options.observeFreshness;
   if (observer === undefined) return undefined;
@@ -1190,12 +1226,12 @@ export class AsyncDocumentOwner {
           });
   }
 
-  connectIsland(port: RuntimeFeatureIslandPort): FeatureIslandController {
+  connectIsland(port: AsyncRuntimeIslandPort): FeatureIslandController {
     if (this.#state === "disposed") throw new Error("async_document_retired");
     return createAsyncIslandLifecycleController(this, this.#context, port);
   }
 
-  activatePoll(port: RuntimeFeatureIslandPort, policy: PollPolicy): PollingIslandController {
+  activatePoll(port: AsyncRuntimeIslandPort, policy: PollPolicy): PollingIslandController {
     if (this.#state === "disposed") throw new Error("async_document_retired");
     const controller = new PollingIslandController(this, port, policy, this.#options);
     this.#pollControllers.add(controller);
@@ -1205,7 +1241,7 @@ export class AsyncDocumentOwner {
   }
 
   activateStream(
-    port: RuntimeFeatureIslandPort,
+    port: AsyncRuntimeIslandPort,
     stream: string,
     pollModifiers: readonly string[] | null,
     streamModifiers: readonly string[],
@@ -1301,12 +1337,12 @@ export class AsyncDocumentOwner {
 
 function configuredFeature(options: () => AsyncFeatureOptions | null): RuntimeFeature {
   const sharedHandshakes = new OriginHandshakeScheduler();
-  const definition: RuntimeFeatureDefinition = Object.freeze({
+  const definition: AsyncRuntimeFeatureDefinition = Object.freeze({
     connectDocument(context: RuntimeFeatureDocumentContext) {
       const configured = options();
       if (configured === null) {
         return Object.freeze({
-          connectIsland(port: RuntimeFeatureIslandPort) {
+          connectIsland(port: AsyncRuntimeIslandPort) {
             if (
               port
                 .queryDirectiveOwnership(parseFeatureDirective)
@@ -1326,7 +1362,7 @@ function configuredFeature(options: () => AsyncFeatureOptions | null): RuntimeFe
         handshakeScheduler: configured.handshakeScheduler ?? sharedHandshakes,
       });
       return Object.freeze({
-        connectIsland(port: RuntimeFeatureIslandPort) {
+        connectIsland(port: AsyncRuntimeIslandPort) {
           return owner.connectIsland(port);
         },
         dispose() {

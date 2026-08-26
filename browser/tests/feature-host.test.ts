@@ -5,6 +5,8 @@ import {
   createOptionalFeatureDriver,
   defineAsyncFeature,
   defineUploadsFeature,
+  sealValidatedAsyncDescriptor,
+  type AsyncRuntimeIslandPort,
   RUNTIME_FEATURE_CORE_RANGE,
   RUNTIME_STIMULUS_ADAPTER_FORMAT,
   RUNTIME_STIMULUS_ADAPTER_IDENTITY,
@@ -16,6 +18,7 @@ import {
   type RuntimeFeatureIslandPort,
   type RuntimeFeatureName,
   type RuntimeStimulusAdapter,
+  type UploadsRuntimeIslandPort,
 } from "../src/features/contract.js";
 import { CLASSIC_FEATURE_SYMBOL, adoptClassicFeatures } from "../src/features/global.js";
 import {
@@ -150,7 +153,7 @@ interface DriverIslandSource {
     (field: string, proposal: UploadHandleProposal) => UploadHandleProposalDisposition
   >;
   readonly writePresentationSignal: Mock<
-    (element: Element, name: string, value: JsonValue) => JsonValue
+    (scope: string, name: string, value: JsonValue) => JsonValue
   >;
   active(): boolean;
   retire(): void;
@@ -174,7 +177,7 @@ function islandSource(name: string, element?: Element): DriverIslandSource {
     retire() {
       active = false;
     },
-    writePresentationSignal: vi.fn((_element, _signal, value) => value),
+    writePresentationSignal: vi.fn((_scope, _signal, value) => value),
   };
 }
 
@@ -319,9 +322,9 @@ class DriverRuntime implements RuntimeFeatureDriverRegistrationHost {
         if (!current()) return "retired";
         return island.source.proposeUploadHandle(field, proposal);
       },
-      writePresentationSignal: (element: Element, name: string, value: JsonValue) => {
-        if (!current() || element !== island.source.element) throw new Error("stale_driver_port");
-        return island.source.writePresentationSignal(element, name, value);
+      writePresentationSignal: (scope: string, name: string, value: JsonValue) => {
+        if (!current()) throw new Error("stale_driver_port");
+        return island.source.writePresentationSignal(scope, name, value);
       },
     });
     this.#invokeEntry(driver, 1, port);
@@ -604,7 +607,7 @@ describe("one driver claim and optional owner per island", () => {
     const record = new IslandRecord(element, Object.create(null) as IslandMetadata, 2, 1);
 
     expect(record.enqueueFreshRender("poll")).toBe("queued");
-    expect(record.enqueueFreshRender("stream")).toBe("queued");
+    expect(record.enqueueFreshRender("stream")).toBe("coalesced");
     expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 0, queued: 1 });
     record.dispose();
     expect(record.enqueueFreshRender("poll")).toBe("retired");
@@ -704,8 +707,9 @@ describe("one driver claim and optional owner per island", () => {
     expect(uploads.counters.connectIsland).toHaveBeenCalledTimes(256);
     expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
 
-    expect(uploads.islandPorts[0]?.enqueueFreshRender("poll")).toBe("queued");
-    expect(admitted[0]?.enqueueFreshRender).toHaveBeenCalledWith("poll");
+    const uploadPort = uploads.islandPorts[0] as UploadsRuntimeIslandPort | undefined;
+    expect(uploadPort?.proposeUploadHandle("avatar", null)).toBe("accepted");
+    expect(admitted[0]?.proposeUploadHandle).toHaveBeenCalledWith("avatar", null);
     const retired = admitted[0];
     if (retired === undefined) throw new Error("bounded island fixture missing");
     runtime.retireIsland(retired.element);
@@ -716,25 +720,36 @@ describe("one driver claim and optional owner per island", () => {
     expect(runtime.driver.diagnostics).toEqual(["resource_exhausted"]);
   });
 
-  it("exposes only typed upload, registered-event, diagnostic, lifecycle, directive, presentation, and fresh-render ports", () => {
+  it("gives each optional artifact only its slot-specific productive runtime effects", () => {
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
-    const source = islandSource("surface");
+    const asynchronous = feature("async");
+    const uploadSource = islandSource("upload-surface");
+    const asyncSource = islandSource("async-surface");
     runtime.register(uploads.feature);
+    runtime.register(asynchronous.feature);
     runtime.start();
-    runtime.connectIsland(source);
+    runtime.connectIsland(uploadSource);
+    runtime.connectIsland(asyncSource);
 
     const documentContext = uploads.documentContexts[0];
-    const islandPort = uploads.islandPorts[0];
+    const uploadPort = uploads.islandPorts[0] as UploadsRuntimeIslandPort | undefined;
+    const asyncPort = asynchronous.islandPorts[1] as AsyncRuntimeIslandPort | undefined;
     expect(Object.keys(documentContext ?? {}).sort()).toEqual(["diagnose", "onDispose"]);
-    expect(Object.keys(islandPort ?? {}).sort()).toEqual([
-      "authorizeRegisteredEvents",
+    expect(Object.keys(uploadPort ?? {}).sort()).toEqual([
+      "element",
+      "identity",
+      "onDispose",
+      "proposeUploadHandle",
+      "queryDirectiveOwnership",
+    ]);
+    expect(Object.keys(asyncPort ?? {}).sort()).toEqual([
+      "consumeRegisteredEventCapability",
       "dispatchRegisteredEvent",
       "element",
       "enqueueFreshRender",
       "identity",
       "onDispose",
-      "proposeUploadHandle",
       "queryDirectiveOwnership",
       "writePresentationSignal",
     ]);
@@ -750,22 +765,54 @@ describe("one driver claim and optional owner per island", () => {
       "module",
     ]) {
       expect(forbidden in (documentContext ?? {})).toBe(false);
-      expect(forbidden in (islandPort ?? {})).toBe(false);
+      expect(forbidden in (uploadPort ?? {})).toBe(false);
+      expect(forbidden in (asyncPort ?? {})).toBe(false);
     }
-    expect(Object.isFrozen(islandPort?.identity)).toBe(true);
-    expect(islandPort?.enqueueFreshRender("poll")).toBe("queued");
+    expect(Reflect.get(asyncPort ?? {}, "authorizeRegisteredEvents")).toBeUndefined();
+    expect(Reflect.get(asyncPort ?? {}, "proposeUploadHandle")).toBeUndefined();
+    expect(Reflect.get(asyncPort ?? {}, "writeState")).toBeUndefined();
+    if (asyncPort !== undefined) {
+      // @ts-expect-error -- the async slot must not expose upload authority in declarations.
+      void asyncPort.proposeUploadHandle;
+      // @ts-expect-error -- the async slot consumes only a core-minted current capability.
+      void asyncPort.authorizeRegisteredEvents;
+    }
+    for (const forbidden of [
+      "authorizeRegisteredEvents",
+      "proposeUploadHandle",
+      "registerEvent",
+      "registerEvents",
+      "writeModel",
+      "writeState",
+    ]) {
+      expect(forbidden in (asyncPort ?? {})).toBe(false);
+    }
+    for (const forbidden of [
+      "consumeRegisteredEventCapability",
+      "dispatchRegisteredEvent",
+      "enqueueFreshRender",
+      "writePresentationSignal",
+    ]) {
+      expect(forbidden in (uploadPort ?? {})).toBe(false);
+    }
+    expect(Object.isFrozen(asyncPort?.identity)).toBe(true);
+    expect(asyncPort?.enqueueFreshRender("stream")).toBe("queued");
     const freshRenderCompletion = vi.fn<FreshRenderCompletionObserver>();
-    expect(islandPort?.enqueueFreshRender("poll", freshRenderCompletion)).toBe("queued");
-    expect(source.enqueueFreshRender).toHaveBeenLastCalledWith("poll", freshRenderCompletion);
-    expect(islandPort?.proposeUploadHandle("avatar", "018f47c1-2af0-7cc4-a001-000000000001")).toBe(
+    expect(asyncPort?.enqueueFreshRender("stream", freshRenderCompletion)).toBe("queued");
+    expect(asyncSource.enqueueFreshRender).toHaveBeenLastCalledWith(
+      "stream",
+      freshRenderCompletion,
+    );
+    expect(uploadPort?.proposeUploadHandle("avatar", "018f47c1-2af0-7cc4-a001-000000000001")).toBe(
       "accepted",
     );
-    expect(source.proposeUploadHandle).toHaveBeenCalledWith(
+    expect(uploadSource.proposeUploadHandle).toHaveBeenCalledWith(
       "avatar",
       "018f47c1-2af0-7cc4-a001-000000000001",
     );
-    expect(islandPort?.writePresentationSignal(source.element, "progress", 42)).toBe(42);
-    const eventCapability = islandPort?.authorizeRegisteredEvents({
+    expect(asyncPort?.writePresentationSignal("root-scope", "progress", 42)).toBe(42);
+    if (asyncPort === undefined) throw new Error("async port fixture missing");
+    const descriptor = {
       descriptorBinding: "binding-v1",
       events: [
         {
@@ -780,13 +827,20 @@ describe("one driver claim and optional owner per island", () => {
           version: 1,
         },
       ],
-    });
+    } as never;
+    expect(() => asyncPort.consumeRegisteredEventCapability(descriptor)).toThrow(
+      "async_descriptor_capability_invalid",
+    );
+    expect(asyncSource.authorizeRegisteredEvents).not.toHaveBeenCalled();
+    const descriptorCapability = sealValidatedAsyncDescriptor(asyncPort, descriptor);
+    const eventCapability = asyncPort.consumeRegisteredEventCapability(descriptorCapability);
+    expect(() => asyncPort.consumeRegisteredEventCapability(descriptorCapability)).toThrow(
+      "async_descriptor_capability_invalid",
+    );
     expect(
       Reflect.apply(
-        Reflect.get(islandPort ?? {}, "dispatchRegisteredEvent") as (
-          ...values: unknown[]
-        ) => unknown,
-        islandPort,
+        Reflect.get(asyncPort, "dispatchRegisteredEvent") as (...values: unknown[]) => unknown,
+        asyncPort,
         [
           eventCapability,
           Object.freeze({
@@ -798,24 +852,32 @@ describe("one driver claim and optional owner per island", () => {
         ],
       ),
     ).toBe("dispatched");
-    expect(source.authorizeRegisteredEvents).toHaveBeenCalledOnce();
-    expect(source.dispatchRegisteredEvent).toHaveBeenCalledOnce();
+    expect(asyncSource.authorizeRegisteredEvents).toHaveBeenCalledOnce();
+    expect(asyncSource.dispatchRegisteredEvent).toHaveBeenCalledOnce();
+    expect(uploadSource.authorizeRegisteredEvents).not.toHaveBeenCalled();
+    expect(uploadSource.dispatchRegisteredEvent).not.toHaveBeenCalled();
   });
 
   it("makes captured ports inert before retirement callbacks and rejects invalid reasons", () => {
     const runtime = new FeatureRuntime();
     const uploads = feature("uploads");
-    const source = islandSource("stale");
+    const asynchronous = feature("async");
+    const uploadSource = islandSource("stale-upload");
+    const asyncSource = islandSource("stale-async");
     runtime.register(uploads.feature);
+    runtime.register(asynchronous.feature);
     runtime.start();
-    runtime.connectIsland(source);
-    const port = uploads.islandPorts[0];
+    runtime.connectIsland(uploadSource);
+    runtime.connectIsland(asyncSource);
+    const uploadPort = uploads.islandPorts[0] as UploadsRuntimeIslandPort | undefined;
+    const asyncPort = asynchronous.islandPorts[1] as AsyncRuntimeIslandPort | undefined;
 
-    expect(port?.enqueueFreshRender("invalid" as FreshRenderReason)).toBe("retired");
-    runtime.retireIsland(source.element);
-    expect(port?.enqueueFreshRender("poll")).toBe("retired");
-    expect(port?.proposeUploadHandle("avatar", null)).toBe("retired");
-    expect(() => port?.writePresentationSignal(source.element, "progress", 1)).toThrow(
+    expect(asyncPort?.enqueueFreshRender("invalid" as FreshRenderReason)).toBe("retired");
+    runtime.retireIsland(uploadSource.element);
+    runtime.retireIsland(asyncSource.element);
+    expect(asyncPort?.enqueueFreshRender("stream")).toBe("retired");
+    expect(uploadPort?.proposeUploadHandle("avatar", null)).toBe("retired");
+    expect(() => asyncPort?.writePresentationSignal("root-scope", "progress", 1)).toThrow(
       "stale_driver_port",
     );
   });

@@ -8,6 +8,7 @@ import type {
   StreamPosition,
   SubscriptionState,
 } from "./types.js";
+import type { FreshRenderCompletion } from "../features/contract.js";
 
 const MAX_REPLAY_BYTES = 256 * 1024;
 
@@ -18,16 +19,34 @@ export interface ReplayOutcome {
 
 export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
 
+export type AsyncSubscriptionLifecycleOutcome =
+  | Readonly<{
+      kind: "complete";
+      reason: "server_shutdown" | "subscription_retired" | "stream_completed";
+    }>
+  | Readonly<{
+      kind: "error";
+      reason: "authorization_lost" | "replay_unavailable" | "backpressure" | "stream_unavailable";
+    }>
+  | Readonly<{
+      kind: "dispatch_failed";
+      reason: "presentation_rejected" | "refresh_failed" | "refresh_canceled" | "refresh_retired";
+    }>;
+
 export class AsyncSubscription {
   #authorization: AuthorizedLogicalSubscription;
   readonly #clock: AsyncClock;
   #continuity: ContinuityMachine;
   readonly #dispatch: AsyncEnvelopeDispatcher;
+  readonly #refreshCompletion: ((completion: FreshRenderCompletion) => void) | undefined;
+  readonly #lifecycle: ((outcome: AsyncSubscriptionLifecycleOutcome) => void) | undefined;
 
   constructor(
     authorization: AuthorizedLogicalSubscription,
     dispatch: AsyncEnvelopeDispatcher,
     clock: AsyncClock,
+    refreshCompletion?: (completion: FreshRenderCompletion) => void,
+    lifecycle?: (outcome: AsyncSubscriptionLifecycleOutcome) => void,
   ) {
     if (!validExpiration(authorization.expiresAt) || typeof clock.now !== "function") {
       throw new Error("async_subscription_invalid");
@@ -36,6 +55,8 @@ export class AsyncSubscription {
     this.#continuity = new ContinuityMachine(authorization.baseline);
     this.#dispatch = dispatch;
     this.#clock = clock;
+    this.#refreshCompletion = refreshCompletion;
+    this.#lifecycle = lifecycle;
   }
 
   state(): SubscriptionState {
@@ -129,14 +150,66 @@ export class AsyncSubscription {
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
     const observation = this.#continuity.observe(envelope.position);
     if (observation !== "apply") return observation;
-    if (this.#dispatch.dispatch(envelope) === "rejected") {
+    const terminal: { value: FreshRenderCompletion | null } = { value: null };
+    let committed = false;
+    const dispatchDisposition = this.#dispatch.dispatch(envelope, (completion) => {
+      if (!committed) {
+        terminal.value = completion;
+        return;
+      }
+      this.#completeRefresh(completion);
+    });
+    if (dispatchDisposition === "rejected") {
       this.#continuity.degrade();
+      this.#observeLifecycle(
+        Object.freeze({ kind: "dispatch_failed", reason: "presentation_rejected" }),
+      );
       return "dispatch_failed";
     }
     this.#continuity.commit(envelope.position);
-    if (envelope.payload.kind === "complete") this.#continuity.close();
-    else if (envelope.payload.kind === "error") this.#continuity.degrade();
+    committed = true;
+    if (envelope.payload.kind === "refresh") {
+      if (terminal.value !== null) this.#completeRefresh(terminal.value);
+      return "pending";
+    }
+    if (envelope.payload.kind === "complete") {
+      this.#continuity.close();
+      this.#observeLifecycle(Object.freeze({ kind: "complete", reason: envelope.payload.reason }));
+    } else if (envelope.payload.kind === "error") {
+      this.#continuity.degrade();
+      this.#observeLifecycle(Object.freeze({ kind: "error", reason: envelope.payload.code }));
+    }
     return "applied";
+  }
+
+  #completeRefresh(completion: FreshRenderCompletion): void {
+    if (completion !== "succeeded") {
+      this.#continuity.degrade();
+      this.#observeLifecycle(
+        Object.freeze({
+          kind: "dispatch_failed",
+          reason:
+            completion === "failed"
+              ? "refresh_failed"
+              : completion === "canceled"
+                ? "refresh_canceled"
+                : "refresh_retired",
+        }),
+      );
+    }
+    try {
+      this.#refreshCompletion?.(completion);
+    } catch {
+      // Presentation/recovery observation cannot rewrite continuity authority.
+    }
+  }
+
+  #observeLifecycle(outcome: AsyncSubscriptionLifecycleOutcome): void {
+    try {
+      this.#lifecycle?.(outcome);
+    } catch {
+      // Lifecycle presentation cannot rewrite continuity authority.
+    }
   }
 
   receiveReplay(encoded: readonly string[]): ReplayOutcome {

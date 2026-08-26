@@ -12,7 +12,7 @@ import {
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
 import type {
   RuntimeFeatureDirectiveOwnership,
-  RuntimeFeatureIslandPort,
+  AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
 
 type Transport = "sse" | "websocket";
@@ -107,10 +107,12 @@ function ownership(root: Element): RuntimeFeatureDirectiveOwnership {
 }
 
 function eventCapability(
-  request?: Parameters<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>[0],
-): ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]> {
+  request?: Parameters<AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]>[0],
+): ReturnType<AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]> {
   void request;
-  return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
+  return Object.freeze({}) as ReturnType<
+    AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]
+  >;
 }
 
 async function settle(): Promise<void> {
@@ -176,7 +178,7 @@ describe("pre-authentication bfcache continuity", () => {
       const requests: AsyncAuthorizationRequest[] = [];
       const refresh = vi.fn(() => "queued" as const);
       const authorizeEvents = vi.fn(eventCapability);
-      const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
+      const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
       let calls = 0;
       const owner = new AsyncDocumentOwner(
         { diagnose: vi.fn(), onDispose: vi.fn() },
@@ -209,7 +211,7 @@ describe("pre-authentication bfcache continuity", () => {
       );
       const root = Object.freeze({}) as Element;
       owner.connectIsland({
-        authorizeRegisteredEvents: authorizeEvents,
+        consumeRegisteredEventCapability: authorizeEvents,
         dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
         element: root,
         enqueueFreshRender: refresh,
@@ -219,7 +221,6 @@ describe("pre-authentication bfcache continuity", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: vi.fn(() => "accepted" as const),
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: signal,
       });
@@ -298,7 +299,7 @@ describe("pre-authentication bfcache continuity", () => {
       await settle();
 
       expect(authorizeEvents).toHaveBeenCalledOnce();
-      expect(authorizeEvents.mock.calls[0]?.[0]?.descriptorBinding).toBe("binding-2");
+      expect(Object.keys(authorizeEvents.mock.calls[0]?.[0] ?? {})).toEqual([]);
       expect(refresh).toHaveBeenCalledTimes(evidence === "replay" ? 1 : 0);
       expect(signal).not.toHaveBeenCalled();
       expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 5_000)).toBe(
@@ -357,7 +358,7 @@ describe("pre-authentication bfcache continuity", () => {
     );
     const root = Object.freeze({}) as Element;
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -367,9 +368,8 @@ describe("pre-authentication bfcache continuity", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => [ownership(root)],
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     });
     await settle();
     sources[0]?.onopen?.();
@@ -500,10 +500,10 @@ describe("pre-authentication bfcache continuity", () => {
       );
       const authorizeEvents = vi.fn(eventCapability);
       const refresh = vi.fn(() => "queued" as const);
-      const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
+      const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
       const root = Object.freeze({}) as Element;
       owner.connectIsland({
-        authorizeRegisteredEvents: authorizeEvents,
+        consumeRegisteredEventCapability: authorizeEvents,
         dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
         element: root,
         enqueueFreshRender: refresh,
@@ -513,7 +513,6 @@ describe("pre-authentication bfcache continuity", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: vi.fn(() => "accepted" as const),
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: signal,
       });
@@ -576,7 +575,7 @@ describe("pre-authentication bfcache continuity", () => {
       await settle();
 
       expect(authorizeEvents).toHaveBeenCalledOnce();
-      expect(authorizeEvents.mock.calls[0]?.[0]?.descriptorBinding).toBe("binding-2");
+      expect(Object.keys(authorizeEvents.mock.calls[0]?.[0] ?? {})).toEqual([]);
       expect(refresh).toHaveBeenCalledTimes(evidence === "replay" ? 1 : 0);
       expect(signal).not.toHaveBeenCalled();
       expect([...timers.pending.values()].some(({ milliseconds }) => milliseconds === 5_000)).toBe(
@@ -624,7 +623,7 @@ describe("pre-authentication bfcache continuity", () => {
     for (let island = 0; island < 9; island += 1) {
       const root = Object.freeze({}) as Element;
       owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
         element: root,
         enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -634,11 +633,8 @@ describe("pre-authentication bfcache continuity", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: vi.fn(() => "accepted" as const),
         queryDirectiveOwnership: () => [ownership(root)],
-        writePresentationSignal: vi.fn(
-          (_element: Element, _name: string, value: JsonValue) => value,
-        ),
+        writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
       });
     }
     await settle();
@@ -775,7 +771,7 @@ describe("pre-authentication bfcache continuity", () => {
     const poolRoot = Object.freeze({}) as Element;
     const authorizeEvents = vi.fn(eventCapability);
     owner.connectIsland({
-      authorizeRegisteredEvents: authorizeEvents,
+      consumeRegisteredEventCapability: authorizeEvents,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: poolRoot,
       enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -785,9 +781,8 @@ describe("pre-authentication bfcache continuity", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => [ownership(poolRoot)],
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     });
     await settle();
     sources[0]?.onopen?.();
@@ -810,7 +805,7 @@ describe("pre-authentication bfcache continuity", () => {
     for (let island = 0; island < 9; island += 1) {
       const root = Object.freeze({}) as Element;
       owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
         element: root,
         enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -820,11 +815,8 @@ describe("pre-authentication bfcache continuity", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: vi.fn(() => "accepted" as const),
         queryDirectiveOwnership: () => [ownership(root)],
-        writePresentationSignal: vi.fn(
-          (_element: Element, _name: string, value: JsonValue) => value,
-        ),
+        writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
       });
     }
     await settle();
@@ -865,7 +857,7 @@ describe("pre-authentication bfcache continuity", () => {
     });
     await settle();
     expect(authorizeEvents).toHaveBeenCalledTimes(2);
-    expect(authorizeEvents.mock.calls[1]?.[0]?.descriptorBinding).toBe("binding-2");
+    expect(Object.keys(authorizeEvents.mock.calls[1]?.[0] ?? {})).toEqual([]);
 
     owner.suspend();
     await resumed;

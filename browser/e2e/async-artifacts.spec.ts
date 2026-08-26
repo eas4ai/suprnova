@@ -48,7 +48,7 @@ async function installAsyncHarness(page: Page, delayInitialAuthority = false): P
         if (connection === undefined) throw new Error("async_fixture_connection_missing");
         connection.request.message(
           JSON.stringify({
-            payload: { kind: "presentation_signal", name: "open", value: open },
+            payload: { kind: "presentation_signal", name: "open", scope: "primary", value: open },
             position: { epoch: "1", sequence: String(sequence) },
             protocol_version: 1,
             stream: "orders",
@@ -87,7 +87,9 @@ async function installAsyncHarness(page: Page, delayInitialAuthority = false): P
           visibility: "visible",
         }),
         heartbeatTimeoutMs: 5_000,
-        presentationSignals: Object.freeze([Object.freeze({ name: "open", schema: "boolean" })]),
+        presentationSignals: Object.freeze([
+          Object.freeze({ name: "open", schema: "boolean", scope: "primary" }),
+        ]),
         reconnect: Object.freeze({
           kind: "resume_or_refresh",
           maximumAttempts: 2,

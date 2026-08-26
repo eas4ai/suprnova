@@ -29,6 +29,7 @@ export interface AsyncRegisteredEventContract {
 export interface AsyncPresentationSignalContract {
   readonly name: string;
   readonly schema: AsyncPayloadSchema;
+  readonly scope: string;
 }
 
 export type AsyncPayload =
@@ -40,7 +41,7 @@ export type AsyncPayload =
       schema_version: number;
       target: string;
     }>
-  | Readonly<{ kind: "presentation_signal"; name: string; value: JsonValue }>
+  | Readonly<{ kind: "presentation_signal"; name: string; scope: string; value: JsonValue }>
   | Readonly<{ kind: "heartbeat" }>
   | Readonly<{
       kind: "complete";
@@ -114,7 +115,14 @@ export interface PollFallbackPolicy {
 }
 
 export type AsyncReceiveDisposition =
-  "applied" | "duplicate" | "stale" | "gap" | "continuity_required" | "dispatch_failed" | "closed";
+  | "applied"
+  | "pending"
+  | "duplicate"
+  | "stale"
+  | "gap"
+  | "continuity_required"
+  | "dispatch_failed"
+  | "closed";
 
 export interface AsyncClock {
   now(): number;

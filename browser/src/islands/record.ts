@@ -2,7 +2,7 @@ import { ISLAND_STATUS_ATTRIBUTE, type IslandMetadata } from "./metadata.js";
 import { createFreshRenderIntent, type ServerIntent } from "../scheduler/intent.js";
 import { FIFO_POLICY } from "../scheduler/policy.js";
 import { IslandScheduler } from "../scheduler/scheduler.js";
-import type { SchedulerPolicy } from "../scheduler/types.js";
+import type { SchedulerPolicy, SchedulerTicket } from "../scheduler/types.js";
 import type {
   FreshRenderCompletion,
   FreshRenderCompletionObserver,
@@ -18,6 +18,7 @@ const FEATURE_REFRESH_POLICY = Object.freeze({
 
 export class IslandRecord {
   readonly #disposers: VoidFunction[] = [];
+  readonly #freshRenders: { readonly intent: ServerIntent; ticket: SchedulerTicket | null }[] = [];
   readonly scheduler: IslandScheduler;
   readonly element: Element;
   #metadata: IslandMetadata;
@@ -94,24 +95,27 @@ export class IslandRecord {
       notifyFreshRenderCompletion(completion, "retired");
       return "retired";
     }
-    const intent = createFreshRenderIntent(this, reason);
-    if (completion !== undefined) {
-      intent.onFinish((finish) => {
-        const result: FreshRenderCompletion =
-          finish === "accepted"
-            ? "succeeded"
-            : finish === "retired"
-              ? "retired"
-              : finish === "canceled"
-                ? "canceled"
-                : "failed";
-        notifyFreshRenderCompletion(completion, result);
-      });
+    const pending = this.#freshRenders.find(
+      ({ ticket }) => ticket !== null && this.scheduler.phase(ticket) === "pending",
+    );
+    if (pending !== undefined) {
+      observeFreshRenderCompletion(pending.intent, completion);
+      return "coalesced";
     }
+    const intent = createFreshRenderIntent(this, reason);
+    const tracked = { intent, ticket: null as SchedulerTicket | null };
+    intent.onFinish(() => {
+      const index = this.#freshRenders.indexOf(tracked);
+      if (index >= 0) this.#freshRenders.splice(index, 1);
+    });
+    observeFreshRenderCompletion(intent, completion);
     const result = this.scheduler.schedule(intent, FEATURE_REFRESH_POLICY);
     if (result.disposition !== "accepted") {
       return result.disposition === "retired" ? "retired" : "coalesced";
     }
+    if (result.ticket === undefined) throw new Error("fresh_render_ticket_missing");
+    tracked.ticket = result.ticket;
+    this.#freshRenders.push(tracked);
     try {
       this.#scheduleObserver?.();
     } catch {
@@ -154,4 +158,22 @@ function notifyFreshRenderCompletion(
   } catch {
     // Completion presentation cannot rewrite scheduler authority.
   }
+}
+
+function observeFreshRenderCompletion(
+  intent: ServerIntent,
+  observer: FreshRenderCompletionObserver | undefined,
+): void {
+  if (observer === undefined) return;
+  intent.onFinish((finish) => {
+    const result: FreshRenderCompletion =
+      finish === "accepted"
+        ? "succeeded"
+        : finish === "retired"
+          ? "retired"
+          : finish === "canceled" || finish === "superseded"
+            ? "canceled"
+            : "failed";
+    notifyFreshRenderCompletion(observer, result);
+  });
 }

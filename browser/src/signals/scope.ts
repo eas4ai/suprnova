@@ -81,6 +81,12 @@ export class LocalSignalScope implements SignalScope {
     owner.#setOwned(name, value);
   }
 
+  setDeclared(name: string, value: SignalValue): void {
+    this.#assertActive();
+    if (!this.#cells.has(name)) throw new Error("signal_missing");
+    this.#setOwned(name, value);
+  }
+
   toggle(name: string): void {
     const current = this.get(name);
     if (typeof current !== "boolean") throw new Error("signal_boolean_required");

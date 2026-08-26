@@ -145,7 +145,23 @@ describe("role-typed optional production artifacts", () => {
   it("publishes typed optional ESM registrations in the single declaration file", async () => {
     const declarations = await readFile(join(outputDirectory, "index.d.ts"), "utf8");
     expect(declarations).toContain("export interface FeatureDocumentController");
-    expect(declarations).toContain("export interface RuntimeFeatureIslandPort");
+    expect(declarations).toContain("export type RuntimeFeatureIslandPort");
+    expect(declarations).toContain("export interface AsyncRuntimeIslandPort");
+    expect(declarations).toContain("export interface UploadsRuntimeIslandPort");
+    expect(declarations).toContain("interface ValidatedAsyncDescriptorCapability");
+    expect(declarations).toContain(
+      "consumeRegisteredEventCapability(\n    descriptor: ValidatedAsyncDescriptorCapability,",
+    );
+    expect(declarations).toContain(
+      "writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;",
+    );
+    expect(declarations).toContain("scope: string;");
+    const asyncPort = declarations.slice(
+      declarations.indexOf("export interface AsyncRuntimeIslandPort"),
+      declarations.indexOf("export interface UploadsRuntimeIslandPort"),
+    );
+    expect(asyncPort).not.toContain("proposeUploadHandle");
+    expect(asyncPort).not.toContain("authorizeRegisteredEvents");
     expect(declarations).toContain("export type FreshRenderCompletion");
     expect(declarations).toContain("export interface RuntimeConnectivity");
     expect(declarations).not.toContain("export type RuntimeFeatureName");
@@ -195,6 +211,7 @@ describe("role-typed optional production artifacts", () => {
         supportedProtocolVersions,
         version,
         type BootstrapOptions,
+        type AsyncRuntimeIslandPort,
         CLASSIC_FEATURE_SYMBOL,
         type ClassicFeatureSurface,
         type EffectContext,
@@ -234,6 +251,7 @@ describe("role-typed optional production artifacts", () => {
         type StimulusMorphBridge,
         type SuprnovaLivePublicApi,
         type TransportPort,
+        type UploadsRuntimeIslandPort,
       } from "@suprnova/live";
       import runtime, { boot as runtimeBoot } from "@suprnova/live/runtime";
       import stimulus, {
@@ -324,6 +342,7 @@ describe("role-typed optional production artifacts", () => {
         connectivity: { isOnline: () => true },
       };
       type RootTypeExports = [
+        AsyncRuntimeIslandPort,
         BootstrapOptions,
         ClassicFeatureSurface,
         EffectContext,
@@ -363,6 +382,7 @@ describe("role-typed optional production artifacts", () => {
         StimulusMorphBridge,
         SuprnovaLivePublicApi,
         TransportPort,
+        UploadsRuntimeIslandPort,
       ];
       const rootTypeExports = null as RootTypeExports | null;
       void [

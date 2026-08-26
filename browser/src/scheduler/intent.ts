@@ -25,7 +25,7 @@ export type ServerOperation =
   | Readonly<{ kind: "fresh_render" }>;
 
 export type IntentFinishReason =
-  "accepted" | "terminal" | "canceled" | "retired" | "exhausted" | "rejected";
+  "accepted" | "terminal" | "canceled" | "superseded" | "retired" | "exhausted" | "rejected";
 export type IntentFinishObserver = (reason: IntentFinishReason) => void;
 
 const MAX_OPERATIONS_PER_INTENT = 32;

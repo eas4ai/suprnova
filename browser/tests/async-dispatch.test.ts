@@ -10,7 +10,7 @@ import type {
 } from "../src/async-updates/types.js";
 import type {
   RegisteredBrowserEventCapability,
-  RuntimeFeatureIslandPort,
+  AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
 import { IslandRecord } from "../src/islands/record.js";
 import {
@@ -59,7 +59,7 @@ function authorization(
     }),
     heartbeatTimeoutMs: 30_000,
     presentationSignals: Object.freeze([
-      Object.freeze({ name: "completion_percent", schema: "u64" as const }),
+      Object.freeze({ name: "completion_percent", schema: "u64" as const, scope: "root-scope" }),
     ]),
     reconnect: Object.freeze({
       kind: "resume_or_refresh" as const,
@@ -99,7 +99,7 @@ function fakeCapability(): RegisteredBrowserEventCapability {
   return Object.freeze({}) as RegisteredBrowserEventCapability;
 }
 
-function fakePort(overrides: Partial<RuntimeFeatureIslandPort> = {}) {
+function fakePort(overrides: Partial<AsyncRuntimeIslandPort> = {}) {
   const element = Object.freeze({ nodeType: 1 }) as unknown as Element;
   const calls = {
     action: vi.fn(),
@@ -109,11 +109,11 @@ function fakePort(overrides: Partial<RuntimeFeatureIslandPort> = {}) {
     event: vi.fn(() => "dispatched" as const),
     morph: vi.fn(),
     refresh: vi.fn(() => "queued" as const),
-    signal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+    signal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     stateWrite: vi.fn(),
   };
-  const port: RuntimeFeatureIslandPort = {
-    authorizeRegisteredEvents: () => fakeCapability(),
+  const port: AsyncRuntimeIslandPort = {
+    consumeRegisteredEventCapability: () => fakeCapability(),
     dispatchRegisteredEvent: calls.event,
     element,
     enqueueFreshRender: calls.refresh,
@@ -123,7 +123,6 @@ function fakePort(overrides: Partial<RuntimeFeatureIslandPort> = {}) {
       slot: "orders-slot",
     }),
     onDispose: vi.fn(),
-    proposeUploadHandle: () => "retired",
     queryDirectiveOwnership: () => Object.freeze([]),
     writePresentationSignal: calls.signal,
     ...overrides,
@@ -138,7 +137,17 @@ function resolver(
   return {
     current,
     event: (type, detail) => ({ detail, type }) as unknown as Event,
-    targets: () => targets(),
+    targets: () => {
+      const resolved = targets();
+      return resolved === "fanout_exceeded"
+        ? resolved
+        : resolved.map((target) =>
+            Object.freeze({
+              current: () => true,
+              dispatch: (event: Event) => target.dispatchEvent(event),
+            }),
+          );
+    },
   };
 }
 
@@ -188,7 +197,7 @@ describe("closed asynchronous presentation dispatcher", () => {
 
   it("maps the complete validated union to only three productive presentation paths", () => {
     const capability = fakeCapability();
-    const { calls, element, port } = fakePort();
+    const { calls, port } = fakePort();
     const dispatcher = new AsyncDispatcher(port, () => capability);
 
     expect(dispatcher.dispatch(envelope({ kind: "refresh", name: "refresh" }))).toBe("queued");
@@ -205,23 +214,30 @@ describe("closed asynchronous presentation dispatcher", () => {
     ).toBe("dispatched");
     expect(
       dispatcher.dispatch(
-        envelope({ kind: "presentation_signal", name: "completion_percent", value: 50 }),
+        envelope({
+          kind: "presentation_signal",
+          name: "completion_percent",
+          scope: "root-scope",
+          value: 50,
+        }),
       ),
     ).toBe("signal_updated");
     expect(dispatcher.dispatch(envelope({ kind: "heartbeat" }))).toBe("observed");
     expect(dispatcher.dispatch(envelope({ kind: "complete", reason: "stream_completed" }))).toBe(
-      "closed",
+      "closed:stream_completed",
     );
-    expect(dispatcher.dispatch(envelope({ code: "backpressure", kind: "error" }))).toBe("degraded");
+    expect(dispatcher.dispatch(envelope({ code: "backpressure", kind: "error" }))).toBe(
+      "degraded:backpressure",
+    );
 
-    expect(calls.refresh).toHaveBeenCalledExactlyOnceWith("stream");
+    expect(calls.refresh).toHaveBeenCalledExactlyOnceWith("stream", expect.any(Function));
     expect(calls.event).toHaveBeenCalledExactlyOnceWith(capability, {
       event: "orders.updated",
       payload: { count: 1 },
       schemaVersion: 1,
       target: "self",
     });
-    expect(calls.signal).toHaveBeenCalledExactlyOnceWith(element, "completion_percent", 50);
+    expect(calls.signal).toHaveBeenCalledExactlyOnceWith("root-scope", "completion_percent", 50);
   });
 
   it("fails closed for forged, stale, retired, wrong-island, wrong-scope, and over-fanout event authority", () => {
@@ -332,14 +348,32 @@ describe("closed asynchronous presentation dispatcher", () => {
   });
 
   it("rejects undeclared or retired signal writes before committing sequence state", () => {
-    const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
+    const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
     const { port } = fakePort({ writePresentationSignal: signal });
     const dispatcher = new AsyncDispatcher(port, fakeCapability);
     const subscription = new AsyncSubscription(authorization(), dispatcher, { now: () => 1_000 });
 
     expect(() =>
       subscription.receive(
-        encoded({ kind: "presentation_signal", name: "undeclared_signal", value: 1 }),
+        encoded({
+          kind: "presentation_signal",
+          name: "undeclared_signal",
+          scope: "root-scope",
+          value: 1,
+        }),
+      ),
+    ).toThrow("async_payload_unregistered");
+    expect(signal).not.toHaveBeenCalled();
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+
+    expect(() =>
+      subscription.receive(
+        encoded({
+          kind: "presentation_signal",
+          name: "completion_percent",
+          scope: "foreign-scope",
+          value: 1,
+        }),
       ),
     ).toThrow("async_payload_unregistered");
     expect(signal).not.toHaveBeenCalled();
@@ -350,19 +384,53 @@ describe("closed asynchronous presentation dispatcher", () => {
     });
     expect(
       subscription.receive(
-        encoded({ kind: "presentation_signal", name: "completion_percent", value: 1 }),
+        encoded({
+          kind: "presentation_signal",
+          name: "completion_percent",
+          scope: "root-scope",
+          value: 1,
+        }),
       ),
     ).toBe("dispatch_failed");
     expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
     expect(subscription.state()).toBe("degraded");
   });
 
+  it("binds a presentation update to the exact signed nested signal-scope identity", () => {
+    const scoped = authorization({
+      presentationSignals: Object.freeze([
+        Object.freeze({ name: "completion_percent", schema: "u64", scope: "nested-panel" }),
+      ]),
+    });
+    const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
+    const { port } = fakePort({ writePresentationSignal: signal });
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+
+    expect(
+      dispatcher.dispatch(
+        envelope(
+          {
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "nested-panel",
+            value: 50,
+          },
+          scoped,
+        ),
+      ),
+    ).toBe("signal_updated");
+    expect(signal).toHaveBeenCalledExactlyOnceWith("nested-panel", "completion_percent", 50);
+  });
+
   it("closes or degrades only the exact decoded subscription lifecycle", () => {
     const { port } = fakePort();
+    const completedLifecycle = vi.fn();
     const completed = new AsyncSubscription(
       authorization(),
       new AsyncDispatcher(port, fakeCapability),
       { now: () => 1_000 },
+      undefined,
+      completedLifecycle,
     );
     completed.receive(encoded({ kind: "heartbeat" }, 41));
     expect(() =>
@@ -379,14 +447,25 @@ describe("closed asynchronous presentation dispatcher", () => {
       "applied",
     );
     expect(completed.state()).toBe("closed");
+    expect(completedLifecycle).toHaveBeenCalledExactlyOnceWith({
+      kind: "complete",
+      reason: "stream_completed",
+    });
 
+    const failedLifecycle = vi.fn();
     const failed = new AsyncSubscription(
       authorization(),
       new AsyncDispatcher(port, fakeCapability),
       { now: () => 1_000 },
+      undefined,
+      failedLifecycle,
     );
     expect(failed.receive(encoded({ code: "backpressure", kind: "error" }, 41))).toBe("applied");
     expect(failed.state()).toBe("degraded");
+    expect(failedLifecycle).toHaveBeenCalledExactlyOnceWith({
+      kind: "error",
+      reason: "backpressure",
+    });
   });
 
   it("uses the existing per-island scheduler with one in-flight and one queued refresh", () => {
@@ -421,5 +500,92 @@ describe("closed asynchronous presentation dispatcher", () => {
 
     expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 1, queued: 1 });
     record.dispose();
+  });
+
+  it("coalesces a pending refresh without reporting success before its terminal outcome", () => {
+    const element = { setAttribute: vi.fn() } as unknown as Element;
+    const record = new IslandRecord(
+      element,
+      Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-orders-coalesced",
+        instanceId: "MDEyMzQ1Njc4OTo7PD0-Pw",
+        lazyComplete: false,
+        protocolMinimum: 2,
+        revision: 7n,
+        runtimeContract: 1,
+        slot: "orders-slot",
+        snapshot: Object.freeze({}),
+        snapshotForm: "instance" as const,
+      }),
+    );
+    const first = vi.fn();
+    const second = vi.fn();
+
+    expect(record.enqueueFreshRender("stream", first)).toBe("queued");
+    expect(record.enqueueFreshRender("stream", second)).toBe("coalesced");
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 0, queued: 1 });
+    const queued = record.scheduler.ready()[0];
+    if (queued === undefined) throw new Error("missing coalesced fresh-render ticket");
+    expect(record.scheduler.start(queued)).toBe("accepted");
+    expect(record.scheduler.settleTransport(queued)).toBe("accepted");
+    expect(record.scheduler.beginApplication(queued)).toBe("accepted");
+    expect(record.scheduler.finish(queued, "accepted")).toBe("accepted");
+    expect(first).toHaveBeenCalledExactlyOnceWith("succeeded");
+    expect(second).toHaveBeenCalledExactlyOnceWith("succeeded");
+    record.dispose();
+  });
+
+  it.each(["failed", "canceled", "retired"] as const)(
+    "keeps a stream refresh pending until terminal %s completion and then degrades at the committed high-water mark",
+    (completion) => {
+      const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+      const { port } = fakePort({
+        enqueueFreshRender: (_reason, observer) => {
+          if (observer !== undefined) completions.push(observer);
+          return "queued";
+        },
+      });
+      const subscription = new AsyncSubscription(
+        authorization(),
+        new AsyncDispatcher(port, fakeCapability),
+        { now: () => 1_000 },
+      );
+
+      expect(subscription.receive(encoded({ kind: "refresh", name: "refresh" }, 41))).toBe(
+        "pending",
+      );
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+      expect(subscription.state()).toBe("current");
+      const complete = completions[0];
+      if (complete === undefined) throw new Error("missing stream refresh completion observer");
+      complete(completion);
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+      expect(subscription.state()).toBe("degraded");
+    },
+  );
+
+  it("reports a stream refresh successful only after the scheduler's commit-after-morph terminal outcome", () => {
+    const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+    const { port } = fakePort({
+      enqueueFreshRender: (_reason, observer) => {
+        if (observer !== undefined) completions.push(observer);
+        return "queued";
+      },
+    });
+    const subscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(port, fakeCapability),
+      { now: () => 1_000 },
+    );
+
+    expect(subscription.receive(encoded({ kind: "refresh", name: "refresh" }, 41))).toBe("pending");
+    const complete = completions[0];
+    if (complete === undefined) throw new Error("missing stream refresh completion observer");
+    complete("succeeded");
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+    expect(subscription.state()).toBe("current");
   });
 });

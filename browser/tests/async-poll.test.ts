@@ -13,7 +13,7 @@ import { AsyncDocumentOwner } from "../src/async-updates/feature.js";
 import type { AsyncRandomness, AsyncTimerPort } from "../src/async-updates/types.js";
 import type {
   RuntimeFeatureDirectiveOwnership,
-  RuntimeFeatureIslandPort,
+  AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
 
 class ControlledClock implements AsyncTimerPort {
@@ -574,35 +574,37 @@ describe("fresh-render overlap remains owned by the island scheduler", () => {
     if (first === undefined) throw new Error("missing_refresh_ticket");
     expect(record.scheduler.start(first)).toBe("accepted");
     expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
-    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
+    expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe(
+      "coalesced",
+    );
     expect(record.scheduler.snapshot()).toMatchObject({ inFlight: 1, queued: 1 });
-    expect(completions).toEqual(["canceled"]);
+    expect(completions).toEqual([]);
 
     expect(record.scheduler.settleTransport(first)).toBe("accepted");
     expect(record.scheduler.beginApplication(first)).toBe("accepted");
     expect(record.scheduler.finish(first, "rejected")).toBe("rejected");
-    expect(completions).toEqual(["canceled", "failed"]);
+    expect(completions).toEqual(["failed"]);
     const queued = record.scheduler.ready()[0];
     if (queued === undefined) throw new Error("missing_queued_refresh_ticket");
     expect(record.scheduler.start(queued)).toBe("accepted");
     expect(record.scheduler.settleTransport(queued)).toBe("accepted");
     expect(record.scheduler.beginApplication(queued)).toBe("accepted");
     expect(record.scheduler.finish(queued, "accepted")).toBe("accepted");
-    expect(completions).toEqual(["canceled", "failed", "succeeded"]);
+    expect(completions).toEqual(["failed", "succeeded", "succeeded"]);
 
     expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
     const canceled = record.scheduler.ready()[0];
     if (canceled === undefined) throw new Error("missing_canceled_refresh_ticket");
     expect(record.scheduler.start(canceled)).toBe("accepted");
     expect(record.scheduler.cancel(canceled, { abortTransport: true })).toBe("canceled");
-    expect(completions).toEqual(["canceled", "failed", "succeeded", "canceled"]);
+    expect(completions).toEqual(["failed", "succeeded", "succeeded", "canceled"]);
 
     expect(record.enqueueFreshRender("poll", (result) => completions.push(result))).toBe("queued");
     const retired = record.scheduler.ready()[0];
     if (retired === undefined) throw new Error("missing_retired_refresh_ticket");
     expect(record.scheduler.start(retired)).toBe("accepted");
     record.scheduler.retire();
-    expect(completions).toEqual(["canceled", "failed", "succeeded", "canceled", "retired"]);
+    expect(completions).toEqual(["failed", "succeeded", "succeeded", "canceled", "retired"]);
   });
 });
 
@@ -634,7 +636,7 @@ describe("poll-only feature integration", () => {
       element: root,
     }) satisfies RuntimeFeatureDirectiveOwnership;
     const port = {
-      authorizeRegisteredEvents: vi.fn(),
+      consumeRegisteredEventCapability: vi.fn(),
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: refresh,
@@ -644,10 +646,9 @@ describe("poll-only feature integration", () => {
         slot: "poll-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => [directive],
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
-    } satisfies RuntimeFeatureIslandPort;
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
+    } satisfies AsyncRuntimeIslandPort;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
       {
@@ -712,7 +713,7 @@ describe("poll-only feature integration", () => {
       },
     );
     const controller = owner.connectIsland({
-      authorizeRegisteredEvents: vi.fn(),
+      consumeRegisteredEventCapability: vi.fn(),
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: refresh,
@@ -722,9 +723,8 @@ describe("poll-only feature integration", () => {
         slot: "poll-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => ownerships,
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     });
 
     controller.beforeMorph?.();
@@ -758,7 +758,7 @@ describe("poll-only feature integration", () => {
       },
     );
     const controller = owner.connectIsland({
-      authorizeRegisteredEvents: vi.fn(),
+      consumeRegisteredEventCapability: vi.fn(),
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: refresh,
@@ -768,9 +768,8 @@ describe("poll-only feature integration", () => {
         slot: "poll-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => ownerships,
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     });
 
     controller.beforeMorph?.();
@@ -827,7 +826,7 @@ describe("poll-only feature integration", () => {
       },
     );
     const controller = owner.connectIsland({
-      authorizeRegisteredEvents: vi.fn(),
+      consumeRegisteredEventCapability: vi.fn(),
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: refresh,
@@ -837,9 +836,8 @@ describe("poll-only feature integration", () => {
         slot: "poll-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => ownerships,
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     });
     expect(refresh).toHaveBeenCalledOnce();
 

@@ -19,7 +19,7 @@ import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.j
 import type {
   RuntimeFeatureDirectiveOwnership,
   RuntimeFeatureDocumentContext,
-  RuntimeFeatureIslandPort,
+  AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
 
 function authorization(
@@ -57,7 +57,7 @@ function authorization(
     }),
     heartbeatTimeoutMs: 5_000,
     presentationSignals: Object.freeze([
-      Object.freeze({ name: "completion_percent", schema: "u64" as const }),
+      Object.freeze({ name: "completion_percent", schema: "u64" as const, scope: "root-scope" }),
     ]),
     reconnect: Object.freeze({
       kind: "resume_or_refresh" as const,
@@ -197,8 +197,10 @@ function pollOwnership(
   });
 }
 
-function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]> {
-  return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
+function eventCapability(): ReturnType<AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]> {
+  return Object.freeze({}) as ReturnType<
+    AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]
+  >;
 }
 
 async function flushMicrotasks(turns = 8): Promise<void> {
@@ -244,7 +246,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -254,7 +256,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => immediateHybridOwnership(root),
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -378,7 +379,7 @@ describe("async feature lifecycle", () => {
         },
       );
       const controller = owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: event,
         element: root,
         enqueueFreshRender: refresh,
@@ -388,7 +389,6 @@ describe("async feature lifecycle", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: () => "accepted",
         queryDirectiveOwnership: () => ownerships,
         writePresentationSignal: (_element, _name, value) => value,
       });
@@ -582,7 +582,7 @@ describe("async feature lifecycle", () => {
         },
       );
       const controller = owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: () => "dispatched",
         element: root,
         enqueueFreshRender: refresh,
@@ -592,7 +592,6 @@ describe("async feature lifecycle", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: () => "accepted",
         queryDirectiveOwnership: () => ownerships,
         writePresentationSignal: (_element, _name, value) => value,
       });
@@ -728,7 +727,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -738,7 +737,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -794,7 +792,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -804,7 +802,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [pushOnlyOwnership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -850,7 +847,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -860,7 +857,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -911,7 +907,7 @@ describe("async feature lifecycle", () => {
       },
     );
     const controller = owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -921,7 +917,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => ownerships,
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1010,7 +1005,7 @@ describe("async feature lifecycle", () => {
     );
     try {
       owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: () => "dispatched",
         element: root,
         enqueueFreshRender: () => "queued",
@@ -1020,7 +1015,6 @@ describe("async feature lifecycle", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: () => "accepted",
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: (_element, _name, value) => value,
       });
@@ -1069,7 +1063,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -1079,7 +1073,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1110,9 +1103,9 @@ describe("async feature lifecycle", () => {
     const root = Object.freeze({}) as Element;
     const refresh = vi.fn(() => "queued" as const);
     const event = vi.fn(() => "dispatched" as const);
-    const signal = vi.fn((_element: Element, _name: string, value: JsonValue) => value);
-    const port: RuntimeFeatureIslandPort = {
-      authorizeRegisteredEvents: eventCapability,
+    const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
+    const port: AsyncRuntimeIslandPort = {
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: event,
       element: root,
       enqueueFreshRender: refresh,
@@ -1122,7 +1115,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: signal,
     };
@@ -1158,7 +1150,12 @@ describe("async feature lifecycle", () => {
     sources[0]?.open();
     sources[0]?.emit(envelope(1n, { kind: "refresh", name: "refresh" }));
     sources[0]?.emit(
-      envelope(2n, { kind: "presentation_signal", name: "completion_percent", value: 75 }),
+      envelope(2n, {
+        kind: "presentation_signal",
+        name: "completion_percent",
+        scope: "root-scope",
+        value: 75,
+      }),
     );
     sources[0]?.emit(
       envelope(3n, {
@@ -1171,7 +1168,7 @@ describe("async feature lifecycle", () => {
     );
 
     expect(refresh).toHaveBeenCalledOnce();
-    expect(signal).toHaveBeenCalledWith(root, "completion_percent", 75);
+    expect(signal).toHaveBeenCalledWith("root-scope", "completion_percent", 75);
     expect(event).toHaveBeenCalledWith(expect.any(Object), {
       event: "orders.updated",
       payload: { order: 42 },
@@ -1208,7 +1205,7 @@ describe("async feature lifecycle", () => {
     const root = Object.freeze({}) as Element;
     const source = vi.fn();
     const port = {
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -1218,10 +1215,9 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => [ownership(root)],
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
-    } satisfies RuntimeFeatureIslandPort;
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
+    } satisfies AsyncRuntimeIslandPort;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
       {
@@ -1259,12 +1255,14 @@ describe("async feature lifecycle", () => {
     });
     let calls = 0;
     const capabilities: object[] = [];
-    const authorizeRegisteredEvents = vi.fn(() => {
+    const consumeRegisteredEventCapability = vi.fn<
+      AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]
+    >(() => {
       const capability = Object.freeze({});
       capabilities.push(capability);
-      return capability as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
+      return capability as ReturnType<AsyncRuntimeIslandPort["consumeRegisteredEventCapability"]>;
     });
-    const dispatch = vi.fn<RuntimeFeatureIslandPort["dispatchRegisteredEvent"]>(
+    const dispatch = vi.fn<AsyncRuntimeIslandPort["dispatchRegisteredEvent"]>(
       () => "dispatched" as const,
     );
     const root = Object.freeze({}) as Element;
@@ -1295,7 +1293,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents,
+      consumeRegisteredEventCapability,
       dispatchRegisteredEvent: dispatch,
       element: root,
       enqueueFreshRender: () => "queued",
@@ -1305,7 +1303,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1325,12 +1322,8 @@ describe("async feature lifecycle", () => {
       }),
     );
 
-    expect(authorizeRegisteredEvents).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        descriptorBinding: "binding-rotated",
-        events: [expect.objectContaining({ maximumFanout: 1, version: 2 })],
-      }),
-    );
+    expect(consumeRegisteredEventCapability).toHaveBeenCalledTimes(2);
+    expect(Object.keys(consumeRegisteredEventCapability.mock.calls[1]?.[0] ?? {})).toEqual([]);
     expect(dispatch.mock.calls[0]?.[0]).toBe(capabilities[1]);
     expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(777);
     owner.dispose();
@@ -1375,7 +1368,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: () => "queued",
@@ -1385,7 +1378,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1442,7 +1434,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -1452,7 +1444,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1507,7 +1498,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: () => "queued",
@@ -1517,7 +1508,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1587,7 +1577,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -1597,7 +1587,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1696,7 +1685,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: refresh,
@@ -1706,7 +1695,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1780,7 +1768,7 @@ describe("async feature lifecycle", () => {
         },
       );
       owner.connectIsland({
-        authorizeRegisteredEvents: eventCapability,
+        consumeRegisteredEventCapability: eventCapability,
         dispatchRegisteredEvent: () => "dispatched",
         element: root,
         enqueueFreshRender: () => "queued",
@@ -1790,7 +1778,6 @@ describe("async feature lifecycle", () => {
           slot: "orders-slot",
         }),
         onDispose: vi.fn(),
-        proposeUploadHandle: () => "accepted",
         queryDirectiveOwnership: () => [ownership(root)],
         writePresentationSignal: (_element, _name, value) => value,
       });
@@ -1855,7 +1842,7 @@ describe("async feature lifecycle", () => {
       },
     );
     owner.connectIsland({
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: () => "dispatched",
       element: root,
       enqueueFreshRender: () => "queued",
@@ -1865,7 +1852,6 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => [ownership(root)],
       writePresentationSignal: (_element, _name, value) => value,
     });
@@ -1923,7 +1909,7 @@ describe("async feature lifecycle", () => {
     };
     const root = Object.freeze({}) as Element;
     const port = {
-      authorizeRegisteredEvents: eventCapability,
+      consumeRegisteredEventCapability: eventCapability,
       dispatchRegisteredEvent: vi.fn(() => "dispatched" as const),
       element: root,
       enqueueFreshRender: vi.fn(() => "queued" as const),
@@ -1933,10 +1919,9 @@ describe("async feature lifecycle", () => {
         slot: "orders-slot",
       }),
       onDispose: vi.fn(),
-      proposeUploadHandle: vi.fn(() => "accepted" as const),
       queryDirectiveOwnership: () => [ownership(root)],
-      writePresentationSignal: vi.fn((_element: Element, _name: string, value: JsonValue) => value),
-    } satisfies RuntimeFeatureIslandPort;
+      writePresentationSignal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
+    } satisfies AsyncRuntimeIslandPort;
     const owner = new AsyncDocumentOwner(
       { diagnose: vi.fn(), onDispose: vi.fn() },
       {

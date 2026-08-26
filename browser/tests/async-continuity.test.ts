@@ -48,7 +48,7 @@ function authorized(baseline: StreamPosition = position(4n, 40n)): AuthorizedLog
     }),
     heartbeatTimeoutMs: 30_000,
     presentationSignals: Object.freeze([
-      Object.freeze({ name: "completion_percent", schema: "u64" as const }),
+      Object.freeze({ name: "completion_percent", schema: "u64" as const, scope: "root-scope" }),
     ]),
     reconnect: Object.freeze({
       kind: "resume_or_refresh" as const,
@@ -78,26 +78,29 @@ function fixture() {
     return true;
   });
   const dispatch: AsyncEnvelopeDispatcher = {
-    dispatch: vi.fn(({ payload }: ValidatedAsyncEnvelope) => {
-      switch (payload.kind) {
-        case "browser_event":
-          browserEvent(payload);
-          return "dispatched";
-        case "presentation_signal":
-          applied.push(payload);
-          return "signal_updated";
-        case "refresh":
-          applied.push(payload);
-          return "queued";
-        case "heartbeat":
-          return "observed";
-        case "complete":
-          return "closed";
-        case "error":
-          return "degraded";
-      }
-      throw new Error("unreachable_async_payload");
-    }),
+    dispatch: vi.fn<AsyncEnvelopeDispatcher["dispatch"]>(
+      ({ payload }: ValidatedAsyncEnvelope, completion) => {
+        switch (payload.kind) {
+          case "browser_event":
+            browserEvent(payload);
+            return "dispatched";
+          case "presentation_signal":
+            applied.push(payload);
+            return "signal_updated";
+          case "refresh":
+            applied.push(payload);
+            completion?.("succeeded");
+            return "queued";
+          case "heartbeat":
+            return "observed";
+          case "complete":
+            return `closed:${payload.reason}`;
+          case "error":
+            return `degraded:${payload.code}`;
+        }
+        throw new Error("unreachable_async_payload");
+      },
+    ),
   };
   const subscription = new AsyncSubscription(authorized(), dispatch, { now: () => 1_000 });
   return { applied, browserEvent, dispatch, subscription };
@@ -113,14 +116,19 @@ describe("browser asynchronous subscription continuity", () => {
       subscription.receive(
         envelope(position(4n, 41n), Object.freeze({ kind: "refresh", name: "refresh" })),
       ),
-    ).toBe("applied");
+    ).toBe("pending");
     expect(subscription.state()).toBe("current");
 
     expect(
       subscription.receive(
         envelope(
           position(4n, 43n),
-          Object.freeze({ kind: "presentation_signal", name: "completion_percent", value: 50 }),
+          Object.freeze({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: 50,
+          }),
         ),
       ),
     ).toBe("gap");
@@ -132,7 +140,12 @@ describe("browser asynchronous subscription continuity", () => {
     const { applied, subscription } = fixture();
     const first = envelope(
       position(4n, 41n),
-      Object.freeze({ kind: "presentation_signal", name: "completion_percent", value: 50 }),
+      Object.freeze({
+        kind: "presentation_signal",
+        name: "completion_percent",
+        scope: "root-scope",
+        value: 50,
+      }),
     );
 
     expect(subscription.receive(first)).toBe("applied");
@@ -171,7 +184,7 @@ describe("browser asynchronous subscription continuity", () => {
     const membership = {
       ...authorized(),
       presentationSignals: Object.freeze([
-        Object.freeze({ name: "message", schema: "string" as const }),
+        Object.freeze({ name: "message", schema: "string" as const, scope: "root-scope" }),
       ]),
     };
     const subscription = new AsyncSubscription(
@@ -181,7 +194,12 @@ describe("browser asynchronous subscription continuity", () => {
     );
     const transcript = Array.from({ length: 9 }, (_, index) =>
       canonicalize({
-        payload: { kind: "presentation_signal", name: "message", value: "x".repeat(30_000) },
+        payload: {
+          kind: "presentation_signal",
+          name: "message",
+          scope: "root-scope",
+          value: "x".repeat(30_000),
+        },
         position: { epoch: "4", sequence: String(41 + index) },
         protocol_version: 1,
         stream: "orders",
@@ -219,7 +237,12 @@ describe("browser asynchronous subscription continuity", () => {
       subscription.receive(
         envelope(
           position(4n, 42n),
-          Object.freeze({ kind: "presentation_signal", name: "completion_percent", value: 51 }),
+          Object.freeze({
+            kind: "presentation_signal",
+            name: "completion_percent",
+            scope: "root-scope",
+            value: 51,
+          }),
         ),
       ),
     ).toBe("continuity_required");

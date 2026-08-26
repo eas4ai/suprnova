@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AsyncRegisteredEventContract } from "../src/async-updates/types.js";
 import {
+  type GuardedRegisteredEventTarget,
   RegisteredEventAuthority,
   type RegisteredEventTargetResolver,
 } from "../src/islands/registered-events.js";
@@ -27,11 +28,18 @@ function registration(events: readonly AsyncRegisteredEventContract[]) {
   return Object.freeze({ descriptorBinding: "signed-binding-v1", events });
 }
 
+function guarded(target: EventTarget, current = () => true): GuardedRegisteredEventTarget {
+  return Object.freeze({
+    current,
+    dispatch: (event: Event) => target.dispatchEvent(event),
+  });
+}
+
 function resolver(target: EventTarget, current = () => true): RegisteredEventTargetResolver {
   return {
     current,
     event: (type) => ({ type }) as Event,
-    targets: () => [target],
+    targets: () => [guarded(target)],
   };
 }
 
@@ -153,13 +161,95 @@ describe("core registered-event authority", () => {
     ).toBe("dispatched");
   });
 
+  it("rejects accessors, inherited fields, sparse or oversized arrays, and hostile descriptor traps", () => {
+    const authority = new RegisteredEventAuthority();
+    const target = { dispatchEvent: vi.fn(() => true) } as unknown as EventTarget;
+    const bindingGetter = vi.fn(() => "signed-binding-v1");
+    const accessorRegistration = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(accessorRegistration, "descriptorBinding", {
+      enumerable: true,
+      get: bindingGetter,
+    });
+    Object.defineProperty(accessorRegistration, "events", {
+      enumerable: true,
+      value: [contract()],
+    });
+
+    expect(() => authority.replace({}, accessorRegistration as never, resolver(target))).toThrow(
+      "registered_event_authority_invalid",
+    );
+    expect(bindingGetter).not.toHaveBeenCalled();
+
+    const inherited = Object.create({ descriptorBinding: "signed-binding-v1" }) as {
+      descriptorBinding: string;
+      events: readonly AsyncRegisteredEventContract[];
+    };
+    inherited.events = [contract()];
+    expect(() => authority.replace({}, inherited, resolver(target))).toThrow(
+      "registered_event_authority_invalid",
+    );
+
+    const sparse = Array<AsyncRegisteredEventContract>(2);
+    sparse[0] = contract();
+    expect(() => authority.replace({}, registration(sparse), resolver(target))).toThrow(
+      "registered_event_authority_invalid",
+    );
+    expect(() =>
+      authority.replace(
+        {},
+        registration(Array.from({ length: 65 }, () => contract())),
+        resolver(target),
+      ),
+    ).toThrow("registered_event_authority_invalid");
+
+    const descriptorTrap = vi.fn(() => {
+      throw new Error("secret-proxy-trap");
+    });
+    const hostile = new Proxy(registration([contract()]), {
+      getOwnPropertyDescriptor: descriptorTrap,
+    });
+    expect(() => authority.replace({}, hostile, resolver(target))).toThrow(
+      "registered_event_authority_invalid",
+    );
+    expect(descriptorTrap).toHaveBeenCalledOnce();
+  });
+
+  it("reads each own data property once and stores only the immutable snapshot", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    const dispatchEvent = vi.fn(() => true);
+    const target = { dispatchEvent } as unknown as EventTarget;
+    const mutableTargets = ["self"];
+    const mutableContract = { ...contract(), targets: mutableTargets };
+    const reads = new Map<PropertyKey, number>();
+    const observed = new Proxy(mutableContract, {
+      getOwnPropertyDescriptor(object, property) {
+        reads.set(property, (reads.get(property) ?? 0) + 1);
+        return Reflect.getOwnPropertyDescriptor(object, property);
+      },
+    });
+    const capability = authority.replace(owner, registration([observed]), resolver(target));
+
+    mutableContract.version = 2;
+    mutableTargets[0] = "document";
+    expect(Math.max(...reads.values())).toBe(1);
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: {},
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("dispatched");
+  });
+
   it("enforces resolved fanout without trusting a caller-supplied maximum", () => {
     const authority = new RegisteredEventAuthority();
     const owner = {};
     const target = { dispatchEvent: vi.fn(() => true) } as unknown as EventTarget;
     const capability = authority.replace(owner, registration([contract()]), {
       ...resolver(target),
-      targets: () => [target, target],
+      targets: () => [guarded(target), guarded(target)],
     });
 
     expect(
@@ -182,7 +272,7 @@ describe("core registered-event authority", () => {
       ...resolver(target, () => active),
       targets: () => {
         active = false;
-        return [target];
+        return [guarded(target)];
       },
     });
 
@@ -218,7 +308,7 @@ describe("core registered-event authority", () => {
     const second = { dispatchEvent: secondDispatch } as unknown as EventTarget;
     const capability = authority.replace(owner, registration([contract({ maximumFanout: 2 })]), {
       ...resolver(first),
-      targets: () => [first, second],
+      targets: () => [guarded(first), guarded(second)],
     });
 
     expect(
@@ -228,7 +318,38 @@ describe("core registered-event authority", () => {
         schemaVersion: 1,
         target: "self",
       }),
-    ).toBe("rejected");
+    ).toBe("partially_dispatched");
+    expect(secondDispatch).not.toHaveBeenCalled();
+  });
+
+  it("revalidates every guarded target and reports partial fanout when a prior listener retires a later target", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let secondCurrent = true;
+    const firstDispatch = vi.fn(() => {
+      secondCurrent = false;
+      return true;
+    });
+    const secondDispatch = vi.fn(() => true);
+    const capability = authority.replace(owner, registration([contract({ maximumFanout: 2 })]), {
+      current: () => true,
+      event: (type) => ({ type }) as Event,
+      targets: () =>
+        [
+          Object.freeze({ current: () => true, dispatch: firstDispatch }),
+          Object.freeze({ current: () => secondCurrent, dispatch: secondDispatch }),
+        ] as never,
+    });
+
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: {},
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("partially_dispatched");
+    expect(firstDispatch).toHaveBeenCalledOnce();
     expect(secondDispatch).not.toHaveBeenCalled();
   });
 

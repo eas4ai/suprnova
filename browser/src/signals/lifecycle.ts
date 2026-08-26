@@ -152,6 +152,36 @@ export class SignalRuntime {
     return scope.get(name);
   }
 
+  setDeclaredFromAsync(
+    record: IslandRecord,
+    scopeIdentity: string,
+    name: string,
+    input: JsonValue,
+  ): JsonValue {
+    const state = this.#records.get(record);
+    if (state === undefined || !SAFE_SCOPE_KEY.test(scopeIdentity)) {
+      throw new Error("signal_async_scope_invalid");
+    }
+    const entry = [...state.scopes].find(([, scope]) => scope.identity === scopeIdentity);
+    if (
+      entry === undefined ||
+      !record.active() ||
+      this.#ownership.ownerForNode(entry[0]) !== record ||
+      !containedBy(record.element, entry[0]) ||
+      this.#scopeByElement.get(entry[0]) !== entry[1] ||
+      !(
+        input === null ||
+        typeof input === "boolean" ||
+        typeof input === "string" ||
+        (typeof input === "number" && Number.isSafeInteger(input))
+      )
+    ) {
+      throw new Error("signal_async_scope_invalid");
+    }
+    entry[1].setDeclared(name, input);
+    return entry[1].get(name);
+  }
+
   dispose(): void {
     this.#removeClickHandler();
     for (const record of [...this.#records.keys()]) this.#retireRecord(record);

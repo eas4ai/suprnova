@@ -11,7 +11,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::canonical::{
     CanonicalErrorKind, CanonicalValue, MAX_SAFE_INTEGER, parse_canonical_value, to_canonical_bytes,
 };
-use crate::identity::{BrowserOperationName, ContentDigest, IslandSlot, UnixMillis};
+use crate::identity::{
+    BrowserOperationName, ContentDigest, IslandSlot, SignalScopeIdentity, UnixMillis,
+};
 use crate::limits::{InputLimits, LimitConfigurationError};
 
 use super::{
@@ -232,6 +234,7 @@ impl fmt::Debug for SubscriptionId {
 /// Registered schema for one presentation-only local-signal update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentationSignalContract {
+    scope: SignalScopeIdentity,
     name: BrowserOperationName,
     schema: BrowserPayloadSchema,
 }
@@ -239,8 +242,22 @@ pub struct PresentationSignalContract {
 impl PresentationSignalContract {
     /// Creates one trusted signal contract from generated metadata.
     #[must_use]
-    pub const fn new(name: BrowserOperationName, schema: BrowserPayloadSchema) -> Self {
-        Self { name, schema }
+    pub const fn new(
+        scope: SignalScopeIdentity,
+        name: BrowserOperationName,
+        schema: BrowserPayloadSchema,
+    ) -> Self {
+        Self {
+            scope,
+            name,
+            schema,
+        }
+    }
+
+    /// Returns the stable declared signal-scope identity.
+    #[must_use]
+    pub const fn scope(&self) -> &SignalScopeIdentity {
+        &self.scope
     }
 
     /// Returns the registered signal identity.
@@ -268,10 +285,14 @@ impl BoundedPresentationSignalContracts {
                 AsyncEnvelopeErrorKind::UnregisteredPayload,
             ));
         }
-        signals.sort_by(|left, right| left.name().cmp(right.name()));
+        signals.sort_by(|left, right| {
+            left.scope()
+                .cmp(right.scope())
+                .then_with(|| left.name().cmp(right.name()))
+        });
         if signals
             .windows(2)
-            .any(|pair| pair[0].name() == pair[1].name())
+            .any(|pair| pair[0].scope() == pair[1].scope() && pair[0].name() == pair[1].name())
         {
             return Err(AsyncEnvelopeError::new(
                 AsyncEnvelopeErrorKind::UnregisteredPayload,
@@ -280,9 +301,18 @@ impl BoundedPresentationSignalContracts {
         Ok(Self(signals))
     }
 
-    fn find(&self, name: &BrowserOperationName) -> Option<&PresentationSignalContract> {
+    fn find(
+        &self,
+        scope: &SignalScopeIdentity,
+        name: &BrowserOperationName,
+    ) -> Option<&PresentationSignalContract> {
         self.0
-            .binary_search_by(|candidate| candidate.name().cmp(name))
+            .binary_search_by(|candidate| {
+                candidate
+                    .scope()
+                    .cmp(scope)
+                    .then_with(|| candidate.name().cmp(name))
+            })
             .ok()
             .map(|index| &self.0[index])
     }
@@ -1179,6 +1209,7 @@ impl RegisteredBrowserEvent {
 /// Declared presentation-only local-signal update.
 #[derive(Clone, PartialEq)]
 pub struct RegisteredPresentationSignal {
+    scope: SignalScopeIdentity,
     name: BrowserOperationName,
     value: CanonicalValue,
     schema: BrowserPayloadSchema,
@@ -1188,6 +1219,7 @@ impl fmt::Debug for RegisteredPresentationSignal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RegisteredPresentationSignal")
+            .field("scope", &self.scope)
             .field("name", &self.name)
             .field("value", &"<redacted>")
             .finish()
@@ -1198,11 +1230,13 @@ impl RegisteredPresentationSignal {
     /// Creates a server-authored signal only when it matches current registration.
     pub fn new(
         context: &AsyncEnvelopeContext,
+        scope: SignalScopeIdentity,
         name: BrowserOperationName,
         value: CanonicalValue,
     ) -> Result<Self, AsyncEnvelopeError> {
-        let schema = registered_presentation_signal_contract(context, &name)?.schema();
+        let schema = registered_presentation_signal_contract(context, &scope, &name)?.schema();
         let signal = Self {
+            scope,
             name,
             value,
             schema,
@@ -1217,6 +1251,12 @@ impl RegisteredPresentationSignal {
     #[must_use]
     pub const fn name(&self) -> &BrowserOperationName {
         &self.name
+    }
+
+    /// Returns the exact declared local-signal scope.
+    #[must_use]
+    pub const fn scope(&self) -> &SignalScopeIdentity {
+        &self.scope
     }
 
     /// Returns the schema-validated presentation value.
@@ -1822,7 +1862,7 @@ fn validate_registered_signal(
     context: &AsyncEnvelopeContext,
     signal: &RegisteredPresentationSignal,
 ) -> Result<(), AsyncEnvelopeError> {
-    let contract = registered_presentation_signal_contract(context, signal.name())?;
+    let contract = registered_presentation_signal_contract(context, signal.scope(), signal.name())?;
     if signal.schema() != contract.schema() || !schema_matches(contract.schema(), signal.value()) {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
@@ -1833,11 +1873,12 @@ fn validate_registered_signal(
 
 fn registered_presentation_signal_contract<'a>(
     context: &'a AsyncEnvelopeContext,
+    scope: &SignalScopeIdentity,
     name: &BrowserOperationName,
 ) -> Result<&'a PresentationSignalContract, AsyncEnvelopeError> {
     context
         .presentation_signals
-        .find(name)
+        .find(scope, name)
         .ok_or_else(|| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))
 }
 
@@ -1884,19 +1925,22 @@ fn parse_presentation_signal(
 ) -> Result<RegisteredPresentationSignal, AsyncEnvelopeError> {
     require_exact_keys(
         &fields,
-        &["kind", "name", "value"],
+        &["kind", "name", "scope", "value"],
         AsyncEnvelopeErrorKind::InvalidPayload,
     )?;
     let name = BrowserOperationName::parse(&string(take(&mut fields, "name")?)?)
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
+    let scope = SignalScopeIdentity::parse(&string(take(&mut fields, "scope")?)?)
+        .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
     let value = take(&mut fields, "value")?;
-    let contract = registered_presentation_signal_contract(context, &name)?;
+    let contract = registered_presentation_signal_contract(context, &scope, &name)?;
     if !schema_matches(contract.schema(), &value) {
         return Err(AsyncEnvelopeError::new(
             AsyncEnvelopeErrorKind::UnregisteredPayload,
         ));
     }
     Ok(RegisteredPresentationSignal {
+        scope,
         name,
         value,
         schema: contract.schema(),
@@ -1978,6 +2022,10 @@ fn payload_value(payload: &AsyncPayload) -> Result<CanonicalValue, AsyncEnvelope
             (
                 "name",
                 CanonicalValue::String(signal.name.as_str().to_owned()),
+            ),
+            (
+                "scope",
+                CanonicalValue::String(signal.scope.as_str().to_owned()),
             ),
             ("value", signal.value.clone()),
         ]),

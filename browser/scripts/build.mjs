@@ -193,6 +193,7 @@ export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retir
 export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
 type RegisteredBrowserEventDisposition =
   | "dispatched"
+  | "partially_dispatched"
   | "no_target"
   | "fanout_exceeded"
   | "rejected"
@@ -264,13 +265,22 @@ export interface RuntimeFeatureDocumentContext {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
   onDispose(dispose: () => void): void;
 }
-export interface RuntimeFeatureIslandPort {
+export interface RuntimeFeatureIslandPortBase {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
-  authorizeRegisteredEvents(registration: Readonly<{
-    descriptorBinding: string;
-    events: readonly RegisteredBrowserEventContract[];
-  }>): RegisteredBrowserEventCapability;
+  onDispose(dispose: () => void): void;
+  queryDirectiveOwnership(
+    parser: RuntimeFeatureDirectiveParser,
+  ): readonly RuntimeFeatureDirectiveOwnership[];
+}
+const VALIDATED_ASYNC_DESCRIPTOR_CAPABILITY: unique symbol;
+interface ValidatedAsyncDescriptorCapability {
+  readonly [VALIDATED_ASYNC_DESCRIPTOR_CAPABILITY]: never;
+}
+export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
+  consumeRegisteredEventCapability(
+    descriptor: ValidatedAsyncDescriptorCapability,
+  ): RegisteredBrowserEventCapability;
   dispatchRegisteredEvent(
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
@@ -279,16 +289,15 @@ export interface RuntimeFeatureIslandPort {
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,
   ): FreshRenderDisposition;
-  onDispose(dispose: () => void): void;
+  writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
+}
+export interface UploadsRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
   proposeUploadHandle(
     field: string,
     proposal: UploadHandleProposal,
   ): UploadHandleProposalDisposition;
-  queryDirectiveOwnership(
-    parser: RuntimeFeatureDirectiveParser,
-  ): readonly RuntimeFeatureDirectiveOwnership[];
-  writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
 }
+export type RuntimeFeatureIslandPort = AsyncRuntimeIslandPort | UploadsRuntimeIslandPort;
 export interface FeatureIslandController {
   abortMorph?(): void;
   afterMorph?(): void;
@@ -297,8 +306,10 @@ export interface FeatureIslandController {
   resume?(): void;
   suspend?(): void;
 }
-export interface FeatureDocumentController {
-  connectIsland(port: RuntimeFeatureIslandPort): FeatureIslandController | undefined;
+export interface FeatureDocumentController<
+  Port extends RuntimeFeatureIslandPort = RuntimeFeatureIslandPort,
+> {
+  connectIsland(port: Port): FeatureIslandController | undefined;
   dispose(): void;
   resume?(): void;
   suspend?(): void;
@@ -651,6 +662,7 @@ export interface AuthorizedLogicalSubscription {
   readonly presentationSignals: readonly Readonly<{
     name: string;
     schema: "json" | "null" | "boolean" | "i64" | "u64" | "f64" | "string";
+    scope: string;
   }>[];
   readonly reconnect: Readonly<{
     kind: "refresh_on_reconnect" | "resume_or_refresh";

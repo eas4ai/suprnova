@@ -186,11 +186,16 @@ Acceptance criteria:
   registered dispatcher. Denial, cancellation, dispatch failure, or unresolved
   drop cannot be reported as successful delivery.
 - The browser async artifact accepts only membership-decoded envelopes through
-  one exhaustive presentation dispatcher over its core-owned island feature
-  port. It has no action, effect, call, HTML, snapshot, revision, component-state,
-  or generic write seam. A registered-event capability is bound to the exact
-  island owner, and core rechecks that owner and the current capability after
-  target resolution immediately before each bounded DOM dispatch.
+  one exhaustive presentation dispatcher over a slot-specific core-owned async
+  island port. That runtime object omits upload, model, component-state, generic
+  registration, action, effect, call, HTML, snapshot, revision, and generic-write
+  authority. Core snapshots one bounded current descriptor registration from own
+  data properties before validation, mints the opaque capability, and rechecks the
+  exact island owner, current capability, and each guarded target's current
+  owner/scope immediately before every bounded DOM dispatch. Presentation-signal
+  authority binds the signed stable signal-scope identity, signal name, and
+  compatible type; no selector, raw DOM target, nearest-scope fallback, or island-
+  root default crosses the optional-feature boundary.
 - Metrics use bounded labels and do not create attacker-controlled cardinality.
 - Upload cleanup metrics are limited to closed age, retained-volume, outcome,
   retry, and orphan buckets. They never carry upload handles, lease identities,

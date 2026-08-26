@@ -486,9 +486,17 @@ _Avoid_: Live protocol v3, streamed DOM patch, event bus message, arbitrary push
 The exhaustive browser router that consumes only a membership-validated
 asynchronous event envelope. Its productive branches can enqueue the existing
 fresh-render intent, consume an exact current registered-event capability, or
-write a declared presentation signal; it owns no action, effect, call, HTML,
-snapshot, revision, component-state, or generic write path.
+write a declared presentation signal through a slot-specific frozen async port;
+it owns no upload, model, state, action, effect, call, HTML, snapshot, revision,
+component-state, generic registration, or generic write path.
 _Avoid_: action dispatcher, event bus, streamed DOM patch, feature RPC
+
+**Async signal scope**:
+The signed stable keyed identity of the exact current owned `live:signal` scope
+that declares a presentation signal. Async delivery binds this scope together
+with the registered signal name and compatible type; it is never a selector, a
+raw DOM handle, a nearest-scope search, or an island-root default.
+_Avoid_: signal selector, async DOM target, nearest signal scope
 
 **Sequence authority**:
 The per-logical-subscription state machine initialized only from the signed

@@ -1,4 +1,5 @@
 import type { JsonValue } from "../canonical.js";
+import type { AuthorizedLogicalSubscription } from "../async-updates/types.js";
 import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
@@ -19,7 +20,6 @@ import {
   type RegisteredBrowserEventCapability,
   type RegisteredBrowserEventDispatch,
   type RegisteredBrowserEventDisposition,
-  type RegisteredBrowserEventRegistration,
   type RuntimeFeatureDiagnosticDetail,
   type RuntimeFeatureDriver,
   type RuntimeFeatureDriverDocumentPort,
@@ -60,11 +60,31 @@ export interface RuntimeFeatureDocumentContext {
   onDispose(dispose: () => void): void;
 }
 
-export interface RuntimeFeatureIslandPort {
+export interface RuntimeFeatureIslandPortBase {
   readonly element: Element;
   readonly identity: IslandExtensionIdentity;
-  authorizeRegisteredEvents(
-    registration: RegisteredBrowserEventRegistration,
+  onDispose(dispose: () => void): void;
+  queryDirectiveOwnership(
+    parser: RuntimeFeatureDirectiveParser,
+  ): readonly RuntimeFeatureDirectiveOwnership[];
+}
+
+declare const VALIDATED_ASYNC_DESCRIPTOR_CAPABILITY: unique symbol;
+
+export interface ValidatedAsyncDescriptorCapability {
+  readonly [VALIDATED_ASYNC_DESCRIPTOR_CAPABILITY]: never;
+}
+
+interface ValidatedAsyncDescriptorRecord {
+  readonly authorization: AuthorizedLogicalSubscription;
+  readonly owner: AsyncRuntimeIslandPort;
+}
+
+const VALIDATED_ASYNC_DESCRIPTORS = new WeakMap<object, ValidatedAsyncDescriptorRecord>();
+
+export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
+  consumeRegisteredEventCapability(
+    descriptor: ValidatedAsyncDescriptorCapability,
   ): RegisteredBrowserEventCapability;
   dispatchRegisteredEvent(
     capability: RegisteredBrowserEventCapability,
@@ -74,15 +94,39 @@ export interface RuntimeFeatureIslandPort {
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,
   ): FreshRenderDisposition;
-  onDispose(dispose: () => void): void;
+  writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
+}
+
+export interface UploadsRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
   proposeUploadHandle(
     field: string,
     proposal: UploadHandleProposal,
   ): UploadHandleProposalDisposition;
-  queryDirectiveOwnership(
-    parser: RuntimeFeatureDirectiveParser,
-  ): readonly RuntimeFeatureDirectiveOwnership[];
-  writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
+}
+
+export type RuntimeFeatureIslandPort = AsyncRuntimeIslandPort | UploadsRuntimeIslandPort;
+
+/** Internal bridge from the checked async authority path to the core-owned event registry. */
+export function sealValidatedAsyncDescriptor(
+  owner: AsyncRuntimeIslandPort,
+  authorization: AuthorizedLogicalSubscription,
+): ValidatedAsyncDescriptorCapability {
+  const capability = Object.freeze({}) as ValidatedAsyncDescriptorCapability;
+  VALIDATED_ASYNC_DESCRIPTORS.set(capability, { authorization, owner });
+  return capability;
+}
+
+function consumeValidatedAsyncDescriptor(
+  owner: AsyncRuntimeIslandPort,
+  capability: ValidatedAsyncDescriptorCapability,
+): AuthorizedLogicalSubscription {
+  const token = capability as object;
+  const record = VALIDATED_ASYNC_DESCRIPTORS.get(token);
+  if (record?.owner !== owner) {
+    throw new Error("async_descriptor_capability_invalid");
+  }
+  VALIDATED_ASYNC_DESCRIPTORS.delete(token);
+  return record.authorization;
 }
 
 export interface FeatureIslandController {
@@ -94,16 +138,23 @@ export interface FeatureIslandController {
   suspend?(): void;
 }
 
-export interface FeatureDocumentController {
-  connectIsland(port: RuntimeFeatureIslandPort): FeatureIslandController | undefined;
+export interface FeatureDocumentController<
+  Port extends RuntimeFeatureIslandPort = RuntimeFeatureIslandPort,
+> {
+  connectIsland(port: Port): FeatureIslandController | undefined;
   dispose(): void;
   resume?(): void;
   suspend?(): void;
 }
 
-export interface RuntimeFeatureDefinition {
-  connectDocument(context: RuntimeFeatureDocumentContext): FeatureDocumentController;
+export interface RuntimeFeatureDefinition<
+  Port extends RuntimeFeatureIslandPort = RuntimeFeatureIslandPort,
+> {
+  connectDocument(context: RuntimeFeatureDocumentContext): FeatureDocumentController<Port>;
 }
+
+export type AsyncRuntimeFeatureDefinition = RuntimeFeatureDefinition<AsyncRuntimeIslandPort>;
+export type UploadsRuntimeFeatureDefinition = RuntimeFeatureDefinition<UploadsRuntimeIslandPort>;
 
 type RuntimeFeatureDriveValue =
   RuntimeFeatureDocumentContext | RuntimeFeatureDriverIslandPort | Element | null;
@@ -441,27 +492,12 @@ function defineFeature(
       let controller: NormalizedIslandController | null = null;
       const pending: IslandOwnership = [null, disposers];
       islands.set(port.element, pending);
-      const featurePort: RuntimeFeatureIslandPort = Object.freeze({
-        authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) =>
-          port.authorizeRegisteredEvents(registration),
-        dispatchRegisteredEvent: (
-          capability: RegisteredBrowserEventCapability,
-          event: RegisteredBrowserEventDispatch,
-        ) => port.dispatchRegisteredEvent(capability, event),
+      const sharedPort = {
         element: port.element,
-        enqueueFreshRender: (
-          reason: FreshRenderReason,
-          completion?: FreshRenderCompletionObserver,
-        ) =>
-          completion === undefined
-            ? port.enqueueFreshRender(reason)
-            : port.enqueueFreshRender(reason, completion),
         identity: port.identity,
         onDispose: (dispose: VoidFunction) => {
           own(disposers, dispose);
         },
-        proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
-          port.proposeUploadHandle(field, proposal),
         queryDirectiveOwnership: (parser: RuntimeFeatureDirectiveParser) =>
           queryFeatureDirectiveOwnership(
             port.element,
@@ -471,9 +507,44 @@ function defineFeature(
               activeDocumentContext.diagnose(detail);
             },
           ),
-        writePresentationSignal: (element: Element, name: string, signalValue: JsonValue) =>
-          port.writePresentationSignal(element, name, signalValue),
-      });
+      } as const;
+      const featurePort: RuntimeFeatureIslandPort =
+        slot === 0
+          ? Object.freeze({
+              ...sharedPort,
+              proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
+                port.proposeUploadHandle(field, proposal),
+            })
+          : Object.freeze({
+              ...sharedPort,
+              consumeRegisteredEventCapability: (
+                descriptor: ValidatedAsyncDescriptorCapability,
+              ) => {
+                const authorization = consumeValidatedAsyncDescriptor(
+                  featurePort as AsyncRuntimeIslandPort,
+                  descriptor,
+                );
+                return port.authorizeRegisteredEvents(
+                  Object.freeze({
+                    descriptorBinding: authorization.descriptorBinding,
+                    events: authorization.events,
+                  }),
+                );
+              },
+              dispatchRegisteredEvent: (
+                capability: RegisteredBrowserEventCapability,
+                event: RegisteredBrowserEventDispatch,
+              ) => port.dispatchRegisteredEvent(capability, event),
+              enqueueFreshRender: (
+                reason: FreshRenderReason,
+                completion?: FreshRenderCompletionObserver,
+              ) =>
+                completion === undefined
+                  ? port.enqueueFreshRender(reason)
+                  : port.enqueueFreshRender(reason, completion),
+              writePresentationSignal: (scope: string, name: string, signalValue: JsonValue) =>
+                port.writePresentationSignal(scope, name, signalValue),
+            });
       try {
         const connectedIsland = document[3](featurePort);
         if (connectedIsland !== undefined) controller = normalizeIslandController(connectedIsland);
@@ -545,11 +616,11 @@ function defineFeature(
   return feature;
 }
 
-export function defineUploadsFeature(definition: RuntimeFeatureDefinition): RuntimeFeature {
+export function defineUploadsFeature(definition: UploadsRuntimeFeatureDefinition): RuntimeFeature {
   return defineFeature(0, definition, UPLOADS);
 }
 
-export function defineAsyncFeature(definition: RuntimeFeatureDefinition): RuntimeFeature {
+export function defineAsyncFeature(definition: AsyncRuntimeFeatureDefinition): RuntimeFeature {
   return defineFeature(1, definition, ASYNC);
 }
 

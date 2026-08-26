@@ -13,7 +13,7 @@ export type FreshRenderDisposition = "queued" | "coalesced" | "retired";
 export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
 export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;
 export type RegisteredBrowserEventDisposition =
-  "dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
+  "dispatched" | "partially_dispatched" | "no_target" | "fanout_exceeded" | "rejected" | "retired";
 
 declare const REGISTERED_BROWSER_EVENT_CAPABILITY: unique symbol;
 
@@ -56,7 +56,7 @@ export interface RuntimeFeatureDriverIslandPort {
     field: string,
     proposal: UploadHandleProposal,
   ): UploadHandleProposalDisposition;
-  writePresentationSignal(element: Element, name: string, value: JsonValue): JsonValue;
+  writePresentationSignal(scope: string, name: string, value: JsonValue): JsonValue;
 }
 
 export type RuntimeFeatureDriverValue =

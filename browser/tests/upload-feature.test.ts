@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   RuntimeFeatureDirectiveOwnership,
   RuntimeFeatureDocumentContext,
-  RuntimeFeatureIslandPort,
+  UploadsRuntimeIslandPort,
 } from "../src/features/contract.js";
 import { connectUploadIsland } from "../src/uploads/feature.js";
 import { UploadManager } from "../src/uploads/manager.js";
@@ -141,12 +141,8 @@ describe("upload feature presentation and morph ownership", () => {
     });
     const initial = surface("stable");
     let ownerships = initial.ownerships;
-    const port: RuntimeFeatureIslandPort = {
-      authorizeRegisteredEvents: () =>
-        Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>,
-      dispatchRegisteredEvent: () => "dispatched",
+    const port: UploadsRuntimeIslandPort = {
       element: { nodeType: 1 } as Element,
-      enqueueFreshRender: () => "queued",
       identity: Object.freeze({
         component: "fixture.upload",
         documentKey: "document-upload-feature",
@@ -155,7 +151,6 @@ describe("upload feature presentation and morph ownership", () => {
       onDispose: vi.fn(),
       proposeUploadHandle: () => "accepted",
       queryDirectiveOwnership: () => ownerships,
-      writePresentationSignal: (_element, _name, value) => value,
     };
     const context: RuntimeFeatureDocumentContext = {
       diagnose: vi.fn(),

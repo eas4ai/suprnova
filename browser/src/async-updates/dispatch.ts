@@ -1,6 +1,7 @@
 import type {
+  AsyncRuntimeIslandPort,
+  FreshRenderCompletion,
   RegisteredBrowserEventCapability,
-  RuntimeFeatureIslandPort,
 } from "../features/contract.js";
 import type { AsyncPayload, ValidatedAsyncEnvelope } from "./types.js";
 
@@ -10,12 +11,20 @@ export type AsyncDispatchDisposition =
   | "dispatched"
   | "signal_updated"
   | "observed"
-  | "closed"
-  | "degraded"
+  | "closed:server_shutdown"
+  | "closed:subscription_retired"
+  | "closed:stream_completed"
+  | "degraded:authorization_lost"
+  | "degraded:replay_unavailable"
+  | "degraded:backpressure"
+  | "degraded:stream_unavailable"
   | "rejected";
 
 export interface AsyncEnvelopeDispatcher {
-  dispatch(envelope: ValidatedAsyncEnvelope): AsyncDispatchDisposition;
+  dispatch(
+    envelope: ValidatedAsyncEnvelope,
+    completion?: (outcome: FreshRenderCompletion) => void,
+  ): AsyncDispatchDisposition;
 }
 
 type EventPayload = Extract<AsyncPayload, { kind: "browser_event" }>;
@@ -41,17 +50,20 @@ function unsupported(): never {
  */
 export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
   readonly #capability: () => RegisteredBrowserEventCapability | null;
-  readonly #island: RuntimeFeatureIslandPort;
+  readonly #island: AsyncRuntimeIslandPort;
 
   constructor(
-    island: RuntimeFeatureIslandPort,
+    island: AsyncRuntimeIslandPort,
     capability: () => RegisteredBrowserEventCapability | null,
   ) {
     this.#island = island;
     this.#capability = capability;
   }
 
-  dispatch(envelope: ValidatedAsyncEnvelope): AsyncDispatchDisposition {
+  dispatch(
+    envelope: ValidatedAsyncEnvelope,
+    completion?: (outcome: FreshRenderCompletion) => void,
+  ): AsyncDispatchDisposition {
     let payload: unknown;
     let kind: unknown;
     try {
@@ -65,7 +77,7 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         if (!exactPayload(payload, ["kind", "name"]) || payload["name"] !== "refresh") {
           return unsupported();
         }
-        return this.#refresh();
+        return this.#refresh(completion);
       case "browser_event":
         if (
           !exactPayload(payload, ["event", "kind", "payload", "schema_version", "target"]) ||
@@ -78,8 +90,9 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         return this.#browserEvent(payload as unknown as EventPayload);
       case "presentation_signal":
         if (
-          !exactPayload(payload, ["kind", "name", "value"]) ||
-          typeof payload["name"] !== "string"
+          !exactPayload(payload, ["kind", "name", "scope", "value"]) ||
+          typeof payload["name"] !== "string" ||
+          typeof payload["scope"] !== "string"
         ) {
           return unsupported();
         }
@@ -96,7 +109,7 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         ) {
           return unsupported();
         }
-        return "closed";
+        return `closed:${payload["reason"]}`;
       case "error":
         if (
           !exactPayload(payload, ["code", "kind"]) ||
@@ -107,7 +120,7 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         ) {
           return unsupported();
         }
-        return "degraded";
+        return `degraded:${payload["code"]}`;
       default:
         return unsupported();
     }
@@ -122,12 +135,13 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
     }
     if (capability === null) return "rejected";
     try {
-      return this.#island.dispatchRegisteredEvent(capability, {
+      const disposition = this.#island.dispatchRegisteredEvent(capability, {
         event: event.event,
         payload: event.payload,
         schemaVersion: event.schema_version,
         target: event.target,
-      }) === "dispatched"
+      });
+      return disposition === "dispatched" || disposition === "partially_dispatched"
         ? "dispatched"
         : "rejected";
     } catch {
@@ -137,16 +151,22 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
 
   #presentationSignal(signal: PresentationSignalPayload): AsyncDispatchDisposition {
     try {
-      this.#island.writePresentationSignal(this.#island.element, signal.name, signal.value);
+      this.#island.writePresentationSignal(signal.scope, signal.name, signal.value);
       return "signal_updated";
     } catch {
       return "rejected";
     }
   }
 
-  #refresh(): AsyncDispatchDisposition {
+  #refresh(completion?: (outcome: FreshRenderCompletion) => void): AsyncDispatchDisposition {
+    let completed = false;
+    const observe = (outcome: FreshRenderCompletion): void => {
+      if (completed) return;
+      completed = true;
+      completion?.(outcome);
+    };
     try {
-      const disposition = this.#island.enqueueFreshRender("stream");
+      const disposition = this.#island.enqueueFreshRender("stream", observe);
       return disposition === "queued" || disposition === "coalesced" ? disposition : "rejected";
     } catch {
       return "rejected";

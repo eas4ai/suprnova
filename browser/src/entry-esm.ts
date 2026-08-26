@@ -42,6 +42,7 @@ export type {
 } from "./extensions/effects.js";
 export type { RuntimeCallContext, RuntimeCallRegistration } from "./extensions/calls.js";
 export type {
+  AsyncRuntimeIslandPort,
   FeatureDocumentController,
   FeatureIslandController,
   FreshRenderCompletion,
@@ -52,6 +53,7 @@ export type {
   RuntimeFeatureDocumentContext,
   RuntimeFeatureIslandPort,
   RuntimeFeatureRegistrationOutcome,
+  UploadsRuntimeIslandPort,
 } from "./features/contract.js";
 export { CLASSIC_FEATURE_SYMBOL } from "./features/global.js";
 export type { ClassicFeatureSurface } from "./features/global.js";

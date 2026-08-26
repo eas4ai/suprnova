@@ -6,7 +6,12 @@ import {
   schedulerPolicyEffects,
   schedulerPolicyKey,
 } from "./policy.js";
-import { createSchedulerRecord, phaseCount, type SchedulerRecord } from "./state.js";
+import {
+  createSchedulerRecord,
+  phaseCount,
+  type SchedulerPhase,
+  type SchedulerRecord,
+} from "./state.js";
 import type {
   IntentDisposition,
   ScheduleResult,
@@ -50,8 +55,9 @@ function finishReason(disposition: IntentDisposition): IntentFinishReason {
     case "duplicate":
       return "rejected";
     case "canceled":
-    case "superseded":
       return "canceled";
+    case "superseded":
+      return "superseded";
     case "retired":
       return "retired";
     case "stale":
@@ -320,6 +326,10 @@ export class IslandScheduler {
     if (disposition === "accepted" && record.phase !== "applying") return "incompatible";
     this.#finalize(record, disposition);
     return disposition;
+  }
+
+  phase(ticket: SchedulerTicket): SchedulerPhase | null {
+    return this.#byTicket.get(ticket)?.phase ?? null;
   }
 
   cancel(ticket: SchedulerTicket, options: SchedulerCancelOptions = {}): IntentDisposition {

@@ -42,7 +42,7 @@ use crate::host::{
 };
 use crate::identity::{
     BrowserOperationName, BuildId, ComponentName, IslandSlot, KeyId, ModelField, RouteIdentity,
-    ScopeFingerprint, UnixMillis, ViewName,
+    ScopeFingerprint, SignalScopeIdentity, UnixMillis, ViewName,
 };
 use crate::metadata::{
     ActionMetadata, ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
@@ -428,14 +428,17 @@ fn membership_registry_for(authorized: &AuthorizedSubscription) -> TestMembershi
         events: authorized.verified().claims().events().clone(),
         presentation_signals: BoundedPresentationSignalContracts::new(vec![
             PresentationSignalContract::new(
+                SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse("completion_percent").expect("signal name"),
                 BrowserPayloadSchema::U64,
             ),
             PresentationSignalContract::new(
+                SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse("signed_count").expect("signal name"),
                 BrowserPayloadSchema::I64,
             ),
             PresentationSignalContract::new(
+                SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse("measurement").expect("signal name"),
                 BrowserPayloadSchema::F64,
             ),
@@ -538,7 +541,7 @@ fn every_closed_payload_kind_decodes_and_round_trips_canonically() {
     let payloads = [
         "{\"kind\":\"refresh\",\"name\":\"refresh\"}",
         "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1},\"schema_version\":1,\"target\":\"self\"}",
-        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":50}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":50}",
         "{\"kind\":\"heartbeat\"}",
         "{\"kind\":\"complete\",\"reason\":\"server_shutdown\"}",
         "{\"code\":\"authorization_lost\",\"kind\":\"error\"}",
@@ -586,6 +589,7 @@ fn server_authored_envelopes_require_the_current_registered_context() {
 
     let signal = RegisteredPresentationSignal::new(
         &context,
+        SignalScopeIdentity::parse("root-scope").expect("signal scope"),
         BrowserOperationName::parse("completion_percent").expect("signal name"),
         CanonicalValue::String("wrong schema".to_owned()),
     )
@@ -618,6 +622,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
     ] {
         let signal = RegisteredPresentationSignal::new(
             &context,
+            SignalScopeIdentity::parse("root-scope").expect("signal scope"),
             BrowserOperationName::parse(name).expect("registered signal"),
             CanonicalValue::number(value).expect("finite canonical number"),
         )
@@ -647,6 +652,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
         assert_eq!(
             RegisteredPresentationSignal::new(
                 &context,
+                SignalScopeIdentity::parse("root-scope").expect("signal scope"),
                 BrowserOperationName::parse(name).expect("registered signal"),
                 CanonicalValue::number(value).expect("finite canonical number"),
             )
@@ -658,6 +664,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
 
     let normalized = RegisteredPresentationSignal::new(
         &context,
+        SignalScopeIdentity::parse("root-scope").expect("signal scope"),
         BrowserOperationName::parse("completion_percent").expect("registered signal"),
         CanonicalValue::number(-0.0).expect("negative zero is finite"),
     )
@@ -707,7 +714,7 @@ fn decoded_payloads_are_closed_registered_values() {
     assert!(matches!(event.payload(), CanonicalValue::Object(_)));
 
     let signal = decode(
-        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":50}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":50}",
         1,
         3,
     );
@@ -792,11 +799,11 @@ fn nested_duplicate_fields_and_semantic_key_misordering_fail_closed() {
         "{\"kind\":\"heartbeat\",\"kind\":\"heartbeat\"}",
         "{\"kind\":\"refresh\",\"name\":\"refresh\",\"name\":\"refresh\"}",
         "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":null,\"schema_version\":1,\"schema_version\":1,\"target\":\"self\"}",
-        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"name\":\"completion_percent\",\"value\":1}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":1}",
         "{\"kind\":\"complete\",\"reason\":\"server_shutdown\",\"reason\":\"server_shutdown\"}",
         "{\"code\":\"authorization_lost\",\"code\":\"authorization_lost\",\"kind\":\"error\"}",
         "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{\"count\":1,\"count\":2},\"schema_version\":1,\"target\":\"self\"}",
-        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":{\"count\":1,\"count\":2}}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":{\"count\":1,\"count\":2}}",
     ];
     for payload in duplicate_cases {
         assert_eq!(
@@ -826,7 +833,7 @@ fn nested_duplicate_fields_and_semantic_key_misordering_fail_closed() {
             "{{\"payload\":{{\"kind\":\"browser_event\",\"event\":\"orders.updated\",\"payload\":{{\"z\":1,\"a\":2}},\"schema_version\":1,\"target\":\"self\"}},\"position\":{{\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
         ),
         format!(
-            "{{\"payload\":{{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":{{\"z\":1,\"a\":2}}}},\"position\":{{\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
+            "{{\"payload\":{{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":{{\"z\":1,\"a\":2}}}},\"position\":{{\"epoch\":\"1\",\"sequence\":\"1\"}},\"protocol_version\":1,\"stream\":\"orders\",\"subscription\":\"{id}\"}}"
         ),
     ];
     for encoded in noncanonical {
@@ -900,8 +907,9 @@ fn event_and_signal_payloads_require_current_registered_contracts() {
         "{\"event\":\"orders.deleted\",\"kind\":\"browser_event\",\"payload\":{},\"schema_version\":1,\"target\":\"self\"}",
         "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{},\"schema_version\":2,\"target\":\"self\"}",
         "{\"event\":\"orders.updated\",\"kind\":\"browser_event\",\"payload\":{},\"schema_version\":1,\"target\":\"parent\"}",
-        "{\"kind\":\"presentation_signal\",\"name\":\"unknown_signal\",\"value\":50}",
-        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"value\":\"fifty\"}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"unknown_signal\",\"scope\":\"root-scope\",\"value\":50}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"foreign-scope\",\"value\":50}",
+        "{\"kind\":\"presentation_signal\",\"name\":\"completion_percent\",\"scope\":\"root-scope\",\"value\":\"fifty\"}",
     ];
     for payload in cases {
         assert_eq!(
@@ -1117,7 +1125,7 @@ fn membership_and_stream_binding_are_validated_before_sequence_observation() {
     assert_eq!(
         decode_async_envelope(
             &wire(
-                "{\"kind\":\"presentation_signal\",\"name\":\"caller_invented\",\"value\":1}",
+                "{\"kind\":\"presentation_signal\",\"name\":\"caller_invented\",\"scope\":\"root-scope\",\"value\":1}",
                 4,
                 41,
             ),

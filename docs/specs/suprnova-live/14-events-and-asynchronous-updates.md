@@ -100,13 +100,18 @@ Acceptance criteria:
 - Push metadata identifies registered response/presentation behavior, not an
   arbitrary method, action, effect, or JavaScript invocation.
 - One exhaustive browser dispatcher consumes only canonical membership-validated
-  envelopes. Its three productive branches use the existing island feature port
-  for fresh render, a core-minted registered-event capability, or the declared
-  presentation-signal write; lifecycle payloads only observe, close, or degrade
-  the exact subscription.
+  envelopes. Its three productive branches use the slot-specific async island
+  port for fresh render, a core-minted registered-event capability, or the exact
+  signed `(signal scope, name, type)` presentation write. Lifecycle payloads
+  return bounded reasons and only observe, close, or degrade the exact logical
+  membership.
 - Push-triggered work enters the owning island scheduler and respects current
   revision.
-- Burst events can coalesce refreshes without losing required state transitions.
+- Refresh admission is pending until normal response validation, morph, and
+  commit-after-morph reach a terminal scheduler outcome. Failure, cancellation,
+  or retirement degrades at the already-consumed stream high-water and requests
+  authoritative recovery without replaying a mutating operation. Burst events
+  can coalesce by the exact island semantic key without losing this completion.
 - Authorization is rechecked when fresh protected data is rendered.
 - A pushed browser event does not automatically invoke a domain-mutating Live
   action. Server-owned reactions use normal server event handlers; application
@@ -544,6 +549,17 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Hardened Task 8 after adversarial implementation review. Optional
+  async code now receives a distinct frozen runtime port with no upload, model,
+  state, or generic event-registration surface; core captures one immutable
+  bounded registered-event snapshot, guards and revalidates every resolved
+  target, and truthfully reports partial fanout. Stream refresh success waits for
+  the existing scheduler's validation/morph/commit terminal outcome, while
+  failure retains the consumed high-water and activates exact-membership
+  recovery. Completion and error retain bounded reasons and own exact membership,
+  heartbeat, and hybrid-fallback lifecycle. Presentation signals are registered,
+  encoded, decoded, and dispatched by exact stable scope identity plus name and
+  compatible type rather than an island-root or nearest-scope default.
 - 2026-08-26 -- Implemented one closed browser async dispatcher over the
   canonical membership-validated envelope union. Refresh enters the existing
   fresh-render scheduler, registered browser events consume a core-minted

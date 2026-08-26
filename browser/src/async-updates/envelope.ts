@@ -16,6 +16,7 @@ import type {
 const MAX_U64 = (1n << 64n) - 1n;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
+const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 const ASYNC_LIMITS: CanonicalLimits = Object.freeze({
   maxBytes: 64 * 1024,
@@ -156,13 +157,17 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
       });
     }
     case "presentation_signal": {
-      exact(fields, ["kind", "name", "value"], "async_payload_invalid");
+      exact(fields, ["kind", "name", "scope", "value"], "async_payload_invalid");
       const name = string(fields["name"], "async_payload_unregistered");
-      const contract = membership.presentationSignals.find((candidate) => candidate.name === name);
+      const scope = string(fields["scope"], "async_payload_unregistered");
+      const contract = membership.presentationSignals.find(
+        (candidate) => candidate.name === name && candidate.scope === scope,
+      );
       const signalValue = fields["value"] ?? null;
       if (
         contract === undefined ||
         !OPERATION_NAME.test(name) ||
+        !SIGNAL_SCOPE.test(scope) ||
         !schemaMatches(contract.schema, signalValue)
       ) {
         fail("async_payload_unregistered");
@@ -170,6 +175,7 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
       return Object.freeze({
         kind: "presentation_signal",
         name,
+        scope,
         value: freezeJson(signalValue),
       });
     }

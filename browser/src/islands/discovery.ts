@@ -51,7 +51,10 @@ import {
 } from "./metadata.js";
 import { LazyCoordinator } from "./lazy.js";
 import { IslandRecord } from "./record.js";
-import { RegisteredEventAuthority } from "./registered-events.js";
+import {
+  RegisteredEventAuthority,
+  type GuardedRegisteredEventTarget,
+} from "./registered-events.js";
 import {
   inspectRuntimeFeatureDriver,
   type FreshRenderCompletionObserver,
@@ -924,11 +927,11 @@ export class DocumentRuntime {
       }),
       proposeUploadHandle: (field: string, proposal: UploadHandleProposal) =>
         this.#proposeUploadHandle(record, field, proposal, current),
-      writePresentationSignal: (target: Element, name: string, value: JsonValue) => {
-        if (!current() || this.#ownership.ownerForNode(target) !== record) {
+      writePresentationSignal: (scope: string, name: string, value: JsonValue) => {
+        if (!current()) {
           throw new Error("feature_signal_context_invalid");
         }
-        return this.#signals.setFromCall(record, target, name, value);
+        return this.#signals.setDeclaredFromAsync(record, scope, name, value);
       },
     });
     this.#invokeFeatureDriver(driver, 1, port);
@@ -946,32 +949,73 @@ export class DocumentRuntime {
     record: IslandRecord,
     target: string,
     maximumFanout: number,
-  ): readonly EventTarget[] | "fanout_exceeded" {
-    const targets: EventTarget[] = [];
+  ): readonly GuardedRegisteredEventTarget[] | "fanout_exceeded" {
+    const targets: GuardedRegisteredEventTarget[] = [];
+    const guard = (
+      eventTarget: EventTarget,
+      current: () => boolean,
+    ): GuardedRegisteredEventTarget =>
+      Object.freeze({
+        current,
+        dispatch: (event: Event) => eventTarget.dispatchEvent(event),
+      });
+    const currentIsland = (candidate: IslandRecord): boolean =>
+      candidate.active() &&
+      this.#records.get(candidate.element) === candidate &&
+      this.#ownership.ownerForNode(candidate.element) === candidate;
     if (target === "self") {
-      targets.push(record.element);
+      targets.push(guard(record.element, () => currentIsland(record)));
     } else if (target === "parent") {
       const parent = record.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
       const parentRecord = parent === null ? undefined : this.#records.get(parent);
-      if (parentRecord?.active() === true) targets.push(parentRecord.element);
+      if (parentRecord?.active() === true) {
+        targets.push(
+          guard(
+            parentRecord.element,
+            () =>
+              currentIsland(parentRecord) &&
+              record.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) === parentRecord.element,
+          ),
+        );
+      }
     } else if (target === "child") {
       for (const candidate of this.#records.values()) {
         if (!candidate.active() || candidate === record) continue;
         const parent = candidate.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) ?? null;
-        if (parent === record.element) targets.push(candidate.element);
+        if (parent === record.element) {
+          targets.push(
+            guard(
+              candidate.element,
+              () =>
+                currentIsland(candidate) &&
+                candidate.element.parentElement?.closest(ISLAND_ROOT_SELECTOR) === record.element,
+            ),
+          );
+        }
         if (targets.length > maximumFanout) return "fanout_exceeded";
       }
     } else if (target === "document") {
-      targets.push(this.#document);
+      targets.push(guard(this.#document, () => currentIsland(record)));
     } else if (target.startsWith("named_island:")) {
       const slot = target.slice("named_island:".length);
       for (const candidate of this.#records.values()) {
-        if (candidate.active() && candidate.metadata.slot === slot) targets.push(candidate.element);
+        if (candidate.active() && candidate.metadata.slot === slot) {
+          targets.push(
+            guard(
+              candidate.element,
+              () => currentIsland(candidate) && candidate.metadata.slot === slot,
+            ),
+          );
+        }
         if (targets.length > maximumFanout) return "fanout_exceeded";
       }
     } else if (target.startsWith("browser:")) {
       const window = this.#document.defaultView;
-      if (window !== null) targets.push(window);
+      if (window !== null) {
+        targets.push(
+          guard(window, () => currentIsland(record) && this.#document.defaultView === window),
+        );
+      }
     }
     return targets;
   }

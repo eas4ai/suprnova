@@ -54,7 +54,10 @@ describe("typed local signal values", () => {
 
 describe("lexical signal scopes", () => {
   it("uses deterministic shadowing without leaking or mutating an ancestor", () => {
-    const parent = new LocalSignalScope("parent", parseSignalDeclarations("open:false"));
+    const parent = new LocalSignalScope(
+      "parent",
+      parseSignalDeclarations("open:false,ancestor_only:true"),
+    );
     const child = new LocalSignalScope("child", parseSignalDeclarations("open:true"), parent);
     expect(parent.get("open")).toBe(false);
     expect(child.get("open")).toBe(true);
@@ -62,6 +65,13 @@ describe("lexical signal scopes", () => {
     expect(child.get("open")).toBe(false);
     expect(parent.get("open")).toBe(false);
     expect(() => child.get("missing")).toThrow("signal_missing");
+    expect(() => {
+      child.setDeclared("missing", false);
+    }).toThrow("signal_missing");
+    expect(() => {
+      child.setDeclared("ancestor_only", false);
+    }).toThrow("signal_missing");
+    expect(parent.get("ancestor_only")).toBe(true);
   });
 
   it("batches changes, suppresses same values, resets, and disposes exactly once", () => {

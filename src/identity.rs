@@ -161,6 +161,11 @@ text_identity!(
     BrowserOperationName,
     128
 );
+text_identity!(
+    /// Stable keyed DOM identity for one declared local-signal scope.
+    SignalScopeIdentity,
+    128
+);
 
 fn parse_binary_identity(value: &str, min: usize, max: usize) -> Result<Vec<u8>, IdentityError> {
     let minimum_encoded_bytes = min.saturating_mul(8).div_ceil(6);

@@ -2,9 +2,9 @@ import {
   defineUploadsFeature,
   type FeatureIslandController,
   type RuntimeFeature,
-  type RuntimeFeatureDefinition,
   type RuntimeFeatureDocumentContext,
-  type RuntimeFeatureIslandPort,
+  type UploadsRuntimeFeatureDefinition,
+  type UploadsRuntimeIslandPort,
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import { UploadManager } from "./manager.js";
@@ -53,14 +53,14 @@ export interface UploadResumeRequest {
 
 interface UploadFeatureOwner {
   manager: UploadManager | null;
-  ports: WeakMap<Element, RuntimeFeatureIslandPort>;
+  ports: WeakMap<Element, UploadsRuntimeIslandPort>;
 }
 
 let defaultConfiguration: UploadFeatureOptions = Object.freeze({});
 let defaultConfigurationLocked = false;
 const defaultOwner: UploadFeatureOwner = {
   manager: null,
-  ports: new WeakMap<Element, RuntimeFeatureIslandPort>(),
+  ports: new WeakMap<Element, UploadsRuntimeIslandPort>(),
 };
 
 class UploadHttpError extends Error {
@@ -273,7 +273,7 @@ function canceledProgress(): UploadProgressView {
 export function connectUploadIsland(
   manager: UploadManager,
   context: RuntimeFeatureDocumentContext,
-  port: RuntimeFeatureIslandPort,
+  port: UploadsRuntimeIslandPort,
 ): FeatureIslandController {
   const disposers: VoidFunction[] = [];
   const presenter = new UploadProgressPresenter();
@@ -420,17 +420,17 @@ function defineConfiguredFeature(
   configuration: () => UploadFeatureOptions,
   owner?: UploadFeatureOwner,
 ): RuntimeFeature {
-  const definition: RuntimeFeatureDefinition = Object.freeze({
+  const definition: UploadsRuntimeFeatureDefinition = Object.freeze({
     connectDocument(context: RuntimeFeatureDocumentContext) {
       const manager = new UploadManager(resolveOptions(configuration()));
       if (owner !== undefined) {
         defaultConfigurationLocked = true;
         owner.manager = manager;
-        owner.ports = new WeakMap<Element, RuntimeFeatureIslandPort>();
+        owner.ports = new WeakMap<Element, UploadsRuntimeIslandPort>();
       }
       let disposed = false;
       return Object.freeze({
-        connectIsland(port: RuntimeFeatureIslandPort) {
+        connectIsland(port: UploadsRuntimeIslandPort) {
           const controller = connectUploadIsland(manager, context, port);
           if (owner === undefined) return controller;
           owner.ports.set(port.element, port);
@@ -456,7 +456,7 @@ function defineConfiguredFeature(
           manager.dispose();
           if (owner?.manager === manager) {
             owner.manager = null;
-            owner.ports = new WeakMap<Element, RuntimeFeatureIslandPort>();
+            owner.ports = new WeakMap<Element, UploadsRuntimeIslandPort>();
           }
         },
         resume() {
