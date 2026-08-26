@@ -7,7 +7,7 @@ use crate::pagination::IntoInertiaScroll;
 use super::config::InertiaConfig;
 use super::response::IntoInertiaData;
 use super::{
-    Inertia303Middleware, InertiaHeadersMiddleware, InertiaResponse,
+    Inertia303Middleware, InertiaErrorPageMiddleware, InertiaHeadersMiddleware, InertiaResponse,
     InertiaValidationRedirectMiddleware, InertiaVersionMiddleware,
 };
 
@@ -94,6 +94,14 @@ impl Inertia {
     ///    conversion above. Without it the client sees a response with no
     ///    `X-Inertia` header, treats it as non-Inertia, and shows the
     ///    error modal instead of populating `form.errors`.
+    ///
+    /// A fifth, [`InertiaErrorPageMiddleware`], is registered innermost
+    /// **only when** [`InertiaConfig::error_page`] names a component. It
+    /// rewrites the framework's own error responses - a `403` denial, an
+    /// unrouted `404`, a `429`, a `500` - into that page, so they stop
+    /// reaching the client as the plain-JSON error modal. Without an
+    /// `error_page` nothing is registered and error responses are
+    /// untouched.
     ///
     /// One call wires all four, so an app cannot end up carrying two of
     /// them and silently missing the third - each closes a failure mode
@@ -193,6 +201,14 @@ impl Inertia {
         }));
         register_global_middleware(Inertia303Middleware::new());
         register_global_middleware(InertiaValidationRedirectMiddleware::new());
+        // Innermost, and only when the app named a component. It has to
+        // see the response the handler and the route middleware actually
+        // produced - a `403` from `PermissionMiddleware` never reaches
+        // the handler at all - and it deliberately declines the `422`
+        // the validation middleware above it is about to bounce.
+        if let Some(component) = config.error_page.clone() {
+            register_global_middleware(InertiaErrorPageMiddleware::new(component));
+        }
         Ok(())
     }
 }
@@ -245,6 +261,32 @@ mod tests {
         // two middlewares in `Inertia::install`'s order and asserts the
         // observable consequence of that order: `Vary` on a `409` the
         // version middleware returns without calling the handler.
+
+        // The error-page middleware is the opt-in fifth. Both installs
+        // live in this one test rather than in a sibling because
+        // registration is idempotent per type and process-global: two
+        // tests each measuring their own delta would race over which of
+        // them registered the four shared types.
+        //
+        // Known side effect: `TestContainer::fake` scopes
+        // `set_installed_config`, but `register_global_middleware` really
+        // is process-global, so from here on every test in this binary
+        // that builds a chain from `get_global_middleware()` carries an
+        // error-page rewrite. Nothing depends on its absence today; if
+        // something ever does, the fix is a registry the container owns,
+        // not moving this assertion somewhere it would race.
+        Inertia::install(
+            &InertiaConfig::new()
+                .version("test-version")
+                .development(true)
+                .error_page("Error"),
+        )
+        .expect("dev-mode install must not require a manifest");
+        assert_eq!(
+            get_global_middleware().len() - after,
+            1,
+            "naming an error page adds exactly one middleware on top of the four"
+        );
     }
 
     /// CFG-01 fail-closed guard. Deliberately uses `.production()` +

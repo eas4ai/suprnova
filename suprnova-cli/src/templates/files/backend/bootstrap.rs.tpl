@@ -89,6 +89,25 @@ pub fn register_http_stack() {
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config));
 
+    // Locale detection - after SessionMiddleware, since its detection
+    // chain checks the session first (then cookie, then Accept-Language).
+    // Reads APP_LOCALE / APP_FALLBACK_LOCALE from the environment and
+    // scopes the detected locale for the rest of the request, so
+    // `Lang::get` / the `__!` macro resolve against it.
+    //
+    // And **before** `Inertia::install` below, which is the part that is
+    // easy to get wrong. A middleware's post-`next` code runs after every
+    // middleware inside it has already returned, so the error-page
+    // middleware that `Inertia::install` registers renders its page once
+    // this middleware's locale scope has been popped. Registered the
+    // other way round, every error page - and only error pages - would
+    // render with the app's default locale instead of the visitor's. The
+    // Inertia layer reads nothing from localization, so this order costs
+    // nothing.
+    global_middleware!(
+        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
+    );
+
     // Inertia protocol layer, four middlewares in one call: the headers
     // middleware (`Vary: X-Inertia` on every response, and an empty `200` on an
     // Inertia visit substituted with a `303` back), the version middleware
@@ -98,11 +117,13 @@ pub fn register_http_stack() {
     // than a replayed PUT/DELETE), and the validation-redirect middleware
     // (turns a `422` carrying an `errors` object into the redirect-back the
     // Inertia client expects, so a failed validation restores the form with
-    // its messages instead of surfacing a raw 422).
+    // its messages instead of surfacing a raw 422). Naming an `error_page`
+    // below adds a fifth: the error-page middleware.
     //
-    // This sits here, after SessionMiddleware, rather than beside the container
-    // wiring below, for two reasons. It registers middleware of its own, so
-    // moving it would silently move the whole Inertia layer within the chain.
+    // This sits here, after SessionMiddleware and LocaleMiddleware, rather
+    // than beside the container wiring below, for two reasons. It registers
+    // middleware of its own, so moving it would silently move the whole
+    // Inertia layer within the chain.
     // And the version middleware re-flashes the session before it bounces a
     // stale client: the client answers a 409 with a full-page GET, and without
     // the re-flash a validation error flashed by the previous request is aged
@@ -129,17 +150,19 @@ pub fn register_http_stack() {
     //
     // Everything set on this config reaches every page: `Inertia::install`
     // retains it as the default each `InertiaResponse` starts from.
-    Inertia::install(&InertiaConfig::new().frontend(Frontend::{frontend_variant}))
-        .expect("Inertia install failed (production needs a built frontend manifest)");
-
-    // Locale detection - registered after SessionMiddleware, since its
-    // detection chain checks the session first (then cookie, then
-    // Accept-Language). Reads APP_LOCALE / APP_FALLBACK_LOCALE from the
-    // environment and scopes the detected locale for the rest of the
-    // request, so `Lang::get` / the `__!` macro resolve against it.
-    global_middleware!(
-        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
-    );
+    // `.error_page` names the page every framework error response renders
+    // through - a 403 from an authorization check, a 404 for an unknown
+    // route, a 500. Without it those reach the Inertia client as a JSON
+    // body with no `X-Inertia` header, and the client answers with its
+    // "a plain JSON response was received" modal instead of a page.
+    // `frontend/src/pages/Error.*` is the component; it receives
+    // `status`, `message`, and `request_id` when the error carried one.
+    Inertia::install(
+        &InertiaConfig::new()
+            .frontend(Frontend::{frontend_variant})
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
 
     // CSRF protection (validates tokens on POST/PUT/PATCH/DELETE)
     global_middleware!(CsrfMiddleware::new());

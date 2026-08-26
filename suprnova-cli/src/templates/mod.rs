@@ -496,6 +496,11 @@ pub mod react {
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/react/src/pages/Home.tsx.tpl")
     }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Error.tsx.tpl")
+    }
     pub fn dashboard_page() -> &'static str {
         include_str!("files/frontend/react/src/pages/Dashboard.tsx.tpl")
     }
@@ -553,6 +558,11 @@ pub mod svelte {
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/svelte/src/pages/Home.svelte.tpl")
     }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Error.svelte.tpl")
+    }
     pub fn dashboard_page() -> &'static str {
         include_str!("files/frontend/svelte/src/pages/Dashboard.svelte.tpl")
     }
@@ -597,6 +607,11 @@ pub mod vue {
     pub fn home_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Home.vue.tpl")
     }
+    /// The page every framework error response renders through, wired up
+    /// by `.error_page("Error")` in the scaffolded `bootstrap.rs`.
+    pub fn error_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Error.vue.tpl")
+    }
     pub fn dashboard_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Dashboard.vue.tpl")
     }
@@ -639,6 +654,14 @@ pub fn scaffold_frontend(
     let ext = frontend.page_ext();
     let main = src.join(frontend.main_file_name());
     let ssr_entry = src.join(frontend.ssr_file_name());
+
+    // Kept out of the tuple below, which is already at the width where a
+    // positional list stops being readable.
+    let error_page = match frontend {
+        Frontend::React => react::error_page(),
+        Frontend::Svelte => svelte::error_page(),
+        Frontend::Vue => vue::error_page(),
+    };
 
     let (pkg, vite, ts, index, main_src, ssr_src, home, dash, login, reg, props, css) =
         match frontend {
@@ -695,6 +718,7 @@ pub fn scaffold_frontend(
         (ssr_entry, &ssr_src),
         (src.join("app.css"), &css),
         (pages.join(format!("Home.{}", ext)), &home),
+        (pages.join(format!("Error.{}", ext)), error_page),
         (pages.join(format!("Dashboard.{}", ext)), &dash),
         (auth.join(format!("Login.{}", ext)), &login),
         (auth.join(format!("Register.{}", ext)), &reg),

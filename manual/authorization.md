@@ -378,6 +378,13 @@ readable on the inspected `Response` but does **not** travel through
 `authorize` - `FrameworkError` has no code field; read it from `inspect()` if
 you need it.
 
+Whichever status a denial lands on, it reaches the client as the
+framework's JSON error body. An Inertia app should also name an
+[error page](frontend-inertia-responses.md#error-pages) - without one,
+the Inertia client treats that body as a non-Inertia response and shows
+its full-screen error modal instead of rendering anything, so a user
+with the wrong role sees a crash rather than "you cannot do that".
+
 ### `raw`: "denied" vs "undefined"
 
 `Gate::raw` (and `raw_async`) returns `Option<Response>`: `None` means *no

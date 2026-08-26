@@ -280,8 +280,27 @@ pub fn inertia_version() -> String {
 /// 4. `SessionMiddleware` - global so every route shares one session
 ///    lifecycle. `AuthMiddleware` and `Auth::user_as` both read state it
 ///    sets up, which is what makes auth-aware controllers work. Ahead of
-///    the Inertia protocol middleware for the reason above.
-/// 5. Inertia protocol, four middlewares registered together by
+///    the locale and Inertia protocol middleware for the reason above.
+/// 5. `LocaleMiddleware` - immediately after the session it depends on:
+///    detection runs Session -> Cookie -> Header, and the session slot
+///    it reads first only exists once `SessionMiddleware` has run.
+///    Scopes the detected locale (via `scope_locale`) for the rest of
+///    the request, so `Lang::get` / `__!` / translated validation
+///    messages all resolve against it downstream. `LocaleShare` - the
+///    Inertia `lang` shared prop - is not part of the middleware chain;
+///    it is registered in [`register`] alongside `AppSharedData`, since
+///    Inertia shared-data providers run inside the Inertia response path
+///    rather than as global middleware.
+///
+///    Ahead of `Inertia::install`, deliberately. A middleware's
+///    post-`next` code runs after everything inside it has returned, so
+///    the error-page middleware `Inertia::install` registers when an app
+///    sets `InertiaConfig::error_page` renders its page *after* this
+///    middleware's locale scope has been popped. The other order would
+///    give every error page the default locale instead of the visitor's.
+///    Nothing in the Inertia layer reads localization, so the swap costs
+///    nothing.
+/// 6. Inertia protocol, four middlewares registered together by
 ///    `Inertia::install`: `Vary: X-Inertia` on every response (outermost
 ///    of the four, so it also covers the `409` below); an empty `200`
 ///    on an Inertia visit substituted with a `303` back; `409` +
@@ -295,16 +314,6 @@ pub fn inertia_version() -> String {
 ///    resolver - a hash of the Vite build manifest - so the version
 ///    string tracks the built frontend rather than a literal that
 ///    someone has to remember to bump.
-/// 6. `LocaleMiddleware` - immediately after the session it depends on:
-///    detection runs Session -> Cookie -> Header, and the session slot
-///    it reads first only exists once `SessionMiddleware` has run.
-///    Scopes the detected locale (via `scope_locale`) for the rest of
-///    the request, so `Lang::get` / `__!` / translated validation
-///    messages all resolve against it downstream. `LocaleShare` - the
-///    Inertia `lang` shared prop - is not part of the middleware chain;
-///    it is registered in [`register`] alongside `AppSharedData`, since
-///    Inertia shared-data providers run inside the Inertia response path
-///    rather than as global middleware.
 /// 7. `CsrfMiddleware` - immediately after the session it depends on.
 ///    `/api/ping`, `/api/welcome` and `/lang-demo` are excepted as
 ///    stateless demo endpoints with nothing ambient for a cross-site
@@ -321,12 +330,12 @@ pub fn register_http_stack() {
 
     global_middleware!(SessionMiddleware::new(SessionConfig::from_env()));
 
-    Inertia::install(&inertia_config())
-        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
-
     global_middleware!(
         LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
     );
+
+    Inertia::install(&inertia_config())
+        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
 
     global_middleware!(CsrfMiddleware::new().except(vec![
         "/api/ping",

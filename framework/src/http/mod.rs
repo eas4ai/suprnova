@@ -21,6 +21,7 @@ pub use cookie::{Cookie, CookieOptions, CookiePrefix, SameSite, parse_cookies};
 pub use extract::{FromParam, FromRequest};
 pub use form_request::FormRequest;
 pub use request::{BodyState, Request, RequestParts};
+pub(crate) use response::NOT_FOUND_BODY;
 pub use response::{HttpResponse, Redirect, RedirectRouteBuilder, Response, ResponseExt};
 pub use trusted_proxies::TrustedProxiesConfig;
 

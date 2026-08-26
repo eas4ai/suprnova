@@ -548,6 +548,14 @@ pub async fn register() {
 `LocaleMiddleware::new(config)` takes one you built yourself. A
 scaffolded app has both lines already.
 
+Register it **before** `Inertia::install` as well, if the app names an
+[Inertia error page](frontend-inertia-responses.md#error-pages). That
+page is rendered by a middleware on the way out, after everything
+registered inside it has returned - so a locale scope opened inside the
+Inertia layer is already gone by then, and every error page would render
+in the default locale. Session outside locale outside Inertia is the
+order the scaffold uses.
+
 ### Changing the locale mid-request
 
 `Lang::set_locale` is Laravel's `App::setLocale` - it rewrites the

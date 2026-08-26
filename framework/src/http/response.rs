@@ -55,6 +55,16 @@ pub struct HttpResponse {
 /// meets a handler.
 pub type Response = Result<HttpResponse, HttpResponse>;
 
+/// Body of the framework's own "nothing matched" response.
+///
+/// Shared by the router's terminal `404` (`server.rs`) and the
+/// static-file handler, and read back by
+/// `InertiaErrorPageMiddleware` - which has to tell the framework's own
+/// fixed 404 apart from a plain-text body a handler wrote on purpose. A
+/// literal in three places would let the middleware silently stop
+/// recognizing the 404 the day someone reworded it.
+pub(crate) const NOT_FOUND_BODY: &str = "404 Not Found";
+
 impl HttpResponse {
     /// Construct an empty `200 OK` response with no body and no headers.
     pub fn new() -> Self {
@@ -337,6 +347,24 @@ impl HttpResponse {
             .iter()
             .filter(move |(n, _)| n.eq_ignore_ascii_case(&name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Every header set on this response, as `(name, value)` pairs in
+    /// insertion order.
+    ///
+    /// Completes the accessor family: [`header_value`](Self::header_value)
+    /// reads one name's first line and
+    /// [`header_values`](Self::header_values) reads every line under one
+    /// name, but neither lets a caller reason about headers it cannot
+    /// name in advance. Middleware that rebuilds a response - swapping the
+    /// body while keeping what the original said about the request, the
+    /// connection, or the client's next move - has to iterate the set it
+    /// was handed, not a list of names it guessed at.
+    ///
+    /// Names are returned exactly as they were set, so compare with
+    /// [`str::eq_ignore_ascii_case`] rather than `==`.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))
     }
 
     /// Replace any prior occurrences of `name` with a single value.
