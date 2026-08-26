@@ -90,6 +90,14 @@ async fn an_ordinary_write_is_never_visible_at_a_partial_length() {
     // turn a correct implementation red. That it got *any* conclusive look is
     // asserted, because a zero-sample run would otherwise pass meaninglessly.
     eprintln!("sampled the target {samples} times during the write");
+    // Order matters: a genuine regression makes every sample partial, and the
+    // diagnostic that lists the lengths is the message worth reading. The
+    // vacuity checks come after, for the case where nothing was sampled at all.
+    assert!(
+        partial.is_empty(),
+        "the object was visible at a partial length: {:?}",
+        &partial.iter().take(8).collect::<Vec<_>>()
+    );
     assert!(
         samples > 0,
         "the sampling loop never looked at the target, so this run proves nothing"
@@ -98,11 +106,6 @@ async fn an_ordinary_write_is_never_visible_at_a_partial_length() {
         conclusive > 0,
         "no sample resolved to either absent or the full length, so this run \
          proves nothing"
-    );
-    assert!(
-        partial.is_empty(),
-        "the object was visible at a partial length: {:?}",
-        &partial.iter().take(8).collect::<Vec<_>>()
     );
     assert_eq!(
         disk.stat("big.bin")
@@ -705,6 +708,12 @@ async fn a_copy_is_never_visible_at_a_partial_length() {
 
     handle.await.expect("the copying task did not panic");
     eprintln!("sampled the destination {samples} times during the copy");
+    // Diagnostic first, vacuity checks after; see the write-side test.
+    assert!(
+        partial.is_empty(),
+        "the copy destination was visible at a partial length: {:?}",
+        &partial.iter().take(8).collect::<Vec<_>>()
+    );
     assert!(
         samples > 0,
         "the sampling loop never looked at the destination, so this run proves nothing"
@@ -713,11 +722,6 @@ async fn a_copy_is_never_visible_at_a_partial_length() {
         conclusive > 0,
         "no sample resolved to either absent or the full length, so this run \
          proves nothing"
-    );
-    assert!(
-        partial.is_empty(),
-        "the copy destination was visible at a partial length: {:?}",
-        &partial.iter().take(8).collect::<Vec<_>>()
     );
     assert_eq!(
         staged_entries(tmp.path()),
@@ -821,12 +825,15 @@ async fn racing_first_appends_onto_a_missing_object_both_land() {
     );
 }
 
-/// A regular file sitting where the staging directory belongs would otherwise
-/// pass registration - opendal only creates the directory when the path is
-/// missing - and fail later, deep in the driver, on the first write. Refuse it
-/// where the message can say what to do about it.
+/// A node sitting where the staging directory belongs would otherwise pass
+/// registration - opendal only creates the directory when the path is missing -
+/// and fail later, deep in the driver, on the first write. A *symlink* there is
+/// worse than a file: opendal canonicalizes `atomic_write_dir`, so every staging
+/// file would land at a path that is neither reserved nor filtered from
+/// listings, defeating the reservation for that disk entirely. Refuse both where
+/// the message can say what to do about it.
 #[tokio::test]
-async fn a_file_occupying_the_reserved_name_is_refused_at_registration() {
+async fn a_non_directory_occupying_the_reserved_name_is_refused_at_registration() {
     let _guard = Storage::fake();
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join(ATOMIC_STAGING_DIR), b"not a directory")
@@ -840,6 +847,28 @@ async fn a_file_occupying_the_reserved_name_is_refused_at_registration() {
         "the refusal must name the reservation, got: {message}"
     );
 
+    // A symlink to a real directory satisfies a `metadata` probe, which follows
+    // it. Only `symlink_metadata` sees the link for what it is.
+    #[cfg(unix)]
+    {
+        let linked = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(linked.path().join("real-staging"))
+            .expect("create the directory the link points at");
+        std::os::unix::fs::symlink(
+            linked.path().join("real-staging"),
+            linked.path().join(ATOMIC_STAGING_DIR),
+        )
+        .expect("plant a symlink where the staging directory belongs");
+
+        let err = Storage::register_fs("symlinked", linked.path())
+            .expect_err("registration must refuse a symlinked reserved name");
+        let message = err.to_string();
+        assert!(
+            message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+            "the refusal must name the reservation, got: {message}"
+        );
+    }
+
     // A directory of that name is what registration itself creates, so an
     // existing one must be accepted rather than tripping the same check.
     let reusable = tempfile::tempdir().expect("tempdir");
@@ -852,4 +881,194 @@ async fn a_file_occupying_the_reserved_name_is_refused_at_registration() {
         .write("ok.txt", "written")
         .await
         .expect("the disk works over a pre-existing staging directory");
+}
+
+/// Assert `err` is the guard's symlink refusal rather than any other failure.
+#[cfg(unix)]
+fn assert_symlink_escape(err: &Error, operation: &str) {
+    assert_eq!(
+        err.kind(),
+        ErrorKind::PermissionDenied,
+        "{operation} through a dangling symlink must be PermissionDenied, got: {err}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("symlink"),
+        "{operation} must be refused as a symlink escape, got: {message}"
+    );
+}
+
+/// Every way of publishing bytes at `link_path` must be refused, and the
+/// symlink's absent target must never come into existence.
+///
+/// `open(.., O_CREAT)` follows a symlink and creates the link's *target*, so a
+/// dangling symlink planted in the root is an arbitrary-file-write primitive
+/// wherever the layer creates rather than renames. `rename(2)` happens not to
+/// follow it, but the guard cannot depend on which publish mechanism a given
+/// operation reaches for.
+#[cfg(unix)]
+async fn assert_dangling_symlink_destination_is_refused(
+    disk: &suprnova::opendal::Operator,
+    link_path: &str,
+    dangling_target: &std::path::Path,
+) {
+    disk.write("dangle-source.txt", "bytes to plant")
+        .await
+        .expect("seed an ordinary source object");
+
+    assert_symlink_escape(
+        &disk
+            .write(link_path, "a plain write")
+            .await
+            .expect_err("a plain write onto a dangling symlink must be refused"),
+        "write",
+    );
+    assert_symlink_escape(
+        &disk
+            .write_with(link_path, "an appending write")
+            .append(true)
+            .await
+            .expect_err("an append onto a dangling symlink must be refused"),
+        "append onto a missing object",
+    );
+    assert_symlink_escape(
+        &disk
+            .copy("dangle-source.txt", link_path)
+            .await
+            .expect_err("a copy onto a dangling symlink must be refused"),
+        "copy destination",
+    );
+    assert_symlink_escape(
+        &disk
+            .rename("dangle-source.txt", link_path)
+            .await
+            .expect_err("a move onto a dangling symlink must be refused"),
+        "move destination",
+    );
+
+    assert!(
+        std::fs::symlink_metadata(dangling_target).is_err(),
+        "the symlink's absent target must never come into existence at {dangling_target:?}"
+    );
+    assert!(
+        disk.exists("dangle-source.txt")
+            .await
+            .expect("exists answers"),
+        "a refused move must leave its source where it was"
+    );
+}
+
+/// A dangling symlink inside the root: the guard's ancestor walk used to read
+/// `canonicalize` returning `NotFound` as "nothing here yet, safe to create".
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_symlink_inside_the_root_refuses_every_publish() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    let dangling_target = tmp.path().join("nowhere");
+    std::os::unix::fs::symlink(&dangling_target, tmp.path().join("link"))
+        .expect("plant a dangling symlink inside the root");
+
+    assert_dangling_symlink_destination_is_refused(&disk, "link", &dangling_target).await;
+}
+
+/// The same symlink pointing out of the root, which is the escape itself: an
+/// `O_CREAT` through it writes wherever the process can reach.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_symlink_pointing_outside_the_root_refuses_every_publish() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+    let outside = tempfile::tempdir().expect("a directory outside the disk root");
+
+    std::fs::create_dir_all(tmp.path().join("sub")).expect("create a real subdirectory");
+    let dangling_target = outside.path().join("pwned");
+    std::os::unix::fs::symlink(&dangling_target, tmp.path().join("sub/link"))
+        .expect("plant a dangling symlink that leaves the root");
+
+    assert_dangling_symlink_destination_is_refused(&disk, "sub/link", &dangling_target).await;
+}
+
+/// The positive control for the two above: refusing an unresolvable node must
+/// not cost the ordinary case, where a path simply has not been written yet.
+#[tokio::test]
+async fn a_plain_missing_path_still_writes() {
+    let _guard = Storage::fake();
+    let (_tmp, disk) = register_local_disk();
+
+    disk.write("existing/seed.txt", "seed")
+        .await
+        .expect("create the directory");
+    disk.write("existing/fresh.txt", "written")
+        .await
+        .expect("a missing path under an existing directory still writes");
+    disk.write_with("existing/appended.txt", "opened")
+        .append(true)
+        .await
+        .expect("a first append under an existing directory still creates the object");
+    disk.write("brand/new/deep.txt", "deep")
+        .await
+        .expect("a path whose whole tree is missing still writes");
+
+    assert_eq!(
+        &disk
+            .read("existing/fresh.txt")
+            .await
+            .expect("the fresh object is readable")
+            .to_vec(),
+        b"written"
+    );
+    assert_eq!(
+        &disk
+            .read("existing/appended.txt")
+            .await
+            .expect("the appended object is readable")
+            .to_vec(),
+        b"opened"
+    );
+    assert_eq!(
+        &disk
+            .read("brand/new/deep.txt")
+            .await
+            .expect("the deep object is readable")
+            .to_vec(),
+        b"deep"
+    );
+}
+
+/// The escape itself, isolated: an append through a dangling symlink must not
+/// create the link's target.
+///
+/// This is the sharp end of the dangling-symlink case and the reason the guard
+/// treats an unresolvable node as an escape rather than as free space.
+/// `OpenOptions::open` follows the link, so `O_CREAT` lands on whatever it
+/// points at - `~/.ssh/authorized_keys`, `/etc/cron.d/*`, a sibling app's
+/// config - anywhere the process can reach whose parent directory exists.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_append_through_a_dangling_symlink_creates_nothing_outside_the_root() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+    let outside = tempfile::tempdir().expect("a directory outside the disk root");
+
+    let victim = outside.path().join("authorized_keys");
+    std::os::unix::fs::symlink(&victim, tmp.path().join("innocent.txt"))
+        .expect("plant a dangling symlink aimed out of the root");
+
+    let outcome = disk
+        .write_with("innocent.txt", "ssh-rsa AAAA... attacker\n")
+        .append(true)
+        .await;
+
+    assert!(
+        std::fs::symlink_metadata(&victim).is_err(),
+        "an append must not create a file outside the disk root at {victim:?}; \
+         it now holds {:?}",
+        std::fs::read_to_string(&victim).unwrap_or_default()
+    );
+    assert_symlink_escape(
+        &outcome.expect_err("the append must be refused, not merely contained"),
+        "append",
+    );
 }

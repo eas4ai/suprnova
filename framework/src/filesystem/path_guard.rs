@@ -151,7 +151,8 @@ fn symlink_escape_error(path: &str) -> Error {
         ErrorKind::PermissionDenied,
         format!(
             "path '{path}' is not allowed on a local-filesystem disk: \
-             it resolves (via a symlink) outside the disk root"
+             it goes through a symlink to somewhere this disk cannot confine - \
+             outside the disk root, or at a target that does not exist"
         ),
     )
 }
@@ -218,7 +219,24 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
                 resolved = Some(resolved_ancestor);
                 break;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // `canonicalize` also reports `NotFound` for a *dangling*
+                // symlink - the link is there, its target is not - and treating
+                // that as "nothing here yet, safe to create" is an escape, not a
+                // gap. `open(.., O_CREAT)` follows the link and creates the
+                // link's *target*, so a planted `link -> /outside/anything`
+                // turns a write into a write at an arbitrary path; `rename(2)`
+                // does not follow it, but nothing in this layer may depend on
+                // which publish mechanism a given operation happens to use.
+                // `symlink_metadata` does not follow the link, so it tells the
+                // two cases apart: a node that exists here but cannot be
+                // resolved is refused like any other escape, because nothing at
+                // this point can prove where it leads.
+                if tokio::fs::symlink_metadata(ancestor).await.is_ok() {
+                    return Err(symlink_escape_error(path));
+                }
+                continue;
+            }
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Unexpected,
@@ -327,8 +345,27 @@ async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
 /// rename wins, so one append is lost outright - the opposite of what an append
 /// means. Creating the object first turns that first append into an ordinary
 /// in-place `O_APPEND` write, which is what every append after it already gets.
+///
+/// The cost is that a first append which then fails, or is aborted, leaves an
+/// empty object where it previously left nothing. That matches what an append
+/// onto an existing object has always done - an append is the one operation
+/// here that is not published in a single step - so the two cases stay
+/// consistent rather than one of them being quietly atomic.
 async fn ensure_target_exists(root: &str, path: &str) -> Result<()> {
     let target = on_disk_path(root, path);
+    // Materialize only what genuinely is not there. `OpenOptions::open` follows
+    // symlinks, and `O_CREAT` on a dangling one creates the link's target - the
+    // only symlink-following create in this layer, so it gets its own lock even
+    // though `validate_resolved_path` has already refused that case above.
+    // `symlink_metadata` does not follow the link, so a dangling symlink reports
+    // as a node that exists rather than as a missing target, and anything that
+    // already exists is left for opendal to open exactly as it would have.
+    if !matches!(
+        tokio::fs::symlink_metadata(&target).await,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Ok(());
+    }
     ensure_parent_dir(&target, path).await?;
     tokio::fs::OpenOptions::new()
         .create(true)

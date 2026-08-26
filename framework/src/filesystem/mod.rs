@@ -88,14 +88,19 @@ pub(crate) fn atomic_fs_service(root: &str) -> Result<services::Fs, FrameworkErr
     // regular *file* of that name satisfies its `metadata` probe and
     // canonicalizes fine, so registration would succeed and the first write
     // would fail deep inside the driver with an opaque `create_dir_all` error.
-    // Refuse at registration instead, where the message can say what to do.
-    if let Ok(existing) = std::fs::metadata(&staging)
+    // A *symlink* there is worse: opendal canonicalizes `atomic_write_dir`, so
+    // every staging file would land somewhere that is neither reserved nor
+    // filtered from listings, defeating the reservation for the whole disk. Both
+    // are refused here, where the message can say what to do - and the probe is
+    // `symlink_metadata`, because `metadata` follows the link and would report
+    // the symlink case as an ordinary directory.
+    if let Ok(existing) = std::fs::symlink_metadata(&staging)
         && !existing.is_dir()
     {
         return Err(FrameworkError::internal(format!(
-            "storage fs root '{root}' already holds a non-directory \
-             '{ATOMIC_STAGING_DIR}' entry; that name is reserved for staging \
-             atomic writes, so move it aside before registering the disk"
+            "storage fs root '{root}' already holds a '{ATOMIC_STAGING_DIR}' \
+             entry that is not a real directory; that name is reserved for \
+             staging atomic writes, so move it aside before registering the disk"
         )));
     }
     let staging = staging.to_str().ok_or_else(|| {
@@ -403,6 +408,9 @@ impl Storage {
     /// A `write_with(..).if_not_exists(true)` is published with `link(2)`
     /// rather than a rename, so it stays a genuine exclusive create: racing
     /// writers cannot all succeed, and every loser gets `ConditionNotMatch`.
+    /// That needs a filesystem with hard links. On FAT, exFAT, and some network
+    /// filesystems the publish fails rather than silently giving up
+    /// exclusivity; every other operation is unaffected.
     ///
     /// `append` is the one in-place operation - staging an append would mean
     /// copying the whole object first - and that holds for the append that
