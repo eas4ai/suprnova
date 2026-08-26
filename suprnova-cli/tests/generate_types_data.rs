@@ -208,7 +208,8 @@ const NESTED_SRC: &str = r#"
 #[derive(suprnova::InertiaProps)]
 pub struct AdminArticlesIndexProps {
     pub articles: Vec<AdminArticleRow>,
-    pub external: serde_json::Value,
+    pub external: uuid::Uuid,
+    pub json: serde_json::Value,
     pub odd: TupleThing,
 }
 
@@ -276,6 +277,23 @@ fn external_and_tuple_types_still_degrade_to_unknown() {
     assert!(
         props.contains("odd: unknown"),
         "tuple structs are not promotable and stay unknown: {props}"
+    );
+}
+
+/// `serde_json::Value` used to be this file's example of an external type
+/// that degrades to `unknown`. It is the one external type the generator
+/// does know, so it moved out of that test and into this one.
+#[test]
+fn serde_json_value_resolves_to_the_json_alias() {
+    let ts = generate_types_string(ScanInput::Source(NESTED_SRC));
+    assert!(
+        ts.contains("export type JsonValue ="),
+        "the alias must be declared when something references it: {ts}"
+    );
+    let props = extract_block(&ts, "AdminArticlesIndexProps");
+    assert!(
+        props.contains("json: JsonValue"),
+        "a JSON document is not an unknown type: {props}"
     );
 }
 
