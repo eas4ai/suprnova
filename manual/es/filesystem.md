@@ -36,6 +36,7 @@ defecto" al que degraden los demás - cada driver está al mismo nivel.
 | `Storage::register_s3(name, cfg)`    | Amazon S3 o compatible con S3 | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
+| `Storage::register_read_through(name, cfg)` | Compuesto read-through | `filesystem` |
 
 `filesystem` está activada por defecto; las features de Azure y GCS no.
 Actívalas en tu `Cargo.toml`:
@@ -259,6 +260,282 @@ let bytes = copy_between_disks("local", "uploads/big.bin", "scratch", "big.bin")
 Si algún paso falla a mitad de la copia, el objeto de destino parcial
 se aborta y se elimina antes de que el error original se propague -
 una copia fallida nunca es observable como un destino truncado.
+
+## Discos read-through
+
+Un disco read-through empareja un *primario* rápido con un *fallback* más
+lento y va moviendo los objetos del segundo al primero a medida que se
+leen. Apunta el primario al store al que estás migrando y el fallback a
+aquel del que migras, y el conjunto de trabajo cruzará bajo tráfico
+real - sin ventana de mantenimiento, sin copia masiva de objetos que
+nadie pide.
+
+```rust,ignore
+use suprnova::{ReadThroughConfig, S3Config, Storage};
+
+Storage::register_s3("new-store", S3Config { bucket: "assets-2".into(), ..Default::default() })?;
+Storage::register_s3("legacy-store", S3Config { bucket: "assets-1".into(), ..Default::default() })?;
+
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        ..Default::default()
+    },
+)?;
+
+let assets = Storage::disk("assets")?;
+// Lee `logo.png` de `legacy-store` y lo escribe en `new-store` de camino a
+// la salida. Cada lectura posterior la sirve `new-store`.
+let bytes = assets.read("logo.png").await?;
+```
+
+`Storage::disk("assets")` devuelve un `Operator` corriente, así que todos
+sus métodos y todas las comodidades de `DiskExt` funcionan sin cambios.
+
+### Qué disco responde a cada operación
+
+| Operación | Disco |
+|---|---|
+| `read` | El primario si tiene el objeto; si no, el fallback - y, salvo que `copy` sea `false`, el acierto en el fallback se promueve |
+| `exists`, `size`, `last_modified`, `mime_type`, `stat` | El primario si tiene el objeto; si no, el fallback |
+| `write`, `make_directory` | Solo el primario |
+| `files`, `directories`, `list` | Solo el primario - las entradas del fallback son invisibles para un listado |
+| `delete` | Ambos, el fallback primero |
+| `copy`, `rename` / `move_to` | El primario si tiene el origen; si no, se transmite en streaming desde el fallback; un `rename` borra además el origen del fallback |
+| `temporary_url` | El primario si tiene el objeto; si no, el fallback |
+| `temporary_upload_url` | Solo el primario - una subida tiene que aterrizar donde aterrizan las escrituras |
+
+El listado es solo del primario por diseño. Un listado unido tendría que
+reconciliar la paginación y el orden entre dos backends, e informaría de
+objetos que un listado posterior ya no devuelve una vez promovidos. Usa
+`Storage::disk("legacy-store")` directamente cuando necesites enumerar lo
+que queda en el fallback.
+
+El borrado elimina el objeto de los dos discos. Si solo eliminara la copia
+del primario, la siguiente lectura promovería la copia del fallback de
+vuelta al instante. La consecuencia es que un disco read-through sobre un
+fallback de solo lectura no puede borrar: el borrado en el fallback falla
+y el error te llega.
+
+### Cuando una promoción falla
+
+Por defecto, un fallo de promoción se registra a nivel `warn` y se
+absorbe. Sigues recibiendo los bytes que pediste; el disco simplemente se
+degrada a leer el fallback cada vez, hasta que el primario vuelva a ser
+escribible. Pon `throw_on_promotion_failure: true` cuando una pérdida
+silenciosa de la promoción te escondería un fallo que necesitas ver - una
+migración que estás intentando terminar, por ejemplo:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        throw_on_promotion_failure: true,
+        ..Default::default()
+    },
+)?;
+```
+
+El registro rechaza una configuración que no puede funcionar: un `primary`
+o un `fallback` vacíos, un par que nombra dos veces el mismo disco, un
+disco que se nombra a sí mismo, o un nombre que no está registrado. Cada
+caso devuelve un `FrameworkError` que nombra el problema, y no se registra
+ningún disco.
+
+### Leer sin promover
+
+Pon `copy: false` para servir los aciertos del fallback sin escribirlos a
+través:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "cache-store".into(),
+        fallback: "origin-store".into(),
+        copy: false,
+        ..Default::default()
+    },
+)?;
+```
+
+### Copiar y mover a través del fallback
+
+`copy` y `rename` resuelven el origen contra el primario primero. Cuando
+solo lo tiene el fallback, el objeto se transmite en streaming en
+fragmentos de 64 KiB y el destino aterriza en el primario:
+
+```rust,ignore
+let assets = Storage::disk("assets")?;
+
+// `logo.png` vive solo en `legacy-store`. La copia lo transmite y escribe
+// `branding/logo.png` en `new-store`; el objeto heredado se queda donde
+// está.
+assets.copy("logo.png", "branding/logo.png").await?;
+
+// Un movimiento hace lo mismo y después borra el origen heredado.
+assets.rename("logo.png", "branding/logo.png").await?;
+```
+
+Un movimiento borra el origen del fallback por los dos caminos - tanto si
+el primario tenía el origen como si no. Sin eso, la siguiente lectura
+promovería de vuelta la copia del fallback y desharía el movimiento.
+
+Los dos caminos se diferencian en cuándo lo borran, y esa diferencia es lo
+que deja atrás un movimiento fallido:
+
+- El primario tenía el origen. La copia del fallback cae primero, antes del
+  rename. Mientras el primario tenga la ruta, la copia del fallback es
+  inalcanzable a través de este disco, así que quitarla primero no cambia
+  nada observable - y si el borrado falla, todavía no se ha movido nada.
+  Reintenta el movimiento. Si en cambio el borrado tuvo éxito y luego falló
+  el rename, el fallback no tiene nada para esa ruta, el destino está sin
+  escribir y el primario sigue teniendo el origen, así que un reintento
+  toma este mismo camino y vuelve a hacer el rename. El fallo cuesta la
+  copia fría y nada más.
+- Solo lo tenía el fallback. El borrado solo puede llegar después de que el
+  destino esté en su sitio, así que un movimiento que falla en el borrado
+  deja el destino escrito y el origen todavía en el fallback. Reintenta el
+  movimiento; el origen ya está en el primario, así que el reintento toma
+  el primer camino.
+
+De un modo u otro, un movimiento fallido es seguro de reintentar, y el
+destino con el que acabas es el objeto del que partió el movimiento.
+
+Las condiciones viajan con la operación también por el camino de streaming.
+`if_not_exists` se convierte en una escritura condicional, así que una copia
+o un movimiento con guarda sigue rechazando un destino existente en lugar
+de sobrescribirlo, y una copia que nombra una versión del origen obtiene
+esa versión del fallback. El `if_match` de una copia es la única excepción:
+es una condición que el backend aplica dentro de su propia copia, que es
+justo la llamada que este camino no puede hacer, así que se rechaza con un
+error `Unsupported` que nombra la condición, en lugar de ignorarse en
+silencio.
+
+Eso convierte a las condiciones en el único sitio donde se deja ver qué
+disco tiene el origen. Un directorio local anuncia `copy` y `rename` pero
+ninguna de sus formas condicionales, así que
+`copy_with(a, b).if_not_exists(true)` funciona cuando solo el fallback
+tiene `a` (se convierte en una escritura condicional) y se rechaza con
+`Unsupported` cuando lo tiene el primario. Comprueba la condición que
+necesitas contra el driver primario, en lugar de suponer que se cumple para
+todos los objetos del disco.
+
+Un movimiento que el primario rechazaría se rechaza antes de borrar nada.
+Un primario sin `rename` en absoluto, un movimiento con guarda hacia un
+primario sin `rename` condicional, y un movimiento con guarda hacia un
+destino que ya existe fallan todos con el origen del fallback todavía en su
+sitio - un movimiento que nunca ocurre no debe costarte la copia fría.
+
+Si el stream falla a medias, se aborta el escritor y se borra el destino
+que la transferencia creó antes de que el error te llegue, así que una
+transferencia fallida no es observable como un objeto truncado. Un destino
+que ya estaba ahí se deja en paz - una copia fallida no debe ser lo que
+destruya un objeto que nunca escribió. Sobre un primario de sistema de
+archivos local esa garantía es más débil de lo que parece: el driver abre
+el destino él mismo y lo trunca, así que un destino local preexistente ya
+ha desaparecido para cuando una transferencia puede fallar.
+
+### Lecturas versionadas y condicionales
+
+Una lectura que lleva una versión o una condición `If-Match`,
+`If-None-Match`, `If-Modified-Since` o `If-Unmodified-Since` se transmite
+con esa condición intacta, así que la respuesta significa lo que pediste
+que significara. Una lectura así se sirve pero nunca se promueve: escribir
+una versión antigua o un cuerpo que casa con el validador en el primario lo
+publicaría como el objeto vivo, y toda lectura simple posterior lo
+recibiría.
+
+Qué disco responde a una de ellas se decide de la forma habitual. El primer
+sondeo es una comprobación de existencia corriente, así que un disco
+read-through delega una lectura versionada o condicional en el primario
+siempre que el primario tenga la ruta; solo llega al fallback cuando el
+primario no la tiene.
+
+El primario decide además cuáles de estas acepta siquiera un disco
+read-through, porque el lector del primario se abre primero. Una lectura
+versionada contra un disco read-through cuyo primario es un directorio
+local se rechaza antes de llegar al fallback, ya que un directorio local no
+tiene versiones.
+
+### Por qué Suprnova diverge
+
+Laravel construye un disco read-through a partir de una entrada de
+`config/filesystems.php` cuyas claves `primary` y `fallback` aceptan o bien
+un nombre de disco o bien una configuración de driver en línea. Suprnova
+toma solo nombres de disco, porque aquí los discos se registran mediante
+constructores tipados en lugar de describirse con arrays: registra primero
+el disco interior y después nómbralo.
+
+La promoción de Laravel vuelve a comprobar el primario después de leer el
+fallback, con lo que gana un escritor concurrente. Suprnova mantiene esa
+comprobación y publica la promoción de forma atómica, cosa que Laravel no
+hace. Sobre un primario de sistema de archivos local, los bytes se preparan
+en un archivo temporal hermano y se renombran a su sitio; escribirlos
+directamente al destino dejaría un archivo a medio escribir y creciendo,
+visible durante toda la escritura, y un disco read-through enruta a los
+lectores por exactamente esa comprobación de existencia. Sobre un primario
+sin rename - en memoria, S3, Azure Blob, GCS - una escritura ya es una
+publicación única e indivisible, así que la promoción escribe el destino
+directamente, condicionada a que el objeto no exista ya, para que dos
+lectores concurrentes no promuevan los dos.
+
+Esa condición es la parte que una promoción preparada no puede tener: la
+ruta de preparación es única, así que una condición de no sobrescribir
+sobre ella sería vacua, y el destino se publica mediante un rename que
+sobrescribe. Un disco read-through sobre un primario de sistema de archivos
+local renuncia por tanto a ella - una escritura que aterriza en el primario
+en el instante que va entre la última comprobación de existencia de la
+promoción y su rename queda sobrescrita por la copia promovida. Sobre un
+primario sin rename la condición se cumple y no existe tal ventana.
+
+El objeto de preparación es una entrada real del primario mientras dura,
+así que un listado tomado a mitad de una promoción puede mostrar un
+hermano `.suprnova-promote-<id>.tmp`. Una lectura que se completa, falla o
+se rinde intenta quitar su propio hermano, y registra una advertencia si
+ese borrado falla, en lugar de hacer fallar la lectura. Nada barre un
+hermano dejado por un borrado fallido, por un proceso que se cayó o por un
+futuro de lectura cancelado a mitad de la promoción: esos hay que quitarlos
+a mano.
+
+Una lectura que se resuelve desde el fallback mantiene el objeto en memoria
+hasta que se completa la escritura de la promoción, porque la promoción
+necesita el objeto entero. Eso encaja con el caso de almacenamiento por
+niveles para el que existe un disco read-through. Para objetos fríos muy grandes,
+lee el disco de fallback directamente o usa
+[`copy_between_disks`](#copia-en-streaming-entre-discos) en su lugar.
+
+Laravel devuelve el propio stream del fallback cuando `copy` es `false` y
+almacena en búfer a través de `php://temp` cuando es `true`. Suprnova, en
+cambio, estrecha la obtención del fallback al rango pedido cuando `copy` es
+`false`, y solo almacena en búfer en el camino que promueve, donde de todas
+formas hace falta el objeto entero.
+
+El `copy` y el `move` entre fallbacks de Laravel también almacenan el
+origen en búfer a través de `php://temp`. Suprnova lo transmite en
+fragmentos de 64 KiB en su lugar, porque el fallback es donde viven los
+objetos grandes y poco tocados, y borra un destino a medio escribir antes
+de devolver el error. De OpenDAL se siguen dos diferencias más. Borrar una
+ruta que no está ahí cuenta como éxito, así que un movimiento limpia el
+origen del fallback sin comprobar antes que exista. Y OpenDAL lleva
+condiciones sobre `copy` y `rename` para las que Flysystem no tiene
+equivalente, así que Suprnova tiene que decidir qué significa cada una
+cuando el origen está solo en el fallback: `if_not_exists` y la versión de
+origen de una copia se respetan, y el `if_match` de una copia se rechaza en
+lugar de descartarse.
+
+Laravel borra el origen del fallback después del movimiento por los dos
+caminos. Suprnova lo borra primero cuando el primario tiene el origen,
+porque los dos órdenes se diferencian bajo un reintento: el origen es
+inalcanzable a través del disco en cualquier caso, pero borrar al final
+hace que un movimiento que perdió su borrado por un fallo transitorio
+vuelva convertido en un movimiento cuyo origen ahora está solo en el
+fallback, y transmita la copia obsoleta del fallback por encima del destino
+que el primer intento ya escribió correctamente.
 
 ## Higiene del registro
 

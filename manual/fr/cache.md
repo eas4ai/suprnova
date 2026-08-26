@@ -386,6 +386,66 @@ Chaque TTL Redis passe par `PX` / `PEXPIRE`, pas `EX` / `EXPIRE`. Cela
   des deux chemins de rejet n'est atteignable depuis le code
   utilisateur.
 
+### Réessais de commandes transitoires
+
+Une socket coupée faisait auparavant échouer le `Cache::get` qui se
+trouvait en vol. La connexion Redis se rétablit d'elle-même, mais la
+commande qui a heurté la socket morte vous retourne quand même son
+erreur.
+
+Les commandes de forme lecture réessaient désormais une fois : `GET`,
+`EXISTS`, et les pages `SCAN` / `SSCAN` derrière `Cache::flush` et
+`Cache::flush_tags`. Les lectures `XLEN`, `ZCARD` et `XPENDING` du
+driver de file d'attente et le calcul du `Retry-After` du limiteur de
+débit réessaient de la même façon. Définissez `REDIS_COMMAND_RETRIES`
+pour ajouter d'autres réessais par-dessus celui qui est intégré.
+
+Budgétez le réessai en secondes, et non à l'échelle de la pause de
+50 ms qui le précède. Une fois qu'une connexion est tombée, la tentative suivante
+attend la connexion de remplacement avant de pouvoir envoyer quoi que
+ce soit : elle paie donc tout le budget de connexion du driver, puis
+son timeout de réponse :
+
+- Le driver de cache autorise jusqu'à 3 réessais de connexion, espacés
+  d'au plus 500 ms, chacun plafonné par un timeout de connexion de 2 s,
+  avec un timeout de réponse de 5 s.
+- Les drivers de file d'attente et de limitation de débit prennent les
+  valeurs par défaut de redis-rs : jusqu'à 6 réessais de connexion avec
+  un délai exponentiel non plafonné démarrant à 100 ms, chacun plafonné
+  par un timeout de connexion de 1 s, avec un timeout de réponse de
+  500 ms.
+
+`REDIS_COMMAND_RETRIES` est plafonné à 10, et ce plafond borne les
+tentatives, pas les secondes : au maximum, une seule lecture effectue
+12 tentatives, ce qui, face à un Redis en panne, représente des
+dizaines de secondes à des minutes sur un seul appel. Une commande
+partie en timeout compte comme transitoire au même titre qu'une
+commande coupée, si bien qu'un Redis simplement lent fait émettre à
+chaque lecture enveloppée jusqu'à ce nombre de commandes plutôt qu'une
+seule. N'augmentez ce réglage que là où l'appelant peut se permettre
+d'attendre.
+
+Les écritures ne réessaient jamais, quel que soit le réglage. Une
+erreur transitoire signifie que la connexion a échoué, pas que le
+serveur a décliné la commande - il peut déjà l'avoir exécutée -, si
+bien que réessayer un `SET`, un `INCR`, une acquisition de verrou, un
+décompte de limitation de débit ou un dépilement de file d'attente
+risque une seconde exécution. Ces commandes vous font remonter l'échec,
+et votre décision de réessayer est la décision informée.
+
+### Pourquoi Suprnova diverge
+
+La configuration `command_retries` de Laravel relève le budget de
+réessais pour toutes les commandes Redis, parce que sa méthode
+`command()` est un point de passage unique qui sait quelle commande
+elle exécute et consulte une liste blanche de 60 entrées en lecture
+seule. Les drivers de Suprnova appellent directement des commandes
+typées, si bien que la liste blanche devient une décision prise site
+d'appel par site d'appel, et `REDIS_COMMAND_RETRIES` ne peut
+qu'approfondir les réessais des commandes qu'il est déjà sans danger de
+répéter. Aucun réglage ne fait réessayer un dépilement de file
+d'attente.
+
 ## Tests
 
 Liez un `InMemoryCache` dans le `TestContainer` et la façade le résout
@@ -412,6 +472,23 @@ async fn cache_round_trips() {
 tests parallèles ne font pas fuiter leur état de cache l'un vers
 l'autre. Voir le chapitre [Conteneur de service](container.md) pour le
 modèle de recherche à trois couches.
+
+### Suites sur un Redis réel
+
+Les tests Redis du framework lui-même sont marqués `#[ignore]`, si bien
+que `cargo test` n'a jamais besoin d'un serveur. Lancez-les avec
+`-- --ignored` et pointez-les vers une instance :
+
+- `cache_redis_integration` lit `CACHE_REDIS_TEST_URL`, en se rabattant
+  sur `REDIS_URL` puis sur `redis://127.0.0.1:6379`. Chaque test se
+  cantonne à un préfixe de clé unique, si bien qu'il est sans danger
+  face à un Redis de développement partagé.
+- `cache_redis_retry` couvre le réessai des commandes transitoires et
+  exige `CACHE_REDIS_TEST_URL` explicitement, sans repli. Il émet
+  `CLIENT KILL TYPE normal`, qui déconnecte tous les autres clients de
+  l'instance : il faut donc lui donner un serveur jetable. Avec la
+  variable non définie, il affiche une ligne de saut et passe sans se
+  connecter.
 
 ## Motifs
 

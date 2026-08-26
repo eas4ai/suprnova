@@ -253,9 +253,40 @@ Una solicitud que nombra una ruta de include que no está en la lista
 de permitidos de este recurso recibe una envoltura de errores
 JSON:API 400.
 
+### Tope de profundidad
+
+Una ruta de include puede llevar como mucho cinco segmentos.
+`?include=a.b.c.d.e.f` se trunca a `a.b.c.d.e` antes de que nada la
+recorra, igual que el `JsonApiResource::$maxRelationshipDepth` de
+Laravel. El techo se cambia una sola vez en el arranque:
+
+```rust
+// En bootstrap::register()
+suprnova::max_relationship_depth(3);
+```
+
+El tope importa porque un grafo de relaciones puede ser cíclico:
+`?include=author.posts.author.posts...` cuesta más trabajo con cada
+segmento que teclea un cliente, y no hay nada más que lo acote salvo la
+longitud de la cadena de consulta. El truncado solo quita segmentos,
+nunca los añade, y cada nivel sigue comprobando su propia lista de
+permitidos antes de descender - así que una ruta truncada nunca puede
+alcanzar datos que la ruta completa no alcanzase.
+
+Merece la pena conocer una consecuencia: un segmento que pasa del tope se
+descarta antes de que la lista de permitidos lo vea. Con un tope de 2,
+`?include=author.posts.secrets` devuelve 200 con `author` y `posts`
+incluidos, en lugar del 400 que se ganaría la ruta completa, porque
+`secrets` ya no existe cuando algo lo valida.
+
+`max_relationship_depth(0)` desactiva los includes por completo. El 0 de
+Laravel sigue emitiendo el primer salto, porque su acotación solo se
+aplica a la cola una vez separado el segmento inicial; el 0 de Suprnova
+significa ninguna relación en absoluto.
+
 ### Por qué Suprnova diverge
 
-Dos divergencias visibles respecto al `JsonApiResource` de Laravel:
+Tres divergencias visibles respecto al `JsonApiResource` de Laravel:
 
 1. **Denegación estricta por defecto para `?include=`.** La capa de
    recursos de Laravel ignora en silencio las rutas de include que no
@@ -274,6 +305,13 @@ Dos divergencias visibles respecto al `JsonApiResource` de Laravel:
    decir, `.status(204)` cuando la respuesta está vacía, y así
    sucesivamente. Un único mutador se mantiene honesto bajo cualquier
    flujo.
+
+3. **Un tope de profundidad de `0` desactiva los includes por completo.**
+   Laravel acota solo la cola de una ruta, después de haber separado ya el
+   segmento inicial, así que su `0` sigue emitiendo el primer salto.
+   Suprnova trunca la ruta entera, así que `max_relationship_depth(0)`
+   significa ninguna relación en absoluto - véase Tope de profundidad más
+   arriba.
 
 ## Paginación
 

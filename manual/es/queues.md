@@ -398,6 +398,84 @@ Suprnova sin token son los sobres encolados antes de que el token
 existiera, y esos se quedan con la caducidad por TTL en lugar de arriesgar
 una liberación que borre el bloqueo de un despacho más nuevo.
 
+### Antirrebote - conservar el último despacho, no el primero
+
+`push_unique` suprime un duplicado y conserva el **primer** despacho. El
+antirrebote es lo contrario: conserva el **último**. Una ráfaga de veinte
+eventos de "este pedido cambió" se convierte en una sola reindexación, una
+ventana después del vigésimo, y lleva el payload más reciente.
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReindexOrder {
+    order_id: u32,
+}
+
+#[async_trait]
+impl Job for ReindexOrder {
+    fn job_name() -> &'static str { "reindex-order" }
+    fn debounce_for() -> Option<Duration> { Some(Duration::from_secs(30)) }
+    fn max_debounce_wait() -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn debounce_id(&self) -> Option<String> { Some(self.order_id.to_string()) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+- `debounce_for` es la ventana: cada despacho la rearma, así que la
+  ejecución ocurre 30 segundos después del *más reciente*.
+- `max_debounce_wait` impide que una ráfaga continua difiera el trabajo para
+  siempre. Una vez que la ráfaga lleva cinco minutos difiriéndolo, el
+  siguiente despacho se encola sin retardo. La ventana se reinicia entonces,
+  así que cada ráfaga mide su espera máxima desde su propio primer despacho.
+- `debounce_id` acota la ventana. Veinte actualizaciones del pedido 7 se
+  convierten en una sola ejecución; una actualización del pedido 8 no se ve
+  afectada por ellas. Omítelo y todos los despachos del job comparten una
+  única ventana.
+
+Cada despacho se sigue encolando. El colapso se resuelve en el worker: cada
+push sobrescribe un token de caché, y el worker descarta cualquier sobre
+cuyo token ya haya sido sustituido por un despacho más nuevo, le hace ack y
+emite `JobDebounced`. Eso es lo que hace que la ejecución superviviente lleve el
+payload más reciente y no el más antiguo. Si el token ha expirado o ha sido
+desalojado, el job se ejecuta - el antirrebote falla abierto, porque un
+token perdido no es prueba de que la ventana sea de otro.
+
+El [driver `sync`](#drivers) no tiene worker, así que ejecuta cada despacho
+en línea y nunca colapsa nada. El driver sync de Laravel se comporta igual.
+`Queue::bulk` empuja a nivel de driver y tampoco arma una ventana, así que
+un job con antirrebote empujado en lote ejecuta todas sus copias. El
+`Queue::bulk` de Laravel se salta su propia adquisición de antirrebote por
+la misma razón.
+
+Fija en cambio la ventana en el punto de llamada cuando esta pertenece a
+quien llama:
+
+```rust
+use suprnova::queue::DebounceOptions;
+
+Queue::push_debounced(
+    ReindexOrder { order_id: 7 },
+    DebounceOptions::new(Duration::from_secs(30))
+        .max_wait(Duration::from_secs(300))
+        .id("7"),
+)
+.await?;
+```
+
+Un job no puede declarar a la vez `debounce_for` y `unique_id`: la unicidad
+conserva el primer despacho de una ráfaga y el antirrebote conserva el
+último, así que el push devuelve un error que nombra a los dos. Las cadenas
+y los lotes rechazan un job con antirrebote por un motivo relacionado: un
+eslabón sustituido se descarta, lo que dejaría varado el resto de una
+cadena, y un job de lote descartado deja el contador de pendientes del lote
+por encima de cero, así que sus callbacks nunca se disparan.
+
 ### Anulaciones por push con `EnvelopeOverrides`
 
 `Queue::push_with` y `Queue::later_with` toman un `EnvelopeOverrides`
@@ -738,6 +816,84 @@ Luego dedícale un worker:
 Un job sin ruta pertenece a `default`, así que `--queue=default` drena el
 trabajo sin enrutar en lugar de dejarlo varado.
 
+### Reenviar una cola entera
+
+`Queue::route` se indexa por tipo de job. Cuando quieres drenar un pool a
+través de otro - retirar una cola, absorber trabajo acumulado, sacar trabajo
+de un pool que estás a punto de apagar -, indexa la redirección por nombre de
+cola en su lugar:
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::forward("default", "high");
+Queue::forward_on("exports", "heavy", "redis");   // solo en la conexión `redis`
+```
+
+La conexión de `forward_on` es una compuerta, y se compara con el nombre de
+conexión de este proceso - `Queue::set_connection_name` si fijaste uno, y si
+no, el nombre propio del driver. No se compara con el `Job::connection` del
+job, ni con la conexión de un `Queue::route`, ni con la conexión de un
+`EnvelopeOverrides` por push: esas nombran lo que informan los eventos del
+ciclo de vida, y un worker solo tiene el nombre del proceso con el que
+condicionar su lista de reclamación. Las dos mitades de la redirección se
+condicionan por ese único valor, así que un reenvío nunca puede mover el push
+sin mover la reclamación.
+
+La redirección se aplica en los dos lados, que es lo que evita que deje
+trabajo varado:
+
+- **En el lado del push**, el nombre se reescribe después de que el
+  enrutamiento y el propio `Job::queue` del job hayan dicho la suya, y después
+  de la cola de un `EnvelopeOverrides` por push si pasaste uno.
+- **En el lado del pop**, un worker arrancado con `--queue=default` drena
+  `high`. Sin esa mitad, la cola de destino acumularía jobs que ningún worker
+  reclama.
+
+Un worker arrancado sin `--queue` en absoluto ya drena todo, así que un
+reenvío no le cambia nada. Reenviar `default` atrapa los jobs que no nombraron
+ninguna cola, porque un job sin enrutar pertenece a `default`.
+
+Un reenvío es una única búsqueda, nunca una cadena. Con `a -> b` y `b -> c`
+registrados, un push que resolvió a `a` aterriza en `b`. Registrar `b -> a`
+sobre un `a -> b` ya existente es, por tanto, un intercambio coherente de
+pools y no un bucle: un push a `a` sigue aterrizando en `b`, un push a `b`
+ahora aterriza en `a`, y un worker arrancado con cualquiera de los dos
+nombres reclama el otro - nada se encadena, así que nada queda varado. Una
+rotación más larga entre más nombres de cola se resuelve igual, un salto
+independiente cada vez. El `Queue::forward` de Laravel tampoco tiene
+comprobación de ciclos, por la misma razón: su resolutor es esta misma
+búsqueda única. Reenviar una cola a su propio nombre es la identidad -
+ninguna redirección en absoluto -, que es como se neutraliza un reenvío ya
+registrado.
+
+Solo se mueven los pushes futuros. Los sobres que ya están en la cola de
+origen se quedan ahí, y el worker que solía drenarlos ahora reclama en el
+destino, así que drena el pool de origen antes de reenviarlo. Lo mismo vale
+para `queue:retry`: un job fallido se vuelve a encolar en la cola en la que
+murió.
+
+La pausa se evalúa antes de la redirección, sobre los nombres con los que se
+arrancó el worker. `Queue::pause(&connection, "default")` sigue parando un
+worker arrancado con `--queue=default`, incluso mientras `default` está
+reenviada a `high`. Lo contrario también vale: pausar el *destino* del
+reenvío - `Queue::pause(&connection, "high")` - no detiene un worker
+arrancado con `--queue=default`, porque a ese worker se llega por su nombre
+de origen y no por el reescrito. El evento `WorkerQueuePaused` que esta
+transición emite lleva `queue: default`, el nombre configurado, nunca `high` -
+Laravel aplica el mismo orden y lo informa igual.
+
+Las llamadas de inspección deliberadamente no se reenvían:
+`Queue::pending_jobs(Some("default"))` lista lo que está literalmente en
+`default`, no lo que está en `high`, que es como se ve el trabajo acumulado
+varado en una cola de origen que acabas de reenviar. Laravel resuelve el
+reenvío también ahí; véase la nota de divergencia más abajo.
+
+Un reenvío registrado se lee de vuelta con `Queue::forward_for("default")`,
+que devuelve el destino en `queue` y la compuerta de conexión en
+`connection`.
+
 ### Por qué Suprnova diverge
 
 El `Queue::route(...)` de Laravel toma un string de clase; Suprnova toma
@@ -756,6 +912,29 @@ base de datos filtran de forma nativa; un driver que no lo hace - el
 driver de Redis es uno de ellos, ya que un único grupo de consumidores de
 stream no tiene almacenamiento por cola - dará un error en lugar de
 engañar.
+
+`Queue::forward` porta por completo la mitad de cola a cola del
+`Queue::forward` de Laravel, y solo esa mitad. El tercer argumento de Laravel
+puede mover una cola reenviada a una *conexión* distinta, porque su gestor de
+colas resuelve un driver por nombre de conexión. Suprnova tiene un único
+driver global del proceso, y un nombre de conexión solo etiqueta los eventos
+del ciclo de vida, así que `Queue::forward_on(from, to, connection)` trata la
+conexión como una **compuerta** - decide si se aplica la redirección por
+nombre de cola - y nunca como un destino. Por la misma razón, aquí `to` es
+obligatorio mientras que el de Laravel es opcional: un `to` omitido en Laravel
+significa "mover solo la conexión", que es justo la dimensión que Suprnova no
+puede respetar, así que un `forward(from, None)` sería una operación nula
+disfrazada de cambio de configuración.
+
+Las llamadas de inspección de Laravel siguen un reenvío, porque
+`pendingJobs($queue)` y sus contrapartes pasan por el mismo `getQueue()` de
+nivel de driver por el que pasan el push y el pop. Los `Queue::pending_jobs` /
+`delayed_jobs` / `reserved_jobs` de Suprnova informan en cambio de la cola
+literal que nombras. Con un único driver global del proceso, la vista literal
+es la única manera de ver los sobres que se quedaron atrás en una cola que
+acabas de reenviar - el trabajo acumulado que esta sección te dice que drenes
+primero. Pide la cola de destino por su nombre para ver dónde está aterrizando
+el trabajo nuevo.
 
 ### La tabla `jobs`
 
@@ -956,6 +1135,7 @@ opera sobre payloads JSON. Los errores viajan como un `String` ya que
 | `JobQueueing` | antes de que el sobre llegue al driver |
 | `JobQueued` | después de que el driver acepta |
 | `UniqueJobSkipped` | `push_unique` suprimió un duplicado dentro de la ventana `unique_for` |
+| `JobDebounced` | el worker descartó un sobre que un despacho con antirrebote más nuevo dejó obsoleto |
 | `JobProcessing` | el worker extrajo el job, a punto de despacharlo |
 | `JobProcessed` | el handler devolvió `Ok` |
 | `JobAttempted` | cada resolución terminal (éxito, fallo, timeout) |
@@ -971,6 +1151,8 @@ opera sobre payloads JSON. Los errores viajan como un `String` ya que
 | `QueueResumed` | `Queue::resume` limpió el interruptor propio de una cola |
 | `QueuesPaused` | `Queue::pause_all` estableció el interruptor global |
 | `QueuesResumed` | `Queue::resume_all` limpió el interruptor global |
+| `WorkerQueuePaused` | un worker en marcha observó por primera vez una cola como pausada |
+| `WorkerQueueResumed` | un worker en marcha vio que una cola pausada volvía a ser reclamable |
 
 Suscríbete con la API normal de `Event::listen`. Los eventos son
 best-effort - `Event::dispatch` sin oyentes es un no-op `Ok(())`, así que
@@ -987,6 +1169,13 @@ supresión que de otro modo sería invisible.
 del mismo modo: desde `Queue::pause` / `resume` / `pause_all` / `resume_all`
 en sí, no desde el bucle del worker. Tampoco llevan identidad de sobre;
 consulta «Pausar colas» abajo para el contrato completo.
+
+`WorkerQueuePaused` / `WorkerQueueResumed` son la pareja del lado del worker,
+y son los que te dicen *por qué se ha quedado callado un worker concreto*. Se
+disparan una vez por transición desde dentro del bucle del worker, llevan la
+conexión que el worker está drenando y llevan el nombre de la cola - o
+`None`, cuando un worker sin filtro está ocioso bajo una pausa global y no
+tiene nombres de cola de los que informar.
 
 ## Almacenamiento de jobs fallidos
 
@@ -1430,6 +1619,20 @@ no elimina una pausa por cola**: una cola pausada individualmente sigue
 pausada después de una reanudación global, igual que en Laravel. Límpiala
 explícitamente con `Queue::resume(&connection, "billing")`.
 
+Un worker pausado también lo dice. `queue:work` imprime una línea por
+transición:
+
+```text
+  2026-08-25 14:03:11 Queue billing PAUSED
+  2026-08-25 14:07:44 Queue billing RESUMED
+```
+
+Un worker arrancado sin `--queue` no tiene nombres de cola de los que
+informar, así que una pausa global imprime `All queues PAUSED` en su lugar.
+Las dos líneas salen de los eventos `WorkerQueuePaused` /
+`WorkerQueueResumed`, así que puedes escucharlos tú y encaminarlos a donde
+viva tu sistema de alertas.
+
 Ambas señales viven en `Cache`, junto a la señal de reinicio de arriba:
 
 | Clave | Significado |
@@ -1543,6 +1746,14 @@ Consulta [Simulación](mocking.md#queue---queuetestinginstall_fake) para
 `pushed_with_overrides`. En modo fake, `push_unique` siempre registra el
 push como nuevo - la deduplicación es irrelevante cuando no hay ningún
 driver conectado.
+
+Un push con antirrebote se comporta igual: el fake no escribe nada en la
+caché, así que no se arma ninguna ventana y el `available_at` registrado no
+lleva retardo de antirrebote. `assert_pushed_later` lo ve como no retardado.
+Lo que el fake sí sigue detectando es un job que declara a la vez
+`debounce_for` y `unique_id` - esa pareja no puede sostenerse sea cual sea el
+entorno, así que el push devuelve un error bajo `Queue::fake()` exactamente
+igual que lo haría en producción.
 
 ## La idempotencia es el contrato del worker contigo
 

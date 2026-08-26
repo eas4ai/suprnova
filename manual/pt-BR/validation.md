@@ -30,14 +30,16 @@ Uma regra é um valor que implementa uma de quatro traits:
 | `AsyncRule` | `async passes(&self, value)` | checagem que faz `.await` (BD, HTTP) |
 
 `Rule`s embutidas: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
-`NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#força-de-senha)
-(somente as checagens de força). `ValueRule`s embutidas: `ArrayKeys`,
-`Distinct`. `ContextualRule`s embutidas: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule`s embutidas:
-[`Unique`](#a-regra-unique) e [`Password`](#força-de-senha) (força mais a
-sua checagem HIBP `uncompromised()` - a única regra embutida que implementa
-tanto `Rule` quanto `AsyncRule`).
+`NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
+`AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`,
+[`Password`](#força-de-senha) (somente as checagens de força).
+`ValueRule`s embutidas: `ArrayKeys`, `Distinct`, `Contains`,
+`DoesntContain`. `ContextualRule`s embutidas: `RequiredIf`, `RequiredWith`,
+`RequiredUnless`, `Same`, `Different`, `Confirmed`, `Gt`, `Gte`, `Lt`,
+`Lte`. `AsyncRule`s embutidas: [`Unique`](#a-regra-unique) e
+[`Password`](#força-de-senha) (força mais a sua checagem HIBP
+`uncompromised()` - a única regra embutida que implementa tanto `Rule`
+quanto `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -281,12 +283,108 @@ em geral, um campo de solicitação extraído diretamente do corpo JSON. Linhas 
 executa é resolvido pelo que o tipo da regra implementa, não por algo que você
 escreve na linha.
 
+### Regras de pertencimento
+
+Três regras respondem "este valor está naquela lista?", cada uma sobre o
+formato de que precisa:
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// O in_array:allowed_roles.* do Laravel - o valor precisa aparecer na
+// lista de outro campo. Passe a própria lista: tanto um campo Vec<String>
+// quanto um literal &[&str] funcionam.
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// O contains:rust,web do Laravel - o array precisa conter todos os
+// valores listados.
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// O doesnt_contain:banned do Laravel - o array não pode conter nenhum
+// deles.
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+Toda comparação é exata. `InArray` compara strings com `==`, e `Contains`
+e `DoesntContain` casam um parâmetro apenas contra um elemento JSON do
+tipo string, então `["1"]` contém `"1"` e `[1]` não. Um valor que não é um
+array falha `Contains` e `DoesntContain` de imediato.
+
+`Contains` e `DoesntContain` rejeitam uma lista de parâmetros vazia como
+um erro de construção sem chave, do mesmo jeito que `ArrayKeys` faz - uma
+lista sem nada dentro não restringe nada. Uma lista de busca vazia em
+`InArray` é diferente: um campo irmão pode legitimamente estar vazio em
+runtime, então o valor simplesmente falha.
+
+A mensagem de falha de `InArray` não nomeia valor nenhum, porque a lista
+dela vem da solicitação e uma mensagem de validação é renderizada dentro
+de um corpo de resposta.
+
+### Regras de comparação
+
+`Gt`, `Gte`, `Lt` e `Lte` comparam um campo contra um número ou contra
+outro campo. `CompareWith` nomeia o operando e a medida juntos:
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// O gt:0 do Laravel - um operando literal, comparado numericamente.
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// O lte:max_price do Laravel - um campo irmão, comparado numericamente.
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// O gt:summary do Laravel em dois campos de string - comparado por
+// contagem de caracteres.
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+Todas as quatro leem campos irmãos, então são `ContextualRule`s e toda
+linha de `validate!` carrega `=> with ctx` - incluindo uma linha cujo
+único operando é um literal, onde o contexto não chega a ser lido. Passe
+um `FormContext` vazio nesse caso.
+
+Qualquer coisa que a regra não consiga medir faz o campo falhar: um valor
+que não é um número finito sob uma comparação numérica, um irmão que o
+formulário nunca enviou, um irmão que não é um número, ou um literal não
+finito como `f64::NAN`. Nenhum desses entra em panic, e nenhum deles
+passa.
+
 ### Por que Suprnova diverge
 
 O `distinct:strict` do Laravel apoia-se no `==` coercitivo do PHP. Valores JSON
 já são tipados, portanto o `strict` do Suprnova só altera se dois *números* com
 representações internas diferentes (`1` versus `1.0`) contam como iguais - ele
 nunca torna uma string e um número "o mesmo", em nenhum modo.
+
+O Laravel escreve o outro campo dentro de uma string de regra -
+`in_array:allowed_roles.*` - e o validador o extrai por glob dos dados da
+solicitação em runtime. O Suprnova não tem parser de string de regra: você
+entrega a lista diretamente ao `InArray`, e o compilador confere que o
+campo existe.
+
+O Laravel 13.27 apertou `in`, `in_array` e `doesnt_contain` para
+comparação estrita porque o `==` do PHP transformava `"1abc"`, `true` e
+`"0x1"` em correspondências. O Suprnova nunca teve esse buraco - `In` e
+`NotIn` comparam `&str` com `==` - e as novas regras casam valores JSON
+variante por variante. O `contains` do Laravel continuou frouxo; o do
+Suprnova não. O custo é que essas regras não conseguem checar um array
+numérico: `Contains(&["1"])` não casa com `[1]`.
+
+A família `gt` do Laravel escolhe a medida dela em runtime: o próprio
+número para numéricos, `count()` para arrays, kilobytes para arquivos, e
+contagem de caracteres para todo o resto, com o ramo numérico condicionado
+a se o campo também carrega `numeric` ou `integer`. O Suprnova escreve a
+medida dentro da regra, porque aqui uma regra não consegue ver as outras
+regras do campo dela, e farejar o formato do valor é justamente o hábito
+de coerção que essas regras existem para evitar. Duas das quatro medidas
+do Laravel não têm contrapartida alguma: uma regra só recebe uma string,
+então um irmão com valor de array não pode ser lido, e uploads nunca
+alcançam a superfície de regras - o parser multipart limita o tamanho
+deles antes de um handler vê-los.
 
 ## A macro `validate!`
 

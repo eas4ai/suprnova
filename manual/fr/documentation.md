@@ -123,6 +123,6 @@
     - [Glossaire](glossary.md)
 
 
----
 *[Documentation API (rustdoc)](https://docs.rs/suprnova) - une fois publiée.*
+---
 

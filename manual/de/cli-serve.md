@@ -56,8 +56,8 @@ Frontend http://127.0.0.1:5765
 ```
 
 Rufen Sie `http://127.0.0.1:8765` in Ihrem Browser auf. Das Backend
-liefert die Inertia-HTML-Shell aus und leitet Asset-Anfragen an Vite
-weiter, sodass Sie die Vite-URL nicht direkt aufrufen müssen.
+liefert die Inertia-HTML-Hülle aus und leitet Asset-Anfragen an Vite
+weiter, Sie müssen die Vite-URL also nicht direkt besuchen.
 
 ### Eigene Ports
 
@@ -78,9 +78,9 @@ VITE_PORT=3001
 suprnova serve --backend-only
 ```
 
-Gut geeignet, wenn Sie an einem reinen API-Projekt arbeiten oder Ihr
-Frontend bereits in einem anderen Terminal läuft (oder auf einer
-anderen Maschine, oder als bereitgestellte Preview).
+Gut geeignet für die Arbeit an einem reinen API-Projekt oder wenn Ihr
+Frontend bereits in einem anderen Terminal läuft (oder auf einer anderen
+Maschine oder in einer bereitgestellten Vorschau).
 
 ### Nur Frontend
 
@@ -88,9 +88,24 @@ anderen Maschine, oder als bereitgestellte Preview).
 suprnova serve --frontend-only
 ```
 
-Gut geeignet, um an der UI zu arbeiten, ohne bei jedem Speichern die
-Kosten eines Rust-Rebuilds zu zahlen, oder wenn das Backend in einer
-anderen Shell (oder in Docker) läuft.
+Gut geeignet für die Arbeit an der Oberfläche, ohne bei jedem Speichern
+einen Rust-Rebuild zu bezahlen, oder wenn das Backend in einer anderen
+Shell (oder in Docker) läuft.
+
+### Reines API-Projekt
+
+Ein mit `suprnova new --api` gescaffoldetes Projekt hat kein
+`frontend/`-Verzeichnis. Führen Sie `serve` genau so aus wie überall
+sonst:
+
+```bash
+suprnova serve
+```
+
+`serve` findet keine `frontend/package.json`, überspringt den
+Vite-Bereich und die TypeScript-Generierung, die ihn speist, und startet
+das Backend. `--frontend-only` bleibt bei einem solchen Projekt ein
+Fehler: Es verlangt genau den Bereich, den es nicht gibt.
 
 ### Typgenerierung überspringen
 
@@ -98,10 +113,10 @@ anderen Shell (oder in Docker) läuft.
 suprnova serve --skip-types
 ```
 
-Deaktiviert den TypeScript-Regenerierungs-Watcher. Verwenden Sie
-dies, wenn Sie `frontend/src/types/inertia-props.ts` von Hand
-verwalten, oder wenn Sie weit entfernt von jeglichem Inertia-Code
-arbeiten und eine ruhigere Ausgabe möchten.
+Schaltet den Watcher für die TypeScript-Regenerierung ab. Nutzen Sie das,
+wenn Sie `frontend/src/types/inertia-props.ts` von Hand pflegen oder wenn
+Sie weit entfernt von jedem Inertia-Code arbeiten und eine ruhigere
+Ausgabe wollen.
 
 ## Was es tatsächlich tut
 
@@ -112,11 +127,13 @@ Wenn Sie `suprnova serve` ausführen, macht die CLI Folgendes:
    Standard).
 3. Prüft, dass Sie sich in einem Suprnova-Projekt befinden -
    `Cargo.toml` muss existieren (außer bei `--frontend-only`), und
-   ein `frontend/`-Verzeichnis muss existieren (außer bei
-   `--backend-only`).
+   `--frontend-only` braucht ein `frontend/`-Verzeichnis mit einer
+   `package.json`. Ein Projekt ohne ein solches Verzeichnis wird
+   backend-only bedient statt abgelehnt.
 4. Regeneriert TypeScript-Typen aus jeder
    `#[derive(InertiaProps)]`-Struktur, die es in `src/` findet, und
-   schreibt sie nach `frontend/src/types/inertia-props.ts`.
+   schreibt sie nach `frontend/src/types/inertia-props.ts`. Wird
+   übersprungen, wenn das Projekt kein Frontend hat.
 5. Installiert `cargo-watch` über `cargo install --locked --version
    "^8.5" cargo-watch`, falls es noch nicht im PATH liegt (einmalig,
    mit einem „Installing...“-Hinweis). Wird unter `--frontend-only`
@@ -129,19 +146,57 @@ Wenn Sie `suprnova serve` ausführen, macht die CLI Folgendes:
    Software installiert, sollte nicht auch noch Versionen für Sie
    auswählen.
 6. Führt `npm install` in `frontend/` aus, falls `node_modules` noch
-   nicht existiert. Wird unter `--backend-only` übersprungen.
+   nicht existiert. Wird unter `--backend-only` übersprungen und
+   ebenso, wenn das Projekt kein Frontend hat.
 7. Startet `cargo watch -x 'run --bin <package-name>'` für das
    Backend. `cargo-watch` führt die Binary bei jeder Änderung einer
    `.rs`-Datei erneut aus.
 8. Startet `npm run dev` in `frontend/` für Vite, was Ihnen HMR für
-   Svelte-/React-/Vue-Komponenten und Tailwind-Klassen gibt.
-9. Startet jeden zusätzlichen Prozess, der in der `Suprnova.toml` des Projekts deklariert ist (siehe [Zusätzliche Entwicklungsprozesse](#zusätzliche-entwicklungsprozesse) unten), jeweils mit eigenem `[name]`-Präfix - Queue-Worker, Log-Tailer oder alles andere, das Sie sonst in einem anderen Terminal verwalten würden.
-10. Startet einen Dateiwächter auf `src/`, der den Typgenerator nach jeder Änderung einer `.rs`-Datei erneut ausführt, sobald die Folge von Speicherungen 500 ms lang ruhig war. Der Debounce erfolgt am Ende der Ruhephase; eine Folge - `cargo fmt`, Format-on-save über mehrere Dateien hinweg, ein Branch-Wechsel - wird so zu genau einer Regenerierung zusammengefasst, die *nach* dem letzten Schreibvorgang läuft, statt bei der ersten Datei auszulösen und den Rest zu verpassen.
-11. Leitet stdout/stderr jedes Kindprozesses mit einem `[name]`-Präfix (`[backend]`, `[frontend]` oder dem konfigurierten Prozessnamen) an Ihr Terminal weiter, optional mit Zeitstempel über `--timestamps` - oder mit `--json` stattdessen als NDJSON-Ereignisse (siehe [JSON-Ausgabe](#json-ausgabe) unten).
+   Svelte-/React-/Vue-Komponenten und Tailwind-Klassen gibt. Wird
+   unter `--backend-only` übersprungen und ebenso, wenn das Projekt
+   kein Frontend hat.
+9. Startet jeden zusätzlichen Prozess, der in der `Suprnova.toml` des
+   Projekts deklariert ist (siehe [Zusätzliche
+   Entwicklungsprozesse](#zusätzliche-entwicklungsprozesse) unten),
+   jeweils mit eigenem `[name]`-Präfix - Queue-Worker, Log-Tailer oder
+   alles andere, das Sie sonst in einem anderen Terminal verwalten
+   würden.
+10. Startet einen Dateiwächter auf `src/`, der den Typgenerator nach
+    jeder Änderung einer `.rs`-Datei erneut ausführt, sobald die Folge
+    von Speicherungen 500 ms lang ruhig war. Wird übersprungen, wenn
+    das Projekt kein Frontend hat, genau wie die Typgenerierung beim
+    Start in Schritt 4. Der Debounce erfolgt am Ende der Ruhephase;
+    eine Folge - `cargo fmt`, Format-on-save über mehrere Dateien
+    hinweg, ein Branch-Wechsel - wird so zu genau einer Regenerierung
+    zusammengefasst, die *nach* dem letzten Schreibvorgang läuft, statt
+    bei der ersten Datei auszulösen und den Rest zu verpassen.
+11. Leitet stdout/stderr jedes Kindprozesses mit einem `[name]`-Präfix
+    (`[backend]`, `[frontend]` oder dem konfigurierten Prozessnamen) an
+    Ihr Terminal weiter, optional mit Zeitstempel über `--timestamps` -
+    oder mit `--json` stattdessen als NDJSON-Ereignisse (siehe
+    [JSON-Ausgabe](#json-ausgabe) unten).
 
-`Ctrl+C` signalisiert dem Manager, sein Shutdown-Flag zu setzen, alle Kindprozesse zu beenden und selbst zu beenden. Endet ein Kindprozess von selbst - ein Rust-Kompilierungsfehler, von dem sich `cargo watch` nicht erholen kann, ein abgestürzter Vite-Prozess, ein fehlgeschlagener `Suprnova.toml`-Prozess -, wird er nach einem kurzen Backoff neu gestartet (200 ms, bei jedem aufeinanderfolgenden Absturz verdoppelt, auf 5 s begrenzt; ein Prozess, der 30 s lief, setzt die Steigerung zurück), statt die Sitzung abzubauen. Übergeben Sie `--no-restart`, um das frühere Verhalten wiederherzustellen: Endet ein Kindprozess, wird die gesamte Sitzung sofort beendet.
+`Ctrl+C` signalisiert dem Manager, sein Shutdown-Flag zu setzen, alle
+Kindprozesse zu beenden und selbst zu beenden. Endet ein Kindprozess
+von selbst - ein Rust-Kompilierungsfehler, von dem sich `cargo watch`
+nicht erholen kann, ein abgestürzter Vite-Prozess, ein fehlgeschlagener
+`Suprnova.toml`-Prozess -, wird er nach einem kurzen Backoff neu
+gestartet (200 ms, bei jedem aufeinanderfolgenden Absturz verdoppelt,
+auf 5 s begrenzt; ein Prozess, der 30 s lief, setzt die Steigerung
+zurück), statt die Sitzung abzubauen. Übergeben Sie `--no-restart`, um
+das frühere Verhalten wiederherzustellen: Endet ein Kindprozess, wird
+die gesamte Sitzung sofort beendet.
 
-Ein Prozess, der weiterhin abstürzt, wird nicht endlos erneut versucht: `--restart-tries` (standardmäßig `5`) begrenzt, wie viele aufeinanderfolgende Abstürze `serve` erneut versucht, bevor es für diesen einen Prozess aufgibt - weitere 30 s Laufzeit setzen die Anzahl zurück, ebenso wie die Backoff-Verzögerung. Beim Aufgeben wird eine konkrete Meldung ausgegeben und *nur* dieser Prozess nicht weiter neu gestartet; die übrigen Prozesse (und die Sitzung selbst) laufen weiter. Das entspricht Laravels eigenem Standardwert `concurrently --restart-tries=5`. Siehe [Fehlerbehebung](#ein-prozess-gerät-in-eine-absturzschleife).
+Ein Prozess, der weiterhin abstürzt, wird nicht endlos erneut versucht:
+`--restart-tries` (standardmäßig `5`) begrenzt, wie viele
+aufeinanderfolgende Abstürze `serve` erneut versucht, bevor es für
+diesen einen Prozess aufgibt - weitere 30 s Laufzeit setzen die Anzahl
+zurück, ebenso wie die Backoff-Verzögerung. Beim Aufgeben wird eine
+konkrete Meldung ausgegeben und *nur* dieser Prozess nicht weiter neu
+gestartet; die übrigen Prozesse (und die Sitzung selbst) laufen weiter.
+Das entspricht Laravels eigenem Standardwert
+`concurrently --restart-tries=5`. Siehe
+[Fehlerbehebung](#ein-prozess-gerät-in-eine-absturzschleife).
 
 ### Warum Suprnova abweicht
 
@@ -156,7 +211,20 @@ die `frontend/src/types/inertia-props.ts` laufend regeneriert, sodass
 Ihre Svelte-/React-/Vue-Komponenten immer die aktuelle Prop-Form ohne
 manuellen Typ-Sync sehen.
 
-Laravels Befehl `dev` bietet außerdem die Modi `--tabs` und `--stream`, die beide die Ausgabe durch ein kleines Node-TUI (`@laravel/multiplex`) rendern. Suprnova liefert dieses TUI nicht aus: Ausgabe mit Präfixen in einem einzelnen Terminal ist im Rust-Ökosystem für Entwicklungstools (`cargo watch`, `bacon`, `just`) die Norm, und ein Prozessregister mit farbigen Präfixen gibt bereits das Signal „welcher Prozess hat das gesagt?“, das ein TUI liefert. Die zugrunde liegende Aufgabe von `--stream` - ein skriptbarer Echtzeit-Ereignisstrom - wird als `--json` ausgeliefert (siehe [JSON-Ausgabe](#json-ausgabe)); das Mehrbereichs-TUI von `--tabs` ist die bewusste Absage, keine Lücke - ein zweites Interaktionsmodell und eine zweite Bibliothek, die über Terminals hinweg funktionieren muss, für ein Problem, das diese Seite bereits löst. Siehe die entsprechende Zeile in [Parität](parity.md#what-we-won-t-ship-and-why).
+Laravels Befehl `dev` bietet außerdem die Modi `--tabs` und
+`--stream`, die beide die Ausgabe durch ein kleines Node-TUI
+(`@laravel/multiplex`) rendern. Suprnova liefert dieses TUI nicht aus:
+Ausgabe mit Präfixen in einem einzelnen Terminal ist im Rust-Ökosystem
+für Entwicklungstools (`cargo watch`, `bacon`, `just`) die Norm, und
+ein Prozessregister mit farbigen Präfixen gibt bereits das Signal
+„welcher Prozess hat das gesagt?“, das ein TUI liefert. Die zugrunde
+liegende Aufgabe von `--stream` - ein skriptbarer
+Echtzeit-Ereignisstrom - wird als `--json` ausgeliefert (siehe
+[JSON-Ausgabe](#json-ausgabe)); das Mehrbereichs-TUI von `--tabs` ist
+die bewusste Absage, keine Lücke - ein zweites Interaktionsmodell und
+eine zweite Bibliothek, die über Terminals hinweg funktionieren muss,
+für ein Problem, das diese Seite bereits löst. Siehe die entsprechende
+Zeile in [Parität](parity.md#what-we-won-t-ship-and-why).
 
 ## Hot Reload
 

@@ -243,12 +243,12 @@ vorgelagerten Panics deterministisch hält.
 
 ## Der Befehl `db:seed`
 
-`db:seed` ist ein vom Framework bereitgestellter Konsolenbefehl - er
-kommt mit dem Framework und landet automatisch in der `console`-Binary
-Ihres Projekts, über dieselbe `inventory`-Registry, die auch Ihre
-eigenen `#[command]`s aufgreift. Siehe [Konsole](console.md) für die
-Mechanik der Binary; dieser Abschnitt deckt die seeder-spezifische
-Oberfläche ab.
+`db:seed` ist ein vom Framework bereitgestellter Konsolenbefehl - er wird
+mit dem Framework ausgeliefert und landet über dieselbe
+`inventory`-Registry, die auch Ihre eigenen `#[command]`s aufsammelt,
+automatisch in der `console`-Binary Ihres Projekts. Die Mechanik der
+Binary beschreibt [Konsole](console.md); dieser Abschnitt behandelt die
+seeder-spezifische Oberfläche.
 
 ### Alles ausführen
 
@@ -256,17 +256,16 @@ Oberfläche ab.
 cargo run --bin console -- db:seed
 ```
 
-Führt jeden registrierten Seeder in Reihenfolge aus. Bei einer leeren
-Registry gibt es eine Warnung auf Stderr aus
-(`db:seed: no seeders registered - nothing to run`) und beendet sich
-mit null - das ist das richtige Verhalten für „jemand hat den Befehl
-ausgeführt, bevor irgendetwas registriert wurde“ und hält
-Testsuiten, die noch nichts Bestimmtes geseedet haben, davon ab,
-fehlzuschlagen.
+Führt jeden registrierten Seeder der Reihe nach aus. Bei leerer Registry
+gibt der Befehl eine Warnung auf stderr aus (`db:seed: no seeders
+registered - nothing to run`) und endet mit null - das ist das richtige
+Verhalten für „jemand hat den Befehl ausgeführt, bevor etwas registriert
+war“, und es bewahrt Testsuiten, die nichts Bestimmtes befüllt haben, vor
+dem Fehlschlag.
 
-### Einen Seeder ausführen
+### Einen einzelnen Seeder ausführen
 
-Drei akzeptierte Formen, in aufsteigender Reihenfolge, wie
+Drei akzeptierte Formen, in aufsteigender Ordnung danach, wie
 Laravel-förmig sie sich anfühlen:
 
 ```bash
@@ -275,8 +274,23 @@ cargo run --bin console -- db:seed --class UsersSeeder
 cargo run --bin console -- db:seed UsersSeeder
 ```
 
-Alle drei suchen den Seeder anhand des exakten Namens in der Registry
-und führen ihn aus. Ein unbekannter Name schlägt fail-fast fehl:
+Alle drei schlagen den Seeder über seinen exakten Namen in der Registry
+nach und führen ihn aus.
+
+Ein gezielter Lauf meldet seinen Fortschritt:
+
+```text
+  UsersSeeder .......................................................... RUNNING
+  UsersSeeder ...................................................... 812 ms DONE
+
+```
+
+Die Zeilen gehen nach stdout. Ein bloßes `db:seed` bleibt still - ein
+vollständiger Lauf würde seine eigene Ausgabe sonst unter je einer Zeile
+pro Seeder begraben. Der `tracing`-Datensatz, den jeder Seeder ausgibt,
+bleibt unverändert und bleibt der Maschinenkanal.
+
+Ein unbekannter Name scheitert sofort:
 
 ```bash
 cargo run --bin console -- db:seed --class=NotARealSeeder
@@ -285,14 +299,14 @@ cargo run --bin console -- db:seed --class=NotARealSeeder
 ```
 
 Ein fehlerhaftes Flag (`--class` ohne folgenden Wert, `--class=` mit
-leerem Wert, `--class --force`) schlägt ebenfalls fail-fast fehl, mit
-einer Diagnose, die die erwartete Form benennt.
+leerem Wert, `--class --force`) scheitert ebenfalls sofort, mit einer
+Diagnose, die die erwartete Form benennt.
 
 ### Aus einer gebauten Binary
 
-In einem containerisierten oder systemd-verwalteten Deployment lebt
-die Console-Binary unter `target/release/console` (oder wo auch immer
-Ihr Release-Artefakt landet). Gleiche Syntax, kein `cargo` davor:
+In einem containerisierten oder von systemd verwalteten Deployment liegt
+die Console-Binary unter `target/release/console` (oder dort, wo Ihr
+Release-Artefakt landet). Gleiche Syntax, kein `cargo` davor:
 
 ```bash
 ./console db:seed
@@ -301,8 +315,8 @@ Ihr Release-Artefakt landet). Gleiche Syntax, kein `cargo` davor:
 
 Die Console-Binary ruft
 `suprnova::console::dispatch_argv(std::env::args())` auf, was über
-dieselbe Registry routet wie `cargo run --bin console --`. Es gibt
-keinen separaten Dispatch-Pfad für gebaute Artefakte.
+dieselbe Registry läuft wie `cargo run --bin console --`. Für gebaute
+Artefakte gibt es keinen eigenen Dispatch-Pfad.
 
 ## Kombination mit Factories
 
@@ -540,64 +554,71 @@ Test-Harness (`#[suprnova_test]`, `TestContainer`,
 `TestDatabase::fresh::<Migrator>()`, die Fakes für jede externe
 Oberfläche).
 
-## Wann seeden, migrieren oder eine Factory verwenden
+## Wann befüllen, migrieren oder eine Factory nutzen
 
-Diese drei Muster bringen alle Zeilen in Tabellen. Die Entscheidung
-ist meist unkompliziert, aber es lohnt sich, die Abgrenzungen explizit
-zu benennen, weil PHP-Teams sie oft verwischen.
+Diese drei Muster bringen alle Zeilen in Tabellen. Die Entscheidung ist
+meist unkompliziert, aber es lohnt sich, die Trennlinien ausdrücklich zu
+benennen, weil PHP-Teams sie oft verwischen.
 
-| Sie wollen … | Verwenden Sie |
+| Sie wollen … | Nutzen Sie |
 |---|---|
-| Eine Spalte, die existiert | [Migration](migrations.md) |
-| Eine Zeile, die existieren muss, damit die App booten kann (der Standard-Admin, die Singleton-Site-Config-Zeile, die kanonische Liste der Währungen) | **Seeder** - idempotent, läuft in jeder Umgebung, auch in der Produktion |
-| Eine randomisierte Menge von Zeilen für lokale Entwicklung oder Staging (50 Nutzer, 200 Posts, 1000 Events) | Seeder, der eine Factory aufruft |
+| Dass eine Spalte existiert | [Migration](migrations.md) |
+| Eine Zeile, die existieren muss, damit die App bootet (der Standard-Admin, die Singleton-Zeile der Site-Config, die kanonische Währungsliste) | **Seeder** - idempotent, läuft in jeder Umgebung, auch in Produktion |
+| Einen zufälligen Satz Zeilen für lokale Entwicklung oder Staging (50 Nutzer, 200 Beiträge, 1000 Ereignisse) | Seeder, der eine Factory aufruft |
 | Eine Zeile, die ein Unit-Test braucht | [Factory](eloquent.md), direkt im Test aufgerufen |
 | Die Form einer Zeile | [Factory](eloquent.md) |
 
-Die Fehler, die man vermeiden sollte:
+Die Fehler, die es zu vermeiden gilt:
 
 - **Fügen Sie keine Daten aus einer Migration ein.** Migrationen
   beschreiben Schema, nicht Zustand. Eine Migration, die eine
-  Standardzeile einfügt, läuft einmal auf der Produktionsdatenbank
-  und dann nie wieder - in dem Moment, in dem sich eine Spalte
-  ändert, haben Sie eine gespaltene Quelle der Wahrheit zwischen der
-  Migrationshistorie und dem Seeder. Setzen Sie den Insert in einen
-  Seeder; braucht die Produktion die Zeile, führen Sie
-  `console db:seed --class=DefaultsSeeder` als Teil des Deploys aus.
-- **Schreiben Sie keine Fixture-Daten von Hand in Ihren Test.**
-  Greifen Sie zu einer Factory. Fünf `User::create(attrs!{ … })`-
-  Blöcke in einem Test sind fünf Umschreibungen in dem Moment, in dem
-  Sie eine NOT-NULL-Spalte hinzufügen. Ein
-  `UserFactory::new().create()` übersteht das.
-- **Legen Sie keine Produktionsdaten in einen Seeder.** Ein Seeder
-  ist für die Zeilen da, die die Anwendung zum Funktionieren braucht,
-  nicht für „hier sind die 8.000 historischen Datensätze, die wir
-  importieren.“ Importe sind Einmal-Skripte (schreiben Sie dafür ein
-  `#[command]`; siehe [Konsole](console.md)).
+  Standardzeile einfügt, läuft einmal auf der Produktionsdatenbank und
+  danach nie wieder - sobald sich eine Spalte ändert, haben Sie eine
+  gegabelte Quelle der Wahrheit zwischen Migrationshistorie und Seeder.
+  Legen Sie das Einfügen in einen Seeder; wenn Produktion die Zeile
+  braucht, führen Sie `console db:seed --class=DefaultsSeeder` als Teil
+  des Deployments aus.
+- **Schreiben Sie keine Fixture-Daten von Hand in Ihren Test.** Greifen
+  Sie zu einer Factory. Fünf `User::create(attrs!{ … })`-Blöcke in einem
+  Test sind fünf Umschreibungen, sobald Sie eine NOT-NULL-Spalte
+  hinzufügen. Ein `UserFactory::new().create()` überlebt.
+- **Legen Sie keine Produktionsdaten in einen Seeder.** Ein Seeder ist
+  für die Zeilen da, die die Anwendung zum Funktionieren braucht, nicht
+  für „hier sind die 8.000 historischen Datensätze, die wir importieren“.
+  Importe sind einmalige Skripte (schreiben Sie ein `#[command]` dafür;
+  siehe [Konsole](console.md)).
 
 ### Warum Suprnova abweicht
 
-Laravel liefert eine Klasse `DatabaseSeeder` mit einem
-Sonderfall-Helfer `call($seeders)`, den Eloquents Seeder-Loader
-erkennt. Suprnova tut das nicht - die Registry ist eine flache
-`IndexMap`, jeder Seeder ist ein Peer, und ein zusammengesetzter
-Seeder ruft `seed::run_one(name)` auf (oder ruft die Unter-Factories
-einfach direkt auf), um zu verketten.
+Laravel liefert eine Klasse `DatabaseSeeder` mit einem Sonderfall-Helfer
+`call($seeders)` aus, den der Seeder-Loader von Eloquent erkennt.
+Suprnova tut das nicht - die Registry ist eine flache `IndexMap`, jeder
+Seeder ist ein Gleichrangiger, und ein zusammengesetzter Seeder ruft zum
+Verketten `seed::run_one(name)` auf (oder ruft die Unter-Factories einfach
+direkt auf).
 
-Der Grund ist derselbe Trade-off, den man anderswo in Suprnova sieht:
-Eine einzige generische Registry mit einer Ordnungsregel ist leichter
-zu durchschauen als eine Klassenhierarchie mit einer magischen
-Wurzel. Das Laravel-Muster funktioniert, weil PHPs Klassen-Autoloading
-und die statische `make()`-Reflection `call([A::class, B::class])`
-diese Klassen namentlich finden und instanziieren lassen; in Rust
+Der Grund ist derselbe Kompromiss, den Sie anderswo in Suprnova sehen:
+Über eine einzige generische Registry mit einer Ordnungsregel lässt sich
+leichter nachdenken als über eine Klassenhierarchie mit einer magischen
+Wurzel. Das Laravel-Muster funktioniert, weil PHPs Klassen-Autoloading und
+die statische `make()`-Reflection `call([A::class, B::class])` erlauben,
+diese Klassen über ihren Namen zu finden und zu instanziieren; in Rust
 müssten wir den Nutzer bitten, `dyn Seeder`-Trait-Objekte
-herumzureichen, was umständlicher ist als die
-Funktionszeiger-Registry, die schon da ist.
+herumzureichen, was klobiger ist als die Funktionszeiger-Registry, die
+ohnehin schon da ist.
 
-Die Konvention des zusammengesetzten Seeders gewinnt dieselbe
-Ergonomie zurück - `BaseSeeder` spielt die Rolle, die
-`DatabaseSeeder` in Laravel spielt -, ohne dass das Framework einen
-Namen als besonders auszeichnen müsste.
+Die Konvention des zusammengesetzten Seeders stellt dieselbe Ergonomie
+wieder her - `BaseSeeder` spielt die Rolle, die `DatabaseSeeder` in
+Laravel spielt -, ohne dass das Framework einen Namen als besonders
+segnen müsste.
+
+Die Fortschrittszeilen des Seeders sind reiner Text mit fester Breite von
+80 Zeichen. Laravel bemisst seine Punktreihe am Terminal und färbt das
+Statuswort; die tatsächliche Terminalbreite auszulesen bedeutet eine
+Abhängigkeit, die das Framework nicht mitträgt, und diese Ausgabe geht auf
+ein stdout, das routinemäßig in ein Log geleitet wird, wo Escape-Codes
+Rauschen sind. Die verstrichene Zeit wird als ganze Millisekunden ohne
+Tausendertrennzeichen ausgegeben.
 
 ## Bootstrap-Registrierung
 

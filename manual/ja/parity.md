@@ -72,7 +72,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | URL生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 実装済み | [URL 生成](urls.md) |
 | セッション | `session()`、`session_mut()`、`req.flash()` 経由のフラッシュバッグ | 実装済み | デフォルトでは `DatabaseSessionDriver` によるデータベースバックエンドです。暗号化されたブラウザークッキーが運ぶのはセッション識別子とアクティビティタッチのメタデータだけであり、セッションデータバッグではありません。[セッション](session.md) |
 | クッキーのキュー（`Cookie::queue`） | `Cookie::queue`/`queued`/`unqueue`/`expire` - `SessionMiddleware` がレスポンスへドレインするタスクローカルのジャー | 実装済み | チェーンに `SessionMiddleware` が必要です。Laravelの `CookieJar` のように名前+パスではなく、名前でキューに入ります |
-| バリデーション | `#[derive(Validate)]` + 28個の組み込みルール + `Rule`/`ValueRule`/`AsyncRule` トレイト | 実装済み | `Url` はLaravelのスキームの許可リストを使い、`Url::protocols([...])` は `url:http,https` をミラーします。非同期のルール（例えば `Unique`）はDBを叩きます。`ArrayKeys`/`Distinct` は `serde_json::Value` 上の `ValueRule` であり、Laravelの `array:keys` と `distinct` に対応します。[バリデーション](validation.md) |
+| バリデーション | `#[derive(Validate)]` + 35個の組み込みルール + `Rule`/`ValueRule`/`AsyncRule` トレイト | 実装済み | `Url` はLaravelのスキームの許可リストを使い、`Url::protocols([...])` は `url:http,https` をミラーします。非同期のルール（例えば `Unique`）はDBを叩きます。`ArrayKeys`/`Distinct` は `serde_json::Value` 上の `ValueRule` であり、Laravelの `array:keys` と `distinct` に対応します。`InArray` は、Laravelの `in_array:other.*` というルール文字列ではなく、相手のフィールドのリストを直接受け取り、`Contains`/`DoesntContain` はJSONの文字列要素と厳密に一致します。`Gt`/`Gte`/`Lt`/`Lte` は、Laravelの4つのサイズの尺度を推測するのではなく、明示的な `CompareWith` のオペランド（リテラルの数値、数値の兄弟フィールド、あるいは文字数で比較される兄弟フィールド）を受け取ります。配列とファイルの比較には対応物がありません。[バリデーション](validation.md) |
 | `Password` ルール（`Password::defaults()`、`uncompromised()`） | `Password::min(n)` + 強度のビルダー（`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`） + `.uncompromised()` | 実装済み | Have I Been Pwned のk匿名性のチェックです。ネットワークエラーではフェイルオープンし、Laravelの `NotPwnedVerifier` と一致します。[バリデーション](validation.md#password-strength) |
 | エラーハンドリング | `FrameworkError`、`AppError`、`HttpError` トレイト、`execute_chain_safely` のパニック境界 | 実装済み | [エラーハンドリング](errors.md)、[エラー モデル](error-model.md) |
 | ロギング | 構造化されたフィールドを持つ `tracing` のサブスクライバー、`LogFormat`（json / pretty / compact） | 差異あり | 1つのログ行が1つのJSONドキュメントです。`request_id` は常に存在します。[ロギング](logging.md) |
@@ -92,7 +92,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | コンテキスト | `Context::put` / `Context::get` / `ContextStore` + キュー / メール / イベントへの自動注入 | 実装済み | [コンテキスト](context.md) |
 | コントラクト | すべての公開の継ぎ目はトレイトです | 実装済み | 上の「アーキテクチャ / コントラクト」の行を参照してください |
 | イベント | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、キューに入れられるリスナー、サブスクライバー | 実装済み | [イベント](events.md) |
-| ファイルストレージ | OpenDAL の上の `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 実装済み | 同じ `put/get/delete/copy/move/exists/url` の表面です。パストラバーサル保護が組み込まれています。[ファイルシステム](filesystem.md) |
+| ファイルストレージ | OpenDAL の上の `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 実装済み | 同じ `put/get/delete/copy/move/exists/url` の表面です。パストラバーサル保護が組み込まれています。`Storage::register_read_through` は、2つのディスクを、フォールバックでのヒットをプライマリへ昇格させるリードスルーディスクへ合成します。昇格をスキップする `copy: false` と、フォールバックをまたぐ `copy` / `rename` を備えます。[ファイルシステム](filesystem.md) |
 | ヘルパー | 相当するものは、それぞれの本拠地のモジュールにあります（何でも入りの `helpers.md` はありません） | 差異あり | 例えば、URLのヘルパーは[urls.md](urls.md)に、文字列のヘルパーは `std`/`heck` に、配列のヘルパーは `std::collections` にあります - Rustはこれを、グローバルな名前空間ではなくクレートで行います |
 | HTTPクライアント | `Http::get/post/...` のビルダー + テスト用の `Http::fake(...)` | 実装済み | リクエストを自動記録します。`assert_sent` / `assert_not_sent`。組み込みリトライポリシーを `RetryContext` で狭める `.retry_when(predicate)` もあります。[HTTP クライアント](http-client.md) |
 | 画像（`Illuminate\Image`） | `Image::from_bytes/from_path/from_disk/from_upload/from_stream` + 同じ操作とターミナルの表面 | 実装済み | `suprnova::media` にあります。Laravelの `gd`/`imagick` と同じく、2つのドライバーがあります: `IMAGE_DRIVER=oxideav`（デフォルト、純粋なRust）か `magick` です。PNG、JPEG、WebP、GIF、BMPを読み書きします。AVIFの出力は、自社製のAV1エンコーダーの公開を待って先送りされています。ヘッダーに対して検査されるデコードの上限があります。[画像](images.md) |
@@ -104,12 +104,16 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | プロセス（シェルコマンドの実行） | 標準ライブラリの `tokio::process::Command` | 意図的に非対応 | ファサードはありません - TokioのAPIがすでに正しい形です |
 | キュー | `Queue::push(job).await?` + ドライバー `sync/memory/database/redis/null`、バッチ、チェーン、`JobMiddleware`、`FailedJobStore` | 実装済み | [キュー](queues.md) |
 | ジョブが宣言する遅延 | `Job` 上の `fn delay() -> Option<Duration>`。`Queue::push` と `Queue::bulk` が尊重します | 実装済み | 明示的な `Queue::push_later` / `Queue::later(delay, job)` 呼び出しは、ジョブ自身の既定値より常に優先されます。[キュー](queues.md) |
+| `Queue::forward` | `Queue::forward(from, to)` / `Queue::forward_on(from, to, connection)`。エンベロープと、ワーカーの `--queue` のリストに適用されます | 実装済み | キューからキューへのみです: `connection` はドライバーを選ぶのではなくリダイレクトを制御し、プロセスのコネクション名と比較されるため、プッシュとワーカーの確保のゲートは同じ値の上でおこなわれます。Laravelでは省略可能な `to` が、ここでは必須です。[キュー](queues.md) |
 | 一意なジョブの抑制イベント | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | 実装済み | `push_unique` が重複排除したときプッシュ側で発火します。呼び出しはなお `Ok(false)` を返します |
-| キューの一時停止（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`。キャッシュに支えられ、`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` イベントを伴います | 実装済み | キューごとの停止は、明示的な `--queue=...` リストで起動したワーカーでのみ有効です。`resume_all` はキューごとの停止を解除しません。[キュー](queues.md) |
+| キューの一時停止（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`。キャッシュに支えられ、`QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` イベントを伴います | 実装済み | キューごとの停止は、明示的な `--queue=...` リストで起動したワーカーでのみ有効です。`resume_all` はキューごとの停止を解除しません。実行中のワーカーは、遷移ごとに一度 `WorkerQueuePaused` / `WorkerQueueResumed` も発行し、`queue:work` はそれぞれについて1行を出力します。それらの `queue` フィールドが `Option<String>` であるのは、`--queue` なしで起動されたワーカーには、グローバルな停止のもとで報告すべきキュー名がないからです。[キュー](queues.md) |
+| Redisの一時的なコマンドのリトライ | 読み取り形のRedisコマンドは、コネクションレベルの失敗に対して一度リトライし、その試行はそれぞれドライバーの再接続の予算を待ちます。`REDIS_COMMAND_RETRIES` がさらに上乗せします | 実装済み | Laravelの `command_retries` は、1つのディスパッチ地点と60エントリの許可リストを通じて、すべてのコマンドを覆います。Suprnovaは呼び出し箇所ごとにリトライし、書き込みやキューのポップをリトライさせる設定はありません。[キャッシュ](cache.md) |
 | コミット後のディスパッチ（`afterCommit()`） | `Job` の `fn after_commit() -> bool`、プッシュごとの `EnvelopeOverrides::after_commit`、`Queue::push_after_commit` | 実装済み | イベントも含めてプッシュ全体がコミットを待ち、ロールバックはそれを捨てます。先送りされた `push_unique` もロックだけは即座に取るため、トランザクションの内側でも重複排除は機能します。手動の `DB::begin_transaction` は決して先送りしません。[キュー](queues.md) |
 | キュー接続のフェイルオーバー | `QUEUE_DRIVER=failover` + `QUEUE_FAILOVER_CONNECTIONS` を介した、順序付きの接続リストの上の `FailoverQueueDriver` | 実装済み | 書き込みはリストを落ちていきます。`pop`、カウンター、一覧は最初の接続に留まるため、それぞれのフォールバックには自身のワーカーが必要です。`QueueFailedOver` はエッジトリガーであり、`bulk_push` はエンベロープごとに落ちていくため、それぞれが自身の遅延を保ちます。[キュー](queues.md) |
 | `ShouldBeUniqueUntilProcessing` | `Job` の `fn unique_until_processing() -> bool`。ミドルウェアの通過の後、ハンドラの前に解放されます | 実装済み | 所有者スコープでの解放であるため、再配送された試行が、より新しいディスパッチのロックを解放することは決してありません。ミドルウェアがキューへ戻したジョブは、そのロックを保ちます。[キュー](queues.md) |
-| キューの検査（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`。`Option<&str>` が、Laravelの `all*Jobs()` という双子を1回の呼び出しへ畳み込みます | 実装済み | `InspectedJob` のDTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）です。トレイトのデフォルトは、空のコレクションではなく誠実な `Err` です。`sync`/`null` は `Ok(vec![])` で上書きします。Redisの `reserved_jobs` はコンシューマーごとです。[キュー](queues.md) |
+| デバウンスされるジョブ（`#[DebounceFor]`） | `Job::debounce_for` / `max_debounce_wait` / `debounce_id`、加えて `Queue::push_debounced(job, DebounceOptions)` | 実装済み | クラスのアトリビュートではなくトレイトのメソッドであるため、タイプミスはコンパイルエラーになります。あらゆるディスパッチはenqueueされ、畳み込みはワーカーで決着します。`debounce_for` と `unique_id` の両方を宣言したジョブは、Laravelが例外を投げるところで `FrameworkError` によって拒否されます。チェーンとバッチは、デバウンスされるジョブをきっぱり拒否します。[キュー](queues.md) |
+| デバウンスされる、キューに入れられたリスナー | リスナーのジョブ上の `Job::debounce_for`、あるいは `DebouncedListener::new(window, build).keyed_by(...)` | 実装済み | Laravelはこのアトリビュートをリスナーのクラスに置きます。Suprnovaのリスナーからジョブへの橋渡しは既に `Queue::push` を通って走るため、ジョブの側で宣言すれば一般的なケースは覆われ、`DebouncedListener` が登録ごとのウィンドウを覆います。[イベント](events.md) |
+| キューの検査（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`。`Option<&str>` が、Laravelの `all*Jobs()` という双子を1回の呼び出しへ畳み込みます | 実装済み | `InspectedJob` のDTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）です。トレイトのデフォルトは、空のコレクションではなく誠実な `Err` です。`sync`/`null` は `Ok(vec![])` で上書きします。Redisの `reserved_jobs` はコンシューマーごとです。Laravelとは異なり、これらは `Queue::forward` に追随しないため、あなたが名指ししたキューをそのまま報告します - これは、転送されたキューに取り残されたバックログが見えたままになる、ということでもあります。[キュー](queues.md) |
 | タスクごとのスケジュールのタイムゾーン | タスクごとの `.timezone(chrono_tz::Tz)` / `.try_timezone("name")`、`Schedule::timezone` のデフォルト、`schedule:list --timezone` | 実装済み | Laravelの文字列ではなく、型付きの `chrono_tz::Tz` です。スケジュール全体のデフォルトは、`app.schedule_timezone` という設定キーではなく `schedule::register` の中の `Schedule::timezone` であり、固定されていないタスクはプロセスのローカルゾーンを保ちます。[タスク スケジューリング](scheduling.md) |
 | レート制限 | `RateLimiter::for_signature(...)`、`ThrottleRequestsMiddleware`、`RateLimitMiddleware` | 実装済み | `SlidingWindowConfig` によるスライディングウィンドウです。[レート リミット](rate-limiting.md) |
 | 検索（Scout） | ファーストパーティの全文検索アダプターはありません | 未実装 | ベクトル検索は今日[ベクトル](vector.md)経由で出荷されています。キーワード検索のScout相当は計画中です |
@@ -166,10 +170,12 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | クエリイベント | `QueryListener` + `QueryExecuted` イベント | 実装済み | `DB::listen(\|q\| { ... })` |
 | Raw式 | `DB::raw("...")`, `DB::select("...", &[...])` | 実装済み | パラメータバインドが必須です（文字列補間はありません） |
 | Postgres / MySQL / SQLite | 3つともSeaORM経由でファーストクラスです | 実装済み | `database::config::database_type()` でのURL検出 |
+| Postgresの `keepalives_*` DSNオプション | `DB_IDLE_TIMEOUT` / `DB_MAX_LIFETIME` / `DB_ACQUIRE_TIMEOUT` / `DB_TEST_BEFORE_ACQUIRE` / `DB_PING_AFTER_IDLE` によるプールの生存性 | 差異あり | sqlxはTCPのキープアライブのセッターを公開していないため、Suprnovaは代わりに、プールされたコネクションを作り直し、pingを打ちます。[データベース](database.md#pool-liveness) |
 | MariaDB | それ自体の選択肢としてファーストクラスです（vector + JSON + temporal） | 差異あり | Laravel が Postgres専用として出荷するマルチパラダイム機能のため、別扱いされています |
 | Redis | ドライバー（cache/queue/rate-limit）から使われます - 独立した `Redis::*` ファサードはありません | 差異あり | アドホックなコマンドが必要なときは `redis` クレートに直接手を伸ばしてください。cache/queue/rate-limit が典型的な用途の95%をカバーします |
 | MongoDB | まだファーストパーティのアダプターはありません | 未実装 | `App::bind` 経由で `mongodb` クレートを直接使ってください |
 | クエリビルダー | `db_where` / `or_where` / `where_in` / `where_between` / `where_null` / `where_has` / `with` / `with_count` / `order_by` / `group_by` / `having` / `paginate` などを持つ `Builder<M>` | 実装済み | [クエリ](queries.md) |
+| `whereBinary()` の一族 | `Builder::where_binary` / `or_where_binary` / `where_not_binary` / `or_where_not_binary`、そして `DB::table(...).where_binary(...)` | 実装済み | MySQLとMariaDBは `= binary` を発します。PostgresとSQLiteは、照合順序に依存したマッチではなくエラーを返します。[クエリ](queries.md) |
 | ページネーション | `LengthAwarePaginator`、`Paginator`（シンプル）、`CursorPaginator` | 実装済み | 3つとも Laravel の形にシリアライズされます。[ページネーション](pagination.md) |
 | マイグレーション | `#[derive(DeriveMigrationName)] struct M;` + `up`/`down` + `Migrator` | 実装済み | `suprnova migrate`/`migrate:rollback`/`migrate:status`/`migrate:fresh` 経由で実行します。[マイグレーション](migrations.md)、[CLI マイグレーション](cli-migrations.md) |
 | シーダー | `Seeder` トレイト + `db:seed` サブコマンド | 実装済み | モデルごとのファクトリー。[シーディング](seeding.md) |
@@ -189,6 +195,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | ローカルスコープ | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | 実装済み | `Builder<M>` へのメソッドディスパッチ |
 | グローバルスコープ | `impl GlobalScope for ActiveOnly { ... }` + 登録 | 実装済み | `Builder::without_global_scope` で取り除けます |
 | リレーションシップ（11種類） | `HasOne`, `HasMany`, `BelongsTo`, `BelongsToMany`, `HasOneThrough`, `HasManyThrough`, `MorphOne`, `MorphMany`, `MorphTo`, `MorphToMany`, `MorphedByMany` | 実装済み | ファミリーごとの morph enum。[リレーションシップ](eloquent-relationships.md) |
+| `wherePivot` の一族（クロージャの形を含む） | `where_pivot` / `where_pivot_op` / `where_pivot_in` / `where_pivot_not_in` / `where_pivot_null` / `where_pivot_not_null` / `where_pivot_between` / `where_pivot_not_between` / `where_pivot_group`、加えて `or_` の双子 | 差異あり | 読み取り専用です - ピボットのフィルターが `attach` / `detach` / `sync` を絞り込むことは決してなく、イーガーロードもそれを運びません。[リレーションシップ](eloquent-relationships.md) |
 | イーガーロード | `User::query().with(&["posts", "posts.comments"]).get()` | 実装済み | `EagerLoadDispatch` はシールされています。マクロが生成したリレーションだけがそれを実装できます |
 | レイジーロードの防止 | `prevent_silently_discarding_attributes(true)` | 実装済み | Laravel の `preventLazyLoading` と同じ形です |
 | リレーション上の集計 | `with_count("posts")`, `with_sum("orders", "total")`, `with_avg`, `with_min`, `with_max` | 実装済み | 集計ごとに単一のサブクエリです |
@@ -201,12 +208,15 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | ミューテータ / アクセッサー | `#[accessor] fn full_name(&self) -> String { ... }` + `#[mutator] fn set_password(&mut self, v: String)` | 実装済み | [ミューテータ](eloquent-mutators.md) |
 | キャスト（22種類組み込み） | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | 実装済み | カスタムのためには `Cast` を実装してください |
 | コレクション | `pluck`、`filter`、`map`、`each`、`chunk`、`groupBy`、`keyBy`、`sort_by`、`where_`、`first`、`last`、`count`、`is_empty`、`to_array` などLaravel系のメソッドを持つ `Collection<M>`。`Deref<Target = Vec<M>>` のため、あらゆる `Vec` のイディオムがそのまま動きます | 実装済み | [コレクション](eloquent-collections.md) |
-| APIリソース | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + フィールドセット + インクルード | 実装済み | JSON:API の形と Laravelスタイルのリソースの形、両方が利用できます。[API リソース](eloquent-resources.md) |
+| APIリソース | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + フィールドセット + インクルード | 実装済み | JSON:API の形と Laravelスタイルのリソースの形、両方が利用できます。`?include=` のパスは `max_relationship_depth`（デフォルトは5）で上限が定められ、`JsonApiResource::$maxRelationshipDepth` に対応します。[API リソース](eloquent-resources.md) |
 | シリアライゼーション | `#[model(hidden = [...], visible = [...], appends = [...])]` | 実装済み | どの属性がシリアライズされるかを、同じように制御できます。[シリアライゼーション](eloquent-serialization.md) |
 | ファクトリー | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?`（または `UserFactory::times(5).create_many().await?`） | 実装済み | 値を循環させる `Sequence`。[ファクトリー](eloquent-factories.md) |
 | `modelKeys()` | `Builder::model_keys().await?`（ハイドレーションなし、修飾されたキー）と `Collection::model_keys()` | 実装済み | どちらも `Vec<M::Key>` を返します。ビルダーの終端は `users.id` を射影するため、joinをまたいでも保持されます |
 | ライフサイクル: chunking / lazy / cursor | `Builder::chunk(n, \|page\| async { ... })`, `lazy()`, `cursor()` | 実装済み | 大きなテーブルに対する、メモリに上限のあるイテレーション |
 | 悲観的ロック | `Builder::lock_for_update()`, `shared_lock()` | 実装済み | トランザクションの内側で |
+| `refreshForUpdate()` | `model.refresh_for_update().await?` | 実装済み | `SELECT ... FOR UPDATE` による再読み込みです。SQLiteではロックはno-opです。[行ロック](eloquent.md#row-locking) |
+| `inOrderOf(col, values)` | `Builder::in_order_of(col, values)` | 実装済み | バインドされた `CASE WHEN` による並び順です。リストにない値は最後に並びます。型付きのビルダーのみです。[並び順](eloquent.md#ordering) |
+| `orWhereKey` / `orWhereKeyNot` | `Builder::or_where_key(id)` / `Builder::or_where_key_not(id)` | 実装済み | 直前の句へ論理和として畳み込まれます。`or_filter_key` / `or_filter_key_not` のエイリアスがあります |
 | `whereJsonContains` ファミリー | SeaORMのカラム式（ドライバー依存）経由で利用できます | 実装済み | 正確な綴りはバックエンドごとに異なります。一般的なケース向けのヘルパーが出荷されています |
 
 ## ページネーション
@@ -284,9 +294,9 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 |---|---|---|---|
 | `php artisan` | `#[command]` マクロから構築される、アプリごとの `console` バイナリ | 実装済み | [コンソール](console.md)、[CLI 概要](cli.md) |
 | `make:controller` / `make:model` / etc. | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task` | 実装済み | [ジェネレーター](cli-generators.md) |
-| `serve` | `suprnova serve`（バックエンド + Vite開発サーバーを一緒に） | 実装済み | [起動](cli-serve.md) |
+| `serve` | `suprnova serve`（バックエンド + Vite開発サーバーを一緒に） | 実装済み | [起動](cli-serve.md)。`--api` のプロジェクトでは、起動を拒否するのではなく、Viteのペインをスキップします。 |
 | `migrate` ファミリー | `suprnova migrate / migrate:rollback / migrate:status / migrate:fresh` | 実装済み | [CLI マイグレーション](cli-migrations.md) |
-| `db:seed` | `cargo run --bin console db:seed`（アプリごとのconsole経由） | 実装済み | `Seeder` トレイト経由で登録されるシーダー |
+| `db:seed` | `cargo run --bin console db:seed`（アプリごとのconsole経由） | 実装済み | `Seeder` トレイト経由で登録されるシーダー。対象を絞った実行は、経過ミリ秒とともにRUNNING / DONEを出力します |
 | `schedule:run` / `schedule:work` / `schedule:list` | アプリごとのコンソールバイナリを介した同じ名前 | 実装済み | [スケジューリング コマンド](cli-scheduling.md) |
 | `queue:work` | アプリごとのコンソールバイナリを介した同じ名前 | 実装済み | SIGTERM/SIGINT でのグレースフルシャットダウン |
 | `tinker` | REPLはありません | 意図的に非対応 | 「さらに掘り下げる」の行を参照してください |
@@ -300,7 +310,7 @@ Laravel 13.x と Suprnova を、機能ごとに正直に対応づけたマップ
 | `php artisan route:cache` | ルートは、コンパイル時にマクロ展開されます | 差異あり | ルーターは、すでに型付けされたルートから起動時に構築されます |
 | Envoy（SSHデプロイ） | 任意のオーケストレーターを使ってください - Docker、systemd、Kubernetes、fly.io、Railway | 意図的に非対応 | バイナリがデプロイのアーティファクトです |
 | Forge / Vapor | 私たちが出荷するものではありません - しかし、Railway、DO、Hetzner のレシピが同じ仕事をカバーします | 差異あり | [デプロイメント](deployment.md)、[Railway](deployment-railway.md)、[Digital Ocean](deployment-digital-ocean.md)、[Hetzner](deployment-hetzner.md) |
-| メンテナンスモード（`php artisan down` / `up`） | `./app down` / `./app up` - バイパス用のシークレット、カスタムのretry/message/exceptパス、`file` または `cache` のドライバー | 実装済み | [デプロイメント](deployment.md) |
+| メンテナンスモード（`php artisan down` / `up`） | `./app down` / `./app up` - サーバー側で検査される12時間の有効期限を持つバイパス用のシークレット、カスタムのretry/message/exceptパス、`file` または `cache` のドライバー | 実装済み | [デプロイメント](deployment.md) |
 | Horizon（キューのダッシュボード） | ダッシュボードはまだありません | 未実装 | それまでは、`cargo run --bin console queue:failed` 経由で失敗したジョブを検査してください |
 
 ## パッケージ（Laravel の公式パッケージ - こちらはコアで出荷するか、アダプターとして出荷するか、意図的なギャップのいずれかです）

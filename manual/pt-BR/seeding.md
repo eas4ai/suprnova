@@ -267,8 +267,22 @@ cargo run --bin console -- db:seed --class UsersSeeder
 cargo run --bin console -- db:seed UsersSeeder
 ```
 
-As três buscam o seeder no registry pelo nome exato e o executam. Um
-nome desconhecido falha rápido:
+As três buscam o seeder no registry pelo nome exato e o executam.
+
+Uma execução direcionada reporta o progresso dela:
+
+```text
+  UsersSeeder .......................................................... RUNNING
+  UsersSeeder ...................................................... 812 ms DONE
+
+```
+
+As linhas vão para o stdout. Um `db:seed` puro fica em silêncio - um
+preenchimento completo, de outro modo, enterraria a própria saída sob
+uma linha por seeder. O registro de `tracing` que cada seeder emite não
+mudou e continua sendo o canal de máquina.
+
+Um nome desconhecido falha rápido:
 
 ```bash
 cargo run --bin console -- db:seed --class=NotARealSeeder
@@ -586,6 +600,14 @@ A convenção de seeder composto recupera a mesma ergonomia -
 `BaseSeeder` desempenha o papel que `DatabaseSeeder` desempenha no
 Laravel - sem precisar que o framework consagre um nome como
 especial.
+
+As linhas de progresso do seeder são texto puro em 80 colunas fixas. O
+Laravel dimensiona a linha pontilhada dele conforme o terminal e
+coloriza a palavra de status; ler a largura real do terminal significa
+uma dependência que o framework não carrega, e esta saída vai para um
+stdout que é rotineiramente canalizado para um log, onde códigos de
+escape são ruído. O tempo decorrido é impresso em milissegundos
+inteiros, sem separador de milhares.
 
 ## Registro no bootstrap
 

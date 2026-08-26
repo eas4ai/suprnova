@@ -74,7 +74,7 @@ HTTP 监听器和请求体的限制。
 
 ## 数据库
 
-连接 URL 和 sqlx 连接池调优。任何触碰数据库的子命令（`migrate*`、`db:sync`、`db:seed`、带 `QUEUE_DRIVER=database` 的 `queue:work`、`workflow:work`、会话的数据库存储），以及在应用注册了迁移时的 `serve`，都需要 `DATABASE_URL`。
+连接 URL 和 sqlx 连接池调优。任何触碰数据库的子命令（`migrate*`、`db:sync`、`db:seed`、带 `QUEUE_DRIVER=database` 的 `queue:work`、`workflow:work`、会话的数据库存储），以及在应用注册了迁移时的 `serve`，都需要 `DATABASE_URL`。那五个存活性旋钮，是您在一个会丢弃空闲连接的网络里活下来的办法 - 参见[连接池的存活性](database.md#pool-liveness)。
 
 | 变量 | 默认值 | 类型 | 用途 |
 |---|---|---|---|
@@ -83,8 +83,12 @@ HTTP 监听器和请求体的限制。
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | sqlx 连接池的下限（保持热连接）。 |
 | `DB_CONNECT_TIMEOUT` | `30`（秒） | `u32` | sqlx 在报错之前，会为一次初始连接等待多久。 |
 | `DB_LOGGING` | `false` | `bool` | 为 true 时，sqlx 会记录每一条语句（在生产环境里请谨慎使用 - 很啰嗦）。 |
+| `DB_IDLE_TIMEOUT` | 未设置（sqlx 用 600 秒） | `u64`（秒） | 一条池化连接在被连接池关掉之前，可以空闲多久。`0` 会关掉空闲回收。 |
+| `DB_MAX_LIFETIME` | 未设置（sqlx 用 1800 秒） | `u64`（秒） | 一条池化连接在被连接池回收之前，可以活多久。`0` 会关掉按寿命的回收。 |
+| `DB_ACQUIRE_TIMEOUT` | 未设置（回退到 `DB_CONNECT_TIMEOUT`） | `u64`（秒） | 一个调用方为一条空闲的池化连接等待多久。对于取出时的等待，它会覆盖 `DB_CONNECT_TIMEOUT`；请设其中一个，不要两个都设。零会在启动时被拒绝。 |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | 在把一条池化连接交出去之前先 ping 它一下。除非您已经量过逐次取出的那趟往返、并且 `DB_PING_AFTER_IDLE` 还不够用，否则请让它开着。 |
+| `DB_PING_AFTER_IDLE` | 未设置 | `u64`（秒） | 只有在一条池化连接空闲了这么久之后，才去 ping 它。设了它就会把 `DB_TEST_BEFORE_ACQUIRE` 关掉，所以热的连接会被原封不动地交出去。 |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | 为 true 时，`serve` 启动期间一次失败的自动迁移会被记录下来，但不会中止启动。默认是失败关闭：启动会以非零状态退出，而不是针对一个只迁移了一部分的架构启动。传入 `--no-migrate` 可以完全跳过自动迁移。 |
-
 ## 会话
 
 会话子系统的 cookie 属性和生存期。注意 `SESSION_SECURE` 默认为**`true`** - 默认就对生产环境安全；只有在本地 HTTP 开发时才把它关掉。
@@ -125,7 +129,7 @@ HTTP 监听器和请求体的限制。
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis 连接 URL（只有在 `CACHE_DRIVER=redis` 时才会被查阅）。 |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | 缓存条目的键前缀（用于在共享 Redis 上避免冲突）。 |
 | `CACHE_DEFAULT_TTL` | `3600`（秒） | `u64` | 默认 TTL，以秒计。`0` 意味着“永不过期”。应用于 `Cache::put(None)` / `Cache::tags_put(None)`；`Cache::forever` 和 `Cache::remember_forever` 总是绕过它。 |
-
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | 给读形状的 Redis 命令追加的重试次数，加在每一次读取本来就有的那一次之上。适用于缓存、队列和限流这三种驱动程序。写操作在任何取值下都绝不重试。请按秒来做预算：一次针对断掉的连接的重试要等待重连，所以它要付掉这个驱动程序的整个连接预算和响应预算 - 缓存驱动程序是最多 3 次连接重试、彼此间隔至多 500 毫秒、每一次上限 2 秒，外加一个 5 秒的响应超时；队列和限流驱动程序是最多 6 次连接重试、指数退避不设上限、每一次上限 1 秒，外加一个 500 毫秒的响应超时。`10` 这个夹取约束的是尝试次数，不是秒数：在那个设置下，一次读取会做出 12 次尝试。一次超时同样算作瞬时故障，所以在一次卡顿期间，每一次被包起来的读取都会发出多达这么多条命令。一个解析不了的值会回退到 `0`。 |
 ## 队列
 
 | 变量 | 默认值 | 类型 | 用途 |

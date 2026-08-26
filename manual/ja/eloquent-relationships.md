@@ -176,10 +176,73 @@ let roles = user.roles().get().await?;
 
 // 各roleは、マクロがアクセス可能にしたピボットのコンテキストを運ぶ:
 for r in &roles {
-    let pivot = r.pivot::<RoleUser>().expect("loaded via BelongsToMany");
+    let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
 ```
+
+### ピボットのカラムでのフィルタリング
+
+`where_pivot` とその一族が制約するのは、関連先のテーブルではなく*ピボット*テーブルです。joinの行が、フィルタしたい状態 - `active` フラグ、有効期限のタイムスタンプ、スコープ用のカラム - を運んでいるときに、これらへ手を伸ばしてください。以下の例は、上記の `RoleUser` ピボットが `active`、`pinned`、`note` の各カラムも宣言していることを前提にしています:
+
+```rust
+// ピボットの行がまだアクティブであるrole。
+let active = user.roles().where_pivot("active", 1i64).get().await?;
+
+// ある期間の中で割り当てられたrole、または明示的にピン留めされたrole。
+let visible = user
+    .roles()
+    .where_pivot_between("assigned_at", start..=end)
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+
+// ネストしたグループ: (active = 1 AND note IS NOT NULL) OR pinned = 1。
+let complex = user
+    .roles()
+    .where_pivot_group(|q| q.filter("active", 1i64).filter_not_null("note"))
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+```
+
+一族の全体:
+
+| メソッド | SQL |
+|---|---|
+| `where_pivot(col, val)` | `col = ?` |
+| `where_pivot_op(col, op, val)` | `col <op> ?` |
+| `where_pivot_in(col, vals)` | `col IN (...)` |
+| `where_pivot_not_in(col, vals)` | `col NOT IN (...)` |
+| `where_pivot_null(col)` | `col IS NULL` |
+| `where_pivot_not_null(col)` | `col IS NOT NULL` |
+| `where_pivot_between(col, low..=high)` | `col BETWEEN ? AND ?` |
+| `where_pivot_not_between(col, low..=high)` | `col NOT BETWEEN ? AND ?` |
+| `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
+
+どのメソッドにも `or_` の双子があり、`Builder` の `or_where` と同じやり方で、直前の項との論理和へ畳み込まれます。クロージャによるグループは、その論理和の内側でもアトミックなまま保たれるため、`.where_pivot_null("note").or_where_pivot_group(|q| ...)` は、平坦化された連鎖ではなく `note IS NULL OR (...)` と読めます。
+
+カラム名は、`Builder::filter` とまったく同じ契約のもとで、生のSQLの識別子としてピボットの文へ埋め込まれます。リクエストのデータから取ってきては決していけません。値のほうはパラメータとしてバインドされるため、そちらはリクエストのデータから取っても安全です。
+
+クロージャの形は同じ文の上で走るため、その内側の `where_raw` や `where_has` は、そのままピボットのSQLへ着地します - 識別子の許可リストは、設計上、生の逃げ道を素通りします。このクロージャは、`Builder::where_raw` を扱うのと同じように扱ってください: その断片を、信用できない入力から組み立てては決していけません。
+
+同じ一族が `MorphToMany` と `MorphedByMany` にもあります。
+
+### Suprnovaが異なる設計を選んだ理由: ピボットのフィルターは読み取り専用である
+
+境界は2つあり、どちらも意図的なものです。
+
+**ピボットのフィルターが書き込みを絞り込むことは決してありません。** Laravelは `wherePivot` の制約を `detach()` へ畳み込むため、`->wherePivot('active', 1)->detach()` はアクティブなjoinの行だけを削除します。Suprnovaはピボットの `DELETE` を手で組み立てており、読み取りの述語が削除へ届いたり届かなかったりするのを黙ってやってのけることは、呼び出し箇所からは見えない差異です。そのため、`attach`、`attach_with`、`detach`、`sync` は、フィルターが1つでも設定されている間はエラーを返します。2つの意図を分けてください:
+
+```rust
+// マッチするものを読み取り、それから明示的にそれへ作用させる。
+let stale = user.roles().where_pivot("active", 0i64).get().await?;
+for role in &stale {
+    user.roles().detach(role.id).await?;
+}
+```
+
+**イーガーロードはピボットのフィルターを運びません。** `user_query.with(["roles"])` は、リレーションが生成するイーガーロードの経路を通ります。この経路は、親のバッチ全体についてピボットテーブルを一度に走査し、*関連先の*テーブルに対して `with_where` のクロージャを適用します。その経路には、ピボットの述語を置く場所がありません。フィルタされた多対多の読み取りが必要なときは、イーガーロードではなく、親ごとにリレーションのアクセッサーを呼んでください（`user.roles().where_pivot(...).get()`）。
 
 ### Suprnovaが異なる設計を選んだ理由: ピボットは本物のモデルである
 
@@ -430,8 +493,7 @@ let mine = Post::query()
 
 ### なぜこれがLEFT JOINに勝るのか
 
-Laravelの古い `has` / `whereHas` エンジンは、JOINを発行し、親の行を重複させていました。相関EXISTSへの書き換えは、Laravel
-9. で届きました。Suprnovaは、初日からEXISTSを出荷しています。その利点です: 結果集合の中に重複がなく、集計のためのGROUP BYの回避策も不要で、`DISTINCT` も必要なく、データベースのオプティマイザは、述語を押し込めないJOINの代わりに、本物のサブクエリを目にします。`has_count(rel, ">=", n)` については、このエンジンは `(SELECT COUNT(*) FROM child WHERE ...) >= n` を直接描画します - 1つのクエリ、1つのプランです。
+Laravelの古い `has` / `whereHas` エンジンは、JOINを発行し、親の行を重複させていました。相関EXISTSへの書き換えは、Laravel 9.で届きました。Suprnovaは、初日からEXISTSを出荷しています。その利点です: 結果集合の中に重複がなく、集計のためのGROUP BYの回避策も不要で、`DISTINCT` も必要なく、データベースのオプティマイザは、述語を押し込めないJOINの代わりに、本物のサブクエリを目にします。`has_count(rel, ">=", n)` については、このエンジンは `(SELECT COUNT(*) FROM child WHERE ...) >= n` を直接描画します - 1つのクエリ、1つのプランです。
 
 ## イーガーロード - `with`、`with_count`、`with_*` の集計
 

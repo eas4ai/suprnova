@@ -49,8 +49,8 @@ SQL-Strings herunterzufallen.
 
 ## Die verkettbare Oberfläche
 
-`DB::table(name)` liefert einen `DbTableBuilder`. Bauen Sie ihn auf und
-rufen Sie dann eine Abschlussmethode auf, um ihn auszuführen.
+`DB::table(name)` gibt einen `DbTableBuilder` zurück. Bauen Sie ihn auf
+und rufen Sie dann eine Abschlussmethode auf, um auszuführen.
 
 ### Filtern
 
@@ -71,15 +71,38 @@ DB::table("audit_log")
     .await?;
 ```
 
-`filter` und `filter_op` akzeptieren beide jedes `Into<SeaValue>` auf
-der rechten Seite, was `i64`, `String`, `&str`, `bool`, `f64`,
-`Option<T>`, `chrono::*`, `uuid::Uuid` und `serde_json::Value`
-abdeckt - jeden Spaltentyp, den das Backend versteht.
+`filter` und `filter_op` nehmen auf der rechten Seite beide jedes
+`Into<SeaValue>` entgegen, was `i64`, `String`, `&str`, `bool`, `f64`,
+`Option<T>`, `chrono::*`, `uuid::Uuid` und `serde_json::Value` abdeckt -
+also jeden Spaltentyp, den das Backend versteht.
+
+#### Byte-exakter Vergleich
+
+`where_binary` vergleicht die rohen Bytes einer Spalte, statt unter ihrer
+Kollation zu vergleichen, `"Alice"` trifft also weder `"alice"` noch
+`"ALICE"`:
+
+```rust
+DB::table("users").where_binary("email", submitted).get().await?;
+DB::table("users").where_not_binary("email", submitted).get().await?;
+```
+
+Das ist ein Feature von MySQL und MariaDB - es gibt deren
+Operator-Modifikator `binary` aus, `email = binary ?`. Postgres und SQLite
+haben keine Entsprechung, auf diesen Backends gibt daher jede
+Abschlussmethode einen Fehler zurück, wenn das Statement gerendert wird,
+noch bevor eine Query läuft. Suprnova verweigert, statt auf ein schlichtes
+`=` zurückzufallen, denn ein Fallback würde unter der Kollation der Spalte
+vergleichen und Zeilen zurückgeben, die Sie ausschließen wollten.
+
+Wenn Sie unter Postgres oder SQLite Groß-/Kleinschreibung beachten müssen,
+setzen Sie eine entsprechende Kollation auf der Spalte oder nutzen Sie
+`DB::select` mit einem backend-spezifischen Ausdruck.
 
 ### Spalten auswählen
 
 ```rust
-// Der Standard ist SELECT *.
+// Standard ist SELECT *.
 DB::table("users").get().await?;
 
 // Spalten einschränken, wenn Sie nur einige brauchen.
@@ -98,8 +121,8 @@ DB::table("posts")
     .await?;
 ```
 
-`order_by_desc` und `order_by_asc` verketten sich in der Reihenfolge
-ihres Einfügens; das erzeugte SQL bewahrt sie.
+`order_by_desc` und `order_by_asc` verketten sich in der Reihenfolge, in
+der sie eingefügt wurden; das erzeugte SQL bewahrt sie.
 
 ### Abschlussmethoden
 
@@ -116,17 +139,17 @@ let first: Option<DynamicRow> = DB::table("audit_log")
     .first()
     .await?;
 
-// Nur die Anzahl (leert vor dem Rendern jedes
-// select/order/limit/offset - die Count-Semantik ignoriert die).
+// Nur die Anzahl (löscht vor dem Rendern jedes select/order/limit/offset -
+// die Zählsemantik kümmert sich nicht darum).
 let n: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .count()
     .await?;
 ```
 
-`get()` liefert `Collection<DynamicRow>` - denselben
-Collection-Wrapper, den typisierte Modelle verwenden, mit derselben
-Oberfläche aus `.iter()`, `.len()` und `.into_vec()`. Siehe
+`get()` gibt `Collection<DynamicRow>` zurück - dieselbe
+Collection-Hülle, die typisierte Modelle nutzen, mit derselben
+Oberfläche `.iter()`, `.len()`, `.into_vec()`. Siehe
 [Eloquent Collections](eloquent-collections.md).
 
 ### Inserts, Updates, Deletes
@@ -134,33 +157,33 @@ Oberfläche aus `.iter()`, `.len()` und `.into_vec()`. Siehe
 ```rust
 use suprnova::attrs;
 
-// INSERT, liefert die Auto-Increment-ID der neuen Zeile.
+// INSERT, gibt die Auto-Increment-ID der neuen Zeile zurück.
 let id: i64 = DB::table("audit_log")
     .insert(attrs! { event: "user.created", actor_id: 42 })
     .await?;
 
-// UPDATE, liefert die Anzahl betroffener Zeilen.
+// UPDATE, gibt die Anzahl der betroffenen Zeilen zurück.
 let updated: u64 = DB::table("audit_log")
     .filter("id", id)
     .update(attrs! { event: "user.created.v2" })
     .await?;
 
-// DELETE, liefert die Anzahl betroffener Zeilen.
+// DELETE, gibt die Anzahl der betroffenen Zeilen zurück.
 let deleted: u64 = DB::table("audit_log")
     .filter("actor_id", 42i64)
     .delete()
     .await?;
 ```
 
-Das Makro `attrs!` baut die Spalten-zu-Wert-Map an der Aufrufstelle.
-Schlüssel sind SQL-Identifier (validiert), und Werte werden als
-Parameter gebunden. Ein expliziter Nullwert wird als SQL `NULL`
-ausgegeben, weil die JSON-Attribut-Map ihren ursprünglichen Rust-Typ
-nicht mehr mitführt; alle Nicht-Null-Werte bleiben parametergebunden.
-Dieselbe Regel gilt für typisierte Eloquent-Massenschreibvorgänge und
-für zusätzliche Attribute in Viele-zu-viele-Pivots.
+Das Makro `attrs!` baut die Zuordnung von Spalte zu Wert an der
+Aufrufstelle. Schlüssel sind SQL-Bezeichner (validiert), und Werte werden
+als Parameter gebunden. Ein ausdrückliches Null wird als SQL-`NULL`
+ausgegeben, weil die JSON-Attributzuordnung ihren ursprünglichen Rust-Typ
+nicht mehr mitträgt; alle Werte ungleich null bleiben parametergebunden.
+Dieselbe Regel gilt für typisierte Eloquent-Massenschreibvorgänge und für
+Pivot-Extras bei Many-to-many.
 
-#### Die Aliase `update_all` und `delete_all`
+#### Aliase `update_all` und `delete_all`
 
 `update` und `delete` sind die Laravel-treuen Namen. Die Aliase im Stil
 von `Builder<M>` - `update_all` und `delete_all` - rufen dieselbe
@@ -170,7 +193,7 @@ fehlendes `filter` für Reviewer sichtbar:
 
 ```rust
 // Gleiches Verhalten wie DB::table("rate_limits").delete().await?, aber
-// das Suffix _all sagt Reviewern: „ja, ich wollte die Tabelle leeren“.
+// das Suffix _all sagt Reviewern: "ja, ich wollte die Tabelle leeren".
 DB::table("rate_limits").delete_all().await?;
 
 // Massen-Update mit einem WHERE - das Suffix _all entspricht hier der
@@ -181,25 +204,24 @@ DB::table("sessions")
     .await?;
 ```
 
-#### Ein leeres WHERE bei Update oder Delete betrifft jede Zeile
+#### Ein leeres WHERE bei Update oder Delete wirkt auf jede Zeile
 
-`DB::table("x").delete().await?` entfernt jede Zeile der Tabelle. Das
-ist absichtlich unterstützt - manchmal wollen Sie eine Tabelle wirklich
-leeren -, aber es ist selten richtig. Sehen Sie sich jeden Aufruf von
-`delete()` / `delete_all()` an und prüfen Sie, ob ein `filter`
-davorsteht. Für `update` / `update_all` gilt dasselbe.
+`DB::table("x").delete().await?` entfernt jede Zeile der Tabelle. Das ist
+so gewollt - manchmal wollen Sie wirklich leeren -, aber es ist selten
+richtig. Sehen Sie sich jeden Aufruf von `delete()` / `delete_all()` an und
+prüfen Sie, ob ein `filter` davorsteht. Dasselbe gilt für `update` /
+`update_all`.
 
-#### Backend-Aufteilung beim Insert
+#### Aufteilung des Insert nach Backend
 
-`RETURNING id` wird auf Postgres und SQLite verwendet. MySQL
-unterstützt `RETURNING` nicht, also führt der Builder den INSERT aus und
-liest das `last_insert_id()` des Treibers pro Verbindung aus dem
-Ergebnis. Der modell-lose Builder setzt einen standardmäßigen
-Auto-Increment-Primärschlüssel `id` voraus. UUID-, zusammengesetzte,
-umbenannte oder nicht ganzzahlige Primärschlüssel werden auf dieser
-Oberfläche nicht unterstützt - verwenden Sie stattdessen die typisierte
-`Model`-Schnittstelle von [Eloquent](eloquent.md), die für die Form des
-Primärschlüssels die Modelldefinition heranzieht.
+`RETURNING id` wird unter Postgres und SQLite verwendet. MySQL
+unterstützt kein `RETURNING`, der Builder führt daher das INSERT aus und
+liest das `last_insert_id()` des Treibers pro Verbindung aus dem Ergebnis.
+Der modell-lose Builder setzt einen üblichen Auto-Increment-Primärschlüssel
+`id` voraus. UUID-, zusammengesetzte, umbenannte oder nicht ganzzahlige
+Primärschlüssel werden auf dieser Oberfläche nicht unterstützt - nutzen Sie
+dafür die typisierte `Model`-Schnittstelle von [Eloquent](eloquent.md), die
+die Modelldefinition nach der Form des Primärschlüssels befragt.
 
 ## `DynamicRow` - typisierte Zugriffsmethoden über eine JSON-Map
 
@@ -410,20 +432,20 @@ in [Eloquent](eloquent.md) beschrieben. Die verkettbare Form, die Sie
 oben gelernt haben, ist dieselbe Form; die Unterschiede liegen in
 Typisierung und Reichweite.
 
-## Zu einer benannten Connection routen
+## Routing auf eine benannte Connection
 
 `DB::table` und die rohen Helfer verwenden standardmäßig die primäre
-Connection. Um eine Read-Replica, einen Shard oder einen Warehouse-
-Pool anzusteuern, pinnen Sie den Aufruf:
+Connection. Um ein Read-Replikat, einen Shard oder einen Warehouse-Pool
+anzusprechen, heften Sie den Aufruf fest:
 
 ```rust
-// Builder, an eine benannte Connection gepinnt.
+// Builder, an eine benannte Connection geheftet.
 let rows = DB::table("audit_log").on("warehouse").get().await?;
 
-// Äquivalente Kurzform.
+// Gleichwertige Kurzform.
 let rows = DB::table_on("warehouse", "audit_log").get().await?;
 
-// Auch die rohen Escapes haben _on-Varianten.
+// Die rohen Notausgänge haben ebenfalls _on-Varianten.
 let rows = DB::select_on("warehouse", "SELECT …", vec![]).await?;
 let n    = DB::affecting_statement_on(
     "warehouse",
@@ -432,34 +454,39 @@ let n    = DB::affecting_statement_on(
 ).await?;
 ```
 
-Wenn `__read_replica__` registriert ist, routet jede lesende
-Abschlussmethode automatisch darüber; Writes (`insert` / `update` /
-`delete` / `update_all` / `delete_all`) zielen immer auf die primäre.
+Ist `__read_replica__` registriert, routet jede lesende Abschlussmethode
+automatisch darüber; Schreibzugriffe (`insert` / `update` / `delete` /
+`update_all` / `delete_all`) zielen immer auf die primäre Connection.
 Innerhalb einer `DB::transaction`-Closure gewinnt die Connection der
-aktiven Transaktion unbedingt - `on(name)` wird stillschweigend
-ignoriert, um Atomarität zu erhalten. Siehe
-[Datenbank - Benannte Connections](database.md) für die vollständige
-Vorrangkette.
+aktiven Transaktion absolut - `on(name)` wird stillschweigend ignoriert,
+um die Atomarität zu bewahren. Die vollständige Vorrangkette beschreibt
+[Datenbank - Benannte Connections](database.md).
 
 ### Warum Suprnova abweicht
 
-Laravels `DB::table(...)` ist sein modell-loser Query Builder;
-darunter liefert es pro Zeile ein `stdClass` (ein PHP-Objekt, dessen
-Eigenschaften die Spalten sind). Suprnova liefert statt dessen
-`DynamicRow` - einen `serde_json::Map`-Newtype mit typisierten
-Zugriffsmethoden. Die Form der Zugriffsmethoden fängt Fehler durch
-fehlende Spalten oder falsche Typen an der Grenze ab, statt tief im
-Nutzercode mit einer Property-Access-Exception zu paniken.
+Laravels `DB::table(...)` ist sein modell-loser Query Builder; unter der
+Haube gibt er pro Zeile ein `stdClass` zurück (ein PHP-Objekt, dessen
+Eigenschaften die Spalten sind). Suprnova gibt stattdessen `DynamicRow`
+zurück - einen Newtype über einer `serde_json::Map` mit typisierten
+Zugriffsmethoden. Die Form der Zugriffsmethoden fängt fehlende Spalten und
+falsche Typen an der Grenze ab, statt tief im Nutzercode mit einer
+Ausnahme beim Eigenschaftszugriff zu panicken.
 
 Die doppelten Namen `update`/`update_all` und `delete`/`delete_all`
-gibt es, weil die typisierte Eloquent-Oberfläche `Builder<M>` das
-Suffix `_all` verwendet, um die tabellenweite Absicht an der
-Aufrufstelle explizit zu machen. Statt sich für eine Seite zu
-entscheiden, liefert der modell-lose Builder beide - `update` und
-`delete` entsprechen Laravels `DB::table($t)->update(...)` und
-`->delete()` buchstabengetreu; `update_all` und `delete_all`
-entsprechen der Konvention, die Nutzer von `M` schon im Muskelgedächtnis
-haben.
+existieren, weil die typisierte Eloquent-Oberfläche `Builder<M>` das
+Suffix `_all` nutzt, um die tabellenweite Absicht an der Aufrufstelle
+deutlich zu machen. Statt sich für eine Seite zu entscheiden, liefert der
+modell-lose Builder beide aus - `update` und `delete` entsprechen Laravels
+`DB::table($t)->update(...)` und `->delete()` Buchstabe für Buchstabe;
+`update_all` und `delete_all` entsprechen der Konvention, die `M`-Nutzer
+ohnehin schon im Muskelgedächtnis haben.
+
+`where_binary` gibt unter Postgres und SQLite einen Fehler zurück, wo
+Laravel aus der Basis-Grammatik eine `RuntimeException` wirft. Der Grund
+ist derselbe, und nur der Mechanismus unterscheidet sich: Code auf der
+öffentlichen Oberfläche gibt in Suprnova ein `Result` zurück, statt zu
+panicken, die Verweigerung kommt also als `Err` aus der Abschlussmethode
+statt als Ausnahme aus der Grammatik.
 
 ## Nächste Schritte
 

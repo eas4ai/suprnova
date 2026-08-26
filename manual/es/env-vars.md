@@ -130,7 +130,10 @@ URL de conexión y ajuste del pool de sqlx. `DATABASE_URL` es
 obligatoria para cualquier subcomando que toque la base de datos
 (`migrate*`, `db:sync`, `db:seed`, `queue:work` con
 `QUEUE_DRIVER=database`, `workflow:work`, el store de sesión en BD) y
-para `serve` cuando la app tiene migraciones registradas.
+para `serve` cuando la app tiene migraciones registradas. Los cinco
+ajustes de vitalidad son la forma de sobrevivir a una red que descarta
+las conexiones inactivas - véase
+[Vitalidad del pool](database.md#pool-liveness).
 
 | Var | Por defecto | Tipo | Propósito |
 |---|---|---|---|
@@ -139,6 +142,11 @@ para `serve` cuando la app tiene migraciones registradas.
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | Piso del pool de sqlx (se mantiene caliente). |
 | `DB_CONNECT_TIMEOUT` | `30` (segundos) | `u32` | Cuánto esperará sqlx una conexión inicial antes de fallar con un error. |
 | `DB_LOGGING` | `false` | `bool` | Cuando es cierto, sqlx registra cada statement (úsalo con moderación en producción - es ruidoso). |
+| `DB_IDLE_TIMEOUT` | sin establecer (sqlx usa 600 segundos) | `u64` (segundos) | Cuánto tiempo puede permanecer inactiva una conexión del pool antes de que el pool la cierre. `0` desactiva la recolección por inactividad. |
+| `DB_MAX_LIFETIME` | sin establecer (sqlx usa 1800 segundos) | `u64` (segundos) | Cuánto tiempo puede vivir una conexión del pool antes de que el pool la recicle. `0` desactiva el reciclado por tiempo de vida. |
+| `DB_ACQUIRE_TIMEOUT` | sin establecer (recurre a `DB_CONNECT_TIMEOUT`) | `u64` (segundos) | Cuánto espera quien llama a que haya una conexión libre en el pool. Anula `DB_CONNECT_TIMEOUT` para esa espera de entrega; establece una u otra, no las dos. El cero se rechaza en el arranque. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Hace ping a una conexión del pool antes de entregarla. Déjalo activado salvo que hayas medido la ida y vuelta de cada entrega y `DB_PING_AFTER_IDLE` no baste. |
+| `DB_PING_AFTER_IDLE` | sin establecer | `u64` (segundos) | Hace ping a una conexión del pool solo después de que lleve inactiva este tiempo. Establecerlo desactiva `DB_TEST_BEFORE_ACQUIRE`, así que las conexiones activas se entregan sin tocarlas. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | Cuando es cierto, una automigración fallida durante el arranque de `serve` se registra pero no aborta. Por defecto es fail-closed: el arranque sale con código distinto de cero en lugar de iniciar contra un esquema parcialmente migrado. Pasa `--no-migrate` para saltarte la automigración por completo. |
 
 ## Sesión
@@ -190,6 +198,7 @@ framework.
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL de conexión a Redis (se consulta solo cuando `CACHE_DRIVER=redis`). |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Prefijo de clave para las entradas de caché (evita colisiones en un Redis compartido). |
 | `CACHE_DEFAULT_TTL` | `3600` (segundos) | `u64` | TTL por defecto en segundos. `0` significa "sin expiración". Se aplica a `Cache::put(None)` / `Cache::tags_put(None)`; `Cache::forever` y `Cache::remember_forever` siempre lo omiten. |
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Reintentos adicionales para los comandos de Redis con forma de lectura, por encima del que ya recibe toda lectura. Se aplica a los drivers de caché, de colas y de limitación de velocidad. Las escrituras nunca reintentan, sea cual sea el valor. Presupuéstalo en segundos: un reintento contra una conexión caída espera a la reconexión, así que cuesta el presupuesto entero de conexión y respuesta del driver - hasta 3 reintentos de conexión separados como mucho por 500 ms, cada uno acotado en 2 s, más un tiempo de espera de respuesta de 5 s en el driver de caché; hasta 6 reintentos de conexión con un retardo exponencial sin tope, cada uno acotado en 1 s, más un tiempo de espera de respuesta de 500 ms en los drivers de colas y de limitación de velocidad. El tope de `10` limita los intentos, no los segundos: con ese ajuste, una lectura hace 12 intentos. Un tiempo de espera agotado también cuenta como transitorio, así que durante un atasco cada lectura envuelta emite hasta esa cantidad de comandos. Un valor que no se puede analizar recurre a `0`. |
 
 ## Cola
 

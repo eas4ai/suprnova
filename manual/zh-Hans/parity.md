@@ -72,7 +72,7 @@
 | URL 生成 | `url("posts.show", &[…])`、`route("posts.show", …)`、`redirect(...)`、`redirect_to(...)` | 已实现 | [URL 生成](urls.md) |
 | 会话 | `session()`、`session_mut()`，flash bag 通过 `req.flash()` | 已实现 | 默认通过 `DatabaseSessionDriver` 由数据库支撑；加密的浏览器 cookie 只携带会话标识符和活动触碰元数据，不携带会话数据包。[会话](session.md) |
 | Cookie 队列（`Cookie::queue`） | `Cookie::queue`/`queued`/`unqueue`/`expire` - 一个由 `SessionMiddleware` 排到响应上的任务本地 jar | 已实现 | 需要链中包含 `SessionMiddleware`；按名称排队，不像 Laravel 的 `CookieJar` 那样按名称+路径 |
-| 验证 | `#[derive(Validate)]` + 28 条内置规则 + `Rule`/`ValueRule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（如 `Unique`）会访问数据库。`ArrayKeys`/`Distinct` 是作用于 `serde_json::Value` 的 `ValueRule`，对应 Laravel 的 `array:keys` 和 `distinct`。[验证](validation.md) |
+| 验证 | `#[derive(Validate)]` + 35 条内置规则 + `Rule`/`ValueRule`/`AsyncRule` trait | 已实现 | `Url` 使用 Laravel 的协议方案允许列表，`Url::protocols([...])` 对应 `url:http,https`。异步规则（如 `Unique`）会访问数据库。`ArrayKeys`/`Distinct` 是作用于 `serde_json::Value` 的 `ValueRule`，对应 Laravel 的 `array:keys` 和 `distinct`。`InArray` 直接接受另一个字段的那个列表，而不是 Laravel 的 `in_array:other.*` 规则字符串，而 `Contains`/`DoesntContain` 精确匹配 JSON 字符串元素。`Gt`/`Gte`/`Lt`/`Lte` 接受一个显式的 `CompareWith` 操作数（字面数字、数值型的兄弟字段，或者按字符数比较的兄弟字段），而不是去推断 Laravel 的那四种尺寸度量；数组和文件的比较没有对应物。[验证](validation.md) |
 | `Password` 规则（`Password::defaults()`、`uncompromised()`） | `Password::min(n)` + 强度构建器（`.letters()`、`.mixed_case()`、`.numbers()`、`.symbols()`）+ `.uncompromised()` | 已实现 | Have I Been Pwned 的 k-匿名检查；网络出错时失败开放，与 Laravel 的 `NotPwnedVerifier` 一致。[验证](validation.md#password-strength) |
 | 错误处理 | `FrameworkError`、`AppError`、`HttpError` trait，`execute_chain_safely` 里的 panic 边界 | 已实现 | [错误处理](errors.md)、[错误模型](error-model.md) |
 | 日志 | 带结构化字段的 `tracing` 订阅者，`LogFormat`（json / pretty / compact） | 路径不同 | 一行日志就是一个 JSON 文档；`request_id` 始终存在。[日志](logging.md) |
@@ -92,7 +92,7 @@
 | 上下文 | `Context::put` / `Context::get` / `ContextStore` + 自动注入到队列 / 邮件 / 事件里 | 已实现 | [上下文](context.md) |
 | 契约 | 所有公开接缝都是 trait | 已实现 | 参见上面“架构 / 契约”那一行 |
 | 事件 | `EventFacade::dispatch(e).await?`、`#[derive(Event)]`、`EventDispatcher`、排队的监听器、订阅者 | 已实现 | [事件](events.md) |
-| 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。[文件存储](filesystem.md) |
+| 文件存储 | 架在 OpenDAL 之上的 `Storage::disk("local"\|"s3"\|"azblob"\|"gcs"\|"memory")` | 已实现 | 同样的 `put/get/delete/copy/move/exists/url` 表面。内置路径穿越防护。`Storage::register_read_through` 把两个磁盘组合成一个读穿透磁盘，它会把命中后备磁盘的对象提升到主磁盘上，另有 `copy: false` 用来跳过提升，以及跨越后备磁盘的 `copy` / `rename`。[文件存储](filesystem.md) |
 | 辅助函数 | 对应物都在各自的所属模块里（没有厨房水槽式的 `helpers.md`） | 路径不同 | 比如 URL 辅助函数在 [urls.md](urls.md) 里，字符串辅助函数在 `std`/`heck` 里，数组辅助函数在 `std::collections` 里 - Rust 是用 crate 而不是一个全局命名空间来做这件事的 |
 | HTTP 客户端 | `Http::get/post/...` 构建器 + 供测试用的 `Http::fake(...)` | 已实现 | 自动记录请求；`assert_sent` / `assert_not_sent`；`.retry_when(predicate)` 以 `RetryContext` 收窄内置重试策略。[HTTP 客户端](http-client.md) |
 | 图像（`Illuminate\Image`） | `Image::from_bytes/from_path/from_disk/from_upload/from_stream` + 同样的一套操作与终结方法表面 | 已实现 | 住在 `suprnova::media` 里。像 Laravel 的 `gd`/`imagick` 那样有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认，纯 Rust）或者 `magick`。读写 PNG、JPEG、WebP、GIF、BMP；AVIF 输出推迟到那个自研 AV1 编码器发布之后。解码限制会对着文件头做检查。[图像](images.md) |
@@ -104,12 +104,16 @@
 | 进程（运行 shell 命令） | 标准库里的 `tokio::process::Command` | 刻意不做 | 没有门面 - Tokio 的 API 形态本来就是对的 |
 | 队列 | `Queue::push(job).await?` + `sync/memory/database/redis/null` 这些驱动程序、批次、链、`JobMiddleware`、`FailedJobStore` | 已实现 | [队列](queues.md) |
 | 作业声明的延迟 | `Job` 上的 `fn delay() -> Option<Duration>`，由 `Queue::push` 和 `Queue::bulk` 遵守 | 已实现 | 显式 `Queue::push_later` / `Queue::later(delay, job)` 调用始终优先于作业自身默认值。[队列](queues.md) |
+| `Queue::forward` | `Queue::forward(from, to)` / `Queue::forward_on(from, to, connection)`，同时施加到信封上和工作进程的 `--queue` 列表上 | 已实现 | 只做队列到队列：`connection` 是给这次重定向把关的，而不是用来选择驱动程序的，而且它会与进程的连接名字做比较，所以这次推送和工作进程的认领是按同一个值把关的；`to` 是必需的，而 Laravel 的那个是可选的。[队列](queues.md) |
 | 唯一作业跳过事件 | `queue::events::UniqueJobSkipped { job_name, unique_id, connection }` | 已实现 | 在推送端 `push_unique` 去重时触发；调用仍返回 `Ok(false)` |
-| 队列暂停（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`，由缓存支撑，带 `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 事件 | 已实现 | 逐队列暂停仅对使用明确 `--queue=...` 列表启动的工作进程生效；`resume_all` 不会清除逐队列暂停。[队列](queues.md) |
+| 队列暂停（`queue:pause` / `queue:resume`） | `Queue::pause`/`resume`/`pause_all`/`resume_all`/`is_paused`/`paused_queues`，由缓存支撑，带 `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 事件 | 已实现 | 逐队列暂停仅对使用明确 `--queue=...` 列表启动的工作进程生效；`resume_all` 不会清除逐队列暂停。一个正在运行的工作进程还会为每一次转变各发出一次 `WorkerQueuePaused` / `WorkerQueueResumed`，而 `queue:work` 会为每一次各打印一行；它们的 `queue` 字段是 `Option<String>`，因为一个不带 `--queue` 启动的工作进程，在一次全局暂停之下没有队列名字可以报告。[队列](queues.md) |
+| 重试瞬时的 Redis 命令 | 读形状的 Redis 命令在一次连接层面的故障上重试一次，每一次尝试都要等待驱动程序的重连预算；`REDIS_COMMAND_RETRIES` 可以再加 | 已实现 | Laravel 的 `command_retries` 通过一个单一的分发点和一张 60 条目的允许列表覆盖每一条命令；Suprnova 是逐调用点重试的，而且没有任何设置能让一次写入或者一次队列弹出去重试。[缓存](cache.md) |
 | 提交后分发（`afterCommit()`） | `Job` 上的 `fn after_commit() -> bool`、逐次推送的 `EnvelopeOverrides::after_commit`、`Queue::push_after_commit` | 已实现 | 整个推送都会等待提交，事件也包括在内，而一次回滚会把它丢弃；一次被推迟的 `push_unique` 仍然会立即取走它的锁，所以去重在事务内部照样有效。手写的 `DB::begin_transaction` 从不推迟。[队列](queues.md) |
 | 故障转移队列连接 | 架在一个有序连接列表之上的 `FailoverQueueDriver`，经由 `QUEUE_DRIVER=failover` + `QUEUE_FAILOVER_CONNECTIONS` 启用 | 已实现 | 写操作会沿着这个列表往下穿；`pop`、那些计数器和那些列举都留在第一个连接上，所以每一个后备连接都需要它自己的工作进程。`QueueFailedOver` 是边沿触发的，而 `bulk_push` 是逐个信封往下穿的，所以每个信封都保住自己的延迟。[队列](queues.md) |
 | `ShouldBeUniqueUntilProcessing` | `Job` 上的 `fn unique_until_processing() -> bool`，在中间件走完之后、处理程序运行之前释放 | 已实现 | 按所有者范围释放，所以一次被重投的尝试永远不会释放掉一次更新的分发所持有的锁。一个被中间件释放回队列的作业会保住它的锁。[队列](queues.md) |
-| 队列检查（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`，用一个 `Option<&str>` 把 Laravel 的 `all*Jobs()` 孪生方法收拢成一次调用 | 已实现 | `InspectedJob` DTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）；trait 的默认实现是一个诚实的 `Err`，而不是一个空集合；`sync`/`null` 用 `Ok(vec![])` 覆盖它；Redis 的 `reserved_jobs` 是逐消费者的。[队列](queues.md) |
+| 防抖作业（`#[DebounceFor]`） | `Job::debounce_for` / `max_debounce_wait` / `debounce_id`，外加 `Queue::push_debounced(job, DebounceOptions)` | 已实现 | 是 trait 方法而不是一个类属性，所以一个笔误就是一个编译错误。每一次分发都会入队，而合并是在工作进程那边结算的；一个同时声明了 `debounce_for` 和 `unique_id` 的作业会被以一个 `FrameworkError` 拒绝，而 Laravel 是抛异常。链和批次会干脆拒绝一个防抖的作业。[队列](queues.md) |
+| 防抖的已入队监听器 | 监听器那个作业上的 `Job::debounce_for`，或者 `DebouncedListener::new(window, build).keyed_by(...)` | 已实现 | Laravel 把这个属性放在监听器类上；Suprnova 从监听器到作业的这座桥本来就走 `Queue::push`，所以把它声明在作业上就覆盖了常见情形，而 `DebouncedListener` 覆盖的是一个逐次注册的窗口。[事件](events.md) |
+| 队列检查（`pendingJobs` / `delayedJobs` / `reservedJobs`） | `Queue::pending_jobs(queue)` / `delayed_jobs` / `reserved_jobs`，用一个 `Option<&str>` 把 Laravel 的 `all*Jobs()` 孪生方法收拢成一次调用 | 已实现 | `InspectedJob` DTO（`id`/`queue`/`name`/`attempts`/`payload`/`created_at`）；trait 的默认实现是一个诚实的 `Err`，而不是一个空集合；`sync`/`null` 用 `Ok(vec![])` 覆盖它；Redis 的 `reserved_jobs` 是逐消费者的。与 Laravel 不同，这几个方法不会跟随一次 `Queue::forward`，所以它们报告的是您点名的那个字面上的队列 - 一个被转发的队列上遗留下来的积压，正是靠这一点才保持可见。[队列](queues.md) |
 | 逐任务时区的调度 | 逐任务的 `.timezone(chrono_tz::Tz)` / `.try_timezone("name")`、`Schedule::timezone` 默认值、`schedule:list --timezone` | 已实现 | 用的是带类型的 `chrono_tz::Tz`，而不是 Laravel 的字符串；整份调度表的默认值是 `schedule::register` 里的 `Schedule::timezone`，而不是一个 `app.schedule_timezone` 配置键，而一个没有钉住时区的任务保持进程本地时区。[任务调度](scheduling.md) |
 | 速率限制 | `RateLimiter::for_signature(...)`、`ThrottleRequestsMiddleware`、`RateLimitMiddleware` | 已实现 | 通过 `SlidingWindowConfig` 实现的滑动窗口。[速率限制](rate-limiting.md) |
 | 搜索（Scout） | 没有官方的全文搜索适配器 | 尚未实现 | 向量搜索今天已经通过[向量搜索](vector.md)实现了；关键词版的 Scout 对应物已在计划中 |
@@ -166,10 +170,12 @@
 | 查询事件 | `QueryListener` + `QueryExecuted` 事件 | 已实现 | `DB::listen(\|q\| { ... })` |
 | 原生表达式 | `DB::raw("...")`、`DB::select("...", &[...])` | 已实现 | 必须走参数绑定（不支持字符串插值） |
 | Postgres / MySQL / SQLite | 三者都通过 SeaORM 一等支持 | 已实现 | URL 检测在 `database::config::database_type()` 里 |
+| Postgres 的 `keepalives_*` DSN 选项 | `DB_IDLE_TIMEOUT` / `DB_MAX_LIFETIME` / `DB_ACQUIRE_TIMEOUT` / `DB_TEST_BEFORE_ACQUIRE` / `DB_PING_AFTER_IDLE` 这套连接池存活性 | 路径不同 | sqlx 没有暴露任何 TCP keepalive 的设置方法，所以 Suprnova 改为回收池化连接并对它们做 ping。[数据库](database.md#pool-liveness) |
 | MariaDB | 作为独立的一等选项（向量 + JSON + 时态） | 路径不同 | 因为存在 Laravel 只在 Postgres 上才提供的多范式特性，所以单独处理 |
 | Redis | 由驱动使用（cache/queue/rate-limit） - 没有单独的 `Redis::*` 门面 | 路径不同 | 需要临时命令时直接拿 `redis` crate；cache/queue/rate-limit 已经覆盖了 95% 的常见用法 |
 | MongoDB | 目前没有官方适配器 | 尚未实现 | 通过 `App::bind` 直接使用 `mongodb` crate |
 | 查询构造器 | 带 `db_where` / `or_where` / `where_in` / `where_between` / `where_null` / `where_has` / `with` / `with_count` / `order_by` / `group_by` / `having` / `paginate` 等方法的 `Builder<M>` | 已实现 | [查询构造器](queries.md) |
+| `whereBinary()` 家族 | `Builder::where_binary` / `or_where_binary` / `where_not_binary` / `or_where_not_binary`，以及 `DB::table(...).where_binary(...)` | 已实现 | MySQL 和 MariaDB 发出 `= binary`；Postgres 和 SQLite 会返回一个错误，而不是给出一个取决于排序规则的匹配。[查询构造器](queries.md) |
 | 分页 | `LengthAwarePaginator`、`Paginator`（简单分页）、`CursorPaginator` | 已实现 | 三者都会序列化成 Laravel 形态的 JSON。[分页](pagination.md) |
 | 迁移 | `#[derive(DeriveMigrationName)] struct M;` + `up`/`down` + `Migrator` | 已实现 | 通过 `suprnova migrate`/`migrate:rollback`/`migrate:status`/`migrate:fresh` 运行。[迁移](migrations.md)、[CLI 迁移](cli-migrations.md) |
 | 填充器 | `Seeder` trait + `db:seed` 子命令 | 已实现 | 逐模型工厂。[数据填充](seeding.md) |
@@ -189,6 +195,7 @@
 | 本地作用域 | `#[scopes(User)] impl User { fn active(b: &mut Builder<User>) { ... } }` | 已实现 | 在 `Builder<M>` 上做方法分发 |
 | 全局作用域 | `impl GlobalScope for ActiveOnly { ... }` + 注册 | 已实现 | 通过 `Builder::without_global_scope` 剥离 |
 | 关系（11 种） | `HasOne`、`HasMany`、`BelongsTo`、`BelongsToMany`、`HasOneThrough`、`HasManyThrough`、`MorphOne`、`MorphMany`、`MorphTo`、`MorphToMany`、`MorphedByMany` | 已实现 | 按族分组的 morph 枚举。[关系](eloquent-relationships.md) |
+| `wherePivot` 家族（含闭包形式） | `where_pivot` / `where_pivot_op` / `where_pivot_in` / `where_pivot_not_in` / `where_pivot_null` / `where_pivot_not_null` / `where_pivot_between` / `where_pivot_not_between` / `where_pivot_group`，外加它们的 `or_` 孪生方法 | 路径不同 | 只用于读 - 一个中间表过滤器绝不会收窄 `attach` / `detach` / `sync`，预加载也不会把它带上。[关系](eloquent-relationships.md) |
 | 预加载 | `User::query().with(&["posts", "posts.comments"]).get()` | 已实现 | `EagerLoadDispatch` 是密封的；只有宏生成的关系才能实现它 |
 | 延迟加载预防 | `prevent_silently_discarding_attributes(true)` | 已实现 | 与 Laravel 的 `preventLazyLoading` 形态相同 |
 | 关系上的聚合 | `with_count("posts")`、`with_sum("orders", "total")`、`with_avg`、`with_min`、`with_max` | 已实现 | 每个聚合一条子查询 |
@@ -202,11 +209,14 @@
 | 转换（22 种内置） | `casts! { AsString, AsInt, AsFloat, AsBool, AsJson, AsArray, AsArrayObject, AsObject, AsCollection, AsDate, AsDateTime, AsImmutableDate, AsImmutableDateTime, AsOptionalDateTime, AsTimestamp, AsDecimal, AsEnum<E>, AsEncrypted, AsEncryptedObject, AsEncryptedArray, AsEncryptedCollection, AsHashed }` | 已实现 | 自定义的话实现 `Cast` |
 | 集合 | 带 `pluck`、`filter`、`map`、`each`、`chunk`、`groupBy`、`keyBy`、`sort_by`、`where_`、`first`、`last`、`count`、`is_empty`、`to_array` 及其 Laravel 同伴的 `Collection<M>`；`Deref<Target = Vec<M>>`，所以所有 `Vec` 惯用法照样能用 | 已实现 | [集合](eloquent-collections.md) |
 | `modelKeys()` | `Builder::model_keys().await?`（不 hydrate、限定键）和 `Collection::model_keys()` | 已实现 | 两者均返回 `Vec<M::Key>`；构建器终端投影 `users.id`，因此可在 join 后存活 |
-| API 资源 | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + 字段集 + include | 已实现 | JSON:API 形态和 Laravel 风格的资源形态两者皆可用。[API 资源](eloquent-resources.md) |
+| API 资源 | `#[derive(Resource)]` + `IntoJsonResource` + `JsonApiResponse` + 字段集 + include | 已实现 | JSON:API 形态和 Laravel 风格的资源形态两者皆可用。`?include=` 的路径深度受 `max_relationship_depth`（默认 5）限制，对应 `JsonApiResource::$maxRelationshipDepth`。[API 资源](eloquent-resources.md) |
 | 序列化 | `#[model(hidden = [...], visible = [...], appends = [...])]` | 已实现 | 对哪些属性会被序列化拥有同样的控制力。[序列化](eloquent-serialization.md) |
 | 工厂 | `#[derive(Factory)] struct UserFactory` + `UserFactory::new().count(5).create().await?`（或 `UserFactory::times(5).create_many().await?`） | 已实现 | 用于循环取值的 `Sequence`。[工厂](eloquent-factories.md) |
 | 生命周期：分块 / 惰性 / 游标 | `Builder::chunk(n, \|page\| async { ... })`、`lazy()`、`cursor()` | 已实现 | 对大表做内存受限的迭代 |
 | 悲观锁 | `Builder::lock_for_update()`、`shared_lock()` | 已实现 | 在一个事务内部 |
+| `refreshForUpdate()` | `model.refresh_for_update().await?` | 已实现 | `SELECT ... FOR UPDATE` 重新加载；在 SQLite 上是一次空操作的加锁。[行级锁](eloquent.md#row-locking) |
+| `inOrderOf(col, values)` | `Builder::in_order_of(col, values)` | 已实现 | 用绑定参数的 `CASE WHEN` 排序；没有列出的值排在最后。仅限带类型的构造器。[排序](eloquent.md#ordering) |
+| `orWhereKey` / `orWhereKeyNot` | `Builder::or_where_key(id)` / `Builder::or_where_key_not(id)` | 已实现 | 会以“或”的关系折进前一个子句；别名是 `or_filter_key` / `or_filter_key_not` |
 | `whereJsonContains` 家族 | 通过 SeaORM 的列表达式提供（因后端而异） | 已实现 | 具体写法因后端而不同；常见场景已经提供了辅助函数 |
 
 ## 分页
@@ -284,9 +294,9 @@
 |---|---|---|---|
 | `php artisan` | 由 `#[command]` 宏构建、逐应用的 `console` 二进制文件 | 已实现 | [控制台](console.md)、[CLI 概览](cli.md) |
 | `make:controller` / `make:model` 等 | `suprnova make:controller / make:middleware / make:action / make:error / make:inertia / make:migration / make:task` | 已实现 | [生成器](cli-generators.md) |
-| `serve` | `suprnova serve`（后端 + Vite 开发服务器一起跑） | 已实现 | [Serve](cli-serve.md) |
+| `serve` | `suprnova serve`（后端 + Vite 开发服务器一起跑） | 已实现 | [Serve](cli-serve.md)。在一个 `--api` 项目上会跳过 Vite 那一格，而不是拒绝启动。 |
 | `migrate` 家族 | `suprnova migrate / migrate:rollback / migrate:status / migrate:fresh` | 已实现 | [CLI 迁移](cli-migrations.md) |
-| `db:seed` | `cargo run --bin console db:seed`（经由逐应用的 console） | 已实现 | 填充器通过 `Seeder` trait 注册 |
+| `db:seed` | `cargo run --bin console db:seed`（经由逐应用的 console） | 已实现 | 填充器通过 `Seeder` trait 注册；一次有针对性的运行会打印 RUNNING / DONE 以及耗时的毫秒数 |
 | `schedule:run` / `schedule:work` / `schedule:list` | 经由逐应用的 console 二进制文件，名字相同 | 已实现 | [调度命令](cli-scheduling.md) |
 | `queue:work` | 经由逐应用的 console 二进制文件，名字相同 | 已实现 | 在 SIGTERM/SIGINT 上优雅关闭 |
 | `tinker` | 没有 REPL | 刻意不做 | 参见“深入探索”里的那一行 |
@@ -300,7 +310,7 @@
 | `php artisan route:cache` | 路由在编译期就被宏展开了 | 路径不同 | 路由器是在启动时，由已经有类型的路由构建出来的 |
 | Envoy（SSH 部署） | 用任何编排工具都行 - Docker、systemd、Kubernetes、fly.io、Railway | 刻意不做 | 二进制文件就是部署产物 |
 | Forge / Vapor | 不是我们该提供的东西 - 但 Railway、DO 和 Hetzner 的方案覆盖了同样的工作 | 路径不同 | [部署](deployment.md)、[Railway](deployment-railway.md)、[Digital Ocean](deployment-digital-ocean.md)、[Hetzner](deployment-hetzner.md) |
-| 维护模式（`php artisan down` / `up`） | `./app down` / `./app up` - 绕过密钥、自定义的 retry/message/except 路径、`file` 或 `cache` 驱动程序 | 已实现 | [部署](deployment.md) |
+| 维护模式（`php artisan down` / `up`） | `./app down` / `./app up` - 带一个由服务端检查的 12 小时有效期的绕过密钥、自定义的 retry/message/except 路径、`file` 或 `cache` 驱动程序 | 已实现 | [部署](deployment.md) |
 | Horizon（队列面板） | 目前还没有面板 | 尚未实现 | 在那之前，失败作业的检查通过 `cargo run --bin console queue:failed` 进行 |
 
 ## 包（Laravel 的官方包 - 我们这边要么内置在核心里，要么以适配器形式提供，要么是刻意留下的空白）

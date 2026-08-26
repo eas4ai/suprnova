@@ -114,8 +114,9 @@ Tokio 以 `current_thread` 这个 flavor 运行 - 在一个一次性的命令里
 
 `db:seed` 会运行您在 `bootstrap::register()` 里通过 `suprnova::seed::register::<MySeeder>()` 注册过的任何东西。在一个空的注册表上，它会打印一条警告并返回 `Ok(())` - 在注册填充器之前调用 `db:seed`，是一个无害的用户失误，不是一个程序员的错误。
 
-> 那些工作守护进程（`queue:work`、`schedule:run`、`schedule:work`、`schedule:list`、`workflow:work`）**不在** console 二进制文件上。它们生活在 app/server 二进制文件的 clap 解析器上（也就是那个提供 HTTP 服务的二进制文件）。全局的 `suprnova` CLI 会为它们 shell 进 `cargo run --quiet -- <name>`。参见下面的[不对称性一节](#与-suprnova-migrate-的不对称性)。
+在一次有针对性的运行里，`db:seed` 会用 `suprnova::two_column_detail` 报告进度，它把一个名字、一串点引导线和一个状态渲染成一行 80 列的输出。您自己的命令也可以调用它，得到同样的观感。
 
+> 那些工作守护进程（`queue:work`、`schedule:run`、`schedule:work`、`schedule:list`、`workflow:work`）**不在** console 二进制文件上。它们生活在 app/server 二进制文件的 clap 解析器上（也就是那个提供 HTTP 服务的二进制文件）。全局的 `suprnova` CLI 会为它们 shell 进 `cargo run --quiet -- <name>`。参见下面的[不对称性一节](#与-suprnova-migrate-的不对称性)。
 ## 定义命令
 
 两个宏，一个注册表。挑一个适合这个命令形态的就好。
@@ -268,6 +269,7 @@ Console 处理程序把面向人类阅读的输出打印到 stdout。如果下�
 | `suprnova::console::dispatch_argv_with_init(argv, init)` | 和 `dispatch_argv` 一样，但会在 clap 解析完 argv 和匹配到的处理程序之间运行那个 `init` 闭包。这个 init 只有在一个真实的子命令匹配时才会触发 - `--help` / `--version` / 解析错误路径都会跳过它。脚手架出来的 `console` 二进制文件用的就是这个。 |
 | `suprnova::console::set_version(&'static str)` | 注册通过 `--version` 和 `--help` 亮出来的版本字符串。在 `main` 开头调用一次。第一次注册的胜出。 |
 | `suprnova::console::find(name)` | 按精确的名字查找一个已注册的命令。 |
+| `suprnova::two_column_detail(left, right)` | 把一个名字、一串点引导线和一个状态词渲染成一行 80 列的进度输出。对应 Laravel 的 `$this->components->twoColumnDetail(...)`。 |
 | `suprnova::console::list()` | 全部已注册的命令，按名字排序。 |
 | `suprnova::CommandEntry` | Inventory 记录：`{ name, description, clap_builder, handler }`。由两个宏共同提交。 |
 | `suprnova::CommandHandler` | 处理程序的函数指针类型：`fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`。 |

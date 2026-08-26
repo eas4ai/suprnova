@@ -256,8 +256,23 @@ cargo run --bin console -- db:seed --class UsersSeeder
 cargo run --bin console -- db:seed UsersSeeder
 ```
 
-Las tres buscan el sembrador en el registro por nombre exacto y lo ejecutan. Un
-nombre desconocido falla rápido:
+Las tres buscan el sembrador en el registro por nombre exacto y lo
+ejecutan.
+
+Una ejecución dirigida informa de su progreso:
+
+```text
+  UsersSeeder .......................................................... RUNNING
+  UsersSeeder ...................................................... 812 ms DONE
+
+```
+
+Las líneas van a stdout. Un `db:seed` a secas se mantiene en silencio: si
+no, una siembra completa enterraría su propia salida bajo una línea por
+sembrador. El registro de `tracing` que emite cada sembrador no cambia y
+sigue siendo el canal para máquinas.
+
+Un nombre desconocido falla rápido:
 
 ```bash
 cargo run --bin console -- db:seed --class=NotARealSeeder
@@ -559,6 +574,13 @@ Seeder`, lo que es más torpe que el registro de punteros a función que ya exis
 La convención del sembrador compuesto recupera la misma ergonomía - `BaseSeeder`
 juega el papel que `DatabaseSeeder` juega en Laravel - sin necesidad de que el
 framework consagre un nombre como especial.
+
+Las líneas de progreso del sembrador son texto plano a 80 columnas fijas.
+Laravel dimensiona su línea de puntos según el terminal y colorea la palabra
+de estado; leer el ancho real del terminal implica una dependencia que el
+framework no lleva, y esta salida va a un stdout que se canaliza de forma
+rutinaria hacia un log, donde los códigos de escape son ruido. El tiempo
+transcurrido se imprime en milisegundos enteros, sin separador de millares.
 
 ## Registro en el arranque
 

@@ -36,6 +36,7 @@ dégradent - chaque driver est un pair.
 | `Storage::register_s3(name, cfg)`    | Amazon S3 ou compatible S3    | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
+| `Storage::register_read_through(name, cfg)` | Composite read-through | `filesystem` |
 
 `filesystem` est activée par défaut ; les features Azure et GCS ne le
 sont pas. Activez-en une dans votre `Cargo.toml` :
@@ -268,6 +269,310 @@ Si une étape échoue en cours de copie, l'objet de destination partiel
 est abandonné et supprimé avant que l'erreur d'origine ne se propage -
 une copie échouée n'est jamais observable comme une destination
 tronquée.
+
+## Disques read-through
+
+Un disque read-through associe un *primaire* rapide à un *repli* plus
+lent et déplace les objets du second vers le premier à mesure qu'ils
+sont lus. Pointez le primaire vers le magasin vers lequel vous migrez
+et le repli vers celui depuis lequel vous migrez : l'ensemble actif
+bascule sous trafic réel - pas de fenêtre de maintenance, pas de copie
+en masse d'objets que personne ne demande.
+
+```rust,ignore
+use suprnova::{ReadThroughConfig, S3Config, Storage};
+
+Storage::register_s3("new-store", S3Config { bucket: "assets-2".into(), ..Default::default() })?;
+Storage::register_s3("legacy-store", S3Config { bucket: "assets-1".into(), ..Default::default() })?;
+
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        ..Default::default()
+    },
+)?;
+
+let assets = Storage::disk("assets")?;
+// Lit `logo.png` depuis `legacy-store` et l'écrit sur `new-store` au
+// passage. Chaque lecture ultérieure est servie par `new-store`.
+let bytes = assets.read("logo.png").await?;
+```
+
+`Storage::disk("assets")` retourne un `Operator` ordinaire : toutes ses
+méthodes et toutes les commodités de `DiskExt` fonctionnent sans
+changement.
+
+### Quel disque répond à quelle opération
+
+| Opération | Disque |
+|---|---|
+| `read` | Le primaire s'il détient l'objet, sinon le repli - et, sauf si `copy` vaut `false`, l'objet trouvé sur le repli est promu |
+| `exists`, `size`, `last_modified`, `mime_type`, `stat` | Le primaire s'il détient l'objet, sinon le repli |
+| `write`, `make_directory` | Le primaire seulement |
+| `files`, `directories`, `list` | Le primaire seulement - les entrées du repli sont invisibles pour un listage |
+| `delete` | Les deux, le repli d'abord |
+| `copy`, `rename` / `move_to` | Le primaire s'il détient la source, sinon la source est transférée en flux depuis le repli ; un `rename` supprime en plus la source sur le repli |
+| `temporary_url` | Le primaire s'il détient l'objet, sinon le repli |
+| `temporary_upload_url` | Le primaire seulement - un upload doit atterrir là où atterrissent les écritures |
+
+Le listage ne porte que sur le primaire, par conception. Un listage unifié
+devrait réconcilier la pagination et l'ordre entre deux backends, et il
+signalerait des objets qu'un listage ultérieur ne retourne plus une
+fois qu'ils ont été promus. Utilisez directement
+`Storage::disk("legacy-store")` quand vous avez besoin d'énumérer ce
+qui reste sur le repli.
+
+La suppression retire l'objet des deux disques. Si elle ne retirait que
+la copie du primaire, la lecture suivante repromouvrait aussitôt la
+copie du repli. La conséquence est qu'un disque read-through par-dessus
+un repli en lecture seule ne peut pas supprimer : la suppression sur le
+repli échoue et l'erreur vous parvient.
+
+### Quand une promotion échoue
+
+Par défaut, un échec de promotion est journalisé en `warn` et avalé.
+Vous recevez quand même les octets que vous avez demandés ; le disque
+se dégrade simplement en lisant le repli à chaque fois, jusqu'à ce que
+le primaire redevienne inscriptible. Positionnez
+`throw_on_promotion_failure: true` quand une perte silencieuse de
+promotion masquerait une panne que vous devez voir - une migration que
+vous essayez de terminer, par exemple :
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        throw_on_promotion_failure: true,
+        ..Default::default()
+    },
+)?;
+```
+
+L'enregistrement rejette une configuration qui ne peut pas fonctionner :
+un `primary` ou un `fallback` vide, une paire qui nomme deux fois le
+même disque, un disque qui se nomme lui-même, ou un nom qui n'est pas
+enregistré. Chacun retourne une `FrameworkError` nommant le problème,
+et aucun disque n'est enregistré.
+
+### Lire sans promouvoir
+
+Positionnez `copy: false` pour servir ce qui est trouvé sur le repli
+sans l'écrire au passage :
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "cache-store".into(),
+        fallback: "origin-store".into(),
+        copy: false,
+        ..Default::default()
+    },
+)?;
+```
+
+Le disque se lit alors comme une surcouche transparente : le primaire
+répond pour ce qu'il détient, le repli répond pour tout le reste, et
+rien ne bouge entre les deux. Employez-le quand le primaire est un
+petit cache que vous ne voulez pas voir rempli par une lecture unique,
+ou quand le repli fait autorité et que le primaire ne détient jamais
+que les objets que vous y avez délibérément déposés.
+
+Le flag gouverne la promotion à la lecture et rien d'autre. Les
+écritures, les suppressions, les métadonnées, les listages et les
+destinations de `copy` et `rename` se comportent exactement comme avec
+la promotion activée - un disque en `copy: false` fait donc quand même
+atterrir sur le primaire un objet copié ou déplacé. Comme rien n'est
+réécrit, une lecture avec `copy: false` ne récupère que la plage
+demandée plutôt que l'objet entier.
+
+### Copier et déplacer à travers le repli
+
+`copy` et `rename` résolvent la source contre le primaire d'abord.
+Quand seul le repli la détient, l'objet est transféré en flux par blocs
+de 64 Kio et la destination atterrit sur le primaire :
+
+```rust,ignore
+let assets = Storage::disk("assets")?;
+
+// `logo.png` ne vit que sur `legacy-store`. La copie le transfère en
+// flux et écrit `branding/logo.png` sur `new-store` ; l'objet d'origine
+// reste en place.
+assets.copy("logo.png", "branding/logo.png").await?;
+
+// Un déplacement fait la même chose puis supprime la source d'origine.
+assets.rename("logo.png", "branding/logo.png").await?;
+```
+
+Un déplacement supprime la source du repli sur les deux chemins -
+que le primaire ait détenu la source ou non. Sans cela, la lecture
+suivante repromouvrait la copie du repli et annulerait le déplacement.
+
+Les deux chemins diffèrent par le moment où ils la suppriment, et cette
+différence est ce qu'un déplacement échoué laisse derrière lui :
+
+- Le primaire détenait la source. La copie du repli part en premier,
+  avant le `rename`. Tant que le primaire détient le chemin, la copie
+  du repli est inatteignable à travers ce disque : la retirer d'abord
+  ne change donc rien d'observable - et si la suppression échoue, rien
+  n'a encore bougé. Refaites le déplacement. Si au contraire la
+  suppression a réussi et que le `rename` a ensuite échoué, le repli ne
+  détient plus rien pour ce chemin, la destination n'est pas écrite et
+  le primaire détient toujours la source : une nouvelle tentative
+  reprend donc ce même chemin et renomme à nouveau. L'échec coûte la
+  copie froide et rien de plus.
+- Seul le repli la détenait. La suppression ne peut venir qu'après la
+  mise en place de la destination : un déplacement qui échoue sur la
+  suppression laisse donc la destination écrite et la source toujours
+  sur le repli. Refaites le déplacement ; la source est désormais sur
+  le primaire, si bien que la nouvelle tentative prend le premier
+  chemin.
+
+Dans les deux cas, un déplacement échoué peut être refait sans danger,
+et la destination que vous obtenez au bout est l'objet dont le
+déplacement est parti.
+
+Les conditions voyagent aussi avec l'opération sur le chemin en flux.
+`if_not_exists` devient une écriture conditionnelle : une copie ou un
+déplacement gardé refuse donc toujours une destination existante au
+lieu de l'écraser, et une copie qui nomme une version de la source
+obtient cette version depuis le repli. Le `if_match` d'une copie est la
+seule exception : c'est une condition que le backend applique à
+l'intérieur de sa propre copie, c'est-à-dire l'appel que ce chemin ne
+peut justement pas faire ; elle est donc refusée avec une erreur
+`Unsupported` nommant la condition, plutôt qu'ignorée en silence.
+
+Cela fait des conditions le seul endroit où le disque qui détient la
+source transparaît. Un répertoire local annonce `copy` et `rename` mais
+aucune de leurs formes conditionnelles :
+`copy_with(a, b).if_not_exists(true)` réussit donc quand seul le repli
+détient `a` (cela devient une écriture conditionnelle) et est refusé
+avec `Unsupported` quand le primaire le détient. Vérifiez la condition
+dont vous avez besoin contre le driver primaire plutôt que de supposer
+qu'elle vaut pour tous les objets du disque.
+
+Un déplacement que le primaire refuserait est refusé avant que quoi que
+ce soit ne soit supprimé. Un primaire sans `rename` du tout, un
+déplacement gardé vers un primaire sans `rename` conditionnel, et un
+déplacement gardé vers une destination qui existe déjà échouent tous
+avec la source du repli toujours en place - un déplacement qui n'a
+jamais lieu ne doit pas vous coûter la copie froide.
+
+Si le flux échoue en cours de route, le writer est avorté et une
+destination créée par le transfert est supprimée avant que l'erreur ne
+vous parvienne : un transfert échoué n'est donc pas observable sous
+forme d'objet tronqué. Une destination qui était déjà là est laissée
+intacte - une copie échouée ne doit pas être ce qui détruit un objet
+qu'elle n'a jamais écrit. Sur un primaire de type système de fichiers
+local, cette garantie est plus faible qu'il n'y paraît : le driver
+ouvre la cible lui-même et la tronque, si bien qu'une destination
+locale préexistante a déjà disparu au moment où un transfert peut
+échouer.
+
+### Lectures versionnées et conditionnelles
+
+Une lecture qui porte une version ou une condition `If-Match`,
+`If-None-Match`, `If-Modified-Since` ou `If-Unmodified-Since` est
+transmise avec cette condition intacte : la réponse veut donc dire ce
+que vous lui avez demandé de vouloir dire. Une telle lecture est servie
+mais jamais promue : écrire sur le primaire une ancienne version, ou un
+corps retenu par un validateur, la publierait comme l'objet courant, et
+toute lecture simple ultérieure l'obtiendrait.
+
+Le disque qui répond à une telle lecture est décidé de la façon
+habituelle. La première sonde est une vérification d'existence
+ordinaire : un disque read-through délègue donc une lecture versionnée
+ou conditionnelle au primaire dès lors que le primaire détient le
+chemin ; il n'atteint le repli que quand le primaire ne le détient pas.
+
+Le primaire décide aussi lesquelles de ces lectures un disque
+read-through accepte tout court, parce que le lecteur du primaire est
+ouvert en premier. Une lecture versionnée contre un disque read-through
+dont le primaire est un répertoire local est rejetée avant d'atteindre
+le repli, puisqu'un répertoire local n'a pas de versions.
+
+### Pourquoi Suprnova diverge
+
+Laravel construit un disque read-through à partir d'une entrée de
+`config/filesystems.php` dont les clés `primary` et `fallback`
+acceptent soit un nom de disque, soit une config de driver en ligne.
+Suprnova ne prend que des noms de disques, parce qu'ici les disques
+sont enregistrés par des constructeurs typés plutôt que décrits par des
+tableaux - enregistrez d'abord le disque interne, puis nommez-le.
+
+La promotion de Laravel revérifie le primaire après avoir lu le repli,
+ce qui fait gagner un writer concurrent. Suprnova garde cette
+vérification et publie la promotion de façon atomique, ce que Laravel
+ne fait pas. Sur un primaire de type système de fichiers local, les
+octets sont déposés dans un voisin temporaire puis renommés en place ;
+les écrire droit dans la cible laisserait un fichier grandissant, à
+moitié écrit, visible pendant toute la durée de l'écriture - et un
+disque read-through route les lecteurs précisément par cette
+vérification d'existence. Sur un primaire sans `rename` - en mémoire,
+S3, Azure Blob, GCS - une écriture est déjà une publication unique et
+indivisible : la promotion écrit donc directement la cible, à condition
+que l'objet n'existe pas déjà, pour que deux lecteurs concurrents ne
+promeuvent pas tous les deux.
+
+Cette condition est justement ce qu'une promotion par dépôt temporaire
+ne peut pas avoir : le chemin de dépôt est unique, une condition de
+non-écrasement sur lui serait donc vide de sens, et la cible est
+publiée par un `rename` qui écrase. Un disque read-through sur un
+primaire de type système de fichiers local y renonce donc - une
+écriture qui atterrit sur le primaire dans l'instant qui sépare la
+dernière vérification d'existence de la promotion de son `rename` est
+écrasée par la copie promue. Sur un primaire sans `rename`, la
+condition tient et une telle fenêtre n'existe pas.
+
+L'objet de dépôt est une véritable entrée du primaire tant qu'il dure :
+un listage pris en pleine promotion peut donc montrer un voisin
+`.suprnova-promote-<id>.tmp`. Une lecture qui se termine, échoue ou
+abandonne essaie de retirer son propre voisin, et journalise un
+avertissement si cette suppression échoue plutôt que de faire échouer
+la lecture. Rien ne balaie un voisin laissé par une suppression
+échouée, par un processus qui a crashé ou par une future de lecture
+annulée en pleine promotion : ceux-là doivent être retirés à la main.
+
+Une lecture qui se résout depuis le repli garde l'objet en mémoire
+jusqu'à ce que l'écriture de promotion se termine, parce que la
+promotion a besoin de l'objet entier. Cela convient au cas du stockage
+hiérarchisé auquel un disque read-through est destiné. Pour des objets
+froids très volumineux, lisez directement le disque de repli ou
+utilisez plutôt
+[`copy_between_disks`](#copie-en-streaming-entre-disques).
+
+Laravel rend le flux du repli lui-même quand `copy` vaut `false` et
+tamponne via `php://temp` quand il vaut `true`. Suprnova, à la place,
+restreint la récupération sur le repli à la plage demandée quand `copy`
+vaut `false`, et ne tamponne que sur le chemin de promotion, où l'objet
+entier est de toute façon nécessaire.
+
+Les `copy` et `move` de Laravel à travers le repli tamponnent eux aussi
+la source via `php://temp`. Suprnova la transfère en flux par blocs de
+64 Kio à la place, parce que c'est sur le repli que vivent les objets
+volumineux et rarement touchés, et supprime une destination à moitié
+écrite avant de retourner l'erreur. Deux autres différences découlent
+d'OpenDAL. Supprimer un chemin qui n'est pas là compte comme un succès :
+un déplacement efface donc la source sur le repli sans vérifier d'abord
+qu'elle existe. Et OpenDAL porte sur `copy` et `rename` des conditions
+pour lesquelles Flysystem n'a pas d'équivalent : Suprnova doit donc
+décider de ce que chacune signifie quand la source n'est que sur le
+repli - `if_not_exists` et la version de source d'une copie sont
+honorées, et le `if_match` d'une copie est refusé plutôt qu'abandonné.
+
+Laravel supprime la source du repli après le déplacement sur les deux
+chemins. Suprnova la supprime en premier quand le primaire détient la
+source, parce que les deux ordres diffèrent lors d'une nouvelle
+tentative : la source est inatteignable à travers le disque dans les
+deux cas, mais supprimer en dernier veut dire qu'un déplacement qui a
+perdu sa suppression sur une panne transitoire revient comme un
+déplacement dont la source n'est plus que sur le repli, et déverse la
+copie périmée du repli sur la destination que la première tentative
+avait déjà écrite correctement.
 
 ## Hygiène du registre
 

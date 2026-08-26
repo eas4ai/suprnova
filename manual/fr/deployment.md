@@ -415,14 +415,19 @@ avec le message fourni, sauf pour les chemins listés dans `--except`
 et pour toute requête qui inclut le secret. `up` retire le marqueur.
 
 Le secret est un identifiant au porteur : quiconque visite `/<secret>`
-reçoit un cookie de contournement valable 12 heures. La correspondance
-d'URL comme celle du cookie sont des comparaisons en temps constant,
-si bien que le temps de réponse n'indique pas à celui qui sonde la
-longueur du préfixe qu'il a deviné correctement. Préférez
-`--with-secret`, qui en génère un pour vous (16 octets aléatoires, 32
-caractères hexadécimaux) et affiche l'URL de contournement, plutôt que
-de choisir une chaîne mémorisable pour `--secret` - et traitez-le
-comme n'importe quel autre identifiant dans vos notes d'incident.
+reçoit un cookie de contournement valable 12 heures. L'échéance est
+scellée dans le cookie chiffré et revérifiée à chaque requête, si bien
+qu'un cookie capturé cesse de fonctionner à l'heure dite même si le
+navigateur ignore son `max-age`. Un cookie dont l'échéance va au-delà
+d'un TTL est refusé, avec une petite tolérance pour les écarts
+d'horloge entre machines. La correspondance d'URL comme la comparaison
+du secret du cookie s'exécutent en temps constant, si bien que le temps
+de réponse n'indique pas à celui qui sonde la longueur du préfixe qu'il
+a deviné correctement. Préférez `--with-secret`, qui en génère un pour
+vous (16 octets aléatoires, 32 caractères hexadécimaux) et affiche
+l'URL de contournement, plutôt que de choisir une chaîne mémorisable
+pour `--secret` - et traitez-le comme n'importe quel autre identifiant
+dans vos notes d'incident.
 
 ## Mise à l'échelle
 

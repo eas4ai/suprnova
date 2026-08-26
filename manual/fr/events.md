@@ -239,6 +239,36 @@ Le `QueuedListener` a seulement besoin que l'événement soit un
 événement synchrone ordinaire - la durabilité vit dans la file
 d'attente, pas dans le dispatcher.
 
+### Appliquer un debounce à un écouteur en file d'attente
+
+Un `QueuedListener` passe par `Queue::push` : un écouteur est donc
+debouncé dès l'instant où son **job** déclare `Job::debounce_for` -
+rien de plus à câbler, et `Job::debounce_id` vous donne une fenêtre par
+entité.
+
+Quand la fenêtre appartient à l'enregistrement plutôt qu'au job,
+utilisez `DebouncedListener` et dérivez la clé depuis l'événement :
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+Quatre événements `OrderUpdated` pour la commande 55 mettent quatre
+jobs en file d'attente et en exécutent un seul. Voir
+[File d'attente](queues.md) pour le contrat complet.
+
 ## Vidage à l'arrêt
 
 Les écouteurs in-process en file d'attente spawnent dans un `JoinSet`

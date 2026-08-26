@@ -165,6 +165,29 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 
 `QueuedListener` は、イベントが通常の同期的なイベントであることだけを必要とします - 永続性は、ディスパッチャーではなく、キューの中に存在します。
 
+### キューに入れられたリスナーをデバウンスする
+
+`QueuedListener` は `Queue::push` を通って流れるため、リスナーは、その**ジョブ**が `Job::debounce_for` を宣言した瞬間にデバウンスされます - ほかに配線するものはなく、`Job::debounce_id` がエンティティごとのウィンドウを与えてくれます。
+
+ウィンドウがジョブではなく登録の側に属するときは、`DebouncedListener` を使い、キーをイベントから導出してください:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+注文55に対する4つの `OrderUpdated` イベントは、4つのジョブをenqueueし、1つだけを実行します。完全な契約については[キュー](queues.md)を参照してください。
 ## シャットダウン時のドレイン
 
 キューに入れられたプロセス内のリスナーは、ディスパッチャーが追跡する `JoinSet` へspawnされます。サーバーのグレースフルシャットダウンのシーケンスは、それらを待つために `EventFacade::drain_queued(timeout)` を呼び出します:

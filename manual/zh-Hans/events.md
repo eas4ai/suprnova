@@ -162,12 +162,9 @@ let ((), flush_err) = EventFacade::defer::<_, ()>(None, async {
 | 监听器应该脱离当前任务运行；崩溃时丢失也没关系 | 在这个事件 trait 上设置 `Event::queued() = true` |
 | 监听器的工作必须在一次崩溃 + 重启中存活下来 | `QueuedListener<E, J>`（把事件桥接到一个持久化的作业） |
 
-`Event::queued() = true` 会让分发器把每一个监听器都 spawn 成它自己的
-Tokio 任务，受一个进程信号量约束，带着有界的重试（3 次尝试，带抖动的退避）。这个工作运行在这个进程上；一次崩溃会丢掉飞行中的监听器。
-[优雅关闭的排空](#关闭时排空)会等待飞行中的任务，直到一个截止时间。
+`Event::queued() = true` 会让分发器把每一个监听器都 spawn 成它自己的 Tokio 任务，受一个进程信号量约束，带着有界的重试（3 次尝试，带抖动的退避）。这个工作运行在这个进程上；一次崩溃会丢掉飞行中的监听器。[优雅关闭的排空](#关闭时排空)会等待飞行中的任务，直到一个截止时间。
 
-`QueuedListener<E, J>` 是一个内置的监听器，它会从每一个事件构建一个
-[`Job`](queues.md)，并把它推送到持久化的队列上。这个事件仍然同步地触发；这个监听器只是入队 - 这很快 - 所以请求延迟保持很低。这个作业本身会在崩溃中存活下来，因为这个队列是持久化的。
+`QueuedListener<E, J>` 是一个内置的监听器，它会从每一个事件构建一个 [`Job`](queues.md)，并把它推送到持久化的队列上。这个事件仍然同步地触发；这个监听器只是入队 - 这很快 - 所以请求延迟保持很低。这个作业本身会在崩溃中存活下来，因为这个队列是持久化的。
 
 ```rust
 use suprnova::{EventFacade, QueuedListener};
@@ -183,6 +180,29 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 
 `QueuedListener` 只需要这个事件是一个常规的同步事件 - 持久性活在队列里，不活在分发器里。
 
+### 给一个已入队的监听器做防抖
+
+一个 `QueuedListener` 会汇入 `Queue::push`，所以只要它的**作业**声明了 `Job::debounce_for`，这个监听器立刻就被防抖了 - 不需要额外接线，而 `Job::debounce_id` 会给您一个逐实体的窗口。
+
+当这个窗口属于这次注册、而不属于这个作业时，请用 `DebouncedListener`，并从事件派生出那个键：
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+订单 55 的四个 `OrderUpdated` 事件会入队四个作业，然后只跑一个。完整的契约请参见[队列](queues.md)。
 ## 关闭时排空
 
 已入队的进程内监听器，会 spawn 进一个由分发器跟踪的 `JoinSet`。服务器的优雅关闭流程，会调用 `EventFacade::drain_queued(timeout)` 来等待它们：

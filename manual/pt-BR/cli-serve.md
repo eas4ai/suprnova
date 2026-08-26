@@ -91,6 +91,21 @@ Bom para trabalhar na UI sem pagar o custo de uma recompilação Rust a
 cada salvamento, ou quando o backend está em execução em outro shell
 (ou no Docker).
 
+### Projeto somente API
+
+Um projeto com scaffold feito por `suprnova new --api` não tem
+diretório `frontend/`. Execute `serve` exatamente como você faria em
+qualquer outro lugar:
+
+```bash
+suprnova serve
+```
+
+O `serve` não vê nenhum `frontend/package.json`, pula o painel do Vite
+e a geração de TypeScript que o alimenta, e executa o backend.
+`--frontend-only` continua sendo um erro num projeto desses: ele pede
+justamente o painel que não existe.
+
 ### Pular a geração de tipos
 
 ```bash
@@ -110,11 +125,13 @@ Quando você executa `suprnova serve`, a CLI:
 2. Resolve as portas de backend e frontend (flag da CLI → variável de
    ambiente → padrão).
 3. Verifica se você está em um projeto Suprnova - `Cargo.toml` deve
-   existir (a menos que `--frontend-only`) e um diretório `frontend/`
-   deve existir (a menos que `--backend-only`).
+   existir (a menos que `--frontend-only`), e `--frontend-only` precisa
+   de um diretório `frontend/` com um `package.json`. Um projeto que não
+   tem isso é servido em modo somente backend, em vez de ser rejeitado.
 4. Regenera os tipos TypeScript a partir de qualquer struct
    `#[derive(InertiaProps)]` que encontrar em `src/`, escrevendo-os em
    `frontend/src/types/inertia-props.ts`.
+   Pulado quando o projeto não tem frontend.
 5. Instala `cargo-watch` via `cargo install --locked --version "^8.5"
    cargo-watch` se ainda não estiver no PATH (uma única vez, com um
    aviso "Installing..."). Pulado sob `--frontend-only`.
@@ -125,23 +142,27 @@ Quando você executa `suprnova serve`, a CLI:
    instala software como efeito colateral de iniciar um servidor de
    dev não deveria também estar escolhendo versões por você.
 6. Executa `npm install` em `frontend/` se `node_modules` ainda não
-   existir. Pulado sob `--backend-only`.
+   existir. Pulado sob `--backend-only` e quando o projeto não tem
+   frontend.
 7. Spawna `cargo watch -x 'run --bin <package-name>'` para o backend.
    O `cargo-watch` executa o binário de novo sempre que um arquivo
    `.rs` muda.
 8. Spawna `npm run dev` em `frontend/` para o Vite, o que oferece HMR
-   para componentes Svelte/React/Vue e classes Tailwind.
+   para componentes Svelte/React/Vue e classes Tailwind. Pulado sob
+   `--backend-only` e quando o projeto não tem frontend.
 9. Inicia cada processo extra declarado no `Suprnova.toml` do projeto
    (veja [Processos de dev extras](#processos-de-dev-extras) abaixo), cada
    um com seu próprio prefixo `[name]` - workers de fila, tailers de logs,
    qualquer coisa que você teria de manter em outro terminal.
 10. Inicia um monitor de arquivos em `src/` que executa o gerador de
     tipos de novo sempre que um arquivo `.rs` muda, uma vez que a
-    sequência de salvamentos ficou quieta por 500 ms. O debounce é
-    trailing-edge, então uma sequência - `cargo fmt`, format-on-save em
-    vários arquivos, uma troca de branch - se funde em exatamente uma
-    regeneração que executa *depois* da última escrita, em vez de uma
-    que dispara no primeiro arquivo e perde o resto.
+    sequência de salvamentos ficou quieta por 500 ms. Pulado quando o
+    projeto não tem frontend, igual à geração de tipos da inicialização
+    no passo 4. O debounce é trailing-edge, então uma sequência -
+    `cargo fmt`, format-on-save em vários arquivos, uma troca de branch -
+    se funde em exatamente uma regeneração que executa *depois* da
+    última escrita, em vez de uma que dispara no primeiro arquivo e
+    perde o resto.
 11. Encaminha stdout/stderr de cada filho para seu terminal com um prefixo
     `[name]` (`[backend]`, `[frontend]` ou o nome configurado do processo),
     opcionalmente com timestamp via `--timestamps` - ou, com `--json`, como
@@ -287,7 +308,6 @@ nomes de campos e valores de `type` não serão renomeados nem removidos sem
 uma nota no changelog. Trate um `type` não reconhecido ou um campo extra
 inesperado como algo a ignorar, não como erro, para que uma versão futura
 possa estender o schema sem quebrar seu consumidor.
-
 
 ## Solução de problemas
 

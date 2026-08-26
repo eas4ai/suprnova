@@ -122,6 +122,6 @@
     - [環境変数](env-vars.md)
     - [用語集](glossary.md)
 
----
 *[API ドキュメンテーション (rustdoc)](https://docs.rs/suprnova) - 公開後に利用可能。*
+---
 

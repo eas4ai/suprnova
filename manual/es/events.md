@@ -233,6 +233,35 @@ El `QueuedListener` solo necesita que el evento sea un evento
 síncrono normal - la durabilidad vive en la cola, no en el
 despachador.
 
+### Antirrebote de un oyente encolado
+
+Un `QueuedListener` canaliza todo a través de `Queue::push`, así que un
+oyente queda con antirrebote en cuanto su **job** declara
+`Job::debounce_for` - no hay nada más que conectar, y `Job::debounce_id`
+da una ventana por entidad.
+
+Cuando la ventana pertenece al registro y no al job, usa
+`DebouncedListener` y deriva la clave a partir del evento:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+Cuatro eventos `OrderUpdated` para el pedido 55 encolan cuatro jobs y
+ejecutan uno. Consulta [Cola](queues.md) para el contrato completo.
+
 ## Drenaje al apagar
 
 Los oyentes encolados en proceso se generan dentro de un `JoinSet`

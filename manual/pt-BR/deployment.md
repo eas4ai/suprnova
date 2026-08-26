@@ -395,12 +395,17 @@ solicitação. Solicitações recebem um 503 (configurável via
 marcador.
 
 O segredo é uma credencial bearer: qualquer um que visite `/<secret>`
-recebe um cookie de bypass de 12 horas. Tanto a correspondência da URL
-quanto a do cookie são comparações em tempo constante, então o tempo
-de resposta não revela a quem sonda o tamanho do prefixo que ele
-acertou. Prefira `--with-secret`, que cunha um para você (16 bytes
-aleatórios, 32 caracteres hex) e imprime a URL de bypass, em vez de
-escolher uma string memorável para `--secret` - e trate-o como
+recebe um cookie de bypass válido por 12 horas. O prazo fica selado
+dentro do cookie criptografado e é reconferido em toda solicitação,
+então um cookie capturado para de funcionar na hora certa mesmo que o
+navegador ignore o `max-age` dele. Um cookie cujo prazo esteja mais
+distante do que um TTL é recusado, com uma pequena margem para
+diferenças de relógio entre hosts. Tanto a correspondência da URL
+quanto a comparação do segredo do cookie rodam em tempo constante,
+então o tempo de resposta não revela a quem sonda o tamanho do prefixo
+que ele acertou. Prefira `--with-secret`, que cunha um para você (16
+bytes aleatórios, 32 caracteres hex) e imprime a URL de bypass, em vez
+de escolher uma string memorável para `--secret` - e trate-o como
 qualquer outra credencial nas suas notas de incidente.
 
 ## Escalando

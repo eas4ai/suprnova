@@ -122,6 +122,6 @@
     - [环境变量](env-vars.md)
     - [词汇表](glossary.md)
 
----
 *[API 文档（rustdoc）](https://docs.rs/suprnova) - 即将发布。*
+---
 

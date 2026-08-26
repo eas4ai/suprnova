@@ -340,6 +340,7 @@ User::filter("plan", "free").increment("quota_reset_count", 1).await?;
 ```php
 // Laravel
 $user->refresh();                          // DBから再読み込みする
+$user->refreshForUpdate();                 // 行ロックの下で再読み込みする
 $copy = $user->fresh();                    // 取得してコピーを返す
 $replica = $user->replicate();             // 新しいPKを持つ未保存のクローン
 $replica = $user->replicate(['email']);    // 1つのフィールドを省く
@@ -348,12 +349,15 @@ $replica = $user->replicate(['email']);    // 1つのフィールドを省く
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
-`refresh` はその場で変更します。`fresh` は、別途取得したコピーを返します。`replicate` は、PKがリセットされた（キーの型の `Default::default()`）メモリ上のクローンを構築します。呼び出し側が明示的に保存します。
+`refresh` はその場で変更します。`fresh` は、別途取得したコピーを返します。`refresh_for_update` は、`SELECT ... FOR UPDATE` の行ロックの下での `refresh` です - 行の現在の値と排他ロックを1つの文で必要とするときに、トランザクションの内側で使ってください。`refresh` とは異なり、`refresh_for_update` は、登録済みのあらゆるグローバルスコープと、`#[model(soft_deletes)]` のフィルタの両方をすり抜けます: ゴミ箱に入った行も再読み込みし、`deleted_at` は設定されたまま返ってきます。この再読み込みは、ロックの下での主キーによる引き当てです - これを通常の読み取りと同じようにスコープしてしまえば、管理ツールやテナントをまたぐ呼び出し元に対して、すでに参照を握っている行について偽の「見つかりません」を手渡すことになります。`replicate` は、PKがリセットされた（キーの型の `Default::default()`）メモリ上のクローンを構築します。呼び出し側が明示的に保存します。
+
+`refresh` と `refresh_for_update` はどちらも、行がもはや存在しないとき、モデルに陳腐化した値を握らせたままにするのではなく、エラーを返します。SQLiteには行レベルのロックがないため、そこでは `refresh_for_update` はロックなしで再読み込みします - [行ロック](#行ロック)を参照してください。
 
 ### Replicating イベント
 
@@ -476,6 +480,8 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | 等価性 |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | 任意の演算子 |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | 論理和の項としての主キーのフィルタ |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | 論理和の項としての、否定された主キーのフィルタ |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -490,6 +496,10 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->whereTime(col, '12:30')` | `.filter_time(col, NaiveTime)` | `.where_time(col, NaiveTime)` | |
 | `->whereLike(col, pattern)` | `.filter_like(col, pattern)` | `.where_like(col, pattern)` | |
 | `->whereNotLike(col, pattern)` | `.filter_not_like(col, pattern)` | `.where_not_like(col, pattern)` | |
+| `->whereBinary(col, val)` | `.filter_binary(col, val)` | `.where_binary(col, val)` | バイト単位で厳密。MySQLとMariaDBのみ |
+| `->orWhereBinary(col, val)` | `.or_filter_binary(col, val)` | `.or_where_binary(col, val)` | |
+| `->whereNotBinary(col, val)` | `.filter_not_binary(col, val)` | `.where_not_binary(col, val)` | |
+| `->orWhereNotBinary(col, val)` | `.or_filter_not_binary(col, val)` | `.or_where_not_binary(col, val)` | |
 | `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | バックエンドにディスパッチされる |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
 | `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | カラム対カラムの比較 |
@@ -498,6 +508,8 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | (10B) |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
+
+`binary` の一族は、カラムの照合順序のもとでマッチさせるのではなく、生のバイトを比較します。MySQLとMariaDBは `col = binary ?` を発します。PostgresとSQLiteには等価な演算子がないため、これらのバックエンドの上では、終端メソッドは、照合順序に依存する `=` へフォールバックするのではなく、文がレンダリングされる時点でエラーを返します。[バイト単位で厳密な比較](queries.md#byte-exact-comparison)を参照してください。
 
 バインドされた生の述語は、SQLite、MySQL、そしてPostgreSQLの間で移植可能な `?` マーカーを使います:
 
@@ -533,6 +545,40 @@ let users = User::query().in_random_order().get().await?;
 ```
 
 `Direction::Asc` / `Direction::Desc` は、SeaORMから再エクスポートされたSuprnovaのenumです。
+
+#### 明示的な順序で並べる
+
+`in_order_of` は、あなたが列挙したとおりの順序に行を並べ替えます。値がそのリストに入っていないものは、入っているものすべての後ろに並びます。
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnovaはこれを、バインドされた `CASE` 式としてレンダリングします。そのため、値はパラメータであり、リクエストのデータから取っても安全です:
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+カラム名はSQLの識別子であって、パラメータではありません。他のあらゆるカラムの引数と同じく、ハードコードするか、許可リストから選んでください。値のリストが空であれば並び順はまったく追加されないため、空のケースを特別扱いすることなく、順序を条件付きで組み立てられます。
+
+`AsEnum<E>` のキャストを使うカラムでは、各バリアントを `as_ref()` に通して渡してください。それが、そのキャストが保存する、まさにその文字列です:
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` は、型付きの `Builder<M>` の表面に出荷されています。モデルを持たない `DB::table(...)` のビルダーは、カラムと方向によってのみ並べます。
 
 ### グループ化 + having
 
@@ -650,6 +696,18 @@ let inventory = Inventory::query()
 | SQLite   | （SQLなし、下記を参照） | （SQLなし、下記を参照） |
 
 ロック句は、複合文のまさに末尾に - すべての `UNION` の枝、すべての `ORDER BY`、すべての `LIMIT` / `OFFSET` の後に - 追加されます。2つのビルダーの `union(...)` の後に続く `.lock_for_update()` は、外側のスコープに、枝ごとに1つではなく、正確に**1つ**の `FOR UPDATE` を発します。
+
+すでに手元にあるモデルを再読み込みし、同じ文の中でロックも取るには、`refresh_for_update` を使ってください:
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### トランザクションの内側で使う
 
@@ -2907,7 +2965,10 @@ Comment::query()
 // 主キーのフィルタ。
 User::query().where_key(7).first().await?;        // filter("id", 7) のシュガー
 User::query().where_key_not(7).get().await?;      // filter_op("id", "!=", 7) のシュガー
-// Rustらしいエイリアス: filter_key / filter_key_not。
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// Rustらしいエイリアス: filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not。
 
 // created_at で並べ替える。
 Post::query().latest().get().await?;              // ORDER BY created_at DESC

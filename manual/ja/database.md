@@ -26,6 +26,44 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
+### プールの生存性
+
+NATゲートウェイ、ロードバランサー、あるいはファイアウォールは、長くアイドルだったTCP接続を黙って落とします。プールはそれに気づきません。その接続に対する次のクエリは失敗し、しかも、その障害とはまったく関係のなかったリクエストの上で失敗します。
+
+Laravelはこれに、libpqの `keepalives`、`keepalives_idle`、`keepalives_interval`、`keepalives_count` というDSNのオプションで答えており、これらはソケットを生かし続けます。**これらはSuprnovaからは到達できません。** sqlx 0.9は、PostgresのURLから `sslmode`、`application_name`、`options`、そしてステートメントキャッシュのサイズしかパースせず、どの層にもTCPのキープアライブのセッターを持たないため、それらを転送する先がありません。
+
+Suprnovaが代わりに与えるのは、プールの側からの答えです - 古い接続を信用するのをやめること。
+
+```bash
+# 2分間アイドルだった接続を閉じる。
+DB_IDLE_TIMEOUT=120
+# それとは無関係に、15分が過ぎた接続はすべて作り直す。
+DB_MAX_LIFETIME=900
+# 接続を渡す前にpingを打つ。ただし30秒アイドルだった場合に限る。
+# 直前まで使われていた接続は、この往復を省く。
+DB_PING_AFTER_IDLE=30
+```
+
+あるいはプログラムから:
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+どのノブもデフォルトでは未設定であり、これはプールがsqlx自身のデフォルトを保つということです: 接続はアイドル600秒の後に閉じられ、1800秒の後に作り直され、チェックアウトのたびにpingが打たれます。この形の刈り取りを完全に止めるには、`DB_IDLE_TIMEOUT=0` または `DB_MAX_LIFETIME=0` を設定してください。
+
+`DB_PING_AFTER_IDLE` と `DB_TEST_BEFORE_ACQUIRE` は、対ではなく択一です: 閾値を設定すると、チェックアウトごとのpingは切れます。両方を走らせれば取得のたびにpingを打つことになり、閾値が無意味になるからです。
+
+### Suprnovaが異なる設計を選んだ理由
+
+キープアライブとプールの作り直しは、同じ失敗に反対の端から取り組みます。キープアライブは、中間装置が接続を期限切れにするのを防ぎます。作り直しは、いずれそうなることを受け入れたうえで、期限切れにされているほど古い接続をプールが決して手渡さないようにします。ドライバーのスタックが公開しているのは後者であり、しかも後者は、キープアライブでは覆えない失敗 - フェイルオーバーしたレプリカ、ローテーションされた認証情報、サーバー側のアイドル切断 - もカバーします。libpqのオプションそのものが必要なのであれば、それはSuprnovaではなくsqlxへの変更です。
 ## 生のクエリ
 
 `DB` ファサードは、Laravel 13の生のエスケープ表面全体を出荷します。すべてのヘルパーは、同じ計測済みのエグゼキューターを通ります - すべての呼び出しが `QueryExecuted` を発火します（[可観測性](#可観測性)を参照）。
@@ -496,5 +534,5 @@ db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").awai
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | マルチ接続の `DB::connection($name)` |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
 | `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` テストトレイト |

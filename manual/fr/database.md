@@ -43,6 +43,73 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
+### Vivacité du pool
+
+Une passerelle NAT, un répartiteur de charge ou un pare-feu coupera
+silencieusement une connexion TCP restée inactive trop longtemps. Le
+pool ne l'apprend pas. La requête suivante sur cette connexion échoue,
+et elle échoue sur une requête qui n'avait rien à voir avec la panne.
+
+Laravel répond à cela avec les options DSN `keepalives`,
+`keepalives_idle`, `keepalives_interval` et `keepalives_count` de
+libpq, qui gardent la socket au chaud. **Elles ne sont pas
+atteignables depuis Suprnova.** sqlx 0.9 n'analyse dans une URL
+Postgres que `sslmode`, `application_name`, `options` et la taille du
+cache d'instructions, et n'expose de setter de keepalive TCP à aucune
+couche : il n'y a donc nulle part où les transmettre.
+
+Ce que Suprnova vous donne à la place, c'est la réponse côté pool :
+cessez de faire confiance aux vieilles connexions.
+
+```bash
+# Fermer une connexion restée inactive pendant deux minutes.
+DB_IDLE_TIMEOUT=120
+# Recycler toutes les connexions au bout de quinze minutes, quoi qu'il arrive.
+DB_MAX_LIFETIME=900
+# Envoyer un ping sur une connexion avant de la distribuer, mais
+# seulement une fois qu'elle est restée inactive trente secondes. Les
+# connexions chaudes évitent l'aller-retour.
+DB_PING_AFTER_IDLE=30
+```
+
+Ou par programme :
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+Chaque réglage est non défini par défaut, ce qui veut dire que le pool
+garde les valeurs par défaut de sqlx : les connexions se ferment après
+600 secondes d'inactivité, se recyclent après 1800 secondes, et
+reçoivent un ping avant chaque acquisition. Mettez `DB_IDLE_TIMEOUT=0`
+ou `DB_MAX_LIFETIME=0` pour désactiver entièrement cette forme de
+purge.
+
+`DB_PING_AFTER_IDLE` et `DB_TEST_BEFORE_ACQUIRE` sont des
+alternatives, pas une paire : définir un seuil désactive le ping
+systématique à l'acquisition, parce qu'activer les deux enverrait un
+ping à chaque acquisition et rendrait le seuil sans objet.
+
+### Pourquoi Suprnova diverge
+
+Les keepalives et le recyclage du pool résolvent la même panne par les
+deux bouts opposés. Les keepalives empêchent un boîtier intermédiaire
+de faire expirer la connexion ; le recyclage accepte qu'il le fera et
+veille à ce que le pool ne distribue jamais une connexion assez vieille
+pour avoir expiré. Le second est ce que la pile de drivers expose, et
+il couvre aussi des pannes que les keepalives ne couvrent pas - une
+réplique après bascule, un identifiant renouvelé par rotation, une
+déconnexion pour inactivité côté serveur. S'il vous faut
+spécifiquement les options libpq, c'est un changement dans sqlx, pas
+dans Suprnova.
+
 ## Requêtes brutes
 
 La façade `DB` livre la surface complète des escapes bruts de
@@ -663,5 +730,5 @@ collision.
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | `DB::connection($name)` multi-connexion |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
 | `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | trait de test `RefreshDatabase` |
