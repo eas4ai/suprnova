@@ -178,6 +178,29 @@ describe("reviewed reconnect authority", () => {
     expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).not.toContain(50);
   });
 
+  it("accepts the current exact-membership reauthorization after a presentation failure", async () => {
+    const { pool, sources } = harness();
+    const successor = authorization(1, { descriptorBinding: "binding-1-successor" });
+    const first = sink(() => Promise.resolve(successor));
+    const second = sink();
+    const firstHandle = pool.subscribe(authorization(1), first);
+    const secondHandle = pool.subscribe(authorization(2), second);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+    secondHandle.continuityProved();
+
+    firstHandle.presentationFailed();
+    await settle();
+
+    expect(first.reauthorize).toHaveBeenCalledOnce();
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.unsubscribe).toHaveBeenCalledExactlyOnceWith("subscription-001");
+    expect(sources[0]?.subscribe).toHaveBeenCalledWith(successor);
+    expect(first.state).toHaveBeenLastCalledWith("current");
+    expect(second.state).toHaveBeenLastCalledWith("current");
+    expect(sources[0]?.close).not.toHaveBeenCalled();
+  });
+
   it("reauthorizes every ordinary reconnect before opening a replacement transport", async () => {
     const { pool, sources, timers } = harness();
     const rotated = authorization(1, { descriptorBinding: "rotated-binding" });

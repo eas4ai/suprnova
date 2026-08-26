@@ -189,8 +189,10 @@ Acceptance criteria:
   one exhaustive presentation dispatcher over a slot-specific core-owned async
   island port. That runtime object omits upload, model, component-state, generic
   registration, action, effect, call, HTML, snapshot, revision, and generic-write
-  authority. Core snapshots one bounded current descriptor registration from own
-  data properties before validation, mints the opaque capability, and rechecks the
+  authority. Core snapshots one bounded current descriptor registration and each
+  complete dispatch candidate/nested payload from own data properties before
+  validation, rejecting accessors, inherited or symbol fields, sparse or excess
+  structures, and trap inconsistency. It mints the opaque capability and rechecks the
   exact island owner, current capability, and each guarded target's connected
   current owner/scope after event construction and immediately before every
   bounded DOM dispatch. Presentation-signal authority binds the signed stable
@@ -279,6 +281,10 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Required one bounded immutable own-data snapshot of each complete
+  browser-event dispatch candidate before any validation or side effect. No
+  accessor, inherited/symbol/extra field, sparse payload, mutable reread, or
+  post-construction detached source/target may influence registered delivery.
 - 2026-08-26 -- Closed browser push dispatch to one exhaustive validated-envelope
   router with exactly refresh, registered browser-event, and declared local-signal
   presentation effects. Bound each core-minted event capability to its exact

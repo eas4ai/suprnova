@@ -12,7 +12,7 @@ use crate::canonical::{
     CanonicalErrorKind, CanonicalValue, MAX_SAFE_INTEGER, parse_canonical_value, to_canonical_bytes,
 };
 use crate::identity::{
-    BrowserOperationName, ContentDigest, IslandSlot, SignalScopeIdentity, UnixMillis,
+    BrowserOperationName, ContentDigest, IslandSlot, SignalName, SignalScopeIdentity, UnixMillis,
 };
 use crate::limits::{InputLimits, LimitConfigurationError};
 
@@ -250,7 +250,7 @@ pub enum PresentationSignalSchema {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentationSignalContract {
     scope: SignalScopeIdentity,
-    name: BrowserOperationName,
+    name: SignalName,
     schema: PresentationSignalSchema,
 }
 
@@ -259,7 +259,7 @@ impl PresentationSignalContract {
     #[must_use]
     pub const fn new(
         scope: SignalScopeIdentity,
-        name: BrowserOperationName,
+        name: SignalName,
         schema: PresentationSignalSchema,
     ) -> Self {
         Self {
@@ -277,7 +277,7 @@ impl PresentationSignalContract {
 
     /// Returns the registered signal identity.
     #[must_use]
-    pub const fn name(&self) -> &BrowserOperationName {
+    pub const fn name(&self) -> &SignalName {
         &self.name
     }
 
@@ -319,7 +319,7 @@ impl BoundedPresentationSignalContracts {
     fn find(
         &self,
         scope: &SignalScopeIdentity,
-        name: &BrowserOperationName,
+        name: &SignalName,
     ) -> Option<&PresentationSignalContract> {
         self.0
             .binary_search_by(|candidate| {
@@ -1225,7 +1225,7 @@ impl RegisteredBrowserEvent {
 #[derive(Clone, PartialEq)]
 pub struct RegisteredPresentationSignal {
     scope: SignalScopeIdentity,
-    name: BrowserOperationName,
+    name: SignalName,
     value: CanonicalValue,
     schema: PresentationSignalSchema,
 }
@@ -1246,7 +1246,7 @@ impl RegisteredPresentationSignal {
     pub fn new(
         context: &AsyncEnvelopeContext,
         scope: SignalScopeIdentity,
-        name: BrowserOperationName,
+        name: SignalName,
         value: CanonicalValue,
     ) -> Result<Self, AsyncEnvelopeError> {
         let schema = registered_presentation_signal_contract(context, &scope, &name)?.schema();
@@ -1264,7 +1264,7 @@ impl RegisteredPresentationSignal {
 
     /// Returns the declared local signal identity.
     #[must_use]
-    pub const fn name(&self) -> &BrowserOperationName {
+    pub const fn name(&self) -> &SignalName {
         &self.name
     }
 
@@ -1891,7 +1891,7 @@ fn validate_registered_signal(
 fn registered_presentation_signal_contract<'a>(
     context: &'a AsyncEnvelopeContext,
     scope: &SignalScopeIdentity,
-    name: &BrowserOperationName,
+    name: &SignalName,
 ) -> Result<&'a PresentationSignalContract, AsyncEnvelopeError> {
     context
         .presentation_signals
@@ -1945,7 +1945,7 @@ fn parse_presentation_signal(
         &["kind", "name", "scope", "value"],
         AsyncEnvelopeErrorKind::InvalidPayload,
     )?;
-    let name = BrowserOperationName::parse(&string(take(&mut fields, "name")?)?)
+    let name = SignalName::parse(&string(take(&mut fields, "name")?)?)
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;
     let scope = SignalScopeIdentity::parse(&string(take(&mut fields, "scope")?)?)
         .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::UnregisteredPayload))?;

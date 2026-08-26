@@ -29,6 +29,7 @@ type ReplayDisposition = ReplayOutcome | "pending";
 interface RefreshSegment {
   count: number;
   readonly first: StreamPosition;
+  readonly generation: number;
   readonly kind: "refresh";
   last: StreamPosition;
   envelope: ValidatedAsyncEnvelope;
@@ -75,6 +76,7 @@ export class AsyncSubscription {
   #observedPosition: StreamPosition;
   #pendingAdmissions = 0;
   #replayActive = false;
+  #lifecycleGeneration = 0;
 
   constructor(
     authorization: AuthorizedLogicalSubscription,
@@ -108,18 +110,22 @@ export class AsyncSubscription {
   }
 
   transportLost(): void {
+    this.#lifecycleGeneration += 1;
     this.#continuity.transportLost();
   }
 
   heartbeatLost(): void {
+    this.#lifecycleGeneration += 1;
     this.#continuity.degrade();
   }
 
   authorizationUncertain(): void {
+    this.#lifecycleGeneration += 1;
     this.#continuity.degrade();
   }
 
   close(): void {
+    this.#lifecycleGeneration += 1;
     this.#clearPending();
     this.#continuity.close();
   }
@@ -130,12 +136,14 @@ export class AsyncSubscription {
       !validExpiration(authorization.expiresAt) ||
       authorization.subscriptionId !== this.#authorization.subscriptionId ||
       authorization.stream !== this.#authorization.stream ||
-      authorization.baseline.epoch !== position.epoch ||
-      authorization.baseline.sequence !== position.sequence
+      ((authorization.baseline.epoch !== position.epoch ||
+        authorization.baseline.sequence !== position.sequence) &&
+        !this.#continuity.acceptsAuthoritativeBaseline(authorization.baseline))
     ) {
       this.#continuity.degrade();
       throw new Error("async_reauthorization_invalid");
     }
+    this.#lifecycleGeneration += 1;
     this.#authorization = authorization;
     this.#observedPosition = position;
     this.#continuity.transportLost();
@@ -151,8 +159,9 @@ export class AsyncSubscription {
       !validExpiration(authorization.expiresAt) ||
       authorization.subscriptionId !== this.#authorization.subscriptionId ||
       authorization.stream !== this.#authorization.stream ||
-      authorization.baseline.epoch !== position.epoch ||
-      authorization.baseline.sequence !== position.sequence
+      ((authorization.baseline.epoch !== position.epoch ||
+        authorization.baseline.sequence !== position.sequence) &&
+        encoded.length !== 0)
     ) {
       throw new Error("async_reauthorization_invalid");
     }
@@ -179,6 +188,7 @@ export class AsyncSubscription {
     this.#assertSameLogicalMembership(authorization);
     if (!validExpiration(authorization.expiresAt)) throw new Error("async_subscription_invalid");
     this.#authorization = authorization;
+    this.#lifecycleGeneration += 1;
     this.#continuity = new ContinuityMachine(authorization.baseline);
     this.#observedPosition = authorization.baseline;
     this.#clearPending();
@@ -199,16 +209,17 @@ export class AsyncSubscription {
     const active = this.#activeRefresh;
     if (active === null) return;
     this.#activeRefresh = null;
-    let notifyRecovery = completion !== "succeeded";
-    if (completion === "succeeded") {
+    const terminal = active.generation === this.#lifecycleGeneration ? completion : "canceled";
+    let notifyRecovery = terminal !== "succeeded";
+    if (terminal === "succeeded") {
       this.#commitRange(active);
       this.#drainPending();
       notifyRecovery = this.#presentationSettled();
     } else {
       this.#failPresentation(
-        completion === "failed"
+        terminal === "failed"
           ? "refresh_failed"
-          : completion === "canceled"
+          : terminal === "canceled"
             ? "refresh_canceled"
             : "refresh_retired",
         active.last,
@@ -216,7 +227,7 @@ export class AsyncSubscription {
     }
     if (notifyRecovery) {
       try {
-        this.#refreshCompletion?.(completion);
+        this.#refreshCompletion?.(terminal);
       } catch {
         // Presentation/recovery observation cannot rewrite continuity authority.
       }
@@ -229,6 +240,7 @@ export class AsyncSubscription {
         count: 1,
         envelope,
         first: envelope.position,
+        generation: this.#lifecycleGeneration,
         kind: "refresh",
         last: envelope.position,
       });
@@ -299,6 +311,7 @@ export class AsyncSubscription {
         count: 1,
         envelope,
         first: envelope.position,
+        generation: this.#lifecycleGeneration,
         kind: "refresh",
         last: envelope.position,
       });
@@ -355,7 +368,8 @@ export class AsyncSubscription {
   ): void {
     const highWater =
       comparePosition(this.#observedPosition, candidate) > 0 ? this.#observedPosition : candidate;
-    this.#continuity.degradeAt(highWater);
+    if (reason === "presentation_partial") this.#continuity.degradeNonReplayableAt(highWater);
+    else this.#continuity.degradeAt(highWater);
     this.#clearPending();
     this.#observeLifecycle(
       reason === "presentation_partial" && partial !== undefined
@@ -416,6 +430,7 @@ export class AsyncSubscription {
           count: 1,
           envelope,
           first: envelope.position,
+          generation: this.#lifecycleGeneration,
           kind: "refresh",
           last: envelope.position,
         });

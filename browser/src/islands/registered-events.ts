@@ -12,6 +12,8 @@ const MAX_BINDING_BYTES = 1_024;
 const MAX_EVENTS = 64;
 const MAX_EVENT_TARGETS = 16;
 const MAX_PAYLOAD_BYTES = 32 * 1_024;
+const MAX_PAYLOAD_DEPTH = 32;
+const MAX_PAYLOAD_ENTRIES = 2_048;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
 
@@ -124,6 +126,99 @@ function immutableRecord(
     Object.defineProperty(record, key, { enumerable: true, value });
   }
   return Object.freeze(record);
+}
+
+interface PayloadSnapshotBudget {
+  entries: number;
+}
+
+function snapshotPayload(
+  input: unknown,
+  budget: PayloadSnapshotBudget,
+  depth = 0,
+): JsonValue | null {
+  if (input === null || typeof input === "boolean" || typeof input === "string") return input;
+  if (typeof input === "number") return Number.isFinite(input) ? input : null;
+  if (typeof input !== "object" || depth >= MAX_PAYLOAD_DEPTH) return null;
+  let descriptors: Record<PropertyKey, PropertyDescriptor | undefined>;
+  let prototype: object | null;
+  try {
+    prototype = Object.getPrototypeOf(input) as object | null;
+    descriptors = Object.getOwnPropertyDescriptors(input);
+  } catch {
+    return null;
+  }
+  if (Array.isArray(input)) {
+    if (prototype !== Array.prototype) return null;
+    const lengthDescriptor = descriptors["length"];
+    const length =
+      lengthDescriptor !== undefined && "value" in lengthDescriptor
+        ? (lengthDescriptor.value as unknown)
+        : null;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      budget.entries + length > MAX_PAYLOAD_ENTRIES ||
+      Reflect.ownKeys(descriptors).length !== length + 1
+    ) {
+      return null;
+    }
+    budget.entries += length;
+    const values: JsonValue[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[index];
+      if (descriptor === undefined || !("value" in descriptor)) return null;
+      const value = snapshotPayload(descriptor.value, budget, depth + 1);
+      if (value === null && descriptor.value !== null) return null;
+      values.push(value);
+    }
+    return Object.freeze(values);
+  }
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.some((key) => typeof key !== "string") ||
+    budget.entries + keys.length > MAX_PAYLOAD_ENTRIES
+  ) {
+    return null;
+  }
+  budget.entries += keys.length;
+  const values: [string, JsonValue][] = [];
+  for (const key of keys) {
+    if (typeof key !== "string") return null;
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !("value" in descriptor)) return null;
+    const value = snapshotPayload(descriptor.value, budget, depth + 1);
+    if (value === null && descriptor.value !== null) return null;
+    values.push([key, value]);
+  }
+  return immutableRecord(values) as JsonValue;
+}
+
+function snapshotDispatch(input: unknown): RegisteredBrowserEventDispatch | null {
+  if ((typeof input !== "object" && typeof input !== "function") || input === null) return null;
+  const prototype = Object.getPrototypeOf(input) as object | null;
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const values = ownDataValues(input, ["event", "payload", "schemaVersion", "target"]);
+  if (values === null) return null;
+  const [event, payloadInput, schemaVersion, target] = values;
+  if (
+    typeof event !== "string" ||
+    typeof schemaVersion !== "number" ||
+    !Number.isSafeInteger(schemaVersion) ||
+    typeof target !== "string"
+  ) {
+    return null;
+  }
+  const payload = snapshotPayload(payloadInput, { entries: 0 });
+  if (payload === null && payloadInput !== null) return null;
+  return immutableRecord([
+    ["event", event],
+    ["payload", payload],
+    ["schemaVersion", schemaVersion],
+    ["target", target],
+  ]) as unknown as RegisteredBrowserEventDispatch;
 }
 
 function snapshotCycle(input: unknown): AsyncRegisteredEventContract["cycle"] | null {
@@ -286,22 +381,31 @@ export class RegisteredEventAuthority {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition {
+    let candidate: RegisteredBrowserEventDispatch | null;
+    try {
+      candidate = snapshotDispatch(event);
+    } catch {
+      return "rejected";
+    }
+    if (candidate === null) return "rejected";
     const token = capability as object;
     const authority = this.#capabilities.get(token);
     if (authority === undefined) return "rejected";
     if (authority.owner !== owner) return "rejected";
     if (!authority.resolver.current()) return "retired";
     if (this.#current.get(authority.owner) !== token) return "rejected";
-    const contract = authority.contracts.get(event.event);
+    const contract = authority.contracts.get(candidate.event);
     if (
-      event.schemaVersion !== contract?.version ||
-      !contract.targets.includes(event.target) ||
-      !schemaMatches(contract.schema, event.payload)
+      candidate.schemaVersion !== contract?.version ||
+      !contract.targets.includes(candidate.target) ||
+      !schemaMatches(contract.schema, candidate.payload)
     ) {
       return "rejected";
     }
     try {
-      if (new TextEncoder().encode(canonicalize(event.payload)).byteLength > MAX_PAYLOAD_BYTES) {
+      if (
+        new TextEncoder().encode(canonicalize(candidate.payload)).byteLength > MAX_PAYLOAD_BYTES
+      ) {
         return "rejected";
       }
     } catch {
@@ -314,7 +418,7 @@ export class RegisteredEventAuthority {
     ) {
       return "rejected";
     }
-    const targets = authority.resolver.targets(event.target, contract.maximumFanout);
+    const targets = authority.resolver.targets(candidate.target, contract.maximumFanout);
     if (!authority.resolver.current()) return "retired";
     if (this.#current.get(authority.owner) !== token) return "rejected";
     if (targets === "fanout_exceeded") return "fanout_exceeded";
@@ -327,7 +431,7 @@ export class RegisteredEventAuthority {
       for (const target of targets) {
         let domEvent: Event;
         try {
-          domEvent = authority.resolver.event(`suprnova:${contract.name}`, event.payload);
+          domEvent = authority.resolver.event(`suprnova:${contract.name}`, candidate.payload);
         } catch {
           return dispatched === 0
             ? "rejected"

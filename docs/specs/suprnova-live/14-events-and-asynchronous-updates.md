@@ -112,6 +112,10 @@ Acceptance criteria:
   or retirement degrades at the already-consumed stream high-water and requests
   authoritative recovery without replaying a mutating operation. Burst events
   can coalesce by the exact island semantic key without losing this completion.
+  The observer captures the exact subscription continuity/lifecycle generation
+  at admission; a later transport loss, heartbeat loss, authorization rotation,
+  cancellation, retirement, or reauthorization fences an older success terminal
+  from committing sequence state or restoring currentness.
 - Coalesced refresh completion uses one scheduler-intent callback plus a bounded
   owner table keyed by exact active logical membership. A newer admission for the
   same membership replaces that slot; it never appends another intent callback.
@@ -129,7 +133,11 @@ Acceptance criteria:
 - Presentation-only stream data cannot write component, authorization,
   revision, accepted-outcome, or domain state.
 - Core binds registered-event authority to the exact island owner and rechecks
-  owner currentness and capability rotation after bounded target resolution,
+  owner currentness and capability rotation after bounded target resolution.
+  It first snapshots the complete caller dispatch candidate and nested payload
+  exactly once into bounded immutable own-data records, rejecting accessors,
+  inherited or symbol fields, sparse structures, extra fields, and inconsistent
+  traps before validation or use. Core then
   constructs the DOM `Event`, then immediately rechecks the connected source,
   current capability, connected target, owner, and scope before each DOM dispatch.
   Forged, stale, detached, cross-island, wrong-scope, over-fanout, cyclic, or
@@ -137,14 +145,24 @@ Acceptance criteria:
 - A fanout whose first target observes an event before a later target becomes
   invalid returns bounded delivered/skipped counts and a closed reason. That
   observable prefix is not rolled back, but the sequence remains uncommitted and
-  degraded at consumed high-water so it cannot be retried automatically and
-  duplicate the prefix.
+  degraded at a non-replayable consumed high-water. Automatic replay that
+  includes or crosses that position is rejected so it cannot duplicate the
+  prefix. Recovery requires a trusted authoritative no-tail baseline at or after
+  the consumed position before later successors may dispatch.
 - A presentation-signal contract accepts only null, boolean, string, or
   browser-safe signed/unsigned integer values. Its scope identity is 1--128 ASCII
   bytes, starts alphanumeric, and then permits only alphanumeric, `.`, `_`, `:`,
-  or `-`; slash and leading punctuation are invalid. Core rechecks the exact
+  or `-`; slash and leading punctuation are invalid. Its distinct signal name is
+  1--64 ASCII bytes, starts with lowercase `a`--`z`, and then permits only
+  lowercase letters, digits, `.`, `_`, or `-`; uppercase, slash, leading digit or
+  punctuation, Unicode, and a 65th byte are invalid. Core rechecks the exact
   connected declared scope element and owner immediately before the write.
 - HTTP action transport remains available when push is absent.
+- SSE unsubscribe rejection, timeout, cancellation, or late completion settles
+  that logical cleanup locally with bounded diagnostics. It never fails or
+  closes the pooled physical source, degrades a sibling membership, or requests
+  sibling reauthorization; subscribe admission failure may still fail the
+  transport when its authentication contract requires it.
 
 UX flow:
 
@@ -305,7 +323,9 @@ transport, document authorization scope)` and multiplexes island subscriptions
   delivered prefix is diagnostic/observable, the current sequence does not
   advance, the consumed position becomes recovery high-water, and later delivery
   remains inert until authoritative recovery. The runtime never automatically
-  retries that partially delivered event.
+  retries that partially delivered event or accepts a replay crossing its
+  non-replayable consumed position; only an authoritative no-tail baseline that
+  absorbs that position can restore currentness.
 - Replay validates the entire bounded same-scope transcript before any dispatch
   or mutation only when the exact lane already has a sequence or pressure
   recovery obligation. A healthy lane rejects every transcript before host
@@ -576,6 +596,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Closed the remaining Task 8 review findings. Registered-event
+  dispatch now snapshots the complete caller candidate and nested payload once
+  before validation, and final delivery rechecks the post-construction connected
+  source and each exact guarded target. SSE unsubscribe failures remain local to
+  logical cleanup. Partial fanout records a non-replayable consumed position that
+  only an absorbing authoritative baseline can recover; refresh terminals carry
+  the dispatch lifecycle generation; and exact-membership reauthorization no
+  longer double-advances that generation. Presentation signals now use a distinct
+  lowercase-first 64-byte `SignalName`, and server coalescing includes exact
+  scope, name, and schema.
 - 2026-08-26 -- Hardened Task 8 after adversarial implementation review. Optional
   async code now receives a distinct frozen runtime port with no upload, model,
   state, or generic event-registration surface; core captures one immutable

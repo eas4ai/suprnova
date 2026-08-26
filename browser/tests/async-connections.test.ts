@@ -520,6 +520,53 @@ describe("browser SSE authorization adapters", () => {
     port.close("transport_replaced");
   });
 
+  it.each(["rejected", "timeout"] as const)(
+    "settles a %s SSE unsubscribe locally without failing a sibling membership or its source",
+    async (failure) => {
+      const timers = new FakeTimers();
+      const failed = vi.fn();
+      const message = vi.fn();
+      const close = vi.fn();
+      const native: {
+        close(): void;
+        onmessage?: (event: Readonly<{ data: string }>) => void;
+      } = { close };
+      const controls: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0][] = [];
+      const ports = new BrowserAsyncTransportPorts({
+        eventSource: () => native,
+        fetch: vi.fn<typeof globalThis.fetch>(),
+        membershipTimeoutMs: 5_000,
+        sseMembership(request) {
+          controls.push(request);
+          if (request.operation === "subscribe") return sseAcknowledgment(request);
+          return failure === "rejected"
+            ? Promise.reject(new Error("unsubscribe_rejected"))
+            : new Promise(() => undefined);
+        },
+        timers: timers.port,
+        webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+      });
+      const port = ports.eventSource(
+        connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed, message }),
+      );
+      await expect(port.subscribe(authorized(1))).resolves.toMatchObject({ kind: "authenticated" });
+      await expect(port.subscribe(authorized(2))).resolves.toMatchObject({ kind: "authenticated" });
+
+      port.unsubscribe("subscription-001");
+      await Promise.resolve();
+      if (failure === "timeout") timers.flush();
+      await Promise.resolve();
+      native.onmessage?.({ data: "sibling-still-current" });
+
+      expect(controls.filter(({ operation }) => operation === "unsubscribe")).toHaveLength(1);
+      expect(failed).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(message).toHaveBeenCalledWith("sibling-still-current");
+      expect(timers.pending.size).toBe(0);
+      port.close("document_retired");
+    },
+  );
+
   it("rejects an SSE acknowledgment echoed by a different physical document connection", async () => {
     const timers = new FakeTimers();
     const controls: {

@@ -520,6 +520,42 @@ describe("closed asynchronous presentation dispatcher", () => {
     },
   );
 
+  it.each([
+    "Progress",
+    "1progress",
+    "_progress",
+    "progress/value",
+    `a${"z".repeat(64)}`,
+    "prøgress",
+  ])("rejects signal name outside the shared lowercase-first grammar: %s", (name) => {
+    const hostile = authorization({
+      presentationSignals: Object.freeze([
+        Object.freeze({ name, schema: "u64", scope: "root-scope" }),
+      ]),
+    });
+    expect(() =>
+      decodeAsyncEnvelope(
+        encoded({ kind: "presentation_signal", name, scope: "root-scope", value: 1 }),
+        hostile,
+      ),
+    ).toThrow("async_payload_unregistered");
+  });
+
+  it("accepts the exact 64-byte signal-name boundary", () => {
+    const name = `a${"z".repeat(63)}`;
+    const membership = authorization({
+      presentationSignals: Object.freeze([
+        Object.freeze({ name, schema: "u64", scope: "root-scope" }),
+      ]),
+    });
+    expect(
+      decodeAsyncEnvelope(
+        encoded({ kind: "presentation_signal", name, scope: "root-scope", value: 1 }),
+        membership,
+      ).payload,
+    ).toMatchObject({ kind: "presentation_signal", name });
+  });
+
   it("rejects generic JSON and floating-point presentation-signal schemas", () => {
     for (const schema of ["json", "f64"] as const) {
       const hostile = authorization({
@@ -789,6 +825,63 @@ describe("closed asynchronous presentation dispatcher", () => {
     );
   });
 
+  it("never replays a partially delivered position and requires a trusted baseline that absorbs it", () => {
+    const event = vi
+      .fn()
+      .mockReturnValueOnce(
+        Object.freeze({
+          delivered: 1,
+          kind: "partially_dispatched" as const,
+          reason: "target_retired" as const,
+          skipped: 1,
+        }),
+      )
+      .mockReturnValue("dispatched" as const);
+    const { port } = fakePort({ dispatchRegisteredEvent: event });
+    const subscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(port, fakeCapability),
+      { now: () => 1_000 },
+    );
+    const event41 = encoded({
+      event: "orders.updated",
+      kind: "browser_event",
+      payload: { count: 1 },
+      schema_version: 1,
+      target: "self",
+    });
+
+    expect(subscription.receive(event41)).toBe("dispatch_failed");
+    expect(event).toHaveBeenCalledOnce();
+    expect(() => subscription.preflightReauthorization(authorization(), [event41])).toThrow(
+      "async_replay_non_replayable",
+    );
+    expect(event).toHaveBeenCalledOnce();
+
+    const recovered = authorization({ baseline: Object.freeze({ epoch: 4n, sequence: 41n }) });
+    expect(subscription.preflightReauthorization(recovered, [])).toBe("authoritative_no_tail");
+    subscription.reauthorize(recovered);
+    subscription.proveAuthoritativeBaseline(recovered.baseline);
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+
+    expect(
+      subscription.receive(
+        encoded(
+          {
+            event: "orders.updated",
+            kind: "browser_event",
+            payload: { count: 2 },
+            schema_version: 1,
+            target: "self",
+          },
+          42,
+        ),
+      ),
+    ).toBe("applied");
+    expect(event).toHaveBeenCalledTimes(2);
+    expect(subscription.position()).toEqual({ epoch: 4n, sequence: 42n });
+  });
+
   it("waits for replay refresh terminals before committing the replay transcript", () => {
     const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
     const signal = vi.fn((_scope: string, _name: string, value: JsonValue) => value);
@@ -877,4 +970,39 @@ describe("closed asynchronous presentation dispatcher", () => {
     expect(subscription.position()).toEqual({ epoch: 4n, sequence: 41n });
     expect(subscription.state()).toBe("current");
   });
+
+  it.each(["transport_lost", "heartbeat_lost", "authorization_rotated"] as const)(
+    "does not let late refresh success cross a newer %s generation",
+    (loss) => {
+      const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+      const lifecycle = vi.fn();
+      const { port } = fakePort({
+        enqueueFreshRender: (_reason, observer) => {
+          if (observer !== undefined) completions.push(observer);
+          return "queued";
+        },
+      });
+      const subscription = new AsyncSubscription(
+        authorization(),
+        new AsyncDispatcher(port, fakeCapability),
+        { now: () => 1_000 },
+        undefined,
+        lifecycle,
+      );
+      expect(subscription.receive(encoded({ kind: "refresh", name: "refresh" }, 41))).toBe(
+        "pending",
+      );
+      if (loss === "transport_lost") subscription.transportLost();
+      else if (loss === "heartbeat_lost") subscription.heartbeatLost();
+      else subscription.reauthorize(authorization());
+
+      completions[0]?.("succeeded");
+
+      expect(subscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+      expect(subscription.state()).toBe("degraded");
+      expect(lifecycle).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "dispatch_failed", reason: "refresh_canceled" }),
+      );
+    },
+  );
 });

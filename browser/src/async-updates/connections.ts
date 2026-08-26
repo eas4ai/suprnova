@@ -334,7 +334,7 @@ class SseMembershipControls {
       }
       if (this.#pending.size + this.#queue.length >= MAX_QUEUED_SSE_MEMBERSHIP_CONTROLS) {
         resolve(membershipRejection("capacity"));
-        this.#request.failed("authorization_lost");
+        if (operation === "subscribe") this.#request.failed("authorization_lost");
         return;
       }
       this.#nextControl += 1;
@@ -447,7 +447,7 @@ class SseMembershipControls {
         request.resolve(membershipRejection(outcome.reason));
       }
     }
-    if (outcome.kind === "rejected" && !this.#closed) {
+    if (outcome.kind === "rejected" && request?.operation === "subscribe" && !this.#closed) {
       this.#request.failed("authorization_lost");
       return;
     }
@@ -1903,7 +1903,7 @@ export class DocumentConnectionPool {
       return;
     }
     const transportGeneration = group.generation;
-    const membershipGeneration = ++membership.generation;
+    membership.generation += 1;
     this.#cancelMembershipAttachment(membership);
     this.#discardPendingAuthorization(membership);
     membership.authenticatedTransportGeneration = -1;
@@ -1918,7 +1918,9 @@ export class DocumentConnectionPool {
     }
     this.#safeState(membership, "degraded");
     const poolGeneration = this.#generation;
-    void this.#requestReauthorization(membership, poolGeneration).then((current) => {
+    const pending = this.#requestReauthorization(membership, poolGeneration);
+    const membershipGeneration = membership.generation;
+    void pending.then((current) => {
       if (
         !membership.active ||
         membership.generation !== membershipGeneration ||

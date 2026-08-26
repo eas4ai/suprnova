@@ -364,6 +364,15 @@ describe("shared versioned Live fixtures", () => {
     });
   });
 
+  it("shares the exact lowercase-first signal-name grammar with Rust", async () => {
+    const fixtures = await loadFixtureSet(4);
+    const asynchronous = asRecord(required(fixtures, "async-envelope.json"));
+    const grammar = /^[a-z][a-z0-9._-]{0,63}$/u;
+    for (const fixture of asArray(asynchronous["signal_name_cases"]).map(asRecord)) {
+      expect(grammar.test(asString(fixture["value"]))).toBe(fixture["expected"] === "accepted");
+    }
+  });
+
   it("makes idempotent upload retries deterministic from their own data", async () => {
     const fixtures = await loadFixtureSet(4);
     const upload = asRecord(required(fixtures, "upload-protocol.json"));

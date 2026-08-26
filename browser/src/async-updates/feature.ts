@@ -47,6 +47,7 @@ const MAX_TRANSPORT_DELAY_MS = 300_000;
 const MAX_CONCURRENT_AUTHORIZATIONS = 8;
 const AUTHORIZATION_TIMEOUT_MS = 5_000;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
+const SIGNAL_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
 const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
@@ -454,7 +455,7 @@ function validateAuthorization(value: AuthorizedLogicalSubscription): void {
       signalNames.size === value.presentationSignals.length &&
       value.presentationSignals.every(
         ({ name, schema, scope }) =>
-          OPERATION_NAME.test(name) &&
+          SIGNAL_NAME.test(name) &&
           SIGNAL_SCOPE.test(scope) &&
           validPresentationSignalSchema(schema),
       ) &&

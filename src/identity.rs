@@ -161,6 +161,43 @@ text_identity!(
     BrowserOperationName,
     128
 );
+/// Declared presentation-only local-signal name shared with the browser runtime.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct SignalName(String);
+
+impl SignalName {
+    /// Parses the exact lowercase-first, 64-byte browser signal-name grammar.
+    pub fn parse(value: &str) -> Result<Self, IdentityError> {
+        let mut bytes = value.bytes();
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+            && bytes.all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            });
+        if !valid {
+            return Err(IdentityError {
+                kind: IdentityErrorKind::InvalidSyntax,
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the validated signal name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SignalName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<SignalName>")
+    }
+}
 /// Stable keyed DOM identity for one declared local-signal scope.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -204,7 +241,51 @@ impl fmt::Debug for SignalScopeIdentity {
 mod signal_scope_tests {
     use proptest::prelude::*;
 
-    use super::SignalScopeIdentity;
+    use super::{SignalName, SignalScopeIdentity};
+
+    #[test]
+    fn signal_name_grammar_is_lowercase_first_and_byte_bounded() {
+        for valid in [
+            "a",
+            "progress",
+            "nested.value_1",
+            &format!("a{}", "z".repeat(63)),
+        ] {
+            assert!(
+                SignalName::parse(valid).is_ok(),
+                "valid signal name {valid}"
+            );
+        }
+        for invalid in [
+            "",
+            "Progress",
+            "1progress",
+            "_progress",
+            "progress/value",
+            &format!("a{}", "z".repeat(64)),
+            "prøgress",
+        ] {
+            assert!(
+                SignalName::parse(invalid).is_err(),
+                "invalid signal name {invalid}"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn signal_name_acceptance_is_exactly_the_shared_ascii_grammar(value in any::<String>()) {
+            let expected = !value.is_empty()
+                && value.len() <= 64
+                && value.as_bytes()[0].is_ascii_lowercase()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                });
+            prop_assert_eq!(SignalName::parse(&value).is_ok(), expected);
+        }
+    }
 
     #[test]
     fn signal_scope_grammar_matches_the_browser_contract() {

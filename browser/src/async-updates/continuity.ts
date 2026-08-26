@@ -12,6 +12,7 @@ export class ContinuityMachine {
   #position: StreamPosition;
   #state: SubscriptionState = "disconnected";
   #requiredHighWater: StreamPosition | null = null;
+  #nonReplayableHighWater: StreamPosition | null = null;
   #proofRequired = false;
 
   constructor(baseline: StreamPosition) {
@@ -49,6 +50,17 @@ export class ContinuityMachine {
     this.degrade();
   }
 
+  degradeNonReplayableAt(candidate: StreamPosition): void {
+    this.#recordHighWater(candidate);
+    if (
+      this.#nonReplayableHighWater === null ||
+      comparePosition(candidate, this.#nonReplayableHighWater) > 0
+    ) {
+      this.#nonReplayableHighWater = copy(candidate);
+    }
+    this.degrade();
+  }
+
   close(): void {
     this.#state = "closed";
   }
@@ -82,6 +94,12 @@ export class ContinuityMachine {
     let prior = this.#position;
     for (const position of positions) {
       if (!isExactSuccessor(prior, position)) throw new Error("async_replay_invalid");
+      if (
+        this.#nonReplayableHighWater !== null &&
+        comparePosition(position, this.#nonReplayableHighWater) >= 0
+      ) {
+        throw new Error("async_replay_non_replayable");
+      }
       prior = position;
     }
     if (this.#requiredHighWater !== null && comparePosition(prior, this.#requiredHighWater) < 0) {
@@ -98,18 +116,33 @@ export class ContinuityMachine {
 
   proveAuthoritativeBaseline(position: StreamPosition): void {
     this.validateAuthoritativeBaseline(position);
+    this.#position = copy(position);
     this.#requiredHighWater = null;
+    this.#nonReplayableHighWater = null;
     this.#proofRequired = false;
     this.#state = "current";
   }
 
   validateAuthoritativeBaseline(position: StreamPosition): void {
+    const validPosition =
+      this.#nonReplayableHighWater === null
+        ? comparePosition(position, this.#position) === 0
+        : comparePosition(position, this.#nonReplayableHighWater) >= 0;
     if (
       this.#state === "closed" ||
-      comparePosition(position, this.#position) !== 0 ||
+      !validPosition ||
       (this.#requiredHighWater !== null && comparePosition(position, this.#requiredHighWater) < 0)
     ) {
       throw new Error("async_replay_incomplete");
+    }
+  }
+
+  acceptsAuthoritativeBaseline(position: StreamPosition): boolean {
+    try {
+      this.validateAuthoritativeBaseline(position);
+      return true;
+    } catch {
+      return false;
     }
   }
 

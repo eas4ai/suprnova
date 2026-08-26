@@ -42,7 +42,7 @@ use crate::host::{
 };
 use crate::identity::{
     BrowserOperationName, BuildId, ComponentName, IslandSlot, KeyId, ModelField, RouteIdentity,
-    ScopeFingerprint, SignalScopeIdentity, UnixMillis, ViewName,
+    ScopeFingerprint, SignalName, SignalScopeIdentity, UnixMillis, ViewName,
 };
 use crate::metadata::{
     ActionMetadata, ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
@@ -429,12 +429,12 @@ fn membership_registry_for(authorized: &AuthorizedSubscription) -> TestMembershi
         presentation_signals: BoundedPresentationSignalContracts::new(vec![
             PresentationSignalContract::new(
                 SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-                BrowserOperationName::parse("completion_percent").expect("signal name"),
+                SignalName::parse("completion_percent").expect("signal name"),
                 PresentationSignalSchema::U64,
             ),
             PresentationSignalContract::new(
                 SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-                BrowserOperationName::parse("signed_count").expect("signal name"),
+                SignalName::parse("signed_count").expect("signal name"),
                 PresentationSignalSchema::I64,
             ),
         ])
@@ -585,7 +585,7 @@ fn server_authored_envelopes_require_the_current_registered_context() {
     let signal = RegisteredPresentationSignal::new(
         &context,
         SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-        BrowserOperationName::parse("completion_percent").expect("signal name"),
+        SignalName::parse("completion_percent").expect("signal name"),
         CanonicalValue::String("wrong schema".to_owned()),
     )
     .expect_err("signal schema must match current registration");
@@ -617,7 +617,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
         let signal = RegisteredPresentationSignal::new(
             &context,
             SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-            BrowserOperationName::parse(name).expect("registered signal"),
+            SignalName::parse(name).expect("registered signal"),
             CanonicalValue::number(value).expect("finite canonical number"),
         )
         .expect("lossless server-authored value");
@@ -647,7 +647,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
             RegisteredPresentationSignal::new(
                 &context,
                 SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-                BrowserOperationName::parse(name).expect("registered signal"),
+                SignalName::parse(name).expect("registered signal"),
                 CanonicalValue::number(value).expect("finite canonical number"),
             )
             .expect_err("integer schemas reject values outside browser-safe exact integers")
@@ -659,7 +659,7 @@ fn server_authored_payloads_share_the_lossless_canonical_codec_contract() {
     let normalized = RegisteredPresentationSignal::new(
         &context,
         SignalScopeIdentity::parse("root-scope").expect("signal scope"),
-        BrowserOperationName::parse("completion_percent").expect("registered signal"),
+        SignalName::parse("completion_percent").expect("registered signal"),
         CanonicalValue::number(-0.0).expect("negative zero is finite"),
     )
     .expect("canonical negative zero represents unsigned zero");
@@ -1773,6 +1773,18 @@ fn version_four_async_fixture_is_executable_not_documentary() {
 
     assert_eq!(root["protocol_versions"], serde_json::json!([1]));
     assert_eq!(root["live_protocol_versions"], serde_json::json!([1, 2]));
+    for case in root["signal_name_cases"]
+        .as_array()
+        .expect("signal-name cases")
+    {
+        let value = case["value"].as_str().expect("signal-name value");
+        let accepted = case["expected"] == "accepted";
+        assert_eq!(
+            SignalName::parse(value).is_ok(),
+            accepted,
+            "signal name {value}"
+        );
+    }
     for case in root["envelope_cases"].as_array().expect("envelope cases") {
         let encoded = case["encoded"].as_str().expect("encoded case").as_bytes();
         let result = decode_async_envelope(encoded, &limits(), &context());

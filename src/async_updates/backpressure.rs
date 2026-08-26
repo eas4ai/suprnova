@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::identity::{BrowserOperationName, ContentDigest};
+use crate::identity::{ContentDigest, SignalName, SignalScopeIdentity};
 use crate::resource::{
     Permit, PermitPool, ResourceError, ResourceOwner, ResourceQueue, Retirement, TailAdmission,
     TailAdmissionOutcome,
@@ -153,7 +153,8 @@ enum CoalescingKey {
         subscription: SubscriptionId,
         stream: StreamName,
         epoch: StreamEpoch,
-        signal: BrowserOperationName,
+        scope: SignalScopeIdentity,
+        signal: SignalName,
         schema: PresentationSignalSchema,
     },
 }
@@ -1306,6 +1307,7 @@ fn coalescing_key(authorized: &AuthorizedAsyncBufferEntry) -> Option<CoalescingK
             subscription,
             stream,
             epoch,
+            scope: signal.scope().clone(),
             signal: signal.name().clone(),
             schema: signal.schema(),
         }),

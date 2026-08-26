@@ -498,6 +498,19 @@ with the registered signal name and compatible type; it is never a selector, a
 raw DOM handle, a nearest-scope search, or an island-root default.
 _Avoid_: signal selector, async DOM target, nearest signal scope
 
+**Signal name**:
+The distinct lowercase-first 1--64 ASCII-byte identity of a declared local
+signal: later bytes permit only lowercase letters, digits, `.`, `_`, or `-`.
+It is not the broader browser operation/event identity vocabulary.
+_Avoid_: browser operation name, signal selector, JavaScript expression
+
+**Non-replayable consumed position**:
+The high-water position of a browser event whose bounded fanout delivered an
+observable prefix before failing. Its sequence remains uncommitted, automatic
+replay may not cross it, and only a trusted authoritative no-tail baseline at or
+after it may restore currentness without duplicating the delivered prefix.
+_Avoid_: committed position, retry cursor, replay suffix
+
 **Sequence authority**:
 The per-logical-subscription state machine initialized only from the signed
 baseline retained by its sealed active async membership context. It applies only

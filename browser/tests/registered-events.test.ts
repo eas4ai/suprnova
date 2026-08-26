@@ -243,6 +243,117 @@ describe("core registered-event authority", () => {
     ).toBe("dispatched");
   });
 
+  it("snapshots the complete dispatch candidate once without invoking accessors or accepting extra authority", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    const dispatchEvent = vi.fn(() => true);
+    const capability = authority.replace(
+      owner,
+      registration([contract({ schema: "string" })]),
+      resolver({ dispatchEvent } as unknown as EventTarget),
+    );
+    const eventGetter = vi.fn(() => "orders.updated");
+    const accessor = {
+      payload: "safe",
+      schemaVersion: 1,
+      target: "self",
+    } as Record<string, unknown>;
+    Object.defineProperty(accessor, "event", { enumerable: true, get: eventGetter });
+
+    expect(authority.dispatch(owner, capability, accessor as never)).toBe("rejected");
+    expect(eventGetter).not.toHaveBeenCalled();
+    expect(dispatchEvent).not.toHaveBeenCalled();
+
+    const withSymbol = {
+      event: "orders.updated",
+      payload: "safe",
+      schemaVersion: 1,
+      target: "self",
+      [Symbol("hidden")]: "document",
+    };
+    expect(authority.dispatch(owner, capability, withSymbol)).toBe("rejected");
+    expect(dispatchEvent).not.toHaveBeenCalled();
+
+    const inherited = Object.assign(Object.create({ target: "document" }) as object, {
+      event: "orders.updated",
+      payload: "safe",
+      schemaVersion: 1,
+      target: "self",
+    });
+    expect(authority.dispatch(owner, capability, inherited as never)).toBe("rejected");
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  it("uses one immutable nested-payload snapshot for schema, size, event construction, and dispatch", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    const payload = { message: "safe" };
+    const reads = new Map<PropertyKey, number>();
+    const observedPayload = new Proxy(payload, {
+      getOwnPropertyDescriptor(object, property) {
+        reads.set(property, (reads.get(property) ?? 0) + 1);
+        return Reflect.getOwnPropertyDescriptor(object, property);
+      },
+    });
+    let constructedDetail: unknown;
+    let dispatchedDetail: unknown;
+    const capability = authority.replace(owner, registration([contract()]), {
+      current: () => true,
+      event: (_type, detail) => {
+        constructedDetail = detail;
+        payload.message = "mutated-after-construction";
+        return { detail } as unknown as Event;
+      },
+      targets: () => [
+        {
+          current: () => true,
+          dispatch: (event) => {
+            dispatchedDetail = (event as unknown as { detail: unknown }).detail;
+            return true;
+          },
+        },
+      ],
+    });
+    const candidate = {
+      event: "orders.updated",
+      payload: observedPayload,
+      schemaVersion: 1,
+      target: "self",
+    };
+
+    expect(authority.dispatch(owner, capability, candidate)).toBe("dispatched");
+    expect(constructedDetail).toEqual({ message: "safe" });
+    expect(dispatchedDetail).toBe(constructedDetail);
+    expect(Object.isFrozen(constructedDetail)).toBe(true);
+    expect(Math.max(...reads.values())).toBe(1);
+  });
+
+  it("rejects a source detached or capability rotated by the event factory before any DOM dispatch", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let sourceCurrent = true;
+    const dispatch = vi.fn(() => true);
+    const capability = authority.replace(owner, registration([contract()]), {
+      current: () => sourceCurrent,
+      event: (type) => {
+        sourceCurrent = false;
+        authority.retire(owner);
+        return { type } as Event;
+      },
+      targets: () => [{ current: () => true, dispatch }],
+    });
+
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: {},
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("retired");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it("enforces resolved fanout without trusting a caller-supplied maximum", () => {
     const authority = new RegisteredEventAuthority();
     const owner = {};

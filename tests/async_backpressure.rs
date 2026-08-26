@@ -16,12 +16,15 @@ use suprnova_live::async_updates::{
     BoundedDocumentTransportSession, BufferDisposition, CloseDisposition, CompletionReason,
     DocumentTransportKind, EventTarget, Heartbeat, MAX_ASYNC_BUFFER_BYTES, MAX_ASYNC_BUFFER_EVENTS,
     MAX_ASYNC_PAYLOAD_BYTES, MAX_EVENT_FANOUT, MAX_REPLAY_TRANSCRIPT_ENVELOPES,
-    RegisteredBrowserEvent, RegisteredRefresh, ResolvedAsyncDelivery, SequenceDegradation,
+    PresentationSignalContract, PresentationSignalSchema, RegisteredBrowserEvent,
+    RegisteredPresentationSignal, RegisteredRefresh, ResolvedAsyncDelivery, SequenceDegradation,
     SequenceDisposition, SequenceErrorKind, SequenceState, StreamErrorCode, SubscriptionId,
     VerifiedOrigin, encode_async_envelope,
 };
 use suprnova_live::canonical::CanonicalValue;
-use suprnova_live::identity::{BrowserOperationName, ContentDigest};
+use suprnova_live::identity::{
+    BrowserOperationName, ContentDigest, SignalName, SignalScopeIdentity,
+};
 use suprnova_live::resource::{PermitPool, ResourceBounds, Retirement};
 
 #[allow(
@@ -1624,6 +1627,54 @@ async fn one_thousand_replaceable_refreshes_coalesce_inside_document_bounds() {
         Some(position(7, 0))
     );
     assert_eq!(dispatcher.applied, 0);
+}
+
+#[tokio::test]
+async fn same_name_signals_in_distinct_declared_scopes_never_coalesce() {
+    let fixture = TransportFixture::new(position(7, 0)).await;
+    fixture.registry.set_presentation_signals(vec![
+        PresentationSignalContract::new(
+            SignalScopeIdentity::parse("left-scope").expect("left scope"),
+            SignalName::parse("progress").expect("signal name"),
+            PresentationSignalSchema::U64,
+        ),
+        PresentationSignalContract::new(
+            SignalScopeIdentity::parse("right-scope").expect("right scope"),
+            SignalName::parse("progress").expect("signal name"),
+            PresentationSignalSchema::U64,
+        ),
+    ]);
+    let provisional = fixture.request(
+        subscription(0x7c),
+        VerifiedOrigin::parse("https://example.test").expect("origin"),
+    );
+    let signal = |scope: &str| {
+        AsyncPayload::PresentationSignal(
+            RegisteredPresentationSignal::new(
+                provisional.context(),
+                SignalScopeIdentity::parse(scope).expect("signal scope"),
+                SignalName::parse("progress").expect("signal name"),
+                CanonicalValue::number(1.0).expect("signal value"),
+            )
+            .expect("registered signal"),
+        )
+    };
+    let (mut bounded, _) = bounded_document(
+        &fixture,
+        0x7c,
+        vec![signal("left-scope"), signal("right-scope")],
+    )
+    .await;
+
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(
+        bounded.pump_next(fixture.registry.as_ref()).await,
+        Ok(Some(BufferDisposition::Queued))
+    );
+    assert_eq!(bounded.retained_events(), 2);
 }
 
 #[tokio::test]
