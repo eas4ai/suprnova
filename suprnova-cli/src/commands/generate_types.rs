@@ -847,6 +847,22 @@ pub struct GenerationOutcome {
     pub wrote: bool,
 }
 
+impl GenerationOutcome {
+    /// Whether a watcher should announce this pass.
+    ///
+    /// Two kinds of pass say nothing. One that emitted no items at all has
+    /// no artifact to talk about. One that emitted the same bytes already
+    /// on disk deliberately did not touch the file - and a watcher only
+    /// reaches here after a real source change, so silence carries
+    /// information: your edit did not change the props. Announcing it
+    /// anyway would contradict the write the tool decided not to make, and
+    /// under `--json` it would put a `types_regenerated` event on the wire
+    /// for a regeneration that did not happen.
+    pub(crate) fn is_reportable_regeneration(&self) -> bool {
+        self.count > 0 && self.wrote
+    }
+}
+
 /// Generate types and write to the output file
 pub fn generate_types_to_file(
     project_path: &Path,
@@ -1667,6 +1683,41 @@ mod json_value_tests {
         let ts = generate_typescript(&structs);
         assert!(ts.contains("v: Value;"), "{ts}");
         assert!(!ts.contains("JsonValue"), "{ts}");
+    }
+}
+
+#[cfg(test)]
+mod reportable_regeneration_tests {
+    use super::*;
+
+    fn outcome(count: usize, wrote: bool) -> GenerationOutcome {
+        GenerationOutcome { count, wrote }
+    }
+
+    #[test]
+    fn a_pass_that_wrote_the_file_is_announced() {
+        assert!(outcome(5, true).is_reportable_regeneration());
+    }
+
+    #[test]
+    fn a_pass_that_wrote_nothing_stays_silent() {
+        // A watcher only runs after a real source change, so silence here
+        // carries information: the edit did not change the props. Saying
+        // "Regenerated 5 type(s)" would contradict the write the tool
+        // deliberately did not make, and under `--json` it would put a
+        // `types_regenerated` event on the wire for a regeneration that
+        // did not happen.
+        assert!(!outcome(5, false).is_reportable_regeneration());
+    }
+
+    #[test]
+    fn a_pass_that_emitted_nothing_stays_silent() {
+        // No structs, or no message ids: there is no artifact to talk
+        // about. This is the pre-existing "stay quiet" case, and the
+        // stale-file removal that reports `wrote` with a zero count rides
+        // on it - the watcher has never announced that either.
+        assert!(!outcome(0, false).is_reportable_regeneration());
+        assert!(!outcome(0, true).is_reportable_regeneration());
     }
 }
 

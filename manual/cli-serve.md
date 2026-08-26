@@ -160,6 +160,11 @@ When you run `suprnova serve`, the CLI:
     `cargo fmt`, format-on-save across several files, a branch switch -
     coalesces into exactly one regeneration that runs *after* the last
     write, rather than one that fires on the first file and misses the rest.
+    A regeneration writes the file only when the emitted TypeScript differs
+    from what's already there, and the watcher reports only what it wrote:
+    an edit that doesn't change any prop shape prints nothing and emits no
+    `types_regenerated` event. Silence after a save means your edit didn't
+    change the generated types.
 11. Forwards every child's stdout/stderr to your terminal with a `[name]`
     prefix (`[backend]`, `[frontend]`, or the process's configured name),
     optionally timestamped with `--timestamps` - or, with `--json`, as
@@ -227,8 +232,9 @@ the generator. If new `#[derive(InertiaProps)]` structs appear (or existing
 ones change shape), the regenerated `frontend/src/types/inertia-props.ts`
 triggers Vite's HMR for the component that imports them. When the emitted
 TypeScript is byte-identical to what's already on disk the file is left
-untouched, so a regeneration that changed nothing isn't a change anything
-downstream has to react to.
+untouched and the watcher says nothing, so a regeneration that changed
+nothing isn't a change anything downstream has to react to - not Vite, not
+the backend watcher, and not whatever is reading `--json`.
 
 ## Extra dev processes
 
@@ -285,7 +291,7 @@ field:
 | `restart_scheduled` | `ts`, `name`, `delay_ms` | A crashed process will be respawned after `delay_ms` (see the backoff schedule above). |
 | `restart_succeeded` | `ts`, `name`, `pid` | A scheduled respawn succeeded; the process is running again under a new PID. |
 | `gave_up` | `ts`, `name`, `tries` | The process crashed `tries` consecutive times (`--restart-tries`) and `serve` stopped retrying it. The session, and every other process, keep running. |
-| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher regenerated a TypeScript artifact in response to a `.rs`/`.ftl` change. |
+| `types_regenerated` | `ts`, `artifact` (`"inertia_props"` or `"lang_keys"`), `count` | The file watcher rewrote a TypeScript artifact after a `.rs`/`.ftl` change. Fires only when the generated file actually changed: a `.rs` edit that leaves the emitted TypeScript byte-identical writes nothing and emits nothing, so an event always means the file on disk is different now. `count` is the number of structs (or message ids) in the rewritten file, not the number that changed. |
 | `shutdown` | `ts` | The session is shutting down. Always the last line. |
 
 For example, a Vite crash and its respawn look like:

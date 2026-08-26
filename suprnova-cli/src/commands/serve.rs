@@ -1039,11 +1039,12 @@ pub fn run(
             }
             Ok(outcome) => {
                 if !json {
-                    ui::success(&format!(
-                        "Generated {} type(s) → {}",
+                    report_startup_generation(
                         outcome.count,
-                        output_path.display()
-                    ));
+                        "type(s)",
+                        &output_path,
+                        outcome.wrote,
+                    );
                 }
             }
             Err(e) => {
@@ -1061,11 +1062,12 @@ pub fn run(
             Ok(outcome) if outcome.count == 0 => {}
             Ok(outcome) => {
                 if !json {
-                    ui::success(&format!(
-                        "Generated {} message id(s) → {}",
+                    report_startup_generation(
                         outcome.count,
-                        lang_keys_output.display()
-                    ));
+                        "message id(s)",
+                        &lang_keys_output,
+                        outcome.wrote,
+                    );
                 }
             }
             Err(e) => {
@@ -1230,6 +1232,33 @@ pub fn run(
     }
 }
 
+/// The line the startup type-generation pass prints for one artifact.
+///
+/// `Generated` is a claim about the filesystem, and the generator writes
+/// only when the emitted bytes differ from what is already there - so on
+/// every `serve` of a project whose props have not moved since the last
+/// run, that claim was false. The count survives either way: how many
+/// types the project has is worth knowing on a boot; what changes is
+/// whether the file was touched.
+fn generation_notice(count: usize, unit: &str, path: &Path, wrote: bool) -> String {
+    if wrote {
+        format!("Generated {} {} → {}", count, unit, path.display())
+    } else {
+        format!("{} {} up to date → {}", count, unit, path.display())
+    }
+}
+
+/// Print [`generation_notice`], as a success when the file changed and as
+/// plain information when it did not.
+fn report_startup_generation(count: usize, unit: &str, path: &Path, wrote: bool) {
+    let notice = generation_notice(count, unit, path, wrote);
+    if wrote {
+        ui::success(&notice);
+    } else {
+        ui::info(&notice);
+    }
+}
+
 /// Paths, relative to the project root, whose contents the backend
 /// process actually depends on - in the order they are handed to
 /// `cargo watch`.
@@ -1366,7 +1395,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 
         if due.rust {
             match super::generate_types::generate_types_to_file(project_path, &output_path) {
-                Ok(outcome) if outcome.count > 0 => {
+                Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
                             mode,
@@ -1384,7 +1413,11 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
                         );
                     }
                 }
-                Ok(_) => {} // No types found, stay quiet
+                // Nothing emitted, or the emitted bytes were identical to
+                // what was already on disk. Either way there is no
+                // regeneration to report - see
+                // `GenerationOutcome::is_reportable_regeneration`.
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
                 }
@@ -1394,7 +1427,7 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
         if due.ftl {
             match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output)
             {
-                Ok(outcome) if outcome.count > 0 => {
+                Ok(outcome) if outcome.is_reportable_regeneration() => {
                     if mode.is_json() {
                         emit_event(
                             mode,
@@ -1412,7 +1445,9 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
                         );
                     }
                 }
-                Ok(_) => {} // No message ids (or lang/ removed); stale file already cleaned up
+                // No message ids (or `lang/` removed, stale file already
+                // cleaned up), or the union is unchanged. Nothing to say.
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!(
                         "{} Failed to regenerate lang-keys: {}",
@@ -1528,6 +1563,38 @@ mod tests {
         // The Cargo.toml half of the check is all that is left, and it
         // does not care about the frontend at all.
         assert!(validate_suprnova_project(true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod generation_notice_tests {
+    use super::*;
+
+    #[test]
+    fn a_written_artifact_is_reported_as_generated() {
+        assert_eq!(
+            generation_notice(5, "type(s)", Path::new("frontend/src/types/x.ts"), true),
+            "Generated 5 type(s) → frontend/src/types/x.ts"
+        );
+    }
+
+    #[test]
+    fn an_unwritten_artifact_is_reported_as_up_to_date() {
+        // The count stays: "how many types this project has" is still
+        // useful on a `serve` boot. What changes is the claim about the
+        // file, which the generator deliberately did not touch.
+        assert_eq!(
+            generation_notice(5, "type(s)", Path::new("frontend/src/types/x.ts"), false),
+            "5 type(s) up to date → frontend/src/types/x.ts"
+        );
+    }
+
+    #[test]
+    fn the_unit_carries_through_for_message_ids() {
+        assert_eq!(
+            generation_notice(12, "message id(s)", Path::new("lang-keys.ts"), false),
+            "12 message id(s) up to date → lang-keys.ts"
+        );
     }
 }
 

@@ -39,11 +39,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   at the top of the generated file and only when something references it. A bare
   `Value` maps there too, unless the project defines a `Value` struct of its own.
 
-- **`generate-types` no longer reports a file it did not write as generated.**
-  Because a pass now writes only when the emitted content differs, `Generated
-  <path>` was a claim about the filesystem that was false on every rerun of an
-  unchanged project. A pass that wrote nothing says `<path> is up to date`
-  instead, in both one-shot and `--watch` mode.
+- **Neither `generate-types` nor `serve` reports a file it did not write as
+  generated.** Because a pass now writes only when the emitted content differs,
+  `Generated <path>` was a claim about the filesystem that was false on every
+  rerun of an unchanged project. `generate-types` says `<path> is up to date`
+  instead, in one-shot and `--watch` alike, and `serve`'s startup pass says
+  `N type(s) up to date → <path>`, keeping the count. `serve`'s file watcher
+  now stays silent on a regeneration that wrote nothing, in text and under
+  `--json` both: a `types_regenerated` event means the generated file on disk is
+  different now, so silence after a save tells you your edit did not change any
+  prop shape.
 
 ## 1.3.4 - 2026-08-25
 
