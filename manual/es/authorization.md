@@ -398,6 +398,15 @@ El `code` se puede leer en el `Response` inspeccionado, pero **no** viaja
 a través de `authorize` - `FrameworkError` no tiene campo de code; léelo
 desde `inspect()` si lo necesitas.
 
+Sea cual sea el estado en el que acabe una denegación, llega al cliente
+como el cuerpo de error JSON del framework. Una aplicación de Inertia
+debería nombrar además una
+[página de error](frontend-inertia-responses.md#error-pages) - sin ella,
+el cliente de Inertia trata ese cuerpo como una respuesta no-Inertia y
+muestra su modal de error a pantalla completa en lugar de renderizar
+nada, así que un usuario con el rol equivocado ve un fallo en lugar de
+un "no puedes hacer eso".
+
 ### `raw`: "denegado" frente a "indefinido"
 
 `Gate::raw` (y `raw_async`) devuelve `Option<Response>`: `None` significa

@@ -922,7 +922,7 @@ de un manifest desde S3), haz la lectura una vez durante el arranque y pasa la
 
 ## Arranque: `Inertia::install`
 
-La mayoría de las apps instala los cuatro middlewares del protocolo en una
+La mayoría de las apps instala los middlewares del protocolo en una
 sola llamada, desde `register_http_stack`: el hook de arranque solo HTTP, que
 ejecuta la ruta del servidor y omiten los binarios de queue, schedule, workflow
 y console (consulta [Bootstrap](bootstrap.md)):
@@ -937,9 +937,14 @@ pub fn register_http_stack() {
 
     Inertia::install(&cfg)
         .expect("Inertia install failed (production needs a built frontend manifest)");
-    // …global middleware, in the order you want it to run
+    // …el resto de tu middleware global, en el orden en que quieras que se ejecute
 }
 ```
+
+Todo aquello de lo que depende la capa de Inertia - `SessionMiddleware` -
+y todo lo que una página de error necesite leer - `LocaleMiddleware` - va
+*por encima* de esta llamada. Consulta
+[las reglas de orden más abajo](#arranque-inertia-install).
 
 ```rust
 // cmd/main.rs
@@ -973,6 +978,9 @@ consigo esos binarios.
 5. Registra `InertiaValidationRedirectMiddleware`: convierte un `422` en una
    visita de Inertia en un `303` de vuelta a la página del formulario con los
    errores enviados como flash. Consulta [Fallos de validación](#fallos-de-validación).
+6. Registra `InertiaErrorPageMiddleware`, **solo cuando** `cfg` nombra un
+   `.error_page(...)`: convierte las propias respuestas de error del
+   framework en esa página. Consulta [Páginas de error](#páginas-de-error).
 
 El orden importa: el middleware de headers se registra primero, por lo que es
 el más externo y ve todas las respuestas, incluido el `409` que el middleware
@@ -1002,11 +1010,229 @@ El middleware de versión vuelve a enviar el flash de la sesión antes de hacer
 rebotar al cliente, por lo que un error enviado como flash sobrevive al GET
 posterior de página completa; solo puede hacerlo dentro de un scope de sesión.
 
+Registra [`LocaleMiddleware`](localization.md) **antes que él también**, si
+usas una [página de error](#páginas-de-error). El código posterior a `next`
+de un middleware se ejecuta después de que todo lo que hay dentro de él ya
+haya retornado, así que el middleware de página de error renderiza una vez
+que se ha desapilado cualquier scope abierto dentro de él, lo que en el caso
+del middleware de locale significa que la página obtendría el locale
+predeterminado de la aplicación y no el del visitante. La capa de
+Inertia no lee nada de la localización, así que poner el locale por fuera no
+cuesta nada. El `bootstrap.rs` del andamiaje ya lo hace. El mismo
+razonamiento vale para cualquier middleware tuyo cuyo scope de solicitud
+necesite leer la página de error.
+
 Omite la llamada solo si realmente no quieres uno de estos middlewares (es
-raro; los cuatro cierran modos de fallo reales: envenenamiento de caché entre
+raro; cada uno cierra un modo de fallo real: envenenamiento de caché entre
 las dos representaciones de una URL, bundle obsoleto silencioso, repetición del
 formulario en una redirección y un `422` de validación que termina en el modal
 de error del cliente en lugar de llegar a `form.errors`).
+
+## Páginas de error
+
+Una visita de Inertia que recibe del framework algo que no es un 2xx no
+muestra una página de error - muestra una pantalla de fallo:
+
+```
+All Inertia requests must receive a valid Inertia response, however a
+plain JSON response was received.
+```
+
+El cliente comprueba una sola cosa antes de renderizar nada: un
+encabezado `X-Inertia: true` en la respuesta. Un `403` de una
+comprobación de [autorización](authorization.md) o de un middleware de
+permisos RBAC, un `404` de una ruta no registrada, un `429` del
+[limitador de velocidad](rate-limiting.md), un `500` de un
+[handler que falla](errors.md): todos llevan el cuerpo de error JSON del
+framework y ningún encabezado de ese tipo, así que el cliente se los
+entrega a su modal. Un usuario con el rol equivocado hace clic en un enlace de
+navegación y la aplicación parece romperse.
+
+Nombra un componente de página y el framework renderiza esas respuestas
+a través de él, conservando el código de estado:
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new()
+            .version(env!("CARGO_PKG_VERSION"))
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+`"Error"` se resuelve exactamente igual que cualquier otro nombre de
+página, así que `frontend/src/pages/Error.svelte` (o `.tsx`, o `.vue`)
+es todo lo que hace falta. **Los tres starters incluyen una y ya
+establecen `.error_page("Error")`** - un proyecto nuevo queda cubierto
+sin hacer nada.
+
+Viene con una regla de orden: **registra `LocaleMiddleware` antes de
+`Inertia::install`**, o las páginas de error se renderizarán en el
+locale predeterminado de la aplicación y no en el del visitante. La
+página de error se construye en la salida, después de que todo
+middleware registrado dentro de la capa de Inertia haya retornado y haya
+desapilado cualquier scope que hubiera abierto. El `bootstrap.rs` del
+andamiaje lo hace bien; si escribiste el tuyo, compruébalo. Lo mismo
+vale para cualquier middleware propio con scope de solicitud cuyo estado
+lean los props compartidos de la página de error.
+
+### Qué recibe la página
+
+| Prop | Tipo | Siempre presente | Qué es |
+|---|---|---|---|
+| `status` | `number` | sí | El estado HTTP original - `403`, `404`, `500`. |
+| `message` | `string` | sí | El `message` del cuerpo de error, o la frase de motivo del estado cuando no llevaba ninguno. Ya viene sanitizado: un `5xx` dice `"Internal Server Error"`, nunca el error subyacente - y eso vale también con `APP_DEBUG=true`. Deliberadamente no se lee el campo `debug_message` que la ruta JSON añade ahí y que solo existe en desarrollo, así que el error en crudo se queda en el log y en la respuesta JSON y nunca se renderiza en una página. |
+| `request_id` | `string` | no | Presente solo cuando el cuerpo de error llevaba uno. El mismo id que registra el log estructurado, así que la página puede mostrar una referencia que el operador pueda buscar. |
+
+```svelte
+<script lang="ts">
+  interface ErrorProps {
+    status: number
+    message: string
+    request_id?: string
+  }
+
+  let { status, message, request_id }: ErrorProps = $props()
+</script>
+
+<h1>{status}</h1>
+<p>{message}</p>
+{#if request_id}<p>Reference: {request_id}</p>{/if}
+```
+
+Declara los props en el componente en lugar de importarlos de
+`types/inertia-props.ts`: [`suprnova generate-types`](frontend-typescript-types.md)
+reescribe ese archivo a partir de tus propios structs
+`#[derive(InertiaProps)]`, y estos props vienen del framework.
+
+### Qué sobrevive al reemplazo
+
+El código de estado se conserva, y también todos los encabezados que
+estableció la respuesta original, **salvo** dos grupos.
+
+**Lo que describía el cuerpo que se sustituye.** Todos los campos
+`Content-*` (un `Content-Length` en una página cuatro veces más grande
+que el JSON al que sustituye es un fallo de framing) y
+`Transfer-Encoding`. `Content-Security-Policy` queda excluido de esa
+regla por nombre: comparte el prefijo por accidente histórico y es
+política de respuesta, no metadatos de representación.
+
+**Lo que regía cómo podía almacenarse ese cuerpo.** `Cache-Control`,
+`Expires`, `Age`, `ETag`, `Last-Modified`. La página lleva tus props
+compartidos - `auth.user`, el flash, la compartición de locale -
+mientras que el cuerpo de error al que sustituye era el mismo para todo
+el mundo, así que nunca debe heredar el permiso de quedar almacenada en
+una caché compartida y entregarse a otro visitante, ni validadores que
+pertenecen a una entidad que ella no es. En su lugar, la página establece
+`Cache-Control: no-cache, private` para sí misma, el mismo valor por
+defecto que Laravel da a una respuesta que lleva sesión.
+
+Todo lo demás se conserva: `Retry-After` en un `429` sigue diciéndole al
+cliente cuándo volver, `WWW-Authenticate` en un `401` sigue llevando el
+desafío, y `Vary`, `Set-Cookie` y tu encabezado de id de solicitud
+llegan intactos. La regla se enuncia como lo que se descarta en lugar de
+como lo que se conserva, así que un encabezado del que el framework
+nunca ha oído hablar sobrevive en vez de desaparecer en silencio.
+
+Ambos públicos quedan cubiertos. Una visita XHR de Inertia recibe el
+objeto de página JSON con `X-Inertia: true`; una navegación completa -
+alguien que pega `/admin/articles` en la barra de direcciones - recibe
+el shell HTML entero, el mismo que recibe la primera carga de cualquier
+página. Así que la página de error funciona tanto si el usuario llegó
+por el SPA como si no.
+
+### Qué no toca nunca
+
+El middleware solo interviene donde nadie más tiene una respuesta. Deja
+intactos:
+
+- **Los `422` de validación.** De esos se encarga
+  `InertiaValidationRedirectMiddleware`; consulta
+  [Fallos de validación](#fallos-de-validación). Un `422` que sobrevive
+  a ese middleware (sin objeto `errors`, o una ejecución en seco de
+  Precognition) también conserva su cuerpo.
+- **Cualquier cosa que lleve `X-Inertia-Location`.** El rebote de
+  versión `409` y la forma `redirect_to` de los middlewares RBAC. El
+  cliente actúa sobre el encabezado, no sobre el cuerpo.
+- **Las redirecciones.** Solo `400`-`599` está dentro del alcance.
+- **Los clientes de API.** Una solicitud cuyo `Accept` prefiere
+  `application/json` a `text/html` conserva el contrato JSON de
+  siempre. El `*/*` de `curl` cuenta como ausencia de preferencia, así que
+  también conserva el JSON. Solo una visita de Inertia o una navegación
+  del navegador reciben una página.
+- **Las respuestas que ya son páginas de Inertia.** Un handler que
+  renderizó su propia página y le dio un `410` conserva su propio
+  componente.
+- **Los cuerpos que no tienen la forma de error del framework.** Tu
+  propia página de error HTML, texto plano que no sea el propio
+  `404 Not Found` del router, o una envoltura JSON con otras claves:
+  ninguno de ellos queda anulado.
+- **Todo, cuando `error_page` no está fijado.** El middleware ni
+  siquiera se registra, así que una aplicación que no ha optado por ello
+  ejecuta exactamente el mismo código que ejecutaba antes.
+
+### Qué cuerpos se reescriben
+
+El criterio es la **forma del cuerpo**, no quién lo escribió. En un
+estado `400`-`599` se sustituyen exactamente tres formas:
+
+- un cuerpo vacío;
+- un objeto JSON cuyo `message` sea una cadena: la propia envoltura de
+  error del framework, y cualquier otra cosa con esa misma forma;
+- el cuerpo fijo de texto plano `404 Not Found` del router.
+
+Todo lo demás pasa de largo. Eso significa que un `401` que un
+middleware tuyo responde con
+`HttpResponse::json(json!({ "message": "Unauthenticated." }))` **sí** se
+convierte en la página de error - que es de lo que se trata, porque esa
+es exactamente la respuesta que el cliente mostraría en su modal en caso
+contrario - y significa que solo `message` y `request_id` sobreviven
+hasta los props. Una envoltura que lleve `errors`, `code` o cualquier
+otra cosa pierde esos campos al convertirse en una página.
+
+Si un middleware tuyo tiene que conservar su propio cuerpo JSON en un
+estado de error, dale una forma que el criterio no reconozca - pon el
+texto legible por humanos bajo una clave distinta de `message` - o
+establece tú mismo `X-Inertia: true` en la respuesta, lo que la marca
+como que ya es una respuesta de Inertia y la deja fuera de alcance.
+Ambas cosas son una línea en el punto que construye la respuesta.
+
+Una laguna que conviene conocer: un handler que entra en **pánico**
+queda fuera de alcance. La red de pánico envuelve toda la cadena de
+middleware, así que el `500` sintetizado se construye después de que
+todas las capas de middleware ya se hayan desenrollado. Los handlers
+que entran en pánico siguen haciendo emerger el modal del cliente.
+Devuelve `Err(...)` en vez de entrar en pánico (consulta
+[Manejo de errores](errors.md)) y la página de error lo cubre.
+
+Si la propia página falla al renderizarse - el componente no se puede
+resolver, el SSR está caído, un prop compartido da error - el framework
+registra un `warn` con el id de solicitud y devuelve la respuesta de
+error original. Una página de error rota nunca enmascara el error que
+estaba renderizando.
+
+### Por qué Suprnova diverge
+
+Laravel pone esto en el handler de excepciones: editas
+`bootstrap/app.php`, haces tú mismo el match sobre el estado y llamas a
+`Inertia::render('Error', ['status' => $response->getStatusCode()])`
+con `$response->setStatusCode(...)` para devolver el código a su sitio.
+Eso es flexible, y también es un trozo de plomería del framework que
+todos los proyectos reescriben a mano, normalmente después de haber
+visto primero el modal en producción.
+
+Aquí es una línea de configuración, porque la decisión es la misma para
+todas las aplicaciones: una visita de Inertia o una navegación del
+navegador reciben una página, un cliente de API recibe JSON, y todo lo
+que pertenece a otro contrato se deja intacto. Lo que se cede a cambio
+es que la regla es fija en lugar de un `match` que escribes tú, así que
+dejar fuera una respuesta concreta significa darle un cuerpo que el
+criterio no reconozca, o marcarla como que ya es de Inertia; consulta
+[Qué cuerpos se reescriben](#qué-cuerpos-se-reescriben).
 
 ## Elementos `<head>` controlados por el servidor
 

@@ -45,6 +45,7 @@ Cada `?` en el cuerpo de un handler ejecuta una única conversión directa de
 para sus tipos de error orientados al handler, pero Rust no encadena varias
 implementaciones de `From`. Convierte explícitamente un error intermedio
 cuando no tiene una conversión directa a `HttpResponse`.
+
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
 use sea_orm::EntityTrait;
@@ -62,7 +63,6 @@ pub async fn show(req: Request) -> Response {
     json_response!({ "user": user })
 }
 ```
-
 
 En ese fragmento ocurren cuatro conversiones:
 
@@ -82,6 +82,14 @@ Cada `?` usa una conversión directa. El código que devuelve
 `Result<_, FrameworkError>` en lugar de `Response` puede usar `.await?` en la
 llamada de SeaORM porque `DbErr` se convierte directamente a
 `FrameworkError`.
+
+Todas esas conversiones terminan en el cuerpo de error JSON del
+framework - `{ "message": …, "request_id": … }` con el estado
+correspondiente. Esa es la respuesta correcta para un cliente de API y
+la equivocada para una visita de Inertia, que necesita una página.
+Nombra una [página de error](frontend-inertia-responses.md#error-pages)
+y una aplicación de Inertia renderiza estos errores como una página de
+verdad, mientras que los clientes de API conservan el JSON sin cambios.
 
 ## `AppError` - errores de dominio en línea
 
@@ -285,7 +293,6 @@ Las políticas de reintento de colas, la planificación con jitter y la
 cabecera HTTP `Retry-After` leen el valor mediante `retry_after()`, que
 devuelve `None` para las demás variantes o cuando no se proporcionó una
 indicación. `.context(...)` conserva la variante y no elimina la duración.
-
 
 ## Errores de dominio personalizados
 
@@ -651,6 +658,7 @@ tanto el fallo de resolución como el fallo de búsqueda en una respuesta.
 | Violación de clave duplicada → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Anotar un error existente | `err.context("creating user")` |
 | Observar todos los 5xx | Escuchar `ErrorOccurred` |
+| Renderizar los errores como una página de Inertia | `InertiaConfig::error_page("Error")` |
 
 ## Siguiente
 

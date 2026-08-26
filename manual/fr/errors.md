@@ -34,7 +34,12 @@ construire, quel statut cela retourne, quelle forme voit le client.
 
 ## `?` est la conversion
 
-Chaque `?` dans le corps d'un handler effectue une seule conversion directe `From<E> for HttpResponse`. Le framework fournit des conversions directes pour ses types d'erreur destinés aux handlers, mais Rust n'enchaîne pas plusieurs impls `From`. Convertissez explicitement une erreur intermédiaire quand elle n'a pas de conversion directe vers `HttpResponse`.
+Chaque `?` dans le corps d'un handler effectue une seule conversion
+directe `From<E> for HttpResponse`. Le framework fournit des conversions
+directes pour ses types d'erreur destinés aux handlers, mais Rust
+n'enchaîne pas plusieurs impls `From`. Convertissez explicitement une
+erreur intermédiaire quand elle n'a pas de conversion directe vers
+`HttpResponse`.
 
 ```rust
 use suprnova::{DB, FrameworkError, Request, Response, json_response};
@@ -56,13 +61,30 @@ pub async fn show(req: Request) -> Response {
 
 Quatre conversions se produisent dans cet extrait :
 
-1. `req.param("id")?` convertit directement `ParamError` en `HttpResponse` (400).
-2. L'erreur d'analyse est explicitement transformée en `FrameworkError::ParamError`, que `?` convertit ensuite directement en `HttpResponse` (400).
-3. L'erreur SeaORM est explicitement transformée de `DbErr` en `FrameworkError::Database` ; `?` convertit ensuite directement ce `FrameworkError` en `HttpResponse` (500, assaini sur le fil).
-4. `.ok_or_else(...)?` transforme `None` en `FrameworkError::ModelNotFound`, qui se convertit en `HttpResponse` (404).
+1. `req.param("id")?` convertit directement `ParamError` en
+   `HttpResponse` (400).
+2. L'erreur d'analyse est explicitement transformée en
+   `FrameworkError::ParamError`, que `?` convertit ensuite directement en
+   `HttpResponse` (400).
+3. L'erreur SeaORM est explicitement transformée de `DbErr` en
+   `FrameworkError::Database` ; `?` convertit ensuite directement ce
+   `FrameworkError` en `HttpResponse` (500, assaini vers le client).
+4. `.ok_or_else(...)?` transforme `None` en
+   `FrameworkError::ModelNotFound`, qui se convertit en `HttpResponse`
+   (404).
 
-Chaque `?` n'utilise qu'une conversion directe. Le code qui retourne `Result<_, FrameworkError>` au lieu de `Response` peut utiliser `.await?` sur l'appel SeaORM parce que `DbErr` se convertit directement en `FrameworkError`.
+Chaque `?` n'utilise qu'une conversion directe. Le code qui retourne
+`Result<_, FrameworkError>` au lieu de `Response` peut utiliser `.await?`
+sur l'appel SeaORM parce que `DbErr` se convertit directement en
+`FrameworkError`.
 
+Chacune de ces conversions aboutit au corps d'erreur JSON du framework -
+`{ "message": …, "request_id": … }` au statut correspondant. C'est la
+bonne réponse pour un client d'API et la mauvaise pour une visite
+Inertia, qui a besoin d'une page. Nommez une
+[page d'erreur](frontend-inertia-responses.md#error-pages) et une
+application Inertia rend ces erreurs sous forme de vraie page, tandis que
+les clients d'API conservent le JSON inchangé.
 
 ## `AppError` - erreurs de domaine en ligne
 
@@ -631,6 +653,7 @@ l'échec de résolution que l'échec de recherche.
 | Une violation de clé dupliquée → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Annoter une erreur existante | `err.context("creating user")` |
 | Observer chaque 5xx | Écouter `ErrorOccurred` |
+| Rendre les erreurs sous forme de page Inertia | `InertiaConfig::error_page("Error")` |
 
 ## Suivant
 

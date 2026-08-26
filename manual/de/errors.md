@@ -80,6 +80,14 @@ Jedes `?` verwendet eine direkte Konvertierung. Code, der
 `Result<_, FrameworkError>` statt `Response` zurückgibt, kann `.await?` beim
 SeaORM-Aufruf verwenden, weil `DbErr` direkt in `FrameworkError` konvertiert.
 
+Jede einzelne dieser Konvertierungen endet im JSON-Fehler-Body des
+Frameworks - `{ "message": …, "request_id": … }` beim passenden Status.
+Das ist die richtige Antwort für einen API-Client und die falsche für
+einen Inertia-Besuch, der eine Seite braucht. Benennen Sie eine
+[Fehlerseite](frontend-inertia-responses.md#error-pages), und eine
+Inertia-Anwendung rendert diese Fehler als echte Seite, während
+API-Clients das JSON unverändert behalten.
+
 ## `AppError` - Inline-Domain-Fehler
 
 Verwenden Sie `AppError` für einmalige Fehler, die keinen eigenen Typ
@@ -649,6 +657,7 @@ zusammenfallen.
 | Duplicate-Key-Verletzung → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | Einen bestehenden Fehler annotieren | `err.context("creating user")` |
 | Jedes 5xx beobachten | Auf `ErrorOccurred` lauschen |
+| Fehler als Inertia-Seite rendern | `InertiaConfig::error_page("Error")` |
 
 ## Nächste Schritte
 

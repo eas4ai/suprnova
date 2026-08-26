@@ -399,6 +399,14 @@ der untersuchten `Response` lesbar, reist aber **nicht** durch `authorize` -
 `FrameworkError` hat kein Code-Feld; lesen Sie ihn aus `inspect()`, wenn Sie
 ihn brauchen.
 
+Auf welchem Status eine Ablehnung auch landet, sie erreicht den Client
+als JSON-Fehler-Body des Frameworks. Eine Inertia-Anwendung sollte
+zusätzlich eine [Fehlerseite](frontend-inertia-responses.md#error-pages)
+benennen - ohne sie behandelt der Inertia-Client diesen Body als
+Nicht-Inertia-Response und zeigt sein Vollbild-Fehlermodal, statt
+überhaupt etwas zu rendern; ein Benutzer mit der falschen Rolle sieht
+also einen Absturz statt „Das dürfen Sie nicht“.
+
 ### `raw`: „abgelehnt“ vs. „undefiniert“
 
 `Gate::raw` (und `raw_async`) gibt `Option<Response>` zurück: `None`

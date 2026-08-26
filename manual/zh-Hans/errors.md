@@ -39,7 +39,8 @@ pub async fn show(req: Request) -> Response {
 
     let user = users::Entity::find_by_id(id)
         .one(&*DB::get()?)
-        .await?
+        .await
+        .map_err(FrameworkError::from)?
         .ok_or_else(|| FrameworkError::not_found("User"))?;
 
     json_response!({ "user": user })
@@ -54,6 +55,8 @@ pub async fn show(req: Request) -> Response {
 4. `.ok_or_else(...)?` 把 `None` 变成 `FrameworkError::ModelNotFound`，再转换成 `HttpResponse`（404）。
 
 每个 `?` 都使用一次直接转换。返回 `Result<_, FrameworkError>` 而不是 `Response` 的代码，可以在 SeaORM 调用上使用 `.await?`，因为 `DbErr` 会直接转换为 `FrameworkError`。
+
+上面每一次转换，最后都落在框架的那份 JSON 错误响应体上 - 在对应的状态码上是 `{ "message": …, "request_id": … }`。对一个 API 客户端来说这是正确答案，对一次需要页面的 Inertia 访问来说则是错的。点名一个[错误页面](frontend-inertia-responses.md#error-pages)，一个 Inertia 应用就会把这些错误渲染成一个真正的页面，而 API 客户端拿到的 JSON 保持不变。
 
 ## `AppError` - 内联的领域错误
 
@@ -519,6 +522,7 @@ pub async fn show(req: Request) -> Response {
 | 重复键冲突 → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | 标注一个已有的错误 | `err.context("creating user")` |
 | 观测每一个 5xx | 监听 `ErrorOccurred` |
+| 把错误渲染成一个 Inertia 页面 | `InertiaConfig::error_page("Error")` |
 
 ## 下一步
 

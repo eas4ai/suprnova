@@ -2,7 +2,7 @@
 
 Inertiaレスポンスは、Suprnovaのハンドラが状態をSvelte / React / Vueのページコンポーネントへ届ける方法です。Inertiaページをレンダリングするすべてのハンドラは、[`inertia_response!`](#the-inertia_response-macro)マクロ（型付きで、コンパイル時に検査されるeagerなプロップ向け）か、[`InertiaResponse`](#inertiaresponse-のビルダー)ビルダー（それ以外のすべて - レイジープロップ、ディファードプロップ、マージ、once、スクロール、フラッシュ）のいずれかを通じて構築したレスポンスを1つ返します。この章ではレスポンスの表面をエンドツーエンドで扱います: マクロ、ビルダー、v3プロトコルの機能（部分的なリロード、履歴の暗号化、バージョン検出）、`App::inertia_share*`による共有データ、そしてリダイレクトをまたいで運ばれるフラッシュバッグです。
 
-まだフロントエンドを選んでいない場合は、[Frontend Overview](frontend.md)と[Page Components](frontend-pages.md)を先に読んでください。この章はSPAブリッジが配線済みであることを前提とし、ハンドラが何を返すかに焦点を当てます。
+まだフロントエンドを選んでいない場合は、[フロントエンド 概要](frontend.md)と[ページ コンポーネント](frontend-pages.md)を先に読んでください。この章はSPAブリッジが配線済みであることを前提とし、ハンドラが何を返すかに焦点を当てます。
 
 ## `inertia_response!` マクロ
 
@@ -40,7 +40,7 @@ use serde_json::json;
 let router = Router::new().inertia("/about", "About", json!({ "team_size": 4 }));
 ```
 
-[Routing](routing.md#router-level-redirects-and-views)を参照してください。そこではコンポーネントが実行時文字列なので、このマクロのコンパイル時存在検査は行われません - ハンドラを書かないこととのトレードオフです。
+[ルーティング](routing.md#router-level-redirects-and-views)を参照してください。そこではコンポーネントが実行時文字列なので、このマクロのコンパイル時存在検査は行われません - ハンドラを書かないこととのトレードオフです。
 
 ### JSON形式のプロップ
 
@@ -82,7 +82,7 @@ pub struct UserProps {
 }
 ```
 
-入れ子の型は通常どおり合成されます - フィールドは`Vec<T>`、`Option<T>`、入れ子の構造体など、`Serialize`可能なものなら何でもかまいません。入れ子の型自体は`InertiaProps`をderiveする必要はなく、`Serialize`だけが必要です。*トップレベルの*プロップ構造体に`#[derive(InertiaProps)]`を使うと、ツリー全体について自動的なTypeScript表面（[TypeScript Types](frontend-typescript-types.md)を参照）が得られます。
+入れ子の型は通常どおり合成されます - フィールドは`Vec<T>`、`Option<T>`、入れ子の構造体など、`Serialize`可能なものなら何でもかまいません。入れ子の型自体は`InertiaProps`をderiveする必要はなく、`Serialize`だけが必要です。*トップレベルの*プロップ構造体に`#[derive(InertiaProps)]`を使うと、ツリー全体について自動的なTypeScript表面（[TypeScript 型](frontend-typescript-types.md)を参照）が得られます。
 
 ## `InertiaResponse` のビルダー
 
@@ -300,7 +300,7 @@ impl ProvidesScrollMetadata for MyCursorPage {
 InertiaResponse::new("Feed/Index").scroll("posts", page.scroll_metadata(), page.rows)
 ```
 
-`LengthAwarePaginator`、`Paginator`、`CursorPaginator`もこれを実装します。[Pagination](pagination.md#inertia-integration-infinite-scroll-props)を参照してください。
+`LengthAwarePaginator`、`Paginator`、`CursorPaginator`もこれを実装します。[ページネーション](pagination.md#inertia-integration-infinite-scroll-props)を参照してください。
 
 ### ドット記法のネスト
 
@@ -581,7 +581,7 @@ let cfg = InertiaConfig::new().version(version);
 
 ## ブートストラップ: `Inertia::install`
 
-ほとんどのアプリは、`register_http_stack`から4つのプロトコルミドルウェアを1回の呼び出しでインストールします。これはHTTP専用のブートストラップフックで、サーバーパスは実行しますが、queue、schedule、workflow、consoleバイナリはスキップします（[Bootstrap](bootstrap.md)を参照）:
+ほとんどのアプリは、`register_http_stack`からプロトコルミドルウェアを1回の呼び出しでインストールします。これはHTTP専用のブートストラップフックで、サーバーパスは実行しますが、queue、schedule、workflow、consoleバイナリはスキップします（[アプリケーション ブートストラップ](bootstrap.md)を参照）:
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
@@ -593,9 +593,11 @@ pub fn register_http_stack() {
 
     Inertia::install(&cfg)
         .expect("Inertia install failed (production needs a built frontend manifest)");
-    // …global middleware, in the order you want it to run
+    // …残りのグローバルミドルウェアを、実行させたい順序で
 }
 ```
+
+Inertiaの層が依存するもの - `SessionMiddleware` - と、エラーページが読む必要のあるもの - `LocaleMiddleware` - は、この呼び出しの*上*に置きます。[後述の順序の規則](#ブートストラップ-inertia-install)を参照してください。
 
 ```rust
 // cmd/main.rs
@@ -613,6 +615,7 @@ Application::new()
 3. `InertiaVersionMiddleware`を登録します - クライアントとサーバーがアセットバージョンで一致しない場合、`409` + `X-Inertia-Location`を出力します。
 4. `Inertia303Middleware`を登録します - GET以外のInertiaリダイレクトで`302`を`303`へ格上げします。
 5. `InertiaValidationRedirectMiddleware`を登録します - Inertia訪問の`422`を、エラーをフラッシュしたフォームページへの`303`へ変換します。[バリデーション失敗](#バリデーション失敗)を参照してください。
+6. `cfg`が`.error_page(...)`を名指ししている**ときだけ**、`InertiaErrorPageMiddleware`を登録します - フレームワーク自身のエラーレスポンスを、そのページへ変えます。[エラーページ](#エラーページ)を参照してください。
 
 順序が重要です。ヘッダーミドルウェアが最初に登録されるため最も外側になり、ハンドラが実行される前にバージョンミドルウェアが返す`409`も含め、すべてのレスポンスを見ます。バリデーションリダイレクトミドルウェアは最後に登録されるため最も内側、つまりハンドラに最も近くなり、他の3つが触れる前の`422`を見ます。
 
@@ -622,7 +625,111 @@ Application::new()
 
 フラッシュデータを使う場合は、`SessionMiddleware`を`Inertia::install`**より前に**登録してください。バージョンミドルウェアはクライアントを跳ね返す前にセッションを再フラッシュするため、フラッシュされたエラーは追いかけのページ全体のGETを生き延びます。これはセッションスコープ内でのみ可能です。
 
-これらのミドルウェアのどれかを本当に望まない場合にだけ呼び出しを省略してください（まれです。4つすべてが実際の失敗モードを塞ぎます - 1つのURLの2つの表現をまたぐキャッシュポイズニング、静かな古いバンドル、リダイレクト時のフォーム再送信、そしてクライアントのエラーモーダルで行き止まりになり`form.errors`へ届かないバリデーション`422`）。
+[`LocaleMiddleware`](localization.md)も、[エラーページ](#エラーページ)を使うのであれば**その前に**登録してください。ミドルウェアの`next`より後のコードは、その内側にあるすべてがすでに戻ってから走ります。そのため、エラーページのミドルウェアが描画するのは、その内側で開かれたスコープがすべて取り払われた後です - ロケールミドルウェアにとってこれは、ページが訪問者のロケールではなくアプリのデフォルトのロケールを受け取ってしまう、ということです。Inertiaの層はローカライゼーションから何も読まないため、ロケールをその外側に置いてもコストはありません。スキャフォルドされる`bootstrap.rs`は、すでにそうしています。同じ理屈は、エラーページが読む必要のあるリクエストスコープを持つ、あなた自身のあらゆるミドルウェアに当てはまります。
+
+これらのミドルウェアのどれかを本当に望まない場合にだけ呼び出しを省略してください（まれです。それぞれが実際の失敗モードを塞ぎます - 1つのURLの2つの表現をまたぐキャッシュポイズニング、静かな古いバンドル、リダイレクト時のフォーム再送信、そしてクライアントのエラーモーダルで行き止まりになり`form.errors`へ届かないバリデーション`422`）。
+
+## エラーページ
+
+フレームワークから2xx以外が返ってきたInertiaの訪問は、エラーページを表示しません - クラッシュ画面を表示します:
+
+```
+All Inertia requests must receive a valid Inertia response, however a
+plain JSON response was received.
+```
+
+クライアントが何かを描画する前に確認するのは、1つだけです: レスポンスの`X-Inertia: true`ヘッダーです。[認可](authorization.md)のチェックやRBACの権限ミドルウェアからの`403`、ルートのないパスに対する`404`、[レート リミット](rate-limiting.md)からの`429`、[失敗するハンドラ](errors.md)からの`500` - これらはどれもフレームワークのJSONのエラーボディを運び、そのヘッダーを持たないため、クライアントはそれらをモーダルへ引き渡します。ロールの合っていないユーザーがナビゲーションリンクをクリックすると、アプリは壊れたように見えます。
+
+ページコンポーネントを名指しすれば、フレームワークは代わりにそのページを通してこれらのレスポンスを描画し、ステータスコードは保ちます:
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new()
+            .version(env!("CARGO_PKG_VERSION"))
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+`"Error"`は、ほかのページ名とまったく同じように解決されるため、`frontend/src/pages/Error.svelte`（あるいは`.tsx`、`.vue`）を置くだけで済みます。**3つのスターターは、すでにこれを同梱し、`.error_page("Error")`を設定しています** - 新しいプロジェクトは、何もしなくてもカバーされます。
+
+これには順序の規則が1つ付いてきます: **`LocaleMiddleware`を`Inertia::install`より前に登録してください**。さもないと、エラーページは訪問者のロケールではなく、アプリのデフォルトのロケールで描画されます。エラーページは出ていく途中で、Inertiaの層の内側に登録されたすべてのミドルウェアが戻り、自分が開いたスコープを取り払った後に組み立てられるからです。スキャフォルドされる`bootstrap.rs`はこれを正しく行っています。自分で書いたのなら、確認してください。エラーページの共有プロップが読む、あなた自身のリクエストスコープのミドルウェアについても、同じことが当てはまります。
+
+### ページが受け取るもの
+
+| プロップ | 型 | 常に存在するか | 何であるか |
+|---|---|---|---|
+| `status` | `number` | はい | 元のHTTPステータスです - `403`、`404`、`500`。 |
+| `message` | `string` | はい | エラーボディの`message`、あるいはそれを運んでいなかった場合はステータスの理由句です。すでにサニタイズ済みです: `5xx`は`"Internal Server Error"`となり、根底のエラーが出ることは決してありません - これは`APP_DEBUG=true`の下でも変わりません。そこでJSONの経路が付け加える開発専用の`debug_message`フィールドは、意図的に読まれません。そのため、生のエラーはログとJSONのレスポンスの中に留まり、ページへ描画されることは決してありません。 |
+| `request_id` | `string` | いいえ | エラーボディがそれを運んでいたときにだけ存在します。構造化ログが記録するのと同じIDなので、ページは運用者が検索できる参照番号を表示できます。 |
+
+```svelte
+<script lang="ts">
+  interface ErrorProps {
+    status: number
+    message: string
+    request_id?: string
+  }
+
+  let { status, message, request_id }: ErrorProps = $props()
+</script>
+
+<h1>{status}</h1>
+<p>{message}</p>
+{#if request_id}<p>Reference: {request_id}</p>{/if}
+```
+
+プロップは`types/inertia-props.ts`からインポートするのではなく、コンポーネントの中で宣言してください: [`suprnova generate-types`](frontend-typescript-types.md)はそのファイルをあなた自身の`#[derive(InertiaProps)]`構造体から書き直しますが、これらのプロップはフレームワークから来るものだからです。
+
+### 差し替えを生き延びるもの
+
+ステータスコードは保たれ、元のレスポンスが設定したすべてのヘッダーも保たれます。**例外は**2つのグループです。
+
+**置き換えられるボディを説明していたもの。** すべての`Content-*`フィールド（置き換えたJSONの4倍の大きさのページに載る`Content-Length`は、フレーミングのバグです）と`Transfer-Encoding`です。`Content-Security-Policy`は、名指しでこの規則から除外されています - 歴史的な偶然でこのプレフィックスを共有しているだけで、表現のメタデータではなくレスポンスのポリシーだからです。
+
+**そのボディをどう保存できるかを統制していたもの。** `Cache-Control`、`Expires`、`Age`、`ETag`、`Last-Modified`です。ページはあなたの共有プロップ - `auth.user`、フラッシュ、ロケールの共有 - を運びますが、それが置き換えたエラーボディは誰にとっても同じものでした。ですからページは、共有キャッシュに保存されて別の訪問者へ手渡される許可も、自分のものではないエンティティに属する検証子も、決して受け継いではなりません。代わりにページは、自分自身のために`Cache-Control: no-cache, private`を設定します - Laravelがセッションを運ぶレスポンスに与えるのと同じデフォルトです。
+
+それ以外はすべて引き継がれます: `429`の`Retry-After`は引き続きクライアントにいつ戻ってくればよいかを伝え、`401`の`WWW-Authenticate`は引き続きチャレンジを運び、`Vary`、`Set-Cookie`、そしてあなたのリクエストIDのヘッダーも、そのまま届きます。この規則は、何が保たれるかではなく何が落とされるかとして述べられています。そのため、フレームワークが一度も耳にしたことのないヘッダーは、静かに消えるのではなく生き延びます。
+
+どちらの相手もカバーされています。InertiaのXHRの訪問は`X-Inertia: true`付きのJSONのページオブジェクトを受け取り、ハードナビゲーション - 誰かが`/admin/articles`をアドレスバーに貼り付ける - は、どのページでも初回ロードで受け取るのと同じ、完全なHTMLシェルを受け取ります。ですからエラーページは、ユーザーがSPAを通して来たかどうかにかかわらず機能します。
+
+### 決して手を触れないもの
+
+このミドルウェアは、ほかの誰も答えを持っていないところでだけ、代わりを務めます。次のものは、そのままにします:
+
+- **バリデーションの`422`。** それらは`InertiaValidationRedirectMiddleware`が所有します - [バリデーション失敗](#バリデーション失敗)を参照してください。そのミドルウェアを生き延びた`422`（`errors`オブジェクトがない、あるいはPrecognitionのドライラン）も、ボディを保ちます。
+- **`X-Inertia-Location`を運ぶもの。** `409`のバージョンの跳ね返しと、RBACミドルウェアの`redirect_to`の形です。クライアントはボディではなくヘッダーに従って動きます。
+- **リダイレクト。** 対象は`400`から`599`だけです。
+- **APIクライアント。** `Accept`が`text/html`より`application/json`を好むリクエストは、これまでどおりのJSONの契約を保ちます。`curl`の`*/*`は好みなしとして扱われるため、こちらもJSONのままです。ページを受け取るのは、Inertiaの訪問かブラウザのナビゲーションだけです。
+- **すでにInertiaのページであるレスポンス。** 自分自身のページを描画して`410`を与えたハンドラは、自分のコンポーネントを保ちます。
+- **フレームワークのエラーの形ではないボディ。** あなた自身のHTMLのエラーページ、ルーター自身の`404 Not Found`ではない平文、あるいはキーの付け方が違うJSONのエンベロープ - どれも覆されることはありません。
+- **`error_page`が未設定なら、すべて。** ミドルウェアはそもそも登録されないため、オプトインしていないアプリは、以前と寸分違わぬコードを実行します。
+
+### どのボディが書き換えられるか
+
+ゲートになるのは**ボディの形**であって、誰がそれを書いたかではありません。`400`から`599`のステータスで置き換えられる形は、ちょうど3つです:
+
+- 空のボディ。
+- `message`が文字列であるJSONオブジェクト - フレームワーク自身のエラーのエンベロープと、それと同じ形をしたすべて。
+- ルーターの固定された`404 Not Found`という平文のボディ。
+
+それ以外はすべて素通りします。つまり、あなたのミドルウェアが`HttpResponse::json(json!({ "message": "Unauthenticated." }))`で答える`401`はエラーページに**なります** - そうでなければクライアントがモーダルにしてしまうのは、まさにそのレスポンスなのですから、それが狙いです - そして、プロップまで生き残るのは`message`と`request_id`だけだ、ということでもあります。`errors`や`code`、そのほか何かを運ぶエンベロープは、ページになるときにそれらのフィールドを失います。
+
+あなたのミドルウェアが、エラーのステータスで自分自身のJSONのボディを保たなければならない場合は、ゲートが一致しない形を与える - 人が読めるテキストのキーを`message`以外にする - か、レスポンスに自分で`X-Inertia: true`を設定してください。後者は、そのレスポンスがすでにInertiaのレスポンスであるという印になり、対象から外します。どちらも、そのレスポンスを組み立てる場所での1行です。
+
+知っておく価値のある穴が1つあります: **パニックする**ハンドラには手が届きません。パニックの網はミドルウェアチェーン全体を包んでいるため、合成される`500`は、すべてのミドルウェアのフレームがすでに巻き戻された後に組み立てられます。パニックするハンドラは、それでもクライアントのモーダルを表面化させます。パニックする代わりに`Err(...)`を返せば（[エラーハンドリング](errors.md)を参照）、エラーページがそれをカバーします。
+
+ページ自身の描画が失敗した場合 - コンポーネントを解決できない、SSRが落ちている、共有プロップがエラーになる - フレームワークはリクエストIDを伴う`warn`をログに記録し、元のエラーレスポンスを返します。壊れたエラーページが、それが描画していたエラーを覆い隠すことは決してありません。
+
+### Suprnovaが異なる設計を選んだ理由
+
+Laravelはこれを例外ハンドラに置きます: `bootstrap/app.php`を編集し、ステータスに自分でマッチさせ、`Inertia::render('Error', ['status' => $response->getStatusCode()])`を呼び、`$response->setStatusCode(...)`でコードを戻します。それは柔軟ですが、同時に、どのプロジェクトも手で書き直すフレームワークの配管でもあり、たいていは本番でモーダルを目にした後にそうすることになります。
+
+ここでは、それが設定1行です。判断はどのアプリでも同じだからです: Inertiaの訪問かブラウザのナビゲーションはページを受け取り、APIクライアントはJSONを受け取り、ほかの契約が所有するものはすべてそのままにされます。その引き換えに、規則はあなたが書く`match`ではなく固定されたものになります。ですから、特定のレスポンスを対象から外すには、ゲートが認識しないボディを与えるか、すでにInertiaであると印を付けることになります - [どのボディが書き換えられるか](#どのボディが書き換えられるか)を参照してください。
 
 ## サーバー主導の`<head>`要素
 
@@ -745,7 +852,7 @@ let cfg = InertiaConfig::new()
 
 LaravelのInertiaアダプターには、単一のグローバル「共有データ」レジストリと、リクエスト単位の`Inertia::share($k, $v)`呼び出しがあります。PHPのリクエストごとのプロセスモデルでは、リクエストごとに新しいプロセスになるため、並行する訪問者間で漏洩せず安全です。
 
-Rustのプロセスモデルは正反対です。1つのプロセスが多数のスレッドをまたいで多数の並行リクエストを処理します。そのためレジストリはプロセスグローバルなstaticではなく、[container](container.md)（task-local → thread-local → global）に存在します。`App::inertia_share*`はアクティブなコンテナの`InertiaRegistry`へ書き込みます。これにより`TestContainer::fake()`を使うテストは何も登録解除せずにきれいな分離を得られます。表面はLaravelと同じですが、ランタイムが異なるため下の機構が違います。
+Rustのプロセスモデルは正反対です。1つのプロセスが多数のスレッドをまたいで多数の並行リクエストを処理します。そのためレジストリはプロセスグローバルなstaticではなく、[サービス コンテナ](container.md)（task-local → thread-local → global）に存在します。`App::inertia_share*`はアクティブなコンテナの`InertiaRegistry`へ書き込みます。これにより`TestContainer::fake()`を使うテストは何も登録解除せずにきれいな分離を得られます。表面はLaravelと同じですが、ランタイムが異なるため下の機構が違います。
 
 注記に値する、Rustらしい他の9つの選択:
 
@@ -761,8 +868,8 @@ Rustのプロセスモデルは正反対です。1つのプロセスが多数の
 
 ## 次のステップ
 
-- [Page Components](frontend-pages.md) - フロントエンドがコンポーネント名をSvelte / React / Vueモジュールへ解決する仕組み
-- [TypeScript Types](frontend-typescript-types.md) - `suprnova generate-types`が`#[derive(InertiaProps)]`構造体からTS定義を出力する
-- [Data Objects](data.md) - 部分的なリロードと合成される、フィールドごとのinclude / allowlistゲーティングを備えたDTO用の`#[derive(Data)]`
-- [Error Model](error-model.md) - `Response`、パニック境界、`FrameworkError`がInertiaレスポンスをどのように通り抜けるか
-- [Container](container.md) - `App::inertia_share*`と`InertiaSharedData`の背後にあるルックアップモデル
+- [ページ コンポーネント](frontend-pages.md) - フロントエンドがコンポーネント名をSvelte / React / Vueモジュールへ解決する仕組み
+- [TypeScript 型](frontend-typescript-types.md) - `suprnova generate-types`が`#[derive(InertiaProps)]`構造体からTS定義を出力する
+- [データ オブジェクト](data.md) - 部分的なリロードと合成される、フィールドごとのinclude / allowlistゲーティングを備えたDTO用の`#[derive(Data)]`
+- [エラー モデル](error-model.md) - `Response`、パニック境界、`FrameworkError`がInertiaレスポンスをどのように通り抜けるか
+- [サービス コンテナ](container.md) - `App::inertia_share*`と`InertiaSharedData`の背後にあるルックアップモデル

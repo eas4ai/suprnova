@@ -348,6 +348,8 @@ pub async fn register() {
 
 `LocaleMiddleware::from_env()` 读取 `LocalizationConfig::from_env()`；`LocaleMiddleware::new(config)` 接受一个您自己构建的。一个脚手架生成的应用已经带着这两行了。
 
+如果这个应用点名了一个 [Inertia 错误页面](frontend-inertia-responses.md#error-pages)，也请把它注册在 `Inertia::install` **之前**。那个页面是由一个中间件在返回的路上渲染的，那时候在它内部注册的一切都已经返回 - 所以在 Inertia 这一层内部打开的语言区域作用域，到那时早就没了，于是每一个错误页面都会以默认语言区域渲染。会话在语言区域外面、语言区域在 Inertia 外面，就是脚手架采用的顺序。
+
 ### 在请求进行到一半时改变语言区域
 
 `Lang::set_locale` 就是 Laravel 的 `App::setLocale` - 它从那一刻起，重写当前请求的语言区域：

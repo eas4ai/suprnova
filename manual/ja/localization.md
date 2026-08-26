@@ -348,6 +348,8 @@ pub async fn register() {
 
 `LocaleMiddleware::from_env()` は `LocalizationConfig::from_env()` を読みます。`LocaleMiddleware::new(config)` は、あなたが自分で組み立てたものを受け取ります。スキャフォルドされたアプリには、すでに両方の行があります。
 
+アプリが[Inertiaのエラーページ](frontend-inertia-responses.md#error-pages)を名指ししている場合は、`Inertia::install` よりも**前に**も登録してください。そのページは、Inertiaの内側に登録されたすべてが戻ったあとで、出ていく途中のミドルウェアによって描画されます - そのため、Inertiaの層の内側で開かれたロケールのスコープは、その時点ではすでに消えており、あらゆるエラーページがデフォルトのロケールで描画されてしまいます。外側からセッション、ロケール、Inertiaの順 - これが、スキャフォルドの使う並びです。
+
 ### リクエストの途中でロケールを変更する
 
 `Lang::set_locale` はLaravelの `App::setLocale` です - それは、その時点から先の、現在のリクエストのロケールを書き換えます:

@@ -388,6 +388,14 @@ mensagem. O `code` é legível no `Response` inspecionado, mas **não** viaja
 através de `authorize` - `FrameworkError` não tem campo de code; leia-o a
 partir de `inspect()` se precisar dele.
 
+Seja qual for o status em que uma negação termine, ela chega ao cliente
+como o corpo de erro JSON do framework. Um app Inertia também deve
+nomear uma [página de erro](frontend-inertia-responses.md#error-pages) -
+sem uma, o cliente Inertia trata esse corpo como uma resposta que não é
+Inertia e mostra seu modal de erro em tela cheia em vez de renderizar
+qualquer coisa, então um usuário com o papel errado vê uma quebra em vez
+de "você não pode fazer isso".
+
 ### `raw`: "negado" vs "indefinido"
 
 `Gate::raw` (e `raw_async`) retorna `Option<Response>`: `None` significa

@@ -313,6 +313,8 @@ decision.status();    // Option<u16> - 这里是 None；deny_as_not_found 之后
 
 所以 `deny_as_not_found()` 会浮现为一个 404，`deny_with_status(422, "…")` 浮现为一个 422，而 `deny_with("…")` 浮现为一个带着您那条消息的 403。这个 `code` 在被检视的那个 `Response` 上是可读的，但它**不会**穿过 `authorize` - `FrameworkError` 没有 code 字段；如果您需要它，请从 `inspect()` 里读。
 
+不管一次拒绝落到哪个状态码上，它到达客户端时都是框架的那份 JSON 错误响应体。一个 Inertia 应用还应该点名一个[错误页面](frontend-inertia-responses.md#error-pages) - 没有它，Inertia 客户端就会把那份响应体当成一个非 Inertia 响应，并显示它那个全屏错误模态框，而不是渲染任何东西，于是一个角色不对的用户看到的是一次崩溃，而不是“您不能这么做”。
+
 ### `raw`：“已拒绝”与“未定义”之别
 
 `Gate::raw`（以及 `raw_async`）返回 `Option<Response>`：`None` 表示*没有规则适用* - 没有 `before` 钩子开火，没有注册过门，也没有 `after` 钩子来补位 - 这和一个明确的 `Some(deny)` 是有区别的。`inspect` 会把那个 `None` 规范化成已配置的默认拒绝响应（除非 `Gate::default_denial_response` 设过别的，否则就是一次朴素的拒绝）；而 `raw` 会把那个 `None` 保留下来，用于诊断（“这个动作到底有没有被管起来？”）。

@@ -5,6 +5,97 @@ geändert hat. Jeder Versionsabschnitt ist der Freigabe-Datensatz dieser
 Version. Eine Version wird freigegeben, wenn ihr Versions-Commit und
 der passende `v<version>`-Tag atomar gepusht werden. Neueste zuerst.
 
+## 1.3.6 - 2026-08-26
+
+### Hinzugefügt
+
+- **Framework-Fehler können Ihre eigene Inertia-Seite rendern statt des
+  Fehlermodals des Clients.** Ein Benutzer ohne die nötige Berechtigung
+  klickte einen Navigationslink in eine geschützte Route und bekam
+  Inertias Bildschirm „All Inertia requests must receive a valid Inertia
+  response, however a plain JSON response was received“: Die `403` trug
+  den JSON-Fehler-Body des Frameworks und keinen Header `X-Inertia`, der
+  Client wies sie also ab. Dasselbe galt für eine `404` für einen Pfad
+  ohne Route, eine ratenbegrenzte `429` und die `500` eines
+  fehlschlagenden Handlers. Benennen Sie mit
+  `InertiaConfig::error_page("Error")` eine Seiten-Komponente, und diese
+  Responses rendern eben jene Seite mit ihrem ursprünglichen Status und
+  den Props `status`, `message` sowie - wenn der Fehler eine trug -
+  `request_id`. Jeder Header, den die Fehler-Response gesetzt hat,
+  übersteht den Austausch, außer denen, die nur den ersetzten Body
+  beschrieben (`Content-*`, `Transfer-Encoding`) oder regelten, wie er
+  gespeichert werden durfte (`Cache-Control`, `Expires`, `Age`, `ETag`,
+  `Last-Modified`); `Retry-After` bei einer `429`, `WWW-Authenticate`
+  bei einer `401`, `Vary` und `Set-Cookie` erreichen den Client also
+  weiterhin alle. Die Seite setzt für sich selbst
+  `Cache-Control: no-cache, private`: Sie trägt Ihre gemeinsamen Props,
+  darf also nie von einem gemeinsam genutzten Cache gespeichert und
+  einem anderen Besucher ausgeliefert werden - was auch immer die von
+  ihr ersetzte Response erlaubte. Ein Inertia-Besuch bekommt das
+  JSON-Page-Objekt, eine harte Navigation die vollständige HTML-Shell;
+  die URL in die Adressleiste einzufügen funktioniert also ebenfalls.
+  Alles, wofür schon jemand zuständig ist, bleibt unberührt:
+  Validierungs-`422`-Responses leiten weiterhin zum Formular zurück,
+  `X-Inertia-Location`-Bounces und Responses, die bereits Inertia-Seiten
+  sind, gehen durch, und ein Client, dessen `Accept` JSON bevorzugt,
+  behält exakt den Body, den er vorher bekam. `suprnova new` scaffoldet
+  `frontend/src/pages/Error.*` und setzt `.error_page("Error")`, neue
+  Projekte sind also ohne jedes Zutun abgedeckt.
+
+### Behoben
+
+- **Eine lokale Disk weist einen legitimen Pfad nicht mehr ab, weil ein
+  anderer Task ihn angefasst hat.** Der Pfad-Schutz löste jede
+  Komponente eines Pfads mit zwei Abfragen auf und fasste sie zu einem
+  einzigen Befund zusammen; gewöhnliche nebenläufige Aktivität konnte
+  daher als Symlink-Flucht gelesen werden: Eine Komponente, die
+  `canonicalize` gerade als fehlend gemeldet hatte und die ein anderer
+  Task dann als gewöhnliche Datei anlegte, kam als `PermissionDenied`
+  zurück und benannte einen Symlink, den es nie gab. Am härtesten traf
+  es dort, wo Writer von Natur aus konkurrieren - ein unterlegener
+  `write_with(..).if_not_exists(true)`-Teilnehmer bekam diese Ablehnung
+  statt `ConditionNotMatch`, sobald der Gewinner den Schlüssel zwischen
+  den beiden Abfragen sichtbar machte, was unter einer ausgelasteten
+  Testsuite rund einem Drittel der Läufe entsprach. Jede Komponente wird
+  jetzt in einem einzigen Durchgang eingeordnet, `symlink_metadata`
+  zuerst: Ist dort nichts, ist es freier Platz; eine gewöhnliche Datei
+  oder ein Verzeichnis wird wie bisher aufgelöst und eingegrenzt; und
+  nur ein Symlink, der sich weiterhin nicht auflösen lässt, wird
+  abgelehnt. Eine Komponente, die mitten in der Einordnung verschwindet,
+  wird noch einmal angesehen, statt abgelehnt zu werden. Jede
+  Symlink-Ablehnung bleibt unverändert.
+
+### Upgrade
+
+- Für eine bestehende Anwendung ändert sich nichts, bis sie sich dafür
+  entscheidet. `InertiaConfig::error_page` ist standardmäßig `None`, und
+  `Inertia::install` registriert die Fehlerseiten-Middleware nur, wenn
+  eine Komponente benannt ist; Fehler-Responses behalten also exakt ihre
+  Bodys. Zum Übernehmen legen Sie neben Ihren anderen Seiten eine
+  Seiten-Komponente namens `Error` an (sie bekommt `status`, `message`
+  und ein optionales `request_id`) und hängen `.error_page("Error")` an
+  die `InertiaConfig`, die Sie an `Inertia::install` übergeben. Ein
+  Handler, der **panikt**, bleibt außen vor: Die Panic-Grenze umschließt
+  die gesamte Middleware-Kette, seine synthetisierte `500` entsteht also
+  erst, nachdem sich jede Middleware bereits abgewickelt hat. Geben Sie
+  `Err(...)` zurück, statt zu paniken, dann deckt die Fehlerseite ihn
+  ab. Beachten Sie, dass die **Form** des Bodys entscheidet und nicht
+  sein Urheber: Bei einem Fehlerstatus werden ein leerer Body, ein
+  JSON-Objekt, dessen `message` ein String ist, und der Text
+  `404 Not Found` des Routers ersetzt, gleich welche Middleware sie
+  gebaut hat, und nur `message` und `request_id` überleben in die Props.
+  Eine Response, die ihren eigenen JSON-Body behalten muss, sollte ihren
+  Text unter einem anderen Schlüssel als `message` führen oder
+  `X-Inertia: true` auf sich selbst setzen. Und registrieren Sie
+  `LocaleMiddleware` **vor** `Inertia::install`: Die Fehlerseite wird
+  auf dem Rückweg gerendert, nachdem jede innerhalb der Inertia-Schicht
+  registrierte Middleware zurückgekehrt ist; ein dort drinnen geöffneter
+  Locale-Scope ist dann bereits weg, und jede Fehlerseite würde im
+  Standard-Locale der Anwendung rendern. Die gescaffoldete
+  `bootstrap.rs` tut das jetzt, und dieselbe Überlegung gilt für jede
+  eigene Middleware mit Anfrage-Scope, aus deren Zustand die gemeinsamen
+  Props der Seite lesen.
+
 ## 1.3.5 - 2026-08-26
 
 ### Geändert

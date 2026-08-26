@@ -313,6 +313,8 @@ decision.status();    // Option<u16> - ここではNone。deny_as_not_found の�
 
 したがって `deny_as_not_found()` は404として、`deny_with_status(422, "…")` は422として、`deny_with("…")` はあなたのメッセージを運ぶ403として表面化します。`code` はinspectした `Response` からは読めますが、`authorize` を通じては**伝わりません** - `FrameworkError` にコードのフィールドはないため、必要なら `inspect()` から読んでください。
 
+拒否がどのステータスに着地するとしても、それはフレームワークのJSONのエラーボディとしてクライアントへ届きます。Inertiaアプリは、[エラーページ](frontend-inertia-responses.md#error-pages)も名指ししておくべきです - それがないと、Inertiaクライアントはそのボディを非Inertiaのレスポンスとして扱い、何も描画せずに全画面のエラーモーダルを表示します。つまり、ロールが合っていないユーザーには「その操作はできません」ではなく、クラッシュが見えることになります。
+
 ### `raw`: 「拒否」と「未定義」
 
 `Gate::raw`（および `raw_async`）は `Option<Response>` を返します: `None` は*どのルールも適用されなかった*ことを意味し - `before` フックは発火せず、ゲートは登録されておらず、`after` フックも埋めていない - 明示的な `Some(deny)` とは区別されます。`inspect` はその `None` を、設定されたデフォルトの拒否レスポンス（`Gate::default_denial_response` が別のものを設定していなければ素の拒否）へ正規化します。`raw` は診断のために `None` を保ちます（「このアクションはそもそも統制されているのか?」）。

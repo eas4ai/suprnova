@@ -360,6 +360,7 @@ merge 和 scroll 标志不会参与：它们决定客户端如何折叠已接收
 - `Optional` 和 `Defer` prop 仍需要显式请求才会解析。带点条目（`permissions.read`）可算作对顶层键的该请求，解析后的值会像 `Eager` prop 一样缩窄。
 - 对当前值不是对象的 prop - 字符串、数字、数组 - 使用带点 `only` 会缩窄为 `{}`，而不是原始值。客户端只在缓存值和传入值**均为**对象时深度合并（`inertia-3.6.1/packages/core/src/response.ts` 的 `nestedTopKeys`）；空对象相对非对象缓存会与填充对象相同地未通过检查，因此空对象会完全替换缓存 scalar，而非合并到其上。请避免向非对象形状 prop 发送带点请求。
 - 带点 `except` 不会在客户端删除字段 - 它阻止该字段在此次响应中刷新，客户端 merge 会从已有缓存恢复它。`deepMergeObjects` 会先克隆缓存值，然后仅覆盖服务器实际发送的键；服务器修剪的键从不触碰，因此保留旧值。客户端首次加载该 prop（尚无缓存）时，修剪字段确实不存在，因为没有可回退的缓存 - “从缓存恢复”行为仅适用于客户端已经见过的页面。
+
 ## 通过 `App::inertia_share*` 共享数据
 
 有些 props 在每一个 Inertia 页面上都是一样的 - 认证状态、CSRF 令牌、当前的语言区域、应用全局的标志。在启动时把它们注册一次，它们就会合并进每一个响应里：
@@ -581,17 +582,23 @@ let cfg = InertiaConfig::new().version(version);
 
 ## 启动：`Inertia::install`
 
-大多数应用会从仅 HTTP 的启动 hook `register_http_stack` 以一次调用安装四个协议中间件；服务器路径运行它，而队列、调度、工作流和 console 二进制跳过它（见[启动](bootstrap.md)）：
+大多数应用会从仅 HTTP 的启动 hook `register_http_stack` 以一次调用安装协议中间件；服务器路径运行它，而队列、调度、工作流和 console 二进制跳过它（见[启动](bootstrap.md)）：
 
 ```rust
 use suprnova::{Inertia, InertiaConfig};
 
 pub fn register_http_stack() {
-    Inertia::install(&InertiaConfig::new())
-        .expect("Inertia install failed");
-    // add global middleware in the order you want it to wrap requests
+    let cfg = InertiaConfig::new()
+        .version(env!("CARGO_PKG_VERSION"))
+        .default_title("My App");
+
+    Inertia::install(&cfg)
+        .expect("Inertia install failed (production needs a built frontend manifest)");
+    // …您其余的全局中间件，按您希望它们运行的顺序排列
 }
 ```
+
+Inertia 这一层所依赖的东西 - `SessionMiddleware` - 以及错误页面需要读取的东西 - `LocaleMiddleware` - 都要放在这次调用*之上*。参见[下面那些顺序规则](#启动-inertia-install)。
 
 ```rust
 // cmd/main.rs
@@ -609,16 +616,121 @@ Application::new()
 3. 注册 `InertiaVersionMiddleware` - 客户端和服务器资产版本不一致时，发送 `409` + `X-Inertia-Location`。
 4. 注册 `Inertia303Middleware` - 在非 GET Inertia 重定向上将 `302` 升级为 `303`。
 5. 注册 `InertiaValidationRedirectMiddleware` - 将 Inertia 访问的 `422` 变为回到表单页、并 flash 错误的 `303`。参见[验证失败](#验证失败)。
+6. **仅当** `cfg` 点名了一个 `.error_page(...)` 时才注册 `InertiaErrorPageMiddleware` - 它会把框架自己的那些错误响应变成那个页面。参见[错误页面](#错误页面)。
 
 顺序很重要：headers middleware 最先注册，所以最外层且能看到每一个响应，包括版本 middleware 在处理程序尚未运行前返回的 `409`。验证重定向 middleware 最后注册，因此最内层、最接近处理程序，在另外三个 middleware 有机会触及它之前先看到 `422`。
 
 `install` 还会**保留配置**。之后构建的每个 `InertiaResponse` 均以它为起点，因此 `.frontend(...)`、`.version(...)`、`.default_title(...)`、`.ssr(...)` 和 `.encrypt_history(...)` 到达每一个页面，无需处理程序传递它。使用 `.with_config(...)` 仍可为单个页面覆盖；从不调用 `Inertia::install` 的应用获得 `InertiaConfig::default()`；再次调用 `install` 会替换保留配置。
 
-`Inertia::install` 只能调用一次；第二次调用失败，不会替换保留配置或叠加中间件。使用同一 `InertiaConfig` 的单一安装调用来设置配置。单页的 `.with_config(...)` 覆盖仍有效，但不能更改已安装版本中间件所使用的版本。
+`.with_config(...)` 会整份替换配置，`version` 也在内。`InertiaVersionMiddleware` 解析的仍然是 `Inertia::install` 拿到的那个版本，所以这里一份没有带上同一个 `.version(...)` 的配置，会让页面对象宣告一个中间件将会弹回的版本 - 客户端在访问过那个页面之后，会多做一次整页加载。请在这份覆盖配置上设置一致的 `.version(...)`。
 
 若使用 flash 数据，请在 `Inertia::install` **之前**注册 `SessionMiddleware`。版本 middleware 会在客户端弹回前重新 flash 会话，使 flash 错误经受后续完整页面 GET；它只能在会话作用域内完成此事。
 
-仅当确实不想要某个 middleware 时才跳过此调用（很少；四者分别阻止 URL 两种表示之间的缓存投毒、静默的陈旧 bundle、重定向上的表单重放，以及验证 `422` 在客户端错误模态框中结束而无法到达 `form.errors`）。
+也请把 [`LocaleMiddleware`](localization.md) 注册在**它之前** - 前提是您用了[错误页面](#错误页面)。一个中间件里 `next` 之后的代码，是在它内部的一切都已经返回之后才运行的，所以错误页面中间件渲染的时候，任何在它内部打开的作用域都已经被弹出了 - 对语言区域中间件来说，这意味着这个页面拿到的会是应用的默认语言区域，而不是访客的。Inertia 这一层不从本地化读取任何东西，所以把语言区域放到它外面不会有任何代价。脚手架出来的 `bootstrap.rs` 已经这么做了。同样的道理适用于您自己的任何一个中间件，只要错误页面需要读取它的请求作用域。
+
+仅当确实不想要某个 middleware 时才跳过此调用（很少；它们分别阻止 URL 两种表示之间的缓存投毒、静默的陈旧 bundle、重定向上的表单重放，以及验证 `422` 在客户端错误模态框中结束而无法到达 `form.errors`）。
+
+## 错误页面
+
+一次 Inertia 访问从框架拿回一个非 2xx 响应时，得到的并不是一个错误页面 - 而是一块崩溃界面：
+
+```
+All Inertia requests must receive a valid Inertia response, however a
+plain JSON response was received.
+```
+
+客户端在渲染任何东西之前只检查一件事：响应上有没有一个 `X-Inertia: true` 响应头。一次[授权](authorization.md)检查或一个 RBAC 权限中间件给出的 `403`、一条未路由路径的 `404`、[速率限制器](rate-limiting.md)给出的 `429`、一个[失败的处理程序](errors.md)给出的 `500` - 它们全都携带着框架的 JSON 错误响应体，而且都没有这个响应头，所以客户端把它们交给了自己的模态框。一个角色不对的用户点了一下导航链接，这个应用看上去就坏了。
+
+点名一个页面组件，框架就会改为通过它来渲染这些响应，并保留状态码：
+
+```rust
+use suprnova::{Inertia, InertiaConfig};
+
+pub fn register_http_stack() {
+    Inertia::install(
+        &InertiaConfig::new()
+            .version(env!("CARGO_PKG_VERSION"))
+            .error_page("Error"),
+    )
+    .expect("Inertia install failed (production needs a built frontend manifest)");
+}
+```
+
+`"Error"` 的解析方式和其他任何页面名完全一样，所以只要有一个 `frontend/src/pages/Error.svelte`（或者 `.tsx`、`.vue`）就够了。**三个起始套件都已经带上了这样一个页面，并且已经设置好了 `.error_page("Error")`** - 一个新项目什么都不用做就已经就绪了。
+
+随之而来有一条顺序规则：**请在 `Inertia::install` 之前注册 `LocaleMiddleware`**，否则错误页面渲染时用的会是应用的默认语言区域，而不是访客的。错误页面是在返回的路上构建的 - 到那时候，在 Inertia 这一层内部注册的每一个中间件都已经返回，并且弹出了它各自打开的那个作用域。脚手架出来的 `bootstrap.rs` 把这件事做对了；如果是您自己写的，请检查一下。对您自己的任何一个请求作用域中间件也是一样，只要错误页面的共享 props 会读取它。
+
+### 页面会收到什么
+
+| Prop | 类型 | 是否总是存在 | 它是什么 |
+|---|---|---|---|
+| `status` | `number` | 是 | 原始的 HTTP 状态码 - `403`、`404`、`500`。 |
+| `message` | `string` | 是 | 错误响应体里的 `message`；如果它没带，就是这个状态码的原因短语。已经清理过：一个 `5xx` 读起来是 `"Internal Server Error"`，绝不会是底层那个错误 - 在 `APP_DEBUG=true` 之下同样如此。JSON 路径在那种情况下加上的那个仅开发环境可见的 `debug_message` 字段，是被刻意不去读取的，所以原始错误留在日志和 JSON 响应里，永远不会被渲染进一个页面。 |
+| `request_id` | `string` | 否 | 只在错误响应体带了一个的时候才存在。它和结构化日志记录下来的是同一个 id，所以这个页面可以显示一条运营者能搜到的引用。 |
+
+```svelte
+<script lang="ts">
+  interface ErrorProps {
+    status: number
+    message: string
+    request_id?: string
+  }
+
+  let { status, message, request_id }: ErrorProps = $props()
+</script>
+
+<h1>{status}</h1>
+<p>{message}</p>
+{#if request_id}<p>Reference: {request_id}</p>{/if}
+```
+
+请在组件里声明这些 props，而不要从 `types/inertia-props.ts` 里导入：[`suprnova generate-types`](frontend-typescript-types.md) 会依据您自己的 `#[derive(InertiaProps)]` 结构体重写那个文件，而这些 props 来自框架。
+
+### 这次替换之后什么会留下来
+
+状态码会被保留，原响应设置的每一个响应头也会被保留，**除了**两组。
+
+**描述了正被替换掉的那份响应体的那些。** 每一个 `Content-*` 字段（一个页面比它替换掉的那份 JSON 大四倍，却还带着原来的 `Content-Length`，那就是一个分帧上的 bug），以及 `Transfer-Encoding`。`Content-Security-Policy` 被按名字从这条规则里挑了出来 - 它共用这个前缀纯属历史上的意外，它是响应策略，而不是表示形式的元数据。
+
+**管着那份响应体可以怎样被存储的那些。** `Cache-Control`、`Expires`、`Age`、`ETag`、`Last-Modified`。这个页面携带着您的共享 props - `auth.user`、flash、语言区域那份共享数据 - 而它替换掉的那份错误响应体对每个人都是一样的，所以它绝不能继承“可以被共享缓存存下来、再交给另一个访客”这份许可，也不能继承本不属于它的那个实体的缓存校验器。这个页面转而为自己设置 `Cache-Control: no-cache, private`，也就是 Laravel 给一个带会话的响应的那个默认值。
+
+其余的一切都会带过去：`429` 上的 `Retry-After` 仍然告诉客户端什么时候再来，`401` 上的 `WWW-Authenticate` 仍然携带着那份质询，而 `Vary`、`Set-Cookie` 以及您自己的 request-id 响应头也都会完好地送达。这条规则是按“什么会被丢掉”而不是按“什么会被保留”来陈述的，所以一个框架从来没听说过的响应头会活下来，而不是悄无声息地消失。
+
+两类受众都照顾到了。一次 Inertia XHR 访问会拿到带 `X-Inertia: true` 的 JSON 页面对象；一次硬性导航 - 比如有人把 `/admin/articles` 粘进地址栏 - 会拿到完整的 HTML 外壳，和任何页面首次加载时拿到的是同一份。所以不管用户是不是经由 SPA 到达的，错误页面都能工作。
+
+### 它从不触碰什么
+
+这个中间件只在没有别人有答案的地方顶上。它不去动这些：
+
+- **验证 `422`。** 那些归 `InertiaValidationRedirectMiddleware` 管 - 参见[验证失败](#验证失败)。一个挺过了那个中间件的 `422`（没有 `errors` 对象，或者是一次 Precognition 试运行）也会保住自己的响应体。
+- **任何携带 `X-Inertia-Location` 的东西。** `409` 版本弹回，以及 RBAC 中间件的 `redirect_to` 形式。客户端依据的是这个响应头，而不是响应体。
+- **重定向。** 只有 `400`-`599` 在范围之内。
+- **API 客户端。** 一个 `Accept` 里 `application/json` 优先于 `text/html` 的请求，保住它一直以来的那份 JSON 契约。`curl` 的 `*/*` 算作没有偏好，所以它也保住 JSON。只有一次 Inertia 访问或者一次浏览器导航才会拿到页面。
+- **本来就已经是 Inertia 页面的那些响应。** 一个渲染了自己的页面、并给了它一个 `410` 的处理程序，会保住自己那个组件。
+- **不是框架那种错误形状的响应体。** 您自己的 HTML 错误页面、不是路由器自己那句 `404 Not Found` 的纯文本，或者一个键名不同的 JSON envelope - 这些都不会被推翻。
+- **`error_page` 没有设置时的一切。** 这个中间件根本不会被注册，所以一个没有选择启用的应用，跑的就是它此前跑的那份代码，分毫不差。
+
+### 哪些响应体会被改写
+
+判定的依据是**响应体的形状**，而不是谁写出了它。在一个 `400`-`599` 的状态码上，恰好有三种形状会被替换：
+
+- 一个空的响应体；
+- 一个 `message` 是字符串的 JSON 对象 - 框架自己的那个错误 envelope，以及任何形状和它一样的东西；
+- 路由器那句固定的 `404 Not Found` 纯文本响应体。
+
+其余的一切都会原样通过。这意味着，您自己的某个中间件用 `HttpResponse::json(json!({ "message": "Unauthenticated." }))` 回答的一个 `401` **确实**会变成错误页面 - 这正是重点，因为客户端否则正好会把这个响应弹成模态框 - 也意味着只有 `message` 和 `request_id` 会活着进入 props。一个携带着 `errors`、`code` 或者别的什么的 envelope，在变成一个页面时会丢掉那些字段。
+
+如果您自己的某个中间件必须在一个错误状态码上保住它自己的 JSON 响应体，就给它一个这条判定匹配不上的形状 - 把那段人类可读的文本放在 `message` 之外的某个键上 - 或者自己在这个响应上设置 `X-Inertia: true`，这会把它标记成已经是一个 Inertia 响应，从而移出范围之外。这两种做法，在构建响应的那个位置都只是一行。
+
+有一个缺口值得知道：一个会 **panic** 的处理程序落在这套机制够不着的地方。那张 panic 安全网包住的是整条中间件链，所以那个合成出来的 `500`，是在每一个中间件栈帧都已经展开之后才构建的。会 panic 的处理程序仍然会让客户端的模态框浮出来。返回 `Err(...)` 而不是 panic（参见[错误处理](errors.md)），错误页面就管得着它了。
+
+如果这个页面自己渲染失败了 - 组件解析不出来、SSR 挂了、某个共享 prop 出错 - 框架会带着 request id 记一条 `warn`，并返回原来那个错误响应。一个坏掉的错误页面，绝不会掩盖它本来要渲染的那个错误。
+
+### 为什么 Suprnova 有所不同
+
+Laravel 把这件事放在异常处理程序里：您去改 `bootstrap/app.php`，自己对状态码做匹配，再调用 `Inertia::render('Error', ['status' => $response->getStatusCode()])`，并用 `$response->setStatusCode(...)` 把状态码放回去。这很灵活，同时它也是一段每个项目都要手工重写一遍的框架内部接线代码 - 而且通常还是在生产环境里先看见了那个模态框之后才写的。
+
+在这里它是一行配置，因为这个决定对每一个应用都是一样的：一次 Inertia 访问或者一次浏览器导航拿到一个页面，一个 API 客户端拿到 JSON，而归别的契约管的一切都不去动。代价是这条规则是固定的，而不是一段您自己写的 `match`，所以要把某一个响应排除在外，就得给它一个这条判定认不出来的响应体，或者把它标记成已经是 Inertia - 参见[哪些响应体会被改写](#哪些响应体会被改写)。
 
 ## 服务器驱动的 `<head>` 元素
 

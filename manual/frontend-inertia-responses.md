@@ -902,7 +902,7 @@ from S3), do the read once at boot and pass the cached `String` to
 
 ## Bootstrap: `Inertia::install`
 
-Most apps install the four protocol middlewares in one call, from
+Most apps install the protocol middlewares in one call, from
 `register_http_stack` - the HTTP-only bootstrap hook, which the server
 path runs and the queue, schedule, workflow, and console binaries skip
 (see [Bootstrap](bootstrap.md)):
@@ -997,8 +997,9 @@ to any middleware of yours whose request scope the error page needs to
 read.
 
 Skip the call only if you genuinely don't want one of these middlewares
-(rare; all four close real failure modes - cache poisoning across the two
-representations of a URL, silent stale-bundle, form-replay-on-redirect,
+(rare; each of them closes a real failure mode - cache poisoning across
+the two representations of a URL, silent stale-bundle,
+form-replay-on-redirect,
 and a validation `422` dead-ending in the client's error modal instead of
 reaching `form.errors`).
 

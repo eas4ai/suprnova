@@ -585,6 +585,16 @@ pub async fn register() {
 `LocaleMiddleware::new(config)` toma una que construyas tú. Una app
 con andamiaje ya tiene ambas líneas.
 
+Regístralo **antes de** `Inertia::install` también, si la aplicación
+nombra una
+[página de error de Inertia](frontend-inertia-responses.md#error-pages).
+Esa página la renderiza un middleware en la salida, después de que todo
+lo registrado dentro de él haya retornado - así que un scope de locale
+abierto dentro de la capa de Inertia ya no existe para entonces, y todas
+las páginas de error se renderizarían en el locale predeterminado.
+Sesión fuera de locale fuera de Inertia es el orden que usa el
+andamiaje.
+
 ### Cambiar el locale a mitad de solicitud
 
 `Lang::set_locale` es el `App::setLocale` de Laravel - reescribe el

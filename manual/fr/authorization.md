@@ -406,6 +406,15 @@ lit sur le `Response` inspecté mais ne voyage **pas** à travers
 `authorize` - `FrameworkError` n'a pas de champ code ; lisez-le depuis
 `inspect()` si vous en avez besoin.
 
+Quel que soit le statut sur lequel un refus atterrit, il parvient au
+client sous la forme du corps d'erreur JSON du framework. Une application
+Inertia devrait aussi nommer une
+[page d'erreur](frontend-inertia-responses.md#error-pages) - sans elle,
+le client Inertia traite ce corps comme une réponse non Inertia et
+affiche sa modale d'erreur plein écran au lieu de rendre quoi que ce
+soit : un utilisateur au mauvais rôle voit alors un plantage plutôt qu'un
+« vous n'avez pas le droit de faire cela ».
+
 ### `raw` : « refusé » vs « indéfini »
 
 `Gate::raw` (et `raw_async`) retourne `Option<Response>` : `None`
@@ -431,10 +440,12 @@ use suprnova::Gate;
 Gate::default_denial_response(Response::deny_as_not_found());
 ```
 
-Après cet appel, deux sortes de résultats prennent la nouvelle forme : un `false` nu - venu d'un gate booléen (`define`/`define_async`, y compris une méthode
-`#[policy]` qui retourne `bool`), ou d'un hook `before`/`after` qui a décidé
-`false` - et une évaluation que rien d'autre n'a tranchée : une ability
-indéfinie sur laquelle aucun hook n'a d'avis non plus. Tout cela remontait auparavant en `Response::deny()` nu
+Après cet appel, deux sortes de résultats prennent la nouvelle forme : un
+`false` nu - venu d'un gate booléen (`define`/`define_async`, y compris
+une méthode `#[policy]` qui retourne `bool`), ou d'un hook
+`before`/`after` qui a décidé `false` - et une évaluation que rien
+d'autre n'a tranchée : une ability indéfinie sur laquelle aucun hook n'a
+d'avis non plus. Tout cela remontait auparavant en `Response::deny()` nu
 (un 403) ; désormais, cela remonte sous la forme donnée à
 `default_denial_response` - un 404 dans l'exemple ci-dessus. C'est le
 geste classique « cacher l'existence de la ressource à un utilisateur qui

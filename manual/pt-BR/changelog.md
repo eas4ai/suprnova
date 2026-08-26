@@ -5,6 +5,93 @@ versão é o registro de lançamento daquela versão. Uma versão é
 lançada quando seu commit de versão e a tag `v<version>` correspondente
 são enviados atomicamente. Mais recentes primeiro.
 
+## 1.3.6 - 2026-08-26
+
+### Adicionado
+
+- **Erros do framework podem renderizar a sua própria página Inertia em
+  vez do modal de falha do cliente.** Um usuário sem determinada
+  permissão clicava num link de navegação para uma rota protegida e
+  recebia a tela do Inertia com "All Inertia requests must receive a
+  valid Inertia response, however a plain JSON response was received": o
+  `403` carregava o corpo de erro JSON do framework e nenhum header
+  `X-Inertia`, então o cliente o recusava. O mesmo valia para um `404`
+  sem rota, um `429` barrado por limitação de taxa e o `500` de um
+  handler que falha. Nomeie um componente de página com
+  `InertiaConfig::error_page("Error")` e essas respostas passam a
+  renderizar essa página no status original, com as props `status`,
+  `message` e - quando o erro carregava um - `request_id`. Todo header
+  definido pela resposta de erro sobrevive à troca, exceto os que apenas
+  descreviam o corpo que está sendo substituído (`Content-*`,
+  `Transfer-Encoding`) ou governavam como ele podia ser armazenado
+  (`Cache-Control`, `Expires`, `Age`, `ETag`, `Last-Modified`), então
+  `Retry-After` num `429`, `WWW-Authenticate` num `401`, `Vary` e
+  `Set-Cookie` continuam todos chegando ao cliente. A página define
+  `Cache-Control: no-cache, private` para si mesma: ela carrega as suas
+  props compartilhadas, então nunca pode ser armazenada por um cache
+  compartilhado e servida a outro visitante, não importa o que a
+  resposta que ela substituiu permitisse. Uma visita Inertia recebe o objeto de
+  página JSON; uma navegação dura recebe o shell HTML completo, então
+  colar a URL na barra de endereços também funciona. Tudo que já tem um
+  dono fica intocado: `422`s de validação continuam redirecionando de
+  volta ao formulário, bounces de `X-Inertia-Location` e respostas que
+  já são páginas Inertia passam direto, e um cliente cujo `Accept`
+  prefere JSON mantém exatamente o corpo que recebia antes. O
+  `suprnova new` gera `frontend/src/pages/Error.*` por scaffold e define
+  `.error_page("Error")`, então projetos novos já estão cobertos sem
+  fazer nada.
+
+### Corrigido
+
+- **Um disco local não recusa mais um caminho legítimo porque outra task
+  o tocou.** A salvaguarda de caminhos resolvia cada componente de um
+  caminho com duas sondagens e combinava as duas num único veredito,
+  então atividade concorrente comum podia ser lida como uma fuga por
+  symlink: um componente que o `canonicalize` acabara de reportar como
+  ausente, e que outra task então criava como um arquivo comum, voltava
+  como `PermissionDenied` apontando um symlink que nunca esteve ali.
+  O problema pegava com mais força onde escritores disputam por design -
+  um `write_with(..).if_not_exists(true)` que perdia a corrida recebia
+  essa recusa em vez de `ConditionNotMatch` sempre que o vencedor
+  publicava a chave entre as duas sondagens, o que sob uma suíte de
+  testes carregada dava aproximadamente um terço das execuções. Cada componente agora é
+  classificado a partir de uma única passagem, `symlink_metadata`
+  primeiro: nada ali é espaço livre, um arquivo ou diretório comum é
+  resolvido e confinado como antes, e só um symlink que ainda assim não
+  pode ser resolvido é recusado. Um componente que desaparece no meio da
+  classificação é olhado mais uma vez em vez de recusado. Toda recusa de
+  symlink permanece inalterada.
+
+### Atualizando
+
+- Nada muda para um app existente até que ele opte por isso. O
+  `InertiaConfig::error_page` tem `None` como padrão, e o
+  `Inertia::install` registra o middleware de página de erro somente
+  quando um componente é nomeado, então as respostas de erro mantêm
+  exatamente os seus corpos. Para adotá-lo, adicione um componente de
+  página chamado `Error` ao lado dos outros (ele recebe `status`,
+  `message` e um `request_id` opcional) e encadeie
+  `.error_page("Error")` no `InertiaConfig` que você passa para
+  `Inertia::install`. Um handler que sofre **panic** continua fora de
+  escopo: a rede de captura de panic envolve toda a cadeia de
+  middlewares, então o `500` sintetizado por ela é construído depois que
+  todo middleware já desempilhou. Retorne `Err(...)` em vez de sofrer
+  panic e a página de erro cobre o caso. Note que o critério é o
+  **formato** do corpo, não quem o escreveu: num status de erro, um
+  corpo vazio, um objeto JSON cujo `message` é uma string e o texto
+  `404 Not Found` do próprio roteador são reescritos não importa qual
+  middleware os construiu, e só `message` e `request_id` sobrevivem até
+  as props. Uma resposta que precisa manter o próprio corpo JSON deve
+  usar para o seu texto uma chave diferente de `message`, ou definir
+  `X-Inertia: true` em si mesma. E registre o `LocaleMiddleware`
+  **antes de** `Inertia::install`: a página de erro é renderizada na
+  saída, depois que todo middleware registrado dentro da camada Inertia
+  já retornou, então um escopo de locale aberto lá dentro já não existe
+  mais e toda página de erro seria renderizada no locale padrão do app.
+  O `bootstrap.rs` com scaffold já faz isso, e o mesmo raciocínio vale
+  para qualquer middleware seu com escopo de solicitação cujo estado as
+  props compartilhadas da página leiam.
+
 ## 1.3.5 - 2026-08-26
 
 ### Alterado

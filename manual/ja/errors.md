@@ -57,6 +57,8 @@ pub async fn show(req: Request) -> Response {
 
 各 `?` は1つの直接的な変換を使います。`Response` ではなく `Result<_, FrameworkError>` を返すコードは、`DbErr` が直接 `FrameworkError` へ変換されるため、SeaORM呼び出しで `.await?` を使えます。
 
+これらの変換はどれも、最後はフレームワークのJSONのエラーボディ - 対応するステータスでの `{ "message": …, "request_id": … }` - に行き着きます。APIクライアントにとってはそれが正解ですが、ページを必要とするInertiaの訪問にとっては不正解です。[エラーページ](frontend-inertia-responses.md#error-pages)を名指ししておけば、Inertiaアプリはこれらのエラーを本物のページとして描画し、APIクライアントはJSONをそのまま受け取り続けます。
+
 ## `AppError` - インラインのドメインエラー
 
 専用の型を用意するほどではない、一回限りのエラーには `AppError` を使ってください。コンストラクタは、Laravelの `abort($status, $msg)` という形に対応しています。
@@ -521,6 +523,7 @@ pub async fn show(req: Request) -> Response {
 | 重複キー違反 → 422 | `FrameworkError::from_unique_violation(field, msg, e)` |
 | 既存のエラーに注釈を付ける | `err.context("creating user")` |
 | あらゆる5xxを観測する | `ErrorOccurred` を購読する |
+| エラーをInertiaのページとして描画する | `InertiaConfig::error_page("Error")` |
 
 ## 次のステップ
 

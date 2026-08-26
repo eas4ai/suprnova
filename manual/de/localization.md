@@ -622,6 +622,16 @@ pub async fn register() {
 `LocaleMiddleware::new(config)` nimmt eine, die Sie selbst gebaut
 haben. Eine gescaffoldete App hat beide Zeilen schon.
 
+Registrieren Sie `LocaleMiddleware` **außerdem vor**
+`Inertia::install`, wenn die Anwendung eine
+[Inertia-Fehlerseite](frontend-inertia-responses.md#error-pages)
+benennt. Diese Seite wird auf dem Rückweg von einer Middleware
+gerendert, nachdem alles darin Registrierte zurückgekehrt ist - ein
+innerhalb der Inertia-Schicht geöffneter Locale-Scope ist dann schon
+weg, und jede Fehlerseite würde im Standard-Locale rendern. Session
+außen, dann Locale, dann Inertia - das ist die Reihenfolge, die das
+Scaffold verwendet.
+
 ### Das Locale mitten in der Anfrage wechseln
 
 `Lang::set_locale` ist Laravels `App::setLocale` - es schreibt das
