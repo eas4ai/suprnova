@@ -68,22 +68,37 @@ async fn an_ordinary_write_is_never_visible_at_a_partial_length() {
     });
 
     let mut samples = 0usize;
+    let mut conclusive = 0usize;
     let mut partial = Vec::new();
     while !handle.is_finished() && samples < 4096 {
         tokio::time::sleep(Duration::from_micros(250)).await;
         samples += 1;
-        if let Ok(metadata) = disk.stat("big.bin").await
-            && metadata.content_length() != full_len
-        {
-            partial.push(metadata.content_length());
+        match disk.stat("big.bin").await {
+            Ok(metadata) if metadata.content_length() != full_len => {
+                partial.push(metadata.content_length());
+            }
+            // Not published yet, or published whole. Both are states a reader
+            // is allowed to see, and counting them is what proves the loop did
+            // real work rather than finishing before the write started.
+            Ok(_) | Err(_) => conclusive += 1,
         }
     }
 
     handle.await.expect("the writing task did not panic");
     // How many looks this gets is a property of the host, not of the code under
-    // test, so it is reported rather than asserted: a faster disk would turn a
-    // correct implementation red.
+    // test, so the count is reported rather than pinned: a faster disk would
+    // turn a correct implementation red. That it got *any* conclusive look is
+    // asserted, because a zero-sample run would otherwise pass meaninglessly.
     eprintln!("sampled the target {samples} times during the write");
+    assert!(
+        samples > 0,
+        "the sampling loop never looked at the target, so this run proves nothing"
+    );
+    assert!(
+        conclusive > 0,
+        "no sample resolved to either absent or the full length, so this run \
+         proves nothing"
+    );
     assert!(
         partial.is_empty(),
         "the object was visible at a partial length: {:?}",
@@ -235,6 +250,45 @@ async fn the_reserved_staging_name_is_refused_on_every_operation() {
         "write onto the reserved name",
     );
 
+    disk.write("ordinary-source.txt", "source")
+        .await
+        .expect("seed an ordinary source object");
+    assert_reserved(
+        &disk
+            .copy("ordinary-source.txt", &reserved_file)
+            .await
+            .expect_err("copying into the staging directory must be refused"),
+        "copy onto a staged path",
+    );
+    assert_reserved(
+        &disk
+            .copy(&reserved_file, "stolen.txt")
+            .await
+            .expect_err("copying out of the staging directory must be refused"),
+        "copy out of a staged path",
+    );
+    assert_reserved(
+        &disk
+            .rename("ordinary-source.txt", &reserved_file)
+            .await
+            .expect_err("renaming into the staging directory must be refused"),
+        "rename onto a staged path",
+    );
+    assert_reserved(
+        &disk
+            .create_dir(&format!("{ATOMIC_STAGING_DIR}/sub/"))
+            .await
+            .expect_err("creating a directory under staging must be refused"),
+        "create_dir under the staging directory",
+    );
+    assert_reserved(
+        &disk
+            .presign_read(&reserved_file, Duration::from_secs(60))
+            .await
+            .expect_err("presigning a staged path must be refused"),
+        "presign_read of a staged path",
+    );
+
     let listing_err = disk
         .files(ATOMIC_STAGING_DIR, false)
         .await
@@ -350,11 +404,12 @@ async fn a_conditional_write_refuses_to_clobber_and_leaves_the_original_bytes() 
     );
 }
 
-/// `append` is the documented exception: opendal writes it in place, because
-/// staging an append would mean copying the whole object first. It has to keep
-/// working, and it must not stage anything.
+/// `append` is the one in-place operation: staging an append would mean copying
+/// the whole object first. It has to keep working, it must not stage anything,
+/// and that holds for the append that *creates* the object as much as for every
+/// append after it.
 #[tokio::test]
-async fn an_append_still_extends_the_object_in_place() {
+async fn an_append_extends_the_object_in_place() {
     let _guard = Storage::fake();
     let (tmp, disk) = register_local_disk();
 
@@ -375,10 +430,31 @@ async fn an_append_still_extends_the_object_in_place() {
         b"first-second",
         "append must extend rather than replace"
     );
+
+    // The first append onto a missing object is the case opendal stages by
+    // default, and staging it is what loses one of two racing first appends.
+    disk.write_with("fresh-log.txt", "opened")
+        .append(true)
+        .await
+        .expect("append onto a missing object creates it");
+    disk.write_with("fresh-log.txt", "-extended")
+        .append(true)
+        .await
+        .expect("the second append extends it");
+    assert_eq!(
+        &disk
+            .read("fresh-log.txt")
+            .await
+            .expect("the created object is readable")
+            .to_vec(),
+        b"opened-extended",
+        "an append that creates the object must still be an append"
+    );
+
     assert_eq!(
         staged_entries(tmp.path()),
         Vec::<String>::new(),
-        "an append writes in place, so it stages nothing"
+        "an append writes in place, so it stages nothing - not even the first one"
     );
 }
 
@@ -402,12 +478,10 @@ fn relative_to_current_dir(target: &std::path::Path) -> std::path::PathBuf {
     )
 }
 
-/// opendal creates the root and then the staging directory at build time, so
-/// neither a root that does not exist yet nor a relative root may break
-/// registration - and both must end up with a staging directory of their own.
-#[cfg(unix)]
+/// opendal creates the root and then the staging directory at build time, so a
+/// root that does not exist yet must not break registration.
 #[tokio::test]
-async fn a_relative_root_and_a_missing_root_both_register_with_staging() {
+async fn a_missing_root_registers_with_staging() {
     let _guard = Storage::fake();
     let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -422,6 +496,14 @@ async fn a_relative_root_and_a_missing_root_both_register_with_staging() {
         .write("x.txt", "created")
         .await
         .expect("the freshly created root is writable");
+}
+
+/// A relative root must stage inside itself, not beside the current directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_relative_root_registers_with_staging() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
 
     let absolute = tmp.path().join("relative-root");
     std::fs::create_dir_all(&absolute).expect("create the relative root");
@@ -443,4 +525,331 @@ async fn a_relative_root_and_a_missing_root_both_register_with_staging() {
             .to_vec(),
         b"relative"
     );
+}
+
+/// `if_not_exists` is the primitive callers reach for to claim a key exactly
+/// once - idempotency keys, upload dedupe, lock objects - so it has to be a real
+/// exclusive create, not a check followed by an unconditional publish. Racing
+/// writers are the only way to tell the two apart: a check-then-publish lets
+/// every racer past the check, and the last publish silently discards the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_conditional_writes_claim_the_key_exactly_once() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    const RACERS: usize = 16;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+
+    let handles: Vec<_> = (0..RACERS)
+        .map(|racer| {
+            let disk = disk.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                let payload = format!("claimed-by-racer-{racer:02}");
+                barrier.wait().await;
+                let outcome = disk
+                    .write_with("claim.txt", payload.clone())
+                    .if_not_exists(true)
+                    .await;
+                (payload, outcome)
+            })
+        })
+        .collect();
+
+    let mut winners = Vec::new();
+    for handle in handles {
+        let (payload, outcome) = handle.await.expect("a racing task did not panic");
+        match outcome {
+            Ok(_) => winners.push(payload),
+            Err(err) => assert_eq!(
+                err.kind(),
+                ErrorKind::ConditionNotMatch,
+                "a loser must be refused by the condition, not by something else: {err}"
+            ),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racer may claim the key, got {} winners: {winners:?}",
+        winners.len()
+    );
+    assert_eq!(
+        &disk
+            .read("claim.txt")
+            .await
+            .expect("the claimed object is readable")
+            .to_vec(),
+        winners[0].as_bytes(),
+        "the object must hold the winner's payload, not a later racer's"
+    );
+    assert_eq!(
+        staged_entries(tmp.path()),
+        Vec::<String>::new(),
+        "neither the winner nor the losers may leave a temp file behind"
+    );
+}
+
+/// The reservation is defeated by a symlink unless the resolved-path guard
+/// enforces it too. This is the module's own threat model - an uploaded or
+/// extracted symlink, then a read through it - pointed at the staging
+/// directory, where reading an entry discloses another writer's in-flight
+/// object and deleting one makes that writer's publish fail.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_into_the_staging_directory_is_refused() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    let staging = tmp.path().join(ATOMIC_STAGING_DIR);
+    std::fs::write(
+        staging.join("victim.tmp"),
+        b"another writer's in-flight bytes",
+    )
+    .expect("plant an in-flight staging file");
+    std::os::unix::fs::symlink(&staging, tmp.path().join("link"))
+        .expect("plant a symlink to the staging directory");
+
+    assert_reserved(
+        &disk
+            .read("link/victim.tmp")
+            .await
+            .expect_err("reading a staging file through a symlink must be refused"),
+        "read through a symlink into staging",
+    );
+    assert_reserved(
+        &disk
+            .delete("link/victim.tmp")
+            .await
+            .expect_err("deleting a staging file through a symlink must be refused"),
+        "delete through a symlink into staging",
+    );
+    assert_reserved(
+        &disk
+            .exists("link/victim.tmp")
+            .await
+            .expect_err("stat-ing a staging file through a symlink must be refused"),
+        "stat through a symlink into staging",
+    );
+    assert_reserved(
+        &disk
+            .write("link/planted.tmp", "collide with a live publish")
+            .await
+            .expect_err("writing into staging through a symlink must be refused"),
+        "write through a symlink into staging",
+    );
+
+    let listing_err = disk
+        .files("link", false)
+        .await
+        .expect_err("listing staging through a symlink must be refused");
+    let message = listing_err.to_string();
+    assert!(
+        message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+        "listing through the symlink must be refused by name, got: {message}"
+    );
+    // The symlink node itself resolves into staging and is refused too.
+    assert_reserved(
+        &disk
+            .exists("link")
+            .await
+            .expect_err("the symlink node itself resolves into staging"),
+        "stat of the symlink node",
+    );
+
+    // The in-flight object is untouched.
+    assert_eq!(
+        std::fs::read(staging.join("victim.tmp")).expect("the staging file is still there"),
+        b"another writer's in-flight bytes",
+        "a refused operation must not have reached the staging file"
+    );
+}
+
+/// `copy` publishes bytes at a path just as `write` does, so it carries the same
+/// promise. The fs driver copies straight into the destination, which is
+/// observable at every intermediate length and leaves a truncated destination
+/// behind a crash - the identical defect this task fixed for `write`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_is_never_visible_at_a_partial_length() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    let payload = vec![b'c'; 64 * 1024 * 1024];
+    let full_len = payload.len() as u64;
+    disk.write("source.bin", payload)
+        .await
+        .expect("seed the copy source");
+
+    let copier = disk.clone();
+    let handle = tokio::spawn(async move {
+        copier
+            .copy("source.bin", "destination.bin")
+            .await
+            .expect("the copy resolves")
+    });
+
+    let mut samples = 0usize;
+    let mut conclusive = 0usize;
+    let mut partial = Vec::new();
+    while !handle.is_finished() && samples < 4096 {
+        tokio::time::sleep(Duration::from_micros(250)).await;
+        samples += 1;
+        match disk.stat("destination.bin").await {
+            Ok(metadata) if metadata.content_length() != full_len => {
+                partial.push(metadata.content_length());
+            }
+            Ok(_) | Err(_) => conclusive += 1,
+        }
+    }
+
+    handle.await.expect("the copying task did not panic");
+    eprintln!("sampled the destination {samples} times during the copy");
+    assert!(
+        samples > 0,
+        "the sampling loop never looked at the destination, so this run proves nothing"
+    );
+    assert!(
+        conclusive > 0,
+        "no sample resolved to either absent or the full length, so this run \
+         proves nothing"
+    );
+    assert!(
+        partial.is_empty(),
+        "the copy destination was visible at a partial length: {:?}",
+        &partial.iter().take(8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        staged_entries(tmp.path()),
+        Vec::<String>::new(),
+        "a copy must not leave its staging file behind"
+    );
+}
+
+/// Staging must not turn `copy` into a conditional operation: it overwrites an
+/// existing destination, exactly as it did before.
+#[tokio::test]
+async fn a_copy_still_overwrites_an_existing_destination() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    disk.write("source.txt", "the new bytes")
+        .await
+        .expect("seed the source");
+    disk.write(
+        "nested/destination.txt",
+        "the bytes that were already there",
+    )
+    .await
+    .expect("seed the destination");
+
+    disk.copy("source.txt", "nested/destination.txt")
+        .await
+        .expect("a copy onto an existing destination resolves");
+
+    assert_eq!(
+        &disk
+            .read("nested/destination.txt")
+            .await
+            .expect("the destination is readable")
+            .to_vec(),
+        b"the new bytes",
+        "copy must still overwrite"
+    );
+    // A destination whose parent directory does not exist yet is created, the
+    // way the driver's own in-place copy created it.
+    disk.copy("source.txt", "brand/new/tree.txt")
+        .await
+        .expect("a copy into a missing directory resolves");
+    assert_eq!(
+        &disk
+            .read("brand/new/tree.txt")
+            .await
+            .expect("the new destination is readable")
+            .to_vec(),
+        b"the new bytes"
+    );
+    assert_eq!(
+        staged_entries(tmp.path()),
+        Vec::<String>::new(),
+        "neither copy may leave a staging file behind"
+    );
+}
+
+/// Two appenders racing to create the same missing object must both land. If
+/// the first append is staged and published by rename, one of the two writes is
+/// lost outright - which is the opposite of what an append means.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_first_appends_onto_a_missing_object_both_land() {
+    let _guard = Storage::fake();
+    let (tmp, disk) = register_local_disk();
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let handles: Vec<_> = ["AAAAAAAA", "BBBBBBBB"]
+        .into_iter()
+        .map(|payload| {
+            let disk = disk.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                disk.write_with("race-log.txt", payload)
+                    .append(true)
+                    .await
+                    .expect("an append resolves")
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.await.expect("an appending task did not panic");
+    }
+
+    let bytes = disk
+        .read("race-log.txt")
+        .await
+        .expect("the appended object is readable")
+        .to_vec();
+    assert!(
+        bytes == b"AAAAAAAABBBBBBBB" || bytes == b"BBBBBBBBAAAAAAAA",
+        "both first appends must land, in either order; got {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        staged_entries(tmp.path()),
+        Vec::<String>::new(),
+        "an append stages nothing, so nothing may be left behind"
+    );
+}
+
+/// A regular file sitting where the staging directory belongs would otherwise
+/// pass registration - opendal only creates the directory when the path is
+/// missing - and fail later, deep in the driver, on the first write. Refuse it
+/// where the message can say what to do about it.
+#[tokio::test]
+async fn a_file_occupying_the_reserved_name_is_refused_at_registration() {
+    let _guard = Storage::fake();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join(ATOMIC_STAGING_DIR), b"not a directory")
+        .expect("plant a file where the staging directory belongs");
+
+    let err = Storage::register_fs("occupied", tmp.path())
+        .expect_err("registration must refuse an occupied reserved name");
+    let message = err.to_string();
+    assert!(
+        message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+        "the refusal must name the reservation, got: {message}"
+    );
+
+    // A directory of that name is what registration itself creates, so an
+    // existing one must be accepted rather than tripping the same check.
+    let reusable = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(reusable.path().join(ATOMIC_STAGING_DIR))
+        .expect("pre-create the staging directory");
+    Storage::register_fs("reusable", reusable.path())
+        .expect("an existing staging directory is reused, not refused");
+    Storage::disk("reusable")
+        .expect("the reusable disk")
+        .write("ok.txt", "written")
+        .await
+        .expect("the disk works over a pre-existing staging directory");
 }

@@ -579,11 +579,11 @@ impl ReadThroughReader {
     /// half-written.
     ///
     /// Where the primary advertises a `rename`, the bytes are staged at a
-    /// unique sibling and renamed onto the target, because that backend - the
-    /// local filesystem - creates the target file first and fills it in place.
-    /// Where it does not, the write itself is the atomic publish and runs
-    /// directly, conditional on the object not already existing so two
-    /// concurrent readers do not both promote.
+    /// unique sibling and renamed onto the target. That covers any primary
+    /// whose write is not itself an indivisible publish, whatever the backend
+    /// stages underneath. Where the primary has no `rename`, the write itself
+    /// is the atomic publish and runs directly, conditional on the object not
+    /// already existing so two concurrent readers do not both promote.
     ///
     /// The staged form cannot use that condition: its path is unique, so the
     /// condition would be vacuous. It re-checks the primary immediately before
@@ -616,11 +616,10 @@ impl ReadThroughReader {
             .write_options(&staged, contents.clone(), options)
             .await
         {
-            // A backend that creates the target before filling it - the local
-            // filesystem does - leaves a partial staging object behind when the
-            // write fails part-way, and nothing else ever sweeps it. Deleting a
-            // path that was never created is a no-op, so this is safe either
-            // way.
+            // A backend that creates the target before filling it leaves a
+            // partial staging object behind when the write fails part-way, and
+            // nothing else ever sweeps it. Deleting a path that was never
+            // created is a no-op, so this is safe either way.
             self.discard(&staged).await;
             return Err(e);
         }

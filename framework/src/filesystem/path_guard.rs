@@ -52,8 +52,9 @@ use opendal::raw::{
 use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
 };
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Reject any path that could escape the local-filesystem disk root.
 ///
@@ -98,22 +99,29 @@ fn validate_storage_path(path: &str) -> Result<()> {
     }
 
     if reaches_staging_directory(path) {
-        tracing::warn!(
-            path = %path,
-            "rejected storage path targeting the reserved atomic-write staging \
-             directory on local-filesystem disk"
-        );
-        return Err(Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "path '{path}' is not allowed on a local-filesystem disk: \
-                 '{ATOMIC_STAGING_DIR}' at the disk root is reserved for staging \
-                 atomic writes"
-            ),
-        ));
+        return Err(staging_reservation_error(path));
     }
 
     Ok(())
+}
+
+/// Build the `PermissionDenied` error returned when a path targets the reserved
+/// atomic-write staging directory - whether it spells the name out or resolves
+/// into the directory through a symlink.
+fn staging_reservation_error(path: &str) -> Error {
+    tracing::warn!(
+        path = %path,
+        "rejected storage path targeting the reserved atomic-write staging \
+         directory on local-filesystem disk"
+    );
+    Error::new(
+        ErrorKind::PermissionDenied,
+        format!(
+            "path '{path}' is not allowed on a local-filesystem disk: \
+             '{ATOMIC_STAGING_DIR}' at the disk root is reserved for staging \
+             atomic writes"
+        ),
+    )
 }
 
 /// True when `path`'s first meaningful component is the reserved staging
@@ -226,6 +234,19 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     // to the canonical root for the prefix check.
     let resolved = resolved.unwrap_or_else(|| canonical_root.clone());
 
+    // The lexical reservation only sees the string the caller supplied. A
+    // symlink inside the root that points at the staging directory resolves
+    // *inside* the root, so the escape check below waves it through - and a read
+    // through it discloses another writer's in-flight object, a delete through
+    // it makes that writer's publish fail with ENOENT, and a list through it
+    // enumerates the staging directory. This is the module's own threat model
+    // (an uploaded or extracted symlink, then an operation through it) aimed at
+    // the one directory the disk owns, so the reservation has to be enforced on
+    // what the path resolves to, not only on how it is spelled.
+    if resolved.starts_with(canonical_root.join(ATOMIC_STAGING_DIR)) {
+        return Err(staging_reservation_error(path));
+    }
+
     if is_within_root(&canonical_root, &resolved) {
         Ok(())
     } else {
@@ -247,6 +268,127 @@ fn is_within_root(canonical_root: &Path, resolved: &Path) -> bool {
 /// [`opendal::raw::AccessorInfo::root`].
 fn inner_root_string(inner: &Servicer) -> String {
     inner.info().root().as_ref().to_string()
+}
+
+/// A unique storage path inside the staging directory, for a publish this layer
+/// performs itself.
+///
+/// It is a *storage* path - relative to the disk root - because it is handed to
+/// the inner accessor rather than to the OS. The basename keeps the file
+/// recognizable while the random suffix keeps two concurrent publishes of the
+/// same key apart. The name never reaches a caller: the reservation refuses it
+/// and the lister filters it out.
+fn staging_path_for(path: &str) -> String {
+    let name = path
+        .trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    format!(
+        "{ATOMIC_STAGING_DIR}/{name}.{}.stage",
+        Uuid::new_v4().simple()
+    )
+}
+
+/// The on-disk path a storage path names under `root`.
+///
+/// `root` is the inner accessor's already-canonicalized root, and `path` has
+/// been through [`validate_storage_path`], so this join cannot leave the root.
+fn on_disk_path(root: &str, path: &str) -> PathBuf {
+    Path::new(root).join(path.trim_end_matches('/'))
+}
+
+/// Wrap a filesystem failure raised while this layer publishes a staged write.
+fn publish_error(what: &str, path: &str, e: std::io::Error) -> Error {
+    Error::new(
+        ErrorKind::Unexpected,
+        format!("{what} while publishing '{path}' on a local-filesystem disk"),
+    )
+    .set_source(e)
+}
+
+/// Create the target's parent directories, which the inner accessor would have
+/// created had it been given the caller's path rather than a staging path.
+async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| publish_error("creating the parent directory failed", path, e))?;
+    }
+    Ok(())
+}
+
+/// Materialize `path` as an empty object if it is missing, without truncating
+/// one that is already there.
+///
+/// opendal writes an append in place only once the object exists; the append
+/// that *creates* it is staged and published by rename instead. Two appenders
+/// racing to create the same object therefore each stage their own copy and one
+/// rename wins, so one append is lost outright - the opposite of what an append
+/// means. Creating the object first turns that first append into an ordinary
+/// in-place `O_APPEND` write, which is what every append after it already gets.
+async fn ensure_target_exists(root: &str, path: &str) -> Result<()> {
+    let target = on_disk_path(root, path);
+    ensure_parent_dir(&target, path).await?;
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&target)
+        .await
+        .map(|_| ())
+        .map_err(|e| publish_error("creating the append target failed", path, e))
+}
+
+/// Publish `staged` at `target` with `link(2)`.
+///
+/// This is what keeps `if_not_exists` an exclusive create. opendal publishes a
+/// staged write with an unconditional `rename(2)`, so its `if_not_exists`
+/// degrades to a `try_exists` check followed by a clobber: every racing writer
+/// passes the check and the last rename wins, silently discarding the rest.
+/// `link(2)` fails with `EEXIST` instead, atomically and in the kernel, so
+/// exactly one racer can claim the path. The staging directory lives inside the
+/// disk root, so the link never crosses a filesystem.
+async fn link_exclusive(staged: &Path, target: &Path, path: &str) -> Result<()> {
+    ensure_parent_dir(target, path).await?;
+    match tokio::fs::hard_link(staged, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(Error::new(
+            ErrorKind::ConditionNotMatch,
+            format!("'{path}' already exists, doesn't match the condition if_not_exists"),
+        )),
+        Err(e) => Err(publish_error("linking the staged write failed", path, e)),
+    }
+}
+
+/// Remove a staging file, logging rather than failing: the caller is either
+/// returning an error that matters more or has already published the bytes
+/// under their real name.
+async fn remove_staged(staged: &Path) {
+    match tokio::fs::remove_file(staged).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            path = %staged.display(),
+            error = %e,
+            "failed to remove an atomic-write staging file"
+        ),
+    }
+}
+
+/// How a [`PathGuardWriter`] publishes what the inner writer staged.
+enum Publish {
+    /// The inner writer holds the caller's path and opendal's own staging
+    /// publishes it. Nothing for this layer to do.
+    Inner,
+    /// The inner writer is filling a staging file this layer named, to be
+    /// published with `link(2)` so the create stays exclusive.
+    ExclusiveLink {
+        /// Storage path of the staging file, until it is linked or discarded.
+        staged: String,
+        /// Whether it has already been settled, so publish and discard are each
+        /// idempotent and cannot undo one another.
+        settled: bool,
+    },
 }
 
 /// [`Layer`] that wraps a local-filesystem accessor so every path-bearing
@@ -313,12 +455,36 @@ impl Service for PathGuardService {
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         validate_storage_path(path)?;
         let root = inner_root_string(&self.inner);
-        let inner = self.inner.write(ctx, path, args)?;
+        // `if_not_exists` has to stay an exclusive create, and opendal's staged
+        // write cannot be one: it checks, then publishes with an unconditional
+        // rename. Give it a staging file of our own and publish that with
+        // `link(2)`. Every other write keeps opendal's staging unchanged.
+        let exclusive = args.if_not_exists();
+        // An append writes in place only once the object exists, so the append
+        // that creates it would otherwise be staged. See `ensure_target_exists`.
+        // A conditional append is excluded: it takes the exclusive path above,
+        // where creating the target first would defeat the condition.
+        let append_in_place = args.append() && !exclusive;
+        let publish = if exclusive {
+            Publish::ExclusiveLink {
+                staged: staging_path_for(path),
+                settled: false,
+            }
+        } else {
+            Publish::Inner
+        };
+        let inner_path = match &publish {
+            Publish::ExclusiveLink { staged, .. } => staged.as_str(),
+            Publish::Inner => path,
+        };
+        let inner = self.inner.write(ctx, inner_path, args)?;
         Ok(PathGuardWriter {
             inner,
             root,
             path: path.to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place,
+            publish,
         })
     }
 
@@ -351,13 +517,20 @@ impl Service for PathGuardService {
         validate_storage_path(from)?;
         validate_storage_path(to)?;
         let root = inner_root_string(&self.inner);
-        let inner = self.inner.copy(ctx, from, to, args, opts)?;
+        // The fs driver copies straight into the destination, so the
+        // destination is observable at every intermediate length and a crash
+        // leaves it truncated - the identical defect atomic writes fix for
+        // `write`. Copy into a staging file and rename that onto the
+        // destination, which is the same publish an ordinary write gets.
+        let staged = staging_path_for(to);
+        let inner = self.inner.copy(ctx, from, &staged, args, opts)?;
         Ok(PathGuardCopier {
             inner,
             root,
             from: from.to_owned(),
             to: to.to_owned(),
             validated: false,
+            staged: Some(staged),
         })
     }
 
@@ -408,35 +581,89 @@ pub(crate) struct PathGuardWriter<W> {
     inner: W,
     root: String,
     path: String,
-    validated: bool,
+    prepared: bool,
+    /// Materialize the target before the first write so opendal appends in
+    /// place rather than staging the append.
+    append_in_place: bool,
+    publish: Publish,
 }
 
 impl<W> PathGuardWriter<W> {
-    async fn validate_once(&mut self) -> Result<()> {
-        if !self.validated {
-            validate_resolved_path(&self.root, &self.path).await?;
-            self.validated = true;
+    /// Validate the caller's path once, and do the one-time preparation this
+    /// write needs before the inner writer touches the filesystem.
+    async fn prepare_once(&mut self) -> Result<()> {
+        if self.prepared {
+            return Ok(());
         }
+        validate_resolved_path(&self.root, &self.path).await?;
+        if self.append_in_place {
+            ensure_target_exists(&self.root, &self.path).await?;
+        }
+        self.prepared = true;
         Ok(())
+    }
+
+    /// Claim the staging file, if this write has one and it is still unsettled.
+    fn take_staged(&mut self) -> Option<String> {
+        match &mut self.publish {
+            Publish::ExclusiveLink { staged, settled } if !*settled => {
+                *settled = true;
+                Some(staged.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Publish an exclusive write by linking its staging file onto the target.
+    async fn publish(&mut self) -> Result<()> {
+        let Some(staged) = self.take_staged() else {
+            return Ok(());
+        };
+        let staged = on_disk_path(&self.root, &staged);
+        let target = on_disk_path(&self.root, &self.path);
+        let linked = link_exclusive(&staged, &target, &self.path).await;
+        // The staging name belongs to this layer either way. When the link
+        // succeeded the target names the same inode, so dropping the staging
+        // name publishes nothing and leaks nothing.
+        remove_staged(&staged).await;
+        linked
+    }
+
+    /// Drop the staging file without publishing it.
+    async fn discard(&mut self) {
+        if let Some(staged) = self.take_staged() {
+            remove_staged(&on_disk_path(&self.root, &staged)).await;
+        }
     }
 }
 
 impl<W: oio::Write> oio::Write for PathGuardWriter<W> {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
-        self.validate_once().await?;
+        self.prepare_once().await?;
         self.inner.write(buffer).await
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.validate_once().await?;
-        self.inner.close().await
+        self.prepare_once().await?;
+        match self.inner.close().await {
+            Ok(meta) => {
+                self.publish().await?;
+                Ok(meta)
+            }
+            Err(e) => {
+                self.discard().await;
+                Err(e)
+            }
+        }
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Aborting cannot create or expose data. Always forward it so an inner
         // writer can release resources even when the path disappears after
         // activation or validation can no longer complete.
-        self.inner.abort().await
+        let aborted = self.inner.abort().await;
+        self.discard().await;
+        aborted
     }
 }
 
@@ -485,6 +712,9 @@ pub(crate) struct PathGuardCopier<C> {
     from: String,
     to: String,
     validated: bool,
+    /// Storage path of the staging file the copy is filling, until it is
+    /// renamed onto `to` or discarded. `None` once it is settled.
+    staged: Option<String>,
 }
 
 impl<C> PathGuardCopier<C> {
@@ -496,6 +726,36 @@ impl<C> PathGuardCopier<C> {
         }
         Ok(())
     }
+
+    /// Publish the copy by renaming its staging file onto the destination.
+    /// `rename(2)` replaces whatever is there, so a copy still overwrites.
+    async fn publish(&mut self) -> Result<()> {
+        let Some(staged) = self.staged.take() else {
+            return Ok(());
+        };
+        let staged = on_disk_path(&self.root, &staged);
+        let target = on_disk_path(&self.root, &self.to);
+        if let Err(e) = ensure_parent_dir(&target, &self.to).await {
+            remove_staged(&staged).await;
+            return Err(e);
+        }
+        if let Err(e) = tokio::fs::rename(&staged, &target).await {
+            remove_staged(&staged).await;
+            return Err(publish_error(
+                "renaming the staged copy failed",
+                &self.to,
+                e,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drop the staging file without publishing it.
+    async fn discard(&mut self) {
+        if let Some(staged) = self.staged.take() {
+            remove_staged(&on_disk_path(&self.root, &staged)).await;
+        }
+    }
 }
 
 impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
@@ -506,12 +766,23 @@ impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
 
     async fn close(&mut self) -> Result<Metadata> {
         self.validate_once().await?;
-        self.inner.close().await
+        match self.inner.close().await {
+            Ok(meta) => {
+                self.publish().await?;
+                Ok(meta)
+            }
+            Err(e) => {
+                self.discard().await;
+                Err(e)
+            }
+        }
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Abort is cleanup-only and must never be suppressed by path validation.
-        self.inner.abort().await
+        let aborted = self.inner.abort().await;
+        self.discard().await;
+        aborted
     }
 }
 
@@ -670,8 +941,10 @@ mod tests {
             "./.suprnova-atomic/leaked.tmp",
             ".suprnova-atomic\\leaked.tmp",
         ] {
-            let err = validate_storage_path(bad)
-                .expect_err("the reserved staging directory must be refused: {bad:?}");
+            let err = match validate_storage_path(bad) {
+                Ok(()) => panic!("the reserved staging directory must be refused: {bad:?}"),
+                Err(err) => err,
+            };
             assert_eq!(
                 err.kind(),
                 ErrorKind::PermissionDenied,
@@ -868,6 +1141,52 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn symlink_resolving_into_the_staging_directory_is_rejected() {
+        // The lexical reservation only sees the spelling. A symlink to the
+        // staging directory resolves *inside* the root, so the escape check
+        // alone would allow it - and reading through it hands the caller
+        // another writer's in-flight object.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let staging = root.join(ATOMIC_STAGING_DIR);
+        std::fs::create_dir_all(&staging).expect("create the staging directory");
+        std::fs::write(staging.join("victim.tmp"), b"in flight").expect("plant a staging file");
+        std::os::unix::fs::symlink(&staging, root.join("link"))
+            .expect("create a symlink into the staging directory");
+
+        let root_str = canonical_root(&root);
+        for through in ["link", "link/", "link/victim.tmp", "link/not-there.tmp"] {
+            let err = match validate_resolved_path(&root_str, through).await {
+                Ok(()) => panic!("a path resolving into staging must be refused: {through:?}"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.kind(),
+                ErrorKind::PermissionDenied,
+                "the refusal for {through:?} must be PermissionDenied, got: {err}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+                "the refusal for {through:?} must name the reservation, got: {message}"
+            );
+        }
+
+        // A sibling directory whose name merely starts with the reserved one is
+        // not the staging directory and must stay reachable.
+        let neighbor = root.join(".suprnova-atomicals");
+        std::fs::create_dir_all(&neighbor).expect("create the neighbor directory");
+        std::fs::write(neighbor.join("ok.txt"), b"ordinary").expect("write an ordinary object");
+        assert!(
+            validate_resolved_path(&root_str, ".suprnova-atomicals/ok.txt")
+                .await
+                .is_ok(),
+            "a name that only shares a prefix with the reservation is an ordinary object"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn symlink_pointing_inside_root_is_allowed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("root");
@@ -946,7 +1265,10 @@ mod tests {
             inner: RecordingWriter::default(),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place: false,
+            // These cases drive validation forwarding, not publishing.
+            publish: super::Publish::Inner,
         };
 
         writer
@@ -977,7 +1299,10 @@ mod tests {
             inner: RecordingWriter::default(),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place: false,
+            // These cases drive validation forwarding, not publishing.
+            publish: super::Publish::Inner,
         };
 
         writer
@@ -1032,6 +1357,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -1065,6 +1392,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -1091,6 +1420,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         std::fs::remove_dir_all(&root).expect("remove root before activation");
