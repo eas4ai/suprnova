@@ -161,6 +161,7 @@ export class PollTimer {
     this.#environmentDisposer = this.#environment.subscribe(() => {
       this.#environmentChanged();
     });
+    if (this.#suspended) return;
     this.#state = this.#freshnessState();
     this.#emitState();
     if (this.#policy.mode === "push_only") return;
@@ -245,6 +246,7 @@ export class PollTimer {
   }
 
   #freshnessState(): PollStatus {
+    if (this.#suspended) return "suspended";
     if (!this.#environment.isOnline()) return "offline";
     return this.#continuityCurrent && this.#policy.mode !== "poll_only" ? "current" : "degraded";
   }

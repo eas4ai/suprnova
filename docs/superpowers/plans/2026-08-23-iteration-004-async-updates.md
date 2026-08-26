@@ -806,6 +806,11 @@
   only that intent against committed authority, so removal/push-only remains
   timer-free and a changed hybrid interval cannot revive the old timer or late
   completion.
+- [x] Preserve `suspended` as the authoritative PollTimer lifecycle state when a
+  pending replacement is discarded during page suspension. Start, policy, and
+  continuity recomputation cannot overwrite it or arm work; SSE/WebSocket late
+  proof remains inert, and one resume applies only the newest committed policy
+  with ordinary jitter.
 - [x] Run corrected Rust checker, controlled-clock poll, real scheduler,
   connectivity, visibility, bfcache, 100-subscription storm, public declaration,
   deterministic build, drift-budget, and full project gates.

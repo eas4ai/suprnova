@@ -438,6 +438,49 @@ describe("controlled polling timer", () => {
     expect(current.environment.listenerCount()).toBe(0);
   });
 
+  it("keeps pre-start suspended, offline, and retired lifecycle truth idempotent", () => {
+    const suspendedStates: string[] = [];
+    const suspended = fixture(policy({ intervalMs: 1_000 }), 0, undefined, (state) => {
+      suspendedStates.push(state);
+    });
+    suspended.timer.suspend();
+    suspended.timer.start();
+    suspended.timer.start();
+    expect(suspended.timer.status()).toBe("suspended");
+    expect(suspendedStates).toEqual(["suspended"]);
+    expect(suspended.clock.pending.size).toBe(0);
+    expect(suspended.environment.listenerCount()).toBe(1);
+    suspended.timer.resume();
+    suspended.timer.resume();
+    expect(suspended.timer.status()).toBe("degraded");
+    expect(suspended.clock.pending.size).toBe(1);
+
+    const offlineStates: string[] = [];
+    const offline = fixture(policy({ intervalMs: 1_000 }), 0, undefined, (state) => {
+      offlineStates.push(state);
+    });
+    offline.environment.online(false);
+    offline.timer.start();
+    offline.timer.start();
+    expect(offline.timer.status()).toBe("offline");
+    expect(offlineStates).toEqual(["offline"]);
+    expect(offline.clock.pending.size).toBe(0);
+
+    const retiredStates: string[] = [];
+    const retired = fixture(policy({ intervalMs: 1_000 }), 0, undefined, (state) => {
+      retiredStates.push(state);
+    });
+    retired.timer.dispose();
+    retired.timer.start();
+    retired.timer.resume();
+    expect(retired.timer.status()).toBe("closed");
+    expect(retiredStates).toEqual(["closed"]);
+    expect(retired.environment.listenerCount()).toBe(0);
+
+    suspended.timer.dispose();
+    offline.timer.dispose();
+  });
+
   it("spreads a 100-subscription recovery cohort without synchronized polling", () => {
     const clock = new ControlledClock();
     const environment = new Environment();

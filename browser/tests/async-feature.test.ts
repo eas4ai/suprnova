@@ -460,7 +460,7 @@ describe("async feature lifecycle", () => {
   it.each(
     (["sse", "websocket"] as const).flatMap((transport) =>
       (["change", "remove", "push-only"] as const).flatMap((scenario) =>
-        (["authenticate", "reject"] as const).map((ending) => ({
+        (["authenticate", "reject", "suspend"] as const).map((ending) => ({
           ending,
           scenario,
           transport,
@@ -472,6 +472,7 @@ describe("async feature lifecycle", () => {
     async ({ ending, scenario, transport }) => {
       const timers = new FakeTimers();
       const refresh = vi.fn(() => "queued" as const);
+      const freshness: string[] = [];
       const root = Object.freeze({}) as Element;
       let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([
         ownership(root),
@@ -574,6 +575,7 @@ describe("async feature lifecycle", () => {
             },
           },
           clock: { now: () => 100 },
+          observeFreshness: ({ state }) => freshness.push(state),
           randomness: { number: () => 0.5 },
           timers: timers.port,
           transports,
@@ -634,7 +636,34 @@ describe("async feature lifecycle", () => {
         ),
       ).toBe(false);
 
-      if (ending === "authenticate") {
+      let activeTransport = 1;
+      if (ending === "suspend") {
+        freshness.length = 0;
+        owner.suspend();
+        expect(freshness).toEqual(["suspended"]);
+        expect(timers.pending.size).toBe(0);
+        expect(refresh).not.toHaveBeenCalled();
+        if (transport === "sse") sseControls[0]?.resolve();
+        else acknowledgeWebSocket(1);
+        await flushMicrotasks();
+        expect(freshness).toEqual(["suspended"]);
+        expect(timers.pending.size).toBe(0);
+        expect(refresh).not.toHaveBeenCalled();
+
+        await owner.resume();
+        await flushMicrotasks();
+        activeTransport = 2;
+        if (transport === "sse") {
+          sources[activeTransport]?.open();
+          await flushMicrotasks();
+          sseControls[1]?.resolve();
+        } else {
+          sockets[activeTransport]?.onopen?.();
+          acknowledgeWebSocket(activeTransport);
+        }
+        await flushMicrotasks();
+        expect(freshness.filter((state) => state === "current")).toHaveLength(1);
+      } else if (ending === "authenticate") {
         if (transport === "sse") sseControls[0]?.resolve();
         else acknowledgeWebSocket(1);
       } else if (transport === "sse") {
@@ -643,9 +672,9 @@ describe("async feature lifecycle", () => {
         sockets[1]?.onmessage?.({ data: canonicalize({ kind: "membership_rejected" }) });
       }
       await flushMicrotasks();
-      if (ending === "authenticate") {
-        if (transport === "sse") sources[1]?.request.failed("transport_lost");
-        else sockets[1]?.onclose?.();
+      if (ending === "authenticate" || ending === "suspend") {
+        if (transport === "sse") sources[activeTransport]?.request.failed("transport_lost");
+        else sockets[activeTransport]?.onclose?.();
       }
       await flushMicrotasks();
 

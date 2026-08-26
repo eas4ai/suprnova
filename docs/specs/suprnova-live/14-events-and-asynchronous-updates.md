@@ -163,6 +163,11 @@ Acceptance criteria:
   timer-free, while a changed hybrid policy uses its new interval. Removal,
   replacement, or a fail-closed directive conflict fences every older intent,
   timer, and late completion.
+- `suspended` and `closed` are stronger lifecycle states than connectivity or
+  continuity. Creating, starting, updating, or receiving a late continuity
+  callback for a timer while suspended cannot report `degraded`, `offline`, or
+  `current` and cannot arm work. Resume recomputes the latest committed policy
+  once and applies ordinary jitter without reviving an older generation.
 - One optional configured observer receives immutable island identity plus the
   closed `current`, `degraded`, `polling`, `offline`, `suspended`, or `closed`
   semantic freshness state only when it changes. It is presentation/accessibility
@@ -530,6 +535,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Made suspended polling state authoritative over start, policy,
+  environment, and continuity recomputation. A replacement stage discarded by
+  page suspension may restore the newest committed policy object, but it remains
+  suspended and timer-free until one lifecycle resume; late membership proof and
+  older timer completion stay inert.
 - 2026-08-26 -- Closed the replacement-membership morph race: a changed
   committed freshness intent immediately retires the older degraded fallback
   while successor membership proof remains pending. Exact acknowledgment applies
