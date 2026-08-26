@@ -6,11 +6,11 @@ use crate::canonical::{CanonicalValue, parse_canonical_value, to_canonical_bytes
 use crate::limits::InputLimits;
 
 use super::{
-    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncTransportError,
-    AsyncTransportErrorKind, AuthorizedTransportSubscription, DocumentTransportKind,
-    DocumentTransportSession, PendingTransportAdd, PendingTransportRemove, StreamName,
-    SubscriptionBinding, SubscriptionId, VerifiedOrigin, decode_async_envelope,
-    encode_async_envelope,
+    AsyncCodecLimits, AsyncEnvelope, AsyncEnvelopeContext, AsyncEventSource, AsyncTransportError,
+    AsyncTransportErrorKind, AuthorizedTransportAdd, AuthorizedTransportSubscription,
+    DocumentTransportKind, DocumentTransportSession, EstablishingTransportAdd, PendingTransportAdd,
+    PendingTransportRemove, ReadyTransportAdd, StreamName, SubscriptionBinding, SubscriptionId,
+    VerifiedOrigin, decode_async_envelope, encode_async_envelope,
 };
 
 const MAX_WEBSOCKET_CONTROL_BYTES: usize = 512;
@@ -114,6 +114,7 @@ impl std::fmt::Debug for WebSocketMembershipRequest {
 pub struct WebSocketMembershipAcknowledgment {
     control_nonce: String,
     descriptor_binding: SubscriptionBinding,
+    stream: StreamName,
     subscription: SubscriptionId,
     transport_generation: u64,
 }
@@ -124,9 +125,132 @@ impl std::fmt::Debug for WebSocketMembershipAcknowledgment {
             .debug_struct("WebSocketMembershipAcknowledgment")
             .field("control_nonce", &self.control_nonce)
             .field("descriptor_binding", &"<redacted>")
+            .field("stream", &self.stream)
             .field("subscription", &self.subscription)
             .field("transport_generation", &self.transport_generation)
             .finish()
+    }
+}
+
+/// One-use WebSocket membership request awaiting fresh transport authority.
+#[must_use = "a pending WebSocket membership request must be authorized or dropped"]
+pub struct PendingWebSocketMembershipAdd {
+    request: WebSocketMembershipRequest,
+    pending: PendingTransportAdd,
+}
+
+impl PendingWebSocketMembershipAdd {
+    /// Revalidates exact current transport authority without borrowing the document.
+    pub async fn authorize(self) -> Result<AuthorizedWebSocketMembershipAdd, AsyncTransportError> {
+        let authorized = self.pending.authorize().await?;
+        Ok(AuthorizedWebSocketMembershipAdd {
+            request: self.request,
+            authorized,
+        })
+    }
+}
+
+impl std::fmt::Debug for PendingWebSocketMembershipAdd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<PendingWebSocketMembershipAdd:redacted>")
+    }
+}
+
+/// One-use authorized request awaiting a fresh document establishment snapshot.
+#[must_use = "an authorized WebSocket membership must be established or dropped"]
+pub struct AuthorizedWebSocketMembershipAdd {
+    request: WebSocketMembershipRequest,
+    authorized: AuthorizedTransportAdd,
+}
+
+impl AuthorizedWebSocketMembershipAdd {
+    /// Rechecks document generation and membership fences before source work.
+    pub fn prepare_establish(
+        self,
+        document: &DocumentTransportSession,
+    ) -> Result<EstablishingWebSocketMembershipAdd, AsyncTransportError> {
+        let establishing = document.prepare_establish(self.authorized)?;
+        Ok(EstablishingWebSocketMembershipAdd {
+            request: self.request,
+            establishing,
+        })
+    }
+}
+
+impl std::fmt::Debug for AuthorizedWebSocketMembershipAdd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<AuthorizedWebSocketMembershipAdd:redacted>")
+    }
+}
+
+/// One-use request authorized to establish its exact stream source.
+#[must_use = "an establishing WebSocket membership must be established or dropped"]
+pub struct EstablishingWebSocketMembershipAdd {
+    request: WebSocketMembershipRequest,
+    establishing: EstablishingTransportAdd,
+}
+
+impl EstablishingWebSocketMembershipAdd {
+    /// Establishes the source and repeats current authority validation after the await.
+    pub async fn establish(
+        self,
+        source: &dyn AsyncEventSource,
+    ) -> Result<ReadyWebSocketMembershipAdd, AsyncTransportError> {
+        let ready = self.establishing.establish(source).await?;
+        Ok(ReadyWebSocketMembershipAdd {
+            request: self.request,
+            ready,
+        })
+    }
+}
+
+impl std::fmt::Debug for EstablishingWebSocketMembershipAdd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<EstablishingWebSocketMembershipAdd:redacted>")
+    }
+}
+
+/// One-use exact membership ready for synchronous document commit.
+#[must_use = "a ready WebSocket membership must be committed or dropped"]
+pub struct ReadyWebSocketMembershipAdd {
+    request: WebSocketMembershipRequest,
+    ready: ReadyTransportAdd,
+}
+
+impl std::fmt::Debug for ReadyWebSocketMembershipAdd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<ReadyWebSocketMembershipAdd:redacted>")
+    }
+}
+
+/// Non-cloneable one-use receipt emitted by one exact successful membership commit.
+///
+/// ```compile_fail
+/// use suprnova_live::async_updates::WebSocketMembershipCommitReceipt;
+///
+/// fn clone_receipt(receipt: WebSocketMembershipCommitReceipt) {
+///     let _duplicate = receipt.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use suprnova_live::async_updates::{
+///     WebSocketMembershipCommitReceipt, WebSocketMembershipControl,
+/// };
+///
+/// fn reuse_receipt(receipt: WebSocketMembershipCommitReceipt) {
+///     let _first = WebSocketMembershipControl::acknowledge_committed(receipt);
+///     let _second = WebSocketMembershipControl::acknowledge_committed(receipt);
+/// }
+/// ```
+#[must_use = "a WebSocket membership commit receipt must be acknowledged or dropped"]
+pub struct WebSocketMembershipCommitReceipt {
+    request: WebSocketMembershipRequest,
+}
+
+impl std::fmt::Debug for WebSocketMembershipCommitReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<WebSocketMembershipCommitReceipt:redacted>")
     }
 }
 
@@ -137,9 +261,9 @@ impl WebSocketMembershipControl {
     /// Prepares an exact descriptor-, stream-, and request-bound subscription.
     pub fn prepare_authenticated_subscribe(
         document: &DocumentTransportSession,
-        request: &WebSocketMembershipRequest,
+        request: WebSocketMembershipRequest,
         authorization: AuthorizedTransportSubscription,
-    ) -> Result<PendingTransportAdd, AsyncTransportError> {
+    ) -> Result<PendingWebSocketMembershipAdd, AsyncTransportError> {
         if request.subscription != *authorization.subscription()
             || request.descriptor_binding != *authorization.binding()
             || request.stream != *authorization.context().stream()
@@ -148,34 +272,39 @@ impl WebSocketMembershipControl {
                 AsyncTransportErrorKind::RoutingMismatch,
             ));
         }
-        Self::prepare_subscribe(
+        let pending = Self::prepare_subscribe(
             document,
             &WebSocketControlRecord::Subscribe(request.subscription.clone()),
             authorization,
-        )
+        )?;
+        Ok(PendingWebSocketMembershipAdd { request, pending })
     }
 
-    /// Produces an acknowledgment only after the exact membership is committed.
-    pub fn acknowledge_committed(
-        document: &DocumentTransportSession,
-        request: &WebSocketMembershipRequest,
-    ) -> Result<WebSocketMembershipAcknowledgment, AsyncTransportError> {
+    /// Commits one exact membership and emits its non-cloneable receipt.
+    pub fn commit_authenticated_subscribe(
+        document: &mut DocumentTransportSession,
+        ready: ReadyWebSocketMembershipAdd,
+    ) -> Result<WebSocketMembershipCommitReceipt, AsyncTransportError> {
         validate_document_kind(document)?;
-        if !document.contains_exact_membership(
-            &request.subscription,
-            &request.descriptor_binding,
-            &request.stream,
-        ) {
-            return Err(AsyncTransportError::new(
-                AsyncTransportErrorKind::UnknownMembership,
-            ));
-        }
-        Ok(WebSocketMembershipAcknowledgment {
-            control_nonce: request.control_nonce.clone(),
-            descriptor_binding: request.descriptor_binding.clone(),
-            subscription: request.subscription.clone(),
-            transport_generation: request.transport_generation,
+        document.commit_add(ready.ready)?;
+        Ok(WebSocketMembershipCommitReceipt {
+            request: ready.request,
         })
+    }
+
+    /// Consumes one exact commit receipt to mint one membership acknowledgment.
+    #[must_use]
+    pub fn acknowledge_committed(
+        receipt: WebSocketMembershipCommitReceipt,
+    ) -> WebSocketMembershipAcknowledgment {
+        let request = receipt.request;
+        WebSocketMembershipAcknowledgment {
+            control_nonce: request.control_nonce,
+            descriptor_binding: request.descriptor_binding,
+            stream: request.stream,
+            subscription: request.subscription,
+            transport_generation: request.transport_generation,
+        }
     }
 
     /// Prepares the exact subscription named by a verified subscribe record.
@@ -488,6 +617,7 @@ struct MembershipAcknowledgmentWire {
     control_nonce: String,
     descriptor_binding: String,
     kind: String,
+    stream: String,
     subscription: String,
     transport_generation: u64,
 }
@@ -498,6 +628,7 @@ impl MembershipAcknowledgmentWire {
             control_nonce: acknowledgment.control_nonce.clone(),
             descriptor_binding: acknowledgment.descriptor_binding.to_base64url(),
             kind: "membership_authenticated".to_owned(),
+            stream: acknowledgment.stream.as_str().to_owned(),
             subscription: acknowledgment.subscription.to_base64url(),
             transport_generation: acknowledgment.transport_generation,
         }

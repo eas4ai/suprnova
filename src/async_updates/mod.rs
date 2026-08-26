@@ -82,7 +82,9 @@ pub use transport::{
     TransportMembershipOperation, VerifiedOrigin,
 };
 pub use websocket::{
-    AuthorizedWebSocketUpgrade, WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord,
-    WebSocketFrame, WebSocketMembershipAcknowledgment, WebSocketMembershipControl,
-    WebSocketMembershipRequest, WebSocketOriginPolicy,
+    AuthorizedWebSocketMembershipAdd, AuthorizedWebSocketUpgrade,
+    EstablishingWebSocketMembershipAdd, PendingWebSocketMembershipAdd, ReadyWebSocketMembershipAdd,
+    WebSocketAuthentication, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
+    WebSocketMembershipAcknowledgment, WebSocketMembershipCommitReceipt,
+    WebSocketMembershipControl, WebSocketMembershipRequest, WebSocketOriginPolicy,
 };

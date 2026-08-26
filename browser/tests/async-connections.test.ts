@@ -65,6 +65,7 @@ class FakeEventSource implements EventSourcePort {
     return Object.freeze({
       descriptorBinding: subscription.descriptorBinding,
       kind: "authenticated" as const,
+      stream: subscription.stream,
       subscriptionId: subscription.subscriptionId,
       transportGeneration: this.request.transportGeneration,
     });
@@ -458,6 +459,7 @@ describe("browser SSE authorization adapters", () => {
 
   it("binds a WebSocket membership acknowledgment to the exact signed descriptor", async () => {
     const sent: string[] = [];
+    const timers = new FakeTimers();
     const native: {
       close(): void;
       onmessage?: (event: Readonly<{ data: string }>) => void;
@@ -471,7 +473,7 @@ describe("browser SSE authorization adapters", () => {
       fetch: vi.fn<typeof globalThis.fetch>(),
       membershipTimeoutMs: 5_000,
       sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
-      timers: new FakeTimers().port,
+      timers: timers.port,
       webSocket: () => native,
     });
     const port = ports.webSocket({
@@ -494,13 +496,16 @@ describe("browser SSE authorization adapters", () => {
         control_nonce: "0000000000000001",
         descriptor_binding: "binding-1",
         kind: "membership_authenticated",
+        stream: "stream-1",
         subscription: "subscription-001",
         transport_generation: 1,
       }),
     });
+    timers.flush();
     await expect(attached).resolves.toEqual({
       descriptorBinding: "binding-1",
       kind: "authenticated",
+      stream: "stream-1",
       subscriptionId: "subscription-001",
       transportGeneration: 1,
     });
@@ -552,16 +557,23 @@ describe("browser SSE authorization adapters", () => {
       control_nonce: "0000000000000001",
       descriptor_binding: "binding-1",
       kind: "membership_authenticated",
+      stream: "stream-1",
       subscription: "subscription-001",
       transport_generation: 1,
     };
 
     native.onmessage?.({
-      data: `{"control_nonce":"0000000000000001","descriptor_binding":"binding-1","kind":"membership_authenticated","kind":"membership_authenticated","subscription":"subscription-001","transport_generation":1}`,
+      data: `{"control_nonce":"0000000000000001","descriptor_binding":"binding-1","kind":"membership_authenticated","kind":"membership_authenticated","stream":"stream-1","subscription":"subscription-001","transport_generation":1}`,
     });
     expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
     native.onmessage?.({
       data: JSON.stringify({ ...acknowledgment, descriptor_binding: "foreign" }),
+    });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({ data: JSON.stringify({ ...acknowledgment, stream: "foreign-stream" }) });
+    expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
+    native.onmessage?.({
+      data: JSON.stringify({ ...acknowledgment, transport_generation: 2 }),
     });
     expect(failed).toHaveBeenLastCalledWith("protocol_invalid");
     native.onmessage?.({ data: JSON.stringify(acknowledgment) });

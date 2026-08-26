@@ -666,8 +666,11 @@
   Replay/no-tail proof is consumed only after the exact logical membership is
   authenticated. SSE returns a bounded typed outcome from its membership
   control; WebSocket returns a canonical post-commit acknowledgment bound to the
-  exact control nonce, subscription, signed-descriptor binding, and document
-  transport generation. Queueing or socket send success is not authentication;
+  exact control nonce, subscription, stream, signed-descriptor binding, and
+  document transport generation. A non-cloneable one-use receipt carries those
+  facts through the exact authorization/source/commit path and is consumed to
+  mint the acknowledgment; ambient membership presence, a repeated/fresh
+  request, queueing, or socket send success is not authentication;
   rejection, timeout, loss, cancellation, and late/foreign/duplicate outcomes
   cannot reset retry state.
 

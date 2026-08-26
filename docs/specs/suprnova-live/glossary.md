@@ -577,9 +577,17 @@ _Avoid_: island socket, global shared socket, subscription authority, event bus
 **Transport membership acknowledgment**:
 Bounded post-commit proof that one exact logical subscription and signed
 descriptor binding were authenticated on the current physical document
-transport generation. WebSocket additionally binds a one-connection control
-nonce; control queueing or socket send success is never this proof.
+transport generation. WebSocket additionally binds the exact stream and a
+one-connection control nonce; control queueing, socket send success, or ambient
+membership presence is never this proof.
 _Avoid_: queued control, sent frame, open socket, connection acknowledgment, continuity proof
+
+**WebSocket membership commit receipt**:
+The non-cloneable, framework-minted one-use capability emitted only by the exact
+successful logical-membership commit. It carries the control nonce,
+subscription, stream, signed-descriptor binding, and browser transport
+generation and is consumed to mint one transport membership acknowledgment.
+_Avoid_: membership lookup, request clone, reusable token, sent control, acknowledgment cache
 
 **Stream continuity**:
 Proof that every required typed event after an authoritative baseline has been

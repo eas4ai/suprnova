@@ -3459,6 +3459,7 @@ async fn websocket_membership_acknowledgment_requires_the_exact_committed_reques
             final_fragment: true,
         })
         .expect("exact membership request");
+    let repeated_request = request.clone();
     let source = ScriptedSource::new(vec![vec![ScriptItem::Pending]]);
     let mut document = DocumentTransportSession::new(
         origin,
@@ -3470,37 +3471,97 @@ async fn websocket_membership_acknowledgment_requires_the_exact_committed_reques
 
     assert_eq!(request.control_nonce(), "0000000000000001");
     assert_eq!(request.transport_generation(), 7);
-    assert_eq!(
-        WebSocketMembershipControl::acknowledge_committed(&document, &request)
-            .expect_err("queueing is not authenticated membership")
-            .kind(),
-        AsyncTransportErrorKind::UnknownMembership
-    );
-
     let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
         &document,
-        &request,
+        request,
         authorization,
     )
     .expect("exact membership authorization");
     let authorized = pending.authorize().await.expect("current authority");
-    let establishing = document
-        .prepare_establish(authorized)
+    let establishing = authorized
+        .prepare_establish(&document)
         .expect("fresh establishment");
     let ready = establishing.establish(&source).await.expect("source ready");
-    document.commit_add(ready).expect("membership committed");
+    let receipt = WebSocketMembershipControl::commit_authenticated_subscribe(&mut document, ready)
+        .expect("membership committed once");
 
-    let acknowledgment = WebSocketMembershipControl::acknowledge_committed(&document, &request)
-        .expect("post-commit acknowledgment");
+    let acknowledgment = WebSocketMembershipControl::acknowledge_committed(receipt);
     let encoded_ack = codec
         .encode_membership_acknowledgment(&acknowledgment)
         .expect("bounded canonical acknowledgment");
     assert_eq!(
         std::str::from_utf8(&encoded_ack).expect("ack UTF-8"),
         format!(
-            "{{\"control_nonce\":\"0000000000000001\",\"descriptor_binding\":\"{binding}\",\"kind\":\"membership_authenticated\",\"subscription\":\"{subscription_wire}\",\"transport_generation\":7}}"
+            "{{\"control_nonce\":\"0000000000000001\",\"descriptor_binding\":\"{binding}\",\"kind\":\"membership_authenticated\",\"stream\":\"{stream}\",\"subscription\":\"{subscription_wire}\",\"transport_generation\":7}}"
         )
     );
+
+    let repeated = WebSocketMembershipControl::prepare_authenticated_subscribe(
+        &document,
+        repeated_request,
+        fixture.request(
+            subscription(19),
+            VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+        ),
+    )
+    .expect("state-blind repeated request still reaches fresh authority")
+    .authorize()
+    .await
+    .expect("fresh repeated authority");
+    let repeated = repeated
+        .prepare_establish(&document)
+        .expect_err("a repeated request cannot mint another commit receipt");
+    assert_eq!(
+        repeated.kind(),
+        AsyncTransportErrorKind::DuplicateMembership
+    );
+
+    for fresh in [
+        encoded.replace("0000000000000001", "0000000000000002"),
+        encoded
+            .replace("0000000000000001", "0000000000000003")
+            .replace("\"transport_generation\":7", "\"transport_generation\":8"),
+    ] {
+        let request = codec
+            .decode_membership_request(WebSocketFrame::Text {
+                payload: fresh.as_bytes(),
+                final_fragment: true,
+            })
+            .expect("fresh valid request");
+        let authorized = WebSocketMembershipControl::prepare_authenticated_subscribe(
+            &document,
+            request,
+            fixture.request(
+                subscription(19),
+                VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+            ),
+        )
+        .expect("fresh request remains state-blind")
+        .authorize()
+        .await
+        .expect("fresh request reauthorizes before membership classification");
+        let error = authorized.prepare_establish(&document).expect_err(
+            "fresh nonce or generation cannot mint a receipt for an ambient membership",
+        );
+        assert_eq!(error.kind(), AsyncTransportErrorKind::DuplicateMembership);
+    }
+
+    let foreign_stream = codec
+        .decode_membership_request(WebSocketFrame::Text {
+            payload: encoded.replace(&stream, "foreign-stream").as_bytes(),
+            final_fragment: true,
+        })
+        .expect("foreign stream remains syntactically valid");
+    let error = WebSocketMembershipControl::prepare_authenticated_subscribe(
+        &document,
+        foreign_stream,
+        fixture.request(
+            subscription(19),
+            VerifiedOrigin::parse("https://app.example.test").expect("origin"),
+        ),
+    )
+    .expect_err("mismatched stream cannot enter the commit path");
+    assert_eq!(error.kind(), AsyncTransportErrorKind::RoutingMismatch);
     for hostile in [
         encoded.replace("0000000000000001", "foreign-control-1"),
         encoded.replace("\"transport_generation\":7", "\"transport_generation\":0"),
@@ -3517,12 +3578,6 @@ async fn websocket_membership_acknowledgment_requires_the_exact_committed_reques
         }) {
             Err(error) => assert_eq!(error.kind(), AsyncTransportErrorKind::InvalidEnvelope),
             Ok(foreign) => {
-                assert_eq!(
-                    WebSocketMembershipControl::acknowledge_committed(&document, &foreign)
-                        .expect_err("foreign request cannot acknowledge committed membership")
-                        .kind(),
-                    AsyncTransportErrorKind::UnknownMembership
-                );
                 let authorization = fixture.request(
                     subscription(19),
                     VerifiedOrigin::parse("https://app.example.test").expect("origin"),
@@ -3530,7 +3585,7 @@ async fn websocket_membership_acknowledgment_requires_the_exact_committed_reques
                 assert_eq!(
                     WebSocketMembershipControl::prepare_authenticated_subscribe(
                         &document,
-                        &foreign,
+                        foreign,
                         authorization,
                     )
                     .expect_err("foreign binding remains unauthorized")

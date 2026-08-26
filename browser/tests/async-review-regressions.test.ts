@@ -47,6 +47,7 @@ class Source implements EventSourcePort {
     Object.freeze({
       descriptorBinding: subscription.descriptorBinding,
       kind: "authenticated" as const,
+      stream: subscription.stream,
       subscriptionId: subscription.subscriptionId,
       transportGeneration: this.request.transportGeneration,
     }),

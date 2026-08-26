@@ -24,7 +24,7 @@ const WEBSOCKET_CONTROL_NONCE = /^[0-9a-z]{16}$/u;
 const WEBSOCKET_ACK_LIMITS: CanonicalLimits = Object.freeze({
   maxBytes: MAX_WEBSOCKET_ACK_BYTES,
   maxDepth: 2,
-  maxEntries: 5,
+  maxEntries: 6,
   maxStringBytes: 128,
 });
 
@@ -54,6 +54,7 @@ export interface DocumentTransportPort {
 export interface DocumentMembershipAcknowledgment {
   readonly descriptorBinding: string;
   readonly kind: "authenticated";
+  readonly stream: string;
   readonly subscriptionId: string;
   readonly transportGeneration: number;
 }
@@ -233,6 +234,7 @@ function membershipAcknowledgment(
   return Object.freeze({
     descriptorBinding: subscription.descriptorBinding,
     kind: "authenticated",
+    stream: subscription.stream,
     subscriptionId: subscription.subscriptionId,
     transportGeneration,
   });
@@ -604,6 +606,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
       const pending: PendingWebSocketMembership = {
         descriptorBinding: subscription.descriptorBinding,
         resolve,
+        stream: subscription.stream,
         subscriptionId: subscription.subscriptionId,
         timer: null,
       };
@@ -678,21 +681,24 @@ class BrowserWebSocketAdapter implements WebSocketPort {
     }
     let controlNonce: unknown;
     let descriptorBinding: unknown;
+    let stream: unknown;
     let subscriptionId: unknown;
     try {
       const keys = Object.keys(value).sort();
       if (
-        keys.length !== 5 ||
+        keys.length !== 6 ||
         keys[0] !== "control_nonce" ||
         keys[1] !== "descriptor_binding" ||
         keys[2] !== "kind" ||
-        keys[3] !== "subscription" ||
-        keys[4] !== "transport_generation"
+        keys[3] !== "stream" ||
+        keys[4] !== "subscription" ||
+        keys[5] !== "transport_generation"
       ) {
         throw new Error("async_websocket_membership_ack_invalid");
       }
       controlNonce = Reflect.get(value, "control_nonce");
       descriptorBinding = Reflect.get(value, "descriptor_binding");
+      stream = Reflect.get(value, "stream");
       subscriptionId = Reflect.get(value, "subscription");
     } catch {
       this.#request.failed("protocol_invalid");
@@ -706,6 +712,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
     if (
       pending === undefined ||
       pending.descriptorBinding !== descriptorBinding ||
+      pending.stream !== stream ||
       pending.subscriptionId !== subscriptionId ||
       Reflect.get(value, "transport_generation") !== this.#request.transportGeneration
     ) {
@@ -717,6 +724,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
       Object.freeze({
         descriptorBinding: pending.descriptorBinding,
         kind: "authenticated",
+        stream: pending.stream,
         subscriptionId: pending.subscriptionId,
         transportGeneration: this.#request.transportGeneration,
       }),
@@ -742,6 +750,7 @@ class BrowserWebSocketAdapter implements WebSocketPort {
 interface PendingWebSocketMembership {
   readonly descriptorBinding: string;
   resolve(outcome: DocumentMembershipOutcome): void;
+  readonly stream: string;
   readonly subscriptionId: string;
   timer: number | null;
 }
@@ -1826,6 +1835,7 @@ export class DocumentConnectionPool {
         Reflect.get(acknowledgment, "kind") === "authenticated" &&
         Reflect.get(acknowledgment, "subscriptionId") === subscription.subscriptionId &&
         Reflect.get(acknowledgment, "descriptorBinding") === subscription.descriptorBinding &&
+        Reflect.get(acknowledgment, "stream") === subscription.stream &&
         Reflect.get(acknowledgment, "transportGeneration") === transportGeneration
       );
     } catch {

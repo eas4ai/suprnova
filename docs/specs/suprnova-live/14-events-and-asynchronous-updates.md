@@ -403,8 +403,11 @@ Acceptance criteria:
   descriptor digest rather than carrying a subscription ID alone. A logical
   membership becomes authenticated only after its bounded transport control
   resolves, or after the WebSocket host returns an exact post-commit membership
-  acknowledgment bound to that connection's control nonce and transport
-  generation. Queueing or sending a control frame is not acknowledgment.
+  acknowledgment bound to that connection's control nonce, stream, and transport
+  generation. The host can mint that acknowledgment only by consuming the
+  non-cloneable receipt emitted by the exact successful commit; current
+  membership presence cannot mint another. Queueing or sending a control frame
+  is not acknowledgment.
   Rejection, timeout, transport loss, cancellation, or a late/foreign
   acknowledgment cannot consume replay/no-tail proof or reset reconnect state.
 - Persisted `pagehide` closes long-lived transports and transport timers before
@@ -456,9 +459,11 @@ UX flow:
   membership acknowledgment before replay or authoritative-no-tail evidence may
   prove physical continuity. SSE acknowledges only after its host control
   settles successfully; WebSocket uses a canonical post-commit frame bound to
-  the exact control nonce, subscription, descriptor binding, and document
-  transport generation. Rejection, timeout, close, and late/foreign/duplicate
-  outcomes remain inert and cannot reset retries.
+  the exact control nonce, subscription, stream, descriptor binding, and
+  document transport generation. The frame is minted only by consuming the
+  exact commit's non-cloneable receipt, never by inspecting ambient membership.
+  Rejection, timeout, close, and late/foreign/duplicate outcomes remain inert
+  and cannot reset retries.
 - 2026-08-25 -- Hardened the Task 6 browser boundary after adversarial review.
   Document transport groups now own compatible credential and aggregate retry
   authority; ordinary reconnect and bfcache restoration share bounded,

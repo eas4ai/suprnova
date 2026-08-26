@@ -255,10 +255,12 @@ blob store merely to replay bytes.
 - 2026-08-26 -- Added a canonical bounded WebSocket membership-request and
   acknowledgment exchange. Subscribe carries a one-connection control nonce,
   exact subscription, stream, signed-descriptor binding, and positive
-  browser-safe transport generation. The host emits
-  `membership_authenticated` only after that exact logical membership commits;
-  the acknowledgment repeats nonce, subscription, binding, and generation.
-  Queue admission or a successful socket `send` is not membership authority.
+  browser-safe transport generation. The exact one-use commit path emits a
+  non-cloneable receipt carrying those facts; only consuming that receipt may
+  mint `membership_authenticated`. Ambient membership presence, a repeated or
+  fresh request, queue admission, or a successful socket `send` cannot mint an
+  acknowledgment. The acknowledgment repeats nonce, subscription, stream,
+  binding, and generation.
   Stale, duplicate, foreign, unknown-field, noncanonical, and oversized
   acknowledgments fail closed.
 - 2026-08-25 -- Made WebSocket control decoding purely bounded syntactic and
