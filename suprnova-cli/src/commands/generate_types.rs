@@ -704,6 +704,31 @@ pub fn generate_types_string(input: ScanInput) -> String {
     output
 }
 
+/// Write `contents` to `path`, but only when they differ from what is
+/// already there. Returns whether a write actually happened.
+///
+/// Regeneration is not a change. `suprnova serve` runs the backend under
+/// `cargo watch`, which restarts on any write inside the project, and the
+/// generator reruns on every `.rs` save - so an unconditional write turned
+/// each regeneration into a backend restart even when the emitted
+/// TypeScript was byte-identical to the file already on disk. Comparing
+/// first makes a no-op rerun genuinely a no-op, which is also what stops
+/// the file from churning its mtime in version control.
+///
+/// A file that exists but cannot be read counts as changed: the write is
+/// attempted anyway, so a real permissions or IO problem surfaces as the
+/// write error it is rather than as a silent skip.
+fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
+    if let Ok(existing) = fs::read(path)
+        && existing == contents.as_bytes()
+    {
+        return Ok(false);
+    }
+
+    fs::write(path, contents).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    Ok(true)
+}
+
 /// Generate types and write to the output file
 pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result<usize, String> {
     let structs = scan_inertia_props(project_path);
@@ -723,8 +748,7 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
     }
 
     let typescript = generate_typescript(&structs);
-    fs::write(output_path, typescript)
-        .map_err(|e| format!("Failed to write TypeScript file: {}", e))?;
+    write_if_changed(output_path, &typescript)?;
 
     Ok(structs.len())
 }
@@ -1099,8 +1123,7 @@ pub fn generate_lang_keys_to_file(
     }
 
     let contents = render_lang_keys_file(&ids, &chain);
-    fs::write(output_path, contents)
-        .map_err(|e| format!("Failed to write {}: {}", output_path.display(), e))?;
+    write_if_changed(output_path, &contents)?;
 
     Ok(ids.len())
 }
@@ -1282,6 +1305,129 @@ fn start_watcher(
                 return Err(format!("Watch error: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod write_if_changed_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// A timestamp far enough in the past that no incidental write could
+    /// coincide with it.
+    fn long_ago() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    }
+
+    fn set_old_mtime(path: &Path) -> SystemTime {
+        let stamp = long_ago();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for set_modified");
+        file.set_modified(stamp).expect("set_modified");
+        stamp
+    }
+
+    fn mtime(path: &Path) -> SystemTime {
+        fs::metadata(path)
+            .expect("metadata")
+            .modified()
+            .expect("modified")
+    }
+
+    #[test]
+    fn identical_contents_are_not_rewritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "same\n").expect("seed");
+        let before = set_old_mtime(&path);
+
+        assert!(
+            !write_if_changed(&path, "same\n").expect("write_if_changed"),
+            "identical contents must not be written"
+        );
+        assert_eq!(
+            mtime(&path),
+            before,
+            "an unchanged file must keep its mtime, or every watcher \
+             downstream sees a change that did not happen"
+        );
+    }
+
+    #[test]
+    fn different_contents_are_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+        fs::write(&path, "old\n").expect("seed");
+        set_old_mtime(&path);
+
+        assert!(
+            write_if_changed(&path, "new\n").expect("write_if_changed"),
+            "changed contents must be written"
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new\n");
+    }
+
+    #[test]
+    fn a_missing_file_counts_as_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.ts");
+
+        assert!(write_if_changed(&path, "fresh\n").expect("write_if_changed"));
+        assert_eq!(fs::read_to_string(&path).expect("read"), "fresh\n");
+    }
+
+    #[test]
+    fn regenerating_an_unchanged_project_leaves_the_output_file_alone() {
+        // The `serve` watcher watches the tree the generator reads, and
+        // cargo-watch watches the tree the generator writes into. A
+        // no-op regeneration that still touches the file is a change
+        // event to both of them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(
+            src.join("props.rs"),
+            "#[derive(InertiaProps)]\npub struct HomeProps {\n    pub title: String,\n}\n",
+        )
+        .expect("seed props.rs");
+        let out = dir.path().join("frontend/src/types/inertia-props.ts");
+
+        assert_eq!(
+            generate_types_to_file(dir.path(), &out).expect("first run"),
+            1
+        );
+        let first = fs::read_to_string(&out).expect("read output");
+        let before = set_old_mtime(&out);
+
+        assert_eq!(
+            generate_types_to_file(dir.path(), &out).expect("second run"),
+            1
+        );
+        assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
+        assert_eq!(fs::read_to_string(&out).expect("read output"), first);
+    }
+
+    #[test]
+    fn regenerating_unchanged_lang_keys_leaves_the_output_file_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lang = dir.path().join("lang/en");
+        fs::create_dir_all(&lang).expect("create lang/en");
+        fs::write(lang.join("app.ftl"), "welcome = Hello\n").expect("seed app.ftl");
+        let out = dir.path().join("frontend/src/types/lang-keys.ts");
+
+        assert_eq!(
+            generate_lang_keys_to_file(dir.path(), &out).expect("first run"),
+            1
+        );
+        let before = set_old_mtime(&out);
+
+        assert_eq!(
+            generate_lang_keys_to_file(dir.path(), &out).expect("second run"),
+            1
+        );
+        assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
     }
 }
 
