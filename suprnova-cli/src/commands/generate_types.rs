@@ -1591,12 +1591,23 @@ mod watch_loop_tests {
             1
         );
 
+        // Positive control: one event a live watcher must deliver, whose
+        // extension is neither `.rs` nor `.ftl` so it arms nothing. Without
+        // it, a dead or stalled watcher would sail through the assertion
+        // below by delivering no events at all.
+        let control = src.join("control.probe");
+        fs::write(&control, "1\n").expect("write control file");
+
         // Pump the loop exactly as `start_watcher` does, for well past the
         // quiet period. Nothing may ever come due.
         let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_control = false;
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) => schedule.observe(&event, Instant::now()),
+                Ok(event) => {
+                    saw_control |= event.paths.iter().any(|p| p == &control);
+                    schedule.observe(&event, Instant::now());
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -1606,6 +1617,11 @@ mod watch_loop_tests {
                 "a regeneration scheduled another one: this is the loop"
             );
         }
+        assert!(
+            saw_control,
+            "the control event never arrived, so 'nothing came due' proves \
+             nothing - treat this as a dead or stalled watcher, not a pass"
+        );
 
         // And a real edit must still get through, or the fix traded a loop
         // for a watcher that never runs.

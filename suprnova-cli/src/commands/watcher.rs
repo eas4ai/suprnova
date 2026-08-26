@@ -409,19 +409,39 @@ mod watch_trigger_tests {
         // A read is exactly what the generator does to every file under
         // the watched tree on each run.
         let _ = std::fs::read_to_string(&file).expect("read a.rs");
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while Instant::now() < deadline {
+
+        // Positive control. Asserting that nothing arrives proves nothing
+        // if the watcher is dead or delivery is slower than the window,
+        // so put one event in the stream that a live watcher *must*
+        // deliver: creating this file is a real `Create`/`Modify`, and its
+        // extension is neither `.rs` nor `.ftl`, so it is still not a
+        // trigger. Seeing it means the window really was live.
+        let control = src.join("control.probe");
+        std::fs::write(&control, "1\n").expect("write control file");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_control = false;
+        while !saw_control && Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) => assert_eq!(
-                    watch_trigger(&event),
-                    WatchTrigger::NONE,
-                    "reading a watched file must not schedule a regeneration, got {:?}",
-                    event.kind
-                ),
+                Ok(event) => {
+                    assert_eq!(
+                        watch_trigger(&event),
+                        WatchTrigger::NONE,
+                        "reading a watched file must not schedule a regeneration, got {:?}",
+                        event.kind
+                    );
+                    saw_control = event.paths.iter().any(|p| p == &control);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
+        assert!(
+            saw_control,
+            "the control event never arrived, so the absence of a trigger \
+             above proves nothing - treat this as a dead or stalled watcher, \
+             not as a pass"
+        );
 
         // A write must still get through, or the fix would have traded a
         // loop for a dead watcher.
