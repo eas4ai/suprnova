@@ -201,6 +201,10 @@ function eventCapability(): ReturnType<RuntimeFeatureIslandPort["authorizeRegist
   return Object.freeze({}) as ReturnType<RuntimeFeatureIslandPort["authorizeRegisteredEvents"]>;
 }
 
+async function flushMicrotasks(turns = 8): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) await Promise.resolve();
+}
+
 describe("async feature lifecycle", () => {
   it("proves exact no-tail continuity before an immediate hybrid timer can refresh", async () => {
     const sources: FakeSource[] = [];
@@ -268,6 +272,190 @@ describe("async feature lifecycle", () => {
     );
     owner.dispose();
   });
+
+  it.each([
+    { scenario: "latest interval", transport: "sse" },
+    { scenario: "latest interval", transport: "websocket" },
+    { scenario: "removed poll", transport: "sse" },
+    { scenario: "removed poll", transport: "websocket" },
+    { scenario: "directive conflict", transport: "sse" },
+    { scenario: "directive conflict", transport: "websocket" },
+  ] as const)(
+    "defers $scenario morph intent until the delayed $transport membership proof",
+    async ({ scenario, transport }) => {
+      const timers = new FakeTimers();
+      const refresh = vi.fn((reason: unknown) => {
+        void reason;
+        return "queued" as const;
+      });
+      const event = vi.fn(() => "dispatched" as const);
+      const diagnose = vi.fn();
+      const root = Object.freeze({}) as Element;
+      let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([
+        ownership(root),
+      ]);
+      const sources: FakeSource[] = [];
+      let acknowledgeSse: VoidFunction | undefined;
+      const sent: string[] = [];
+      const sockets: {
+        close: ReturnType<typeof vi.fn>;
+        onmessage?: (event?: unknown) => void;
+        onopen?: VoidFunction;
+        send(data: string): void;
+      }[] = [];
+      const subscription = authorization(0n, {
+        document: Object.freeze({
+          authorizationScope: "document-scope",
+          origin: "https://app.example.test",
+          transport,
+        }),
+      });
+      const replay = Object.freeze([
+        envelope(1n, { kind: "refresh", name: "refresh" }),
+        envelope(2n, {
+          event: "orders.updated",
+          kind: "browser_event",
+          payload: { order: 42 },
+          schema_version: 1,
+          target: "self",
+        }),
+      ]);
+      const transports: AsyncTransportPorts =
+        transport === "sse"
+          ? {
+              eventSource(request) {
+                const source = new FakeSource(request);
+                source.subscribe.mockImplementation(
+                  (current) =>
+                    new Promise((resolve) => {
+                      acknowledgeSse = () => {
+                        resolve(
+                          Object.freeze({
+                            descriptorBinding: current.descriptorBinding,
+                            kind: "authenticated" as const,
+                            stream: current.stream,
+                            subscriptionId: current.subscriptionId,
+                            transportGeneration: request.transportGeneration,
+                          }),
+                        );
+                      };
+                    }),
+                );
+                sources.push(source);
+                return source;
+              },
+              webSocket() {
+                throw new Error("unexpected_websocket");
+              },
+            }
+          : new BrowserAsyncTransportPorts({
+              eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+              fetch: vi.fn<typeof globalThis.fetch>(),
+              membershipTimeoutMs: 5_000,
+              sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+              timers: timers.port,
+              webSocket() {
+                const socket = {
+                  close: vi.fn(),
+                  send(data: string) {
+                    sent.push(data);
+                  },
+                };
+                sockets.push(socket);
+                return socket;
+              },
+            });
+      const owner = new AsyncDocumentOwner(
+        { diagnose, onDispose: vi.fn() },
+        {
+          authority: {
+            authorize: () => Object.freeze({ replay, subscription }),
+          },
+          clock: { now: () => 100 },
+          randomness: { number: () => 0.5 },
+          timers: timers.port,
+          transports,
+        },
+      );
+      const controller = owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: event,
+        element: root,
+        enqueueFreshRender: refresh,
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `document-pending-${transport}-${scenario}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: () => "accepted",
+        queryDirectiveOwnership: () => ownerships,
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      await flushMicrotasks();
+      if (transport === "sse") sources[0]?.open();
+      else sockets[0]?.onopen?.();
+      await flushMicrotasks();
+
+      controller.beforeMorph?.();
+      ownerships = Object.freeze([ownership(root), pollOwnership(root, ["5s", "immediate"])]);
+      controller.afterMorph?.();
+      if (scenario === "latest interval") {
+        controller.beforeMorph?.();
+        ownerships = Object.freeze([ownership(root), pollOwnership(root, ["10s", "immediate"])]);
+        controller.afterMorph?.();
+      } else if (scenario === "removed poll") {
+        controller.beforeMorph?.();
+        ownerships = Object.freeze([pushOnlyOwnership(root)]);
+        controller.afterMorph?.();
+      } else {
+        controller.beforeMorph?.();
+        ownerships = Object.freeze([
+          pushOnlyOwnership(root),
+          pollOwnership(root, ["5s", "immediate"]),
+        ]);
+        controller.afterMorph?.();
+      }
+
+      expect(refresh).not.toHaveBeenCalled();
+      expect(event).not.toHaveBeenCalled();
+
+      if (transport === "sse") {
+        acknowledgeSse?.();
+      } else {
+        const request = JSON.parse(sent[0] ?? "null") as Record<string, unknown>;
+        sockets[0]?.onmessage?.({
+          data: canonicalize({
+            control_nonce: String(request["control_nonce"]),
+            descriptor_binding: String(request["descriptor_binding"]),
+            kind: "membership_authenticated",
+            stream: String(request["stream"]),
+            subscription: String(request["subscription"]),
+            transport_generation: Number(request["transport_generation"]),
+          }),
+        });
+      }
+      await flushMicrotasks();
+
+      if (scenario === "directive conflict") {
+        expect(diagnose).toHaveBeenCalledWith("operation_rejected");
+        expect(refresh.mock.calls.some(([reason]) => reason === "poll")).toBe(false);
+        expect(event).not.toHaveBeenCalled();
+      } else {
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(event).toHaveBeenCalledOnce();
+        if (transport === "sse") sources[0]?.emit(envelope(4n, { kind: "heartbeat" }));
+        else sockets[0]?.onmessage?.({ data: envelope(4n, { kind: "heartbeat" }) });
+        const pendingDelays = [...timers.pending.values()].map(({ milliseconds }) => milliseconds);
+        if (scenario === "latest interval") expect(pendingDelays).toContain(11_000);
+        else {
+          expect(pendingDelays).not.toContain(5_500);
+          expect(pendingDelays).not.toContain(33_000);
+        }
+      }
+      owner.dispose();
+    },
+  );
 
   it("falls back from a failed pageshow reauthorization without reusing the old socket", async () => {
     const sources: FakeSource[] = [];

@@ -445,16 +445,16 @@ enforces 20 KiB for each upload variant. Async variants compare against
 an append-only reviewed history, deterministic build/compression method, and
 exact role hashes and measurements. Its immutable Task 6 anchor retains source
 commit `499eda2287f17d6a46c9b8c306df5791b1f671d8`, decision, rationale,
-16,356-byte ESM, and 14,155-byte classic measurements. The explicit Task 7
-quality-review entry records stable decision provenance, rationale,
-18,638-byte ESM with SHA-256
-`244da05005037fe07041e1fccd6f11719559d203f3616187989c922407ba3bab`, and
-16,420-byte classic with SHA-256
-`b14898ef30df20f9e7b0e1eacf2081c370020e96875e3679f4ff639300e1c4cf`.
-The ordinary gate admits Task 7's 18,638-byte ESM and 16,420-byte classic as
-the newest explicitly reviewed baseline, not as an automatic self-baseline.
-More than 15 percent growth from the newest reviewed entry fails as unreviewed
-drift; a candidate cannot supply, overwrite, delete, collapse, or silently
+16,356-byte ESM, and 14,155-byte classic measurements. Task 6 remains the active
+entry until a later reviewed baseline can reference a strictly prior immutable
+commit containing both its policy decision and the code that produced its
+measured artifacts. A candidate hash need not equal the historical hash: stored
+hashes authenticate past reviewed artifacts, while current deterministic bytes
+are measured as a candidate. More than 15 percent growth from the newest
+reviewed entry fails only as `unreviewed_regression`; it is a review trigger,
+not an absolute product limit. Intentional growth, including a substantially
+larger feature or dependency such as Three.js, may be correct after explicit
+review. A candidate cannot supply, overwrite, delete, collapse, or silently
 self-baseline the reviewed history. The binding browser benchmark independently
 compares a separately recorded current core candidate with its prior performance
 baseline and refuses a self-comparison path. Runtime workloads enforce the
@@ -480,14 +480,25 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
-- 2026-08-26 -- Appended the independently reviewed Task 7 artifact baseline:
-  18,638-byte ESM and 16,420-byte classic, each bound to its exact SHA-256 and
-  the stable `iteration-004-task-7-quality-review` decision. The schema retains
-  and anchors Task 6 unchanged, rejects deletion, overwrite, history collapse,
-  missing provenance, or hash mismatch, and continues the 15-percent alert from
-  the newest reviewed entry. Production-build hooks use isolated output roots
-  and an explicit 30-second timeout; shared-`dist/` tests use the cross-process
-  lock.
+- 2026-08-26 -- Decision ID: iteration-004-task-7-membership-budget-policy.
+  Confirmed that async artifacts
+  have no absolute total-size cap; intentional growth, even large growth from a
+  feature such as Three.js, may be correct. The 15-percent rule reports only an
+  unreviewed regression between reviewed baselines. Candidate hash differences
+  below that threshold pass because reviewed hashes authenticate historical
+  artifacts rather than freezing future candidates. Task 7's lifecycle-aware
+  committed-morph rescan, event-driven offline/hidden storm prevention, public
+  freshness semantics, and membership-proof deferral are explicitly reviewed
+  correctness growth. A new baseline may record that approval only after this
+  decision and its producing code exist in a prior immutable commit; the earlier
+  self-referential Task 7 entry is withdrawn, leaving Task 6 active until that
+  two-commit provenance sequence completes.
+- 2026-08-26 -- Previously attempted to append the independently reviewed Task 7
+  artifact baseline. Its measurements and review rationale were valid, but its
+  same-entry `sourceDecision` was circular rather than prior immutable
+  provenance; the newer decision above corrects that record without weakening
+  the Task 6 anchor or 15-percent review trigger. Production-build hooks remain
+  isolated and bounded, with shared-`dist/` tests using the cross-process lock.
 - 2026-08-26 -- Replaced the async artifacts' arbitrary 16 KiB total-size cliff
   with deterministic exact-byte reporting and a closed-provenance Task 6 size
   baseline. Missing, malformed, self-derived, or greater-than-threshold

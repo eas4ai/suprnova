@@ -787,10 +787,16 @@
   burst, including the 100-island random-boundary workload.
 - [x] Give production-build test hooks isolated temporary output roots and an
   explicit 30-second timeout; serialize only tests that must mutate shared
-  `dist/` bytes behind the bounded cross-process lock. Append the independently
-  reviewed Task 7 artifact-size baseline without deleting or overwriting the
-  immutable Task 6 provenance; retain the 15-percent alert between reviewed
-  baselines.
+  `dist/` bytes behind the bounded cross-process lock. Preserve Task 6 as the
+  active baseline until reviewed Task 7 code and its policy decision exist in a
+  strictly prior immutable commit, then append exact measurements in a separate
+  commit. Historical hashes authenticate reviewed artifacts; candidate hash
+  changes alone pass, while size growth above 15 percent reports only
+  `unreviewed_regression` pending explicit review.
+- [x] Retain the latest committed-morph freshness intent while initial or
+  reconnect membership is pending, but apply no pending authorization or poll
+  timer. Exact staged SSE/WebSocket acknowledgment applies only the newest
+  generation; removal or conflict prevents stale immediate policy activation.
 - [x] Run corrected Rust checker, controlled-clock poll, real scheduler,
   connectivity, visibility, bfcache, 100-subscription storm, public declaration,
   deterministic build, drift-budget, and full project gates.

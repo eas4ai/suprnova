@@ -16,6 +16,11 @@ export function evaluateArtifactBudgets(
   baselineValue: unknown,
 ): ArtifactBudgetEvaluation;
 
+export function validateArtifactSizeBaselineProvenance(
+  value: unknown,
+  repositoryRoot: string,
+): unknown;
+
 export function evaluateBindingEvidence(
   baseline: Readonly<{
     recordedAt: string;

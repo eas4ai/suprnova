@@ -152,6 +152,12 @@ Acceptance criteria:
   proof establish continuity before an immediate hybrid timer can start. A
   current initial membership therefore emits no speculative refresh; late or
   replaced proofs remain generation-fenced.
+- A committed morph that changes owned freshness directives while initial or
+  replacement membership proof is pending records only the newest policy
+  intent. It cannot apply pending authorization, start polling, or dispatch
+  staged replay/effects. The exact accepted acknowledgment applies that newest
+  intent atomically against committed authorization; removal, replacement, or
+  a fail-closed directive conflict fences every older intent and timer.
 - One optional configured observer receives immutable island identity plus the
   closed `current`, `degraded`, `polling`, `offline`, `suspended`, or `closed`
   semantic freshness state only when it changes. It is presentation/accessibility
@@ -519,6 +525,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Deferred committed-morph freshness changes while exact initial
+  or replacement membership proof is pending. The browser retains the latest
+  generation-fenced owned directive intent, applies it only with committed
+  authorization after the exact SSE/WebSocket acknowledgment, and prevents
+  removed, conflicting, or stale immediate policies from starting later.
 - 2026-08-26 -- Made freshness directives committed-morph lifecycle state for
   every async-enabled island, including initially directive-free islands. Only
   island-owned directives are rescanned after commit; removal, addition, and

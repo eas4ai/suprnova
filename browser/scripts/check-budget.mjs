@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import { buildRuntimeAssets } from "./build.mjs";
 const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v1.json");
 const artifactSizeBaselinePath = resolve(browserRoot, "benchmarks/baselines/artifact-size-v1.json");
+const artifactSizeBaselineRepositoryPath = "browser/benchmarks/baselines/artifact-size-v1.json";
 const candidatePath = resolve(
   process.env["SUPRNOVA_LIVE_BROWSER_BUDGET_CANDIDATE"] ??
     resolve(browserRoot, "benchmarks/local/latest.json"),
@@ -70,7 +72,7 @@ export function validateArtifactSizeBaseline(value) {
       value.methodology.compression !== "brotli-quality-11" ||
       value.methodology.deterministic !== true ||
       !Array.isArray(value.history) ||
-      value.history.length < 2 ||
+      value.history.length < 1 ||
       value.history.length > 64
     ) {
       throw new Error("artifact_size_baseline_invalid");
@@ -82,29 +84,33 @@ export function validateArtifactSizeBaseline(value) {
         throw new Error("artifact_size_baseline_invalid");
       }
       const { review, roles } = entry;
-      const commitReview = exactKeys(review, [
-        "decision",
-        "rationale",
-        "recordedAt",
-        "sourceCommit",
-      ]);
-      const decisionReview = exactKeys(review, [
-        "decision",
-        "rationale",
-        "recordedAt",
-        "sourceDecision",
-      ]);
+      const anchorReview =
+        index === 0 && exactKeys(review, ["decision", "rationale", "recordedAt", "sourceCommit"]);
+      const provenanceReview =
+        index > 0 &&
+        exactKeys(review, [
+          "decision",
+          "rationale",
+          "recordedAt",
+          "sourceCommit",
+          "sourceDecision",
+          "sourceDecisionPath",
+        ]);
       const recordedAt = Date.parse(review.recordedAt);
       if (
-        (!commitReview && !decisionReview) ||
+        (!anchorReview && !provenanceReview) ||
         !/^[a-z0-9][a-z0-9._-]{2,127}$/u.test(review.decision) ||
         decisions.has(review.decision) ||
         typeof review.rationale !== "string" ||
         review.rationale.length < 20 ||
         !Number.isFinite(recordedAt) ||
         recordedAt <= priorRecordedAt ||
-        (commitReview && !/^[0-9a-f]{40}$/u.test(review.sourceCommit)) ||
-        (decisionReview && review.sourceDecision !== review.decision) ||
+        !/^[0-9a-f]{40}$/u.test(review.sourceCommit) ||
+        (provenanceReview && review.sourceDecision !== review.decision) ||
+        (provenanceReview &&
+          !/^docs\/specs\/suprnova-live\/[a-z0-9][a-z0-9._/-]*\.md$/u.test(
+            review.sourceDecisionPath,
+          )) ||
         !exactKeys(roles, ["async-classic", "async-esm"])
       ) {
         throw new Error("artifact_size_baseline_invalid");
@@ -141,6 +147,92 @@ export function validateArtifactSizeBaseline(value) {
   } catch {
     throw new Error("artifact_size_baseline_invalid");
   }
+}
+
+function git(repositoryRoot, arguments_) {
+  try {
+    return execFileSync("git", ["-C", repositoryRoot, ...arguments_], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new Error("artifact_size_baseline_provenance_invalid");
+  }
+}
+
+function committedBaseline(repositoryRoot, commit) {
+  try {
+    return JSON.parse(
+      git(repositoryRoot, ["show", `${commit}:${artifactSizeBaselineRepositoryPath}`]),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function sameEntry(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function validateArtifactSizeBaselineProvenance(value, repositoryRoot) {
+  const baseline = validateArtifactSizeBaseline(value);
+  const commits = git(repositoryRoot, [
+    "log",
+    "--format=%H",
+    "--reverse",
+    "--",
+    artifactSizeBaselineRepositoryPath,
+  ])
+    .split("\n")
+    .filter(Boolean);
+  const historical = [];
+  for (const commit of commits) {
+    const candidate = committedBaseline(repositoryRoot, commit);
+    if (candidate === null) continue;
+    try {
+      historical.push(
+        Object.freeze({
+          baseline: validateArtifactSizeBaseline(candidate),
+          commit,
+        }),
+      );
+    } catch {
+      // Invalid historical schemas cannot confer reviewed-baseline authority.
+    }
+  }
+  for (const prior of historical) {
+    if (
+      prior.baseline.history.length > baseline.history.length ||
+      prior.baseline.history.some((entry, index) => !sameEntry(entry, baseline.history[index]))
+    ) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+  }
+  for (const entry of baseline.history.slice(1)) {
+    const introduced = historical.find(({ baseline: historicalBaseline }) =>
+      historicalBaseline.history.some(({ review }) => review.decision === entry.review.decision),
+    );
+    if (
+      introduced === undefined ||
+      introduced.commit === entry.review.sourceCommit ||
+      git(repositoryRoot, [
+        "merge-base",
+        "--is-ancestor",
+        entry.review.sourceCommit,
+        introduced.commit,
+      ]) !== ""
+    ) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+    const decisionSource = git(repositoryRoot, [
+      "show",
+      `${entry.review.sourceCommit}:${entry.review.sourceDecisionPath}`,
+    ]);
+    if (!decisionSource.includes(`Decision ID: ${entry.review.sourceDecision}`)) {
+      throw new Error("artifact_size_baseline_provenance_invalid");
+    }
+  }
+  return baseline;
 }
 
 export function evaluateArtifactBudgets(assets, baselineValue) {
@@ -207,9 +299,6 @@ export function evaluateArtifactBudgets(assets, baselineValue) {
     }
     if (asset !== undefined && reviewed !== undefined && asset.file !== reviewed.artifact) {
       issues.push(`artifact_budget:baseline_artifact:${role}`);
-    }
-    if (asset !== undefined && reviewed?.sha256 !== undefined && asset.sha256 !== reviewed.sha256) {
-      issues.push(`artifact_budget:baseline_hash:${role}`);
     }
   }
   return Object.freeze({ lines: Object.freeze(lines), issues: Object.freeze(issues) });
@@ -292,8 +381,9 @@ async function checkBudgets(release, binding) {
   }
 
   await buildRuntimeAssets();
-  const artifactSizeBaseline = validateArtifactSizeBaseline(
+  const artifactSizeBaseline = validateArtifactSizeBaselineProvenance(
     await boundedBenchmarkJson(artifactSizeBaselinePath, false),
+    resolve(browserRoot, ".."),
   );
   const manifest = JSON.parse(
     await readFile(resolve(browserRoot, "dist/suprnova-live.assets.json"), "utf8"),

@@ -209,12 +209,14 @@ iteration must do that explicitly.
   the developer explicitly approves them together.
 - An artifact with no absolute transfer ceiling still has mechanical drift
   control. Its reviewed artifact-size baseline uses a closed, append-only,
-  version-controlled history with source commit or stable decision provenance,
-  artifact hashes, decision, rationale, and deterministic measurement method.
+  version-controlled history with a source commit plus a decision record that
+  both strictly predate the baseline-append commit, artifact hashes, rationale,
+  and deterministic measurement method. Stored hashes authenticate the exact
+  historical artifact; a changed current-candidate hash does not fail by itself.
   The immutable Task 6 anchor cannot be overwritten, deleted, or collapsed, and
   the current candidate is never an implicit or automatically written baseline.
   More than the approved drift threshold requires an explicit reviewed baseline
-  decision in the same coherent change.
+  decision in a prior immutable change; it is not an absolute size veto.
 
 ### Testing strategy
 
@@ -516,11 +518,18 @@ fixtures.
 
 ## Decisions and revisions
 
-- 2026-08-26 -- Advanced the async artifact baseline through an explicit
-  independent Task 7 review. The closed schema now retains append-only Task 6
-  and Task 7 entries, anchors Task 6 against overwrite/deletion, binds later
-  entries to exact artifact hashes plus commit or stable-decision provenance,
-  and continues to treat 15 percent as an alert between reviewed baselines.
+- 2026-08-26 -- Corrected reviewed-baseline provenance to require a strictly
+  prior immutable source commit and decision record before a later append. A
+  candidate hash change alone is not drift; exact stored hashes authenticate
+  historical reviewed artifacts, while the 15-percent size rule reports only
+  unreviewed growth. The circular Task 7 entry was withdrawn, Task 6 remains
+  active during the two-commit correction, and correctness-driven growth has no
+  absolute transfer veto.
+- 2026-08-26 -- Previously advanced the async artifact baseline through an
+  explicit independent Task 7 review. The measurements and rationale remain
+  review evidence, but the newer decision corrects its circular provenance.
+  The closed schema retains the immutable Task 6 anchor and continues to treat
+  15 percent as an alert between valid reviewed baselines.
   Production-build hooks use isolated temporary output roots and an explicit
   30-second timeout; only tests that must mutate shared `dist/` bytes serialize
   behind the cross-process lock, rather than inflating unrelated test limits.

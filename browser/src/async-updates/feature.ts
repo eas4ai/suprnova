@@ -625,10 +625,26 @@ class AsyncIslandController implements FeatureIslandController {
     if (this.#state === "disposed") return;
     this.#pollModifiers = pollModifiers;
     this.#streamModifiers = streamModifiers;
-    const authorization = this.#currentAuthorization ?? this.#pendingAuthorization?.authorization;
-    if (authorization === undefined) return;
+    if (this.#pendingAuthorization !== null) {
+      try {
+        this.#resolvePollPolicy(this.#pendingAuthorization.authorization);
+      } catch {
+        this.#poll?.dispose();
+        this.#poll = null;
+        report(this.#context, "operation_rejected");
+      }
+      return;
+    }
+    const authorization = this.#currentAuthorization;
+    if (authorization === null) return;
     const continuity = this.#subscription?.state() === "current" ? "current" : "degraded";
-    this.#commitPollPolicy(authorization, continuity, true);
+    try {
+      this.#commitPollPolicy(this.#resolvePollPolicy(authorization), continuity, true);
+    } catch {
+      this.#poll?.dispose();
+      this.#poll = null;
+      report(this.#context, "operation_rejected");
+    }
   }
 
   async #authorize(
@@ -819,6 +835,7 @@ class AsyncIslandController implements FeatureIslandController {
         let capability: RegisteredBrowserEventCapability;
         let installed = false;
         try {
+          const pollPolicy = this.#resolvePollPolicy(authorization);
           capability = this.#port.authorizeRegisteredEvents(
             Object.freeze({
               descriptorBinding: authorization.descriptorBinding,
@@ -837,7 +854,7 @@ class AsyncIslandController implements FeatureIslandController {
           }
           const continuity = subscription.state() === "current" ? "current" : "degraded";
           this.#owner.remember(this, authorization);
-          this.#commitPollPolicy(authorization, continuity);
+          this.#commitPollPolicy(pollPolicy, continuity);
           clearPending();
           return "committed";
         } catch {
@@ -914,24 +931,19 @@ class AsyncIslandController implements FeatureIslandController {
     );
   }
 
+  #resolvePollPolicy(authorization: AuthorizedLogicalSubscription): PollPolicy | null {
+    return resolvePollPolicy(
+      this.#pollModifiers,
+      this.#streamModifiers,
+      authorization.fallbackPoll,
+    );
+  }
+
   #commitPollPolicy(
-    authorization: AuthorizedLogicalSubscription,
+    policy: PollPolicy | null,
     continuity: "current" | "degraded",
     applyInitial = false,
   ): void {
-    let policy: PollPolicy | null;
-    try {
-      policy = resolvePollPolicy(
-        this.#pollModifiers,
-        this.#streamModifiers,
-        authorization.fallbackPoll,
-      );
-    } catch {
-      this.#poll?.dispose();
-      this.#poll = null;
-      report(this.#context, "operation_rejected");
-      return;
-    }
     if (policy === null) {
       this.#poll?.dispose();
       this.#poll = null;

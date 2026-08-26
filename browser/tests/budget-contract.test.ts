@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -35,8 +37,9 @@ type ArtifactSizeBaseline = Readonly<{
       decision: string;
       rationale: string;
       recordedAt: string;
-      sourceCommit?: string;
+      sourceCommit: string;
       sourceDecision?: string;
+      sourceDecisionPath?: string;
     }>;
     roles: Readonly<
       Record<
@@ -85,27 +88,6 @@ const ARTIFACT_BASELINE = Object.freeze({
         }),
       }),
     }),
-    Object.freeze({
-      review: Object.freeze({
-        decision: "iteration-004-task-7-quality-review",
-        rationale:
-          "Lifecycle-aware committed-morph rescan, event-driven offline and hidden storm prevention, and public semantic correctness from independent production review.",
-        recordedAt: "2026-08-26T09:45:00-04:00",
-        sourceDecision: "iteration-004-task-7-quality-review",
-      }),
-      roles: Object.freeze({
-        "async-classic": Object.freeze({
-          artifact: "suprnova-live.async.classic.js",
-          brotliBytes: 16_420,
-          sha256: "b14898ef30df20f9e7b0e1eacf2081c370020e96875e3679f4ff639300e1c4cf",
-        }),
-        "async-esm": Object.freeze({
-          artifact: "suprnova-live.async.esm.js",
-          brotliBytes: 18_638,
-          sha256: "244da05005037fe07041e1fccd6f11719559d203f3616187989c922407ba3bab",
-        }),
-      }),
-    }),
   ]),
   schemaVersion: 2 as const,
 }) satisfies ArtifactSizeBaseline;
@@ -118,12 +100,29 @@ function baselineEntry(index: number): (typeof ARTIFACT_BASELINE.history)[number
 
 const TASK6_ARTIFACT_BASELINE = baselineEntry(0);
 const CURRENT_ARTIFACT_BASELINE = baselineEntry(ARTIFACT_BASELINE.history.length - 1);
-const CURRENT_ARTIFACT_ROLES = CURRENT_ARTIFACT_BASELINE.roles as Readonly<
-  Record<
-    "async-esm" | "async-classic",
-    Readonly<{ artifact: string; brotliBytes: number; sha256: string }>
-  >
->;
+const REVIEWED_ARTIFACT_BASELINE = Object.freeze({
+  review: Object.freeze({
+    decision: "iteration-004-task-7-membership-budget-policy",
+    rationale:
+      "Reviewed correctness growth is recorded only after its prior immutable decision commit exists.",
+    recordedAt: "2026-08-26T11:00:00-04:00",
+    sourceCommit: "a".repeat(40),
+    sourceDecision: "iteration-004-task-7-membership-budget-policy",
+    sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
+  }),
+  roles: Object.freeze({
+    "async-classic": Object.freeze({
+      artifact: "suprnova-live.async.classic.js",
+      brotliBytes: 16_420,
+      sha256: "b".repeat(64),
+    }),
+    "async-esm": Object.freeze({
+      artifact: "suprnova-live.async.esm.js",
+      brotliBytes: 18_638,
+      sha256: "c".repeat(64),
+    }),
+  }),
+});
 
 async function evaluator(): Promise<
   Readonly<{
@@ -158,9 +157,7 @@ function validArtifacts(): ArtifactBudgetInput[] {
           ? "suprnova-live.async.classic.js"
           : `${role}.js`,
     compatibleCore: ">=0.1.0 <0.2.0",
-    ...(role === "async-esm" || role === "async-classic"
-      ? { sha256: CURRENT_ARTIFACT_ROLES[role].sha256 }
-      : {}),
+    ...(role === "async-esm" || role === "async-classic" ? { sha256: "d".repeat(64) } : {}),
     brotliBytes:
       role === "async-esm"
         ? CURRENT_ARTIFACT_BASELINE.roles["async-esm"].brotliBytes
@@ -191,17 +188,36 @@ describe("role-aware production artifact budgets", () => {
     const excess = Math.floor(asyncEsm.brotliBytes * 1.15) + 1;
     artifacts[artifacts.indexOf(asyncEsm)] = { ...asyncEsm, brotliBytes: excess };
 
-    expect(evaluate(artifacts, ARTIFACT_BASELINE).issues).toContain(
+    expect(evaluate(artifacts, ARTIFACT_BASELINE).issues).toEqual([
       `artifact_budget:async-esm:unreviewed_regression:+${String(excess - asyncEsm.brotliBytes)}`,
-    );
+    ]);
+  });
+
+  it("accepts a changed candidate hash below the reviewed drift threshold", async () => {
+    const { evaluate } = await evaluator();
+    const artifacts = validArtifacts();
+    const asyncEsm = artifacts.find(({ role }) => role === "async-esm");
+    if (asyncEsm === undefined) throw new Error("async_esm_fixture_missing");
+    artifacts[artifacts.indexOf(asyncEsm)] = {
+      ...asyncEsm,
+      brotliBytes: Math.floor(asyncEsm.brotliBytes * 1.1),
+      sha256: "c".repeat(64),
+    };
+
+    expect(evaluate(artifacts, ARTIFACT_BASELINE).issues).toEqual([]);
   });
 
   it("requires append-only reviewed history with closed provenance", async () => {
     const { evaluate, validate } = await evaluator();
+    const reviewed = {
+      ...ARTIFACT_BASELINE,
+      history: [TASK6_ARTIFACT_BASELINE, REVIEWED_ARTIFACT_BASELINE],
+    };
+    expect(validate(reviewed)).toEqual(reviewed);
     expect(() => evaluate(validArtifacts(), null)).toThrow("artifact_size_baseline_missing");
-    expect(() =>
-      validate({ ...ARTIFACT_BASELINE, history: ARTIFACT_BASELINE.history.slice(1) }),
-    ).toThrow("artifact_size_baseline_invalid");
+    expect(() => validate({ ...ARTIFACT_BASELINE, history: [] })).toThrow(
+      "artifact_size_baseline_invalid",
+    );
     expect(() =>
       validate({
         ...ARTIFACT_BASELINE,
@@ -216,7 +232,7 @@ describe("role-aware production artifact budgets", () => {
               },
             },
           },
-          CURRENT_ARTIFACT_BASELINE,
+          REVIEWED_ARTIFACT_BASELINE,
         ],
       }),
     ).toThrow("artifact_size_baseline_invalid");
@@ -247,9 +263,24 @@ describe("role-aware production artifact budgets", () => {
         history: [
           TASK6_ARTIFACT_BASELINE,
           {
-            ...CURRENT_ARTIFACT_BASELINE,
+            ...REVIEWED_ARTIFACT_BASELINE,
+            review: {
+              ...REVIEWED_ARTIFACT_BASELINE.review,
+              sourceDecisionPath: undefined,
+            },
+          },
+        ],
+      }),
+    ).toThrow("artifact_size_baseline_invalid");
+    expect(() =>
+      validate({
+        ...ARTIFACT_BASELINE,
+        history: [
+          TASK6_ARTIFACT_BASELINE,
+          {
+            ...REVIEWED_ARTIFACT_BASELINE,
             roles: {
-              ...CURRENT_ARTIFACT_BASELINE.roles,
+              ...REVIEWED_ARTIFACT_BASELINE.roles,
               "async-classic": {
                 artifact: "suprnova-live.async.classic.js",
                 brotliBytes: 16_420,
@@ -259,6 +290,82 @@ describe("role-aware production artifact budgets", () => {
         ],
       }),
     ).toThrow("artifact_size_baseline_invalid");
+  });
+
+  it("requires the review decision and code commit to predate the baseline append", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "suprnova-live-artifact-provenance-"));
+    const baselineRelative = "browser/benchmarks/baselines/artifact-size-v1.json";
+    const decisionRelative = "docs/specs/suprnova-live/19-developer-tooling-and-testing.md";
+    const runGit = (...arguments_: string[]): string => {
+      const result = spawnSync("git", arguments_, { cwd: repository, encoding: "utf8" });
+      if (result.status !== 0) {
+        throw new Error(`${result.stdout}${result.stderr}`);
+      }
+      return result.stdout.trim();
+    };
+    try {
+      await mkdir(join(repository, "browser/benchmarks/baselines"), { recursive: true });
+      await mkdir(join(repository, "docs/specs/suprnova-live"), { recursive: true });
+      await writeFile(
+        join(repository, baselineRelative),
+        `${JSON.stringify(ARTIFACT_BASELINE, null, 2)}\n`,
+      );
+      await writeFile(
+        join(repository, decisionRelative),
+        "Decision ID: iteration-004-task-7-membership-budget-policy\n",
+      );
+      runGit("init", "-q");
+      runGit("config", "user.email", "fixture@example.test");
+      runGit("config", "user.name", "Fixture");
+      runGit("add", ".");
+      runGit("commit", "-qm", "record prior review decision");
+      const sourceCommit = runGit("rev-parse", "HEAD");
+      const reviewed = {
+        ...ARTIFACT_BASELINE,
+        history: [
+          TASK6_ARTIFACT_BASELINE,
+          {
+            ...REVIEWED_ARTIFACT_BASELINE,
+            review: {
+              ...REVIEWED_ARTIFACT_BASELINE.review,
+              sourceCommit,
+            },
+          },
+        ],
+      };
+      await writeFile(join(repository, baselineRelative), `${JSON.stringify(reviewed, null, 2)}\n`);
+      runGit("add", baselineRelative);
+      runGit("commit", "-qm", "append reviewed baseline");
+      const appendCommit = runGit("rev-parse", "HEAD");
+      const loaded = (await import("../scripts/check-budget.mjs")) as {
+        readonly validateArtifactSizeBaselineProvenance: (
+          value: unknown,
+          repositoryRoot: string,
+        ) => unknown;
+      };
+
+      expect(loaded.validateArtifactSizeBaselineProvenance(reviewed, repository)).toEqual(reviewed);
+      expect(() =>
+        loaded.validateArtifactSizeBaselineProvenance(
+          {
+            ...reviewed,
+            history: [
+              TASK6_ARTIFACT_BASELINE,
+              {
+                ...reviewed.history[1],
+                review: { ...reviewed.history[1]?.review, sourceCommit: appendCommit },
+              },
+            ],
+          },
+          repository,
+        ),
+      ).toThrow("artifact_size_baseline_provenance_invalid");
+      expect(() =>
+        loaded.validateArtifactSizeBaselineProvenance(ARTIFACT_BASELINE, repository),
+      ).toThrow("artifact_size_baseline_provenance_invalid");
+    } finally {
+      await rm(repository, { force: true, recursive: true });
+    }
   });
 
   it("reports duplicate, missing, incompatible, and over-budget roles together", async () => {
@@ -295,6 +402,12 @@ describe("browser benchmark provenance", () => {
   it(
     "keeps ordinary clean-checkout budgets independent of ignored binding evidence",
     async () => {
+      const checkedBaseline = JSON.parse(
+        await readFile(
+          new URL("../benchmarks/baselines/artifact-size-v1.json", import.meta.url),
+          "utf8",
+        ),
+      ) as ArtifactSizeBaseline;
       await withProductionBuildLock(() => {
         const script = new URL("../scripts/check-budget.mjs", import.meta.url);
         const buildScript = new URL("../scripts/build.mjs", import.meta.url);
@@ -315,7 +428,16 @@ describe("browser benchmark provenance", () => {
           encoding: "utf8",
           env: environment,
         });
-        expect(`${ordinary.stdout}${ordinary.stderr}`).toContain("browser_binding=skipped");
+        const ordinaryOutput = `${ordinary.stdout}${ordinary.stderr}`;
+        if (checkedBaseline.history.length === 1) {
+          expect(ordinary.status).not.toBe(0);
+          expect(ordinaryOutput).toContain(
+            "artifact_budget_failed:artifact_budget:async-classic:unreviewed_regression:",
+          );
+          expect(ordinaryOutput).not.toContain("baseline_hash");
+          return;
+        }
+        expect(ordinaryOutput).toContain("browser_binding=skipped");
         expect(ordinary.status).toBe(0);
 
         const binding = spawnSync(process.execPath, [script.pathname, "--binding"], {
