@@ -4,7 +4,7 @@
 
 ## 要求
 
-- 当前 `main` 需要 **Rust 1.94.0+**（workspace 使用 2024 edition）。带标签的 v1.3.5 版本同样以 Rust 1.94.0 为最低版本。通过 [rustup](https://rustup.rs/) 安装：
+- 当前 `main` 需要 **Rust 1.94.0+**（workspace 使用 2024 edition）。带标签的 v1.3.6 版本同样以 Rust 1.94.0 为最低版本。通过 [rustup](https://rustup.rs/) 安装：
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -25,7 +25,7 @@
 Suprnova 以一个 Cargo 项目的形式分发，CLI 安装程序会从 git 拉取框架（不是从 crates.io - 原因见下面的[发布前说明](#pre-launch-note)）：
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
 ```
 
 这会编译出 `suprnova` 二进制文件，并把它放进 `~/.cargo/bin`。确认它生效了：
@@ -143,7 +143,7 @@ my-app/
 CLI 就住在您的 `~/.cargo/bin` 里。要更新到最新版：
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
 ```
 
 `--force` 会让 Cargo 覆盖已有的那个二进制文件。
@@ -153,7 +153,7 @@ cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 
 一个脚手架出来的应用，是通过 `Cargo.toml` 里的一条 git 依赖来依赖 `suprnova` 框架 crate 的：
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.5" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6" }
 ```
 
 要拉取最新的框架变更：
@@ -166,7 +166,7 @@ cargo update -p suprnova
 
 ## 分发模型
 
-Suprnova 是通过 git 分发的，不是 crates.io - 框架和 CLI 都从 GitHub 安装。每个版本都会作为一个带标签的 GitHub Release（比如 `v1.2.4`）发布出来，而您的应用依赖的正是这个标签：一个脚手架出来的 `Cargo.toml` 会钉住 `tag = "v1.3.5"`，而 `Cargo.lock` 会记下这个标签解析到的那个精确提交，所以在您主动选择挪动之前，构建都是可复现的。更新是刻意为之的，绝不会顺带发生 - 递增这个标签，然后运行 `cargo update -p suprnova`；关于更新您应用框架版本的那一节会带您走一遍。
+Suprnova 是通过 git 分发的，不是 crates.io - 框架和 CLI 都从 GitHub 安装。每个版本都会作为一个带标签的 GitHub Release（比如 `v1.2.4`）发布出来，而您的应用依赖的正是这个标签：一个脚手架出来的 `Cargo.toml` 会钉住 `tag = "v1.3.6"`，而 `Cargo.lock` 会记下这个标签解析到的那个精确提交，所以在您主动选择挪动之前，构建都是可复现的。更新是刻意为之的，绝不会顺带发生 - 递增这个标签，然后运行 `cargo update -p suprnova`；关于更新您应用框架版本的那一节会带您走一遍。
 
 ## 编辑器设置
 

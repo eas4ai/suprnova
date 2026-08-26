@@ -36,7 +36,7 @@ the framework from git rather than crates.io (see the [Pre-launch
 note](#pre-launch-note) below). The command installs the tagged v1.2.4 release:
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
 ```
 
 This compiles the `suprnova` binary and drops it into `~/.cargo/bin`.
@@ -167,7 +167,7 @@ The full directory tour is in [Directory Structure](structure.md).
 The CLI lives in your `~/.cargo/bin`. To update to the latest:
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.5 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.6 suprnova-cli
 ```
 
 `--force` makes Cargo overwrite the existing binary.
@@ -178,7 +178,7 @@ A scaffolded app depends on the `suprnova` framework crate via a git
 dependency in `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.5" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.6" }
 ```
 
 To pull the latest framework changes:
@@ -197,7 +197,7 @@ there's no need to hand-pin a `rev` in `Cargo.toml`.
 Suprnova is distributed through git, not crates.io - both the framework
 and the CLI install from GitHub. Each version is published as a tagged
 GitHub Release (e.g. `v1.2.4`), and the tag is what your app depends on:
-a scaffolded `Cargo.toml` pins `tag = "v1.3.5"`, and `Cargo.lock` records
+a scaffolded `Cargo.toml` pins `tag = "v1.3.6"`, and `Cargo.lock` records
 the exact commit that tag resolved, so builds are reproducible until you
 choose to move. Updating is deliberate, never incidental - bump the tag and
 run `cargo update -p suprnova`; the section on updating your app's
