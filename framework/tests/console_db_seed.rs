@@ -188,7 +188,7 @@ async fn db_seed_class_unknown_returns_not_found_error() {
 // --- Progress reporting on a targeted run (Wave 6 T51) ------------------
 //
 // The lines themselves go to stdout, which the libtest harness owns, so
-// these tests assert the behaviour that must NOT change: a targeted run
+// these tests assert the behavior that must NOT change: a targeted run
 // still returns Ok, a failing targeted run still returns the seeder's
 // Err, and the seeder still runs exactly once. The line layout is
 // pinned by the unit tests on `console::output::two_column_detail`.

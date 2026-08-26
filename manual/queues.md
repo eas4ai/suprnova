@@ -798,11 +798,15 @@ forward changes nothing for it. Forwarding `default` catches jobs that named no
 queue, because an unrouted job belongs to `default`.
 
 A forward is a single lookup, never a chain. With `a -> b` and `b -> c`
-registered, a push that resolved to `a` lands on `b`. Registering a forward that
-closes a loop is an error rather than a redirect, because a loop can only mean
-the chaining that forwards never do. Forwarding a queue onto its own name is the
-identity - no redirect at all - which is how you neutralize a forward you
-already registered.
+registered, a push that resolved to `a` lands on `b`. Registering `b -> a` on
+top of an existing `a -> b` is therefore a coherent pool swap, not a loop: a
+push to `a` still lands on `b`, a push to `b` now lands on `a`, and a worker
+started on either name claims the other - nothing chains, so nothing strands. A
+longer rotation among more queue names resolves the same way, one independent
+hop at a time. Laravel's `Queue::forward` has no cycle check either, for the
+same reason: its resolver is this same single lookup. Forwarding a queue onto
+its own name is the identity - no redirect at all - which is how you neutralize
+a forward you already registered.
 
 Only future pushes move. Envelopes already sitting on the source queue stay
 there, and the worker that used to drain them is now claiming the destination,
@@ -811,7 +815,12 @@ so drain the source pool before you forward it. The same applies to
 
 Pausing is evaluated before the redirect, on the names the worker was started
 with. `Queue::pause(&connection, "default")` still stops a worker started on
-`--queue=default`, even while `default` is forwarded to `high`.
+`--queue=default`, even while `default` is forwarded to `high`. The converse
+also holds: pausing the forward's *destination* - `Queue::pause(&connection,
+"high")` - does not stop a worker started on `--queue=default`, because that
+worker is reached through its source name, not the rewritten one. The
+`WorkerQueuePaused` event this transition raises carries `queue: default`,
+the configured name, never `high` - Laravel orders and reports it the same way.
 
 The inspection calls are deliberately not forwarded: `Queue::pending_jobs(
 Some("default"))` lists what is literally on `default`, not what is on `high`,

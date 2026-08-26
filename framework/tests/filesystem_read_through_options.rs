@@ -56,7 +56,7 @@ async fn copy_false_serves_the_fallback_without_promoting() {
 }
 
 #[tokio::test]
-async fn copy_false_honours_a_ranged_read() {
+async fn copy_false_honors_a_ranged_read() {
     let _guard = Storage::fake();
     Storage::register_memory("primary");
     Storage::register_memory("fallback");
@@ -86,7 +86,7 @@ async fn copy_false_honours_a_ranged_read() {
             .expect("a ranged read resolves from the fallback")
             .to_vec(),
         b"bytes",
-        "a non-promoting read still honours the caller's range"
+        "a non-promoting read still honors the caller's range"
     );
 }
 
@@ -528,7 +528,7 @@ async fn a_copy_of_a_fallback_only_source_refuses_an_if_match_condition() {
     let message = err.to_string();
     assert!(
         message.contains("if_match"),
-        "the error must name the condition it cannot honour, got: {message}"
+        "the error must name the condition it cannot honor, got: {message}"
     );
 
     assert!(

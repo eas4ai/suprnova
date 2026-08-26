@@ -490,7 +490,7 @@ move clears the fallback source without first checking that it exists. And
 OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
 equivalent for, so Suprnova has to decide what each one means when the source
 is only on the fallback: `if_not_exists` and a copy's source version are
-honoured, and a copy's `if_match` is refused rather than dropped.
+honored, and a copy's `if_match` is refused rather than dropped.
 
 Laravel deletes the fallback source after the move on both paths. Suprnova
 deletes it first when the primary holds the source, because the two orders

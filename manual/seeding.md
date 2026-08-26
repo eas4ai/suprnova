@@ -561,7 +561,7 @@ plays the role `DatabaseSeeder` plays in Laravel - without needing the
 framework to bless one name as special.
 
 Seeder progress lines are plain text at a fixed 80 columns. Laravel
-sizes its dot leader to the terminal and colours the status word;
+sizes its dot leader to the terminal and colors the status word;
 reading the real terminal width means a dependency the framework does
 not carry, and this output goes to a stdout that is routinely piped
 into a log, where escape codes are noise. Elapsed time prints as whole

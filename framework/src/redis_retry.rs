@@ -90,7 +90,7 @@ pub(crate) fn attempts_from_raw(raw: Option<&str>) -> u32 {
 /// its own `retry_method` returns `NoRetry` for that kind.
 ///
 /// `LOADING`, `TRYAGAIN`, and `MASTERDOWN` are excluded too, and this one is a
-/// judgement call rather than an echo of redis-rs, whose `retry_method` marks
+/// judgment call rather than an echo of redis-rs, whose `retry_method` marks
 /// all three `WaitAndRetry`. They are server-authored replies about server
 /// state, not connection failures: the server received the command, understood
 /// it, and asked for time. Answering that on a 50 ms cadence adds load to a

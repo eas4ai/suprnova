@@ -724,7 +724,7 @@ impl Storage {
     /// Register a read-through disk with a custom layer stack applied to the
     /// composed [`Operator`] before it lands in the registry.
     ///
-    /// The closure wraps the read-through behaviour, so a `RetryLayer` added
+    /// The closure wraps the read-through behavior, so a `RetryLayer` added
     /// here retries the composite operation - including the fallback lookup -
     /// rather than only the primary. See [`Storage::register_fs_with`] for the
     /// full list of available layers.

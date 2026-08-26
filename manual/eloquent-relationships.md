@@ -238,7 +238,7 @@ let roles = user.roles().get().await?;
 
 // Each role carries the pivot context the macro made accessible:
 for r in &roles {
-    let pivot = r.pivot::<RoleUser>().expect("loaded via BelongsToMany");
+    let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
 ```

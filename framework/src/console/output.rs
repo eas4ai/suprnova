@@ -2,7 +2,7 @@
 //!
 //! Laravel renders command progress through Blade "components"
 //! (`$this->components->twoColumnDetail(...)`), which resolve terminal
-//! width and ANSI colour at render time. Suprnova's console has no view
+//! width and ANSI color at render time. Suprnova's console has no view
 //! layer, carries no terminal-width crate, and writes to a stdout that
 //! is routinely piped into a log - so the equivalent here is a pure
 //! function that returns the line. Pure means the layout is unit

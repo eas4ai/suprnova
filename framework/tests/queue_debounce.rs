@@ -954,6 +954,27 @@ async fn a_failed_push_never_tears_down_a_newer_dispatch_window() {
 // The fake must not hide a conflict that is a bug in the job
 // ---------------------------------------------------------------------------
 
+/// Declares uniqueness only, with no declarative `debounce_for` override.
+/// Pushing it through [`Queue::push_debounced`] with call-site options is the
+/// only way the two mechanisms collide for this job, which isolates the
+/// options form of the conflict from `ConfusedJob`, which conflicts through
+/// the declarative form alone.
+#[derive(Serialize, Deserialize, Clone)]
+struct UniqueOnlyJob;
+
+#[async_trait]
+impl Job for UniqueOnlyJob {
+    fn job_name() -> &'static str {
+        "queue_debounce::UniqueOnlyJob"
+    }
+    fn unique_id(&self) -> Option<String> {
+        Some("only-one".to_string())
+    }
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn the_fake_refuses_a_job_declaring_both_too() {
@@ -970,6 +991,21 @@ async fn the_fake_refuses_a_job_declaring_both_too() {
     let err = Queue::push_unique(ConfusedJob)
         .await
         .expect_err("and through the unique entry point too");
+    assert!(
+        err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
+        "the error must name both declarations: {err}"
+    );
+
+    // The options form conflicts the same way, even though this job declares
+    // no `debounce_for` at all: the window comes from the call site instead
+    // of the job, and the fake must refuse it exactly as production does
+    // rather than reporting `Ok` because there was no cache to write to.
+    let err = Queue::push_debounced(
+        UniqueOnlyJob,
+        DebounceOptions::new(Duration::from_millis(50)),
+    )
+    .await
+    .expect_err("call-site debounce options conflict with a declared unique_id too");
     assert!(
         err.to_string().contains("debounce_for") && err.to_string().contains("unique_id"),
         "the error must name both declarations: {err}"

@@ -146,10 +146,11 @@ When you run `suprnova serve`, the CLI:
    otherwise juggle in another terminal.
 10. Starts a file watcher on `src/` that re-runs the type generator whenever
     a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
-    The debounce is trailing-edge, so a burst - `cargo fmt`, format-on-save
-    across several files, a branch switch - coalesces into exactly one
-    regeneration that runs *after* the last write, rather than one that
-    fires on the first file and misses the rest.
+    Skipped when the project has no frontend, the same as the startup type
+    generation in step 4. The debounce is trailing-edge, so a burst -
+    `cargo fmt`, format-on-save across several files, a branch switch -
+    coalesces into exactly one regeneration that runs *after* the last
+    write, rather than one that fires on the first file and misses the rest.
 11. Forwards every child's stdout/stderr to your terminal with a `[name]`
     prefix (`[backend]`, `[frontend]`, or the process's configured name),
     optionally timestamped with `--timestamps` - or, with `--json`, as

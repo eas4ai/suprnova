@@ -1655,8 +1655,8 @@ where
 ///
 /// Split from the listener so the shape can be pinned by a unit test - the
 /// listener itself writes to stdout from inside a long-lived daemon. Mirrors
-/// Laravel's `WorkCommand::writeQueueStatus` output, minus its ANSI colours
-/// (the worker's other lines are uncoloured too) and minus its `--json` mode,
+/// Laravel's `WorkCommand::writeQueueStatus` output, minus its ANSI colors
+/// (the worker's other lines are uncolored too) and minus its `--json` mode,
 /// which `queue:work` does not have.
 fn format_worker_queue_status(
     queue: Option<&str>,

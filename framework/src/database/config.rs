@@ -101,7 +101,7 @@ pub struct DatabaseConfig {
     /// unset. Setting it overrides that mapping.
     pub acquire_timeout: Option<u64>,
     /// Ping a pooled connection before handing it out. `true` is sqlx's
-    /// default and the framework's existing behaviour. Turn it off only
+    /// default and the framework's existing behavior. Turn it off only
     /// when the per-checkout round trip is measurably too expensive and
     /// [`Self::ping_after_idle`] is not enough.
     pub test_before_acquire: bool,

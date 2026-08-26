@@ -177,7 +177,7 @@ async fn where_pivot_narrows_count() {
     assert_eq!(
         u.roles().where_pivot("active", 1i64).count().await.unwrap(),
         2,
-        "count must honour the same filter get() does",
+        "count must honor the same filter get() does",
     );
 }
 
@@ -695,7 +695,7 @@ async fn an_illegal_pivot_column_is_rejected_by_count_too() {
 // ---- Polymorphic m2m ----------------------------------------------------
 
 #[tokio::test]
-async fn morph_to_many_honours_pivot_filters() {
+async fn morph_to_many_honors_pivot_filters() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
 
@@ -768,7 +768,7 @@ async fn morph_to_many_pivot_filters_refuse_a_write() {
 }
 
 #[tokio::test]
-async fn morph_to_many_honours_the_closure_group() {
+async fn morph_to_many_honors_the_closure_group() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
 
@@ -797,7 +797,7 @@ async fn morph_to_many_honours_the_closure_group() {
 }
 
 #[tokio::test]
-async fn morphed_by_many_honours_pivot_filters() {
+async fn morphed_by_many_honors_pivot_filters() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
 
@@ -837,7 +837,7 @@ async fn morphed_by_many_honours_pivot_filters() {
 }
 
 #[tokio::test]
-async fn morphed_by_many_honours_the_closure_group() {
+async fn morphed_by_many_honors_the_closure_group() {
     let _db = TestDatabase::sqlite_memory().await.unwrap();
     migrate(&_db).await;
 

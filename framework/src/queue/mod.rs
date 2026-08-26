@@ -209,10 +209,14 @@ impl Queue {
     /// with no `--queue` at all already drains everything and is unaffected.
     ///
     /// A forward is a single lookup, not a chain: with `a -> b` and `b -> c`
-    /// registered, a push that resolved to `a` lands on `b`. A forward that
-    /// would close a loop is refused for that reason. Forwarding a queue onto
-    /// its own name is the identity - no redirect at all - which is how a
-    /// registered forward is neutralized.
+    /// registered, a push that resolved to `a` lands on `b`. A forward back
+    /// onto its own source (`a -> b` with `b -> a` also registered) is
+    /// therefore a coherent pool swap rather than a loop - nothing chains, so
+    /// nothing strands - and a longer rotation among more names resolves the
+    /// same way, one hop at a time. Laravel's `QueueRoutes` has no cycle
+    /// check either, for the same reason. Forwarding a queue onto its own
+    /// name is the identity - no redirect at all - which is how a registered
+    /// forward is neutralized.
     ///
     /// Only future pushes are redirected. Envelopes already sitting on `from`
     /// stay there, and the worker that used to drain them is now claiming `to`,
@@ -223,11 +227,10 @@ impl Queue {
     /// started on `--queue=default` even while `default` is forwarded. Laravel
     /// orders it the same way.
     ///
-    /// Infallible by design to match Laravel's spelling. The failures it
-    /// swallows are a refused cycle and a registry left unavailable by a
-    /// previous caller panicking while holding its lock; both are logged and
-    /// the forward is dropped. Use [`Queue::try_forward`] when you need to
-    /// handle them.
+    /// Infallible by design to match Laravel's spelling. The only failure it
+    /// swallows is the registry being left unavailable by a previous caller
+    /// panicking while holding its lock; that is logged and the forward is
+    /// dropped. Use [`Queue::try_forward`] when you need to handle it.
     pub fn forward(from: &str, to: &str) {
         Self::log_forward_failure(from, Self::try_forward(from, to, None));
     }
@@ -261,9 +264,8 @@ impl Queue {
 
     /// Fallible sibling of [`Queue::forward`] / [`Queue::forward_on`].
     ///
-    /// `connection` is `None` for "every connection". Returns `Err` when the
-    /// forward would close a cycle, or when the forward registry's lock is
-    /// poisoned.
+    /// `connection` is `None` for "every connection". Returns `Err` only when
+    /// the forward registry's lock is poisoned.
     pub fn try_forward(
         from: &str,
         to: &str,
@@ -444,7 +446,11 @@ impl Queue {
         // property of the environment, so `Queue::fake()` must surface it
         // rather than hide it until production. Only the check is hoisted: a
         // fake push writes nothing to the cache, so there is no window to arm.
-        if J::debounce_for().is_some() && job.unique_id().is_some() {
+        // Covers both spellings of "debounced": the job's own declarative
+        // `Job::debounce_for` and the caller-supplied `debounce` options
+        // `push_debounced` passes in, so the fake refuses the conflict the
+        // same way for either entry point.
+        if (J::debounce_for().is_some() || debounce.is_some()) && job.unique_id().is_some() {
             return Err(debounce_conflict(J::job_name()));
         }
         if testing::is_active() {
@@ -1566,7 +1572,14 @@ async fn arm_debounce<J: Job>(
     } else {
         window_delay
     };
-    Ok(Some(Utc::now() + delay))
+    // `DateTime<Utc>`'s `Add<Duration>` panics near chrono's representable
+    // range; house rule 2 says public-surface code returns `Result` instead.
+    let available_at = Utc::now().checked_add_signed(delay).ok_or_else(|| {
+        FrameworkError::internal(
+            "debounce window pushes availability out of the representable date range",
+        )
+    })?;
+    Ok(Some(available_at))
 }
 
 fn envelope_for<J: Job>(

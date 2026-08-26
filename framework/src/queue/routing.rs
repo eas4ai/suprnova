@@ -121,36 +121,6 @@ fn forwards() -> &'static RwLock<HashMap<String, QueueRoute>> {
 
 const FORWARD_LOCK_CONTEXT: &str = "queue forward registry";
 
-/// Whether registering `from -> to` would close a loop in `map`.
-///
-/// Walks the destinations already registered, starting at `to`; a walk that
-/// arrives back at `from` is a loop. The entry being replaced is never
-/// followed, because reaching `from` at all is precisely the answer `true`.
-/// `from == to` is the identity rather than a loop - see [`forwarded_queue`] -
-/// so it is reported as no cycle. The walk is bounded by the map's size: the
-/// existing graph is acyclic by induction, so a path visits at most that many
-/// distinct names, and the bound holds even if that invariant were ever broken.
-fn forms_cycle(map: &HashMap<String, QueueRoute>, from: &str, to: &str) -> bool {
-    if from == to {
-        return false;
-    }
-    let mut hop = to;
-    for _ in 0..map.len() {
-        let Some(next) = map.get(hop).and_then(|f| f.queue.as_deref()) else {
-            return false;
-        };
-        if next == from {
-            return true;
-        }
-        if next == hop {
-            // A self-forward is the identity, so the chain ends here.
-            return false;
-        }
-        hop = next;
-    }
-    false
-}
-
 /// Register (or replace) the forward for the queue named `from`.
 ///
 /// `connection` gates the forward: `None` applies it everywhere, `Some(name)`
@@ -162,12 +132,15 @@ fn forms_cycle(map: &HashMap<String, QueueRoute>, from: &str, to: &str) -> bool 
 /// forward that moves the push without moving the claim strands work.
 /// Registering the same source twice replaces the earlier forward.
 ///
-/// A forward that would close a loop (`a -> b` with `b -> a` already
-/// registered) is refused. Forwards resolve in a single lookup and never
-/// chain, so a loop cannot mean what the operator who wrote it intended;
-/// refusing it at registration says so, where accepting it would quietly
-/// resolve to something else. Forwarding a queue onto its own name is the
-/// identity, not a loop, and stays legal.
+/// A forward that points back at its own source (`a -> b` with `b -> a`
+/// already registered) is a legal pool swap, not a loop: a push that resolves
+/// to `a` lands on `b`, a worker started with `--queue=a` claims `b` instead,
+/// and the same holds in the other direction - nothing chains, so nothing
+/// loops and nothing strands. A longer rotation among more than two names
+/// resolves the same way, one hop at a time. Laravel's `QueueRoutes` has no
+/// cycle check either, for the same reason: its resolver is this same single
+/// lookup. Forwarding a queue onto its own name is the identity, not a swap,
+/// and is the one case that neutralizes a forward rather than redirecting it.
 pub(crate) fn try_set_forward(
     from: &str,
     to: &str,
@@ -178,13 +151,6 @@ pub(crate) fn try_set_forward(
         queue: Some(to.to_owned()),
     };
     let mut guard = crate::lock::write(forwards(), FORWARD_LOCK_CONTEXT)?;
-    if forms_cycle(&guard, from, to) {
-        return Err(FrameworkError::internal(format!(
-            "queue forward `{from}` -> `{to}` would create a cycle; forwards \
-             resolve in a single lookup and never chain, so a cycle cannot \
-             redirect anywhere"
-        )));
-    }
     guard.insert(from.to_owned(), forward);
     Ok(())
 }
@@ -232,8 +198,9 @@ pub(crate) fn has_forwards() -> bool {
 ///
 /// A single lookup, never a chain: with `a -> b` and `b -> c` registered, a
 /// push for `a` lands on `b`. Laravel's `forwardedQueue` behaves the same way.
-/// A forward that would close a loop is refused by [`try_set_forward`], so this
-/// resolver never walks a graph and never has to defend against one.
+/// A swap (`a -> b` with `b -> a` also registered) or a longer rotation
+/// resolves exactly the same way, one hop at a time - see [`try_set_forward`] -
+/// so this resolver never walks a graph and never needs to defend against one.
 pub(crate) fn forwarded_queue(queue: Option<&str>, connection: &str) -> Option<String> {
     if !has_forwards() {
         return queue.map(str::to_owned);
@@ -456,20 +423,32 @@ mod tests {
             "and a worker on any other connection must not"
         );
 
-        // A loop is what an operator writes when they expect forwards to
-        // chain. They never do, so the configuration cannot mean what it looks
-        // like and is refused at registration rather than resolving to
-        // something else.
-        let err = try_set_forward("b", "a", None)
-            .expect_err("a forward that closes a loop must be refused");
-        assert!(
-            err.to_string().contains("cycle"),
-            "the error must name the cycle rather than just failing: {err}"
-        );
+        // A forward that points back at its own source is a legal pool swap,
+        // not a loop: `a -> b` is already registered above, so registering
+        // `b -> a` makes a push to `a` land on `b` and a push to `b` land on
+        // `a` - a coherent pool exchange, exactly like Laravel, where the
+        // resolver is this same single lookup with no cycle check at all.
+        try_set_forward("b", "a", None).expect("a swap is a coherent pool exchange, not a cycle");
+        assert_eq!(forwarded_queue(Some("a"), "conn").as_deref(), Some("b"));
+        assert_eq!(forwarded_queue(Some("b"), "conn").as_deref(), Some("a"));
         assert_eq!(
-            forwarded_queue(Some("b"), "conn").as_deref(),
-            Some("b"),
-            "a refused forward must leave nothing half-registered"
+            forward_active_queues("conn", vec!["a".into(), "b".into()]),
+            vec!["b".to_string(), "a".to_string()],
+            "the pop side follows the same swap: --queue=a claims b and --queue=b claims a"
+        );
+
+        // A longer rotation resolves the same way, one independent
+        // single-lookup hop per source - nothing chains, so nothing loops.
+        try_set_forward("p", "q", None).expect("set");
+        try_set_forward("q", "r", None).expect("set");
+        try_set_forward("r", "p", None).expect("set");
+        assert_eq!(forwarded_queue(Some("p"), "conn").as_deref(), Some("q"));
+        assert_eq!(forwarded_queue(Some("q"), "conn").as_deref(), Some("r"));
+        assert_eq!(forwarded_queue(Some("r"), "conn").as_deref(), Some("p"));
+        assert_eq!(
+            forward_active_queues("conn", vec!["p".into(), "q".into(), "r".into()]),
+            vec!["q".to_string(), "r".to_string(), "p".to_string()],
+            "a rotation resolves each source through its own single lookup, same as a swap"
         );
 
         // One hop onto the queue's own name is the identity, not a loop: it

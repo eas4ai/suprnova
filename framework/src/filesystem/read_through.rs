@@ -257,7 +257,7 @@ impl Service for ReadThroughService {
             // this branch: opendal's `CorrectnessCheckLayer` sits under the
             // primary's stack, and the primary's `copy` - the call it would
             // have checked - is exactly the call a fallback-only source cannot
-            // make. So the conditions are honoured here, by hand, or not at
+            // make. So the conditions are honored here, by hand, or not at
             // all.
             if let Some(etag) = args.if_match() {
                 // `if_match` on a copy is a condition on the destination
@@ -268,7 +268,7 @@ impl Service for ReadThroughService {
                 return Err(Error::new(
                     ErrorKind::Unsupported,
                     format!(
-                        "read-through copy of '{from}' to '{to}' cannot honour \
+                        "read-through copy of '{from}' to '{to}' cannot honor \
                          `if_match` ({etag}): the source lives only on the \
                          fallback disk, so the copy is a streaming write rather \
                          than a backend copy"
@@ -303,7 +303,7 @@ impl Service for ReadThroughService {
             // established *before* the fallback source is deleted. A move that
             // is never attempted must leave both disks exactly as it found
             // them - the delete-first order below is what makes an attempted
-            // move safe to retry, not a licence to destroy the cold copy for a
+            // move safe to retry, not a license to destroy the cold copy for a
             // move that was going to be rejected anyway. Nothing else will
             // catch these in time: opendal's correctness check sits under this
             // layer, so it only speaks once the rename is already running.
@@ -327,7 +327,7 @@ impl Service for ReadThroughService {
                         ErrorKind::Unsupported,
                         format!(
                             "read-through move of '{from}' to '{to}' cannot \
-                             honour `if_not_exists`: the primary disk has no \
+                             honor `if_not_exists`: the primary disk has no \
                              conditional `rename`"
                         ),
                     ));
@@ -962,7 +962,7 @@ mod tests {
 
     /// How a [`StubDisk`] behaves when it is written to.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    enum WriteBehaviour {
+    enum WriteBehavior {
         /// Refuse to open a writer at all.
         #[default]
         Refuse,
@@ -1008,7 +1008,7 @@ mod tests {
         /// local filesystem is exactly that case - and the two refusals it
         /// produces are different.
         renames_conditionally: bool,
-        writes: WriteBehaviour,
+        writes: WriteBehavior,
     }
 
     /// A disk that answers from a fixed body and records what it is asked for.
@@ -1256,9 +1256,9 @@ mod tests {
         ) -> Result<Self::Writer> {
             locked(&self.journal.writes).push((path.to_owned(), args));
             match self.spec.writes {
-                WriteBehaviour::Refuse => Err(unsupported()),
-                WriteBehaviour::FailAfterOpen => Ok(StubWriter { fails: true }),
-                WriteBehaviour::Accept => Ok(StubWriter { fails: false }),
+                WriteBehavior::Refuse => Err(unsupported()),
+                WriteBehavior::FailAfterOpen => Ok(StubWriter { fails: true }),
+                WriteBehavior::Accept => Ok(StubWriter { fails: false }),
             }
         }
 
@@ -1466,7 +1466,7 @@ mod tests {
 
     /// A primary that renames, over a fallback holding a typed object.
     fn rename_capable_read_through(
-        writes: WriteBehaviour,
+        writes: WriteBehavior,
         fallback_stat_fails: bool,
         throw_on_promotion_failure: bool,
     ) -> (Operator, Arc<Journal>, Arc<Journal>) {
@@ -1489,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn a_promotion_on_a_rename_capable_primary_is_staged_and_renamed() {
         let (assets, primary, _fallback) =
-            rename_capable_read_through(WriteBehaviour::Accept, false, false);
+            rename_capable_read_through(WriteBehavior::Accept, false, false);
 
         let bytes = assets.read("cold.txt").await.expect("read resolves");
         assert_eq!(&bytes.to_vec(), b"cold bytes");
@@ -1526,7 +1526,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_staged_write_removes_the_staging_object() {
         let (assets, primary, _fallback) =
-            rename_capable_read_through(WriteBehaviour::FailAfterOpen, false, false);
+            rename_capable_read_through(WriteBehavior::FailAfterOpen, false, false);
 
         let bytes = assets
             .read("cold.txt")
@@ -1551,7 +1551,7 @@ mod tests {
     #[tokio::test]
     async fn a_fallback_stat_failure_leaves_a_resolved_read_intact() {
         let (assets, primary, _fallback) =
-            rename_capable_read_through(WriteBehaviour::Accept, true, false);
+            rename_capable_read_through(WriteBehavior::Accept, true, false);
 
         let bytes = assets
             .read("cold.txt")
@@ -1567,7 +1567,7 @@ mod tests {
     #[tokio::test]
     async fn a_fallback_stat_failure_surfaces_when_promotion_failures_are_fatal() {
         let (assets, _primary, _fallback) =
-            rename_capable_read_through(WriteBehaviour::Accept, true, true);
+            rename_capable_read_through(WriteBehavior::Accept, true, true);
 
         let err = assets
             .read("cold.txt")
@@ -1588,7 +1588,7 @@ mod tests {
         read_through(
             StubSpec {
                 stat_fails_after: Some(1),
-                writes: WriteBehaviour::Accept,
+                writes: WriteBehavior::Accept,
                 ..Default::default()
             },
             StubSpec {
@@ -1967,7 +1967,7 @@ mod tests {
         );
         assert!(
             err.to_string().contains("if_not_exists"),
-            "the error must name the condition it cannot honour, got: {err}"
+            "the error must name the condition it cannot honor, got: {err}"
         );
         assert!(
             fallback.deletes().is_empty(),

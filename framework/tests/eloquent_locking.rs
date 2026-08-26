@@ -196,7 +196,7 @@ fn lock_appears_once_after_union_postgres() {
 // `Model::refresh_for_update` builds
 // `query().without_global_scopes().where_key(pk).lock_for_update().first()`.
 // These pin the rendered shape of that composition on the backends that
-// actually take a row lock; the behavioural half lives in
+// actually take a row lock; the behavioral half lives in
 // `framework/tests/eloquent_model.rs`.
 
 #[test]

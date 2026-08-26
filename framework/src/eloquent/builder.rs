@@ -1228,30 +1228,15 @@ impl<M> Builder<M> {
     /// Fold an already-built term into the preceding WHERE clause as a
     /// disjunction.
     ///
-    /// Every `or_*` method routes through here so the three cases stay
-    /// in one place: append into a trailing `Or` group so consecutive
-    /// `or_*` calls stay flat, wrap the previous term and the new one
-    /// when the last clause is a plain term, and - with no prior
-    /// clause - push the term plain so the renderer doesn't emit a
-    /// dangling `()` wrapper around a single disjunct.
+    /// Every self-consuming `or_*` method routes through here so the three
+    /// cases stay in one place: append into a trailing `Or` group so
+    /// consecutive `or_*` calls stay flat, wrap the previous term and the new
+    /// one when the last clause is a plain term, and - with no prior clause -
+    /// push the term plain so the renderer doesn't emit a dangling `()`
+    /// wrapper around a single disjunct. Just [`Self::merge_or_term`] adapted
+    /// to the builder's consuming style; see there for the actual logic.
     fn or_push_term(mut self, new: WhereTerm) -> Self {
-        match self.where_terms.last_mut() {
-            Some(WhereTerm::Or(group)) => group.push(new),
-            Some(_) => {
-                // Pop the previous term and wrap both in an Or group.
-                let last = self
-                    .where_terms
-                    .pop()
-                    .expect("checked Some in match arm above");
-                self.where_terms.push(WhereTerm::Or(vec![last, new]));
-            }
-            None => {
-                // No prior clause - the disjunction reduces to the new
-                // term. Push it plain so the renderer doesn't emit a
-                // dangling `()` wrapper.
-                self.where_terms.push(new);
-            }
-        }
+        self.merge_or_term(new);
         self
     }
 
