@@ -274,11 +274,12 @@ it and every `DiskExt` convenience works unchanged.
 
 | Operation | Disk |
 |---|---|
-| `read` | Primary if it holds the object, otherwise the fallback - and the fallback hit is promoted |
+| `read` | Primary if it holds the object, otherwise the fallback - and, unless `copy` is `false`, the fallback hit is promoted |
 | `exists`, `size`, `last_modified`, `mime_type`, `stat` | Primary if it holds the object, otherwise the fallback |
 | `write`, `make_directory` | Primary only |
 | `files`, `directories`, `list` | Primary only - fallback entries are invisible to a listing |
 | `delete` | Both, fallback first |
+| `copy`, `rename` / `move_to` | Primary if it holds the source, otherwise streamed across from the fallback; a `rename` also deletes the fallback source |
 | `temporary_url` | Primary if it holds the object, otherwise the fallback |
 | `temporary_upload_url` | Primary only - an upload has to land where writes land |
 
@@ -308,6 +309,7 @@ Storage::register_read_through(
         primary: "new-store".into(),
         fallback: "legacy-store".into(),
         throw_on_promotion_failure: true,
+        ..Default::default()
     },
 )?;
 ```
@@ -316,6 +318,60 @@ Registration rejects a configuration that cannot work: an empty `primary` or
 `fallback`, a pair that names the same disk twice, a disk that names itself,
 or a name that is not registered. Each returns a `FrameworkError` naming the
 problem, and no disk is registered.
+
+### Reading without promoting
+
+Set `copy: false` to serve fallback hits without writing them through:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "cache-store".into(),
+        fallback: "origin-store".into(),
+        copy: false,
+        ..Default::default()
+    },
+)?;
+```
+
+The disk then reads like a transparent overlay: the primary answers what it
+holds, the fallback answers everything else, and nothing moves between them.
+Use it when the primary is a small cache you do not want a one-off read to
+fill, or when the fallback is authoritative and the primary only ever holds
+objects you put there deliberately.
+
+The flag governs read-time promotion and nothing else. Writes, deletes,
+metadata, listings, and the destinations of `copy` and `rename` all behave
+exactly as they do with promotion on - so a `copy: false` disk still lands a
+copied or moved object on the primary. Because nothing is written back, a
+read with `copy: false` fetches only the range you asked for rather than the
+whole object.
+
+### Copying and moving across the fallback
+
+`copy` and `rename` resolve the source against the primary first. When only
+the fallback holds it, the object is streamed across in 64 KiB chunks and the
+destination lands on the primary:
+
+```rust,ignore
+let assets = Storage::disk("assets")?;
+
+// `logo.png` lives only on `legacy-store`. The copy streams it across and
+// writes `branding/logo.png` to `new-store`; the legacy object stays put.
+assets.copy("logo.png", "branding/logo.png").await?;
+
+// A move does the same and then deletes the legacy source.
+assets.rename("logo.png", "branding/logo.png").await?;
+```
+
+A move deletes the fallback source on both paths - whether the primary held
+the source or not. Without that, the next read would promote the fallback
+copy back and undo the move.
+
+If the stream fails partway, the half-written destination is aborted and
+deleted before the error reaches you, so a failed transfer is never
+observable as a truncated object.
 
 ### Versioned and conditional reads
 
@@ -365,15 +421,30 @@ condition holds and no such window exists.
 
 The staging object is a real entry on the primary while it lasts, so a listing
 taken mid-promotion can show a `.suprnova-promote-<id>.tmp` sibling. A read
-that completes, fails, or gives up removes its own sibling, but nothing sweeps
-one left by a process that crashed or a read future that was cancelled
-mid-promotion: those have to be removed by hand.
+that completes, fails, or gives up tries to remove its own sibling, and logs a
+warning if that delete fails rather than failing the read. Nothing sweeps a
+sibling left by a failed delete, a process that crashed, or a read future
+cancelled mid-promotion: those have to be removed by hand.
 
 A read that resolves from the fallback holds the object in memory until the
 promotion write completes, because promotion needs the whole object. That
 suits the tiering case a read-through disk is for. For very large cold
 objects, read the fallback disk directly or use
 [`copy_between_disks`](#cross-disk-streaming-copy) instead.
+
+Laravel hands back the fallback's own stream when `copy` is `false` and
+buffers through `php://temp` when it is `true`. Suprnova instead narrows the
+fallback fetch to the requested range when `copy` is `false`, and buffers only
+on the promoting path where the whole object is needed anyway.
+
+Laravel's cross-fallback `copy` and `move` also buffer the source through
+`php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
+fallback is where the large, rarely-touched objects live, and deletes a
+half-written destination before returning the error. One more difference
+follows from OpenDAL: deleting a path that is not there counts as success, so
+a move clears the fallback source without first checking that it exists. If
+that delete does fail, the move fails with it - a source left on the fallback
+is a move that did not happen.
 
 ## Registry hygiene
 

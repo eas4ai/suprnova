@@ -532,6 +532,7 @@ async fn a_failed_promotion_is_swallowed_by_default_and_surfaced_on_request() {
         ReadThroughConfig {
             primary: "primary".into(),
             fallback: "fallback".into(),
+            copy: true,
             throw_on_promotion_failure: true,
         },
     )

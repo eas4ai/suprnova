@@ -222,7 +222,16 @@ impl std::fmt::Debug for GcsConfig {
 /// fallback with that condition intact, and is served but never promoted:
 /// writing an old version or a validator-matched body to the primary would
 /// publish it as the live object.
-#[derive(Clone, Debug, Default)]
+///
+/// # Copying and moving across the fallback
+///
+/// `copy` and `rename` resolve the source against the primary first. When only
+/// the fallback holds it, the object is streamed across and the destination
+/// lands on the primary - without that, either call would fail on an object
+/// the disk happily reads. A `rename` additionally deletes the fallback's copy
+/// of the source, on both branches, or the next read would promote it straight
+/// back and undo the move.
+#[derive(Clone, Debug)]
 pub struct ReadThroughConfig {
     /// Name of the disk that answers writes and listings, and that promoted
     /// objects are written to. Required.
@@ -230,6 +239,18 @@ pub struct ReadThroughConfig {
     /// Name of the disk consulted when the primary does not hold an object.
     /// Must differ from `primary`. Required.
     pub fallback: String,
+    /// Whether a fallback hit is written through to the primary.
+    ///
+    /// Defaults to `true`. Set it to `false` to serve fallback hits without
+    /// promoting them, which turns the disk into a transparent read-only
+    /// overlay - useful when the primary is a small cache you do not want a
+    /// one-off read to fill, or when the fallback is authoritative and the
+    /// primary only ever holds objects you put there deliberately.
+    ///
+    /// The flag governs read-time promotion and nothing else: writes, deletes,
+    /// metadata, listings, and the `copy` / `rename` destinations all behave
+    /// identically either way.
+    pub copy: bool,
     /// Whether a failed promotion fails the read.
     ///
     /// Defaults to `false`, which is the safer production posture: the caller
@@ -237,7 +258,24 @@ pub struct ReadThroughConfig {
     /// unwritable primary degrades throughput instead of returning errors. Set
     /// it to `true` when a silent loss of promotion would hide a real fault -
     /// a migration you are trying to complete, for instance.
+    ///
+    /// Has no effect when `copy` is `false`: there is no promotion to fail.
     pub throw_on_promotion_failure: bool,
+}
+
+impl Default for ReadThroughConfig {
+    /// `copy` defaults to `true`, matching Laravel's constructor default, so
+    /// `..Default::default()` yields a promoting disk. A derived `Default`
+    /// would silently give `false` and turn every abbreviated call site into a
+    /// non-promoting overlay.
+    fn default() -> Self {
+        Self {
+            primary: String::new(),
+            fallback: String::new(),
+            copy: true,
+            throw_on_promotion_failure: false,
+        }
+    }
 }
 
 /// Default resilience layer applied by the cloud convenience constructors
@@ -611,9 +649,12 @@ impl Storage {
     /// Register a read-through disk over two already-registered disks.
     ///
     /// Reads and metadata resolve against `primary` first and fall back to
-    /// `fallback`; anything found on the fallback is written through to the
-    /// primary, so the working set migrates under real traffic. Writes and
-    /// listings are primary-only, and a delete removes the object from both.
+    /// `fallback`; unless [`ReadThroughConfig::copy`] is `false`, anything
+    /// found on the fallback is written through to the primary, so the working
+    /// set migrates under real traffic. Writes and listings are primary-only,
+    /// and a delete removes the object from both. A `copy` or `rename` whose
+    /// source lives only on the fallback streams it across to the primary
+    /// destination.
     ///
     /// Equivalent to [`Storage::register_read_through_with`] with an identity
     /// closure.
@@ -707,6 +748,7 @@ impl Storage {
         let composed = primary.clone().layer(read_through::ReadThroughLayer {
             primary,
             fallback,
+            copy: config.copy,
             throw_on_promotion_failure: config.throw_on_promotion_failure,
         });
 
