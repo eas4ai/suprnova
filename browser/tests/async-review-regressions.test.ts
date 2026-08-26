@@ -104,11 +104,20 @@ function harness() {
 }
 
 function sink(
-  reauthorize: LogicalSubscriptionSink["reauthorize"] = (prior) => Promise.resolve(prior),
+  reauthorize: (
+    prior: AuthorizedLogicalSubscription,
+    signal: AbortSignal,
+  ) => AuthorizedLogicalSubscription | Promise<AuthorizedLogicalSubscription> = (prior) =>
+    Promise.resolve(prior),
 ) {
   return {
     envelope: vi.fn(),
-    reauthorize: vi.fn(reauthorize),
+    reauthorize: vi.fn(async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) =>
+      Object.freeze({
+        proof: "authoritative_no_tail" as const,
+        subscription: await reauthorize(prior, signal),
+      }),
+    ),
     state: vi.fn(),
   } satisfies LogicalSubscriptionSink;
 }
@@ -140,23 +149,63 @@ describe("reviewed reconnect authority", () => {
     expect(sources[1]?.request.authorization).toEqual(rotated.authorization);
   });
 
-  it("does not reset retry attempts on raw open/drop churn", async () => {
+  it("does not reset retry attempts when replacement handshakes drop before proof consumption", async () => {
     const { pool, sources, timers } = harness();
     const logical = sink();
     pool.subscribe(authorization(1), logical);
-
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      sources[attempt]?.open();
-      sources[attempt]?.fail();
-      timers.fire(attempt === 0 ? 50 : 100);
-      await settle();
-    }
-    sources[2]?.open();
+    sources[0]?.open();
+    sources[0]?.fail();
+    timers.fire(50);
+    await settle();
+    sources[1]?.fail();
+    timers.fire(100);
+    await settle();
     sources[2]?.fail();
 
     expect(sources).toHaveLength(3);
     expect(timers.pending.size).toBe(0);
     expect(logical.state).toHaveBeenLastCalledWith("degraded");
+  });
+
+  it("does not consume a continuity proof when the authenticated membership cannot attach", async () => {
+    const { pool, sources, timers } = harness();
+    const reconnect = Object.freeze({
+      kind: "resume_or_refresh" as const,
+      maximumAttempts: 1,
+      maximumDelayMs: 100,
+      minimumDelayMs: 100,
+    });
+    const logical = sink();
+    pool.subscribe(authorization(1, { reconnect }), logical);
+    sources[0]?.open();
+    sources[0]?.fail();
+    timers.fire(50);
+    await settle();
+
+    sources[1]?.subscribe.mockImplementation(() => {
+      throw new Error("membership_rejected");
+    });
+    sources[1]?.open();
+    sources[1]?.fail();
+
+    expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).not.toContain(50);
+    expect(logical.state).toHaveBeenLastCalledWith("degraded");
+  });
+
+  it("commits one physical continuity outcome per transport generation", async () => {
+    const { pool, sources, timers } = harness();
+    const logical = sink();
+    const handle = pool.subscribe(authorization(1), logical);
+    sources[0]?.open();
+    sources[0]?.fail();
+    timers.fire(50);
+    await settle();
+    sources[1]?.open();
+
+    expect(logical.state.mock.calls.filter(([state]) => state === "current")).toHaveLength(1);
+    handle.continuityProved();
+    handle.continuityProved();
+    expect(logical.state.mock.calls.filter(([state]) => state === "current")).toHaveLength(1);
   });
 
   it("does not revive terminal memberships when a later compatible island connects", () => {
@@ -307,6 +356,37 @@ describe("reviewed reconnect authority", () => {
     timers.fire(50);
     await settle();
     expect(sources).toHaveLength(3);
+  });
+
+  it("fences a late continuity proof from a superseded transport generation", async () => {
+    const { pool, sources, timers } = harness();
+    let calls = 0;
+    let releaseLate: ((value: AuthorizedLogicalSubscription) => void) | undefined;
+    const logical = sink((prior) => {
+      calls += 1;
+      if (calls !== 1) return Promise.resolve(prior);
+      return new Promise((resolve) => {
+        releaseLate = resolve;
+      });
+    });
+    pool.subscribe(authorization(1), logical);
+    sources[0]?.open();
+    sources[0]?.fail();
+    timers.fire(50);
+    await settle();
+
+    pool.suspend();
+    const resumed = pool.resume();
+    await settle();
+    await resumed;
+    sources[1]?.open();
+    logical.state.mockClear();
+
+    releaseLate?.(authorization(1, { descriptorBinding: "late-proof" }));
+    await settle();
+
+    expect(sources).toHaveLength(2);
+    expect(logical.state).not.toHaveBeenCalledWith("current");
   });
 
   it("keeps compatible arrivals behind an active reconnect backoff", async () => {

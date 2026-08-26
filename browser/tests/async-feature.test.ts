@@ -566,6 +566,178 @@ describe("async feature lifecycle", () => {
     owner.dispose();
   });
 
+  it.each([
+    { lifecycle: "ordinary reconnect", replay: false },
+    { lifecycle: "ordinary reconnect", replay: true },
+    { lifecycle: "bfcache resume", replay: false },
+    { lifecycle: "bfcache resume", replay: true },
+  ])(
+    "resets retry authority after $lifecycle with $replay replay entries and no live successor",
+    async ({ lifecycle, replay }) => {
+      const sources: FakeSource[] = [];
+      const timers = new FakeTimers();
+      const root = Object.freeze({}) as Element;
+      const reconnect = Object.freeze({
+        kind: "resume_or_refresh" as const,
+        maximumAttempts: 1,
+        maximumDelayMs: 100,
+        minimumDelayMs: 100,
+      });
+      const owner = new AsyncDocumentOwner(
+        { diagnose: vi.fn(), onDispose: vi.fn() },
+        {
+          authority: {
+            authorize(request) {
+              const position = request.position?.sequence ?? 0n;
+              const current = authorization(position, { reconnect });
+              if (request.prior === null) return current;
+              return Object.freeze({
+                replay: replay
+                  ? Object.freeze([envelope(position + 1n, { kind: "refresh", name: "refresh" })])
+                  : Object.freeze([]),
+                subscription: current,
+              });
+            },
+          },
+          clock: { now: () => 100 },
+          randomness: { number: () => 0.5 },
+          timers: timers.port,
+          transports: {
+            eventSource(request) {
+              const source = new FakeSource(request);
+              sources.push(source);
+              return source;
+            },
+            webSocket() {
+              throw new Error("unexpected_websocket");
+            },
+          },
+        },
+      );
+      owner.connectIsland({
+        authorizeRegisteredEvents: eventCapability,
+        dispatchRegisteredEvent: () => "dispatched",
+        element: root,
+        enqueueFreshRender: () => "queued",
+        identity: Object.freeze({
+          component: "fixture.orders",
+          documentKey: `document-silent-${lifecycle}-${String(replay)}`,
+          slot: "orders-slot",
+        }),
+        onDispose: vi.fn(),
+        proposeUploadHandle: () => "accepted",
+        queryDirectiveOwnership: () => [ownership(root)],
+        writePresentationSignal: (_element, _name, value) => value,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      sources[0]?.open();
+
+      if (lifecycle === "bfcache resume") {
+        owner.suspend();
+        await owner.resume();
+        sources[1]?.open();
+      }
+
+      const firstRecoverySource = sources[sources.length - 1];
+      firstRecoverySource?.request.failed("transport_lost");
+      timers.fire(50);
+      for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+      const replacement = sources[sources.length - 1];
+      expect(replacement).not.toBe(firstRecoverySource);
+      replacement?.open();
+      replacement?.request.failed("transport_lost");
+
+      expect([...timers.pending.values()].map(({ milliseconds }) => milliseconds)).toContain(50);
+      owner.dispose();
+    },
+  );
+
+  it("bounds repeated noncooperative bfcache authority and ignores every late settlement", async () => {
+    const timers = new FakeTimers();
+    const sources: FakeSource[] = [];
+    const diagnose = vi.fn();
+    const late: ((value: AuthorizedLogicalSubscription) => void)[] = [];
+    const signals: AbortSignal[] = [];
+    let calls = 0;
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose, onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            calls += 1;
+            if (calls === 1) return authorization(0n);
+            signals.push(request.signal);
+            return new Promise<AuthorizedLogicalSubscription>((resolve) => {
+              late.push(resolve);
+            });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: () => "queued",
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-noncooperative-authority",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      owner.suspend();
+      const resumed = owner.resume();
+      await Promise.resolve();
+      expect(
+        [...timers.pending.values()].filter(({ milliseconds }) => milliseconds === 5_000),
+      ).toHaveLength(2);
+      timers.fire(5_000);
+      await resumed;
+      await Promise.resolve();
+      expect(signals[attempt]?.aborted).toBe(true);
+      expect(timers.pending.size).toBe(0);
+    }
+
+    expect(late).toHaveLength(3);
+    late[0]?.(authorization(0n));
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect(sources).toHaveLength(1);
+    expect(timers.pending.size).toBe(0);
+    expect(diagnose).not.toHaveBeenCalled();
+
+    owner.dispose();
+    for (const resolve of late.slice(1)) resolve(authorization(0n));
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+
+    expect(sources).toHaveLength(1);
+    expect(timers.pending.size).toBe(0);
+    expect(diagnose).not.toHaveBeenCalled();
+  });
+
   it("cancels an in-progress pageshow reauthorization when the page suspends again", async () => {
     let resolveResume: ((value: AuthorizedLogicalSubscription) => void) | undefined;
     let authorizations = 0;

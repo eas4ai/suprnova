@@ -117,9 +117,20 @@ function harness(scheduler = new OriginHandshakeScheduler(8)) {
 function logicalSink(
   envelope: (encoded: string) => void = vi.fn(),
   state: (state: import("../src/async-updates/types.js").SubscriptionState) => void = vi.fn(),
-  reauthorize = (prior: AuthorizedLogicalSubscription) => Promise.resolve(prior),
+  reauthorize: (
+    prior: AuthorizedLogicalSubscription,
+    signal: AbortSignal,
+  ) => Promise<AuthorizedLogicalSubscription> = (prior) => Promise.resolve(prior),
 ) {
-  return { envelope, reauthorize, state };
+  return {
+    envelope,
+    reauthorize: async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) =>
+      Object.freeze({
+        proof: "authoritative_no_tail" as const,
+        subscription: await reauthorize(prior, signal),
+      }),
+    state,
+  };
 }
 
 describe("multiplexed document transports", () => {

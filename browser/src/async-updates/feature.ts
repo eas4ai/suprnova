@@ -13,6 +13,7 @@ import {
   OriginHandshakeScheduler,
   type AsyncTransportPorts,
   type LogicalSubscriptionHandle,
+  type ReauthorizedLogicalSubscription,
 } from "./connections.js";
 import { AsyncSubscription } from "./subscription.js";
 import type {
@@ -34,6 +35,7 @@ const MAX_EVENT_TARGETS = 16;
 const MAX_PRESENTATION_SIGNALS = 64;
 const MAX_RECONNECT_ATTEMPTS = 16;
 const MAX_TRANSPORT_DELAY_MS = 300_000;
+const AUTHORIZATION_TIMEOUT_MS = 5_000;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const PAYLOAD_CONTRACT = /^[a-z][a-z0-9._/-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
@@ -58,6 +60,87 @@ export interface AsyncAuthorityPort {
 export interface AsyncAuthorizationResult {
   readonly replay: readonly string[];
   readonly subscription: AuthorizedLogicalSubscription;
+}
+
+interface AuthorityCompletion {
+  settle: ((outcome: AuthorityOutcome) => void) | null;
+}
+
+type AuthorityOutcome =
+  | Readonly<{
+      kind: "authorized";
+      value: AsyncAuthorizationResult | AuthorizedLogicalSubscription;
+    }>
+  | Readonly<{ kind: "rejected"; reason: string }>;
+
+interface AppliedAuthorization {
+  readonly proof: ReauthorizedLogicalSubscription["proof"] | null;
+  readonly subscription: AuthorizedLogicalSubscription;
+}
+
+function completeAuthority(completion: AuthorityCompletion, outcome: AuthorityOutcome): void {
+  completion.settle?.(outcome);
+}
+
+function invokeAuthority(
+  authority: AsyncAuthorityPort,
+  timers: AsyncTimerPort,
+  abort: AbortController,
+  request: AsyncAuthorizationRequest,
+): Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription> {
+  return new Promise((resolve, reject) => {
+    const completion: AuthorityCompletion = { settle: null };
+    let timer: number | null = null;
+    const settle = (outcome: AuthorityOutcome) => {
+      if (completion.settle === null) return;
+      completion.settle = null;
+      abort.signal.removeEventListener("abort", aborted);
+      if (timer !== null) timers.clearTimeout(timer);
+      timer = null;
+      if (outcome.kind === "authorized") resolve(outcome.value);
+      else reject(new Error(outcome.reason));
+    };
+    const aborted = () => {
+      completeAuthority(
+        completion,
+        Object.freeze({ kind: "rejected", reason: "async_authorization_aborted" }),
+      );
+    };
+    completion.settle = settle;
+    abort.signal.addEventListener("abort", aborted, { once: true });
+    timer = timers.timeout(() => {
+      completeAuthority(
+        completion,
+        Object.freeze({ kind: "rejected", reason: "async_authorization_timeout" }),
+      );
+      abort.abort();
+    }, AUTHORIZATION_TIMEOUT_MS);
+    if (abort.signal.aborted) {
+      aborted();
+      return;
+    }
+    let pending: ReturnType<AsyncAuthorityPort["authorize"]>;
+    try {
+      pending = authority.authorize(request);
+    } catch {
+      completeAuthority(
+        completion,
+        Object.freeze({ kind: "rejected", reason: "async_authorization_rejected" }),
+      );
+      return;
+    }
+    void Promise.resolve(pending).then(
+      (value) => {
+        completeAuthority(completion, Object.freeze({ kind: "authorized", value }));
+      },
+      () => {
+        completeAuthority(
+          completion,
+          Object.freeze({ kind: "rejected", reason: "async_authorization_rejected" }),
+        );
+      },
+    );
+  });
 }
 
 export interface AsyncFeatureOptions {
@@ -238,7 +321,7 @@ class AsyncIslandController implements FeatureIslandController {
   async reauthorize(
     prior: AuthorizedLogicalSubscription,
     signal: AbortSignal,
-  ): Promise<AuthorizedLogicalSubscription> {
+  ): Promise<ReauthorizedLogicalSubscription> {
     if (
       (this.#state !== "suspended" && this.#state !== "active") ||
       this.authorizationId() !== prior.subscriptionId
@@ -249,11 +332,12 @@ class AsyncIslandController implements FeatureIslandController {
     if (resume) this.#state = "resuming";
     try {
       const current = await this.#authorize(prior, signal);
+      if (current.proof === null) throw new Error("async_continuity_proof_required");
       if (resume) {
         if (!this.#resuming()) throw new Error("async_authorization_stale");
         this.#state = "active";
       }
-      return current;
+      return Object.freeze({ proof: current.proof, subscription: current.subscription });
     } catch (error: unknown) {
       if (resume && this.#state === "resuming") this.#state = "suspended";
       throw error;
@@ -287,7 +371,7 @@ class AsyncIslandController implements FeatureIslandController {
   async #authorize(
     prior: AuthorizedLogicalSubscription | null,
     externalSignal?: AbortSignal,
-  ): Promise<AuthorizedLogicalSubscription> {
+  ): Promise<AppliedAuthorization> {
     const generation = ++this.#generation;
     this.#authorizationAbort?.abort();
     const abort = new AbortController();
@@ -300,7 +384,10 @@ class AsyncIslandController implements FeatureIslandController {
     const position = this.#subscription?.position() ?? null;
     let resolved: AsyncAuthorizationResult | AuthorizedLogicalSubscription;
     try {
-      resolved = await this.#authority.authorize(
+      resolved = await invokeAuthority(
+        this.#authority,
+        this.#timers,
+        abort,
         Object.freeze({
           identity: this.#port.identity,
           position,
@@ -311,6 +398,7 @@ class AsyncIslandController implements FeatureIslandController {
       );
     } finally {
       externalSignal?.removeEventListener("abort", externallyAbort);
+      if (this.#authorizationAbort === abort) this.#authorizationAbort = null;
     }
     let current: AuthorizedLogicalSubscription;
     let replay: readonly string[];
@@ -331,7 +419,7 @@ class AsyncIslandController implements FeatureIslandController {
     ) {
       throw new Error("async_authorization_stale");
     }
-    this.#authorizationAbort = null;
+    let proof: ReauthorizedLogicalSubscription["proof"] | null = null;
     if (prior === null) {
       this.#install(current);
       if (replay.length !== 0) this.#subscription?.receiveReplay(replay);
@@ -344,10 +432,15 @@ class AsyncIslandController implements FeatureIslandController {
       );
       this.#currentAuthorization = current;
       this.#owner.remember(this, current);
-      if (replay.length !== 0) subscription.receiveReplay(replay);
-      else subscription.proveAuthoritativeBaseline(position);
+      if (replay.length !== 0) {
+        subscription.receiveReplay(replay);
+        proof = "complete_replay";
+      } else {
+        subscription.proveAuthoritativeBaseline(position);
+        proof = "authoritative_no_tail";
+      }
     }
-    return current;
+    return Object.freeze({ proof, subscription: current });
   }
 
   #authorization(): AuthorizedLogicalSubscription | null {
