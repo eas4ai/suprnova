@@ -16,8 +16,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use suprnova::App;
 use suprnova::cache::{Cache, CacheStore, InMemoryCache};
-use suprnova::events::{EventFacade, assert_dispatched_once};
-use suprnova::queue::events::{QueuePaused, QueueResumed, QueuesPaused, QueuesResumed};
+use suprnova::events::{EventFacade, assert_dispatched_once, dispatched_count};
+use suprnova::queue::events::{
+    QueuePaused, QueueResumed, QueuesPaused, QueuesResumed, WorkerQueuePaused, WorkerQueueResumed,
+};
 use suprnova::queue::{
     MemoryQueueDriver, Queue,
     worker::{WorkerConfig, register_job, run_worker},
@@ -457,5 +459,163 @@ async fn pausable_false_worker_ignores_the_global_pause_signal() {
         UNPAUSABLE_RUNS.load(Ordering::SeqCst),
         1,
         "QUEUE_PAUSABLE=false must make the worker ignore the global pause"
+    );
+}
+
+// ============================================================================
+// Worker-side pause/resume events (Laravel #61142)
+// ============================================================================
+
+#[tokio::test]
+#[serial]
+async fn a_worker_emits_one_paused_and_one_resumed_event_per_named_queue() {
+    cache_init();
+    Queue::resume_all().await.unwrap(); // defensive
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let connection = Queue::connection_name();
+    Queue::resume(&connection, "pause_evt_a").await.unwrap(); // defensive
+
+    let _fake = EventFacade::fake();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        default_worker_cfg(vec!["pause_evt_a".to_string(), "pause_evt_b".to_string()]),
+        CancellationToken::new(),
+    ));
+
+    // Let the worker observe an unpaused world first, so the pause below is a
+    // transition rather than the initial state.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        dispatched_count::<WorkerQueuePaused>(|_| true),
+        0,
+        "nothing is paused yet"
+    );
+
+    Queue::pause(&connection, "pause_evt_a").await.unwrap();
+    for _ in 0..60 {
+        if dispatched_count::<WorkerQueuePaused>(|_| true) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Many loop iterations pass while the queue stays paused; the event must
+    // fire on the transition, not on every one of them.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        dispatched_count::<WorkerQueuePaused>(|e| e.queue.as_deref() == Some("pause_evt_a")),
+        1,
+        "exactly one WorkerQueuePaused per transition, not one per loop"
+    );
+    assert_eq!(
+        dispatched_count::<WorkerQueuePaused>(|e| e.queue.as_deref() == Some("pause_evt_b")),
+        0,
+        "the queue that was never paused must not be reported"
+    );
+
+    Queue::resume(&connection, "pause_evt_a").await.unwrap();
+    for _ in 0..60 {
+        if dispatched_count::<WorkerQueueResumed>(|_| true) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+    assert_eq!(
+        dispatched_count::<WorkerQueueResumed>(|e| e.queue.as_deref() == Some("pause_evt_a")),
+        1,
+        "and exactly one WorkerQueueResumed on the way back"
+    );
+
+    Queue::resume(&connection, "pause_evt_a").await.unwrap(); // leave the world clean
+}
+
+#[tokio::test]
+#[serial]
+async fn a_queue_already_paused_at_worker_start_is_reported_once() {
+    cache_init();
+    Queue::resume_all().await.unwrap(); // defensive
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let connection = Queue::connection_name();
+    Queue::pause(&connection, "pause_evt_start").await.unwrap();
+
+    let _fake = EventFacade::fake();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        default_worker_cfg(vec!["pause_evt_start".to_string()]),
+        CancellationToken::new(),
+    ));
+
+    // Far more loop iterations than events we expect.
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+
+    assert_eq!(
+        dispatched_count::<WorkerQueuePaused>(|e| e.queue.as_deref() == Some("pause_evt_start")),
+        1,
+        "a worker that starts into a paused queue reports it once, not once per poll"
+    );
+    assert_eq!(
+        dispatched_count::<WorkerQueueResumed>(|_| true),
+        0,
+        "nothing resumed"
+    );
+
+    Queue::resume(&connection, "pause_evt_start").await.unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unfiltered_worker_reports_a_global_pause_without_a_queue_name() {
+    cache_init();
+    Queue::resume_all().await.unwrap(); // defensive
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+
+    let _fake = EventFacade::fake();
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        default_worker_cfg(Vec::new()),
+        CancellationToken::new(),
+    ));
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    Queue::pause_all().await.unwrap();
+    for _ in 0..60 {
+        if dispatched_count::<WorkerQueuePaused>(|_| true) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        dispatched_count::<WorkerQueuePaused>(|e| e.queue.is_none()),
+        1,
+        "an unfiltered worker has no queue names to report, so the event carries None"
+    );
+
+    Queue::resume_all().await.unwrap();
+    for _ in 0..60 {
+        if dispatched_count::<WorkerQueueResumed>(|_| true) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    handle.abort();
+    assert_eq!(
+        dispatched_count::<WorkerQueueResumed>(|e| e.queue.is_none()),
+        1,
+        "and one resume on the way back"
     );
 }

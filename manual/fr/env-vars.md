@@ -129,7 +129,10 @@ URL de connexion et réglage du pool sqlx. `DATABASE_URL` est requise
 pour toute sous-commande qui touche la base de données (`migrate*`,
 `db:sync`, `db:seed`, `queue:work` avec `QUEUE_DRIVER=database`,
 `workflow:work`, le magasin de session en base) et pour `serve` quand
-l'application a des migrations enregistrées.
+l'application a des migrations enregistrées. Les cinq réglages de
+vivacité sont ce qui vous permet de survivre à un réseau qui coupe les
+connexions inactives - voir
+[Vivacité du pool](database.md#pool-liveness).
 
 | Var | Défaut | Type | Objet |
 |---|---|---|---|
@@ -138,6 +141,11 @@ l'application a des migrations enregistrées.
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | Plancher du pool sqlx (maintenu chaud). |
 | `DB_CONNECT_TIMEOUT` | `30` (secondes) | `u32` | Combien de temps sqlx attendra une connexion initiale avant d'échouer. |
 | `DB_LOGGING` | `false` | `bool` | Quand vrai, sqlx journalise chaque instruction (à utiliser avec parcimonie en production - bavard). |
+| `DB_IDLE_TIMEOUT` | non défini (sqlx utilise 600 secondes) | `u64` (secondes) | Combien de temps une connexion du pool peut rester inactive avant que le pool ne la ferme. `0` désactive la purge pour inactivité. |
+| `DB_MAX_LIFETIME` | non défini (sqlx utilise 1800 secondes) | `u64` (secondes) | Combien de temps une connexion du pool peut vivre avant que le pool ne la recycle. `0` désactive le recyclage par durée de vie. |
+| `DB_ACQUIRE_TIMEOUT` | non défini (retombe sur `DB_CONNECT_TIMEOUT`) | `u64` (secondes) | Combien de temps un appelant attend une connexion libre du pool. Remplace `DB_CONNECT_TIMEOUT` pour l'attente d'acquisition ; définissez l'une ou l'autre, pas les deux. Zéro est rejeté à l'amorçage. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Envoyer un ping sur une connexion du pool avant de la distribuer. Laissez-le activé, sauf si vous avez mesuré l'aller-retour à chaque acquisition et que `DB_PING_AFTER_IDLE` ne suffit pas. |
+| `DB_PING_AFTER_IDLE` | non défini | `u64` (secondes) | N'envoyer un ping sur une connexion du pool qu'après ce temps d'inactivité. Le définir désactive `DB_TEST_BEFORE_ACQUIRE`, si bien que les connexions chaudes sont distribuées sans être touchées. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | Quand vrai, une auto-migration en échec durant l'amorçage de `serve` est journalisée mais n'interrompt pas. Le défaut échoue de façon fermée : l'amorçage sort avec un code non nul plutôt que de démarrer contre un schéma partiellement migré. Passez `--no-migrate` pour ignorer entièrement l'auto-migration. |
 
 ## Session
@@ -190,6 +198,7 @@ validation anglais embarqué du framework.
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL de connexion Redis (consultée seulement quand `CACHE_DRIVER=redis`). |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Préfixe de clé pour les entrées de cache (évitement de collision pour un Redis partagé). |
 | `CACHE_DEFAULT_TTL` | `3600` (secondes) | `u64` | TTL par défaut en secondes. `0` signifie « pas d'expiration ». Appliqué à `Cache::put(None)` / `Cache::tags_put(None)` ; `Cache::forever` et `Cache::remember_forever` contournent toujours. |
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Réessais supplémentaires pour les commandes Redis de forme lecture, en plus de celui dont chaque lecture bénéficie déjà. S'applique aux drivers de cache, de file d'attente et de limitation de débit. Les écritures ne réessaient jamais, quelle que soit la valeur. Budgétez-le en secondes : un réessai contre une connexion coupée attend la reconnexion, il coûte donc tout le budget de connexion et de réponse du driver - jusqu'à 3 réessais de connexion espacés d'au plus 500 ms, chacun plafonné à 2 s, plus un timeout de réponse de 5 s sur le driver de cache ; jusqu'à 6 réessais de connexion avec un délai exponentiel non plafonné, chacun plafonné à 1 s, plus un timeout de réponse de 500 ms sur les drivers de file d'attente et de limitation de débit. Le plafond de `10` borne les tentatives, pas les secondes : à ce réglage, une lecture effectue 12 tentatives. Un timeout compte lui aussi comme transitoire, si bien que pendant un blocage chaque lecture enveloppée émet jusqu'à ce nombre de commandes. Une valeur non analysable retombe sur `0`. |
 
 ## File d'attente
 

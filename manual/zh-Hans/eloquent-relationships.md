@@ -176,17 +176,79 @@ let roles = user.roles().get().await?;
 
 // 每一个 role 都带着宏让它可访问的那份中间表上下文：
 for r in &roles {
-    let pivot = r.pivot::<RoleUser>().expect("loaded via BelongsToMany");
+    let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
 ```
+
+### 按中间表的列过滤
+
+`where_pivot` 和它这一家子约束的是*中间*表，不是关联表。当联结行上带着您想拿来过滤的状态时 - 一个 `active` 标志、一个过期时间戳、一个作用域列 - 就该用它们。下面的例子假定上面那个 `RoleUser` 中间表还声明了 `active`、`pinned` 和 `note` 这几个列：
+
+```rust
+// 中间表行仍然处于 active 的那些角色。
+let active = user.roles().where_pivot("active", 1i64).get().await?;
+
+// 在某个窗口内被指派的角色，或者被显式置顶的角色。
+let visible = user
+    .roles()
+    .where_pivot_between("assigned_at", start..=end)
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+
+// 一个嵌套的分组：(active = 1 AND note IS NOT NULL) OR pinned = 1。
+let complex = user
+    .roles()
+    .where_pivot_group(|q| q.filter("active", 1i64).filter_not_null("note"))
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+```
+
+这一整家子：
+
+| 方法 | SQL |
+|---|---|
+| `where_pivot(col, val)` | `col = ?` |
+| `where_pivot_op(col, op, val)` | `col <op> ?` |
+| `where_pivot_in(col, vals)` | `col IN (...)` |
+| `where_pivot_not_in(col, vals)` | `col NOT IN (...)` |
+| `where_pivot_null(col)` | `col IS NULL` |
+| `where_pivot_not_null(col)` | `col IS NOT NULL` |
+| `where_pivot_between(col, low..=high)` | `col BETWEEN ? AND ?` |
+| `where_pivot_not_between(col, low..=high)` | `col NOT BETWEEN ? AND ?` |
+| `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
+
+每一个方法都有一个 `or_` 的孪生方法，它会和它前面那一项折叠成一个“或”的关系，就像 `Builder` 上的 `or_where` 那样。一个闭包分组在那个“或”的关系里仍然保持为一个整体，所以 `.where_pivot_null("note").or_where_pivot_group(|q| ...)` 读起来是 `note IS NULL OR (...)`，而不是一条被摊平的链。
+
+列名会作为原始 SQL 标识符插进中间表的语句里，契约和 `Builder::filter` 一样。绝不要从请求数据里取列名。值是作为参数绑定的，所以那些从请求数据里取是安全的。
+
+闭包形式跑在同一条语句上，所以它内部的一个 `where_raw` 或者一个 `where_has`，会逐字落进中间表的 SQL 里 - 标识符允许列表按设计就跳过那道原始 SQL 的脱围机制。请像对待 `Builder::where_raw` 那样对待这个闭包：绝不要用不受信任的输入去拼它的片段。
+
+`MorphToMany` 和 `MorphedByMany` 上有同样的一家子。
+
+### 为什么 Suprnova 有所不同：中间表过滤器是只读的
+
+两条边界，两条都是刻意划下的。
+
+**一个中间表过滤器绝不会收窄一次写入。** Laravel 会把 `wherePivot` 的约束折进 `detach()` 里，所以 `->wherePivot('active', 1)->detach()` 只会删掉那些 active 的联结行。Suprnova 的中间表 `DELETE` 是手写出来的，而一个读谓词到底有没有触及一次删除、却在调用点看不出来，这样的差别是您没法看见的。所以只要设了任何过滤器，`attach`、`attach_with`、`detach` 和 `sync` 都会返回一个错误。请把这两种意图拆开：
+
+```rust
+// 先读出匹配的东西，再显式地对它动手。
+let stale = user.roles().where_pivot("active", 0i64).get().await?;
+for role in &stale {
+    user.roles().detach(role.id).await?;
+}
+```
+
+**预加载不会把中间表过滤器带上。** `user_query.with(["roles"])` 走的是这个关系生成出来的预加载路径，它会一次性为整批父行扫描中间表，并把一个 `with_where` 闭包施加到*关联*表上。那条路径上没有留给中间表谓词的位置。当您需要一次带过滤的多对多读取时，请逐个父行去调用关系访问器（`user.roles().where_pivot(...).get()`），而不是预加载。
 
 ### 为什么 Suprnova 有所不同：中间表是一个真正的模型
 
 Laravel 的中间表是一个不透明的逐属性包（`$role->pivot->note`）。Suprnova 要求您声明这个中间表结构体，因为 Rust 的类型系统需要在编译期就知道这些列 - 而一旦您为这份声明付出了代价，这个中间表就会得到和任何其他表一样的 `#[suprnova::model]` 待遇：迁移、事件、观察者、工厂、软删除。`r.pivot::<RoleUser>()` 返回一个类型化的引用；没有字符串键的属性查找，一列名字打错了也不会在运行时给您惊喜。
 
 代价是每张中间表多一个结构体。好处是这个中间表能携带行为 - 领域逻辑、验证规则、审计列 - 而不需要逃逸到原始 SQL 里。
-
 ## `HasOneThrough` 和 `HasManyThrough`
 
 两跳关系：`A → B → C`，其中 `B` 是一个中间模型，它的外键指向 `A`；`C` 是最终目标，它的外键指向 `B`。经典例子：`Country` 有多个 `User`；`User` 有多个 `Post`；`Country::posts()` 会在一次 SQL 往返里跳过这两跳。
@@ -430,8 +492,7 @@ let mine = Post::query()
 
 ### 为什么这比 LEFT JOIN 更好
 
-Laravel 更早期的 `has` / `whereHas` 引擎，过去会发出 JOIN，并重复父级的行；关联 EXISTS 的重写在 Laravel
-9. 落地。Suprnova 从第一天起就提供 EXISTS。好处是：结果集里没有重复项，聚合不需要 GROUP BY 变通方案，不需要 `DISTINCT`，而且数据库的优化器看到的是一个真正的子查询，不是一个它没法把谓词下推过去的 JOIN。对 `has_count(rel, ">=", n)`，这个引擎会直接渲染出 `(SELECT COUNT(*) FROM child WHERE ...) >= n` - 一条查询，一份执行计划。
+Laravel 更早期的 `has` / `whereHas` 引擎，过去会发出 JOIN，并重复父级的行；关联 EXISTS 的重写在 Laravel 9.落地。Suprnova 从第一天起就提供 EXISTS。好处是：结果集里没有重复项，聚合不需要 GROUP BY 变通方案，不需要 `DISTINCT`，而且数据库的优化器看到的是一个真正的子查询，不是一个它没法把谓词下推过去的 JOIN。对 `has_count(rel, ">=", n)`，这个引擎会直接渲染出 `(SELECT COUNT(*) FROM child WHERE ...) >= n` - 一条查询，一份执行计划。
 
 ## 预加载 - `with`、`with_count`、`with_*` 聚合
 

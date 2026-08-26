@@ -4,6 +4,101 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.4 - 2026-08-25
+
+### Added
+
+- **Read-through disks take a `copy` flag and resolve `copy` / `rename` across the fallback.** Set `copy: false` on `ReadThroughConfig` to serve fallback hits without writing them through, which turns the disk into a transparent overlay and narrows each fetch to the range you asked for. `copy` and `rename` now stream a source that lives only on the fallback across to the primary destination; a `rename` also deletes the fallback source, so a later read cannot resurrect the moved object. Conditions carry across that streaming path: `if_not_exists` still refuses an existing destination, a copy's source version selects which object the fallback hands over, and a copy's `if_match` is refused with `Unsupported` rather than silently dropped. A transfer that fails partway removes only a destination it created, so it cannot destroy an object that was already there.
+- **Debounced jobs and debounced queued listeners.** `Job::debounce_for()` collapses
+  a burst of dispatches into one run, one window after the most recent one, carrying
+  the newest payload. It is the mirror of `push_unique`, which keeps the first
+  dispatch and suppresses the rest. `Job::max_debounce_wait()` stops a continuous
+  burst from deferring the work forever, and `Job::debounce_id(&self)` scopes the
+  window per entity so twenty updates to one order collapse without touching
+  another order's. `Queue::push_debounced(job, DebounceOptions)` sets the window at
+  the call site, and `DebouncedListener::new(window, build).keyed_by(...)` debounces
+  an event listener with the key derived from the event - a plain `QueuedListener`
+  already honors a window the job itself declares. Every dispatch is still enqueued;
+  the collapse is settled at the worker, which acknowledges a superseded envelope
+  and emits `JobDebounced`. Debouncing fails open: an expired or evicted window runs
+  the job rather than dropping it. Each actual run starts a fresh maximum-wait
+  window, so a burst always measures its maximum wait from its own first dispatch
+  rather than inheriting the previous burst's. A job cannot declare both
+  `debounce_for` and `unique_id`, and chains and batches refuse a debounced job -
+  a superseded link would strand the rest of its chain, and a superseded batch job
+  would leave the batch's pending count above zero forever. The envelope carries two
+  additive fields for this and stays byte-identical on the wire for every
+  non-debounced push.
+
+- **`Storage::register_read_through` composes two disks into a read-through disk.** Reads and metadata resolve against the primary first and fall back to the second disk; anything found on the fallback is written through to the primary, so a store migration completes under real traffic. Writes and listings stay on the primary, and a delete removes the object from both disks. Set `throw_on_promotion_failure` when a failed promotion must surface instead of degrading to a fallback read. A promotion is published atomically, so no reader can see a half-written object, and it carries the fallback object's content type, cache control, content disposition, content encoding, and user metadata across. A versioned or conditional read is passed through with its condition intact and served without being promoted.
+- **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
+  keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -
+  the lever for retiring a pool, absorbing a backlog, or moving work off a pool you
+  are about to take down, without touching a single job or route. It applies on
+  both sides: new pushes that resolved to `default` land on `high`, *and* a worker
+  started with `--queue=default` drains `high`, so the destination cannot collect
+  work nobody claims. Forwarding `default` catches jobs that named no queue. A
+  forward is a single lookup, never a chain, so a swap (`a -> b` with `b -> a`
+  also registered) or a longer rotation is a coherent pool exchange rather than
+  a loop - exactly like Laravel, whose resolver is the same single lookup.
+  Pausing is still evaluated on the names a worker was started with, so
+  `Queue::pause(&connection, "default")` stops that worker even while `default` is
+  forwarded. `Queue::forward_on(from, to, connection)` restricts a forward to one
+  connection name, compared against this process's connection name rather than a
+  job's declared connection, so both halves of the redirect gate on the same
+  value. `Queue::forward_for(from)` reads a forward back, and `Queue::try_forward`
+  is the fallible sibling. The inspection calls (`Queue::pending_jobs` and its
+  siblings) deliberately do not follow a forward, so a backlog left behind on a
+  forwarded queue stays visible.
+
+- **Read-shaped Redis commands retry a transient failure instead of surfacing it.**
+  The connection manager already reconnected in the background, but the command
+  that hit the dead socket still failed your call. `GET`, `EXISTS`, the `SCAN`
+  and `SSCAN` pages behind `Cache::flush` / `Cache::flush_tags`, the queue
+  driver's `XLEN` / `ZCARD` / `XPENDING` reads, and the rate limiter's
+  `Retry-After` computation now retry once after a short pause.
+  `REDIS_COMMAND_RETRIES` adds further retries on top, clamped at 10. Budget the
+  retry in seconds rather than milliseconds: the second attempt waits for the
+  replacement connection, so it costs the driver's whole connect and response
+  budget, and a timed-out command counts as transient as well as a dropped one.
+  Writes never retry at any setting: a transient error means the connection
+  failed, not that the server refused the command, so repeating a `SET`, an
+  `INCR`, a lock acquisition, a rate-limit hit, or a queue pop could run it
+  twice. Error messages are unchanged, so anything matching on them keeps working.
+- **A paused worker now tells you it is paused.** `queue:work` prints one line per
+  transition - `2026-08-25 14:03:11 Queue billing PAUSED`, and `RESUMED` on the way
+  back - and the worker emits `WorkerQueuePaused` / `WorkerQueueResumed` so you can
+  route the same signal into your own alerting. These are the worker-side pair; the
+  existing `QueuePaused` / `QueueResumed` fire in whichever process ran
+  `queue:pause`, which is never the worker, so until now a worker that went quiet
+  because somebody paused its queue was indistinguishable from a hung one. Each
+  event fires once per transition, not once per poll. Their `queue` field is
+  optional: a worker started without `--queue` drains everything and has no queue
+  names to report under `pause_all`, so it reports `None` rather than inventing a
+  name a listener could match on.
+- **`?include=` paths are capped at five segments, and `max_relationship_depth` moves the ceiling.** A cyclic relationship graph turns `?include=author.posts.author.posts...` into fan-out a client controls, bounded only by the query string. Paths are now truncated while they parse; call `suprnova::max_relationship_depth(n)` in `bootstrap::register()` to change the limit, or pass `0` to turn includes off.
+- **`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against another field.** `CompareWith` names the operand and the measure in one value: `Number` for a literal, `NumericField` for a numeric sibling, and `LengthField` for a sibling compared by character count. An operand the rule cannot measure fails the field instead of panicking.
+- **Three membership rules join the built-in set: `InArray`, `Contains`, and `DoesntContain`.** `InArray` checks a value against another field's list, and you pass the list directly instead of naming the field in a rule string. `Contains` and `DoesntContain` run over a JSON array and match a parameter only against a string element, so `1` and `"1"` stay distinct.
+- **The database pool now has liveness knobs.** `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`, `DB_TEST_BEFORE_ACQUIRE`, and `DB_PING_AFTER_IDLE` control when the pool closes, recycles, and pings a connection, with matching `DatabaseConfig::builder()` setters. Each is unset by default, so an existing deployment's pool behaves exactly as it did. Use them when a NAT gateway or firewall drops idle connections: sqlx exposes no libpq `keepalives_*` equivalent, so pool recycling is the mechanism.
+- **`db:seed <Class>` reports its progress.** A targeted run prints a `RUNNING` line before the seeder and an elapsed-milliseconds `DONE` line after it. A bare `db:seed` stays silent. The formatter, `suprnova::two_column_detail`, is available to your own `#[command]` handlers.
+- **Many-to-many relations now filter on pivot columns.** `where_pivot`, `where_pivot_op`, `where_pivot_in`, `where_pivot_not_in`, `where_pivot_null`, `where_pivot_not_null`, `where_pivot_between`, `where_pivot_not_between`, `where_pivot_group`, and their `or_` twins constrain `get`, `first`, and `count` on `BelongsToMany`, `MorphToMany`, and `MorphedByMany`. `where_pivot_group` takes a closure and renders one parenthesised group, so it stays atomic inside a following `or_where_pivot`. Pivot filters apply to reads only: `attach`, `attach_with`, `detach`, and `sync` return an error while one is set, and eager loading does not carry them.
+- **`where_binary` compares column values byte for byte.** The family (`where_binary`, `or_where_binary`, `where_not_binary`, `or_where_not_binary`) ships on `Builder<M>`, and `where_binary` and `where_not_binary` ship on `DB::table(...)`. MySQL and MariaDB emit `= binary`; Postgres and SQLite return an error when the query renders, rather than falling back to a collation-dependent match.
+- **`Builder::try_to_sql_with_bindings_for` renders SQL for a dialect without panicking.** It is the fallible sibling of `to_sql_with_bindings_for`, for the cases where a builder legitimately cannot render for a backend.
+- **`Model::refresh_for_update` reloads a row under a `FOR UPDATE` lock.** Call it inside a transaction when you need the row's current state and the exclusive lock in one statement. SQLite has no row-level locking, so the lock clause is a no-op there.
+- **`Builder::or_where_key` and `Builder::or_where_key_not` add primary-key filters as a disjunction.** Both fold into the preceding `WHERE` clause the same way `or_where` does, and both ship `or_filter_key` and `or_filter_key_not` aliases.
+- **`Builder::in_order_of` sorts rows into an explicit sequence.** Pass a column and the values in the order you want them; rows whose value is not in the list sort last. The values bind as parameters, so they are safe to take from request data.
+
+### Fixed
+
+- **The maintenance bypass cookie now expires on the server.** The 12-hour TTL was a `max-age` the browser enforced, so a captured cookie kept working until you rotated the secret. The encrypted payload now carries the deadline, and every request re-checks it.
+- **`suprnova serve` runs a frontend-less project.** A project scaffolded with `suprnova new --api` has no `frontend/` directory, and `serve` rejected it as "No frontend directory found. Are you in a Suprnova project directory?" unless you passed `--backend-only`. It now skips the Vite pane and the TypeScript generation that feeds it, and serves the backend. `--frontend-only` still fails on such a project, with a message that says why.
+
+### Upgrading
+
+- **Bypass cookies issued before this release stop working.** The cookie's payload changed from the bare secret to a sealed `{ secret, expires_at }` object, and a payload with no deadline is refused. Visit the secret URL once after upgrading to get a new cookie. Nothing else changes: `down`, `up`, `--secret`, and `--with-secret` all behave as before.
+- **An include path longer than five segments now returns its first five relationships instead of all of them.** Nothing outside a resource's allowlist was ever reachable, so no response gains data; a deep path loses its tail. One status code changes with it: a path whose over-deep tail names a relationship the resource does not allow is truncated before anything validates it, so it now returns `200` with the segments that survived where the full path used to return `400` - adjust any client or test asserting on that rejection. Raise the ceiling with `suprnova::max_relationship_depth(n)` if your API documents paths longer than that.
+- **`DatabaseConfig` gained five public fields.** Code that builds one with a struct literal no longer compiles. Use `DatabaseConfig::from_env()` or `DatabaseConfig::builder()`, both of which fill the new fields with the defaults that preserve today's pool behavior.
+
 ## 1.3.3 - 2026-08-25
 
 ### Added

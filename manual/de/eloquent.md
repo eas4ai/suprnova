@@ -362,14 +362,13 @@ let user = User::create(attrs! {
 }).await?;
 ```
 
-`attrs!` ist ein Makro, das einen `Attrs`-Wert erzeugt (eine
-typisierte JSON-Map). Reines JSON funktioniert ebenfalls -
+`attrs!` ist ein Makro, das einen `Attrs`-Wert erzeugt (eine typisierte
+JSON-Map). Reines JSON funktioniert ebenfalls -
 `User::create(serde_json::json!({"name": "Alice", "email": "..."}))`.
 Der `Fillable`-Filter läuft innerhalb von `create`; nicht befüllbare
-Felder werden stillschweigend verworfen, passend zu Laravels
-Verhalten.
+Felder werden stillschweigend verworfen, wie bei Laravel.
 
-### Speichern / Aktualisieren
+### Save / update
 
 ```php
 // Laravel
@@ -387,13 +386,13 @@ user.save().await?;
 user.update(attrs! { name: "Alice B" }).await?;
 ```
 
-`save()` durchläuft jedes Nicht-PK-Feld, setzt es über `Set(...)`
-auf dem ActiveModel, ruft SeaORMs `update()` auf und gibt die
-kanonische Zeile zurück. `update(attrs)` ist derselbe Ablauf, wendet
-aber zuerst eine partielle Attribut-Map an (wobei der
-`Fillable`-Filter und alle deklarierten Mutatoren laufen).
+`save()` läuft jedes Feld außer dem Primärschlüssel ab, setzt sie über
+`Set(...)` am ActiveModel, ruft SeaORMs `update()` auf und gibt die
+kanonische Zeile zurück. `update(attrs)` ist derselbe Ablauf, wendet aber
+zuerst eine partielle Attribut-Map an (dabei laufen der
+`Fillable`-Filter und alle deklarierten Mutatoren).
 
-### Erhöhen / Verringern
+### Increment / decrement
 
 ```php
 // Laravel
@@ -411,44 +410,64 @@ user.decrement("credits", 10).await?;
 User::filter("plan", "free").increment("quota_reset_count", 1).await?;
 ```
 
-`increment` / `decrement` erzeugen SQL der Form `UPDATE table SET
-col = col + N WHERE ...` - atomar gegenüber gleichzeitigen Updates,
-ohne Read-Modify-Write-Race. Verfügbar sowohl auf einer geholten
-Modellinstanz (verwendet den PK der Zeile in der WHERE-Klausel) als
-auch als Builder-Terminal (verwendet die WHERE-Klauseln der Kette).
+`increment` / `decrement` geben SQL der Form
+`UPDATE table SET col = col + N WHERE ...` aus - atomar gegenüber
+nebenläufigen Updates, ohne Read-Modify-Write-Race. Verfügbar sowohl auf
+einer geholten Modellinstanz (nutzt den Primärschlüssel der Zeile in der
+WHERE-Klausel) als auch als Abschlussmethode am Builder (nutzt die
+WHERE-Klauseln der Kette).
 
-### Fresh / Refresh / Replicate
+### Fresh / refresh / replicate
 
 ```php
 // Laravel
-$user->refresh();                          // aus der DB neu laden
-$copy = $user->fresh();                    // holt + gibt Kopie zurück
-$replica = $user->replicate();             // nicht gespeicherter Klon mit frischem PK
-$replica = $user->replicate(['email']);    // ein Feld auslassen
+$user->refresh();                          // reload from DB
+$user->refreshForUpdate();                 // reload under a row lock
+$copy = $user->fresh();                    // fetch + return copy
+$replica = $user->replicate();             // unsaved clone with fresh PK
+$replica = $user->replicate(['email']);    // skip a field
 ```
 
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
-`refresh` mutiert in place; `fresh` gibt eine separat geholte Kopie
-zurück. `replicate` baut einen In-Memory-Klon mit zurückgesetztem PK
-(`Default::default()` für den Key-Typ). Der Aufrufer speichert
-explizit.
+`refresh` verändert an Ort und Stelle; `fresh` gibt eine separat geholte
+Kopie zurück. `refresh_for_update` ist `refresh` unter einer Zeilensperre
+per `SELECT ... FOR UPDATE` - nutzen Sie es innerhalb einer Transaktion,
+wenn Sie die aktuellen Werte der Zeile und die exklusive Sperre in einem
+Statement brauchen. Anders als `refresh` umgeht `refresh_for_update`
+jeden registrierten globalen Scope UND den
+`#[model(soft_deletes)]`-Filter: Es lädt auch eine gelöschte Zeile neu,
+und `deleted_at` kommt gesetzt zurück. Das Neuladen ist ein Nachschlag
+über den Primärschlüssel unter einer Sperre - es wie ein gewöhnliches
+Lesen einzugrenzen würde Admin-Werkzeugen und mandantenübergreifenden
+Aufrufern ein falsches „nicht gefunden“ für eine Zeile liefern, auf die
+sie bereits eine Referenz halten. `replicate` baut einen Klon im
+Speicher, dessen Primärschlüssel zurückgesetzt ist
+(`Default::default()` für den Schlüsseltyp). Der Aufrufer speichert
+ausdrücklich.
+
+`refresh` und `refresh_for_update` geben beide einen Fehler zurück, wenn
+die Zeile nicht mehr existiert, statt das Modell mit veralteten Werten
+zurückzulassen. SQLite hat keine Sperren auf Zeilenebene,
+`refresh_for_update` lädt dort also ohne Sperre neu - siehe
+[Zeilensperren](#zeilensperren).
 
 ### Replicating-Event
 
-`replicate` und `replicate_except` lösen nach dem Konstruieren des
-In-Memory-Klons und VOR dessen Rückgabe das Pro-Modell-Event
-`Replicating { source, replica }` aus. Das Feld `replica` ist ein
-`Arc<tokio::sync::Mutex<Self>>`, sodass Listener die Replica
-verändern können, bevor der Aufrufer sie sieht - nützlich, um Titel
-mit `(copy)` zu präfigieren, Flags zu löschen, abgeleitete Spalten
-zurückzusetzen usw.
+`replicate` und `replicate_except` lösen das Event
+`Replicating { source, replica }` pro Modell aus, nachdem der Klon im
+Speicher gebaut wurde und BEVOR er zurückgegeben wird. Das Feld `replica`
+ist ein `Arc<tokio::sync::Mutex<Self>>`, sodass Listener die Replica
+verändern können, bevor der Aufrufer sie sieht - nützlich, um Titeln
+`(copy)` voranzustellen, Flags zu löschen, abgeleitete Spalten
+zurückzusetzen und so weiter.
 
 ```rust
 use suprnova::events::{EventFacade, Listener};
@@ -479,16 +498,16 @@ EventFacade::listen::<post::events::Replicating, _>(
 let replica: UserDraft = user.replicate_into().await?;  // typübergreifender Klon
 ```
 
-Eine Suprnova-Abweichung - Laravel kann das nicht, weil PHP keine
-Typen hat. Nützlich, um ein Draft-Modell zu einem finalen zu machen
+Eine Suprnova-Abweichung - Laravel kann das nicht, weil PHP keine Typen
+hat. Nützlich, wenn Sie ein Entwurfsmodell in ein endgültiges befördern
 oder umgekehrt.
 
-`replicate_into<T>` löst KEIN `Replicating` aus (das Event trägt
-`Arc<Mutex<Self>>`, sodass ein Listener auf dem Quelltyp die
-typübergreifende Replica ohnehin nicht verändern könnte). Aufrufer,
-die ein Pro-T-Setup wollen, sollten es auf dem zurückgegebenen `T`
-ausführen, bevor sie `T::save` aufrufen - die normale
-`Saving`-/`Created`-Kette läuft weiterhin innerhalb von `save`.
+`replicate_into<T>` löst `Replicating` NICHT aus (das Event trägt
+`Arc<Mutex<Self>>`, ein Listener auf dem Quelltyp könnte die
+typübergreifende Replica also ohnehin nicht verändern). Wer eine
+Einrichtung pro `T` möchte, führt sie auf dem zurückgegebenen `T` aus,
+bevor `T::save` aufgerufen wird - die normale Kette aus `Saving` /
+`Created` feuert innerhalb von `save` weiterhin.
 
 ## Löschen und Soft Deletes
 
@@ -533,18 +552,17 @@ Zeilen; `User::with_trashed().find(id)` findet sie.
 
 `Builder<M>` ist der verkettbare Query-Typ, den `User::query()`,
 `User::filter(...)`, `User::db_where(...)` und jede andere statische
-Methode zurückgeben, die die Kette nicht terminiert.
+Methode zurückgeben, die die Kette nicht beendet.
 
-### Namenshinweis: Dual-API
+### Anmerkung zur Benennung: Dual-API
 
-`where` ist ein Rust-Keyword, daher kann die
-Bare-Equality-where-Methode nicht Laravels Namen teilen. Statt einen
-Gewinner zu bestimmen, liefert jede where-förmige Methode sowohl
-unter einem Rust-idiomatischen Namen (`filter`, `filter_in`,
-`filter_null`, …) als auch unter einem Laravel-förmigen Namen
-(`db_where`, `where_in`, `where_null`, …) aus. Es sind Aliase über
-eine kanonische Implementierung - nehmen Sie, was Ihrem
-Muskelgedächtnis entspricht.
+`where` ist ein Rust-Schlüsselwort, die Where-Methode für schlichte
+Gleichheit kann sich Laravels Namen also nicht teilen. Statt einen
+Gewinner zu küren, wird jede Methode in Where-Form unter **beiden** Namen
+ausgeliefert: einem rust-idiomatischen (`filter`, `filter_in`,
+`filter_null`, …) und einem Laravel-förmigen (`db_where`, `where_in`,
+`where_null`, …). Sie sind Aliase über einer kanonischen Implementierung -
+nehmen Sie den, zu dem Ihr Muskelgedächtnis passt.
 
 ```rust
 // Rust-Entwickler:
@@ -566,14 +584,15 @@ $users = User::where('email', 'like', '%@example.com')->get();
 ```
 
 ```rust
-// Suprnova - eine Familie wählen; beide kompilieren, beide dokumentiert.
+// Suprnova - nehmen Sie eine der beiden Familien; beide kompilieren,
+// beide sind dokumentiert.
 
-// Rust-förmig (filter-Familie):
+// Rust-Form (filter-Familie):
 let users = User::query().filter("email", &email).get().await?;
 let users = User::query().filter_op("age", ">=", 18).get().await?;
 let users = User::query().filter_like("email", "%@example.com").get().await?;
 
-// Laravel-förmig (db_where- / where_*-Familie):
+// Laravel-Form (db_where- / where_*-Familie):
 let users = User::db_where("email", &email).get().await?;
 let users = User::query().db_where_op("age", ">=", 18).get().await?;
 let users = User::query().where_like("email", "%@example.com").get().await?;
@@ -581,17 +600,19 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 
 ### Where-Varianten
 
-Jede Zeile hat zwei gleichwertige Suprnova-Formen - Rust-förmig
-(`filter*`) und Laravel-förmig (`db_where` / `where_*`). Beide rufen
+Jede Zeile hat zwei gleichwertige Suprnova-Formen - die Rust-Form
+(`filter*`) und die Laravel-Form (`db_where` / `where_*`). Beide rufen
 dieselbe kanonische Implementierung auf; beide sind mit
-`#[doc(alias = "...")]` markiert, damit die rustdoc-Suche beide
-findet.
+`#[doc(alias = "...")]` ausgezeichnet, sodass die rustdoc-Suche jede von
+beiden findet.
 
-| Laravel | Suprnova (Rust-förmig) | Suprnova (Laravel-förmig) | Hinweise |
+| Laravel | Suprnova (Rust-Form) | Suprnova (Laravel-Form) | Hinweise |
 |---------|----------------------|--------------------------|-------|
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | Gleichheit |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | Beliebiger Operator |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | PK-Filter als Disjunkt |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | Negierter PK-Filter als Disjunkt |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -606,17 +627,29 @@ findet.
 | `->whereTime(col, '12:30')` | `.filter_time(col, NaiveTime)` | `.where_time(col, NaiveTime)` | |
 | `->whereLike(col, pattern)` | `.filter_like(col, pattern)` | `.where_like(col, pattern)` | |
 | `->whereNotLike(col, pattern)` | `.filter_not_like(col, pattern)` | `.where_not_like(col, pattern)` | |
-| `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | Backend-abhängig |
+| `->whereBinary(col, val)` | `.filter_binary(col, val)` | `.where_binary(col, val)` | Byte-exakt; nur MySQL und MariaDB |
+| `->orWhereBinary(col, val)` | `.or_filter_binary(col, val)` | `.or_where_binary(col, val)` | |
+| `->whereNotBinary(col, val)` | `.filter_not_binary(col, val)` | `.where_not_binary(col, val)` | |
+| `->orWhereNotBinary(col, val)` | `.or_filter_not_binary(col, val)` | `.or_where_not_binary(col, val)` | |
+| `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | Nach Backend verteilt |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
-| `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | Spalte-zu-Spalte-Vergleich |
+| `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | Vergleich Spalte gegen Spalte |
 | `->whereExists(closure)` | `.filter_exists(builder)` | `.where_exists(builder)` | Subquery |
 | `->whereHas(rel, closure)` | `.filter_has(rel, fn)` | `.where_has(rel, fn)` | Relations-Prädikat (10B) |
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | (10B) |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
 
-Gebundene rohe Prädikate verwenden portable `?`-Marker auf SQLite,
-MySQL und PostgreSQL:
+Die `binary`-Familie vergleicht rohe Bytes, statt unter der Kollation der
+Spalte zu vergleichen. MySQL und MariaDB geben `col = binary ?` aus;
+Postgres und SQLite haben keinen entsprechenden Operator, eine
+Abschlussmethode gibt auf diesen Backends daher beim Rendern des
+Statements einen Fehler zurück, statt auf ein kollationsabhängiges `=`
+zurückzufallen. Siehe
+[Byte-exakter Vergleich](queries.md#byte-exact-comparison).
+
+Gebundene rohe Prädikate nutzen unter SQLite, MySQL und PostgreSQL
+portable `?`-Marker:
 
 ```rust
 let rows = User::query()
@@ -629,18 +662,17 @@ let rows = User::query()
     .await?;
 ```
 
-Auf PostgreSQL nummeriert Suprnova diese Marker hinter bereits
-vorhandenen Query-Bindings neu, sodass das Beispiel `$1` für
-`active` und `$2`/`$3` für das rohe Prädikat rendert. Verwenden Sie
-`??` für einen literalen Fragezeichen-Operator in einem gebundenen
-rohen Fragment, etwa `"payload ?? 'enabled' AND status = ?"`.
-Bestehende `$N`-Fragmente werden weiterhin akzeptiert, aber portable
-Marker vermeiden eine Kopplung der Aufrufstellen an die
-Query-Position. Gemischte Marker-Stile und Diskrepanzen zwischen
-Marker- und Binding-Anzahl werden vor der Datenbank-I/O abgewiesen.
-Wie bei jedem rohen Ausdruck muss der SQL-Text vertrauenswürdig
-sein; nicht-vertrauenswürdige Werte gehören ausschließlich in den
-Bindings-Vektor.
+Unter PostgreSQL setzt Suprnova diese Marker hinter den vorherigen
+Query-Bindings neu auf, das Beispiel rendert also `$1` für `active` und
+`$2`/`$3` für das rohe Prädikat. Nutzen Sie `??` für einen wörtlichen
+Fragezeichen-Operator in einem gebundenen rohen Fragment, etwa
+`"payload ?? 'enabled' AND status = ?"`. Bestehende `$N`-Fragmente
+werden weiterhin angenommen, aber portable Marker koppeln Aufrufstellen
+nicht an die Position in der Query. Gemischte Markerstile und eine nicht
+passende Anzahl von Markern und Bindings werden vor jeder
+Datenbank-E/A abgelehnt. Wie bei jedem rohen Ausdruck muss dem SQL-Text
+vertraut werden; nicht vertrauenswürdige Werte gehören ausschließlich in
+den Bindings-Vektor.
 
 ### Sortierung
 
@@ -660,10 +692,55 @@ let users = User::oldest().get().await?;
 let users = User::query().in_random_order().get().await?;
 ```
 
-`Direction::Asc` / `Direction::Desc` ist das von SeaORM
-re-exportierte Suprnova-Enum.
+`Direction::Asc` / `Direction::Desc` ist das Suprnova-Enum, das aus
+SeaORM re-exportiert wird.
 
-### Gruppieren + Having
+#### Nach einer ausdrücklichen Reihenfolge sortieren
+
+`in_order_of` sortiert Zeilen in die Reihenfolge, die Sie auflisten. Was
+einen Wert hat, der nicht in der Liste steht, sortiert hinter alles, was
+darin steht.
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnova rendert das als gebundenen `CASE`-Ausdruck, die Werte sind also
+Parameter und dürfen aus Anfragedaten stammen:
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+Der Spaltenname ist ein SQL-Bezeichner, kein Parameter. Schreiben Sie ihn
+fest oder wählen Sie ihn aus einer Allowlist, genau wie jedes andere
+Spaltenargument. Eine leere Werteliste fügt gar keine Sortierung hinzu,
+Sie können die Reihenfolge also bedingt aufbauen, ohne den leeren Fall
+gesondert zu behandeln.
+
+Bei einer Spalte, die den Cast `AsEnum<E>` nutzt, reichen Sie jede
+Variante durch `as_ref()`. Das ist genau die Zeichenkette, die der Cast
+speichert:
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` wird auf der typisierten `Builder<M>`-Oberfläche
+ausgeliefert. Der modell-lose `DB::table(...)`-Builder sortiert nur nach
+Spalte und Richtung.
+
+### Gruppieren + having
 
 ```php
 $rows = User::groupBy('role')->having('count(*)', '>', 5)->get();
@@ -677,7 +754,7 @@ let rows = User::query()
     .await?;
 ```
 
-### Limit / Offset
+### Limit / offset
 
 ```php
 $users = User::limit(10)->offset(20)->get();
@@ -700,10 +777,10 @@ let rows  = User::query().select_raw("count(*) as total, role")
     .await?;
 ```
 
-`get_raw()` gibt das roh-förmige Spaltenergebnis für `select_raw`-
-Fälle zurück, in denen die Spalten nicht zum Modell-Schema passen;
+`get_raw()` gibt das Ergebnis in roher Spaltenform zurück, für
+`select_raw`-Fälle, in denen die Spalten nicht zum Modellschema passen;
 `get()` gibt `Vec<User>` zurück und verlangt, dass die ausgewählten
-Spalten die Modell-Struktur füllen.
+Spalten die Modellstruktur füllen.
 
 ### Distinct
 
@@ -724,16 +801,15 @@ let exists  = User::filter("email", &email).exists().await?;
 let missing = User::filter("email", &email).doesnt_exist().await?;
 ```
 
-Aggregate sind generisch über den Rückgabetyp, weil SeaORM wissen
-muss, worauf das DB-Skalar zu koerzieren ist. Typ-Standardwerte:
-`count -> i64`; `sum`/`avg` tragen einen expliziten Typparameter.
-Suprnova aliast intern generierte Aggregat-Ausdrücke, sodass
-dasselbe typisierte Ergebnis auf PostgreSQL, MySQL und SQLite
-dekodiert wird. `sum` und `avg` geben bei einer leeren Treffermenge
-`0` zurück, während `min` und `max` `None` zurückgeben. Ein
-inkompatibler angeforderter Rust-Typ oder eine fehlende
-Ergebnisspalte ist ein Datenbankfehler; er wird niemals in ein
-plausibles `0` oder ein `None` umgewandelt.
+Aggregate sind über den Rückgabetyp generisch, weil SeaORM wissen muss,
+worauf es den Skalar aus der Datenbank umwandeln soll. Typ-Vorgaben:
+`count -> i64`; `sum`/`avg` tragen einen ausdrücklichen Typparameter.
+Suprnova versieht generierte Aggregat-Ausdrücke intern mit Aliasen, damit
+unter PostgreSQL, MySQL und SQLite dasselbe typisierte Ergebnis dekodiert
+wird. `sum` und `avg` geben bei einer leeren Treffermenge null zurück,
+während `min` und `max` `None` liefern. Ein unpassender angeforderter
+Rust-Typ oder eine fehlende Ergebnisspalte ist ein Datenbankfehler; das
+wird nie in eine plausible Null oder ein `None` umgedeutet.
 
 ### Abschlussmethoden
 
@@ -748,12 +824,18 @@ let ids:    Vec<i64>           = User::query().model_keys().await?;
 let sql:    String             = User::filter("...").to_sql();
 ```
 
-`to_sql` gibt das parametrisierte SQL zurück, das das nächste
-Terminal ausgeben würde - nützlich zum Debuggen oder zum Bauen von
+`to_sql` gibt das parametrisierte SQL zurück, das die nächste
+Abschlussmethode ausgeben würde - nützlich zum Debuggen oder zum Bauen von
 Views. Die Bindings sind über
 `.to_sql_with_bindings() -> (String, Vec<Value>)` erreichbar.
 
-`model_keys` ist das Terminal nur für Schlüssel: Es projiziert den **qualifizierten** Primärschlüssel (`users.id`) und hydratisiert niemals ein Modell, sodass die Frage „Welche Zeilen passten?“ nur eine Spalte statt einer vollständigen Zeile pro Treffer kostet. Die Qualifizierung lässt es eine Abfrage überstehen, die eine weitere Tabelle mit eigener Spalte `id` joint. Jedes bereits auf dem Builder vorhandene `select(...)` wird verworfen - der Aufrufer hat nach Schlüsseln gefragt.
+`model_keys` ist die Abschlussmethode nur für Schlüssel: Sie projiziert den
+**qualifizierten** Primärschlüssel (`users.id`) und hydriert nie ein
+Modell, eine Frage nach dem Motto „welche Zeilen haben getroffen?“ kostet
+also eine Spalte statt einer ganzen Zeile pro Treffer. Die Qualifizierung
+ist das, was sie eine Query überstehen lässt, die eine andere Tabelle mit
+eigenem `id` joint. Ein `select(...)`, das bereits auf dem Builder liegt,
+wird verworfen - der Aufrufer hat nach Schlüsseln gefragt.
 
 ### Unions
 
@@ -766,13 +848,13 @@ let users  = first.union_all(second).get().await?;
 
 ## Zeilensperren
 
-Zwei Builder-Methoden fordern beim SELECT eine Datenbank-Sperre pro
-Zeile an:
+Zwei Builder-Methoden fordern zum SELECT-Zeitpunkt eine Datenbanksperre
+pro Zeile an:
 
 ```rust
 // Exklusive Schreibsperre - blockiert andere Transaktionen, die
-// versuchen, dieselben Zeilen zu sperren oder zu schreiben, bis
-// diese Transaktion committet.
+// dieselben Zeilen sperren oder schreiben wollen, bis diese Transaktion
+// committet.
 let order = Order::query()
     .filter("id", 42)
     .lock_for_update()
@@ -788,26 +870,39 @@ let inventory = Inventory::query()
     .await?;
 ```
 
-Pro Backend ausgegebenes SQL:
+Das je Backend ausgegebene SQL:
 
-| Backend  | `lock_for_update()` | `shared_lock()`        |
+| Backend | `lock_for_update()` | `shared_lock()` |
 |----------|---------------------|------------------------|
-| Postgres | `FOR UPDATE`        | `FOR SHARE`            |
-| MySQL    | `FOR UPDATE`        | `LOCK IN SHARE MODE`   |
-| SQLite   | (kein SQL, siehe unten) | (kein SQL, siehe unten) |
+| Postgres | `FOR UPDATE` | `FOR SHARE` |
+| MySQL | `FOR UPDATE` | `LOCK IN SHARE MODE` |
+| SQLite | (kein SQL, siehe unten) | (kein SQL, siehe unten) |
 
-Die Sperr-Klausel wird ganz am Ende des zusammengesetzten Statements
-angehängt - nach jedem `UNION`-Arm, jedem `ORDER BY`, jedem `LIMIT` /
-`OFFSET`. Ein `union(...)` zweier Builder, gefolgt von
-`.lock_for_update()`, gibt genau **eine** `FOR UPDATE` im äußeren
-Scope aus, nicht eine pro Arm.
+Die Sperrklausel wird ganz am Ende des zusammengesetzten Statements
+angehängt - nach jedem `UNION`-Zweig, jedem `ORDER BY`, jedem
+`LIMIT` / `OFFSET`. Ein `union(...)` zweier Builder, gefolgt von
+`.lock_for_update()`, gibt genau **ein** `FOR UPDATE` im äußeren Scope
+aus, nicht eines pro Zweig.
+
+Um ein Modell, das Sie bereits halten, neu zu laden und im selben
+Statement die Sperre zu nehmen, nutzen Sie `refresh_for_update`:
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### Verwendung innerhalb einer Transaktion
 
-Die Sperre leistet nur **innerhalb einer Transaktion** sinnvolle
-Arbeit - ohne eine solche wird das SQL weiterhin ausgegeben, aber
-die Sperre wird am Ende des Statements wieder freigegeben.
-Kombinieren Sie sie mit `DB::transaction(...)`:
+Die Sperre leistet nur **innerhalb einer Transaktion** nützliche Arbeit -
+ohne eine solche wird das SQL zwar ausgegeben, die Sperre wird aber am
+Ende des Statements freigegeben. Kombinieren Sie sie mit
+`DB::transaction(...)`:
 
 ```rust
 DB::transaction(|tx| async move {
@@ -817,50 +912,51 @@ DB::transaction(|tx| async move {
         .first_or_fail()
         .with_tx(&tx)
         .await?;
-    // Andere Transaktionen, die versuchen, id=42 zu sperren,
-    // blockieren hier bis zum Commit.
+    // Andere Transaktionen, die id=42 sperren wollen, blockieren hier
+    // bis zum Commit.
     order.status = "processed".into();
     order.save_with_tx(&tx).await?;
     Ok(())
 }).await?;
 ```
 
-### `lock_for_update` vs `shared_lock`
+### `lock_for_update` vs. `shared_lock`
 
-Die meisten "Read-then-write"-Abläufe wollen `lock_for_update`. Eine
-geteilte Sperre kann Sie bei einem folgenden `UPDATE` immer noch mit
-einem anderen `shared_lock`-Leser in ein Race verwickeln - nur
-`FOR UPDATE` ist wechselseitig exklusiv.
+Die meisten Abläufe nach dem Muster „lesen, dann schreiben“ wollen
+`lock_for_update`. Bei einer geteilten Sperre kann ein anderer
+`shared_lock`-Leser weiterhin mit Ihnen in eine Race Condition um ein
+folgendes `UPDATE` geraten - nur `FOR UPDATE` schließt sich gegenseitig
+aus.
 
-`shared_lock` ist richtig für konsistente Snapshot-Reads, bei denen
-Sie eine Zeile lesen, daraus eine Entscheidung ableiten und nicht
-zurückschreiben - z. B. eine Bestandsprüfung, die den Lagerbestand
-nicht selbst verringert.
+`shared_lock` ist richtig für konsistente Snapshot-Lesevorgänge, bei
+denen Sie eine Zeile lesen, daraus eine Entscheidung ableiten und nichts
+zurückschreiben - etwa eine Bestandsprüfung, die selbst keinen Bestand
+verringert.
 
 ### SQLite
 
-SQLite hat keine Sperren auf Zeilenebene. Es verwendet ausschließlich
-Sperren auf Transaktionsebene der Datei (`BEGIN IMMEDIATE` / `BEGIN
-EXCLUSIVE`). Die Sperr-Methoden werden im SQLite-Pfad **beibehalten**,
-damit Backend-übergreifender Code kompiliert, aber sie geben kein SQL
-aus.
+SQLite hat keine Sperren auf Zeilenebene. Es nutzt ausschließlich
+Transaktionssperren auf Dateiebene (`BEGIN IMMEDIATE` /
+`BEGIN EXCLUSIVE`). Die Sperrmethoden **bleiben** im SQLite-Pfad
+erhalten, damit backend-übergreifender Code kompiliert, aber sie geben
+kein SQL aus.
 
-Beim ersten Mal pro Prozess, dass `lock_for_update` / `shared_lock`
-gegen ein SQLite-Backend läuft, protokolliert das Framework einmalig
-ein `warn!` auf dem Tracing-Target `suprnova::eloquent::lock`. Das
-macht den No-Op sichtbar, ohne Code-Pfade mit hohem Volumen
+Beim ersten Mal pro Prozess, dass `lock_for_update` / `shared_lock` gegen
+ein SQLite-Backend läuft, protokolliert das Framework ein einzelnes
+`warn!` auf dem Tracing-Ziel `suprnova::eloquent::lock`. Das macht die
+Wirkungslosigkeit sichtbar, ohne Codepfade mit hohem Aufkommen
 zuzuspammen.
 
-Wenn Sie zeilenübergreifende Kontentions-Garantien auf SQLite
-brauchen, hüllen Sie den kritischen Abschnitt in eine explizite
-`BEGIN IMMEDIATE`-Transaktion - auf Dateiebene blockiert das jeden
-anderen Schreiber.
+Wenn Sie unter SQLite Garantien gegen zeilenübergreifende Konkurrenz
+brauchen, umschließen Sie den kritischen Abschnitt mit einer
+ausdrücklichen `BEGIN IMMEDIATE`-Transaktion - auf Dateiebene blockiert
+das jeden anderen Schreiber.
 
-### Was in v1 fehlt
+### Was in v1 nicht enthalten ist
 
-- **`NOWAIT` / `SKIP LOCKED`** - nützlich für
-  Job-Queue-Claim-Workflows, aber sie erweitern die API-Oberfläche.
-  Aufgeschoben, bis ein echter Konsument sie braucht.
+- **`NOWAIT` / `SKIP LOCKED`** - nützlich für Abläufe, in denen ein
+  Job-Queue-Anspruch erhoben wird, aber sie vergrößern die
+  API-Oberfläche. Zurückgestellt, bis ein echter Konsument sie braucht.
 
 ## Transaktionen
 
@@ -3828,52 +3924,55 @@ unter der Haube `query_one` + `try_get` verwendet.
 ## Relations-Existenz + günstige Kurzformen
 
 Suprnova spiegelt Laravels Query-Familie zur Relations-Existenz. Jede
-Methode hier paart den Namen in Laravel-Form mit einem idiomatischen
-Rust-Alias (Suprnovas ständige Dual-API-Konvention).
+Methode hier paart den Laravel-förmigen Namen mit einem idiomatischen
+Rust-Alias (Suprnovas stehende Dual-API-Konvention).
 
-### Filter zur Relations-Existenz (`has` / `where_has` / `where_belongs_to`)
+### Filter auf Relations-Existenz (`has` / `where_has` / `where_belongs_to`)
 
-Die korrelierte `EXISTS (...)`-Familie schränkt die Eltern-Query über
-die Existenz (oder Abwesenheit oder Anzahl) verwandter Zeilen ein, ohne
-die Relation in das äußere SELECT zu joinen.
+Die Familie mit korreliertem `EXISTS (...)` schränkt die Eltern-Query
+über das Vorhandensein (oder Fehlen oder die Anzahl) verwandter Zeilen
+ein, ohne die Relation in das äußere SELECT zu joinen.
 
 ```rust
 use suprnova::Model;
 
-// Nutzer, die mindestens einen Post haben.
+// Nutzer, die mindestens einen Beitrag haben.
 let users = User::query().has("posts").get().await?;
 
-// Nutzer, die KEINE Posts haben.
+// Nutzer, die KEINE Beiträge haben.
 let empty = User::query().doesnt_have("posts").get().await?;
 
-// Nutzer mit >= 3 Posts (Laravel `has("posts", ">=", 3)`).
+// Nutzer mit >= 3 Beiträgen (Laravels `has("posts", ">=", 3)`).
 let prolific = User::query().has_count("posts", ">=", 3).get().await?;
 
-// Innere Einschränkung per Closure - schränkt den Rumpf der EXISTS-Subquery ein.
+// Innere Bedingung über eine Closure - schränkt den Rumpf der
+// EXISTS-Subquery ein.
 let recent = User::query()
     .where_has::<Post, _>("posts", |q| q.filter_op("created_at", ">=", "2026-01-01"))
     .get()
     .await?;
 
-// Kurzform für eine Spalte - äquivalent zu `where_has` mit winziger Closure.
+// Kurzform für eine Spalte - entspricht `where_has` mit einer winzigen
+// Closure.
 let with_pub = User::query()
     .where_relation("posts", "published", true)
     .get()
     .await?;
 
-// Direkter Belongs-to-Join (kein EXISTS - der FK liegt auf dieser Tabelle).
+// Direkter Belongs-to-Join (kein EXISTS - die FK liegt auf dieser
+// Tabelle).
 let posts = Post::query().where_belongs_to("author", author.id).get().await?;
 ```
 
-Alle Varianten lassen sich mit den Begleitern `or_*` und
-`*_doesnt_have` kombinieren:
+Alle Varianten lassen sich mit den `or_*`- und
+`*_doesnt_have`-Begleitern komponieren:
 
 - `has` / `or_has` / `has_count` / `doesnt_have` / `or_doesnt_have`
 - `where_has` / `or_where_has` / `where_doesnt_have` / `or_where_doesnt_have`
 - `where_relation` / `where_relation_op` / `or_where_relation`
 - `where_belongs_to`
 
-Die Engine liest die Relations-Metadaten aus dem makro-generierten
+Die Engine liest die Relations-Metadaten aus dem makrogenerierten
 `RelationEntry`-Inventory: Join-Spalten, Pivot-Tabellen und
 Morph-Diskriminatoren fließen alle automatisch mit. Drei
 Subquery-Formen werden gerendert:
@@ -3882,25 +3981,25 @@ Subquery-Formen werden gerendert:
 - **Pivot** - `EXISTS (SELECT 1 FROM pivot INNER JOIN target ON ... WHERE pivot.parent_fk = parent.pk)`
 - **Morph** - Has- oder Pivot-Form plus `AND target.<morph>_type = '<value>'`
 
-Unbekannte Relationsnamen rendern die sicher fehlschlagende Form
+Unbekannte Relationsnamen rendern die sicher scheiternde Form
 (`EXISTS (SELECT 1 WHERE 1 = 0)`), die zu `FALSE` auswertet und null
-Zeilen liefert. Ein Tippfehler lässt nie einen Full Table Scan
-durchsickern.
+Zeilen zurückgibt. Ein Tippfehler lässt nie einen vollständigen
+Tabellenscan durch.
 
-### Abweichung bei `MorphTo`
+### `MorphTo`-Abweichung
 
-Laravels `MorphTo`-Inverse (`whereMorphedTo`, `whereHasMorph`) läuft
-über mehrere Zieltabellen, weil das Morph-Kind einen
-`*_type`-Diskriminator trägt, der eines von N möglichen Elternteilen
-auswählt. Suprnovas `MorphTo` senkt sich zur Makro-Expansionszeit auf
-ein Enum pro Familie ab - der Zieltyp ist statisch ein
-`<Family>Morph { Variant1(...), ... }`, keine einzelne SQL-Tabelle. Die
-Existenz-Engine kann für diesen Fall kein festes
-`EXISTS (SELECT 1 FROM <table>)` rendern, weil es keine einzelne
-Tabelle gibt.
+Laravels `MorphTo`-Umkehrung (`whereMorphedTo`, `whereHasMorph`) läuft
+mehrere Zieltabellen ab, weil das Morph-Kind einen `*_type`-Diskriminator
+trägt, der eines von N möglichen Elternteilen auswählt. Suprnovas
+`MorphTo` wird bei der Makroexpansion zu einem Enum pro Familie
+heruntergebrochen - der Zieltyp ist statisch ein
+`<Family>Morph { Variant1(...), ... }` und keine einzelne SQL-Tabelle.
+Die Existenz-Engine kann dafür kein festes
+`EXISTS (SELECT 1 FROM <table>)` rendern, weil es keine einzelne Tabelle
+gibt.
 
 Empfohlene Migration: Führen Sie die Existenzprüfung stattdessen auf
-Ebene des Morph-Kinds durch. Wo Laravel schreibt:
+Ebene des Morph-Kindes durch. Wo Laravel schreibt:
 
 ```php
 Comment::whereHasMorph('commentable', [Post::class], fn ($q) => $q->where('published', true))
@@ -3916,9 +4015,9 @@ Comment::query()
     .await?;
 ```
 
-Die enger typisierte Form gibt Ihnen volle IDE-Vervollständigung auf
-dem inneren Builder, was das lose typisierte `whereHasMorph` nicht
-kann.
+Die enger typisierte Form gibt Ihnen im inneren Builder die volle
+IDE-Vervollständigung, die das lose typisierte `whereHasMorph` nicht
+bieten kann.
 
 ### Günstige Builder-Kurzformen
 
@@ -3926,14 +4025,17 @@ kann.
 // PK-Filter.
 User::query().where_key(7).first().await?;        // Zucker für filter("id", 7)
 User::query().where_key_not(7).get().await?;      // Zucker für filter_op("id", "!=", 7)
-// Rust-idiomatische Aliase: filter_key / filter_key_not.
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// Rust-idiomatische Aliase: filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not.
 
 // Nach created_at sortieren.
 Post::query().latest().get().await?;              // ORDER BY created_at DESC
 Post::query().oldest().get().await?;              // ORDER BY created_at ASC
 Post::query().latest_by("published_at").get().await?;  // benannte Spalte
 
-// Genau-eins-Matching.
+// Treffer auf genau eine Zeile.
 let one = User::query().filter("email", e).sole().await?;          // Fehler bei 0 oder >1
 let val: i64 = User::query().filter("id", 1).sole_value("views").await?;
 let v: i64 = User::query().filter("name", "x").value_or_fail("views").await?;
@@ -3949,19 +4051,19 @@ Builder::<User>::qualify_columns(["name", "id"]);  // -> ["users.name", "users.i
 
 ### Massenmutation - `update_all` / `delete_all` / `upsert` / `*_each`
 
-Diese gehen mit einem einzigen Statement direkt an die Datenbank und
-feuern KEINE Modell-Events pro Zeile. Verwenden Sie sie, wenn das
-Einengen per Scope ausreicht und Sie keine Lifecycle-Hooks brauchen;
-für Hooks pro Zeile iterieren Sie mit `.get()` und rufen `.update()` /
-`.delete()` pro Zeile auf.
-`delete_all` zielt immer auf das statische `M::TABLE` des Modells;
-Tabellennamen zur Laufzeit werden nicht als ausführbares SQL akzeptiert.
-Explizite Null-Attribute werden als SQL `NULL` ausgegeben, sodass
-nullable bigint-, integer-, boolean-, timestamp- und andere
-Nicht-Text-Spalten unter PostgreSQL ihren Datenbanktyp behalten. Jedes
-Nicht-Null-Attribut bleibt parametergebunden. Upsert-Zeilen müssen
-dieselbe Spaltenmenge haben; ein fehlender oder zusätzlicher Schlüssel
-wird abgelehnt, statt als Null interpretiert zu werden.
+Diese treffen die Datenbank direkt mit einem einzigen Statement und lösen
+KEINE Modell-Events pro Zeile aus. Nutzen Sie sie, wenn das Eingrenzen
+über den Scope genügt und Sie keine Lifecycle-Hooks brauchen; für Hooks
+pro Zeile iterieren Sie mit `.get()` und rufen pro Zeile `.update()` /
+`.delete()` auf. `delete_all` zielt immer auf das statische `M::TABLE`
+des Modells; Tabellennamen zur Laufzeit werden nicht als ausführbares SQL
+angenommen. Ausdrückliche Null-Attribute werden als SQL-`NULL`
+ausgegeben, sodass nullable Spalten vom Typ bigint, integer, boolean,
+timestamp und anderen Nicht-Text-Typen unter PostgreSQL ihren
+Datenbanktyp behalten. Jedes Attribut ungleich null bleibt
+parametergebunden. Upsert-Zeilen müssen denselben Spaltensatz haben; ein
+fehlender oder zusätzlicher Schlüssel wird abgelehnt, statt als Null
+gedeutet zu werden.
 
 ```rust
 // Massen-UPDATE.
@@ -3980,12 +4082,12 @@ let n = Session::query()
 let n = Counter::query()
     .upsert(
         vec![attrs! { key: "page_views", n: 1 }, attrs! { key: "signups", n: 1 }],
-        vec!["key"],                  // Konflikt-Ziel
-        Some(vec!["n"]),              // Update-Spalten; None = jede nicht-eindeutige Spalte
+        vec!["key"],                  // Konfliktziel
+        Some(vec!["n"]),              // Update-Spalten; None = jede nicht eindeutige Spalte
     )
     .await?;
 
-// Atomares Inkrementieren/Dekrementieren gegen einen Scope.
+// Atomares Erhöhen/Verringern gegen einen Scope.
 User::query()
     .filter("id", 7)
     .increment_each(vec![("views", 1), ("likes", 1)])
@@ -4000,23 +4102,23 @@ User::query()
 ### Statische `Model`-Helfer
 
 ```rust
-// Massen-Löschen über eine PK-Menge. Events pro Zeile feuern (jede Zeile
-// geht durch .delete(), sodass die Tombstone-Semantik von Soft Deletes +
-// der Deleting/Deleted-Dispatch respektiert werden).
+// Massenlöschung über eine PK-Menge. Events pro Zeile feuern (jede Zeile
+// läuft durch .delete(), sodass die Grabstein-Semantik der Soft Deletes
+// und der Dispatch von Deleting/Deleted beachtet werden).
 let removed: u64 = User::destroy(vec![1i64, 2, 3]).await?;
 let removed: u64 = User::force_destroy(vec![1i64, 2, 3]).await?;
 
-// Identitätsvergleich über den PK.
+// Identitätsvergleich über den Primärschlüssel.
 assert!(alice.is(&also_alice));
 assert!(alice.is_not(&bob));
 ```
 
 ### `*Quietly`-Varianten - Lifecycle-Events unterdrücken
 
-Zucker über `seed::without_events`. Die fünf statischen
-Lifecycle-Events (`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`)
-und die nicht abbrechbaren After-Events brechen innerhalb des Scopes
-beide früh ab.
+Zucker über `seed::without_events`. Die fünf statischen Lifecycle-Events
+(`Saving`/`Creating`/`Updating`/`Deleting`/`Restoring`) und die nicht
+abbrechbaren After-Events werden innerhalb des Scopes beide
+kurzgeschlossen.
 
 ```rust
 user.save_quietly().await?;            // kein Saving / Updated / Saved
@@ -4027,39 +4129,39 @@ user.force_delete_quietly().await?;
 
 ### `*_or_fail`-Varianten
 
-Expliziter Fehler im Nicht-gefunden-Fall. Nützlich in Codepfaden, die
-Invarianten prüfen, wo eine fehlende Zeile ein Bug ist.
+Ausdrücklicher Fehler im Nicht-gefunden-Fall. Nützlich in Codepfaden,
+die Invarianten prüfen und in denen eine fehlende Zeile ein Bug ist.
 
 ```rust
-let user = user.update_or_fail(attrs).await?;   // not_found, falls die Zeile zwischendurch gelöscht wurde
+let user = user.update_or_fail(attrs).await?;   // not_found, wenn die Zeile zwischenzeitlich gelöscht wurde
 user.delete_or_fail().await?;
 ```
 
 ### Gefilterte Serialisierung - `to_array_except` / `to_array_only`
 
-Suprnovas Rust-nativer Ersatz für Laravels `makeHidden` /
-`makeVisible` pro Instanz. Die Eloquent-Struktur trägt keine
-Laufzeit-Attribut-Bag, daher wird die Spaltenliste an der Aufrufstelle
-mitgegeben:
+Suprnovas rust-nativer Ersatz für Laravels `makeHidden` / `makeVisible`
+pro Instanz. Die Eloquent-Struktur trägt keine Attribut-Bag zur Laufzeit,
+die Spaltenliste wird daher an der Aufrufstelle mitgegeben:
 
 ```rust
 return Json::ok(user.to_array_except(&["password_hash", "remember_token"]));
 return Json::ok(user.to_array_only(&["id", "name", "email"]));
 ```
 
-**Hinweis zur Abweichung.** Laravels `makeHidden` pro Instanz mutiert
+**Hinweis zur Abweichung.** Laravels `makeHidden` pro Instanz verändert
 Zustand, der sich fortpflanzt, wenn das Modell im `toArray()`-Aufruf
-eines Elternteils verschachtelt ist. Suprnovas Filter ist terminal - er
-erzeugt einen `serde_json::Value` und beeinflusst künftige
-Serialisierungen von `self` nicht. Für deklarative und dauerhafte
-Sichtbarkeitssteuerung verwenden Sie die Attribute
+eines Elternteils verschachtelt ist. Suprnovas Filter ist eine
+Abschlussmethode - er erzeugt einen `serde_json::Value` und beeinflusst
+künftige Serialisierungen von `self` nicht. Für deklarative und dauerhafte
+Sichtbarkeitssteuerung nutzen Sie die Attribute
 `#[model(hidden = [...])]` / `#[model(visible = [...])]`.
 
-### UUID-/ULID-Primärschlüssel - `#[model(unique_id = "...")]`
+### UUID- / ULID-Primärschlüssel - `#[model(unique_id = "...")]`
 
-Suprnovas Analogon zu Laravels Trait-Familie `HasUuids` / `HasUlids` /
-`HasVersion4Uuids`. Setzen Sie das Attribut, typisieren Sie den PK als
-`String`, und das Makro befüllt die ID vor dem INSERT automatisch.
+Suprnovas Entsprechung zu Laravels Trait-Familie `HasUuids` /
+`HasUlids` / `HasVersion4Uuids`. Setzen Sie das Attribut, typisieren Sie
+den Primärschlüssel als `String`, und das Makro füllt die ID vor dem
+INSERT automatisch.
 
 ```rust
 #[model(
@@ -4074,81 +4176,93 @@ pub struct User {
     pub email: String,
 }
 
-// Automatisch befüllt:
+// Automatisch gefüllt:
 let u = User::create(attrs! { email: "a@b.com" }).await?;
 // u.id ist eine frische UUID v7.
 
-// Vom Aufrufer gelieferte IDs gewinnen weiterhin (entspricht Laravels HasUuids).
+// Vom Aufrufer angegebene IDs gewinnen weiterhin (entspricht dem
+// Verhalten von Laravels HasUuids).
 let u = User::create(attrs! { id: "...", email: "..." }).await?;
 ```
 
 Unterstützte Strategien:
 
-- `"uuid"` / `"uuid_v7"` - UUID v7 (nach Zeitstempel geordnet,
-  empfohlen; entspricht dem Standard `Str::uuid7()` von Laravel 11+)
+- `"uuid"` / `"uuid_v7"` - UUID v7 (nach Zeitstempel geordnet, empfohlen;
+  entspricht dem Standard `Str::uuid7()` ab Laravel 11)
 - `"uuid_v4"` - zufällige UUID (entspricht `HasVersion4Uuids`)
-- `"ulid"` - kleingeschriebene 26-Zeichen-ULID in Crockford-Base32
+- `"ulid"` - kleingeschriebene ULID mit 26 Zeichen in Crockford-Base32
 
 Das Makro gibt einen Block `impl HasUniqueId for YourStruct` aus, der
-`UNIQUE_ID_KIND` und einen Hook `new_unique_id()` offenlegt, den Sie auf
-dem Typ für einen eigenen Generator überschreiben können (z. B.
-präfigierte IDs wie `usr_<uuid>`).
+`UNIQUE_ID_KIND` und einen Hook `new_unique_id()` bereitstellt, den Sie
+auf dem Typ für einen eigenen Generator überschreiben können (etwa für
+IDs mit Präfix wie `usr_<uuid>`).
 
 ### `find_or` / `find_or_new` / `create_or_first`
 
 Runden die Trait-Oberfläche `FirstOrCreate` ab.
 
 ```rust
-// Über den PK nachschlagen; Fallback ausführen, falls nicht gefunden.
+// Über den Primärschlüssel nachschlagen; bei Nichtfund den Fallback
+// ausführen.
 let user = User::find_or(id, || async {
     User::create(attrs! { id, name: "guest" }).await
 }).await?;
 
-// Über den PK nachschlagen; falls nicht gefunden, eine ungespeicherte
-// Instanz aus den Defaults bauen.
+// Über den Primärschlüssel nachschlagen; bei Nichtfund aus Standardwerten
+// eine ungespeicherte Instanz bauen.
 let user = User::find_or_new(id, attrs! { name: "draft" }).await?;
-// user.id == 0 hier - die Instanz existiert nur im Speicher.
+// user.id ist hier 0 - die Instanz existiert nur im Speicher.
 
-// Race-sicheres Insert: create versuchen, bei Konflikt auf Fetch zurückfallen.
+// Race-sicheres Einfügen: create versuchen, bei Konflikt auf ein Holen
+// zurückfallen.
 let user = User::create_or_first(
     attrs! { email: "race@x.com" },
     attrs! { name: "race winner" },
 ).await?;
 ```
 
-### Der Scope `without_touching`
+### Scope `without_touching`
 
-Suprnovas Analogon zu Laravels `Model::withoutTouching`. Innerhalb des
-Scopes bricht jeder Aufruf von `model.touch().await` früh ab - nützlich
-bei Datenmigrationen oder Batch-Jobs, die Zeitstempel über andere Pfade
-verändern.
+Die Suprnova-Entsprechung zu Laravels `Model::withoutTouching`.
+Innerhalb des Scopes wird jeder Aufruf von `model.touch().await`
+kurzgeschlossen - nützlich bei Datenmigrationen oder Batch-Jobs, die
+Zeitstempel über andere Wege verändern.
 
 ```rust
 use suprnova::eloquent::without_touching;
 
 without_touching(async {
-    // .touch()-Aufrufe hier sind No-Ops.
+    // .touch()-Aufrufe sind hier wirkungslos.
     for post in posts {
         post.touch().await?;
     }
 }).await;
 ```
 
-Der Scope wird von `tokio::task_local` getragen, sodass gleichzeitige Requests in anderen Tasks weiterhin ihren eigenen Scope (oder dessen Fehlen) beachten. `without_touching` unterdrückt außerdem die [Kaskade für übergeordnete Modelle](#übergeordnete-modelle-berühren) - ein innerhalb des Scopes gespeichertes untergeordnetes Modell lässt jedes in seiner Liste `touches` genannte übergeordnete Modell unangetastet.
+Der Scope liegt auf `tokio::task_local`, nebenläufige Anfragen auf
+anderen Tasks beachten also weiterhin ihren eigenen Scope (oder dessen
+Fehlen). `without_touching` unterdrückt außerdem die
+[Berührungskaskade zum Elternteil](#übergeordnete-modelle-berühren) - ein
+Kind, das innerhalb des Scopes gespeichert wird, lässt jeden Besitzer in
+Ruhe, den seine `touches`-Liste benennt.
 
-`without_touching_on::<Post, _, _>(fut)` ist die Form pro Typ - Laravels `Model::withoutTouchingOn([Post::class], $cb)`. Darin bleiben `post.touch()` und jede Kaskade, die einen `Post` aktualisieren würde, aus, während übergeordnete Modelle jedes anderen Typs weiterhin aktualisiert werden:
+`without_touching_on::<Post, _, _>(fut)` ist die Form pro Typ -
+Laravels `Model::withoutTouchingOn([Post::class], $cb)`. Darin werden
+`post.touch()` und jede Kaskade, die einen `Post` anstoßen würde, still,
+während Besitzer jedes anderen Typs weiterhin angestoßen werden:
 
 ```rust
 use suprnova::eloquent::without_touching_on;
 
 without_touching_on::<Post, _, _>(async {
-    // Comment saves in here leave their Post owners alone; a Video
-    // owner on the same comment still bumps.
+    // Comment-Speicherungen hier drin lassen ihre Post-Besitzer in Ruhe;
+    // ein Video-Besitzer am selben Kommentar wird trotzdem angestoßen.
     comment.save().await
 }).await?;
 ```
 
-Scopes lassen sich verschachteln, und beide werden von `tokio::task_local` getragen.
+Scopes lassen sich verschachteln, und beide liegen auf
+`tokio::task_local`.
 
 ## Nächste Schritte
 

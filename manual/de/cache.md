@@ -349,51 +349,106 @@ geschrieben, aber nie geleert werden, nicht unbegrenzt ansammeln.
 
 ## Zwei Backends
 
-| Feature | `InMemoryCache` | `RedisCache` |
+| Merkmal | `InMemoryCache` | `RedisCache` |
 |---|---|---|
 | Prozessübergreifend geteilt | Nein | Ja |
 | Persistenz | Nein | Ja, wenn Redis dafür konfiguriert ist |
-| Atomares `add` | Ja (Write-Lock) | Ja (`SET NX`) |
-| Atomares `increment`/`decrement` | Ja (Write-Lock) | Ja (`INCRBY`/`DECRBY`) |
+| Atomares `add` | Ja (Schreibsperre) | Ja (`SET NX`) |
+| Atomares `increment`/`decrement` | Ja (Schreibsperre) | Ja (`INCRBY`/`DECRBY`) |
 | Getaggter Cache | Ja | Ja |
 | Sperren | Ja | Ja (prozessübergreifend) |
-| Sub-Sekunden-TTL | Ja (`tokio::time::Instant`) | Ja (`PX`/`PEXPIRE`) |
+| TTL unter einer Sekunde | Ja (`tokio::time::Instant`) | Ja (`PX`/`PEXPIRE`) |
 | Ausgewählt über | `CACHE_DRIVER=memory` (Standard) | `CACHE_DRIVER=redis` |
 
-Es gibt keinen Datenbank-Cache-Treiber - die zwei obigen Backends sind
-die, die das Framework mitbringt. Benutzerdefinierte Backends können
-`CacheStore` implementieren und sich direkt in den Container binden;
-siehe das Test-Injection-Muster unten.
+Es gibt keinen Datenbank-Cache-Treiber - die beiden Backends oben sind
+die, die das Framework ausliefert. Eigene Backends können `CacheStore`
+implementieren und sich direkt in den Container binden; siehe das Muster
+zur Test-Injektion weiter unten.
 
 ### In-Memory-Ablauf
 
-`InMemoryCache` entfernt abgelaufene Einträge **lazy beim Lesen**:
-`get_raw`, `has` und `add_raw` bereinigen einen Eintrag beim ersten
-Mal, wenn sie ihn abgelaufen vorfinden. Erneut zugegriffene Schlüssel
-sammeln nie tote Einträge an.
+`InMemoryCache` räumt abgelaufene Einträge **träge beim Lesen** aus:
+`get_raw`, `has` und `add_raw` entfernen einen Eintrag, sobald sie ihn
+zum ersten Mal als abgelaufen sehen. Bei erneut angefragten Schlüsseln
+sammeln sich also nie Leichen an.
 
-Eine Workload, die eine hochkardinale Menge kurzlebiger Schlüssel
-schreibt und sie nie zurückliest, hat keinen solchen Auslöser. Rufen
-Sie in diesem Fall `InMemoryCache::purge_expired()` aus einer
-periodischen Aufgabe auf - es gibt die Zahl der entfernten Einträge
-zurück. Redis behandelt seinen eigenen Ablauf serverseitig; das
-Äquivalent wird dort nicht gebraucht.
+Eine Last, die einen hochkardinalen Satz kurzlebiger Schlüssel schreibt
+und sie nie zurückliest, hat diesen Auslöser nicht. Rufen Sie in diesem
+Fall `InMemoryCache::purge_expired()` aus einer periodischen Aufgabe auf -
+es gibt die Anzahl der entfernten Einträge zurück. Redis erledigt seinen
+Ablauf serverseitig selbst; dort braucht es die Entsprechung nicht.
 
-### Redis-TTL-Präzision
+### Redis-TTL-Genauigkeit
 
-Jede Redis-TTL läuft über `PX` / `PEXPIRE`, nicht über `EX` /
-`EXPIRE`. Das vermeidet zwei Fallstricke:
+Jede Redis-TTL läuft über `PX` / `PEXPIRE`, nicht über `EX` / `EXPIRE`.
+Das vermeidet zwei Fallstricke:
 
-- Sub-Sekunden-`Duration`s würden unter `EX` auf `0 Sekunden`
-  abgeschnitten, was Redis entweder ablehnt (`SET … EX 0`) oder,
-  schlimmer, als „Schlüssel löschen“ interpretiert (`EXPIRE key 0`).
-- `Duration::ZERO` wird vor dem Aufruf auf 1 ms gekappt, sodass keiner
+- `Duration`s unter einer Sekunde würden unter `EX` auf `0 seconds`
+  abgeschnitten, was Redis ablehnt (`SET … EX 0`) oder, schlimmer, als
+  „lösche den Schlüssel“ auslegt (`EXPIRE key 0`).
+- `Duration::ZERO` wird vor dem Aufruf auf 1 ms angehoben, sodass keiner
   der beiden Ablehnungspfade aus Nutzercode erreichbar ist.
+
+### Wiederholungen bei transienten Befehlen
+
+Ein abgerissener Socket ließ früher genau das `Cache::get` scheitern, das
+gerade unterwegs war. Der Redis-Connection-Manager verbindet sich von
+selbst neu, aber der Befehl, der den toten Socket erwischt hat, gibt
+Ihnen trotzdem seinen Fehler zurück.
+
+Lesende Befehle wiederholen jetzt einmal: `GET`, `EXISTS` sowie die
+`SCAN`- / `SSCAN`-Seiten hinter `Cache::flush` und `Cache::flush_tags`.
+Die Lesezugriffe `XLEN`, `ZCARD` und `XPENDING` des Queue-Treibers und
+die `Retry-After`-Berechnung der Ratenbegrenzung wiederholen genauso.
+Setzen Sie `REDIS_COMMAND_RETRIES`, um über die eingebaute Wiederholung
+hinaus weitere hinzuzufügen.
+
+Rechnen Sie die Wiederholung in Sekunden, nicht in der Pause von 50 ms,
+die ihr vorausgeht. Ist eine Verbindung erst einmal abgerissen, wartet
+der nächste Versuch auf die Ersatzverbindung, bevor er überhaupt etwas
+senden kann, er zahlt also das gesamte Verbindungsbudget des Treibers und
+danach dessen Antwort-Timeout:
+
+- Der Cache-Treiber erlaubt bis zu 3 Verbindungsversuche im Abstand von
+  höchstens 500 ms, jeder gedeckelt durch ein Verbindungs-Timeout von
+  2 s, mit einem Antwort-Timeout von 5 s.
+- Die Queue- und Rate-Limit-Treiber übernehmen die Standardwerte von
+  redis-rs: bis zu 6 Verbindungsversuche mit ungedeckelter exponentieller
+  Verzögerung ab 100 ms, jeder gedeckelt durch ein Verbindungs-Timeout
+  von 1 s, mit einem Antwort-Timeout von 500 ms.
+
+`REDIS_COMMAND_RETRIES` ist auf 10 gedeckelt, und diese Deckelung
+begrenzt Versuche, nicht Sekunden: Beim Maximum macht ein einzelnes Lesen
+12 Versuche, was gegen ein ausgefallenes Redis Dutzende Sekunden bis
+Minuten in einem Aufruf bedeutet. Ein Befehl, der ins Timeout läuft, gilt
+ebenso als transient wie ein abgerissener, ein bloß langsames Redis lässt
+also jedes umschlossene Lesen bis zu so viele Befehle absetzen statt
+eines. Erhöhen Sie die Einstellung nur dort, wo der Aufrufer sich das
+Warten leisten kann.
+
+Schreibzugriffe wiederholen nie, bei keiner Einstellung. Ein transienter
+Fehler bedeutet, dass die Verbindung ausgefallen ist, nicht, dass der
+Server den Befehl abgelehnt hätte - er hat ihn womöglich bereits
+ausgeführt -, ein `SET`, ein `INCR`, ein Sperrerwerb, ein Treffer der
+Ratenbegrenzung oder ein Queue-Pop riskiert bei einer Wiederholung also
+eine zweite Ausführung. Diese Befehle reichen den Fehlschlag an Sie
+weiter, und Ihre Entscheidung über eine Wiederholung ist die informierte.
+
+### Warum Suprnova abweicht
+
+Laravels Config `command_retries` erhöht das Wiederholungsbudget für
+jeden Redis-Befehl, denn seine Methode `command()` ist ein einziger
+Engpass, der weiß, welchen Befehl er gerade ausführt, und eine
+Nur-Lese-Allowlist mit 60 Einträgen heranzieht. Suprnovas Treiber rufen
+typisierte Befehle direkt auf, damit wird die Allowlist zu einer
+Entscheidung pro Aufrufstelle, und `REDIS_COMMAND_RETRIES` kann nur die
+Wiederholungen für Befehle vertiefen, die ohnehin gefahrlos wiederholbar
+sind. Es gibt keine Einstellung, die ein Queue-Pop wiederholen lässt.
 
 ## Testen
 
-Binden Sie einen `InMemoryCache` in den `TestContainer`, und die
-Facade löst ihn wie jeden anderen Store auf:
+Binden Sie einen `InMemoryCache` in den `TestContainer`, und die Facade
+löst ihn wie jeden anderen Store auf:
 
 ```rust
 use std::sync::Arc;
@@ -412,10 +467,27 @@ async fn cache_round_trips() {
 }
 ```
 
-`TestContainer::bind` schreibt in den Thread-Local-Scope, sodass
-parallele Tests keinen Cache-Zustand ineinander überlaufen lassen.
-Siehe das Kapitel [Service Container](container.md) für das
-Drei-Ebenen-Lookup-Modell.
+`TestContainer::bind` schreibt in den thread-lokalen Scope, sodass
+parallele Tests keinen Cache-Zustand ineinander auslaufen lassen. Das
+Kapitel [Service Container](container.md) beschreibt das dreischichtige
+Lookup-Modell.
+
+### Live-Redis-Suites
+
+Die Redis-Tests des Frameworks sind `#[ignore]`d, sodass `cargo test` nie
+einen Server braucht. Führen Sie sie mit `-- --ignored` aus und richten
+Sie sie auf eine Instanz:
+
+- `cache_redis_integration` liest `CACHE_REDIS_TEST_URL` und fällt auf
+  `REDIS_URL` und dann auf `redis://127.0.0.1:6379` zurück. Jeder Test
+  grenzt sich auf ein eindeutiges Schlüssel-Präfix ein und ist damit
+  gegenüber einem geteilten Entwicklungs-Redis unbedenklich.
+- `cache_redis_retry` deckt die Wiederholung transienter Befehle ab und
+  verlangt `CACHE_REDIS_TEST_URL` ausdrücklich, ohne Fallback. Er setzt
+  `CLIENT KILL TYPE normal` ab, was jeden anderen Client auf der Instanz
+  trennt, ihm muss also ein Wegwerf-Server gegeben werden. Ist die
+  Variable nicht gesetzt, gibt er eine Skip-Zeile aus und besteht, ohne
+  sich zu verbinden.
 
 ## Muster
 

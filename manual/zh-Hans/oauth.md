@@ -103,13 +103,11 @@ init_magnetar_oauth_only(
 ```
 
 照常使用 `Auth::oauth(provider).begin()` 启动认证仪式。在回调中调用
-`verify_oauth_identity(code, state)`，把已验证的提供方 subject 映射到应用自己的
-用户表，然后通过 `Auth::login` 建立现有的框架会话。此模式下不要调用
+`verify_oauth_identity(code, state)`，把已验证的提供方 subject 映射到应用自己的用户表，然后通过 `Auth::login` 建立现有的框架会话。此模式下不要调用
 `complete`：`complete` 会应用 Magnetar 默认的账户和会话映射，而仅 OAuth
 初始化的目的正是把这些决定留给应用。
 
-仅 OAuth 初始化与完整的默认初始化是二选一的方案。第二个初始化器会失败，而不会
-混合两个会话权威来源。
+仅 OAuth 初始化与完整的默认初始化是二选一的方案。第二个初始化器会失败，而不会混合两个会话权威来源。
 
 ### GitHub 提供方要求
 

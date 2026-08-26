@@ -209,6 +209,65 @@ async fn release_unique_lock_if_held(env: &Envelope) {
     }
 }
 
+/// Whether this envelope was superseded by a newer dispatch of the same
+/// debounce window.
+///
+/// Fails **open** at every uncertainty: an envelope with no token was not
+/// debounced, a window whose key is gone (evicted, expired) is not evidence
+/// that somebody else owns it, and a cache error is not evidence of anything.
+/// Only a token that is present and different means "a newer dispatch owns this
+/// window", which is the one case where dropping the job is correct. Getting
+/// this backwards would silently discard work.
+async fn envelope_was_superseded(env: &Envelope) -> bool {
+    let Some(owner) = env
+        .debounce_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+    else {
+        return false;
+    };
+    let key = crate::queue::debounce_key(&env.job_name, env.debounce_id.as_deref());
+    match crate::queue::debounce::current_owner(&key).await {
+        Ok(Some(current)) => current != owner,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                job = %env.job_name,
+                id = %env.id,
+                error = %e,
+                "debounce owner lookup failed; running the job rather than dropping it"
+            );
+            false
+        }
+    }
+}
+
+/// Start a fresh max-wait window for an envelope that is about to actually run.
+///
+/// A no-op for a non-debounced envelope. See
+/// [`release_max_wait`](crate::queue::debounce::release_max_wait) for why the
+/// reset belongs at the start of every run and not only when max wait fired.
+async fn reset_debounce_max_wait(env: &Envelope) {
+    if env
+        .debounce_owner
+        .as_deref()
+        .filter(|owner| !owner.is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let key = crate::queue::debounce_key(&env.job_name, env.debounce_id.as_deref());
+    if let Err(e) = crate::queue::debounce::release_max_wait(&key).await {
+        tracing::warn!(
+            job = %env.job_name,
+            id = %env.id,
+            error = %e,
+            "could not reset the debounce max-wait window; the next burst may measure \
+             its maximum wait from this one's first dispatch"
+        );
+    }
+}
+
 /// Run the middleware pipeline ending in the raw dispatcher. Returns the
 /// terminal [`JobOutcome`] OR a handler error (which the worker translates
 /// into retry / dead-letter).
@@ -240,6 +299,14 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
             if unique_until_processing {
                 release_unique_lock_if_held(&env).await;
             }
+            // Laravel #61281: start a fresh max-wait window at the start of
+            // every actual run, not only when max wait fired. Without this a
+            // job that reached the worker by the ordinary debounce path leaves
+            // the previous burst's `first_dispatched_at` behind, and the NEXT
+            // burst measures its maximum wait from a first dispatch that was
+            // never its own - so its very first dispatch can look overdue and
+            // fire with no delay at all.
+            reset_debounce_max_wait(&env).await;
             let payload = env.payload.clone();
             dispatch_by_name(&env.job_name, payload).await?;
             Ok(JobOutcome::Completed)
@@ -333,40 +400,57 @@ enum DispatchOutcome {
     TimedOut(Duration),
 }
 
-/// Which queues this loop iteration may poll, after applying
-/// `Queue::pause` / `Queue::pause_all`. `None` means "nothing to poll this
-/// iteration" - the caller treats it exactly like an empty `pop_from`
-/// result: sleep, loop again, never touch the driver.
+/// Which queues this loop iteration may poll, plus which it observed paused.
+///
+/// The first element is `None` for "nothing to poll this iteration" - the
+/// caller treats that exactly like an empty `pop_from` result: sleep, loop
+/// again, never touch the driver. The second is the paused set, which the
+/// caller diffs against the previous iteration to emit
+/// [`WorkerQueuePaused`](crate::queue::events::WorkerQueuePaused) /
+/// [`WorkerQueueResumed`](crate::queue::events::WorkerQueueResumed) exactly
+/// once per transition.
+///
+/// Reporting and deciding are separate on purpose: the diff is the part with
+/// the off-by-one risk, and keeping it out of here lets it be unit-tested
+/// without a running worker. Laravel splits the same way, between
+/// `getPausedQueues` and `raisePausedQueueEvents`.
 ///
 /// `pausable == false` skips the check entirely and returns `cfg_queues`
-/// unfiltered, mirroring Laravel's `Worker::getPausedQueues` returning
-/// `[]` (nothing paused) when `Worker::$pausable` is false.
+/// unfiltered with an empty paused set, mirroring Laravel's
+/// `Worker::getPausedQueues` returning `[]` when `Worker::$pausable` is false.
 ///
 /// A cache error fails OPEN - folded into "nothing is paused" via
-/// `.unwrap_or(...)`, the same contract `run_worker`'s restart-signal
-/// check applies a few lines above via `if let Ok(Some(ts)) = ...`. An
-/// unreachable cache must not silently freeze every worker in the fleet
-/// over what is, from the worker's point of view, an optional control
-/// signal.
+/// `.unwrap_or(...)`, the same contract `run_worker`'s restart-signal check
+/// applies a few lines above via `if let Ok(Some(ts)) = ...`. An unreachable
+/// cache must not silently freeze every worker in the fleet over what is, from
+/// the worker's point of view, an optional control signal.
 ///
-/// `cfg_queues.is_empty()` - a worker started without `--queue`, which
-/// drains every queue the driver holds - can only honor the *global*
-/// pause. There is nothing to intersect a per-queue pause against:
-/// `QueueDriver::pop_from` never reports which queue names exist. Name
-/// queues with `--queue=a,b` to make them individually pausable.
+/// `cfg_queues.is_empty()` - a worker started without `--queue`, which drains
+/// every queue the driver holds - can only honor the *global* pause. There is
+/// nothing to intersect a per-queue pause against:
+/// [`QueueDriver::pop_from`](crate::queue::QueueDriver::pop_from) never reports
+/// which queue names exist. Such a worker also has no names to put in the
+/// paused set, which is why the caller tracks that case as a separate boolean
+/// and reports it with a `None` queue. Name queues with `--queue=a,b` to make
+/// them individually pausable and individually reported.
 async fn pause_gate(
     connection: &str,
     cfg_queues: &[String],
     pausable: bool,
-) -> Option<Vec<String>> {
+) -> (Option<Vec<String>>, Vec<String>) {
     if !pausable {
-        return Some(cfg_queues.to_vec());
+        return (Some(cfg_queues.to_vec()), Vec::new());
     }
     if crate::queue::is_globally_paused().await.unwrap_or(false) {
-        return None;
+        // Under the global switch every named queue is paused, which is what
+        // `Queue::paused_queues` reports too (and what Laravel's
+        // `getPausedQueues` returns). Reporting the names here rather than
+        // short-circuiting past them is what lets a `--queue=a,b` worker emit
+        // per-queue events under `pause_all` exactly as it does under `pause`.
+        return (None, cfg_queues.to_vec());
     }
     if cfg_queues.is_empty() {
-        return Some(Vec::new());
+        return (Some(Vec::new()), Vec::new());
     }
     let paused = crate::queue::Queue::paused_queues(connection, cfg_queues)
         .await
@@ -377,10 +461,59 @@ async fn pause_gate(
         .cloned()
         .collect();
     if active.is_empty() {
-        None
+        (None, paused)
     } else {
-        Some(active)
+        (Some(active), paused)
     }
+}
+
+/// Which queues changed pause state since the last iteration.
+///
+/// Returns `(newly_paused, newly_resumed)`, each in the order the names appear
+/// in the slice they came from, so the emitted event order is deterministic.
+/// Slice `contains` rather than a set: a worker's queue list is single digits
+/// long, and preserving order is worth more here than the asymptotics.
+/// Mirrors the two `array_diff` calls in Laravel's `raisePausedQueueEvents`.
+fn diff_paused_queues(previous: &[String], current: &[String]) -> (Vec<String>, Vec<String>) {
+    let newly_paused: Vec<String> = current
+        .iter()
+        .filter(|q| !previous.contains(q))
+        .cloned()
+        .collect();
+    let newly_resumed: Vec<String> = previous
+        .iter()
+        .filter(|q| !current.contains(q))
+        .cloned()
+        .collect();
+    (newly_paused, newly_resumed)
+}
+
+/// Emit one event per queue that changed state, then adopt `current` as the
+/// new baseline.
+///
+/// Best-effort like every other queue event: a listener that errors must not
+/// cost the worker a loop iteration, so the dispatch result is dropped.
+async fn raise_paused_queue_events(
+    connection: &str,
+    previous: &mut Vec<String>,
+    current: Vec<String>,
+) {
+    let (newly_paused, newly_resumed) = diff_paused_queues(previous, &current);
+    for queue in newly_paused {
+        let _ = EventFacade::dispatch(queue_events::WorkerQueuePaused {
+            connection: connection.to_string(),
+            queue: Some(queue),
+        })
+        .await;
+    }
+    for queue in newly_resumed {
+        let _ = EventFacade::dispatch(queue_events::WorkerQueueResumed {
+            connection: connection.to_string(),
+            queue: Some(queue),
+        })
+        .await;
+    }
+    *previous = current;
 }
 
 /// Pull-loop worker: pops one reservation at a time, dispatches by job_name,
@@ -414,6 +547,12 @@ pub async fn run_worker(
     .await;
 
     let mut processed: u64 = 0;
+    // Last iteration's paused set, and whether an unfiltered worker was idle
+    // on the global switch. Two states because there are two kinds of
+    // transition: a named queue's, which carries a name, and an unfiltered
+    // worker's, which has none to carry.
+    let mut paused_queues: Vec<String> = Vec::new();
+    let mut idle_on_global_pause = false;
     let exit_with = |reason: &'static str, processed: u64, connection: &str| {
         tracing::info!(
             reason,
@@ -469,7 +608,29 @@ pub async fn run_worker(
         // it only stops the NEXT claim. `None` means every eligible
         // queue is paused this iteration; behave exactly like an empty
         // poll, without touching the driver.
-        let Some(active_queues) = pause_gate(&connection, &cfg.queues, pausable).await else {
+        let (active, observed_paused) = pause_gate(&connection, &cfg.queues, pausable).await;
+        raise_paused_queue_events(&connection, &mut paused_queues, observed_paused).await;
+        // An unfiltered worker has no queue names, so its global-pause
+        // transition is reported with a `None` queue instead. `paused_queues`
+        // stays empty on this path, so the two trackers never double-report.
+        let now_idle_unnamed = active.is_none() && cfg.queues.is_empty();
+        if now_idle_unnamed != idle_on_global_pause {
+            if now_idle_unnamed {
+                let _ = EventFacade::dispatch(queue_events::WorkerQueuePaused {
+                    connection: connection.clone(),
+                    queue: None,
+                })
+                .await;
+            } else {
+                let _ = EventFacade::dispatch(queue_events::WorkerQueueResumed {
+                    connection: connection.clone(),
+                    queue: None,
+                })
+                .await;
+            }
+            idle_on_global_pause = now_idle_unnamed;
+        }
+        let Some(active_queues) = active else {
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     exit_with("cancelled", processed, &connection);
@@ -479,6 +640,15 @@ pub async fn run_worker(
             }
             continue;
         };
+
+        // Follow any registered forward. Deliberately after the pause gate:
+        // pausing is evaluated on the names this worker was started with, so
+        // `Queue::pause(conn, "default")` still stops a worker on
+        // `--queue=default` while `default` is forwarded elsewhere. Laravel
+        // orders it the same way - `getPausedQueues` sees the raw list, and the
+        // driver's `getQueue()` applies the forward at the pop.
+        let active_queues =
+            crate::queue::routing::forward_active_queues(&connection, active_queues);
 
         // Pop OR cancel - whichever happens first. `biased` makes cancel win
         // a tie so a queue under load can still exit promptly.
@@ -568,6 +738,33 @@ pub async fn run_worker(
             job: identity_pre.clone(),
         })
         .await;
+
+        // Laravel checks this in `CallQueuedHandler::call`, after the worker
+        // has fired `JobProcessing` and before the middleware pipeline - so a
+        // superseded job runs no middleware at all. Same order here. This is a
+        // settlement, not a failure: ack, report, move on.
+        if envelope_was_superseded(&env).await {
+            let _ = EventFacade::dispatch(queue_events::JobDebounced {
+                job: identity_pre.clone(),
+            })
+            .await;
+            if let Err(e) = driver.ack(&res.token).await {
+                settlement_failure(&*driver, &env, "ack", "debounced", &e);
+            }
+            tracing::debug!(
+                job = %env.job_name,
+                id = %env.id,
+                "queue job superseded by a newer debounced dispatch"
+            );
+            processed += 1;
+            if let Some(max) = cfg.max_jobs
+                && processed >= max
+            {
+                exit_with("max_jobs reached", processed, &connection);
+                break ExitReason::MaxJobs;
+            }
+            continue;
+        }
 
         let timeout_opt = env.timeout_secs.map(Duration::from_secs);
         let env_for_dispatch = env.clone();
@@ -1255,6 +1452,10 @@ fn settlement_failure(
             "queue ack failed for timed-out dead-lettered job; \
              reservation may stay until visibility expiry"
         }
+        ("ack", "debounced") => {
+            "queue ack failed for a superseded debounced job; \
+             reservation may stay until visibility expiry"
+        }
         ("ack", "deleted") => {
             "queue ack failed for middleware-dropped job; \
              reservation may stay until visibility expiry"
@@ -1693,6 +1894,8 @@ mod tests {
             fail_on_timeout: false,
             idempotency_key: None,
             unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
             batch_id: None,
             chain_remaining: Vec::new(),
         }
@@ -2309,5 +2512,27 @@ mod tests {
             vec!["failed_store.log", "batch.record_failed", "ack"],
             "both follow-ups precede the ack; only the failed-jobs write gates it"
         );
+    }
+
+    #[test]
+    fn diff_paused_queues_reports_only_the_transitions() {
+        // Nothing changed: no events.
+        let (paused, resumed) = diff_paused_queues(&["a".into()], &["a".into()]);
+        assert!(paused.is_empty() && resumed.is_empty());
+
+        // One newly paused, in the order `current` lists it.
+        let (paused, resumed) = diff_paused_queues(&[], &["a".into(), "b".into()]);
+        assert_eq!(paused, vec!["a".to_string(), "b".to_string()]);
+        assert!(resumed.is_empty());
+
+        // One resumed while another stays paused.
+        let (paused, resumed) = diff_paused_queues(&["a".into(), "b".into()], &["b".into()]);
+        assert!(paused.is_empty());
+        assert_eq!(resumed, vec!["a".to_string()]);
+
+        // Both directions in one iteration.
+        let (paused, resumed) = diff_paused_queues(&["a".into()], &["b".into()]);
+        assert_eq!(paused, vec!["b".to_string()]);
+        assert_eq!(resumed, vec!["a".to_string()]);
     }
 }

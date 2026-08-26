@@ -3,6 +3,7 @@
 pub mod batch;
 pub mod chain;
 pub mod database;
+pub mod debounce;
 pub mod driver;
 pub mod envelope;
 pub mod errors;
@@ -29,6 +30,7 @@ pub use batch::{
 };
 pub use chain::{ChainLink, PendingChain};
 pub use database::DatabaseQueueDriver;
+pub use debounce::{DebounceOptions, Debounced};
 pub use driver::{QueueDriver, Reservation, ReservationToken, Settled};
 pub use envelope::{CURRENT_SCHEMA_VERSION, Envelope, EnvelopeError};
 pub use errors::{ManuallyFailed, MaxAttemptsExceeded, TimeoutExceeded};
@@ -183,6 +185,115 @@ impl Queue {
         routing::route_for(J::job_name())
     }
 
+    /// Redirect every job that resolves to the queue named `from` onto `to`.
+    ///
+    /// Where [`Queue::route`] is keyed by job type, this is keyed by queue
+    /// *name*: it is the operational lever for draining one pool through
+    /// another without touching any job's code or any route. Mirrors Laravel's
+    /// `Queue::forward($queue, $to)`.
+    ///
+    /// ```rust,no_run
+    /// # use suprnova::Queue;
+    /// # fn ex() {
+    /// // Every push that resolved to `default` now lands on `high`, and a
+    /// // worker started with `--queue=default` drains `high` instead.
+    /// Queue::forward("default", "high");
+    /// # }
+    /// ```
+    ///
+    /// The redirect applies on **both** sides. On the push side it rewrites the
+    /// name after [`Queue::route`] and the job's own [`Job::queue`] have had
+    /// their say, and after a per-push [`EnvelopeOverrides::queue`] if one was
+    /// given. On the pop side it rewrites the worker's `--queue` list, so the
+    /// destination cannot accumulate work no worker claims. A worker started
+    /// with no `--queue` at all already drains everything and is unaffected.
+    ///
+    /// A forward is a single lookup, not a chain: with `a -> b` and `b -> c`
+    /// registered, a push that resolved to `a` lands on `b`. A forward back
+    /// onto its own source (`a -> b` with `b -> a` also registered) is
+    /// therefore a coherent pool swap rather than a loop - nothing chains, so
+    /// nothing strands - and a longer rotation among more names resolves the
+    /// same way, one hop at a time. Laravel's `QueueRoutes` has no cycle
+    /// check either, for the same reason. Forwarding a queue onto its own
+    /// name is the identity - no redirect at all - which is how a registered
+    /// forward is neutralized.
+    ///
+    /// Only future pushes are redirected. Envelopes already sitting on `from`
+    /// stay there, and the worker that used to drain them is now claiming `to`,
+    /// so drain the source pool before you forward it.
+    ///
+    /// Pausing is evaluated *before* the redirect, on the names the worker was
+    /// started with - so `Queue::pause(conn, "default")` still stops a worker
+    /// started on `--queue=default` even while `default` is forwarded. Laravel
+    /// orders it the same way.
+    ///
+    /// Infallible by design to match Laravel's spelling. The only failure it
+    /// swallows is the registry being left unavailable by a previous caller
+    /// panicking while holding its lock; that is logged and the forward is
+    /// dropped. Use [`Queue::try_forward`] when you need to handle it.
+    pub fn forward(from: &str, to: &str) {
+        Self::log_forward_failure(from, Self::try_forward(from, to, None));
+    }
+
+    /// [`Queue::forward`], restricted to one connection name.
+    ///
+    /// The forward fires only when `connection` equals this process's
+    /// connection name - [`Queue::connection_name`], which is
+    /// [`Queue::set_connection_name`] if it was set and the driver's own name
+    /// otherwise. It is **not** compared against the job's
+    /// [`Job::connection`], against a [`Queue::route`]'s connection, or against
+    /// a per-push [`EnvelopeOverrides::connection`]; those name what the
+    /// lifecycle events report, and a worker has only the process name to gate
+    /// its claim list on. Gating the two halves on different values would let a
+    /// forward move the push without moving the claim, which strands work. On
+    /// any other connection name the forward is inert and the queue name passes
+    /// through unchanged.
+    ///
+    /// # What this cannot do
+    ///
+    /// Laravel's `forward($queue, $to, $connection)` can also move a forwarded
+    /// queue onto a *different* connection, because its `QueueManager` resolves
+    /// a driver per connection name. Suprnova has one process-global driver and
+    /// the connection name only labels lifecycle events (see this module's
+    /// docs), so `connection` here is a **gate**, never a destination: it
+    /// decides whether the queue-name redirect applies, and the push still
+    /// reaches the same driver either way.
+    pub fn forward_on(from: &str, to: &str, connection: &str) {
+        Self::log_forward_failure(from, Self::try_forward(from, to, Some(connection)));
+    }
+
+    /// Fallible sibling of [`Queue::forward`] / [`Queue::forward_on`].
+    ///
+    /// `connection` is `None` for "every connection". Returns `Err` only when
+    /// the forward registry's lock is poisoned.
+    pub fn try_forward(
+        from: &str,
+        to: &str,
+        connection: Option<&str>,
+    ) -> Result<(), FrameworkError> {
+        routing::try_set_forward(from, to, connection)
+    }
+
+    /// The forward registered for the queue named `from`, if any.
+    ///
+    /// The returned [`QueueRoute`]'s `queue` is the destination and its
+    /// `connection` is the gate, `None` meaning "every connection".
+    pub fn forward_for(from: &str) -> Option<routing::QueueRoute> {
+        routing::forward_for(from)
+    }
+
+    /// Shared failure log for the two infallible forward setters, so the
+    /// message stays identical whichever spelling registered the forward.
+    fn log_forward_failure(from: &str, result: Result<(), FrameworkError>) {
+        if let Err(e) = result {
+            tracing::error!(
+                queue = from,
+                error = %e,
+                "queue forward registration failed; the queue will not be redirected"
+            );
+        }
+    }
+
     /// Push a typed job. Returns when the envelope is committed to the
     /// driver (NOT when the job runs).
     ///
@@ -196,7 +307,13 @@ impl Queue {
     /// [`DB::transaction`](crate::DB::transaction) an opted-in job's push
     /// waits for the commit and a rollback discards it.
     pub async fn push<J: Job>(job: J) -> Result<(), FrameworkError> {
-        Self::dispatch_push(job, AvailableAt::FromJobDelay, EnvelopeOverrides::default()).await
+        Self::dispatch_push(
+            job,
+            AvailableAt::FromJobDelay,
+            EnvelopeOverrides::default(),
+            None,
+        )
+        .await
     }
 
     /// Push `job`, deferring it until the surrounding transaction commits.
@@ -237,6 +354,7 @@ impl Queue {
             job,
             AvailableAt::Fixed(available_at),
             EnvelopeOverrides::default(),
+            None,
         )
         .await
     }
@@ -289,7 +407,7 @@ impl Queue {
         job: J,
         overrides: EnvelopeOverrides,
     ) -> Result<(), FrameworkError> {
-        Self::dispatch_push(job, AvailableAt::FromJobDelay, overrides).await
+        Self::dispatch_push(job, AvailableAt::FromJobDelay, overrides, None).await
     }
 
     /// `push_with` variant that takes a delay from now, mirroring
@@ -302,7 +420,7 @@ impl Queue {
         let available_at = Utc::now()
             + chrono::Duration::from_std(delay)
                 .map_err(|e| FrameworkError::internal(format!("delay overflow: {e}")))?;
-        Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides).await
+        Self::dispatch_push(job, AvailableAt::Fixed(available_at), overrides, None).await
     }
 
     /// The single funnel for the whole [`Queue::push`] family: fake, then
@@ -321,7 +439,20 @@ impl Queue {
         job: J,
         when: AvailableAt,
         overrides: EnvelopeOverrides,
+        debounce: Option<debounce::DebounceOptions>,
     ) -> Result<(), FrameworkError> {
+        // Above the fake on purpose, unlike the arming below it. Two
+        // declarations that cannot both hold is a bug in the job, not a
+        // property of the environment, so `Queue::fake()` must surface it
+        // rather than hide it until production. Only the check is hoisted: a
+        // fake push writes nothing to the cache, so there is no window to arm.
+        // Covers both spellings of "debounced": the job's own declarative
+        // `Job::debounce_for` and the caller-supplied `debounce` options
+        // `push_debounced` passes in, so the fake refuses the conflict the
+        // same way for either entry point.
+        if (J::debounce_for().is_some() || debounce.is_some()) && job.unique_id().is_some() {
+            return Err(debounce_conflict(J::job_name()));
+        }
         if testing::is_active() {
             let available_at = when.resolve::<J>()?;
             // Records `overrides` too, so a test can assert on the
@@ -340,14 +471,12 @@ impl Queue {
         {
             return crate::database::after_commit::register_callback(Box::new(move || {
                 Box::pin(async move {
-                    let available_at = when.resolve::<J>()?;
-                    Self::push_immediately::<J>(job, available_at, overrides).await
+                    Self::push_immediately::<J>(job, when, overrides, debounce).await
                 })
             }))
             .await;
         }
-        let available_at = when.resolve::<J>()?;
-        Self::push_immediately::<J>(job, available_at, overrides).await
+        Self::push_immediately::<J>(job, when, overrides, debounce).await
     }
 
     /// Build the envelope, emit `JobQueueing`, write to the driver, emit
@@ -359,23 +488,80 @@ impl Queue {
     /// envelope, only reported on the events below).
     async fn push_immediately<J: Job>(
         job: J,
-        available_at: chrono::DateTime<chrono::Utc>,
+        when: AvailableAt,
         overrides: EnvelopeOverrides,
+        debounce: Option<debounce::DebounceOptions>,
     ) -> Result<(), FrameworkError> {
         let connection = overrides
             .connection
             .clone()
             .unwrap_or_else(|| routing::resolve_connection::<J>(Self::connection_name()));
+        let available_at = when.resolve::<J>()?;
         let mut env = envelope_for::<J>(&job, available_at)?;
-        apply_overrides(&mut env, &overrides);
+        // The forward gate is the process connection name; `connection` above is
+        // the resolved name the lifecycle events report, and the two are
+        // deliberately different values.
+        apply_overrides(&mut env, &overrides, &Self::connection_name());
+        // The window is armed here rather than at the entry point so a deferred
+        // push arms it at the commit, in the same step that writes the
+        // envelope. Arming earlier would let a rolled-back transaction leave an
+        // owner token behind for a dispatch that never happened - and the
+        // worker would then read an *earlier*, still-queued envelope as
+        // superseded and drop it, losing work whose own push succeeded.
+        if let Some(armed_at) = arm_debounce::<J>(&job, &mut env, debounce.as_ref()).await?
+            && (debounce.is_some()
+                || (matches!(when, AvailableAt::FromJobDelay) && J::delay().is_none()))
+        {
+            // An explicit `available_at` and an explicit `Job::delay` both
+            // outrank a declared window, the way Laravel's
+            // `is_null($this->job->delay)` guard does. Options handed in at the
+            // call site *are* the explicit statement, so they win instead.
+            env.available_at = armed_at;
+        }
         let _ = crate::events::EventFacade::dispatch(events::JobQueueing {
             job_name: J::job_name().into(),
             connection: connection.clone(),
         })
         .await;
-        let drv = current_driver()?;
         let env_id = env.id;
-        drv.push(env).await?;
+        // Cloned before `env` moves into the driver: the cleanup below is
+        // owner-checked, so it needs this dispatch's own token and not just the
+        // key.
+        let armed = env.debounce_owner.clone().map(|owner| {
+            (
+                debounce_key(&env.job_name, env.debounce_id.as_deref()),
+                owner,
+            )
+        });
+        // Resolving the driver is inside the guarded block, not above it: a
+        // missing driver after the window was armed is the same hazard as a
+        // failed write, and leaving it outside would skip the cleanup.
+        let result = async {
+            let drv = current_driver()?;
+            drv.push(env).await
+        }
+        .await;
+        if let Err(e) = result {
+            // The window is armed for an envelope that never reached the queue.
+            // Leaving the token in place would make every earlier envelope of
+            // this burst look superseded, and the worker would drop work whose
+            // own push reported success. Let the window lapse instead - a
+            // lapsed window fails open, so whatever is still queued runs. Only
+            // while this dispatch still owns it: a newer one that armed and
+            // enqueued while this write was failing keeps its window.
+            if let Some((key, owner)) = armed
+                && let Err(cleanup) = debounce::abandon(&key, &owner).await
+            {
+                tracing::warn!(
+                    job = J::job_name(),
+                    error = %cleanup,
+                    "a debounced push failed and its window could not be cleared; \
+                     envelopes already queued for this window may be dropped as \
+                     superseded by a dispatch that never reached the queue"
+                );
+            }
+            return Err(e);
+        }
         let _ = crate::events::EventFacade::dispatch(events::JobQueued {
             id: env_id,
             job_name: J::job_name().into(),
@@ -383,6 +569,59 @@ impl Queue {
         })
         .await;
         Ok(())
+    }
+
+    /// Push a job with a debounce window supplied at the call site.
+    ///
+    /// The declarative form is [`Job::debounce_for`] and friends; reach for
+    /// this when the window belongs to the *caller* rather than to the job -
+    /// which is what [`DebouncedListener`](crate::events::DebouncedListener)
+    /// does, and what Laravel's `#[DebounceFor]` attribute on a listener
+    /// expresses.
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use suprnova::queue::{DebounceOptions, Job, Queue};
+    /// # use suprnova::FrameworkError;
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct ReindexOrder { order_id: u32 }
+    /// # #[suprnova::async_trait]
+    /// # impl Job for ReindexOrder {
+    /// #     fn job_name() -> &'static str { "ReindexOrder" }
+    /// #     async fn handle(self) -> Result<(), FrameworkError> { Ok(()) }
+    /// # }
+    /// # async fn ex() -> Result<(), FrameworkError> {
+    /// Queue::push_debounced(
+    ///     ReindexOrder { order_id: 7 },
+    ///     DebounceOptions::new(Duration::from_secs(30))
+    ///         .max_wait(Duration::from_secs(300))
+    ///         .id("7"),
+    /// )
+    /// .await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// The options win over anything the job declares, including
+    /// [`Job::delay`]: naming a window at the call site is the explicit
+    /// statement, so the envelope becomes available one window from now.
+    ///
+    /// Honors [`Job::after_commit`] like the rest of the [`Queue::push`]
+    /// family - the window is armed at the commit, in the same step that
+    /// writes the envelope, so a rollback arms nothing.
+    ///
+    /// Returns `Err` when the job also declares [`Job::unique_id`], for the
+    /// reason [`Job::debounce_for`] gives.
+    pub async fn push_debounced<J: Job>(
+        job: J,
+        options: debounce::DebounceOptions,
+    ) -> Result<(), FrameworkError> {
+        Self::dispatch_push(
+            job,
+            AvailableAt::FromJobDelay,
+            EnvelopeOverrides::default(),
+            Some(options),
+        )
+        .await
     }
 
     /// Push a typed job, but only if no job with the same
@@ -454,6 +693,13 @@ impl Queue {
     /// and reports `true` for `Fresh` and `FreshUnfenced` (the envelope
     /// reached the driver either way), `false` only for `Duplicate`.
     async fn push_unique_at<J: Job>(job: J, when: AvailableAt) -> Result<bool, FrameworkError> {
+        // The conflict is in the declarations, not in which entry point was
+        // called: a job reaching the queue through `push_unique` must not have
+        // its declared window quietly demoted to nothing. Above the fake for
+        // the reason `dispatch_push` gives.
+        if J::debounce_for().is_some() && job.unique_id().is_some() {
+            return Err(debounce_conflict(J::job_name()));
+        }
         if testing::is_active() {
             // In fake mode, dedupe is irrelevant - record and report fresh.
             testing::record::<J>(&job, when.resolve::<J>()?)?;
@@ -1260,6 +1506,82 @@ pub(crate) fn unique_key(job_name: &str, id: &str) -> String {
     format!("queue-unique:{job_name}:{id}")
 }
 
+/// The cache key a debounced dispatch takes its window under.
+///
+/// Shared by the push side and the worker side, because those two are the only
+/// places that address this key and a drift between them is invisible: the
+/// worker would find no owner, fail open, and run every envelope in the burst.
+pub(crate) fn debounce_key(job_name: &str, id: Option<&str>) -> String {
+    format!("queue-debounce:{job_name}:{}", id.unwrap_or(""))
+}
+
+/// The refusal both push families raise for a job declaring debouncing *and*
+/// uniqueness.
+///
+/// Laravel throws a `LogicException` here; house rule 2 says public-surface
+/// code returns `Result`. Shared so the two entry points cannot drift into
+/// naming different things as the problem.
+fn debounce_conflict(job_name: &str) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "job `{job_name}` declares both debounce_for() and unique_id(): debouncing keeps \
+         the last dispatch of a burst while uniqueness keeps the first, so the two \
+         cannot both apply. Drop one."
+    ))
+}
+
+/// Arm the debounce window for a push, stamp the envelope, and report the
+/// moment the window asks the envelope to become available at.
+///
+/// `Ok(None)` means the job is not debounced and the caller's `available_at`
+/// stands. `Ok(Some(ts))` is the timestamp the envelope should become available
+/// at, which callers that took an explicit `available_at` from the user ignore -
+/// Laravel guards its own delay assignment with `is_null($this->job->delay)`,
+/// and an explicitly requested delay is a stronger statement than a declared
+/// window.
+async fn arm_debounce<J: Job>(
+    job: &J,
+    env: &mut Envelope,
+    options: Option<&debounce::DebounceOptions>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, FrameworkError> {
+    let (window, max_wait, id) = match options {
+        Some(o) => (o.window, o.max_wait, o.id.clone()),
+        None => match J::debounce_for() {
+            Some(window) => (window, J::max_debounce_wait(), job.debounce_id()),
+            None => return Ok(None),
+        },
+    };
+    // Uniqueness keeps the first dispatch and suppresses the rest; debouncing
+    // keeps the last and drops the rest. A job declaring both has no coherent
+    // reading, and Laravel raises here too (`PendingDispatch::acquireDebounceLock`).
+    if job.unique_id().is_some() {
+        return Err(debounce_conflict(J::job_name()));
+    }
+    let key = debounce_key(J::job_name(), id.as_deref());
+    // Converted before the window is armed, not after. It depends only on
+    // `window`, and failing this conversion below `acquire` would leave an
+    // owner token in the cache with no envelope behind it - which is the one
+    // way a debounce can silently discard work.
+    let window_delay = chrono::Duration::from_std(window)
+        .map_err(|e| FrameworkError::internal(format!("debounce window overflow: {e}")))?;
+    let armed = debounce::acquire(&key, window, max_wait).await?;
+    env.debounce_id = id;
+    env.debounce_owner = Some(armed.owner);
+    let delay = if armed.max_wait_exceeded {
+        // The burst has been deferring this long enough; queue it immediately.
+        chrono::Duration::zero()
+    } else {
+        window_delay
+    };
+    // `DateTime<Utc>`'s `Add<Duration>` panics near chrono's representable
+    // range; house rule 2 says public-surface code returns `Result` instead.
+    let available_at = Utc::now().checked_add_signed(delay).ok_or_else(|| {
+        FrameworkError::internal(
+            "debounce window pushes availability out of the representable date range",
+        )
+    })?;
+    Ok(Some(available_at))
+}
+
 fn envelope_for<J: Job>(
     job: &J,
     available_at: chrono::DateTime<chrono::Utc>,
@@ -1270,9 +1592,16 @@ fn envelope_for<J: Job>(
 /// Overlay `overrides` onto an already-resolved envelope, after
 /// `envelope_for` - see [`EnvelopeOverrides`]. No schema change: every
 /// touched field already exists on the frozen envelope.
-fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides) {
+///
+/// `connection` is the **process** connection name, not the one this push
+/// resolved to: an explicit queue override replaces the name `build_envelope`
+/// already forwarded, so the override has to be forwarded in its place, and it
+/// has to be gated on the same value every other half of the redirect uses.
+/// Forwarding the already-forwarded envelope instead would make forwards
+/// transitive, which they are not.
+fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection: &str) {
     if let Some(queue) = &overrides.queue {
-        env.queue = Some(queue.clone());
+        env.queue = routing::forwarded_queue(Some(queue.as_str()), connection);
     }
     if let Some(max_tries) = overrides.max_tries {
         env.max_tries = max_tries;
@@ -1298,11 +1627,25 @@ pub(crate) fn build_envelope<J: Job>(
     let payload = serde_json::to_value(job)
         .map_err(|e| FrameworkError::internal(format!("encode job: {e}")))?;
     let timeout_secs = J::timeout().map(|d| d.as_secs());
+    // Routing decides the name; the forwards map then redirects it, exactly
+    // where Laravel's driver-level `getQueue()` calls `resolveQueue()`.
+    //
+    // The gate is the *process* connection name, never the one routing or the
+    // job resolved. The worker has only `Queue::connection_name()` to gate its
+    // claim list on, so any other value here would let `forward_on` move one
+    // half of the pair and strand work on the other. That is sound because the
+    // connection dimension is a label rather than a driver selector (see the
+    // `routing` module docs). Gated on `has_forwards` so a deployment that
+    // never forwards does not pay the lookup on every push.
+    let mut queue = routing::resolve_queue::<J>();
+    if routing::has_forwards() {
+        queue = routing::forwarded_queue(queue.as_deref(), &Queue::connection_name());
+    }
     Ok(Envelope {
         schema_version: CURRENT_SCHEMA_VERSION,
         id: Uuid::new_v4(),
         job_name: J::job_name().to_string(),
-        queue: routing::resolve_queue::<J>(),
+        queue,
         payload,
         dispatched_at: Utc::now(),
         available_at,
@@ -1313,6 +1656,8 @@ pub(crate) fn build_envelope<J: Job>(
         fail_on_timeout: J::fail_on_timeout(),
         idempotency_key: None,
         unique_lock_owner: None,
+        debounce_id: None,
+        debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     })

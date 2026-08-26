@@ -48,6 +48,8 @@ fn env(name: &str) -> Envelope {
         fail_on_timeout: false,
         idempotency_key: None,
         unique_lock_owner: None,
+        debounce_id: None,
+        debounce_owner: None,
         batch_id: None,
         chain_remaining: Vec::new(),
     }

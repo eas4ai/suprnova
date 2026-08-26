@@ -223,7 +223,24 @@ impl Fixture {
         // Present ⇒ ensure_npm_dependencies skips the real `npm install`.
         fs::create_dir_all(dir.path().join("frontend/node_modules"))
             .expect("mkdir frontend/node_modules");
+        // Present ⇒ `frontend_present()` sees a real frontend project, which
+        // is what `--frontend-only` needs. `Fixture::api_project` is the
+        // deliberate opposite.
+        fs::write(dir.path().join("frontend/package.json"), "{}\n")
+            .expect("write frontend/package.json");
         Self { dir }
+    }
+
+    /// A `suprnova new --api` project: `Cargo.toml` and `src/`, and no
+    /// `frontend/` at all. `Fixture::new` pre-creates
+    /// `frontend/node_modules` so `ensure_npm_dependencies` skips the real
+    /// `npm install`; this one deliberately does not, because the frontend
+    /// pane must never be reached here in the first place.
+    fn api_project(package_name: &str) -> Self {
+        let dir = tempdir().expect("create tempdir");
+        let fx = Self { dir };
+        fx.write_backend_project(package_name);
+        fx
     }
 
     fn root(&self) -> &Path {
@@ -959,4 +976,94 @@ fn natural_leader_exit_remains_unreaped_until_delayed_cleanup_disarms_guard() {
         child.child.is_none(),
         "repeated cleanup must not restore stale signaling authority"
     );
+}
+
+/// `suprnova new --api` scaffolds no `frontend/`. Before the fix, `serve`
+/// rejected that project outright with "No frontend directory found. Are
+/// you in a Suprnova project directory?" unless the user remembered
+/// `--backend-only` - misdiagnosing a valid project as not a project.
+#[test]
+fn serve_on_an_api_project_starts_the_backend_and_skips_the_frontend_pane() {
+    let fx = Fixture::api_project("api-fixture-app");
+    fx.shim("cargo", CARGO_WATCH_SHIM);
+    // No `npm` shim on purpose: if `serve` still tried to run the frontend
+    // pane it would `npm install` in a directory that does not exist and
+    // die, which is exactly what this test would catch.
+
+    let (mut child, out_path, err_path) = fx.spawn_serve_split_full(&["--json"]);
+
+    std::thread::sleep(Duration::from_millis(1000));
+
+    assert!(
+        process_is_live(child.id()),
+        "serve must keep running on a frontend-less project; stderr: {}",
+        fs::read_to_string(&err_path).unwrap_or_default()
+    );
+
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    let mut started = HashSet::new();
+    for line in output.lines().filter(|l| !l.is_empty()) {
+        let value: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("line {line:?} is not valid JSON: {e}"));
+        if value.get("type").and_then(Value::as_str) == Some("started")
+            && let Some(name) = value.get("name").and_then(Value::as_str)
+        {
+            started.insert(name.to_string());
+        }
+    }
+    assert!(
+        started.contains("backend"),
+        "the backend pane must start: {started:?}"
+    );
+    assert!(
+        !started.contains("frontend"),
+        "there is no frontend to start: {started:?}"
+    );
+
+    assert!(
+        !fx.root().join("frontend").exists(),
+        "serve must not create a frontend/ directory on an API project"
+    );
+
+    let stderr = fs::read_to_string(&err_path).unwrap_or_default();
+    assert!(
+        !stderr.contains("No frontend directory found"),
+        "the old misdiagnosis must be gone: {stderr}"
+    );
+
+    child.terminate();
+}
+
+/// `--frontend-only` on a project with no frontend is still an error: it
+/// asks for the one pane that does not exist. `serve` exits before it
+/// spawns anything, so this one can just wait on the status.
+#[test]
+fn frontend_only_on_an_api_project_still_fails_with_an_actionable_message() {
+    let fx = Fixture::api_project("api-fixture-app");
+    fx.shim("cargo", CARGO_WATCH_SHIM);
+
+    let out_path = fx.root().join("serve.out");
+    let out_file = fs::File::create(&out_path).expect("create serve.out");
+    let err_file = out_file.try_clone().expect("clone serve.out handle");
+    let path = format!(
+        "{}:{}",
+        fx.bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = Command::new(BIN)
+        .args(["serve", "--frontend-only"])
+        .current_dir(fx.root())
+        .env("PATH", path)
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file))
+        .status()
+        .expect("run suprnova serve --frontend-only");
+
+    assert!(
+        !status.success(),
+        "--frontend-only must fail without a frontend"
+    );
+    let output = fs::read_to_string(&out_path).unwrap_or_default();
+    assert!(output.contains("--frontend-only"), "{output}");
+    assert!(output.contains("--api"), "{output}");
 }

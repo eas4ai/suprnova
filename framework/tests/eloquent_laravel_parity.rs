@@ -318,6 +318,112 @@ async fn where_key_not_excludes_pk() {
 }
 
 #[tokio::test]
+async fn or_where_key_disjoins_with_the_previous_clause() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let _a = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let b = ParUser::create(attrs! { name: "B", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let _c = ParUser::create(attrs! { name: "C", views: 0, likes: 0 })
+        .await
+        .unwrap();
+
+    let mut rows = ParUser::query()
+        .filter("name", "A")
+        .or_where_key(b.id)
+        .get()
+        .await
+        .unwrap()
+        .into_vec();
+    rows.sort_by_key(|r| r.id);
+
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["A", "B"],
+        "or_where_key must widen the result set, not narrow it"
+    );
+}
+
+#[tokio::test]
+async fn or_where_key_not_disjoins_a_negated_pk_filter() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let a = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let _b = ParUser::create(attrs! { name: "B", views: 0, likes: 0 })
+        .await
+        .unwrap();
+
+    // `name = "nobody" OR id != a.id` matches every row except A.
+    let rows = ParUser::query()
+        .filter("name", "nobody")
+        .or_where_key_not(a.id)
+        .get()
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "B");
+}
+
+#[tokio::test]
+async fn or_where_key_with_no_prior_clause_behaves_like_where_key() {
+    let _db = TestDatabase::sqlite_memory().await.unwrap();
+    migrate(&_db).await;
+    let a = ParUser::create(attrs! { name: "A", views: 0, likes: 0 })
+        .await
+        .unwrap();
+    let _b = ParUser::create(attrs! { name: "B", views: 0, likes: 0 })
+        .await
+        .unwrap();
+
+    let rows = ParUser::query().or_where_key(a.id).get().await.unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a leading disjunct reduces to a plain filter"
+    );
+    assert_eq!(rows[0].name, "A");
+}
+
+#[test]
+fn or_where_key_renders_one_flat_or_group() {
+    use sea_orm::DbBackend;
+    let (sql, vals) = ParUser::query()
+        .filter("name", "A")
+        .or_where_key(2i64)
+        .or_where_key_not(3i64)
+        .to_sql_with_bindings_for(DbBackend::Postgres);
+
+    assert!(
+        sql.contains("(name = $1 OR id = $2 OR id != $3)"),
+        "consecutive or_* calls append into one group instead of nesting; got: {sql}"
+    );
+    assert_eq!(vals.len(), 3, "got: {vals:?}");
+}
+
+#[test]
+fn or_filter_key_aliases_match_the_laravel_spelling() {
+    use sea_orm::DbBackend;
+    let laravel = ParUser::query()
+        .filter("name", "A")
+        .or_where_key(2i64)
+        .or_where_key_not(3i64)
+        .to_sql_for(DbBackend::Sqlite);
+    let rust_shape = ParUser::query()
+        .filter("name", "A")
+        .or_filter_key(2i64)
+        .or_filter_key_not(3i64)
+        .to_sql_for(DbBackend::Sqlite);
+    assert_eq!(laravel, rust_shape);
+}
+
+#[tokio::test]
 async fn latest_orders_by_created_at_desc() {
     // We use a model with a real created_at column.
     let _db = TestDatabase::sqlite_memory().await.unwrap();

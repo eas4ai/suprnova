@@ -198,27 +198,27 @@ werden verworfen, der Fehler propagiert.
 Der defer-Puffer ist pro Tokio-Task, sodass zwei gleichzeitige
 `defer`-Aufrufe sich nicht gegenseitig den Zustand zerstören können.
 
-## Queued Listener - in-process vs. durable
+## Queued Listener - prozessintern vs. dauerhaft
 
-Zwei unterschiedliche "queued"-Stufen, und die Benennung ist wichtig:
+Zwei klar getrennte „queued“-Ebenen, und die Benennung ist wichtig:
 
 | Bedarf | Greifen Sie zu |
 |---|---|
-| Listener soll off-task laufen; Verlust bei Absturz OK | `Event::queued() = true` auf dem Event-Trait |
-| Listener-Arbeit MUSS einen Absturz + Neustart überleben | `QueuedListener<E, J>` (verbrückt Event → dauerhaften Job) |
+| Der Listener soll außerhalb der Task laufen; ein Verlust beim Absturz ist in Ordnung | `Event::queued() = true` auf dem Event-Trait |
+| Die Arbeit des Listeners MUSS Absturz und Neustart überleben | `QueuedListener<E, J>` (Brücke Event → dauerhafter Job) |
 
-`Event::queued() = true` lässt den Dispatcher jeden Listener als
-eigene Tokio-Task spawnen, begrenzt durch ein Prozess-Semaphore, mit
-begrenzter Wiederholung (3 Versuche, gejitterter Backoff). Die Arbeit läuft
-auf diesem Prozess; ein Absturz verwirft in-flight Listener. Das
-[Leeren beim Graceful Shutdown](#leeren-beim-shutdown) wartet bis zu
-einer Deadline auf in-flight Tasks.
+`Event::queued() = true` lässt den Dispatcher jeden Listener als eigene
+Tokio-Task starten, begrenzt durch eine prozessweite Semaphore, mit
+begrenzter Wiederholung (3 Versuche, Backoff mit Jitter). Die Arbeit
+läuft in diesem Prozess; ein Absturz verwirft die gerade laufenden
+Listener. Die [Leerung beim Graceful Shutdown](#leeren-beim-shutdown)
+wartet bis zu einer Frist auf die laufenden Tasks.
 
-`QueuedListener<E, J>` ist ein vorgefertigter Listener, der aus jedem
-Event einen [`Job`](queues.md) baut und ihn auf die dauerhafte Queue
-pusht. Das Event feuert weiterhin synchron; der Listener reiht nur
-ein - was schnell ist -, sodass die Request-Latenz niedrig bleibt.
-Der Job selbst überlebt den Absturz, weil die Queue dauerhaft ist.
+`QueuedListener<E, J>` ist ein fertiger Listener, der aus jedem Event
+einen [`Job`](queues.md) baut und ihn auf die dauerhafte Queue schiebt.
+Das Event feuert weiterhin synchron; der Listener reiht nur ein - was
+schnell geht -, sodass die Latenz der Anfrage niedrig bleibt. Der Job
+selbst übersteht den Absturz, weil die Queue dauerhaft ist.
 
 ```rust
 use suprnova::{EventFacade, QueuedListener};
@@ -232,9 +232,38 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 .await;
 ```
 
-Der `QueuedListener` braucht nur, dass das Event ein gewöhnliches
-synchrones Event ist - die Dauerhaftigkeit lebt in der Queue, nicht
-im Dispatcher.
+Der `QueuedListener` braucht das Event nur als gewöhnliches synchrones
+Event - die Dauerhaftigkeit lebt in der Queue, nicht im Dispatcher.
+
+### Einen Queued Listener entprellen
+
+Ein `QueuedListener` läuft durch `Queue::push`, ein Listener ist also in
+dem Moment entprellt, in dem sein **Job** `Job::debounce_for` deklariert -
+nichts weiter zu verdrahten, und `Job::debounce_id` gibt Ihnen ein
+Fenster pro Entität.
+
+Gehört das Fenster zur Registrierung statt zum Job, nutzen Sie
+`DebouncedListener` und leiten Sie den Schlüssel aus dem Event ab:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+Vier `OrderUpdated`-Events für Bestellung 55 reihen vier Jobs ein und
+führen einen aus. Den vollständigen Vertrag beschreibt
+[Warteschlange](queues.md).
 
 ## Leeren beim Shutdown
 

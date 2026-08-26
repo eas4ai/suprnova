@@ -26,6 +26,44 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
+### 连接池的存活性
+
+一个 NAT 网关、一个负载均衡器，或者一道防火墙，都会悄无声息地丢掉一条空闲太久的 TCP 连接。连接池并不会发现这件事。这条连接上的下一次查询会失败，而且它失败在一个与那次中断毫无关系的请求上。
+
+Laravel 用 libpq 的 `keepalives`、`keepalives_idle`、`keepalives_interval` 和 `keepalives_count` 这几个 DSN 选项来回答这个问题，它们让套接字保持热着。**这些从 Suprnova 这边够不着。** sqlx 0.9 从一个 Postgres URL 里只解析出 `sslmode`、`application_name`、`options` 和语句缓存的大小，而且在任何一层都没有带 TCP keepalive 的设置方法，所以没有地方可以把它们转发过去。
+
+Suprnova 给您的替代品是连接池那一侧的答案：别再信任老的连接。
+
+```bash
+# 关掉一条已经空闲了两分钟的连接。
+DB_IDLE_TIMEOUT=120
+# 不管怎样，每条连接过了十五分钟就回收。
+DB_MAX_LIFETIME=900
+# 在把一条连接交出去之前先 ping 它一下，但只在它已经空闲了三十秒
+# 之后才这么做。热的连接会跳过这次往返。
+DB_PING_AFTER_IDLE=30
+```
+
+或者以编程方式：
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+每一个旋钮默认都是未设置的，这意味着连接池保留 sqlx 自己的默认值：连接在空闲 600 秒后关闭，1800 秒后回收，并且在每一次取出之前都会被 ping 一下。设置 `DB_IDLE_TIMEOUT=0` 或者 `DB_MAX_LIFETIME=0`，就能把那种形式的回收整个关掉。
+
+`DB_PING_AFTER_IDLE` 和 `DB_TEST_BEFORE_ACQUIRE` 是二选一的替代关系，不是一对搭档：设了一个阈值，就会把逐次取出的那次 ping 关掉，因为两个一起跑会导致每一次获取都 ping，让那个阈值失去意义。
+
+### 为什么 Suprnova 有所不同
+
+keepalive 和连接池回收，是从相反的两端解决同一个故障。keepalive 阻止中间盒把连接过期掉；回收则接受它一定会被过期掉，并且确保连接池绝不会交出一条老到可能已经被过期掉的连接。第二种才是这套驱动程序栈暴露出来的东西，而且它还覆盖了 keepalive 覆盖不到的那些故障 - 一个发生过故障转移的副本、一份轮换过的凭据、一次服务端发起的空闲断连。如果您就是需要 libpq 的那些选项，那是一处对 sqlx 的改动，不是对 Suprnova 的改动。
 ## 原始查询
 
 `DB` 门面发布了完整的 Laravel 13 原始脱围表面。每一个助手方法都会经过同一个装配了埋点的执行器 - 每一次调用都会触发 `QueryExecuted`（参见[可观测性](#可观测性)）。
@@ -493,5 +531,5 @@ db.execute_unprepared("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)").awai
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
 | `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | 多连接的 `DB::connection($name)` |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
 | `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` 测试 trait |

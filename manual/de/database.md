@@ -25,14 +25,14 @@ DB::init().await.expect("DB::init failed");
 ```
 
 `DatabaseConfig::from_env` liest `DATABASE_URL` und (optional) die
-Pool-Regler `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
+Pool-Stellschrauben `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`,
 `DB_CONNECT_TIMEOUT`, `DB_LOGGING`. Ist `DATABASE_URL` nicht gesetzt,
-fällt die Config auf `sqlite://./database.db` zurück - praktisch für
-Entwicklung ohne Setup; Produktions-Boots verweigern den Fallback
-über `validate_for_environment`, sodass Sie nicht versehentlich eine
-SQLite-Datei bei `APP_ENV=production` ausliefern können.
+fällt die Config auf `sqlite://./database.db` zurück - praktisch für die
+Entwicklung ohne Einrichtung; ein Produktionsstart verweigert den
+Fallback über `validate_for_environment`, sodass Sie nicht versehentlich
+eine SQLite-Datei unter `APP_ENV=production` ausliefern.
 
-URL-→-Treiber-Erkennung:
+URL → Treibererkennung:
 
 ```text
 postgres://user:pass@host/db       → DatabaseType::Postgres
@@ -41,6 +41,72 @@ mysql://user:pass@host/db          → DatabaseType::Mysql
 sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
+
+### Pool-Lebendigkeit
+
+Ein NAT-Gateway, ein Load Balancer oder eine Firewall verwirft eine
+TCP-Verbindung stillschweigend, wenn sie zu lange untätig war. Der Pool
+erfährt davon nichts. Die nächste Query auf dieser Verbindung schlägt
+fehl, und zwar bei einer Anfrage, die mit dem Ausfall nichts zu tun
+hatte.
+
+Laravel beantwortet das mit den libpq-DSN-Optionen `keepalives`,
+`keepalives_idle`, `keepalives_interval` und `keepalives_count`, die den
+Socket warm halten. **Aus Suprnova heraus sind sie nicht erreichbar.**
+sqlx 0.9 parst aus einer Postgres-URL nur `sslmode`, `application_name`,
+`options` und die Größe des Statement-Cache und bietet auf keiner Ebene
+einen Setter für TCP-Keepalive, es gibt also nichts, wohin man sie
+weiterreichen könnte.
+
+Was Suprnova Ihnen stattdessen gibt, ist die Antwort auf der Pool-Seite:
+alten Verbindungen nicht mehr vertrauen.
+
+```bash
+# Eine Verbindung schließen, die zwei Minuten lang untätig war.
+DB_IDLE_TIMEOUT=120
+# Jede Verbindung nach fünfzehn Minuten unabhängig davon recyceln.
+DB_MAX_LIFETIME=900
+# Eine Verbindung vor der Herausgabe anpingen, aber erst, wenn sie
+# dreißig Sekunden untätig war. Heiße Verbindungen sparen sich den
+# Round-Trip.
+DB_PING_AFTER_IDLE=30
+```
+
+Oder programmatisch:
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+Jede Stellschraube ist standardmäßig ungesetzt, das heißt, der Pool
+behält die eigenen Standardwerte von sqlx: Verbindungen schließen nach
+600 untätigen Sekunden, werden nach 1800 Sekunden recycelt und vor jedem
+Checkout angepingt. Setzen Sie `DB_IDLE_TIMEOUT=0` oder
+`DB_MAX_LIFETIME=0`, um diese Form der Ernte vollständig abzuschalten.
+
+`DB_PING_AFTER_IDLE` und `DB_TEST_BEFORE_ACQUIRE` sind Alternativen, kein
+Paar: Einen Schwellenwert zu setzen schaltet den Ping pro Checkout ab,
+denn beides zusammen würde bei jedem Acquire pingen und den
+Schwellenwert bedeutungslos machen.
+
+### Warum Suprnova abweicht
+
+Keepalives und Pool-Recycling lösen denselben Ausfall von zwei Seiten
+her. Keepalives verhindern, dass eine Middlebox die Verbindung ablaufen
+lässt; Recycling nimmt hin, dass sie es tun wird, und stellt sicher, dass
+der Pool nie eine Verbindung herausgibt, die alt genug wäre, um
+abgelaufen zu sein. Das Zweite ist das, was der Treiber-Stack anbietet,
+und es deckt zusätzlich Ausfälle ab, die Keepalives nicht abdecken - ein
+Replikat nach einem Failover, ein rotiertes Credential, ein
+serverseitiger Idle-Disconnect. Wenn Sie speziell die libpq-Optionen
+brauchen, ist das eine Änderung an sqlx, nicht an Suprnova.
 
 ## Rohe Queries
 
@@ -643,9 +709,9 @@ kollidieren.
 - [Konfiguration](configuration.md) - `DatabaseConfig` neben dem Rest
   Ihrer typisierten Config registrieren
 
-## Oberflächenindex
+## Oberflächen-Index
 
-| Oberfläche | Laravel-Analogon |
+| Oberfläche | Laravel-Entsprechung |
 | --- | --- |
 | `DB::init` / `DB::init_with` / `DB::connection` / `DB::is_connected` / `DB::get` | `DB::connection()` |
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
@@ -655,7 +721,7 @@ kollidieren.
 | `DB::listen(callback)` | `DB::listen` |
 | `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
-| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | Multi-Connection `DB::connection($name)` |
+| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | `DB::connection($name)` für mehrere Connections |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
-| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
+| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | Testing-Trait `RefreshDatabase` |

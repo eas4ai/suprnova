@@ -879,6 +879,54 @@ where
         Ok(())
     }
 
+    /// Reload this row from the database under an exclusive row lock,
+    /// mutating self in place. The locked read and the reload are one
+    /// statement, so there is no window between "I have the current
+    /// values" and "I hold the lock".
+    ///
+    /// Mirrors Laravel's `refreshForUpdate()` -> `newQueryWithoutScopes()`.
+    /// The reload runs on a fresh, unscoped [`Builder`], never through
+    /// [`Self::query`]: every registered global scope AND the
+    /// `#[model(soft_deletes)]` filter are bypassed, the same way the
+    /// macro-emitted `with_trashed()` / `only_trashed()` build their
+    /// own unscoped builder rather than undoing `query()`'s scope. A
+    /// trashed row reloads too, with `deleted_at` coming back set -
+    /// this is a lookup by primary key under a lock, and scoping a
+    /// by-key reload is exactly what would hand admin tooling and
+    /// cross-tenant callers a false not-found. A row that no longer
+    /// exists returns [`FrameworkError::not_found`] rather than
+    /// leaving `self` stale.
+    ///
+    /// The lock only holds for the length of a transaction - call this
+    /// inside `DB::transaction(...)`, otherwise the lock releases the
+    /// moment the statement finishes and buys you nothing.
+    ///
+    /// **SQLite emits no lock clause.** SQLite has no row-level
+    /// locking, so the reload happens without one and the framework
+    /// logs a single `warn!` per process on the
+    /// `suprnova::eloquent::lock` target. The method is kept on that
+    /// backend so cross-backend code compiles unchanged.
+    ///
+    /// The two extra bounds are the ones
+    /// [`Builder::first`](crate::eloquent::Builder::first) needs and
+    /// this trait's own where clause does not carry - the same gap
+    /// [`FirstOrCreate`] documents. Every `#[suprnova::model]` struct
+    /// satisfies them, so call sites never name them.
+    async fn refresh_for_update(&mut self) -> Result<(), FrameworkError>
+    where
+        Self: crate::eloquent::EagerLoadDispatch,
+        <Self::Entity as EntityTrait>::Model: sea_orm::FromQueryResult,
+    {
+        let fresh = Builder::<Self>::new()
+            .where_key(self.primary_key_value_json())
+            .lock_for_update()
+            .first()
+            .await?
+            .ok_or_else(|| FrameworkError::not_found("refresh_for_update: row no longer exists"))?;
+        *self = fresh;
+        Ok(())
+    }
+
     /// Return a freshly-fetched copy of this row without mutating
     /// `self`. `None` if the row was deleted in the interim.
     async fn fresh(&self) -> Result<Option<Self>, FrameworkError> {

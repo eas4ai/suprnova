@@ -125,7 +125,9 @@ URL de conexão e o ajuste do pool do sqlx. `DATABASE_URL` é
 obrigatória para todo subcomando que toca o banco de dados
 (`migrate*`, `db:sync`, `db:seed`, `queue:work` com
 `QUEUE_DRIVER=database`, `workflow:work`, o store de sessão em BD) e
-para `serve` quando a app tem migrações registradas.
+para `serve` quando a app tem migrações registradas. Os cinco knobs de
+vivacidade são como você sobrevive a uma rede que derruba conexões
+ociosas - veja [Vivacidade do pool](database.md#pool-liveness).
 
 | Var | Padrão | Tipo | Propósito |
 |---|---|---|---|
@@ -134,6 +136,11 @@ para `serve` quando a app tem migrações registradas.
 | `DB_MIN_CONNECTIONS` | `1` | `u32` | Piso do pool do sqlx (mantido aquecido). |
 | `DB_CONNECT_TIMEOUT` | `30` (segundos) | `u32` | Quanto tempo o sqlx espera por uma conexão inicial antes de dar erro. |
 | `DB_LOGGING` | `false` | `bool` | Quando `true`, o sqlx registra todo statement (use com moderação em produção - fica verboso). |
+| `DB_IDLE_TIMEOUT` | não definido (o sqlx usa 600 segundos) | `u64` (segundos) | Por quanto tempo uma conexão do pool pode ficar ociosa antes de o pool fechá-la. `0` desativa a coleta por ociosidade. |
+| `DB_MAX_LIFETIME` | não definido (o sqlx usa 1800 segundos) | `u64` (segundos) | Por quanto tempo uma conexão do pool pode viver antes de o pool reciclá-la. `0` desativa a reciclagem por tempo de vida. |
+| `DB_ACQUIRE_TIMEOUT` | não definido (recai para `DB_CONNECT_TIMEOUT`) | `u64` (segundos) | Quanto tempo quem chama espera por uma conexão livre do pool. Sobrescreve `DB_CONNECT_TIMEOUT` para a espera do checkout; defina um ou outro, não os dois. Zero é rejeitado no boot. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Faz ping em uma conexão do pool antes de entregá-la. Deixe ligado, a menos que você tenha medido o round trip por checkout e `DB_PING_AFTER_IDLE` não seja suficiente. |
+| `DB_PING_AFTER_IDLE` | não definido | `u64` (segundos) | Faz ping em uma conexão do pool somente depois que ela ficou ociosa por esse tempo. Defini-lo desliga `DB_TEST_BEFORE_ACQUIRE`, então conexões quentes são entregues sem serem tocadas. |
 | `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | Quando `true`, uma auto-migração que falha durante o boot do `serve` é registrada no log mas não aborta. O padrão é fail-closed: o boot sai com código não-zero em vez de iniciar contra um schema parcialmente migrado. Passe `--no-migrate` para pular a auto-migração por completo. |
 
 ## Sessão
@@ -185,6 +192,7 @@ framework.
 | `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | URL de conexão do Redis (consultada somente quando `CACHE_DRIVER=redis`). |
 | `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Prefixo de chave para entradas de cache (evita colisão em Redis compartilhado). |
 | `CACHE_DEFAULT_TTL` | `3600` (segundos) | `u64` | TTL padrão em segundos. `0` significa "sem expiração". Aplicado a `Cache::put(None)` / `Cache::tags_put(None)`; `Cache::forever` e `Cache::remember_forever` sempre ignoram isso. |
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Retentativas extras para comandos Redis com formato de leitura, além da que toda leitura já ganha. Vale para os drivers de cache, de fila e de limitação de taxa. Escritas nunca tentam de novo, em nenhum valor. Faça o orçamento em segundos: uma retentativa contra uma conexão derrubada espera pela reconexão, então ela custa todo o orçamento de conexão e de resposta do driver - até 3 retentativas de conexão separadas por no máximo 500 ms, cada uma limitada a 2 s, mais um timeout de resposta de 5 s no driver de cache; até 6 retentativas de conexão com um atraso exponencial sem limite, cada uma limitada a 1 s, mais um timeout de resposta de 500 ms nos drivers de fila e de limitação de taxa. O limite de `10` delimita tentativas, não segundos: nessa configuração uma leitura faz 12 tentativas. Um timeout também conta como transitório, então, durante um travamento, cada leitura envolvida emite até essa quantidade de comandos. Um valor não parseável recai para `0`. |
 
 ## Fila
 

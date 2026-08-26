@@ -195,12 +195,12 @@ sie lösen sich nur gegen Modelle auf, die eine Spalte `created_at`
 deklarieren, die das Makro `#[suprnova::model]` automatisch
 hinzufügt, wann immer Timestamps aktiv sind (der Standard).
 
-## Viele-zu-viele: `BelongsToMany<R, P>` und das erstklassige Pivot
+## Many-to-many: `BelongsToMany<R, P>` und das First-Class-Pivot
 
-`BelongsToMany` ist Viele-zu-viele über eine Join-Tabelle. Suprnovas
-Pivot ist selbst eine `#[suprnova::model]`-Struktur mit eigenen
-Migrationen, eigenen Accessoren, eigenen Events. Das ist die
-Abweichung - siehe [unten](#warum-suprnova-abweicht-pivot-ist-ein-echtes-modell).
+`BelongsToMany` ist Many-to-many über eine Join-Tabelle. Suprnovas Pivot
+ist selbst eine `#[suprnova::model]`-Struktur mit eigenen Migrationen,
+eigenen Accessoren und eigenen Events. Das ist die Abweichung - siehe
+[unten](#warum-suprnova-abweicht-das-pivot-ist-ein-echtes-modell).
 
 ```rust
 #[model(table = "users", relations = {
@@ -222,7 +222,7 @@ pub struct RoleUser {
 }
 ```
 
-Mutatoren laufen gegen die Pivot-Zeile:
+Mutatoren wirken auf die Pivot-Zeile:
 
 ```rust
 use suprnova::attrs;
@@ -234,40 +234,136 @@ user.roles().sync([role_a.id, role_b.id, role_c.id]).await?;
 ```
 
 `sync` liest die aktuelle Pivot-Menge, berechnet
-`attach_set = ids - current` und `detach_set = current - ids`, und
-führt die Deltas innerhalb einer Transaction aus. Duplikate in der
-Eingabemenge fallen anhand ihrer JSON-String-Form zusammen, sodass
-`sync([1, 1, 2])` das tut, was Sie meinen.
+`attach_set = ids - current` und `detach_set = current - ids` und führt
+die Deltas innerhalb einer Transaktion aus. Duplikate in der Eingabemenge
+fallen über ihre JSON-String-Form zusammen, `sync([1, 1, 2])` tut also,
+was Sie meinen.
 
 Das Lesen läuft über die Zwei-Query-Strategie:
 
 ```rust
-// Query 1: SELECT roles.*, role_user.* via INNER JOIN, gescoped nach user_id.
-// Query 2: SELECT role_user.* für denselben Join, um __pivot pro Zeile zu stempeln.
+// Query 1: SELECT roles.*, role_user.* über INNER JOIN, auf user_id
+// eingegrenzt.
+// Query 2: SELECT role_user.* für denselben Join, um pro Zeile __pivot zu
+// stempeln.
 let roles = user.roles().get().await?;
 
 // Jede Rolle trägt den Pivot-Kontext, den das Makro zugänglich gemacht hat:
 for r in &roles {
-    let pivot = r.pivot::<RoleUser>().expect("loaded via BelongsToMany");
+    let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
 ```
 
-### Warum Suprnova abweicht: Pivot ist ein echtes Modell
+### Nach Pivot-Spalten filtern
 
-Laravels Pivot ist ein undurchsichtiger Pro-Attribut-Bag
-(`$role->pivot->note`). Suprnova verlangt, dass Sie die
-Pivot-Struktur deklarieren, weil Rusts Typsystem die Spalten zur
-Compile-Zeit braucht - und sobald Sie für diese Deklaration bezahlt
-haben, bekommt das Pivot dieselbe `#[suprnova::model]`-Behandlung wie
-jede andere Tabelle: Migrationen, Events, Observer, Factories,
-Soft-Delete. `r.pivot::<RoleUser>()` gibt eine typisierte Referenz
-zurück; keine string-geschlüsselten Attribut-Lookups, keine
-Überraschungen zur Laufzeit, wenn eine Spalte falsch geschrieben ist.
+`where_pivot` und seine Familie schränken die *Pivot*-Tabelle ein, nicht
+die verwandte Tabelle. Greifen Sie dazu, wenn die Join-Zeile Zustand
+trägt, nach dem Sie filtern wollen - ein `active`-Flag, einen Zeitstempel
+für den Ablauf, eine Scope-Spalte. Die folgenden Beispiele setzen voraus,
+dass das obige `RoleUser`-Pivot außerdem die Spalten `active`, `pinned`
+und `note` deklariert:
 
-Die Kosten sind eine zusätzliche Struktur pro Pivot-Tabelle. Der
-Nutzen ist, dass das Pivot Verhalten tragen kann - Domänenlogik,
-Validierungsregeln, Audit-Spalten - ohne in rohes SQL auszubrechen.
+```rust
+// Rollen, deren Pivot-Zeile noch aktiv ist.
+let active = user.roles().where_pivot("active", 1i64).get().await?;
+
+// Rollen, die in einem Zeitfenster zugewiesen oder ausdrücklich
+// angeheftet wurden.
+let visible = user
+    .roles()
+    .where_pivot_between("assigned_at", start..=end)
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+
+// Eine verschachtelte Gruppe: (active = 1 AND note IS NOT NULL) OR pinned = 1.
+let complex = user
+    .roles()
+    .where_pivot_group(|q| q.filter("active", 1i64).filter_not_null("note"))
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+```
+
+Die vollständige Familie:
+
+| Methode | SQL |
+|---|---|
+| `where_pivot(col, val)` | `col = ?` |
+| `where_pivot_op(col, op, val)` | `col <op> ?` |
+| `where_pivot_in(col, vals)` | `col IN (...)` |
+| `where_pivot_not_in(col, vals)` | `col NOT IN (...)` |
+| `where_pivot_null(col)` | `col IS NULL` |
+| `where_pivot_not_null(col)` | `col IS NOT NULL` |
+| `where_pivot_between(col, low..=high)` | `col BETWEEN ? AND ?` |
+| `where_pivot_not_between(col, low..=high)` | `col NOT BETWEEN ? AND ?` |
+| `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
+
+Jede Methode hat einen `or_`-Zwilling, der sich mit dem Term davor zu
+einer Disjunktion faltet, genauso wie `or_where` es auf `Builder` tut.
+Eine Closure-Gruppe bleibt innerhalb dieser Disjunktion atomar, sodass
+`.where_pivot_null("note").or_where_pivot_group(|q| ...)` als
+`note IS NULL OR (...)` gelesen wird und nicht als flachgezogene Kette.
+
+Spaltennamen werden als rohe SQL-Bezeichner in das Pivot-Statement
+interpoliert, derselbe Vertrag wie bei `Builder::filter`. Nehmen Sie nie
+einen aus Anfragedaten. Die Werte werden als Parameter gebunden, diese
+dürfen also aus Anfragedaten stammen.
+
+Die Closure-Form läuft auf demselben Statement, ein `where_raw` oder ein
+`where_has` darin landet also wörtlich im Pivot-SQL - die
+Bezeichner-Allowlist überspringt den rohen Notausgang absichtlich.
+Behandeln Sie die Closure so, wie Sie `Builder::where_raw` behandeln:
+Bauen Sie ihre Fragmente nie aus nicht vertrauenswürdiger Eingabe.
+
+Dieselbe Familie gibt es auf `MorphToMany` und `MorphedByMany`.
+
+### Warum Suprnova abweicht: Pivot-Filter sind nur lesend
+
+Zwei Grenzen, beide bewusst gezogen.
+
+**Ein Pivot-Filter schränkt nie einen Schreibvorgang ein.** Laravel faltet
+`wherePivot`-Bedingungen in `detach()`, sodass
+`->wherePivot('active', 1)->detach()` nur die aktiven Join-Zeilen löscht.
+Suprnova baut sein Pivot-`DELETE` von Hand, und ein Lese-Prädikat, das
+stillschweigend ein Löschen erreicht oder eben nicht, ist ein Unterschied,
+den Sie von der Aufrufstelle aus nicht sehen können. Deshalb geben
+`attach`, `attach_with`, `detach` und `sync` einen Fehler zurück, solange
+irgendein Filter gesetzt ist. Trennen Sie die beiden Absichten:
+
+```rust
+// Lesen, was passt, und dann ausdrücklich darauf handeln.
+let stale = user.roles().where_pivot("active", 0i64).get().await?;
+for role in &stale {
+    user.roles().detach(role.id).await?;
+}
+```
+
+**Eager Loading trägt keine Pivot-Filter mit.**
+`user_query.with(["roles"])` läuft über den generierten Eager-Load-Pfad
+der Relation, der die Pivot-Tabelle für den gesamten Eltern-Batch auf
+einmal durchsucht und eine `with_where`-Closure auf die *verwandte*
+Tabelle anwendet. Auf diesem Pfad gibt es keinen Platz für ein
+Pivot-Prädikat. Wenn Sie ein gefiltertes Many-to-many-Lesen brauchen,
+rufen Sie den Relations-Accessor pro Elternteil auf
+(`user.roles().where_pivot(...).get()`), statt eager zu laden.
+
+### Warum Suprnova abweicht: das Pivot ist ein echtes Modell
+
+Laravels Pivot ist eine undurchsichtige Bag pro Attribut
+(`$role->pivot->note`). Suprnova verlangt, dass Sie die Pivot-Struktur
+deklarieren, weil Rusts Typsystem die Spalten zur Compile-Zeit braucht -
+und wenn Sie diese Deklaration einmal bezahlt haben, bekommt das Pivot
+dieselbe `#[suprnova::model]`-Behandlung wie jede andere Tabelle:
+Migrationen, Events, Observer, Factories, Soft Deletes.
+`r.pivot::<RoleUser>()` gibt eine typisierte Referenz zurück; kein
+Attributzugriff über String-Schlüssel, keine Überraschungen zur Laufzeit,
+wenn eine Spalte falsch geschrieben ist.
+
+Der Preis ist eine zusätzliche Struktur pro Pivot-Tabelle. Der Gewinn ist,
+dass das Pivot Verhalten tragen kann - Domänenlogik, Validierungsregeln,
+Audit-Spalten -, ohne in rohes SQL auszubrechen.
 
 ## `HasOneThrough` und `HasManyThrough`
 
@@ -608,8 +704,8 @@ aus, sodass die Query sicher nichts zurückgibt.
 
 Laravels ältere `has` / `whereHas`-Engine gab früher JOINs und
 doppelte Eltern-Zeilen aus; die Umstellung auf korreliertes EXISTS
-landete in Laravel
-9. Suprnova liefert EXISTS von Tag eins. Die
+landete in Laravel 9.
+Suprnova liefert EXISTS von Tag eins. Die
 Vorteile: keine Duplikate in der Ergebnismenge, keine
 GROUP-BY-Workarounds für Aggregate, kein Bedarf an `DISTINCT`, und
 der Optimizer der Datenbank sieht eine echte Subquery statt eines

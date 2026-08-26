@@ -386,3 +386,72 @@ impl Event for QueueFailedOver {
         "queue::QueueFailedOver"
     }
 }
+
+/// Fired by the **worker** when it first observes a queue as paused.
+///
+/// Distinct from [`QueuePaused`], which fires in whichever process called
+/// [`Queue::pause`](crate::queue::Queue::pause) - usually the `queue:pause`
+/// CLI, never the worker. Before this event existed, a paused worker went
+/// completely silent with nothing to explain why. Mirrors Laravel's
+/// `Illuminate\Queue\Events\WorkerQueuePaused`.
+///
+/// Fires once per transition, not once per poll.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerQueuePaused {
+    /// Connection name the worker is draining.
+    pub connection: String,
+    /// Queue that went paused, or `None` for "every queue this worker drains".
+    ///
+    /// Laravel always carries a name because its worker is always started with
+    /// an explicit queue list. A Suprnova worker started without `--queue`
+    /// drains whatever the driver holds, and
+    /// [`QueueDriver::pop_from`](crate::queue::QueueDriver::pop_from) never
+    /// reports which queue names exist - so under
+    /// [`Queue::pause_all`](crate::queue::Queue::pause_all) there is no name to
+    /// report. `None` says exactly that. A sentinel string would be worse than
+    /// nothing: `"default"` is a real queue name a listener could match on, and
+    /// this worker is not draining only that one.
+    pub queue: Option<String>,
+}
+
+impl Event for WorkerQueuePaused {
+    fn event_name() -> &'static str {
+        "queue::WorkerQueuePaused"
+    }
+}
+
+/// Fired by the **worker** when a queue it had observed as paused becomes
+/// claimable again. The mirror of [`WorkerQueuePaused`]; see that event for
+/// why `queue` is optional. Mirrors Laravel's
+/// `Illuminate\Queue\Events\WorkerQueueResumed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerQueueResumed {
+    /// Connection name the worker is draining.
+    pub connection: String,
+    /// Queue that resumed, or `None` for "every queue this worker drains".
+    pub queue: Option<String>,
+}
+
+impl Event for WorkerQueueResumed {
+    fn event_name() -> &'static str {
+        "queue::WorkerQueueResumed"
+    }
+}
+
+/// Fired when the worker drops a popped envelope because a newer dispatch owns
+/// its debounce window.
+///
+/// Not a failure: the job was superseded, its payload is stale, and the newer
+/// envelope behind it carries the work. The envelope is acknowledged and never
+/// retried. Mirrors Laravel's `Illuminate\Queue\Events\JobDebounced`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobDebounced {
+    /// Identity of the superseded envelope.
+    pub job: JobIdentity,
+}
+
+impl Event for JobDebounced {
+    fn event_name() -> &'static str {
+        "queue::JobDebounced"
+    }
+}

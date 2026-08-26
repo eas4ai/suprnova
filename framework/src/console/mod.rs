@@ -32,8 +32,10 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 
 pub mod builtins;
+pub mod output;
 mod typed;
 
+pub use output::{DETAIL_WIDTH, two_column_detail};
 pub use typed::TypedCommand;
 
 /// fn-pointer-compatible boxed-future returned by every command

@@ -147,28 +147,33 @@ Framework zu fädeln.
 
 ## Eingebaute Befehle
 
-Das Framework registriert selbst eine kleine Menge an Befehlen. Das
-Framework in ein Projekt einzubinden zieht sie automatisch mit.
+Das Framework registriert selbst einen kleinen Satz von Befehlen. Wer das
+Framework in ein Projekt linkt, zieht sie automatisch mit herein.
 
-| Befehl        | Was er tut                              |
-|---------------|-------------------------------------------|
-| `db:seed`     | Führt jeden registrierten `Seeder` der Reihe nach aus. Akzeptiert `--class=<Name>` (oder ein bloßes Positional), um einen einzelnen benannten Seeder auszuführen, passend zu `php artisan db:seed --class=UserSeeder`. |
-| `model:prune` | Durchläuft die `PrunerEntry`-Registry und löscht zwangsweise jede Zeile, die jeder registrierte `Prunable`- / `MassPrunable`-Scope zurückgibt. `--model=<Name>` schränkt auf einen Typ ein; `--pretend` meldet die Zeilenzahl, ohne Zeilen zu ändern. |
-| `--help` / `-h` | Listet verfügbare Befehle auf; `--help` pro Subcommand wird von clap aus den typisierten Args gebaut. |
-| `--version`   | Gibt die über `set_version` registrierte Version aus (typischerweise die `CARGO_PKG_VERSION` Ihrer App). Fehlt vollständig, wenn `set_version` nie aufgerufen wurde. |
+| Befehl | Was er tut |
+|---|---|
+| `db:seed` | Führt jeden registrierten `Seeder` der Reihe nach aus. Akzeptiert `--class=<Name>` (oder ein bloßes Positionsargument), um einen einzelnen benannten Seeder auszuführen, passend zu `php artisan db:seed --class=UserSeeder`. |
+| `model:prune` | Läuft die `PrunerEntry`-Registry ab und löscht jede Zeile endgültig, die ein registrierter `Prunable`- / `MassPrunable`-Scope zurückgibt. `--model=<Name>` beschränkt auf einen Typ; `--pretend` meldet die Zeilenzahl, ohne Zeilen zu verändern. |
+| `--help` / `-h` | Listet die verfügbaren Befehle auf; das `--help` je Subcommand baut clap aus den typisierten Args. |
+| `--version` | Gibt die von `set_version` registrierte Version aus (typischerweise das `CARGO_PKG_VERSION` Ihrer App). Entfällt vollständig, wenn `set_version` nie aufgerufen wurde. |
 
-`db:seed` führt aus, was auch immer Sie in `bootstrap::register()` mit
-`suprnova::seed::register::<MySeeder>()` registriert haben. Bei einer
-leeren Registry gibt es eine Warnung aus und liefert `Ok(())` zurück -
-`db:seed` aufzurufen, bevor Seeder registriert wurden, ist ein
-harmloser Nutzerfehler, kein Programmierfehler.
+`db:seed` führt aus, was Sie in `bootstrap::register()` mit
+`suprnova::seed::register::<MySeeder>()` registriert haben. Bei leerer
+Registry gibt der Befehl eine Warnung aus und liefert `Ok(())` zurück -
+`db:seed` aufzurufen, bevor Seeder registriert sind, ist ein harmloser
+Bedienfehler, kein Programmierfehler.
+
+`db:seed` meldet den Fortschritt eines gezielten Laufs über
+`suprnova::two_column_detail`, das einen Namen, eine Punktreihe und einen
+Status als eine 80 Zeichen breite Zeile rendert. Ihre eigenen Befehle
+können es für dieselbe Optik aufrufen.
 
 > Die Worker-Daemons (`queue:work`, `schedule:run`, `schedule:work`,
-> `schedule:list`, `workflow:work`) sind **nicht** auf der
-> Console-Binary. Sie leben auf dem clap-Parser der App-/Server-Binary
-> (derselben Binary, die HTTP bedient). Die globale `suprnova`-CLI
-> shellt für diese in `cargo run --quiet -- <name>` aus. Siehe den
-> [Asymmetrie-Abschnitt](#asymmetrie-mit-suprnova-migrate) unten.
+> `schedule:list`, `workflow:work`) liegen **nicht** auf der Console-Binary.
+> Sie leben im clap-Parser der App-/Server-Binary (derselben Binary, die HTTP
+> ausliefert). Die globale `suprnova`-CLI ruft dafür
+> `cargo run --quiet -- <name>` in einer Shell auf. Siehe den
+> [Abschnitt zur Asymmetrie](#asymmetrie-mit-suprnova-migrate) weiter unten.
 
 ## Befehle definieren
 
@@ -372,19 +377,20 @@ muss nur den Exit-Code lesen.
 
 ## Referenz
 
-| Symbol                                    | Zweck                                       |
-|-------------------------------------------|-----------------------------------------------|
-| `suprnova::Command` (derive)              | Registriert eine `clap::Parser`-ableitende Struktur als typisierten Console-Befehl. Gehört zu `TypedCommand`. |
-| `suprnova::TypedCommand` (trait)          | Trait mit `async fn run(self) -> Result<(), FrameworkError>` - der Rumpf eines typisierten Befehls. |
-| `suprnova::command` (attribute)           | Registriert eine asynchrone Funktion, die `Vec<String>` nimmt, als Console-Befehl mit rohen Args. |
-| `suprnova::console::dispatch_argv(argv)`  | Baut den clap-Parser-Baum aus jedem registrierten Eintrag, parst argv, leitet an den Handler weiter. Kein Lazy-Init - praktisch für Tests und programmatische Aufrufer. |
-| `suprnova::console::dispatch_argv_with_init(argv, init)` | Wie `dispatch_argv`, führt aber die `init`-Closure zwischen claps argv-Parse und dem gematchten Handler aus. Das Init feuert nur, wenn ein echter Subcommand matcht - `--help` / `--version` / Parse-Fehler-Pfade überspringen es. Das ist, was die gescaffoldete `console`-Binary verwendet. |
-| `suprnova::console::set_version(&'static str)` | Registriert die über `--version` und in `--help` gezeigte Versions-Zeichenkette. Einmal am Anfang von `main` aufrufen. Die erste Registrierung gewinnt. |
-| `suprnova::console::find(name)`           | Sucht einen registrierten Befehl anhand des exakten Namens.   |
-| `suprnova::console::list()`               | Alle registrierten Befehle, nach Namen sortiert.      |
-| `suprnova::CommandEntry`                  | Inventory-Eintrag: `{ name, description, clap_builder, handler }`. Von beiden Makros eingereicht. |
-| `suprnova::CommandHandler`                | Der Handler-Funktionszeiger-Typ: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
-| `FrameworkError::silent()` / `.is_silent()` | Konstruiert / erkennt einen Fehler, den der Dispatcher NICHT auf stderr ausgibt. Intern verwendet, um Doppel-Ausgaben zu unterdrücken, wenn clap bereits einen Parse-Fehler ins Terminal geschrieben hat. |
+| Symbol | Zweck |
+|---|---|
+| `suprnova::Command` (Derive) | Registriert eine Struktur, die `clap::Parser` ableitet, als typisierten Konsolenbefehl. Gehört mit `TypedCommand` zusammen. |
+| `suprnova::TypedCommand` (Trait) | Trait mit `async fn run(self) -> Result<(), FrameworkError>` - der Rumpf eines typisierten Befehls. |
+| `suprnova::command` (Attribut) | Registriert eine async fn, die ein `Vec<String>` entgegennimmt, als Konsolenbefehl mit rohen Args. |
+| `suprnova::console::dispatch_argv(argv)` | Baut den clap-Parser-Baum aus jedem registrierten Eintrag, parst argv und leitet an den Handler weiter. Keine Lazy-Initialisierung - praktisch für Tests und programmatische Aufrufer. |
+| `suprnova::console::dispatch_argv_with_init(argv, init)` | Wie `dispatch_argv`, führt aber die `init`-Closure zwischen claps argv-Parse und dem gematchten Handler aus. Das Init feuert nur, wenn ein echter Subcommand matcht - die Pfade `--help` / `--version` / Parse-Fehler überspringen es. Das nutzt die gescaffoldete `console`-Binary. |
+| `suprnova::console::set_version(&'static str)` | Registriert den Versions-String, der über `--version` und in `--help` erscheint. Einmal am Anfang von `main` aufrufen. Die erste Registrierung gewinnt. |
+| `suprnova::console::find(name)` | Schlägt einen registrierten Befehl über seinen exakten Namen nach. |
+| `suprnova::two_column_detail(left, right)` | Rendert einen Namen, eine Punktreihe und ein Statuswort als eine 80 Zeichen breite Fortschrittszeile. Spiegelt Laravels `$this->components->twoColumnDetail(...)`. |
+| `suprnova::console::list()` | Alle registrierten Befehle, nach Namen sortiert. |
+| `suprnova::CommandEntry` | Inventory-Eintrag: `{ name, description, clap_builder, handler }`. Wird von beiden Makros eingereicht. |
+| `suprnova::CommandHandler` | Der Fn-Pointer-Typ des Handlers: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |
+| `FrameworkError::silent()` / `.is_silent()` | Erzeugt bzw. erkennt einen Fehler, den der Dispatcher NICHT auf stderr ausgibt. Wird intern genutzt, um Doppelausgaben zu unterdrücken, wenn clap bereits einen Parse-Fehler ins Terminal geschrieben hat. |
 
 ## Nächste Schritte
 

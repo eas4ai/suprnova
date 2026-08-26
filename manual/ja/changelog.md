@@ -2,6 +2,39 @@
 
 Suprnovaで何が変わったかを、バージョンごとに読みやすくまとめたログです。各バージョンのセクションは、そのバージョンのリリース記録です。バージョンは、バージョンコミットと対応する`v<version>`タグがアトミックにプッシュされたときにリリースされます。新しい順に並んでいます。
 
+## 1.3.4 - 2026-08-25
+
+### 追加
+
+- **リードスルーディスクが `copy` フラグを取り、フォールバックをまたいで `copy` / `rename` を解決します。** `ReadThroughConfig` に `copy: false` を設定すると、フォールバックでのヒットを書き抜くことなく提供します。これはディスクを透過的なオーバーレイに変え、各取得を、あなたが要求した範囲へ絞り込みます。`copy` と `rename` は、フォールバックにしか存在しないソースを、プライマリの行き先までストリームで渡すようになりました。`rename` はフォールバック側のソースも削除するため、後の読み取りが、移動したオブジェクトを蘇らせることはできません。条件はそのストリーミングの経路をまたいで運ばれます: `if_not_exists` は既存の行き先を変わらず拒否し、コピーのソースバージョンは、フォールバックがどのオブジェクトを引き渡すかを選び、コピーの `if_match` は、黙って落とされるのではなく `Unsupported` で拒否されます。途中で失敗した転送は、自分が作った行き先だけを取り除くため、もともとそこにあったオブジェクトを壊すことはできません。
+- **デバウンスされるジョブと、デバウンスされる、キューに入れられたリスナー。** `Job::debounce_for()` は、ディスパッチのバーストを、直近のディスパッチからウィンドウ1つ分の後に走る1回の実行へ畳み込み、最新のペイロードを運びます。これは、最初のディスパッチを残して残りを抑制する `push_unique` の鏡像です。`Job::max_debounce_wait()` は、途切れないバーストが作業を永遠に先送りしてしまうのを止め、`Job::debounce_id(&self)` はウィンドウをエンティティごとにスコープするため、1つの注文への20回の更新は、別の注文のものに触れることなく畳み込まれます。`Queue::push_debounced(job, DebounceOptions)` は呼び出し箇所でウィンドウを設定し、`DebouncedListener::new(window, build).keyed_by(...)` は、イベントから導出したキーでイベントリスナーをデバウンスします - 素の `QueuedListener` は、ジョブ自身が宣言したウィンドウをすでに尊重します。あらゆるディスパッチは、それでもenqueueされます。畳み込みはワーカーで決着し、ワーカーは追い越されたエンベロープをackして `JobDebounced` を発行します。デバウンスはフェイルオープンします: 期限切れになった、あるいは追い出されたウィンドウは、ジョブを落とすのではなく実行します。実際の実行はそのたびに新しい最大待ちのウィンドウを始めるため、バーストは常に、前のバーストのものを引き継ぐのではなく、自分自身の最初のディスパッチから最大待ち時間を測ります。1つのジョブが `debounce_for` と `unique_id` の両方を宣言することはできず、チェーンとバッチはデバウンスされるジョブを拒否します - 追い越されたリンクは、そのチェーンの残りを取り残すことになり、追い越されたバッチのジョブは、バッチの保留カウントを永遠にゼロより上に残すことになるからです。エンベロープはこのために2つの追加のみのフィールドを運びますが、デバウンスされないすべてのプッシュにとって、ワイヤの上ではバイト単位で同一のままです。
+- **`Storage::register_read_through` が、2つのディスクをリードスルーディスクへ合成します。** 読み取りとメタデータは、まずプライマリに対して解決され、2つ目のディスクへフォールバックします。フォールバックで見つかったものはプライマリへ書き抜かれるため、ストアの移行が実トラフィックの下で完了します。書き込みと一覧はプライマリに留まり、削除は両方のディスクからオブジェクトを取り除きます。昇格の失敗が、フォールバックの読み取りへ劣化するのではなく表面化しなければならないときは、`throw_on_promotion_failure` を設定してください。昇格はアトミックに公開されるため、書きかけのオブジェクトが読み手に見えることはなく、フォールバックのオブジェクトのコンテンツタイプ、キャッシュ制御、コンテンツディスポジション、コンテンツエンコーディング、そしてユーザーメタデータを一緒に運びます。バージョン付き、あるいは条件付きの読み取りは、その条件を保ったまま通され、昇格されることなく提供されます。
+- **`Queue::forward` が、キュー全体を名前でリダイレクトします。** `Queue::route` がジョブの型でキー付けされるのに対し、`Queue::forward("default", "high")` はキュー名でキー付けされます - プールを引退させる、バックログを吸収する、これから落とそうとしているプールから作業を移す、といったことを、ジョブもルートも1つとして触ることなく行うためのレバーです。これは両側に適用されます: `default` に解決された新しいプッシュは `high` に着地し、*そして* `--queue=default` で起動したワーカーが `high` をドレインするため、行き先が、誰も確保しない作業を集めてしまうことはありません。`default` を転送すると、キューを名指ししなかったジョブが捕まります。転送は1回の引き当てであって決して連鎖ではないため、入れ替え（`a -> b` に加えて `b -> a` も登録されている状態）やより長いローテーションは、ループではなく、筋の通ったプールの交換になります - リゾルバーがこれと同じ1回の引き当てであるLaravelと、まったく同じです。一時停止は、今もワーカーが起動時に与えられた名前の上で評価されるため、`Queue::pause(&connection, "default")` は、`default` が転送されている間もそのワーカーを止めます。`Queue::forward_on(from, to, connection)` は、転送を1つのコネクション名に制限します。これは、ジョブが宣言したコネクションではなく、このプロセスのコネクション名と比較されるため、リダイレクトの両側が同じ値でゲートされます。`Queue::forward_for(from)` は転送を読み戻し、`Queue::try_forward` は失敗し得る兄弟です。検査の呼び出し（`Queue::pending_jobs` とその兄弟たち）は、意図的に転送に追随しません。そのため、転送されたキューに取り残されたバックログは、見えたままになります。
+- **読み取り形のRedisコマンドが、一時的な失敗を表面化させるのではなくリトライします。** コネクションマネージャーは既にバックグラウンドで再接続していましたが、死んだソケットに当たったコマンドは、それでもあなたの呼び出しを失敗させていました。`GET`、`EXISTS`、`Cache::flush` / `Cache::flush_tags` の背後にある `SCAN` と `SSCAN` のページ、キューのドライバーの `XLEN` / `ZCARD` / `XPENDING` の読み取り、そしてレートリミッターの `Retry-After` の計算は、短い休止の後に一度リトライするようになりました。`REDIS_COMMAND_RETRIES` はその上にさらにリトライを積み、10でクランプされます。リトライの見積もりは、ミリ秒ではなく秒の単位で立ててください: 2回目の試行は代わりのコネクションを待つため、ドライバーのコネクトとレスポンスの予算の全体を費やしますし、タイムアウトしたコマンドも、切断されたコマンドと同じく一時的なものと数えられます。書き込みは、どの設定であっても決してリトライしません: 一時的なエラーが意味するのは、コネクションが失敗したということであって、サーバーがそのコマンドを拒んだということではないため、`SET`、`INCR`、ロックの獲得、レートリミットのヒット、あるいはキューのポップを繰り返せば、それが2回実行されうるからです。エラーメッセージは変わっていないため、それに対してマッチしているものは引き続き動作します。
+- **停止されたワーカーが、自分は停止していると告げるようになりました。** `queue:work` は遷移ごとに1行を出力し - `2026-08-25 14:03:11 Queue billing PAUSED`、そして復帰するときには `RESUMED` です - ワーカーは `WorkerQueuePaused` / `WorkerQueueResumed` を発行するため、同じシグナルをあなた自身のアラートへルーティングできます。これらはワーカー側の対です。既存の `QueuePaused` / `QueueResumed` は、`queue:pause` を実行したプロセスがどれであれ、そのプロセスで発火し、それがワーカーであることは決してないため、これまでは、誰かが自分のキューを停止したせいで静かになったワーカーは、ハングしたワーカーと見分けがつきませんでした。各イベントは、ポーリングごとにではなく、遷移ごとに一度発火します。それらの `queue` フィールドは省略可能です: `--queue` なしで起動したワーカーはすべてをドレインし、`pause_all` のもとで報告すべきキュー名を持たないため、リスナーがマッチできてしまう名前をでっち上げるのではなく、`None` を報告します。
+- **`?include=` のパスが5セグメントで上限を定められ、`max_relationship_depth` がその天井を動かします。** 循環するリレーションのグラフは、`?include=author.posts.author.posts...` を、クエリ文字列だけを境界とする、クライアントが制御するファンアウトへ変えてしまいます。パスは、パースされる途中で切り詰められるようになりました。上限を変えるには `bootstrap::register()` で `suprnova::max_relationship_depth(n)` を呼び、includeを切るには `0` を渡してください。
+- **`Gt`、`Gte`、`Lt`、`Lte` が、あるフィールドを数値と、あるいは別のフィールドと比較します。** `CompareWith` が、オペランドと尺度を1つの値の中で名指しします: リテラルには `Number`、数値の兄弟フィールドには `NumericField`、文字数で比較される兄弟フィールドには `LengthField` です。ルールが測れないオペランドは、パニックするのではなく、そのフィールドを失敗させます。
+- **3つのメンバーシップのルールが組み込みの集合に加わりました: `InArray`、`Contains`、`DoesntContain` です。** `InArray` は、ある値を別のフィールドのリストに対して検査します。フィールドをルールの文字列で名指しするのではなく、リストを直接渡します。`Contains` と `DoesntContain` はJSONの配列の上で走り、パラメータを文字列の要素とだけ照合するため、`1` と `"1"` は別のままです。
+- **データベースのプールが、生存性のノブを持つようになりました。** `DB_IDLE_TIMEOUT`、`DB_MAX_LIFETIME`、`DB_ACQUIRE_TIMEOUT`、`DB_TEST_BEFORE_ACQUIRE`、`DB_PING_AFTER_IDLE` が、プールがコネクションを閉じる、作り直す、pingを打つタイミングを制御し、対応する `DatabaseConfig::builder()` のセッターがあります。どれもデフォルトでは未設定であるため、既存のデプロイのプールは、これまでとまったく同じように振る舞います。NATゲートウェイやファイアウォールがアイドルのコネクションを落とすときに使ってください: sqlxはlibpqの `keepalives_*` に相当するものを公開していないため、プールの作り直しがその仕組みです。
+- **`db:seed <Class>` が、その進捗を報告します。** 対象を絞った実行は、シーダーの前に `RUNNING` の行を、その後に経過ミリ秒を伴う `DONE` の行を出力します。素の `db:seed` は静かなままです。そのフォーマッター `suprnova::two_column_detail` は、あなた自身の `#[command]` のハンドラからも使えます。
+- **多対多のリレーションが、ピボットのカラムでフィルタできるようになりました。** `where_pivot`、`where_pivot_op`、`where_pivot_in`、`where_pivot_not_in`、`where_pivot_null`、`where_pivot_not_null`、`where_pivot_between`、`where_pivot_not_between`、`where_pivot_group`、そしてそれらの `or_` の双子が、`BelongsToMany`、`MorphToMany`、`MorphedByMany` の上の `get`、`first`、`count` を制約します。`where_pivot_group` はクロージャを取り、括弧でくくられた1つのグループを描画するため、続く `or_where_pivot` の内側でもアトミックなまま保たれます。ピボットのフィルターは読み取りにのみ適用されます: `attach`、`attach_with`、`detach`、`sync` は、フィルターが1つでも設定されている間はエラーを返し、イーガーロードはそれらを運びません。
+- **`where_binary` が、カラムの値をバイト単位で比較します。** この一族（`where_binary`、`or_where_binary`、`where_not_binary`、`or_where_not_binary`）は `Builder<M>` の上に出荷され、`where_binary` と `where_not_binary` は `DB::table(...)` の上にも出荷されます。MySQLとMariaDBは `= binary` を発します。PostgresとSQLiteは、照合順序に依存したマッチへフォールバックするのではなく、クエリがレンダリングされる時点でエラーを返します。
+- **`Builder::try_to_sql_with_bindings_for` が、パニックすることなく、あるダイアレクト向けのSQLを描画します。** これは `to_sql_with_bindings_for` の失敗し得る兄弟であり、ビルダーがあるバックエンド向けに正当に描画できないケースのためのものです。
+- **`Model::refresh_for_update` が、`FOR UPDATE` のロックの下で行を再読み込みします。** 行の現在の状態と排他ロックを1つの文で必要とするときに、トランザクションの内側で呼び出してください。SQLiteには行レベルのロックがないため、そこではロック句はno-opです。
+- **`Builder::or_where_key` と `Builder::or_where_key_not` が、主キーのフィルタを論理和として加えます。** どちらも、`or_where` と同じやり方で直前の `WHERE` 句へ畳み込まれ、どちらも `or_filter_key` と `or_filter_key_not` のエイリアスを出荷します。
+- **`Builder::in_order_of` が、行を明示的な順序へ並べます。** カラムと、あなたが望む順序に並べた値を渡してください。値がリストにない行は、最後に並びます。値はパラメータとしてバインドされるため、リクエストのデータから取っても安全です。
+
+### 修正
+
+- **メンテナンスのバイパスクッキーが、サーバー側で期限切れになるようになりました。** 12時間のTTLは、ブラウザーが強制する `max-age` だったため、盗まれたクッキーは、あなたがシークレットをローテーションするまで効き続けていました。暗号化されたペイロードが期限を運ぶようになり、リクエストごとにそれを再検査します。
+- **`suprnova serve` が、フロントエンドのないプロジェクトを走らせます。** `suprnova new --api` でスキャフォルドされたプロジェクトには `frontend/` ディレクトリがなく、`--backend-only` を渡さないかぎり、`serve` はそれを「No frontend directory found. Are you in a Suprnova project directory?」として拒否していました。今は、Viteのペインと、それに材料を供給するTypeScriptの生成をスキップし、バックエンドを配信します。そのようなプロジェクトでは `--frontend-only` は依然として失敗しますが、その理由を告げるメッセージを伴います。
+
+### アップグレード
+
+- **このリリースより前に発行されたバイパスクッキーは、機能しなくなります。** クッキーのペイロードは、素のシークレットから、封じられた `{ secret, expires_at }` のオブジェクトへ変わり、期限を持たないペイロードは拒否されます。アップグレードの後、新しいクッキーを得るために、シークレットのURLを一度訪れてください。ほかには何も変わりません: `down`、`up`、`--secret`、`--with-secret` は、すべて以前と同じように振る舞います。
+- **5セグメントより長いincludeのパスは、そのすべてではなく、最初の5つのリレーションを返すようになりました。** リソースの許可リストの外側にあるものが到達可能だったことは一度もないため、レスポンスがデータを得ることはありません。深いパスは、その末尾を失います。それに伴ってステータスコードが1つ変わります: 深すぎる末尾が、そのリソースが許していないリレーションを名指ししているパスは、何かがバリデーションされるより前に切り詰められるため、完全なパスが以前は `400` を返していたところで、生き延びたセグメントとともに `200` を返すようになりました - その拒否をアサートしているクライアントやテストがあれば、調整してください。あなたのAPIがそれより長いパスをドキュメント化しているのなら、`suprnova::max_relationship_depth(n)` で天井を上げてください。
+- **`DatabaseConfig` が、5つの公開フィールドを得ました。** 構造体リテラルでそれを組み立てているコードは、もうコンパイルできません。`DatabaseConfig::from_env()` か `DatabaseConfig::builder()` を使ってください。どちらも、今日のプールの振る舞いを保つデフォルトで、新しいフィールドを埋めます。
+
 ## 1.3.3 - 2026-08-25
 
 ### 追加
@@ -16,7 +49,7 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 - **Laravelの形をした画像サブシステム。デフォルトで有効な `media` フィーチャーの背後、`suprnova::media` にあります。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` がレイジーなパイプラインを組み立て - `resize`、`scale`、`crop`、`cover`、`contain`、任意の角度の `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type`、`dominant_color` で仕上げます。PNG、JPEG、WebP、GIF、BMPを読み書きします。AVIFの出力は、自社製のAV1エンコーダーが公開されるまで先送りされており、その時点で新しい `OutputFormat` のバリアントが1つ増えるだけで、ほかには何も変わりません。Laravelの `gd`/`imagick` の分かれ方と同じく、2つのドライバーがあります: `IMAGE_DRIVER=oxideav`（デフォルト）は、ネイティブライブラリもインストールするものもない純粋なRustの [OxideAV](https://github.com/OxideAV) のコーデックファミリーの上で走り、`IMAGE_DRIVER=magick` は、HEICを含むより広い入力サポートのために、ホストにインストールされたImageMagick 7へシェルアウトします。デコードの上限（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）は、何かが割り当てられる前に入力自身のヘッダーに対して検査されます - 拡張WebPの内側のビットストリームも含みます。その助言的なキャンバスのサイズを使って、より大きなフレームを密輸してゲートを通すことはできません - そして、ピクセルの作業はすべてブロッキングスレッドの上で走ります。`magick` ドライバーは、ImageMagickにバイト列からコーダーを選ばせるのではなく、入力のコーダーを名前で固定し、すべての起動を `IMAGE_MAGICK_TIMEOUT_SECS` で境界付けます。`ImageDriver` が、それ以外のあらゆるもののためのトレイトの境界です。モジュールが `media` という名前なのは、OxideAVに支えられた音声と動画の表面が、その隣に置かれることになるからです。[画像](../images.md)
 - **WebPのゲートは、1つの固定された、設定できない境界を運びます。** WebPは、実際のデコード後のサイズを最も内側のビットストリームのチャンクの中で宣言するため、フレームワークはそれを見つけるためにコンテナを歩きます。その歩みはレベルあたり最大4096チャンクを訪れ、2レベルのネストをたどり、そのどちらかを超えるファイルは測られるのではなく拒否されます。終えられなかった歩みから数字を報告することは、十分な量の詰め物のチャンクを積めば回り込めるゲートになってしまいます。どの `IMAGE_MAX_*` 変数もそれに影響せず、エラーメッセージもそう述べます。300フレームのアニメーションは影響を受けず、4100フレームのものは拒否されます。[画像](../images.md#one-bound-is-not-configurable)
 
-- **OAuth can now be installed without replacing an application's existing password and session authority.** `MagnetarOAuthOnlyConfig` and `init_magnetar_oauth_only` install the default ceremony and provider engine while leaving the password and passkey slots empty. Applications with an existing `users` table can call `verify_oauth_identity`, map the verified provider subject themselves, and establish their normal framework session.
+- **OAuthを、アプリケーションの既存のパスワードとセッションの権限元を置き換えることなくインストールできるようになりました。** `MagnetarOAuthOnlyConfig` と `init_magnetar_oauth_only` は、デフォルトのセレモニーとプロバイダーのエンジンをインストールし、パスワードとパスキーのスロットは空のままにします。既存の `users` テーブルを持つアプリケーションは、`verify_oauth_identity` を呼び、検証済みのプロバイダー subject を自分で対応付け、通常のフレームワークセッションを確立できます。
 
 ### 変更
 
@@ -30,7 +63,7 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 
 ### 修正
 
-- **Installing OAuth no longer forces provider-backed applications into Magnetar web-binding validation.** The full `init_magnetar` path remains atomic and unchanged. The OAuth-only path reserves the engine slots during construction, publishes only OAuth, and fails rather than mixing two authentication authorities.
+- **OAuthをインストールしても、プロバイダーに支えられたアプリケーションがMagnetarのウェブ束縛の検証を強いられることがなくなりました。** 完全な `init_magnetar` の経路は、原子的なまま変わりません。OAuth専用の経路は、構築の間にエンジンのスロットを予約し、OAuthだけを公開し、2つの認証の権限元を混在させるのではなく失敗します。
 
 ### アップグレード
 
@@ -38,7 +71,7 @@ Suprnovaで何が変わったかを、バージョンごとに読みやすくま
 - **`EnvelopeOverrides` が、公開の `after_commit: Option<bool>` フィールドを得ました。** このリポジトリとスキャフォルドされたテンプレートの中のすべての構築は `..Default::default()` を使っており、変更は不要です。網羅的な構造体リテラルで `EnvelopeOverrides` を組み立てているコードは、新しいフィールドを名指しする必要があります。`after_commit: None` は今日の振る舞い、すなわち `Job::after_commit()` に委ねる振る舞いを保ちます。ほかには何も変わりません: `after_commit()` のデフォルトは `false` であるため、既存のジョブが、これまで待っていなかったコミットを待ち始めることはありません。
 - **`Envelope` が、公開の `unique_lock_owner: Option<String>` フィールドを得ました。** ワイヤ形式は変わりません - このフィールドは `#[serde(default)]` で、`None` のときはスキップされるため、エンベロープは双方向でバイト単位に同一に往復し、`schema_version` は2のままです - が、構造体リテラルで `Envelope` を組み立てているコードは、これを名指しする必要があります。プッシュをまたいで一意性のロックを意図的に持ち越すのでなければ、`unique_lock_owner: None` を加えてください。エンベロープを読むだけのコードや、`Queue::push` とその兄弟を通じて組み立てるコードには、変更は不要です。
 
-- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application already owns users, passwords, framework sessions, and remember-me state. OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications continue to use `complete`.
+- アプリケーションがユーザー、パスワード、フレームワークセッション、remember-me の状態をすでに所有している場合は、`init_magnetar` の代わりに `init_magnetar_oauth_only` を使ってください。OAuth専用のコールバックは `verify_oauth_identity` を使い、完全なMagnetarのアプリケーションは引き続き `complete` を使います。
 
 ## 1.3.2 - 2026-08-25
 

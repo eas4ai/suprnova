@@ -126,20 +126,27 @@ Der HTTP-Listener und die Grenzen für Request-Bodys.
 
 ## Datenbank
 
-Connection-URL und sqlx-Pool-Tuning. `DATABASE_URL` ist für jeden
-Subcommand erforderlich, der die Datenbank berührt (`migrate*`,
+Connection-URL und Feinabstimmung des sqlx-Pools. `DATABASE_URL` ist für
+jeden Subcommand erforderlich, der die Datenbank berührt (`migrate*`,
 `db:sync`, `db:seed`, `queue:work` mit `QUEUE_DRIVER=database`,
-`workflow:work`, den Session-DB-Store) und für `serve`, wenn die App
-Migrationen registriert hat.
+`workflow:work`, der Session-DB-Speicher) und für `serve`, wenn die App
+Migrationen registriert hat. Die fünf Stellschrauben für die Lebendigkeit
+sind Ihr Mittel gegen ein Netzwerk, das untätige Verbindungen verwirft -
+siehe [Pool-Lebendigkeit](database.md#pool-liveness).
 
 | Variable | Standard | Typ | Zweck |
 |---|---|---|---|
-| `DATABASE_URL` | keine - erforderlich, wenn Migrationen existieren | `String` | Connection-URL. Das Schema wählt den Treiber: `sqlite://path`, `postgres://...` / `postgresql://...`, `mysql://...`, `mariadb://...`. Das Framework legt das übergeordnete Verzeichnis für SQLite-Pfade automatisch an. `serve` überspringt die Datenbankverbindung vollständig, wenn der konfigurierte `Migrator` keine Migrationen hat. |
-| `DB_MAX_CONNECTIONS` | `10` | `u32` | sqlx-Pool-Obergrenze. |
-| `DB_MIN_CONNECTIONS` | `1` | `u32` | sqlx-Pool-Untergrenze (warmgehalten). |
-| `DB_CONNECT_TIMEOUT` | `30` (Sekunden) | `u32` | Wie lange sqlx auf eine initiale Verbindung wartet, bevor ein Fehler ausgelöst wird. |
-| `DB_LOGGING` | `false` | `bool` | Wenn wahr, protokolliert sqlx jede Anweisung (in Produktion sparsam verwenden - geschwätzig). |
-| `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | Wenn wahr, wird eine fehlschlagende Auto-Migration während des `serve`-Boots protokolliert, bricht aber nicht ab. Der Standard ist fail-closed: Der Boot beendet sich mit Non-Zero, statt gegen ein teilweise migriertes Schema zu starten. Übergeben Sie `--no-migrate`, um die Auto-Migration vollständig zu überspringen. |
+| `DATABASE_URL` | keiner - erforderlich, wenn Migrationen existieren | `String` | Connection-URL. Das Schema wählt den Treiber: `sqlite://path`, `postgres://...` / `postgresql://...`, `mysql://...`, `mariadb://...`. Für SQLite-Pfade legt das Framework das übergeordnete Verzeichnis automatisch an. `serve` überspringt die Datenbankverbindung vollständig, wenn der konfigurierte `Migrator` keine Migrationen hat. |
+| `DB_MAX_CONNECTIONS` | `10` | `u32` | Obergrenze des sqlx-Pools. |
+| `DB_MIN_CONNECTIONS` | `1` | `u32` | Untergrenze des sqlx-Pools (wird warm gehalten). |
+| `DB_CONNECT_TIMEOUT` | `30` (Sekunden) | `u32` | Wie lange sqlx auf eine erste Verbindung wartet, bevor es einen Fehler meldet. |
+| `DB_LOGGING` | `false` | `bool` | Wenn true, protokolliert sqlx jedes Statement (in Produktion sparsam einsetzen - geschwätzig). |
+| `DB_IDLE_TIMEOUT` | nicht gesetzt (sqlx nutzt 600 Sekunden) | `u64` (Sekunden) | Wie lange eine Pool-Verbindung untätig liegen darf, bevor der Pool sie schließt. `0` schaltet das Ernten untätiger Verbindungen ab. |
+| `DB_MAX_LIFETIME` | nicht gesetzt (sqlx nutzt 1800 Sekunden) | `u64` (Sekunden) | Wie lange eine Pool-Verbindung leben darf, bevor der Pool sie recycelt. `0` schaltet das Recyceln nach Lebensdauer ab. |
+| `DB_ACQUIRE_TIMEOUT` | nicht gesetzt (fällt auf `DB_CONNECT_TIMEOUT` zurück) | `u64` (Sekunden) | Wie lange ein Aufrufer auf eine freie Pool-Verbindung wartet. Überschreibt `DB_CONNECT_TIMEOUT` für die Wartezeit beim Checkout; setzen Sie das eine oder das andere, nicht beides. Null wird beim Boot abgelehnt. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Eine Pool-Verbindung vor der Herausgabe anpingen. Lassen Sie es an, sofern Sie nicht den Round-Trip pro Checkout gemessen haben und `DB_PING_AFTER_IDLE` nicht ausreicht. |
+| `DB_PING_AFTER_IDLE` | nicht gesetzt | `u64` (Sekunden) | Eine Pool-Verbindung erst anpingen, wenn sie so lange untätig war. Es zu setzen schaltet `DB_TEST_BEFORE_ACQUIRE` ab, sodass heiße Verbindungen unangetastet herausgegeben werden. |
+| `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | Wenn true, wird eine fehlschlagende Auto-Migration beim `serve`-Boot protokolliert, bricht den Start aber nicht ab. Der Standard schließt bei Fehlern: Der Boot endet mit einem Wert ungleich null, statt gegen ein teilweise migriertes Schema zu starten. Übergeben Sie `--no-migrate`, um die Auto-Migration ganz zu überspringen. |
 
 ## Sitzungen
 
@@ -187,10 +194,11 @@ Validierungskatalog des Frameworks.
 
 | Variable | Standard | Typ | Zweck |
 |---|---|---|---|
-| `CACHE_DRIVER` | `memory` | `String` (`memory`/`in-memory`/`inmemory`, `redis`) | Wählt das Bootstrap-Ziel. Memory hält alles im Prozess; Redis erfordert `REDIS_URL` und lässt den Boot fehlschlagen, wenn es unerreichbar ist. Unbekannte Werte lassen den Boot mit einem klaren Fehler fehlschlagen. |
-| `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis-Connection-URL (nur konsultiert, wenn `CACHE_DRIVER=redis`). |
-| `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Schlüssel-Präfix für Cache-Einträge (Kollisionsvermeidung bei gemeinsam genutztem Redis). |
-| `CACHE_DEFAULT_TTL` | `3600` (Sekunden) | `u64` | Standard-TTL in Sekunden. `0` bedeutet "kein Ablauf". Wird auf `Cache::put(None)` / `Cache::tags_put(None)` angewendet; `Cache::forever` und `Cache::remember_forever` umgehen es immer. |
+| `CACHE_DRIVER` | `memory` | `String` (`memory`/`in-memory`/`inmemory`, `redis`) | Wählt das Bootstrap-Ziel. Memory hält alles prozessintern; Redis braucht `REDIS_URL` und lässt den Boot scheitern, wenn es nicht erreichbar ist. Unbekannte Werte lassen den Boot mit einer klaren Fehlermeldung scheitern. |
+| `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis-Connection-URL (wird nur bei `CACHE_DRIVER=redis` herangezogen). |
+| `REDIS_PREFIX` | `"suprnova_cache:"` | `String` | Schlüssel-Präfix für Cache-Einträge (Kollisionsvermeidung bei geteiltem Redis). |
+| `CACHE_DEFAULT_TTL` | `3600` (Sekunden) | `u64` | Standard-TTL in Sekunden. `0` bedeutet „kein Ablauf“. Gilt für `Cache::put(None)` / `Cache::tags_put(None)`; `Cache::forever` und `Cache::remember_forever` umgehen sie immer. |
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Zusätzliche Wiederholungen für lesende Redis-Befehle, über die eine hinaus, die jedes Lesen ohnehin bekommt. Gilt für die Cache-, Queue- und Rate-Limit-Treiber. Schreibzugriffe wiederholen bei keinem Wert. Rechnen Sie in Sekunden: Eine Wiederholung auf einer abgerissenen Verbindung wartet auf den Reconnect und kostet damit das gesamte Verbindungs- und Antwortbudget des Treibers - bis zu 3 Verbindungsversuche im Abstand von höchstens 500 ms, jeder auf 2 s gedeckelt, plus 5 s Antwort-Timeout beim Cache-Treiber; bis zu 6 Verbindungsversuche mit ungedeckelter exponentieller Verzögerung, jeder auf 1 s gedeckelt, plus 500 ms Antwort-Timeout bei den Queue- und Rate-Limit-Treibern. Die Deckelung auf `10` begrenzt Versuche, nicht Sekunden: Bei dieser Einstellung macht ein Lesen 12 Versuche. Ein Timeout gilt ebenfalls als transient, während einer Blockade setzt jedes umschlossene Lesen also bis zu so viele Befehle ab. Ein nicht parsbarer Wert fällt auf `0` zurück. |
 
 ## Warteschlange
 

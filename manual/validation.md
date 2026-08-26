@@ -28,14 +28,15 @@ A rule is a value implementing one of four traits:
 | `AsyncRule` | `async passes(&self, value)` | check that `.await`s (DB, HTTP) |
 
 Built-in `Rule`s: `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
-`NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`, [`Password`](#password-strength)
-(strength checks only). Built-in `ValueRule`s: `ArrayKeys`,
-`Distinct`. Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. Built-in `AsyncRule`s:
-[`Unique`](#the-unique-rule) and [`Password`](#password-strength) (strength
-plus its `uncompromised()` HIBP check - the one built-in rule implementing
-both `Rule` and `AsyncRule`).
+`NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`,
+`AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`,
+[`Password`](#password-strength) (strength checks only). Built-in
+`ValueRule`s: `ArrayKeys`, `Distinct`, `Contains`, `DoesntContain`.
+Built-in `ContextualRule`s: `RequiredIf`, `RequiredWith`,
+`RequiredUnless`, `Same`, `Different`, `Confirmed`, `Gt`, `Gte`, `Lt`,
+`Lte`. Built-in `AsyncRule`s: [`Unique`](#the-unique-rule) and
+[`Password`](#password-strength) (strength plus its `uncompromised()` HIBP
+check - the one built-in rule implementing both `Rule` and `AsyncRule`).
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -268,12 +269,99 @@ accept `Rule`s and `ValueRule`s in the same field list; which trait runs
 is resolved by which one the rule's type implements, not by anything
 you write in the row.
 
+### Membership rules
+
+Three rules answer "is this value in that list?", each over the shape it
+needs:
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// Laravel's in_array:allowed_roles.* - the value must appear in another
+// field's list. Pass the list itself: a Vec<String> field and a &[&str]
+// literal both work.
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// Laravel's contains:rust,web - the array must hold every listed value.
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// Laravel's doesnt_contain:banned - the array must hold none of them.
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+Every comparison is exact. `InArray` compares strings with `==`, and
+`Contains` and `DoesntContain` match a parameter against a JSON string
+element only, so `["1"]` contains `"1"` and `[1]` does not. A value that
+is not an array fails `Contains` and `DoesntContain` outright.
+
+`Contains` and `DoesntContain` reject an empty parameter list as a keyless
+construction error, the same way `ArrayKeys` does - a list with nothing in
+it constrains nothing. An empty `InArray` haystack is different: a sibling
+field can legitimately be empty at run time, so the value simply fails.
+
+`InArray`'s failure message names no values, because its list comes out of
+the request and a validation message is rendered into a response body.
+
+### Comparison rules
+
+`Gt`, `Gte`, `Lt`, and `Lte` compare a field against a number or against
+another field. `CompareWith` names the operand and the measure together:
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// Laravel's gt:0 - a literal operand, compared numerically.
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// Laravel's lte:max_price - a sibling field, compared numerically.
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// Laravel's gt:summary on two string fields - compared by character count.
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+All four read sibling fields, so they are `ContextualRule`s and every
+`validate!` row carries `=> with ctx` - including a row whose only operand
+is a literal, where the context goes unread. Pass an empty `FormContext`
+there.
+
+Anything the rule cannot measure fails the field: a value that is not a
+finite number under a numeric comparison, a sibling the form never sent, a
+sibling that is not a number, or a non-finite literal such as `f64::NAN`.
+None of those panics, and none of them passes.
+
 ### Why Suprnova diverges
 
 Laravel's `distinct:strict` leans on PHP's coercing `==`. JSON values are
 already typed, so Suprnova's `strict` only changes whether two *numbers*
 with different internal representations (`1` vs `1.0`) count as equal -
 it never makes a string and a number "the same," in either mode.
+
+Laravel writes the other field into a rule string - `in_array:allowed_roles.*` -
+and the validator globs it out of the request data at run time. Suprnova
+has no rule-string parser: you hand `InArray` the list directly, and the
+compiler checks the field exists.
+
+Laravel 13.27 tightened `in`, `in_array`, and `doesnt_contain` to strict
+comparison because PHP's `==` turned `"1abc"`, `true`, and `"0x1"` into
+matches. Suprnova never had that hole - `In` and `NotIn` compare `&str`
+with `==` - and the new rules match JSON values variant by variant. Laravel's
+`contains` stayed loose; Suprnova's does not. The cost is that these rules
+cannot check a numeric array: `Contains(&["1"])` does not match `[1]`.
+
+Laravel's `gt` family picks its measure at run time: the number itself for
+numerics, `count()` for arrays, kilobytes for files, and character length
+for everything else, with the numeric branch gated on whether the field
+also carries `numeric` or `integer`. Suprnova writes the measure into the
+rule instead, because a rule here cannot see the other rules on its field
+and sniffing the value's shape is the coercion habit these rules exist to
+avoid. Two of Laravel's four measures have no counterpart at all: a rule
+only ever receives a string, so an array-valued sibling cannot be read,
+and uploads never reach the rule surface - the multipart parser caps their
+size before a handler sees them.
 
 ## The `validate!` macro
 

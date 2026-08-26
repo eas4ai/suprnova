@@ -204,14 +204,30 @@ pub struct PostResource {
 
 このリソースの許可リストに載っていないincludeパスを指定するリクエストは、JSON:APIの400 errorsエンベロープを受け取ります。
 
+### 深さの上限
+
+includeのパスが運べるのは、最大で5セグメントです。`?include=a.b.c.d.e.f` は、何かがそれを歩き始めるより前に `a.b.c.d.e` へ切り詰められ、Laravelの `JsonApiResource::$maxRelationshipDepth` に対応します。この天井は、起動時に一度だけ変更してください:
+
+```rust
+// bootstrap::register() にて
+suprnova::max_relationship_depth(3);
+```
+
+この上限が重要なのは、リレーションのグラフが循環しうるからです: `?include=author.posts.author.posts...` は、クライアントが1セグメント打つごとに作業を増やし、それを境界づけるものは、クエリ文字列の長さのほかにありません。切り詰めはセグメントを取り除くだけで、決して追加せず、しかも各レベルは、降りる前に自分自身の許可リストを変わらず検査します - そのため、切り詰められたパスが、完全なパスでは届かなかったデータに届くことは決してありません。
+
+知っておく価値のある帰結が1つあります: 上限を超えたセグメントは、許可リストがそれを目にするより前に落とされます。上限が2のとき、`?include=author.posts.secrets` は、完全なパスなら受け取るはずの400ではなく、`author` と `posts` をincludeした200を返します。何かがそれをバリデーションする時点では、`secrets` がもう存在しないからです。
+
+`max_relationship_depth(0)` は、includeを完全に切ります。Laravelの0は、それでも最初の1ホップを出力します。Laravelのクランプは、先頭のセグメントが切り離された後の末尾にしか適用されないからです。Suprnovaの0は、リレーションがまったくないことを意味します。
+
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelの `JsonApiResource` から、目に見える2つの相違点があります:
+Laravelの `JsonApiResource` から、目に見える3つの相違点があります:
 
 1. **`?include=` に対する厳格なデフォルト拒否。** Laravelのリソース層は、解決できないincludeパスをサイレントに無視します。Suprnovaは、JSON:APIのerrorsエンベロープを伴う `400 Bad Request` でそれらを拒否します。仕様の§5.2.2が定めるデフォルト拒否の姿勢は、クライアントがそれに対してプログラムを組める契約です - サイレントな無視は、クライアントのバグを隠し、複合ドキュメントの整合性を壊します。
 
 2. **自動201の代わりに明示的な `.status(code)` / `.created()`。** Laravelは、背後のEloquentモデルの `wasRecentlyCreated` から `201` を自動的に設定します。SuprnovaはリソースのDTOを特定の永続化ライフサイクルから切り離しているため、ステータスはレスポンスオブジェクト自身に設定されます - 意図的に作成レスポンスを返したいときは `.created()` を、レスポンスが空のときは `.status(204)` を、といった具合です。1つのミューテータが、どんなフローの下でも正直なままです。
 
+3. **深さの上限 `0` は、includeを完全に切ります。** Laravelがクランプするのは、先頭のセグメントが既に切り離された後の、パスの末尾だけであるため、その `0` は今も最初の1ホップを出力します。Suprnovaはパス全体を切り詰めるため、`max_relationship_depth(0)` はリレーションがまったくないことを意味します - 上の深さの上限を参照してください。
 ## ページネーション
 
 `Resource::paginated(p)` は、`Paginated<T>` トレイトを実装するあらゆるページネーターと動作します - `suprnova::pagination` の `LengthAwarePaginator<T>` と `CursorPaginator<T>` は、どちらもこのimplを出荷しています。レンダラーは、`links.{self,first,prev,next,last}` と `meta.pagination` ブロックを自動的に添付します。

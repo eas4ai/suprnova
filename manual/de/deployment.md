@@ -384,21 +384,25 @@ Vorfall stillzulegen:
 ./app up
 ```
 
-`down` schreibt einen Wartungs-Marker, den die Middleware bei jeder
-Anfrage liest. Anfragen bekommen ein 503 (über `--status`
-konfigurierbar) mit der angegebenen Nachricht, außer bei Pfaden in
-`--except` und bei jeder Anfrage, die das Secret mitführt. `up` entfernt
-den Marker.
+`down` schreibt eine Wartungsmarkierung, die die Middleware bei jeder
+Anfrage liest. Anfragen erhalten ein 503 (über `--status` konfigurierbar)
+mit der angegebenen Meldung, ausgenommen Pfade in `--except` und jede
+Anfrage, die das Secret mitbringt. `up` entfernt die Markierung.
 
-Das Secret ist ein Bearer-Credential: Wer `/<secret>` besucht, bekommt
-ein Bypass-Cookie mit zwölf Stunden Gültigkeit ausgestellt. Sowohl der
-URL-Match als auch der Cookie-Match sind Vergleiche in konstanter Zeit,
-sodass das Response-Timing einem Prober nicht verrät, wie lang das von
-ihm korrekt geratene Präfix war. Bevorzugen Sie `--with-secret`, das
-eines für Sie prägt (16 zufällige Bytes, 32 Hex-Zeichen) und die
-Bypass-URL ausgibt, gegenüber dem Wählen einer merkbaren Zeichenkette
-für `--secret` - und behandeln Sie es wie jedes andere Credential in
-Ihren Incident-Notizen.
+Das Secret ist ein Bearer-Credential: Wer `/<secret>` aufruft, bekommt ein
+Bypass-Cookie ausgestellt, das 12 Stunden gilt. Die Frist ist im
+verschlüsselten Cookie eingeschlossen und wird bei jeder Anfrage erneut
+geprüft, sodass ein abgefangenes Cookie pünktlich seine Wirkung verliert,
+selbst wenn der Browser seine `max-age` ignoriert. Ein Cookie, dessen
+Frist weiter in der Zukunft liegt als eine TTL, wird abgelehnt, mit einer
+kleinen Toleranz für Uhrenunterschiede zwischen Hosts. Sowohl der
+URL-Abgleich als auch der Vergleich des Cookie-Secrets laufen in
+konstanter Zeit, die Antwortzeit verrät einem Prober also nicht, wie lang
+das Präfix war, das er richtig erraten hat. Bevorzugen Sie
+`--with-secret`, das eines für Sie erzeugt (16 Zufallsbytes, 32
+Hex-Zeichen) und die Bypass-URL ausgibt, gegenüber einer einprägsamen
+Zeichenkette für `--secret` - und behandeln Sie es wie jedes andere
+Credential in Ihren Vorfallsnotizen.
 
 ## Skalierung
 

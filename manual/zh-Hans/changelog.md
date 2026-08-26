@@ -2,6 +2,40 @@
 
 一份可读的、逐版本记录 Suprnova 变更内容的日志。每个版本小节都是该版本的发布记录。当一个版本的版本提交与匹配的 `v<version>` 标签被原子性地推送时，这个版本就算发布了。按最新到最旧排列。
 
+## 1.3.4 - 2026-08-25
+
+### 新增
+
+- **读穿透磁盘接受一个 `copy` 标志，并且能跨后备磁盘完成 `copy` / `rename`。** 在 `ReadThroughConfig` 上设置 `copy: false`，就能在应答命中后备磁盘的读取时不把它们写穿过去，这会把这个磁盘变成一层透明的覆盖层，并把每一次取回都收窄到您所要的那个范围。`copy` 和 `rename` 现在会把一个只存在于后备磁盘上的源对象，流式传到主磁盘上的目的地；一次 `rename` 还会删掉后备磁盘上的源对象，这样之后的读取就不可能把这个被移走的对象复活。那些条件会跟着这条流式路径一起走：`if_not_exists` 仍然会拒绝一个已经存在的目的地，一次复制的源版本决定后备磁盘交出哪一个对象，而一次复制的 `if_match` 会被以 `Unsupported` 拒绝，而不是被悄悄丢掉。一次在中途失败的传输，只会移走它自己创建出来的那个目的地，所以它不可能毁掉一个本来就在那里的对象。
+- **防抖作业与防抖的已入队监听器。** `Job::debounce_for()` 会把一阵分发合并成一次运行，时间落在最近一次分发之后的一个窗口时长处，并且携带最新的那份载荷。它是 `push_unique` 的镜像 - 后者保住第一次分发，把其余的都压制掉。`Job::max_debounce_wait()` 阻止一阵连绵不断的分发把这份工作永远推迟下去，而 `Job::debounce_id(&self)` 把这个窗口按实体划定范围，所以对某一个订单的二十次更新会合并起来，而不会碰到另一个订单的。`Queue::push_debounced(job, DebounceOptions)` 在调用点设置这个窗口，而 `DebouncedListener::new(window, build).keyed_by(...)` 会给一个事件监听器做防抖，键从事件派生出来 - 一个朴素的 `QueuedListener` 本来就已经遵从作业自己声明的窗口。每一次分发仍然会入队；合并是在工作进程那边结算的，它会把一个被取代的信封确认掉，并发出 `JobDebounced`。防抖是失败开放的：一个过期或被淘汰的窗口会让这个作业跑起来，而不是把它丢掉。每一次真正的运行都会开启一个全新的最大等待窗口，所以一阵分发总是从它自己的第一次分发开始计量它的最大等待时长，而不会继承上一阵的。一个作业不能同时声明 `debounce_for` 和 `unique_id`，而链和批次会拒绝一个防抖的作业 - 一个被取代的链环会把这条链的其余部分晾在那里，而一个被取代的批次作业，会让这个批次的待办计数永远停在零以上。信封为此携带了两个附加字段，而对每一次非防抖的推送，它在传输格式上仍然逐字节相同。
+
+- **`Storage::register_read_through` 把两个磁盘组合成一个读穿透磁盘。** 读取和元数据先对着主磁盘解析，然后回退到第二个磁盘；任何在后备磁盘上找到的东西都会被写穿到主磁盘上，所以一次存储迁移能在真实流量之下完成。写入和列举留在主磁盘上，而一次删除会把这个对象从两个磁盘上都移走。当一次失败的提升必须浮现出来、而不是退化成一次后备读取时，请设置 `throw_on_promotion_failure`。一次提升是原子地发布出去的，所以没有任何读取方能看到一个写了一半的对象，而且它会把后备对象的内容类型、缓存控制、内容处置、内容编码和用户元数据都带过去。一次带版本的或者条件的读取，会带着它的条件原封不动地被传递下去，被应答，但不会被提升。
+- **`Queue::forward` 按名字重定向一整个队列。** `Queue::route` 是按作业类型定键的，而 `Queue::forward("default", "high")` 是按队列名字定键的 - 这是那根用来退役一个池子、吸收一批积压，或者把工作从一个您即将下线的池子上挪走的杠杆，不需要碰任何一个作业或者路由。它在两侧都生效：新的、解析到了 `default` 的推送会落在 `high` 上，*并且*一个以 `--queue=default` 启动的工作进程会去排空 `high`，所以目的队列不会攒下没人认领的工作。转发 `default` 会捕获那些没有点名任何队列的作业。一次转发是一次单一的查找，绝不成链，所以一次对调（在 `a -> b` 之上还注册了 `b -> a`）或者一次更长的轮换，是一次说得通的池子交换，而不是一个环 - 和 Laravel 完全一样，它的解析器就是这同一次单一查找。暂停仍然是按一个工作进程启动时所用的那些名字来求值的，所以 `Queue::pause(&connection, "default")` 会停住那个工作进程，哪怕 `default` 正被转发。`Queue::forward_on(from, to, connection)` 把一次转发限制到一个连接名字上，比较的对象是这个进程的连接名字，而不是某个作业声明的连接，所以这次重定向的两半是按同一个值把关的。`Queue::forward_for(from)` 把一条转发读回来，而 `Queue::try_forward` 是那个可失败的对应方法。那几个检查调用（`Queue::pending_jobs` 及其兄弟方法）刻意不跟随转发，所以一个被转发的队列上遗留下来的积压仍然保持可见。
+
+- **读形状的 Redis 命令会重试一次瞬时故障，而不是把它浮现出来。** 连接管理器本来就已经在后台重连了，但撞上那个死套接字的命令，仍然让您这次调用失败了。`GET`、`EXISTS`、`Cache::flush` / `Cache::flush_tags` 背后的那些 `SCAN` 和 `SSCAN` 分页、队列驱动程序的 `XLEN` / `ZCARD` / `XPENDING` 读取，以及限流器的 `Retry-After` 计算，现在都会在一小段停顿之后重试一次。`REDIS_COMMAND_RETRIES` 在此之上追加重试，上限夹在 10。请按秒而不是按毫秒来给这次重试做预算：第二次尝试要等待替换连接就位，所以它要付掉这个驱动程序的整个连接预算和响应预算，而且一条超时的命令和一个被断开的套接字一样都算瞬时故障。写操作在任何设置下都绝不重试：一个瞬时错误意味着连接失败了，而不是服务器拒绝了这条命令，所以重复一次 `SET`、一次 `INCR`、一次锁获取、一次限流计数，或者一次队列弹出，都可能让它跑两遍。错误消息没有变化，所以任何基于它们做匹配的东西都照常工作。
+- **一个被暂停的工作进程现在会告诉您它被暂停了。** `queue:work` 会为每一次状态转变打印一行 - `2026-08-25 14:03:11 Queue billing PAUSED`，回来的时候则是 `RESUMED` - 而且这个工作进程会发出 `WorkerQueuePaused` / `WorkerQueueResumed`，好让您把同样的信号路由进您自己的告警系统。这是工作进程那一侧的一对；已有的 `QueuePaused` / `QueueResumed` 是在跑 `queue:pause` 的那个进程里触发的，而那绝不会是工作进程，所以在此之前，一个因为有人暂停了它的队列而安静下来的工作进程，和一个卡死了的工作进程是分辨不出来的。每一个事件为每一次状态转变各触发一次，而不是每轮询一次就触发一次。它们的 `queue` 字段是可选的：一个不带 `--queue` 启动的工作进程会排空一切，在 `pause_all` 之下它没有队列名字可以报告，所以它报告的是 `None`，而不是编出一个监听器可能拿去匹配的名字。
+- **`?include=` 的路径被限制在五段之内，而 `max_relationship_depth` 可以挪动这个上限。** 一张有环的关系图，会把 `?include=author.posts.author.posts...` 变成一场由客户端控制的扇出，唯一的界限就是查询字符串。路径现在会在解析的过程中就被截断；在 `bootstrap::register()` 里调用 `suprnova::max_relationship_depth(n)` 可以改这个上限，或者传 `0` 把 include 整个关掉。
+- **`Gt`、`Gte`、`Lt` 和 `Lte` 把一个字段与一个数字、或者与另一个字段做比较。** `CompareWith` 用一个值同时点出操作数和度量方式：`Number` 用于一个字面量，`NumericField` 用于一个数值型的兄弟字段，而 `LengthField` 用于一个按字符数比较的兄弟字段。一个这条规则量不出来的操作数，会让这个字段失败，而不是 panic。
+- **有三条成员资格规则加入了内置集合：`InArray`、`Contains` 和 `DoesntContain`。** `InArray` 拿一个值去对另一个字段的列表做检查，而且您是直接把列表传进去的，不是在一个规则字符串里点这个字段的名字。`Contains` 和 `DoesntContain` 作用在一个 JSON 数组上，并且只把一个参数与字符串元素相匹配，所以 `1` 和 `"1"` 仍然是两回事。
+- **数据库连接池现在有了存活性旋钮。** `DB_IDLE_TIMEOUT`、`DB_MAX_LIFETIME`、`DB_ACQUIRE_TIMEOUT`、`DB_TEST_BEFORE_ACQUIRE` 和 `DB_PING_AFTER_IDLE` 控制着连接池什么时候关闭、回收和 ping 一条连接，并配有对应的 `DatabaseConfig::builder()` 设置方法。每一个默认都是未设置的，所以一个既有部署的连接池行为和以前完全一样。当一个 NAT 网关或者防火墙会丢弃空闲连接时，请用它们：sqlx 没有暴露任何与 libpq `keepalives_*` 等价的东西，所以连接池回收就是那个机制。
+- **`db:seed <Class>` 会报告它的进度。** 一次有针对性的运行会在这个填充器之前打印一行 `RUNNING`，在它之后打印一行带耗时毫秒数的 `DONE`。一个光秃秃的 `db:seed` 保持沉默。那个格式化函数 `suprnova::two_column_detail`，您自己的 `#[command]` 处理程序也能用。
+- **多对多关系现在可以按中间表的列过滤了。** `where_pivot`、`where_pivot_op`、`where_pivot_in`、`where_pivot_not_in`、`where_pivot_null`、`where_pivot_not_null`、`where_pivot_between`、`where_pivot_not_between`、`where_pivot_group` 以及它们的 `or_` 孪生方法，会约束 `BelongsToMany`、`MorphToMany` 和 `MorphedByMany` 上的 `get`、`first` 和 `count`。`where_pivot_group` 接受一个闭包，并渲染成一个带括号的分组，所以它在紧随其后的一个 `or_where_pivot` 里仍然保持为一个整体。中间表过滤器只作用于读取：只要设了一个，`attach`、`attach_with`、`detach` 和 `sync` 就会返回一个错误，而预加载也不会把它们带上。
+- **`where_binary` 逐字节地比较列的值。** 这一家子（`where_binary`、`or_where_binary`、`where_not_binary`、`or_where_not_binary`）发布在 `Builder<M>` 上，而 `where_binary` 和 `where_not_binary` 还发布在 `DB::table(...)` 上。MySQL 和 MariaDB 发出 `= binary`；Postgres 和 SQLite 会在这条查询渲染时返回一个错误，而不是回退成一次取决于排序规则的匹配。
+- **`Builder::try_to_sql_with_bindings_for` 为某个方言渲染 SQL，而不会 panic。** 它是 `to_sql_with_bindings_for` 那个可失败的对应方法，用于一个构造器确实没法为某个后端渲染出来的场合。
+- **`Model::refresh_for_update` 会在一把 `FOR UPDATE` 锁之下重新加载一行。** 当您需要在一条语句里同时拿到这一行的当前状态和那把排他锁时，请在一个事务内部调用它。SQLite 没有行级锁，所以那个锁子句在那里是一次空操作。
+- **`Builder::or_where_key` 和 `Builder::or_where_key_not` 以“或”的关系加上主键过滤。** 两者都会像 `or_where` 那样折进前面那个 `WHERE` 子句，而且两者都带有 `or_filter_key` 和 `or_filter_key_not` 别名。
+- **`Builder::in_order_of` 把行排进一个明确的序列。** 传一个列，以及您想要的那个顺序的那些值；值不在列表里的行排在最后。这些值是作为参数绑定的，所以从请求数据里取也是安全的。
+
+### 修复
+
+- **维护模式的绕过 cookie 现在在服务端过期。** 那个 12 小时的 TTL 原本是一个由浏览器执行的 `max-age`，所以一个被截获的 cookie 会一直有效，直到您轮换密钥为止。加密的载荷现在携带着这个截止时间，而且每一个请求都会重新检查它。
+- **`suprnova serve` 能跑一个没有前端的项目。** 一个用 `suprnova new --api` 脚手架出来的项目没有 `frontend/` 目录，而 `serve` 以前会用“No frontend directory found. Are you in a Suprnova project directory?”拒绝它，除非您传了 `--backend-only`。现在它会跳过 Vite 那一格，以及喂给它的那次 TypeScript 生成，然后把后端跑起来。在这样的项目上，`--frontend-only` 仍然会失败，并带着一条说明原因的消息。
+
+### 升级
+
+- **本次发布之前签发的绕过 cookie 会失效。** 这个 cookie 的载荷从光秃秃的密钥，变成了一个封好的 `{ secret, expires_at }` 对象，而一个没有截止时间的载荷会被拒绝。升级之后请访问一次那个密钥 URL，拿一个新的 cookie。别的都没变：`down`、`up`、`--secret` 和 `--with-secret` 的行为都和以前一样。
+- **一条长于五段的 include 路径，现在返回它前五个关系，而不是全部。** 资源允许列表之外的东西从来就够不着，所以没有哪个响应会因此多出数据；只是一条很深的路径会丢掉它的尾巴。有一个状态码会随之改变：一条过深的尾巴点了一个这个资源并不允许的关系的路径，会在任何东西开始校验之前就被截断，所以它现在会带着活下来的那几段返回 `200`，而完整路径以前返回的是 `400` - 请调整任何对那次拒绝做断言的客户端或者测试。如果您的 API 有文档写明的路径比那还长，请用 `suprnova::max_relationship_depth(n)` 把上限抬高。
+- **`DatabaseConfig` 多了五个公开字段。** 用结构体字面量来构建它的代码不再能编译。请用 `DatabaseConfig::from_env()` 或者 `DatabaseConfig::builder()`，两者都会用那些保持今天连接池行为的默认值把新字段填上。
 ## 1.3.3 - 2026-08-25
 
 ### 新增
@@ -16,7 +50,7 @@
 - **一套 Laravel 形状的图像子系统，位于 `suprnova::media` 里、默认开启的 `media` feature 之后。** `Image::from_bytes/from_path/from_disk/from_upload/from_stream` 构建出一条惰性管道 - `resize`、`scale`、`crop`、`cover`、`contain`、任意角度的 `rotate`、`flip_vertically`/`flip_horizontally`、`blur`、`sharpen`、`grayscale`、`to_format`、`quality` - 最后用 `to_bytes`、`to_response`、`save`、`store`、`dimensions`、`mime_type` 或者 `dominant_color` 收尾。它读写 PNG、JPEG、WebP、GIF 和 BMP；AVIF 输出推迟到那个自研的 AV1 编码器发布之后，到那时它就是一个新的 `OutputFormat` 变体，除此之外别无改动。和 Laravel 的 `gd`/`imagick` 分野一样，这里有两个驱动程序：`IMAGE_DRIVER=oxideav`（默认）跑在纯 Rust 的 [OxideAV](https://github.com/OxideAV) 编解码器家族之上，没有原生库，也没有东西要装；而 `IMAGE_DRIVER=magick` 会去调用一个宿主上安装好的 ImageMagick 7，以换取更宽的输入支持，包括 HEIC。解码限制（`IMAGE_MAX_DIMENSION`、`IMAGE_MAX_ALLOC_BYTES`）会在分配任何东西之前，对着输入自己的文件头做检查 - 包括一个扩展 WebP 的内层比特流，它那个仅供参考的画布尺寸没法被用来把一个更大的帧偷运过这道关卡 - 而且所有像素工作都跑在一个阻塞线程上。`magick` 驱动程序会按名字钉死输入的编解码器，而不是让 ImageMagick 从字节里自己挑一个，并且用 `IMAGE_MAGICK_TIMEOUT_SECS` 给每一次调用设界。`ImageDriver` 是通往其他一切的 trait 边界。这个模块之所以叫 `media`，是因为由 OxideAV 支撑的音频和视频表面将来会挨着它住。[图像](../images.md)
 - **WebP 那道关卡带着一个固定的、不可配置的界限。** 一个 WebP 会把它真正的解码尺寸声明在最内层的比特流 chunk 里，所以框架会走一遍这个容器去把它找出来；那次遍历每层最多访问 4096 个 chunk，并且只跟进两层嵌套，超出其中任何一条的文件都会被拒绝，而不是被测量。从一次没走完的遍历里报出一个数字，会造就一道只要堆上足够多的填充 chunk 就能绕过去的关卡。没有任何 `IMAGE_MAX_*` 变量会影响它，错误信息里也是这么说的。一段 300 帧的动画不受影响；一段 4100 帧的会被拒绝。[图像](../images.md#one-bound-is-not-configurable)
 
-- **OAuth can now be installed without replacing an application's existing password and session authority.** `MagnetarOAuthOnlyConfig` and `init_magnetar_oauth_only` install the default ceremony and provider engine while leaving the password and passkey slots empty. Applications with an existing `users` table can call `verify_oauth_identity`, map the verified provider subject themselves, and establish their normal framework session.
+- **现在可以安装 OAuth，而不必取代一个应用已有的密码与会话权威。** `MagnetarOAuthOnlyConfig` 和 `init_magnetar_oauth_only` 会安装默认的认证仪式引擎和提供方引擎，同时把密码和 passkey 的槽位留空。已经有一张 `users` 表的应用，可以调用 `verify_oauth_identity`，自己把已验证的提供方 subject 映射过去，然后建立它自己平常的那个框架会话。
 
 ### 变更
 
@@ -30,7 +64,7 @@
 
 ### 修复
 
-- **Installing OAuth no longer forces provider-backed applications into Magnetar web-binding validation.** The full `init_magnetar` path remains atomic and unchanged. The OAuth-only path reserves the engine slots during construction, publishes only OAuth, and fails rather than mixing two authentication authorities.
+- **现在安装 OAuth，不再强迫那些由提供方支撑的应用去走 Magnetar 的 web 绑定校验。** 完整的 `init_magnetar` 那条路径仍然是原子的，也没有变化。仅 OAuth 那条路径会在构建期间就把那些引擎槽位预留下来，只发布 OAuth，并且宁可失败，也不把两个认证权威来源混在一起。
 
 ### 升级
 
@@ -38,7 +72,7 @@
 - **`EnvelopeOverrides` 获得了一个公开的 `after_commit: Option<bool>` 字段。** 本仓库和脚手架模板里的每一处构造都用了 `..Default::default()`，不需要任何改动。用穷尽式结构体字面量来构建一个 `EnvelopeOverrides` 的代码，必须把这个新字段点出来；`after_commit: None` 保持今天的行为，也就是听从 `Job::after_commit()`。别的都没变：`after_commit()` 默认为 `false`，所以没有哪个既有作业会开始等待一次它以前并不等待的提交。
 - **`Envelope` 获得了一个公开的 `unique_lock_owner: Option<String>` 字段。** 传输格式没有变化 - 这个字段是 `#[serde(default)]` 的，并且在为 `None` 时被跳过，所以信封在两个方向上都能逐字节地往返，`schema_version` 也仍然停在 2 - 但任何用结构体字面量来构建一个 `Envelope` 的代码，现在都必须把它点出来。请加上 `unique_lock_owner: None`，除非您是有意要把一把唯一性锁带过这次推送。只读取信封、或者通过 `Queue::push` 及其兄弟方法来构建信封的代码，不需要任何改动。
 
-- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application already owns users, passwords, framework sessions, and remember-me state. OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications continue to use `complete`.
+- 当应用已经自己拥有用户、密码、框架会话和记住我状态时，请使用 `init_magnetar_oauth_only`，而不是 `init_magnetar`。仅 OAuth 的回调使用 `verify_oauth_identity`；完整的 Magnetar 应用继续使用 `complete`。
 
 ## 1.3.2 - 2026-08-25
 

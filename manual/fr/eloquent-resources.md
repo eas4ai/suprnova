@@ -251,9 +251,40 @@ pub struct PostResource {
 Une requête qui nomme un chemin d'include absent de l'allowlist de
 cette ressource reçoit une enveloppe d'erreurs JSON:API 400.
 
+### Plafond de profondeur
+
+Un chemin d'include peut porter au plus cinq segments.
+`?include=a.b.c.d.e.f` est tronqué en `a.b.c.d.e` avant que quoi que ce
+soit ne le parcoure, à l'image du `JsonApiResource::$maxRelationshipDepth`
+de Laravel. Changez le plafond une fois à l'amorçage :
+
+```rust
+// Dans bootstrap::register()
+suprnova::max_relationship_depth(3);
+```
+
+Le plafond compte parce qu'un graphe de relations peut être cyclique :
+`?include=author.posts.author.posts...` coûte davantage de travail à
+chaque segment qu'un client tape, et rien d'autre ne le borne que la
+longueur de la chaîne de requête. La troncature ne fait que retirer des
+segments, jamais en ajouter, et chaque niveau vérifie encore sa propre
+allowlist avant de descendre - un chemin tronqué ne peut donc jamais
+atteindre des données que le chemin complet ne pouvait pas atteindre.
+
+Une conséquence mérite d'être connue : un segment au-delà du plafond est
+abandonné avant que l'allowlist ne le voie. Avec un plafond de 2,
+`?include=author.posts.secrets` retourne 200 avec `author` et `posts`
+inclus, plutôt que le 400 que vaudrait le chemin complet, parce que
+`secrets` n'existe plus au moment où quoi que ce soit le valide.
+
+`max_relationship_depth(0)` désactive entièrement les includes. Le 0 de
+Laravel émet quand même le premier saut, parce que son plafonnement ne
+s'applique qu'à la queue, une fois le segment de tête détaché ; le 0 de
+Suprnova veut dire aucune relation du tout.
+
 ### Pourquoi Suprnova diverge
 
-Deux divergences visibles par rapport au `JsonApiResource` de Laravel :
+Trois divergences visibles par rapport au `JsonApiResource` de Laravel :
 
 1. **Refus par défaut strict pour `?include=`.** La couche de
    ressources de Laravel ignore silencieusement les chemins d'include
@@ -271,6 +302,13 @@ Deux divergences visibles par rapport au `JsonApiResource` de Laravel :
    lui-même - `.created()` quand c'est votre intention, `.status(204)`
    quand la réponse est vide, et ainsi de suite. Un seul mutateur reste
    honnête sous n'importe quel flux.
+
+3. **Un plafond de profondeur de `0` désactive entièrement les
+   includes.** Laravel ne plafonne que la queue d'un chemin, une fois
+   le segment de tête déjà détaché : son `0` émet donc encore le
+   premier saut. Suprnova tronque le chemin entier, si bien que
+   `max_relationship_depth(0)` veut dire aucune relation du tout - voir
+   Plafond de profondeur ci-dessus.
 
 ## Pagination
 

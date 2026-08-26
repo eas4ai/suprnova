@@ -164,6 +164,12 @@ pub(crate) enum WhereTerm {
     NotNull(String),
     Like(String, String),
     NotLike(String, String),
+    /// Byte-exact comparison from [`Builder::filter_binary`] and its
+    /// family: `(column, value, negated)`. Renders as MySQL's
+    /// `col = binary ?` / `col != binary ?`; every other backend
+    /// refuses at render time (see
+    /// `crate::database::binary_comparison_unsupported`).
+    Binary(String, String, bool),
     Column(String, String),
     Raw(String, Vec<Value>),
     JsonContains(String, Value),
@@ -171,6 +177,13 @@ pub(crate) enum WhereTerm {
     DatePart(DatePart, String, Value),
     Not(Box<WhereTerm>),
     Or(Vec<WhereTerm>),
+    /// A parenthesised conjunction: `(t1 AND t2 AND ...)`. Rendered as
+    /// one atom so an enclosing `Or` fold cannot split it. Built by the
+    /// closure forms of the pivot filters
+    /// ([`BelongsToMany::where_pivot_group`](crate::BelongsToMany::where_pivot_group)),
+    /// which is the only place a caller can hand the builder a list of
+    /// terms that must stay together. `Or` is the disjunctive twin.
+    Group(Vec<WhereTerm>),
     /// Correlated `EXISTS (...)` / `NOT EXISTS (...)` from
     /// [`Builder::has`] / [`Builder::where_has`] /
     /// [`Builder::doesnt_have`] / [`Builder::where_doesnt_have`] and the
@@ -259,6 +272,12 @@ pub(crate) enum OrderTerm {
     Col(String, Direction),
     Raw(String),
     Random,
+    /// `ORDER BY CASE WHEN col = ? THEN 0 ... ELSE <len> END` from
+    /// [`Builder::in_order_of`]. The values are bound, not inlined, so
+    /// the sequence can come from request data; the column is an
+    /// identifier and is validated by `Builder::validate_inputs`
+    /// before the renderer ever sees it.
+    InOrderOf(String, Vec<Value>),
 }
 
 /// Row-locking hint applied to a SELECT.
@@ -728,7 +747,12 @@ fn validate_raw_placeholders(sql: &str, binding_count: usize) -> Result<(), Fram
 /// carries. Free function (not a method) so [`Builder::validate_inputs`]
 /// can recurse via `Not` / `Or` without monomorphisation noise on
 /// `M`. See [`Builder::validate_inputs`] for the full contract.
-fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
+///
+/// `pub(crate)` because the pivot-filter accumulator (`PivotFilters`,
+/// in `eloquent::relations::pivot_filters`) renders its terms into
+/// hand-built SQL that `validate_inputs` never sees, so it has to run
+/// this pass itself before rendering.
+pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
     use crate::database::{validate_identifier, validate_sql_operator};
     match term {
         WhereTerm::Eq(c, _)
@@ -740,6 +764,7 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
         | WhereTerm::NotNull(c)
         | WhereTerm::Like(c, _)
         | WhereTerm::NotLike(c, _)
+        | WhereTerm::Binary(c, _, _)
         | WhereTerm::JsonContains(c, _)
         | WhereTerm::DatePart(_, c, _) => {
             validate_identifier(c)?;
@@ -759,7 +784,7 @@ fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError> {
             validate_raw_placeholders(sql, bindings.len())?;
         }
         WhereTerm::Not(inner) => validate_where_term(inner)?,
-        WhereTerm::Or(terms) => {
+        WhereTerm::Or(terms) | WhereTerm::Group(terms) => {
             for t in terms {
                 validate_where_term(t)?;
             }
@@ -854,6 +879,9 @@ impl<M> Builder<M> {
         for o in &self.orders {
             match o {
                 OrderTerm::Col(c, _) => {
+                    validate_identifier(c)?;
+                }
+                OrderTerm::InOrderOf(c, _) => {
                     validate_identifier(c)?;
                 }
                 OrderTerm::Raw(_) | OrderTerm::Random => {
@@ -1192,25 +1220,23 @@ impl<M> Builder<M> {
     /// clause to form a disjunction. If there is no previous clause,
     /// the new equality stands alone.
     #[doc(alias = "or_where")]
-    pub fn or_filter(mut self, col: impl IntoColumn, val: impl IntoVal) -> Self {
+    pub fn or_filter(self, col: impl IntoColumn, val: impl IntoVal) -> Self {
         let new = WhereTerm::Eq(col.col_name(), val.into_val());
-        match self.where_terms.last_mut() {
-            Some(WhereTerm::Or(group)) => group.push(new),
-            Some(_) => {
-                // Pop the previous term and wrap both in an Or group.
-                let last = self
-                    .where_terms
-                    .pop()
-                    .expect("checked Some in match arm above");
-                self.where_terms.push(WhereTerm::Or(vec![last, new]));
-            }
-            None => {
-                // No prior clause - the disjunction reduces to the new
-                // equality. Push as a plain Eq so the renderer doesn't
-                // emit a dangling `()` wrapper.
-                self.where_terms.push(new);
-            }
-        }
+        self.or_push_term(new)
+    }
+
+    /// Fold an already-built term into the preceding WHERE clause as a
+    /// disjunction.
+    ///
+    /// Every self-consuming `or_*` method routes through here so the three
+    /// cases stay in one place: append into a trailing `Or` group so
+    /// consecutive `or_*` calls stay flat, wrap the previous term and the new
+    /// one when the last clause is a plain term, and - with no prior clause -
+    /// push the term plain so the renderer doesn't emit a dangling `()`
+    /// wrapper around a single disjunct. Just [`Self::merge_or_term`] adapted
+    /// to the builder's consuming style; see there for the actual logic.
+    fn or_push_term(mut self, new: WhereTerm) -> Self {
+        self.merge_or_term(new);
         self
     }
 
@@ -1396,6 +1422,73 @@ impl<M> Builder<M> {
     #[doc(alias = "filter_not_like")]
     pub fn where_not_like(self, col: impl IntoColumn, pattern: impl Into<String>) -> Self {
         self.filter_not_like(col, pattern)
+    }
+
+    // ---- Byte-exact comparison (Laravel `whereBinary`) -------------------
+
+    /// `WHERE col = binary val` - compare the raw bytes instead of the
+    /// column's collation, so the match is case- and accent-sensitive.
+    ///
+    /// **MySQL and MariaDB only.** Postgres and SQLite have no `binary`
+    /// operator modifier; on those backends every terminal on this
+    /// builder returns `Err` when the statement renders, before any
+    /// I/O. That is deliberate: falling back to a plain `=` would
+    /// compare under the column's collation and return rows the caller
+    /// asked to exclude, and a wrong answer is worse than an error.
+    #[doc(alias = "where_binary")]
+    pub fn filter_binary(mut self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.where_terms
+            .push(WhereTerm::Binary(col.col_name(), val.into(), false));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_binary`].
+    #[doc(alias = "filter_binary")]
+    pub fn where_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.filter_binary(col, val)
+    }
+
+    /// `WHERE (... OR col = binary val)` - [`Self::filter_binary`]
+    /// folded into the previous clause as a disjunction. Same backend
+    /// split.
+    #[doc(alias = "or_where_binary")]
+    pub fn or_filter_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        let term = WhereTerm::Binary(col.col_name(), val.into(), false);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_binary`].
+    #[doc(alias = "or_filter_binary")]
+    pub fn or_where_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.or_filter_binary(col, val)
+    }
+
+    /// `WHERE col != binary val` - the negated form of
+    /// [`Self::filter_binary`]. Same backend split.
+    #[doc(alias = "where_not_binary")]
+    pub fn filter_not_binary(mut self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.where_terms
+            .push(WhereTerm::Binary(col.col_name(), val.into(), true));
+        self
+    }
+
+    /// Laravel-shape alias for [`Self::filter_not_binary`].
+    #[doc(alias = "filter_not_binary")]
+    pub fn where_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.filter_not_binary(col, val)
+    }
+
+    /// `WHERE (... OR col != binary val)`. Same backend split.
+    #[doc(alias = "or_where_not_binary")]
+    pub fn or_filter_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        let term = WhereTerm::Binary(col.col_name(), val.into(), true);
+        self.or_push_term(term)
+    }
+
+    /// Laravel-shape alias for [`Self::or_filter_not_binary`].
+    #[doc(alias = "or_filter_not_binary")]
+    pub fn or_where_not_binary(self, col: impl IntoColumn, val: impl Into<String>) -> Self {
+        self.or_filter_not_binary(col, val)
     }
 
     // ---- Date / time parts -----------------------------------------------
@@ -1599,6 +1692,44 @@ impl<M> Builder<M> {
     /// helper.
     pub fn in_random_order(mut self) -> Self {
         self.orders.push(OrderTerm::Random);
+        self
+    }
+
+    /// `ORDER BY` an explicit sequence of values - rows whose column
+    /// matches the first value come first, then the second, and so on.
+    /// Anything not in the list sorts after everything that is.
+    ///
+    /// Mirrors Laravel's `inOrderOf`. An empty `values` adds no
+    /// ordering at all, so a caller can pass a sequence it built
+    /// conditionally without special-casing the empty result.
+    ///
+    /// The values are bound as parameters, so they are safe to take
+    /// from untrusted input. `col` is **not** - it is an SQL
+    /// identifier interpolated into the statement, same contract as
+    /// every other [`IntoColumn`] argument.
+    ///
+    /// For a column that uses the `AsEnum<E>` cast, pass each variant
+    /// through `as_ref()`: that is exactly the string the cast writes
+    /// to the column (`AsEnum::to_storage`), and a `Serialize`-derived
+    /// spelling can differ from it.
+    ///
+    /// ```rust,ignore
+    /// User::query()
+    ///     .in_order_of("role", ["admin", "member", "guest"])
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn in_order_of<C, V, I>(mut self, col: C, values: I) -> Self
+    where
+        C: IntoColumn,
+        V: IntoVal,
+        I: IntoIterator<Item = V>,
+    {
+        let vals: Vec<Value> = values.into_iter().map(IntoVal::into_val).collect();
+        if vals.is_empty() {
+            return self;
+        }
+        self.orders.push(OrderTerm::InOrderOf(col.col_name(), vals));
         self
     }
 
@@ -2139,7 +2270,12 @@ fn render_exists(
 /// database rejects the statement. The `Raw` escape hatch is left
 /// verbatim: the caller owns its qualification the same way it owns the
 /// trust boundary the validator skips for it.
-fn render_subquery_term(
+///
+/// `pub(crate)` because the pivot-filter accumulator (`PivotFilters`,
+/// in `eloquent::relations::pivot_filters`) reuses it to splice pivot
+/// predicates into the relations' hand-built pivot statements, which
+/// are not built from a `Builder` at all.
+pub(crate) fn render_subquery_term(
     backend: DbBackend,
     qualifier: Option<&str>,
     term: &WhereTerm,
@@ -2234,6 +2370,12 @@ fn render_subquery_term(
             values.push(SeaValue::String(Some(pat.clone())));
             format!("{} NOT LIKE {ph}", q(col))
         }
+        WhereTerm::Binary(col, val, not) => {
+            *n += 1;
+            let ph = placeholder(backend, *n)?;
+            values.push(SeaValue::String(Some(val.clone())));
+            render_binary(backend, &q(col), *not, &ph)?
+        }
         WhereTerm::Column(a, b) => format!("{} = {}", q(a), q(b)),
         WhereTerm::Raw(sql, bindings) => {
             let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
@@ -2268,8 +2410,47 @@ fn render_subquery_term(
                 .collect::<Result<Vec<_>, _>>()?;
             format!("({})", parts.join(" OR "))
         }
+        WhereTerm::Group(terms) => {
+            let parts: Vec<String> = terms
+                .iter()
+                .map(|t| render_subquery_term(backend, qualifier, t, values, n))
+                .collect::<Result<Vec<_>, _>>()?;
+            if parts.is_empty() {
+                // An empty group has no way to reach here through the
+                // public surface - `PivotFilters::group_from` drops a
+                // no-op closure before it becomes a term - but `()` is
+                // a syntax error in every backend, so render the
+                // always-true identity instead of emitting one.
+                "1 = 1".to_string()
+            } else {
+                format!("({})", parts.join(" AND "))
+            }
+        }
         WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
     })
+}
+
+/// Render a byte-exact comparison.
+///
+/// MySQL and MariaDB carry it as the `binary` operator modifier, which
+/// forces the comparison onto the raw bytes instead of the column's
+/// collation. The operator itself is synthesised here from the term's
+/// `negated` flag and never taken from a caller, so it does not go
+/// through the SQL-operator allowlist.
+fn render_binary(
+    backend: DbBackend,
+    col: &str,
+    not: bool,
+    ph: &str,
+) -> Result<String, FrameworkError> {
+    let op = if not { "!=" } else { "=" };
+    match backend {
+        DbBackend::MySql => Ok(format!("{col} {op} binary {ph}")),
+        DbBackend::Postgres | DbBackend::Sqlite => {
+            Err(crate::database::binary_comparison_unsupported(backend))
+        }
+        _ => Err(crate::database::unsupported_database_backend(backend)),
+    }
 }
 
 fn render_json_contains(backend: DbBackend, col: &str, ph: &str) -> Result<String, FrameworkError> {
@@ -2395,6 +2576,12 @@ impl<M> Builder<M> {
                 values.push(SeaValue::String(Some(pat.clone())));
                 format!("{col} NOT LIKE {ph}")
             }
+            WhereTerm::Binary(col, val, not) => {
+                *n += 1;
+                let ph = placeholder(backend, *n)?;
+                values.push(SeaValue::String(Some(val.clone())));
+                render_binary(backend, col, *not, &ph)?
+            }
             WhereTerm::Column(a, b) => format!("{a} = {b}"),
             WhereTerm::Raw(sql, bindings) => {
                 let rendered = rewrite_raw_placeholders(backend, sql, bindings.len(), *n)?;
@@ -2429,24 +2616,60 @@ impl<M> Builder<M> {
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
+            WhereTerm::Group(terms) => {
+                let parts: Vec<String> = terms
+                    .iter()
+                    .map(|t| Self::render_where_term(backend, t, values, n))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if parts.is_empty() {
+                    // See the matching arm in `render_subquery_term`:
+                    // `()` is invalid SQL, so an empty group renders as
+                    // the always-true identity.
+                    "1 = 1".to_string()
+                } else {
+                    format!("({})", parts.join(" AND "))
+                }
+            }
             WhereTerm::Exists(spec) => render_exists(backend, spec, values, n)?,
         })
     }
 
-    fn render_orders(&self) -> String {
+    /// Render the ORDER BY list.
+    ///
+    /// Takes the statement's binding vector and placeholder counter
+    /// because [`OrderTerm::InOrderOf`] emits bound parameters. ORDER
+    /// BY renders after WHERE and HAVING and before the UNION arms, so
+    /// pushing here keeps Postgres `$N` numbering monotonic with the
+    /// SQL text - see the union comment in `render_select_into`.
+    fn render_orders(
+        &self,
+        backend: DbBackend,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+    ) -> Result<String, FrameworkError> {
         if self.orders.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
-        let parts: Vec<String> = self
-            .orders
-            .iter()
-            .map(|o| match o {
+        let mut parts: Vec<String> = Vec::with_capacity(self.orders.len());
+        for o in &self.orders {
+            let rendered = match o {
                 OrderTerm::Col(col, dir) => format!("{col} {}", dir.sql()),
                 OrderTerm::Raw(sql) => sql.clone(),
                 OrderTerm::Random => "RANDOM()".to_string(),
-            })
-            .collect();
-        format!(" ORDER BY {}", parts.join(", "))
+                OrderTerm::InOrderOf(col, vs) => {
+                    let mut cases = String::new();
+                    for (idx, v) in vs.iter().enumerate() {
+                        *n += 1;
+                        let ph = placeholder(backend, *n)?;
+                        values.push(json_value_to_sea_value(v));
+                        cases.push_str(&format!(" WHEN {col} = {ph} THEN {idx}"));
+                    }
+                    format!("CASE{cases} ELSE {} END", vs.len())
+                }
+            };
+            parts.push(rendered);
+        }
+        Ok(format!(" ORDER BY {}", parts.join(", ")))
     }
 
     fn render_having(
@@ -2659,7 +2882,7 @@ impl<M> Builder<M> {
         }
 
         sql.push_str(&self.render_having(backend, values, n)?);
-        sql.push_str(&self.render_orders());
+        sql.push_str(&self.render_orders(backend, values, n)?);
 
         if let Some(l) = self.limit {
             sql.push_str(&format!(" LIMIT {l}"));
@@ -3051,6 +3274,36 @@ where
         self.where_key_not(id)
     }
 
+    /// Laravel-shape `orWhereKey` - `WHERE (... OR pk = id)`. Folds
+    /// into the previous clause as a disjunction, the same way
+    /// [`Self::or_filter`] does, so it widens the result set instead of
+    /// narrowing it.
+    pub fn or_where_key(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        self.or_filter(pk, id)
+    }
+
+    /// Rust-idiomatic alias for [`Self::or_where_key`].
+    pub fn or_filter_key(self, id: impl IntoVal) -> Self {
+        self.or_where_key(id)
+    }
+
+    /// Laravel-shape `orWhereKeyNot` - `WHERE (... OR pk <> id)`.
+    ///
+    /// Emits the same `!=` comparison [`Self::where_key_not`] does, so
+    /// the two spellings render identically apart from the boolean that
+    /// joins them to the preceding clause.
+    pub fn or_where_key_not(self, id: impl IntoVal) -> Self {
+        let pk = M::primary_key_name();
+        let term = WhereTerm::Op(pk.to_string(), "!=".to_string(), id.into_val());
+        self.or_push_term(term)
+    }
+
+    /// Rust-idiomatic alias for [`Self::or_where_key_not`].
+    pub fn or_filter_key_not(self, id: impl IntoVal) -> Self {
+        self.or_where_key_not(id)
+    }
+
     /// Laravel-shape `latest()` - `ORDER BY <col> DESC`. Defaults to
     /// `"created_at"`; pass an explicit column to override.
     pub fn latest(self) -> Self {
@@ -3142,20 +3395,22 @@ where
     /// Render the SQL for the live DB connection's backend, returning
     /// both the SQL string and the bound values.
     ///
-    /// **Panics** when this builder contains an identifier or
-    /// operator that fails [`crate::database::validate_identifier`] /
-    /// [`crate::database::validate_sql_operator`] - the same
-    /// validation the execution path applies. The debug-only API
-    /// keeps an infallible signature; the execution path
-    /// ([`Self::get`] / [`Self::count`] / ...) surfaces the same
-    /// condition as `Err(FrameworkError)` instead.
+    /// **Panics** when this builder cannot render for that backend -
+    /// an identifier or operator that fails
+    /// [`crate::database::validate_identifier`] /
+    /// [`crate::database::validate_sql_operator`], or a
+    /// backend-specific clause such as [`Self::filter_binary`] on
+    /// Postgres or SQLite. The debug-only API keeps an infallible
+    /// signature; the execution path ([`Self::get`] / [`Self::count`]
+    /// / ...) surfaces the same condition as `Err(FrameworkError)`
+    /// instead.
     pub fn to_sql_with_bindings(&self) -> (String, Vec<SeaValue>) {
         let backend = DB::connection()
             .ok()
             .map(|db| db.inner().get_database_backend())
             .unwrap_or(DbBackend::Sqlite);
         self.render_select_for(backend, M::TABLE, "*")
-            .expect("to_sql_with_bindings: builder contains invalid identifier/operator")
+            .expect("to_sql_with_bindings: builder cannot render for the live connection's backend")
     }
 
     /// Render the SQL for a specific dialect. Useful when debugging
@@ -3167,9 +3422,36 @@ where
 
     /// Render the SQL for a specific dialect, returning both the SQL
     /// string and the bound values.
+    ///
+    /// **Panics** when the builder cannot render for `backend` - an
+    /// identifier or operator that fails validation, or a
+    /// backend-specific clause such as [`Self::filter_binary`] on
+    /// Postgres or SQLite. Use
+    /// [`try_to_sql_with_bindings_for`](Self::try_to_sql_with_bindings_for)
+    /// when you want that as an error; the execution path
+    /// ([`Self::get`] / [`Self::count`] / ...) always surfaces it as
+    /// `Err`.
     pub fn to_sql_with_bindings_for(&self, backend: DbBackend) -> (String, Vec<SeaValue>) {
+        self.try_to_sql_with_bindings_for(backend)
+            .expect("to_sql_with_bindings_for: builder cannot render for this backend")
+    }
+
+    /// Fallible sibling of [`Self::to_sql_with_bindings_for`], for the
+    /// cases where "this builder cannot render for this dialect" is an
+    /// answer rather than a bug - cross-dialect inspection, and
+    /// [`Self::filter_binary`], which only MySQL and MariaDB support.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::param`] when an identifier or
+    /// operator on the builder fails validation, or when a clause has
+    /// no rendering on `backend` - `filter_binary` on Postgres or
+    /// SQLite, for instance.
+    pub fn try_to_sql_with_bindings_for(
+        &self,
+        backend: DbBackend,
+    ) -> Result<(String, Vec<SeaValue>), FrameworkError> {
         self.render_select_for(backend, M::TABLE, "*")
-            .expect("to_sql_with_bindings_for: builder contains invalid identifier/operator")
     }
 
     /// Phase 10C T14 - log the rendered SQL via `tracing` and return
@@ -3261,13 +3543,20 @@ where
     /// The legacy `table` argument is retained for source compatibility but
     /// is deliberately ignored. Delete targets always come from `M::TABLE`;
     /// callers cannot inject or redirect the executable statement.
+    ///
+    /// **Panics** when a WHERE clause on this builder has no rendering
+    /// for `backend` - [`Self::filter_binary`] on Postgres or SQLite,
+    /// a raw fragment whose placeholders do not match its bindings, or
+    /// a backend this renderer does not know. The execution path
+    /// ([`Self::delete_all`]) surfaces the same condition as
+    /// `Err(FrameworkError)` instead.
     pub fn to_delete_sql_with_bindings_for(
         &self,
         backend: DbBackend,
         _table: &str,
     ) -> (String, Vec<SeaValue>) {
         self.render_model_delete_sql_with_bindings(backend)
-            .expect("SeaORM returned an unsupported backend to the pure SQL renderer")
+            .expect("to_delete_sql_with_bindings_for: builder cannot render for this backend")
     }
 
     fn render_model_delete_sql_with_bindings(

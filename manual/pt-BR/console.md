@@ -162,6 +162,11 @@ Em um registro vazio ele imprime um aviso e retorna `Ok(())` - invocar
 `db:seed` antes de registrar seeders é um erro benigno do usuário, não
 um erro de programador.
 
+`db:seed` relata o progresso de uma execução direcionada usando
+`suprnova::two_column_detail`, que renderiza um nome, uma linha
+pontilhada e um status como uma única linha de 80 colunas. Seus
+próprios comandos podem chamá-la para ter a mesma aparência.
+
 > Os daemons de worker (`queue:work`, `schedule:run`, `schedule:work`,
 > `schedule:list`, `workflow:work`) **não** estão no binário console.
 > Eles vivem no parser clap do binário app/server (o mesmo binário que
@@ -379,6 +384,7 @@ code.
 | `suprnova::console::dispatch_argv_with_init(argv, init)` | O mesmo que `dispatch_argv` mas executa a closure `init` entre o parse de argv do clap e o handler correspondido. O init só dispara quando um subcomando real corresponde - os caminhos de `--help` / `--version` / erro de parse o pulam. É isso que o binário `console` gerado por scaffold usa. |
 | `suprnova::console::set_version(&'static str)` | Registra a string de versão exposta via `--version` e em `--help`. Chame uma vez no início do `main`. O primeiro registro vence. |
 | `suprnova::console::find(name)`           | Procura um comando registrado pelo nome exato.   |
+| `suprnova::two_column_detail(left, right)` | Renderiza um nome, uma linha pontilhada e uma palavra de status como uma única linha de progresso de 80 colunas. Espelha o `$this->components->twoColumnDetail(...)` do Laravel. |
 | `suprnova::console::list()`               | Todos os comandos registrados, ordenados por nome.      |
 | `suprnova::CommandEntry`                  | Registro de inventory: `{ name, description, clap_builder, handler }`. Submetido pelas duas macros. |
 | `suprnova::CommandHandler`                | O tipo de function pointer do handler: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |

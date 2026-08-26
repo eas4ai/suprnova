@@ -6,6 +6,234 @@ versión se lanza cuando su commit de versión y la etiqueta
 `v<version>` correspondiente se publican de forma atómica. Las más
 recientes primero.
 
+## 1.3.4 - 2026-08-25
+
+### Añadido
+
+- **Los discos read-through toman un flag `copy` y resuelven `copy` /
+  `rename` a través del fallback.** Pon `copy: false` en
+  `ReadThroughConfig` para servir los aciertos del fallback sin
+  escribirlos a través, lo que convierte el disco en una superposición
+  transparente y estrecha cada obtención al rango que pediste. `copy` y
+  `rename` ahora transmiten en streaming hasta el destino del primario un
+  origen que vive solo en el fallback; un `rename` borra además el origen
+  del fallback, así que una lectura posterior no puede resucitar el objeto
+  movido. Las condiciones se llevan por ese camino de streaming:
+  `if_not_exists` sigue rechazando un destino existente, la versión de
+  origen de una copia selecciona qué objeto entrega el fallback, y el
+  `if_match` de una copia se rechaza con `Unsupported` en lugar de
+  descartarse en silencio. Una transferencia que falla a medias solo
+  elimina un destino que ella misma creó, así que no puede destruir un
+  objeto que ya estaba ahí.
+- **Jobs con antirrebote y oyentes encolados con antirrebote.**
+  `Job::debounce_for()` colapsa una ráfaga de despachos en una sola
+  ejecución, una ventana después del más reciente, y lleva el payload más
+  nuevo. Es el espejo de `push_unique`, que conserva el primer despacho y
+  suprime el resto. `Job::max_debounce_wait()` impide que una ráfaga
+  continua difiera el trabajo para siempre, y `Job::debounce_id(&self)`
+  acota la ventana por entidad, de modo que veinte actualizaciones de un
+  pedido colapsan sin tocar las de otro.
+  `Queue::push_debounced(job, DebounceOptions)` fija la ventana en el punto
+  de llamada, y
+  `DebouncedListener::new(window, build).keyed_by(...)` aplica antirrebote
+  a un oyente de eventos con la clave derivada del evento; un
+  `QueuedListener` normal ya respeta una ventana que declare el propio
+  job. Cada despacho se sigue encolando; el colapso se resuelve en el
+  worker, que hace ack de un sobre sustituido y emite `JobDebounced`. El
+  antirrebote falla abierto: una ventana expirada o desalojada ejecuta el
+  job en lugar de descartarlo. Cada ejecución real arranca una ventana de
+  espera máxima nueva, así que una ráfaga siempre mide su espera máxima
+  desde su propio primer despacho en lugar de heredar la de la ráfaga
+  anterior. Un job no puede declarar a la vez `debounce_for` y
+  `unique_id`, y las cadenas y los lotes rechazan un job con antirrebote:
+  un eslabón sustituido dejaría varado el resto de su cadena, y un job de
+  lote sustituido dejaría el contador de pendientes del lote por encima de
+  cero para siempre. El sobre lleva dos campos aditivos para esto y su
+  forma serializada sigue siendo byte a byte idéntica para todo push sin
+  antirrebote.
+- **`Storage::register_read_through` compone dos discos en un disco
+  read-through.** Las lecturas y los metadatos se resuelven primero contra
+  el primario y recurren al segundo disco; todo lo que se encuentra en el
+  fallback se escribe a través hacia el primario, así que una migración de
+  store se completa bajo tráfico real. Las escrituras y los listados se
+  quedan en el primario, y un borrado elimina el objeto de los dos discos.
+  Pon `throw_on_promotion_failure` cuando una promoción fallida tenga que
+  emerger en lugar de degradarse a una lectura del fallback. Una promoción
+  se publica de forma atómica, así que ningún lector puede ver un objeto a
+  medio escribir, y lleva consigo el tipo de contenido, el control de
+  caché, la disposición de contenido, la codificación de contenido y los
+  metadatos de usuario del objeto del fallback. Una lectura versionada o
+  condicional se transmite con su condición intacta y se sirve sin
+  promoverse.
+- **`Queue::forward` redirige una cola entera por su nombre.** Donde
+  `Queue::route` se indexa por tipo de job,
+  `Queue::forward("default", "high")` se indexa por nombre de cola: la
+  palanca para retirar un pool,
+  absorber trabajo acumulado o sacar trabajo de un pool que estás a punto
+  de apagar, sin tocar un solo job ni una sola ruta. Se aplica en los dos
+  lados: los pushes nuevos que resolvieron a `default` aterrizan en
+  `high`, *y* un worker arrancado con `--queue=default` drena `high`, así
+  que el destino no puede acumular trabajo que nadie reclama. Reenviar
+  `default` atrapa los jobs que no nombraron ninguna cola. Un reenvío es
+  una única búsqueda, nunca una cadena, así que intercambiar dos colas
+  (`a -> b` con `b -> a` también registrado), o una rotación más larga, es
+  un intercambio coherente de pools y no un bucle - exactamente como en
+  Laravel, cuyo resolutor es la misma búsqueda única. La pausa se sigue
+  evaluando sobre los nombres con los que se arrancó un worker, así que
+  `Queue::pause(&connection, "default")` para ese worker incluso mientras
+  `default` está reenviada.
+  `Queue::forward_on(from, to, connection)` restringe un reenvío a un
+  nombre de conexión, comparado con el nombre de conexión de este proceso
+  y no con la conexión declarada de un job, así que las dos mitades de la
+  redirección se condicionan por el mismo valor.
+  `Queue::forward_for(from)` lee un reenvío de vuelta, y
+  `Queue::try_forward` es la contraparte falible. Las llamadas de
+  inspección (`Queue::pending_jobs` y sus contrapartes) deliberadamente no
+  siguen un reenvío, así que el trabajo acumulado que queda atrás en una
+  cola reenviada sigue siendo visible.
+- **Los comandos de Redis con forma de lectura reintentan ante un fallo
+  transitorio en lugar de hacerlo emerger.** El gestor de conexiones ya
+  reconectaba en segundo plano, pero el comando que dio con el socket
+  muerto seguía haciendo fallar tu llamada. `GET`, `EXISTS`, las páginas
+  de `SCAN` y `SSCAN` que hay detrás de `Cache::flush` /
+  `Cache::flush_tags`, las lecturas `XLEN` / `ZCARD` / `XPENDING` del
+  driver de colas y el cálculo del `Retry-After` del limitador de
+  velocidad ahora reintentan una vez tras una pausa breve.
+  `REDIS_COMMAND_RETRIES` añade más reintentos por encima, acotados en 10.
+  Presupuesta el reintento en segundos y no en milisegundos: el segundo
+  intento espera a la conexión de reemplazo, así que cuesta el presupuesto
+  entero de conexión y de respuesta del driver, y un comando cuyo tiempo
+  de espera se agota cuenta como transitorio igual que uno caído. Las
+  escrituras nunca reintentan, con ningún ajuste: un error transitorio
+  significa que la conexión falló, no que el servidor rechazara el
+  comando, así que repetir un `SET`, un `INCR`, la adquisición de un
+  bloqueo, un impacto contra el limitador de velocidad o sacar un job de
+  la cola podría ejecutarlo dos veces. Los mensajes de error no cambian,
+  así que cualquier cosa que case con ellos sigue funcionando.
+- **Un worker pausado ahora te dice que está pausado.** `queue:work`
+  imprime una línea por transición
+  (`2026-08-25 14:03:11 Queue billing PAUSED`, y `RESUMED` a la vuelta), y
+  el worker emite `WorkerQueuePaused` / `WorkerQueueResumed` para que
+  puedas encaminar la misma señal hacia tu propio sistema de alertas. Estos son la pareja del lado del worker; los
+  `QueuePaused` / `QueueResumed` existentes se disparan en el proceso que
+  haya ejecutado `queue:pause`, que nunca es el worker, así que hasta
+  ahora un worker que se quedaba callado porque alguien pausó su cola era
+  indistinguible de uno colgado. Cada evento se dispara una vez por
+  transición, no una vez por sondeo. Su campo `queue` es opcional: un
+  worker arrancado sin `--queue` drena todo y no tiene nombres de cola de
+  los que informar bajo `pause_all`, así que informa `None` en lugar de
+  inventar un nombre con el que un oyente pudiera casar.
+- **Las rutas de `?include=` se acotan a cinco segmentos, y
+  `max_relationship_depth` mueve el techo.** Un grafo de relaciones
+  cíclico convierte `?include=author.posts.author.posts...` en una
+  dispersión que controla el cliente, acotada solo por la cadena de
+  consulta. Ahora las rutas se truncan mientras se parsean; llama a
+  `suprnova::max_relationship_depth(n)` en `bootstrap::register()` para
+  cambiar el límite, o pasa `0` para desactivar los includes.
+- **`Gt`, `Gte`, `Lt` y `Lte` comparan un campo con un número o con otro
+  campo.** `CompareWith` nombra el operando y la medida en un único valor:
+  `Number` para un literal, `NumericField` para un hermano numérico y
+  `LengthField` para un hermano comparado por número de caracteres. Un
+  operando que la regla no puede medir hace fallar el campo en lugar de
+  entrar en pánico.
+- **Tres reglas de pertenencia se unen al conjunto integrado: `InArray`,
+  `Contains` y `DoesntContain`.** `InArray` comprueba un valor contra la
+  lista de otro campo, y la lista se le pasa directamente en lugar de
+  nombrar el campo en una cadena de regla. `Contains` y `DoesntContain`
+  recorren un array JSON y casan un parámetro solo contra un elemento de
+  tipo cadena, así que `1` y `"1"` siguen siendo distintos.
+- **El pool de base de datos ahora tiene ajustes de vitalidad.**
+  `DB_IDLE_TIMEOUT`, `DB_MAX_LIFETIME`, `DB_ACQUIRE_TIMEOUT`,
+  `DB_TEST_BEFORE_ACQUIRE` y `DB_PING_AFTER_IDLE` controlan cuándo el pool
+  cierra, recicla y hace ping a una conexión, con los setters
+  correspondientes en `DatabaseConfig::builder()`. Cada uno viene sin
+  establecer por defecto, así que el pool de un despliegue existente se
+  comporta exactamente igual que antes. Úsalos cuando una pasarela NAT o
+  un firewall descarten las conexiones inactivas: sqlx no expone ningún
+  equivalente de los `keepalives_*` de libpq, así que el reciclado del
+  pool es el mecanismo.
+- **`db:seed <Class>` informa de su progreso.** Una ejecución dirigida
+  imprime una línea `RUNNING` antes del sembrador y una línea `DONE` con
+  los milisegundos transcurridos después de él. Un `db:seed` a secas se
+  mantiene en silencio. El formateador, `suprnova::two_column_detail`,
+  está disponible para tus propios handlers `#[command]`.
+- **Las relaciones muchos a muchos ahora filtran por columnas del pivot.**
+  `where_pivot`, `where_pivot_op`, `where_pivot_in`, `where_pivot_not_in`,
+  `where_pivot_null`, `where_pivot_not_null`, `where_pivot_between`,
+  `where_pivot_not_between`, `where_pivot_group` y sus gemelos `or_`
+  restringen `get`, `first` y `count` en `BelongsToMany`, `MorphToMany` y
+  `MorphedByMany`. `where_pivot_group` toma un closure y renderiza un
+  único grupo entre paréntesis, así que se mantiene atómico dentro de un
+  `or_where_pivot` posterior. Los filtros de pivot se aplican solo a las
+  lecturas: `attach`, `attach_with`, `detach` y `sync` devuelven un error
+  mientras haya alguno puesto, y la carga anticipada no los arrastra.
+- **`where_binary` compara los valores de columna byte a byte.** La
+  familia (`where_binary`, `or_where_binary`, `where_not_binary`,
+  `or_where_not_binary`) se publica en `Builder<M>`, y `where_binary` y
+  `where_not_binary` se publican en `DB::table(...)`. MySQL y MariaDB
+  emiten `= binary`; Postgres y SQLite devuelven un error al renderizar la
+  consulta, en lugar de recurrir a una coincidencia dependiente de la
+  intercalación.
+- **`Builder::try_to_sql_with_bindings_for` renderiza SQL para un dialecto
+  sin entrar en pánico.** Es la contraparte falible de
+  `to_sql_with_bindings_for`, para los casos en que un builder
+  legítimamente no puede renderizar para un backend.
+- **`Model::refresh_for_update` recarga una fila bajo un bloqueo
+  `FOR UPDATE`.** Llámalo dentro de una transacción cuando necesites el
+  estado
+  actual de la fila y el bloqueo exclusivo en una sola sentencia. SQLite
+  no tiene bloqueo a nivel de fila, así que allí la cláusula de bloqueo no
+  hace nada.
+- **`Builder::or_where_key` y `Builder::or_where_key_not` añaden filtros
+  de clave primaria como una disyunción.** Los dos se pliegan en la
+  cláusula `WHERE` anterior igual que hace `or_where`, y los dos traen los
+  alias `or_filter_key` y `or_filter_key_not`.
+- **`Builder::in_order_of` ordena las filas siguiendo una secuencia
+  explícita.** Pásale una columna y los valores en el orden que quieras;
+  las filas cuyo valor no esté en la lista quedan al final. Los valores se
+  vinculan como parámetros, así que es seguro tomarlos de los datos de la
+  solicitud.
+
+### Corregido
+
+- **La cookie de bypass del modo de mantenimiento ahora caduca en el
+  servidor.** El TTL de 12 horas era un `max-age` que hacía cumplir el
+  navegador, así que una cookie capturada seguía funcionando hasta que
+  rotabas el secreto. El payload cifrado ahora lleva el plazo, y cada
+  solicitud lo vuelve a comprobar.
+- **`suprnova serve` ejecuta un proyecto sin frontend.** Un proyecto con
+  andamiaje de `suprnova new --api` no tiene directorio `frontend/`, y
+  `serve` lo rechazaba con "No frontend directory found. Are you in a
+  Suprnova project directory?" salvo que pasaras `--backend-only`. Ahora
+  se salta el panel de Vite y la generación de TypeScript que lo alimenta,
+  y sirve el backend. `--frontend-only` sigue fallando en un proyecto así,
+  con un mensaje que dice por qué.
+
+### Actualización
+
+- **Las cookies de bypass emitidas antes de esta versión dejan de
+  funcionar.** El payload de la cookie pasó del secreto a secas a un
+  objeto sellado `{ secret, expires_at }`, y un payload sin plazo se
+  rechaza. Visita la URL del secreto una vez después de actualizar para
+  obtener una cookie nueva. Nada más cambia: `down`, `up`, `--secret` y
+  `--with-secret` se comportan como antes.
+- **Una ruta de include de más de cinco segmentos ahora devuelve sus
+  primeras cinco relaciones en lugar de todas.** Nunca fue alcanzable nada
+  que estuviera fuera de la lista de permitidos de un recurso, así que
+  ninguna respuesta gana datos; una ruta profunda pierde su cola. Con ello
+  cambia un código de estado: una ruta cuya cola demasiado profunda nombra
+  una relación que el recurso no permite se trunca antes de que nada la
+  valide, así que ahora devuelve `200` con los segmentos que sobrevivieron
+  allí donde la ruta completa devolvía `400`; ajusta cualquier cliente o
+  test que afirme sobre ese rechazo. Sube el techo con
+  `suprnova::max_relationship_depth(n)` si tu API documenta rutas más
+  largas.
+- **`DatabaseConfig` ganó cinco campos públicos.** El código que construye
+  uno con un literal de struct ya no compila. Usa
+  `DatabaseConfig::from_env()` o `DatabaseConfig::builder()`, que rellenan
+  los campos nuevos con los valores por defecto que preservan el
+  comportamiento actual del pool.
+
 ## 1.3.3 - 2026-08-25
 
 ### Añadido
@@ -238,7 +466,13 @@ recientes primero.
   una de 4100 se rechaza.
   [Imágenes](../images.md#one-bound-is-not-configurable)
 
-- **OAuth can now be installed without replacing an application's existing password and session authority.** `MagnetarOAuthOnlyConfig` and `init_magnetar_oauth_only` install the default ceremony and provider engine while leaving the password and passkey slots empty. Applications with an existing `users` table can call `verify_oauth_identity`, map the verified provider subject themselves, and establish their normal framework session.
+- **OAuth ya se puede instalar sin reemplazar la autoridad de contraseñas
+  y de sesiones que la aplicación ya tiene.** `MagnetarOAuthOnlyConfig` e
+  `init_magnetar_oauth_only` instalan la ceremonia y el motor de
+  proveedor predeterminados, y dejan vacías las ranuras de contraseña y
+  de passkey. Las aplicaciones con una tabla `users` existente pueden
+  llamar a `verify_oauth_identity`, asignar ellas mismas el subject
+  verificado del proveedor y establecer su sesión normal del framework.
 
 ### Cambiado
 
@@ -283,7 +517,12 @@ recientes primero.
 
 ### Corregido
 
-- **Installing OAuth no longer forces provider-backed applications into Magnetar web-binding validation.** The full `init_magnetar` path remains atomic and unchanged. The OAuth-only path reserves the engine slots during construction, publishes only OAuth, and fails rather than mixing two authentication authorities.
+- **Instalar OAuth ya no obliga a las aplicaciones respaldadas por un
+  proveedor a pasar por la validación de vinculación web de Magnetar.** El
+  camino completo de `init_magnetar` sigue siendo atómico y no cambia. El
+  camino de solo OAuth reserva las ranuras de motor durante la
+  construcción, publica únicamente OAuth y falla en lugar de mezclar dos
+  autoridades de autenticación.
 
 ### Actualización
 
@@ -315,7 +554,11 @@ recientes primero.
   solo lee sobres, o que los construye mediante `Queue::push` y sus
   contrapartes, no necesita ningún cambio.
 
-- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application already owns users, passwords, framework sessions, and remember-me state. OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications continue to use `complete`.
+- Usa `init_magnetar_oauth_only` en lugar de `init_magnetar` cuando la
+  aplicación ya sea dueña de los usuarios, las contraseñas, las sesiones del
+  framework y el estado de recordarme. Los callbacks de solo OAuth usan
+  `verify_oauth_identity`; las aplicaciones con Magnetar completo siguen
+  usando `complete`.
 
 ## 1.3.2 - 2026-08-25
 

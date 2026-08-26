@@ -58,6 +58,19 @@ DB::table("audit_log")
 
 `filter` と `filter_op` は、どちらも右辺に任意の `Into<SeaValue>` を受け付けます。これは、`i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid`、`serde_json::Value` をカバーします - バックエンドが理解するすべてのカラム型です。
 
+#### バイト単位で厳密な比較
+
+`where_binary` は、カラムの照合順序のもとでマッチさせるのではなく、そのカラムの生のバイトを比較します。そのため、`"Alice"` は `"alice"` にも `"ALICE"` にもマッチしません:
+
+```rust
+DB::table("users").where_binary("email", submitted).get().await?;
+DB::table("users").where_not_binary("email", submitted).get().await?;
+```
+
+これはMySQLとMariaDBの機能です - それらの `binary` という演算子の修飾子、`email = binary ?` を発します。PostgresとSQLiteには等価なものがないため、これらのバックエンドの上では、どの終端メソッドも、クエリが1つでも走るより前、文がレンダリングされる時点でエラーを返します。Suprnovaが素の `=` へフォールバックするのではなく拒否するのは、フォールバックがカラムの照合順序のもとで比較し、あなたが除きたいと言った行を返してしまうからです。
+
+PostgresやSQLiteで大文字小文字を区別したマッチが必要なときは、そのカラムに大文字小文字を区別する照合順序を設定するか、バックエンド固有の式とともに `DB::select` を使ってください。
+
 ### カラムの選択
 
 ```rust
@@ -343,6 +356,7 @@ Laravelの `DB::table(...)` は、そのモデルを持たないクエリビル�
 
 `update`/`update_all` と `delete`/`delete_all` という二重の名前が存在するのは、型付きEloquentの `Builder<M>` 表面が、テーブル全体を対象とする意図を呼び出し箇所で明示するために `_all` 接尾辞を使っているからです。どちらか一方を選ぶのではなく、モデルを持たないビルダーは両方を出荷します - `update` と `delete` は、Laravelの `DB::table($t)->update(...)` と `->delete()` に文字どおり一致します。`update_all` と `delete_all` は、`M` の利用者がすでに体で覚えている規約に一致します。
 
+`where_binary` は、Laravelが基底のグラマーから `RuntimeException` を投げるところで、PostgresとSQLiteの上ではエラーを返します。理由は同じで、違うのは仕組みだけです: Suprnovaの公開表面のコードは、パニックするのではなく `Result` を返すため、その拒否は、グラマーからの例外ではなく、終端メソッドからの `Err` として届きます。
 ## 次のステップ
 
 - [データベース](database.md) - `DB` ファサード、セーブポイントを伴うトランザクション、`DB::listen` による可観測性、名前付き接続

@@ -223,17 +223,17 @@ Resource-Schicht berücksichtigt sie automatisch.
 // Antwort: { "data": { "type": "users", "id": "7", "attributes": { "email": "alice@example.com" } } }
 ```
 
-## Zusammengesetzte Dokumente - `?include=`-Ketten
+## Compound Documents - `?include=`-Ketten
 
 Deklarieren Sie Relationsfelder mit `#[data(allow_include)]`. Das
 Framework baut aus `?include=author.posts.tags,comments` einen
-`IncludeTree`, durchläuft jeden Knoten und schiebt vollständig
-aufgelöste Resource-Objekte in `included`. Die Deduplizierung läuft
-beim Push über `IncludedSink`, geschlüsselt nach `(type, id)` gemäß
-§8 der JSON:API-Spec - sodass eine 1.000-Element-Collection, bei der
-jedes Element denselben Autor teilt, den Autor genau einmal auflöst.
-Spitzenspeicher und -CPU bleiben proportional zu den
-unterschiedlichen included-Resources, nicht zum Relations-Fan-in.
+`IncludeTree`, läuft jeden Knoten ab und schiebt vollständig aufgelöste
+Resource-Objekte nach `included`. Die Deduplizierung läuft beim Schieben
+über `IncludedSink`, geschlüsselt nach `(type, id)` gemäß §8 der
+JSON:API-Spezifikation - eine Collection mit 1.000 Einträgen, bei der
+jeder Eintrag denselben Autor teilt, löst den Autor also genau einmal
+auf. Spitzenverbrauch bei Speicher und CPU bleibt proportional zu den
+unterschiedlichen eingebundenen Resourcen, nicht zum Fan-in der Relation.
 
 ```rust
 #[derive(Data)]
@@ -250,30 +250,67 @@ pub struct PostResource {
 }
 ```
 
-Eine Anfrage, die einen Include-Pfad nennt, der nicht auf der
-Allowlist dieser Resource steht, erhält eine JSON:API-400-Errors-
-Envelope.
+Eine Anfrage, die einen Include-Pfad benennt, der nicht auf der Allowlist
+dieser Resource steht, bekommt ein JSON:API-Errors-Envelope mit 400.
+
+### Tiefenbegrenzung
+
+Ein Include-Pfad darf höchstens fünf Segmente tragen.
+`?include=a.b.c.d.e.f` wird auf `a.b.c.d.e` abgeschnitten, bevor
+irgendetwas ihn abläuft, passend zu Laravels
+`JsonApiResource::$maxRelationshipDepth`. Ändern Sie die Obergrenze
+einmal beim Boot:
+
+```rust
+// In bootstrap::register()
+suprnova::max_relationship_depth(3);
+```
+
+Die Deckelung ist wichtig, weil ein Relationsgraph zyklisch sein kann:
+`?include=author.posts.author.posts...` kostet mit jedem Segment, das ein
+Client tippt, mehr Arbeit, und nichts außer der Länge des Query-Strings
+begrenzt das sonst. Das Abschneiden entfernt nur Segmente und fügt nie
+welche hinzu, und jede Ebene prüft vor dem Absteigen weiterhin ihre
+eigene Allowlist - ein abgeschnittener Pfad kann also nie Daten
+erreichen, die der vollständige Pfad nicht erreichen konnte.
+
+Eine Folge ist es wert, sie zu kennen: Ein Segment jenseits der Deckelung
+wird verworfen, bevor die Allowlist es sieht. Bei einer Deckelung von 2
+gibt `?include=author.posts.secrets` ein 200 mit eingebundenem `author`
+und `posts` zurück statt des 400, das der vollständige Pfad einbrächte,
+denn `secrets` existiert nicht mehr, wenn irgendetwas es validiert.
+
+`max_relationship_depth(0)` schaltet Includes vollständig ab. Laravels 0
+gibt den ersten Sprung weiterhin aus, weil seine Klemmung immer nur für
+den Rest nach dem abgetrennten führenden Segment gilt; Suprnovas 0
+bedeutet gar keine Relationen.
 
 ### Warum Suprnova abweicht
 
-Zwei sichtbare Abweichungen von Laravels `JsonApiResource`:
+Drei sichtbare Abweichungen von Laravels `JsonApiResource`:
 
 1. **Striktes Default-Deny für `?include=`.** Laravels Resource-Schicht
-   ignoriert Include-Pfade, die sich nicht auflösen lassen,
-   stillschweigend. Suprnova weist sie mit einem `400 Bad Request`
-   samt JSON:API-Errors-Envelope zurück. Die Default-Deny-Haltung aus
-   §5.2.2 der Spec ist der Vertrag, gegen den Clients programmieren
-   können; stillschweigendes Ignorieren verbirgt Client-Bugs und
-   bricht die Integrität zusammengesetzter Dokumente.
+   ignoriert Include-Pfade, die nicht auflösen, stillschweigend. Suprnova
+   lehnt sie mit einem `400 Bad Request` ab, der ein
+   JSON:API-Errors-Envelope trägt. Die Default-Deny-Haltung aus §5.2.2
+   der Spezifikation ist der Vertrag, gegen den Clients programmieren
+   können; stilles Ignorieren verbirgt Client-Fehler und bricht die
+   Integrität von Compound Documents.
 
-2. **Explizites `.status(code)` / `.created()` statt Auto-201.**
-   Laravel setzt `201` automatisch aus `wasRecentlyCreated` auf dem
-   zugrundeliegenden Eloquent-Modell. Suprnova entkoppelt das
-   Resource-DTO von jedem spezifischen Persistenz-Lifecycle, sodass
-   der Status am Response-Objekt selbst gesetzt wird - `.created()`,
-   wenn Sie es so meinen, `.status(204)`, wenn die Response leer ist,
-   und so weiter. Ein einzelner Mutator bleibt unter jedem Ablauf
-   ehrlich.
+2. **Ausdrückliches `.status(code)` / `.created()` statt eines
+   automatischen 201.** Laravel setzt `201` automatisch aus
+   `wasRecentlyCreated` am zugrunde liegenden Eloquent-Modell. Suprnova
+   entkoppelt das Resource-DTO von jedem bestimmten Persistenz-Lifecycle,
+   der Status wird daher am Antwortobjekt selbst gesetzt - `.created()`,
+   wenn Sie es meinen, `.status(204)`, wenn die Antwort leer ist, und so
+   weiter. Ein einzelner Mutator bleibt unter jedem Ablauf ehrlich.
+
+3. **Eine Tiefenbegrenzung von `0` schaltet Includes vollständig ab.**
+   Laravel klemmt nur den Rest eines Pfades, nachdem das führende Segment
+   bereits abgetrennt wurde, sein `0` gibt den ersten Sprung also
+   weiterhin aus. Suprnova schneidet den ganzen Pfad ab,
+   `max_relationship_depth(0)` bedeutet also gar keine Relationen - siehe
+   „Tiefenbegrenzung“ weiter oben.
 
 ## Paginierung
 

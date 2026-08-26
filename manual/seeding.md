@@ -249,8 +249,22 @@ cargo run --bin console -- db:seed --class UsersSeeder
 cargo run --bin console -- db:seed UsersSeeder
 ```
 
-All three look the seeder up in the registry by exact name and run it. An
-unknown name fails fast:
+All three look the seeder up in the registry by exact name and run it.
+
+A targeted run reports its progress:
+
+```text
+  UsersSeeder .......................................................... RUNNING
+  UsersSeeder ...................................................... 812 ms DONE
+
+```
+
+The lines go to stdout. A bare `db:seed` stays silent - a full seed
+would otherwise bury its own output under one line per seeder. The
+`tracing` record each seeder emits is unchanged and remains the machine
+channel.
+
+An unknown name fails fast:
 
 ```bash
 cargo run --bin console -- db:seed --class=NotARealSeeder
@@ -545,6 +559,13 @@ clunkier than the function-pointer registry that's already there.
 The composite-seeder convention recovers the same ergonomics - `BaseSeeder`
 plays the role `DatabaseSeeder` plays in Laravel - without needing the
 framework to bless one name as special.
+
+Seeder progress lines are plain text at a fixed 80 columns. Laravel
+sizes its dot leader to the terminal and colors the status word;
+reading the real terminal width means a dependency the framework does
+not carry, and this output goes to a stdout that is routinely piped
+into a log, where escape codes are noise. Elapsed time prints as whole
+milliseconds with no thousands separator.
 
 ## Bootstrap registration
 

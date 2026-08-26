@@ -72,6 +72,27 @@ right-hand side, which covers `i64`, `String`, `&str`, `bool`, `f64`,
 `Option<T>`, `chrono::*`, `uuid::Uuid`, and `serde_json::Value` - every
 column type the backend understands.
 
+#### Byte-exact comparison
+
+`where_binary` compares the raw bytes of a column instead of matching
+under its collation, so `"Alice"` does not match `"alice"` or `"ALICE"`:
+
+```rust
+DB::table("users").where_binary("email", submitted).get().await?;
+DB::table("users").where_not_binary("email", submitted).get().await?;
+```
+
+This is a MySQL and MariaDB feature - it emits their `binary` operator
+modifier, `email = binary ?`. Postgres and SQLite have no equivalent, so
+on those backends every terminal returns an error when the statement
+renders, before any query runs. Suprnova refuses rather than falling back
+to a plain `=`, because a fallback would compare under the column's
+collation and return rows you asked to exclude.
+
+If you need case-sensitive matching on Postgres or SQLite, set a
+case-sensitive collation on the column, or use `DB::select` with a
+backend-specific expression.
+
 ### Selecting columns
 
 ```rust
@@ -435,6 +456,12 @@ a side, the model-less builder ships both - `update` and `delete`
 match Laravel's `DB::table($t)->update(...)` and `->delete()` letter
 for letter; `update_all` and `delete_all` match the convention `M`
 users will already have in their muscle memory.
+
+`where_binary` returns an error on Postgres and SQLite where Laravel
+throws a `RuntimeException` from the base grammar. The reason is the
+same and only the mechanism differs: public-surface code in Suprnova
+returns `Result` rather than panicking, so the refusal arrives as an
+`Err` from the terminal instead of an exception from the grammar.
 
 ## Next
 

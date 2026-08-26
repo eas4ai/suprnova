@@ -34,6 +34,7 @@ others degrade into - each driver is a peer.
 | `Storage::register_s3(name, cfg)`    | Amazon S3 or S3-compatible    | `filesystem`        |
 | `Storage::register_azblob(name, cfg)`| Azure Blob Storage            | `filesystem-azure`  |
 | `Storage::register_gcs(name, cfg)`   | Google Cloud Storage          | `filesystem-gcs`    |
+| `Storage::register_read_through(name, cfg)` | Read-through composite | `filesystem` |
 
 `filesystem` is on by default; the Azure and GCS features are not. Turn one
 on in your `Cargo.toml`:
@@ -236,6 +237,267 @@ let bytes = copy_between_disks("local", "uploads/big.bin", "scratch", "big.bin")
 If any step fails mid-copy, the partial destination object is aborted and
 deleted before the original error propagates - a failed copy is never
 observable as a truncated destination.
+
+## Read-through disks
+
+A read-through disk pairs a fast *primary* with a slower *fallback* and moves
+objects from the second to the first as they are read. Point the primary at
+the store you are migrating to and the fallback at the one you are migrating
+from, and the working set crosses over under real traffic - no maintenance
+window, no bulk copy of objects nobody asks for.
+
+```rust,ignore
+use suprnova::{ReadThroughConfig, S3Config, Storage};
+
+Storage::register_s3("new-store", S3Config { bucket: "assets-2".into(), ..Default::default() })?;
+Storage::register_s3("legacy-store", S3Config { bucket: "assets-1".into(), ..Default::default() })?;
+
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        ..Default::default()
+    },
+)?;
+
+let assets = Storage::disk("assets")?;
+// Reads `logo.png` from `legacy-store` and writes it to `new-store` on the way
+// out. Every later read is served by `new-store`.
+let bytes = assets.read("logo.png").await?;
+```
+
+`Storage::disk("assets")` returns an ordinary `Operator`, so every method on
+it and every `DiskExt` convenience works unchanged.
+
+### Which disk answers which operation
+
+| Operation | Disk |
+|---|---|
+| `read` | Primary if it holds the object, otherwise the fallback - and, unless `copy` is `false`, the fallback hit is promoted |
+| `exists`, `size`, `last_modified`, `mime_type`, `stat` | Primary if it holds the object, otherwise the fallback |
+| `write`, `make_directory` | Primary only |
+| `files`, `directories`, `list` | Primary only - fallback entries are invisible to a listing |
+| `delete` | Both, fallback first |
+| `copy`, `rename` / `move_to` | Primary if it holds the source, otherwise streamed across from the fallback; a `rename` also deletes the fallback source |
+| `temporary_url` | Primary if it holds the object, otherwise the fallback |
+| `temporary_upload_url` | Primary only - an upload has to land where writes land |
+
+Listing is primary-only by design. A union listing would have to reconcile
+paging and ordering across two backends, and it would report objects that a
+later listing no longer returns once they are promoted. Use
+`Storage::disk("legacy-store")` directly when you need to enumerate what is
+left on the fallback.
+
+Delete removes the object from both disks. If it only removed the primary
+copy, the next read would promote the fallback copy straight back. The
+consequence is that a read-through disk over a read-only fallback cannot
+delete: the fallback delete fails and the error reaches you.
+
+### When a promotion fails
+
+By default a promotion failure is logged at `warn` and swallowed. You still
+receive the bytes you asked for; the disk simply degrades to reading the
+fallback every time until the primary is writable again. Set
+`throw_on_promotion_failure: true` when a silent loss of promotion would hide
+a fault you need to see - a migration you are trying to finish, for instance:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "new-store".into(),
+        fallback: "legacy-store".into(),
+        throw_on_promotion_failure: true,
+        ..Default::default()
+    },
+)?;
+```
+
+Registration rejects a configuration that cannot work: an empty `primary` or
+`fallback`, a pair that names the same disk twice, a disk that names itself,
+or a name that is not registered. Each returns a `FrameworkError` naming the
+problem, and no disk is registered.
+
+### Reading without promoting
+
+Set `copy: false` to serve fallback hits without writing them through:
+
+```rust,ignore
+Storage::register_read_through(
+    "assets",
+    ReadThroughConfig {
+        primary: "cache-store".into(),
+        fallback: "origin-store".into(),
+        copy: false,
+        ..Default::default()
+    },
+)?;
+```
+
+The disk then reads like a transparent overlay: the primary answers what it
+holds, the fallback answers everything else, and nothing moves between them.
+Use it when the primary is a small cache you do not want a one-off read to
+fill, or when the fallback is authoritative and the primary only ever holds
+objects you put there deliberately.
+
+The flag governs read-time promotion and nothing else. Writes, deletes,
+metadata, listings, and the destinations of `copy` and `rename` all behave
+exactly as they do with promotion on - so a `copy: false` disk still lands a
+copied or moved object on the primary. Because nothing is written back, a
+read with `copy: false` fetches only the range you asked for rather than the
+whole object.
+
+### Copying and moving across the fallback
+
+`copy` and `rename` resolve the source against the primary first. When only
+the fallback holds it, the object is streamed across in 64 KiB chunks and the
+destination lands on the primary:
+
+```rust,ignore
+let assets = Storage::disk("assets")?;
+
+// `logo.png` lives only on `legacy-store`. The copy streams it across and
+// writes `branding/logo.png` to `new-store`; the legacy object stays put.
+assets.copy("logo.png", "branding/logo.png").await?;
+
+// A move does the same and then deletes the legacy source.
+assets.rename("logo.png", "branding/logo.png").await?;
+```
+
+A move deletes the fallback source on both paths - whether the primary held
+the source or not. Without that, the next read would promote the fallback
+copy back and undo the move.
+
+The two paths differ in when they delete it, and the difference is what a
+failed move leaves behind:
+
+- The primary held the source. The fallback copy goes first, before the
+  rename. While the primary holds the path, the fallback's copy is unreachable
+  through this disk, so removing it first changes nothing you can observe - and
+  if the delete fails, nothing has moved yet. Retry the move. If instead the
+  delete succeeded and the rename then failed, the fallback holds nothing for
+  that path, the destination is unwritten, and the primary still holds the
+  source - so a retry takes this same path and renames again. The failure costs
+  the cold copy and nothing else.
+- Only the fallback held it. The delete can only come after the destination is
+  in place, so a move that fails on the delete leaves the destination written
+  and the source still on the fallback. Retry the move; the source is now on
+  the primary, so the retry takes the first path.
+
+Either way a failed move is safe to retry, and the destination you end up with
+is the object the move started from.
+
+Conditions travel with the operation on the streaming path too. `if_not_exists`
+becomes a conditional write, so a guarded copy or move still refuses an
+existing destination rather than clobbering it, and a copy that names a source
+version gets that version out of the fallback. A copy's `if_match` is the one
+exception: it is a condition the backend applies inside its own copy, which is
+the call this path cannot make, so it is refused with an `Unsupported` error
+naming the condition rather than quietly ignored.
+
+That makes conditions the one place where which disk holds the source shows
+through. A local directory advertises `copy` and `rename` but neither of their
+conditional forms, so `copy_with(a, b).if_not_exists(true)` succeeds when only
+the fallback holds `a` (it becomes a conditional write) and is refused with
+`Unsupported` when the primary holds it. Check the condition you need against
+the primary driver rather than assuming it holds for every object on the disk.
+
+A move the primary would refuse is refused before anything is deleted. A
+primary with no `rename` at all, a guarded move onto a primary with no
+conditional `rename`, and a guarded move onto a destination that already exists
+all fail with the fallback source still in place - a move that never happens
+must not cost you the cold copy.
+
+If the stream fails partway, the writer is aborted and a destination the
+transfer created is deleted before the error reaches you, so a failed transfer
+is not observable as a truncated object. A destination that was already there
+is left alone - a failed copy must not be the thing that destroys an object it
+never wrote. On a local-filesystem primary that guarantee is weaker than it
+looks: the driver opens the target itself and truncates it, so a pre-existing
+local destination is already gone by the time a transfer can fail.
+
+### Versioned and conditional reads
+
+A read that carries a version or an `If-Match`, `If-None-Match`,
+`If-Modified-Since`, or `If-Unmodified-Since` condition is passed on with that
+condition intact, so the answer means what you asked it to mean. Such a read
+is served but never promoted: writing an old version or a validator-matched
+body to the primary would publish it as the live object, and every later
+plain read would get it.
+
+Which disk answers one is decided the usual way. The first probe is an
+ordinary existence check, so a read-through disk delegates a versioned or
+conditional read to the primary whenever the primary holds the path at all;
+it reaches the fallback only when the primary does not.
+
+The primary also decides which of these a read-through disk accepts at all,
+because the primary's reader is opened first. A versioned read against a
+read-through disk whose primary is a local directory is rejected before it
+reaches the fallback, since a local directory has no versions.
+
+### Why Suprnova diverges
+
+Laravel builds a read-through disk from a `config/filesystems.php` entry whose
+`primary` and `fallback` keys accept either a disk name or an inline driver
+config. Suprnova takes disk names only, because disks here are registered by
+typed constructors rather than described by arrays - register the inner disk
+first, then name it.
+
+Laravel's promotion re-checks the primary after reading the fallback, which
+makes a concurrent writer win. Suprnova keeps that check and publishes the
+promotion atomically, which Laravel does not. On a local-filesystem primary
+the bytes are staged at a temporary sibling and renamed into place; writing
+them straight to the target would leave a growing, half-written file visible
+for the length of the write, and a read-through disk routes readers by
+exactly that existence check. On a primary without a rename - in-memory, S3,
+Azure Blob, GCS - a write is already a single indivisible publish, so the
+promotion writes the target directly, conditional on the object not already
+existing so two concurrent readers do not both promote.
+
+That condition is the part a staged promotion cannot have: the staging path is
+unique, so a no-clobber condition on it would be vacuous, and the target is
+published by a rename that overwrites. A read-through disk on a
+local-filesystem primary therefore trades it away - a write that lands on the
+primary in the moment between the promotion's last existence check and its
+rename is overwritten by the promoted copy. On a primary without a rename the
+condition holds and no such window exists.
+
+The staging object is a real entry on the primary while it lasts, so a listing
+taken mid-promotion can show a `.suprnova-promote-<id>.tmp` sibling. A read
+that completes, fails, or gives up tries to remove its own sibling, and logs a
+warning if that delete fails rather than failing the read. Nothing sweeps a
+sibling left by a failed delete, a process that crashed, or a read future
+cancelled mid-promotion: those have to be removed by hand.
+
+A read that resolves from the fallback holds the object in memory until the
+promotion write completes, because promotion needs the whole object. That
+suits the tiering case a read-through disk is for. For very large cold
+objects, read the fallback disk directly or use
+[`copy_between_disks`](#cross-disk-streaming-copy) instead.
+
+Laravel hands back the fallback's own stream when `copy` is `false` and
+buffers through `php://temp` when it is `true`. Suprnova instead narrows the
+fallback fetch to the requested range when `copy` is `false`, and buffers only
+on the promoting path where the whole object is needed anyway.
+
+Laravel's cross-fallback `copy` and `move` also buffer the source through
+`php://temp`. Suprnova streams it in 64 KiB chunks instead, because the
+fallback is where the large, rarely-touched objects live, and deletes a
+half-written destination before returning the error. Two more differences
+follow from OpenDAL. Deleting a path that is not there counts as success, so a
+move clears the fallback source without first checking that it exists. And
+OpenDAL carries conditions on `copy` and `rename` that Flysystem has no
+equivalent for, so Suprnova has to decide what each one means when the source
+is only on the fallback: `if_not_exists` and a copy's source version are
+honored, and a copy's `if_match` is refused rather than dropped.
+
+Laravel deletes the fallback source after the move on both paths. Suprnova
+deletes it first when the primary holds the source, because the two orders
+differ under a retry: the source is unreachable through the disk either way,
+but deleting last means a move that lost its delete to a transient fault comes
+back as a move whose source is now fallback-only, and streams the fallback's
+stale copy over the destination the first attempt already wrote correctly.
 
 ## Registry hygiene
 

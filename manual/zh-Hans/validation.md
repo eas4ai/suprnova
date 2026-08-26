@@ -18,7 +18,7 @@ Suprnova 在两条互补的轨道上验证请求输入：
 | `ContextualRule` | `passes(&self, value, ctx)` | 会读取兄弟字段的检查 |
 | `AsyncRule` | `async passes(&self, value)` | 会 `.await` 的检查（数据库、HTTP） |
 
-内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#密码强度)（只做强度检查）。内置的 `ValueRule`：`ArrayKeys`、`Distinct`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。内置的 `AsyncRule`：[`Unique`](#unique-规则) 和 [`Password`](#密码强度)（强度，外加它那项 `uncompromised()` HIBP 检查 - 唯一一个同时实现了 `Rule` 和 `AsyncRule` 的内置规则）。
+内置的 `Rule`：`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`InArray`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`AlphaDash`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#密码强度)（只做强度检查）。内置的 `ValueRule`：`ArrayKeys`、`Distinct`、`Contains`、`DoesntContain`。内置的 `ContextualRule`：`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`、`Gt`、`Gte`、`Lt`、`Lte`。内置的 `AsyncRule`：[`Unique`](#unique-规则) 和 [`Password`](#密码强度)（强度，外加它那项 `uncompromised()` HIBP 检查 - 唯一一个同时实现了 `Rule` 和 `AsyncRule` 的内置规则）。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -161,9 +161,63 @@ Distinct { ignore_case: false, strict: false }
 
 由 `ValueRule` 验证的字段必须直接持有 `serde_json::Value`（对于 `?:`/`?=>` 行则是 `Option<serde_json::Value>`）- 通常是直接从 JSON 请求体提取的请求字段。`validate!` 行接受同一字段列表中的 `Rule` 和 `ValueRule`；运行哪个 trait 由规则类型实现的 trait 决定，而不是由您在行中写入的内容决定。
 
+### 成员资格规则
+
+有三条规则回答“这个值在那个列表里吗？”，每一条都作用在它所需要的那种形状上：
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// Laravel 的 in_array:allowed_roles.* - 这个值必须出现在另一个字段的列表里。
+// 请把那个列表本身传进来：一个 Vec<String> 字段和一个 &[&str] 字面量都可以。
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// Laravel 的 contains:rust,web - 这个数组必须持有列出的每一个值。
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// Laravel 的 doesnt_contain:banned - 这个数组必须一个都不持有。
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+每一次比较都是精确的。`InArray` 用 `==` 比较字符串，而 `Contains` 和 `DoesntContain` 只把一个参数与 JSON 的字符串元素相匹配，所以 `["1"]` 含有 `"1"`，而 `[1]` 没有。一个不是数组的值会直接让 `Contains` 和 `DoesntContain` 失败。
+
+`Contains` 和 `DoesntContain` 会把一个空的参数列表当作一个无键的构造错误拒绝掉，和 `ArrayKeys` 的做法一样 - 一个什么都没装的列表约束不了任何东西。一个空的 `InArray` 待查列表则是另一回事：一个兄弟字段在运行时完全可能理所当然地为空，所以这个值就是单纯地失败。
+
+`InArray` 的失败消息不点任何值的名，因为它那个列表是从请求里来的，而一条验证消息是要被渲染进一个响应体里的。
+
+### 比较规则
+
+`Gt`、`Gte`、`Lt` 和 `Lte` 把一个字段与一个数字、或者与另一个字段做比较。`CompareWith` 把操作数和度量方式一并点了出来：
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// Laravel 的 gt:0 - 一个字面操作数，按数值比较。
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// Laravel 的 lte:max_price - 一个兄弟字段，按数值比较。
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// Laravel 在两个字符串字段上的 gt:summary - 按字符数比较。
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+这四条都会读取兄弟字段，所以它们是 `ContextualRule`，而且每一个 `validate!` 行都要带上 `=> with ctx` - 包括那种唯一的操作数是一个字面量、上下文根本不会被读的行。那种情况请传一个空的 `FormContext` 进去。
+
+任何这条规则量不出来的东西，都会让这个字段失败：一个在数值比较之下并不是有限数的值、一个表单从未发送过的兄弟字段、一个不是数字的兄弟字段，或者一个像 `f64::NAN` 这样的非有限字面量。这里面没有一样会 panic，也没有一样会通过。
+
 ### 为什么 Suprnova 有所不同
 
 Laravel 的 `distinct:strict` 依赖 PHP 会进行强制转换的 `==`。JSON 值已具有类型，因此 Suprnova 的 `strict` 仅改变内部表示不同的两个*数字*（`1` 与 `1.0`）是否计作相等 - 它在两种模式下都不会让字符串和数字“相同”。
+
+Laravel 是把另一个字段写进一个规则字符串里的 - `in_array:allowed_roles.*` - 再由验证器在运行时从请求数据里把它 glob 出来。Suprnova 没有规则字符串解析器：您直接把那个列表交给 `InArray`，而编译器会检查这个字段确实存在。
+
+Laravel 13.27 把 `in`、`in_array` 和 `doesnt_contain` 收紧成了严格比较，因为 PHP 的 `==` 会把 `"1abc"`、`true` 和 `"0x1"` 都变成匹配。Suprnova 从来没有过那个漏洞 - `In` 和 `NotIn` 是用 `==` 比较 `&str` 的 - 而这几条新规则是逐个变体地匹配 JSON 值的。Laravel 的 `contains` 仍然是松散的；Suprnova 的不是。代价是这几条规则没法检查一个数值数组：`Contains(&["1"])` 不会匹配上 `[1]`。
+
+Laravel 的 `gt` 家族是在运行时挑它的度量方式的：数值就用数字本身，数组用 `count()`，文件用千字节，其余一切用字符长度，而那条数值分支还取决于这个字段是否同时带着 `numeric` 或 `integer`。Suprnova 改为把度量方式写进规则里，因为这里的一条规则看不见它那个字段上的其他规则，而嗅探值的形态，正是这几条规则存在的意义所要避开的那种强制转换习惯。Laravel 那四种度量方式里有两种在这里根本没有对应物：一条规则永远只会收到一个字符串，所以一个数组值的兄弟字段读不出来；而上传永远到不了规则这个表面 - multipart 解析器早在处理程序看到它们之前，就已经给它们的大小设了上限。
 
 ## `validate!` 宏
 

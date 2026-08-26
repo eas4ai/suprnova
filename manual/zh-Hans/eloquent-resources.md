@@ -204,14 +204,32 @@ pub struct PostResource {
 
 一个指名了某个不在该资源允许列表上的 include 路径的请求，会得到一个 JSON:API 400 的错误信封。
 
+### 深度上限
+
+一条 include 路径最多可以携带五段。`?include=a.b.c.d.e.f` 会在任何东西开始走它之前，被截断成 `a.b.c.d.e`，与 Laravel 的 `JsonApiResource::$maxRelationshipDepth` 一致。在启动时改一次这个上限：
+
+```rust
+// 在 bootstrap::register() 里
+suprnova::max_relationship_depth(3);
+```
+
+这个上限之所以要紧，是因为一张关系图可以是有环的：`?include=author.posts.author.posts...` 每多打一段，客户端就多招来一份工作，而除了查询字符串的长度之外，没有别的东西给它设界。截断只会拿掉段，绝不会添上段，而且每一层在往下走之前，仍然会检查它自己那份允许列表 - 所以一条被截断的路径，永远够不到完整路径够不到的数据。
+
+有一个后果值得知道：超出上限的那一段，是在允许列表看到它之前就被丢掉的。在上限为 2 时，`?include=author.posts.secrets` 会带着 `author` 和 `posts` 返回 200，而不是完整路径本该招来的那个 400，因为等到有东西开始校验的时候，`secrets` 已经不存在了。
+
+`max_relationship_depth(0)` 会把 include 整个关掉。Laravel 的 0 仍然会发出第一跳，因为它的夹取永远只作用在领头那一段被切下来之后的尾巴上；Suprnova 的 0 意味着一个关系都没有。
+
 ### 为什么 Suprnova 有所不同
 
-与 Laravel 的 `JsonApiResource` 相比，有两处可见的分歧：
+与 Laravel 的 `JsonApiResource` 相比，有三处可见的分歧：
 
 1. **对 `?include=` 采用严格的默认拒绝。** Laravel 的资源层会静默忽略解析不出来的 include 路径。Suprnova 会用一个带着 JSON:API 错误信封的 `400 Bad Request` 拒绝它们。规范第 5.2.2 节的默认拒绝立场，正是客户端可以据以编程的契约；静默忽略会掩盖客户端的 bug，并破坏复合文档的完整性。
 
 2. **显式的 `.status(code)` / `.created()`，而不是自动 201。** Laravel 会从底层 Eloquent 模型的 `wasRecentlyCreated` 自动设成 `201`。Suprnova 把资源 DTO 与任何具体的持久化生命周期解耦，所以状态码是设在响应对象本身上的 - 想表达这一点就用 `.created()`，响应为空就用 `.status(204)`，依此类推。在任何流程下，单一的修改方法都能保持诚实。
 
+
+
+3. **深度上限为 `0` 会把 include 整个关掉。** Laravel 只夹取一条路径的尾巴，而且是在领头那一段已经被切下来之后，所以它的 `0` 仍然会发出第一跳。Suprnova 截断的是整条路径，所以 `max_relationship_depth(0)` 意味着一个关系都没有 - 参见上面的深度上限。
 ## 分页
 
 `Resource::paginated(p)` 能配合任何实现了 `Paginated<T>` trait 的分页器工作 - `suprnova::pagination` 里的 `LengthAwarePaginator<T>` 和 `CursorPaginator<T>` 都实现了这个 trait。渲染器会自动附上 `links.{self,first,prev,next,last}` 和一个 `meta.pagination` 块。

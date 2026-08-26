@@ -15,7 +15,19 @@
 //! `FrameworkError::not_found("no seeder registered for `X`")`
 //! through the normal dispatch path - non-zero exit + diagnostic on
 //! stderr. Matches Laravel's `php artisan db:seed --class=UserSeeder`.
+//!
+//! A targeted run reports progress on stdout - a `RUNNING` line before
+//! the seeder and a `<elapsed> ms DONE` line after it, both through
+//! [`crate::console::two_column_detail`]. A bare `db:seed` stays silent
+//! so a full seed does not bury its own output. The `tracing::info!` in
+//! `seed::run_one` remains the machine channel; this is the human one.
+//! The name is resolved before anything prints - an unknown class fails
+//! with the not-found error and no progress line at all, matching
+//! Laravel's own resolve-then-report order.
 
+use std::time::Instant;
+
+use crate::console::output;
 use crate::error::FrameworkError;
 use crate::seed;
 use suprnova_macros::command;
@@ -38,7 +50,38 @@ async fn db_seed(args: Vec<String>) -> Result<(), FrameworkError> {
     }
 
     match class {
-        Some(name) => seed::run_one(&name).await,
+        Some(name) => {
+            // Laravel resolves the seeder before it reports progress
+            // (`SeedCommand.php:71` runs before the `:79-83` RUNNING
+            // line) - an unknown class fails before any progress line
+            // prints. Match that here: bail out through `run_one` (the
+            // single owner of the not-found error text) before printing
+            // RUNNING, rather than duplicating the message.
+            if !seed::is_registered(&name) {
+                return seed::run_one(&name).await;
+            }
+            // Laravel reports progress only for a targeted run - its
+            // `--class` option defaults to the root seeder's class name,
+            // so the effective rule there is "did the operator name a
+            // class". Suprnova has no root-seeder class (`run_all` walks
+            // the whole registry), so the rule is exactly that: a named
+            // class reports, a bare `db:seed` stays quiet.
+            println!("{}", output::two_column_detail(&name, "RUNNING"));
+            let started = Instant::now();
+            let result = seed::run_one(&name).await;
+            // DONE only on success. A failure is reported once, by the
+            // dispatcher, on stderr - printing it here as well would
+            // double up.
+            if result.is_ok() {
+                let elapsed = started.elapsed().as_millis();
+                println!(
+                    "{}",
+                    output::two_column_detail(&name, &format!("{elapsed} ms DONE"))
+                );
+                println!();
+            }
+            result
+        }
         None => seed::run_all().await,
     }
 }

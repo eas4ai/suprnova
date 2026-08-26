@@ -58,6 +58,19 @@ DB::table("audit_log")
 
 `filter` 和 `filter_op` 的右手边都接受任何 `Into<SeaValue>`，这涵盖了 `i64`、`String`、`&str`、`bool`、`f64`、`Option<T>`、`chrono::*`、`uuid::Uuid` 和 `serde_json::Value` - 也就是后端认识的每一种列类型。
 
+#### 逐字节精确的比较
+
+`where_binary` 比较的是一个列的原始字节，而不是在它的排序规则之下做匹配，所以 `"Alice"` 不会匹配上 `"alice"` 或者 `"ALICE"`：
+
+```rust
+DB::table("users").where_binary("email", submitted).get().await?;
+DB::table("users").where_not_binary("email", submitted).get().await?;
+```
+
+这是 MySQL 和 MariaDB 的一个特性 - 它发出的是它们那个 `binary` 运算符修饰符，`email = binary ?`。Postgres 和 SQLite 没有对应物，所以在那些后端上，每一个终结方法都会在这条语句渲染时返回一个错误，在任何查询跑起来之前。Suprnova 选择拒绝，而不是回退成一个朴素的 `=`，因为一次回退会在这个列的排序规则之下做比较，把您要求排除掉的那些行返回给您。
+
+如果您在 Postgres 或 SQLite 上需要区分大小写的匹配，请在这个列上设一个区分大小写的排序规则，或者用 `DB::select` 配上一个后端特有的表达式。
+
 ### 选择列
 
 ```rust
@@ -342,6 +355,8 @@ let n    = DB::affecting_statement_on(
 Laravel 的 `DB::table(...)` 是它那个不带模型的查询构造器；其底层每一行返回的是一个 `stdClass`（一个属性即列的 PHP 对象）。Suprnova 返回的是 `DynamicRow` - 一个带类型化访问器的 `serde_json::Map` newtype。这种访问器形态会在边界上就捕获列缺失和类型错误的问题，而不是让它在用户代码深处以一个属性访问异常的形式 panic。
 
 `update`/`update_all` 和 `delete`/`delete_all` 这两对名字之所以并存，是因为类型化的 Eloquent `Builder<M>` 表面用 `_all` 后缀来让针对整张表的意图在调用点变得明确。与其挑一边站，这个不带模型的构造器把两者都发布了出来 - `update` 和 `delete` 逐字匹配 Laravel 的 `DB::table($t)->update(...)` 和 `->delete()`；`update_all` 和 `delete_all` 匹配的是用户在 `M` 上早已养成的那套肌肉记忆。
+
+`where_binary` 在 Postgres 和 SQLite 上返回一个错误，而 Laravel 是从它的基础语法层抛出一个 `RuntimeException`。理由是一样的，只是机制不同：Suprnova 的公开表面代码返回 `Result` 而不是 panic，所以这次拒绝是以终结方法给出的一个 `Err` 的形式到来的，而不是语法层抛出的一个异常。
 
 ## 下一步
 

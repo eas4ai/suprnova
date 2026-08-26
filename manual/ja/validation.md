@@ -18,7 +18,7 @@ Suprnovaは、2つの補完し合う経路でリクエスト入力をバリデ�
 | `ContextualRule` | `passes(&self, value, ctx)` | 兄弟フィールドを読むチェック |
 | `AsyncRule` | `async passes(&self, value)` | `.await` するチェック（DB、HTTP） |
 
-組み込みの `Rule`: `Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#パスワードの強度)（強度のチェックのみ）。組み込みの `ValueRule`: `ArrayKeys`、`Distinct`。組み込みの `ContextualRule`: `RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。組み込みの `AsyncRule`: [`Unique`](#unique-ルール) と [`Password`](#パスワードの強度)（強度に加えて、その `uncompromised()` のHIBPチェック - `Rule` と `AsyncRule` の両方を実装する唯一の組み込みルールです）。
+組み込みの `Rule`: `Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`InArray`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`AlphaDash`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#パスワードの強度)（強度のチェックのみ）。組み込みの `ValueRule`: `ArrayKeys`、`Distinct`、`Contains`、`DoesntContain`。組み込みの `ContextualRule`: `RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`、`Gt`、`Gte`、`Lt`、`Lte`。組み込みの `AsyncRule`: [`Unique`](#unique-ルール) と [`Password`](#パスワードの強度)（強度に加えて、その `uncompromised()` のHIBPチェック - `Rule` と `AsyncRule` の両方を実装する唯一の組み込みルールです）。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -162,10 +162,64 @@ Distinct { ignore_case: false, strict: false }
 
 `ValueRule` によって検証されるフィールドは、`serde_json::Value` そのもの（あるいは `?:`/`?=>` の行のためには `Option<serde_json::Value>`）を保持していなければなりません - 通常は、JSONのボディから直接引き出したリクエストのフィールドです。`validate!` の行は、同じフィールドの一覧の中で `Rule` と `ValueRule` の両方を受け付けます。どちらのトレイトが走るかは、そのルールの型がどちらを実装しているかによって解決され、行の中にあなたが書く何かによって決まるのではありません。
 
+### メンバーシップのルール
+
+3つのルールが「この値はそのリストの中にあるか？」に答えます。それぞれが、自分の必要とする形の上で答えます:
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// Laravelの in_array:allowed_roles.* - 値は、別のフィールドのリストの中に
+// 現れなければなりません。リストそのものを渡してください: Vec<String> の
+// フィールドでも、&[&str] のリテラルでも、どちらでも動きます。
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// Laravelの contains:rust,web - 配列は、挙げられた値をすべて保持していなければなりません。
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// Laravelの doesnt_contain:banned - 配列は、それらを1つも保持していてはなりません。
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+比較はどれも厳密です。`InArray` は文字列を `==` で比較し、`Contains` と `DoesntContain` はパラメータをJSONの文字列要素とだけ照合します。そのため、`["1"]` は `"1"` を含みますが、`[1]` は含みません。配列でない値は、`Contains` と `DoesntContain` を端から失敗します。
+
+`Contains` と `DoesntContain` は、`ArrayKeys` と同じやり方で、空のパラメータの一覧をキーなしの構築エラーとして拒否します - 何も入っていない一覧は、何も制約しないからです。`InArray` の探索対象の一覧が空である場合は、事情が違います: 兄弟フィールドは実行時に正当に空でありうるため、その値は単に失敗します。
+
+`InArray` の失敗メッセージは、値を1つも名指ししません。そのリストはリクエストから出てくるものであり、バリデーションのメッセージはレスポンスのボディへレンダリングされるからです。
+
+### 比較のルール
+
+`Gt`、`Gte`、`Lt`、`Lte` は、あるフィールドを、数値と、あるいは別のフィールドと比較します。`CompareWith` が、オペランドと尺度を一緒に名指しします:
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// Laravelの gt:0 - リテラルのオペランドで、数値として比較します。
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// Laravelの lte:max_price - 兄弟フィールドで、数値として比較します。
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// 2つの文字列フィールドに対するLaravelの gt:summary - 文字数で比較します。
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+4つとも兄弟フィールドを読むため、これらは `ContextualRule` であり、`validate!` のどの行も `=> with ctx` を運びます - オペランドがリテラルだけで、そのコンテキストが読まれないままの行も含めてです。そこには空の `FormContext` を渡してください。
+
+ルールが測れないものは、そのフィールドを失敗させます: 数値の比較のもとでの有限でない数、フォームがそもそも送らなかった兄弟、数ではない兄弟、あるいは `f64::NAN` のような有限でないリテラルです。そのどれもパニックせず、そのどれも通過しません。
+
 ### Suprnovaが異なる設計を選んだ理由
 
 Laravelの `distinct:strict` は、PHPの型を強制変換する `==` に寄りかかっています。JSONの値はすでに型付きであるため、Suprnovaの `strict` が変えるのは、内部表現の異なる2つの*数*（`1` と `1.0`）を等しいと数えるかどうかだけです - どちらのモードでも、文字列と数を「同じもの」にすることは決してありません。
 
+Laravelは、相手のフィールドをルールの文字列 - `in_array:allowed_roles.*` - へ書き込み、バリデーターが実行時にリクエストのデータからそれをグロブで拾い出します。Suprnovaにはルール文字列のパーサーがありません: `InArray` にはリストを直接手渡し、そのフィールドが存在することはコンパイラがチェックします。
+
+Laravel 13.27は、PHPの `==` が `"1abc"`、`true`、`"0x1"` をマッチへ変えてしまうため、`in`、`in_array`、`doesnt_contain` を厳密な比較へ引き締めました。Suprnovaにその穴が空いていたことは一度もありません - `In` と `NotIn` は `&str` を `==` で比較します - そして新しいルールは、JSONの値をバリアントごとに照合します。Laravelの `contains` は緩いままですが、Suprnovaのそれは違います。その代償は、これらのルールが数値の配列を検査できないことです: `Contains(&["1"])` は `[1]` にマッチしません。
+
+Laravelの `gt` の一族は、その尺度を実行時に選びます: 数値にはその数自身、配列には `count()`、ファイルにはキロバイト、それ以外のすべてには文字数の長さであり、数値の分岐は、そのフィールドが `numeric` または `integer` も併せて運んでいるかどうかで決まります。Suprnovaは代わりに、尺度をルールの中へ書き込みます。ここでのルールは、自分のフィールドに載っているほかのルールを見ることができませんし、値の形を嗅ぎ回ることは、これらのルールがまさに避けるために存在している強制変換の習慣だからです。Laravelの4つの尺度のうち2つには、そもそも対応物がありません: ルールが受け取るのは常に文字列だけであるため、配列を値に持つ兄弟は読めませんし、アップロードがルールの表面に到達することはありません - マルチパートのパーサーが、ハンドラがそれを目にするより前にサイズの上限をかけます。
 ## `validate!` マクロ
 
 `validate!` は、構造体のフィールドに対してルールの連鎖を実行し、あらゆる失敗を1つの `ValidationErrors` へ積み上げます。同期的なフィールド横断フックである [`after_validation`](#フィールド横断のフック) の、慣用的な置き場所です。

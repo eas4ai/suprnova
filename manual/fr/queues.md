@@ -407,6 +407,87 @@ un worker Suprnova sans token sont celles mises en file avant l'existence
 du token, et celles-là gardent l'expiration par TTL plutôt que de risquer
 une libération qui supprimerait le verrou d'un dispatch plus récent.
 
+### Debounce - garder le dernier dispatch, pas le premier
+
+`push_unique` supprime un doublon et garde le **premier** dispatch. Le
+debounce fait l'inverse : il garde le **dernier**. Une salve de vingt
+événements « cette commande a changé » devient une seule réindexation,
+une fenêtre après le vingtième, portant le payload le plus récent.
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReindexOrder {
+    order_id: u32,
+}
+
+#[async_trait]
+impl Job for ReindexOrder {
+    fn job_name() -> &'static str { "reindex-order" }
+    fn debounce_for() -> Option<Duration> { Some(Duration::from_secs(30)) }
+    fn max_debounce_wait() -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn debounce_id(&self) -> Option<String> { Some(self.order_id.to_string()) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+- `debounce_for` est la fenêtre : chaque dispatch la réarme, si bien que
+  l'exécution a lieu 30 secondes après le *plus récent* d'entre eux.
+- `max_debounce_wait` empêche une salve continue de différer le travail
+  indéfiniment. Une fois que la salve diffère depuis cinq minutes, le
+  dispatch suivant est mis en file sans délai. La fenêtre repart alors,
+  si bien que chaque salve mesure son attente maximale depuis son
+  propre premier dispatch.
+- `debounce_id` cantonne la fenêtre. Vingt mises à jour de la commande 7
+  deviennent une seule exécution ; une mise à jour de la commande 8 n'en
+  est pas affectée. Omettez-le et chaque dispatch du job partage une
+  seule fenêtre.
+
+Chaque dispatch est quand même mis en file d'attente. La réduction se
+règle au niveau du worker : chaque push écrase un token de cache, et le
+worker abandonne toute enveloppe dont le token a été remplacé par un
+dispatch plus récent, en l'acquittant et en émettant `JobDebounced`.
+C'est ce qui fait que l'exécution survivante porte le payload le plus
+récent plutôt que le plus ancien. Si le token a expiré ou a été évincé,
+le job s'exécute - le debounce échoue en mode ouvert, parce qu'un token
+perdu ne prouve pas que quelqu'un d'autre possède la fenêtre.
+
+Le [driver `sync`](#drivers) n'a pas de worker : il exécute donc chaque
+dispatch en ligne et rien n'est jamais réduit. Le driver sync de Laravel
+se comporte de la même façon. `Queue::bulk` pousse au niveau du driver
+et n'arme pas de fenêtre non plus, si bien qu'un job avec debounce
+poussé en masse exécute chaque copie. Le `Queue::bulk` de Laravel saute
+sa propre acquisition de debounce pour la même raison.
+
+Définissez plutôt la fenêtre au site d'appel quand elle appartient à
+l'appelant :
+
+```rust
+use suprnova::queue::DebounceOptions;
+
+Queue::push_debounced(
+    ReindexOrder { order_id: 7 },
+    DebounceOptions::new(Duration::from_secs(30))
+        .max_wait(Duration::from_secs(300))
+        .id("7"),
+)
+.await?;
+```
+
+Un job ne peut pas déclarer à la fois `debounce_for` et `unique_id` :
+l'unicité garde le premier dispatch d'une salve et le debounce garde le
+dernier, si bien que le push retourne une erreur nommant les deux. Les
+chaînes et les lots refusent un job avec debounce pour une raison
+voisine - un maillon supplanté est abandonné, ce qui laisserait le reste
+d'une chaîne en plan, et un job de lot abandonné laisse le compte
+d'attente du lot au-dessus de zéro, si bien que ses callbacks ne se
+déclenchent jamais.
+
 ### Remplacements par-push avec `EnvelopeOverrides`
 
 `Queue::push_with` et `Queue::later_with` prennent un `EnvelopeOverrides`
@@ -751,6 +832,89 @@ Puis dédiez-lui un worker :
 Un job sans route appartient à `default`, donc `--queue=default` vide
 le travail non routé plutôt que de l'abandonner.
 
+### Faire suivre une file d'attente entière
+
+`Queue::route` est indexée par type de job. Quand vous voulez vider un
+pool à travers un autre - retirer une file d'attente du service,
+absorber un backlog, déplacer le travail hors d'un pool que vous vous
+apprêtez à arrêter - indexez plutôt la redirection par nom de file
+d'attente :
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::forward("default", "high");
+Queue::forward_on("exports", "heavy", "redis");   // seulement sur la connexion `redis`
+```
+
+La connexion de `forward_on` est une gate, et elle est comparée au nom
+de connexion de ce processus - `Queue::set_connection_name` si vous en
+avez défini un, le nom propre du driver sinon. Elle n'est pas comparée
+au `Job::connection` du job, à la connexion d'une `Queue::route`, ni à
+une connexion `EnvelopeOverrides` par push : celles-ci nomment ce que
+rapportent les événements de cycle de vie, et un worker n'a que le nom
+du processus pour filtrer sa liste de réclamation. Les deux moitiés de
+la redirection filtrent sur cette unique valeur, si bien qu'un forward
+ne peut jamais déplacer le push sans déplacer la réclamation.
+
+La redirection s'applique des deux côtés, et c'est ce qui l'empêche
+d'abandonner du travail :
+
+- **Du côté du push**, le nom est réécrit après que le routage et le
+  `Job::queue` propre au job ont eu leur mot à dire, et après une file
+  d'attente `EnvelopeOverrides` par push si vous en avez passé une.
+- **Du côté du pop**, un worker démarré avec `--queue=default` vide
+  `high`. Sans cette moitié, la file d'attente de destination
+  collecterait des jobs que personne ne réclame.
+
+Un worker démarré sans aucun `--queue` vide déjà tout, si bien qu'un
+forward ne change rien pour lui. Faire suivre `default` attrape les jobs
+qui n'ont nommé aucune file d'attente, parce qu'un job non routé
+appartient à `default`.
+
+Un forward est une recherche unique, jamais une chaîne. Avec `a -> b` et
+`b -> c` enregistrés, un push qui s'est résolu en `a` atterrit sur `b`.
+Enregistrer `b -> a` par-dessus un `a -> b` existant est donc un échange
+de pools cohérent, pas une boucle : un push vers `a` atterrit toujours
+sur `b`, un push vers `b` atterrit désormais sur `a`, et un worker
+démarré sur l'un ou l'autre nom réclame l'autre - rien ne s'enchaîne,
+donc rien n'est abandonné. Une rotation plus longue entre davantage de
+noms de files d'attente se résout de la même façon, un saut indépendant
+à la fois. Le `Queue::forward` de Laravel n'a pas non plus de
+vérification de cycle, pour la même raison : son résolveur est cette
+même recherche unique. Faire suivre une file d'attente vers son propre
+nom est l'identité - aucune redirection du tout - et c'est ainsi que
+vous neutralisez un forward que vous avez déjà enregistré.
+
+Seuls les pushs futurs se déplacent. Les enveloppes déjà posées sur la
+file d'attente source y restent, et le worker qui les vidait réclame
+désormais la destination : videz donc le pool source avant de le faire
+suivre. Il en va de même pour `queue:retry` : un job en échec est remis
+en file d'attente sur celle où il est mort.
+
+La mise en pause est évaluée avant la redirection, sur les noms avec
+lesquels le worker a été démarré. `Queue::pause(&connection, "default")`
+arrête toujours un worker démarré sur `--queue=default`, même pendant
+que `default` est fait suivre vers `high`. La réciproque vaut aussi :
+mettre en pause la *destination* du forward - `Queue::pause(&connection,
+"high")` - n'arrête pas un worker démarré sur `--queue=default`, parce
+que ce worker est atteint par son nom source, pas par le nom réécrit.
+L'événement `WorkerQueuePaused` que cette transition déclenche porte
+`queue: default`, le nom configuré, jamais `high` - Laravel ordonne et
+rapporte cela de la même façon.
+
+Les appels d'inspection ne sont délibérément pas redirigés :
+`Queue::pending_jobs(Some("default"))` liste ce qui est littéralement
+sur `default`, pas ce qui est sur `high`, et c'est ainsi que vous voyez
+le backlog abandonné sur une file d'attente source que vous venez de
+faire suivre. Laravel y résout le forward lui aussi ; voir la note de
+divergence ci-dessous.
+
+Relisez un forward enregistré avec `Queue::forward_for("default")`, qui
+retourne la destination dans `queue` et la gate de connexion dans
+`connection`.
+
 ### Pourquoi Suprnova diverge
 
 Le `Queue::route(...)` de Laravel prend une chaîne de classe ;
@@ -770,6 +934,32 @@ drivers mémoire et base de données filtrent nativement ; un driver qui
 ne le fait pas - le driver Redis en est un, puisqu'un unique groupe de
 consommateurs de stream n'a pas de stockage par file d'attente -
 lèvera une erreur plutôt que de tromper.
+
+`Queue::forward` porte intégralement la moitié file-à-file du
+`Queue::forward` de Laravel, et seulement cette moitié. Le troisième
+argument de Laravel peut déplacer une file d'attente redirigée vers une
+*connexion* différente, parce que Laravel résout un driver par nom de
+connexion. Suprnova n'a qu'un seul driver global au processus et un nom
+de connexion ne fait qu'étiqueter les événements de cycle de vie, si
+bien que `Queue::forward_on(from, to, connection)` traite la connexion
+comme une **gate** - elle décide si la redirection de nom de file
+d'attente s'applique - et jamais comme une destination. Pour la même
+raison, `to` est ici obligatoire alors que celui de Laravel est
+optionnel : un `to` omis signifie chez Laravel « ne déplacer que la
+connexion », ce qui est précisément la dimension que Suprnova ne peut
+pas honorer, si bien qu'un `forward(from, None)` serait une opération
+sans effet déguisée en changement de configuration.
+
+Les appels d'inspection de Laravel suivent un forward, parce que
+`pendingJobs($queue)` et ses homologues passent par le même `getQueue()`
+au niveau du driver que le push et le pop. Les `Queue::pending_jobs` /
+`delayed_jobs` / `reserved_jobs` de Suprnova rapportent à la place la
+file d'attente littérale que vous nommez. Avec un seul driver global au
+processus, la vue littérale est le seul moyen de voir les enveloppes
+restées en arrière sur une file d'attente que vous venez de faire suivre
+ailleurs - le backlog que cette section vous dit de vider en premier.
+Demandez la file d'attente de destination par son nom pour voir où
+atterrit le nouveau travail.
 
 ### La table `jobs`
 
@@ -961,6 +1151,7 @@ effacé sur des payloads JSON. Les erreurs voyagent sous forme de
 | `JobQueueing` | avant que l'enveloppe n'atteigne le driver |
 | `JobQueued` | après que le driver l'accepte |
 | `UniqueJobSkipped` | `push_unique` a supprimé un doublon pendant la fenêtre `unique_for` |
+| `JobDebounced` | le worker a abandonné une enveloppe qu'un dispatch avec debounce plus récent a supplantée |
 | `JobProcessing` | extrait par le worker, sur le point d'être dispatché |
 | `JobProcessed` | le handler a retourné `Ok` |
 | `JobAttempted` | à chaque clôture terminale (succès, échec, timeout) |
@@ -976,6 +1167,8 @@ effacé sur des payloads JSON. Les erreurs voyagent sous forme de
 | `QueueResumed` | `Queue::resume` a effacé le commutateur propre à une file |
 | `QueuesPaused` | `Queue::pause_all` a défini le commutateur global |
 | `QueuesResumed` | `Queue::resume_all` a effacé le commutateur global |
+| `WorkerQueuePaused` | un worker en cours d'exécution a observé pour la première fois une file d'attente en pause |
+| `WorkerQueueResumed` | un worker en cours d'exécution a vu une file d'attente en pause redevenir réclamable |
 
 Abonnez-vous avec l'API normale `Event::listen`. Les événements sont
 best-effort - `Event::dispatch` sans écouteur est un `Ok(())` sans
@@ -995,6 +1188,13 @@ déclenchent de la même façon - depuis `Queue::pause` / `resume` /
 `pause_all` / `resume_all` eux-mêmes, et non depuis la boucle du worker.
 Ils ne portent pas non plus d'identité d'enveloppe ; voir « Mettre les
 files en pause » ci-dessous pour le contrat complet.
+
+`WorkerQueuePaused` / `WorkerQueueResumed` sont la paire côté worker, et
+ce sont eux qui vous disent *pourquoi un worker donné s'est tu*. Ils se
+déclenchent une fois par transition depuis l'intérieur de la boucle du
+worker, portent la connexion que le worker vide, et portent le nom de la
+file d'attente - ou `None`, quand un worker sans filtre est au repos sur
+une pause globale et n'a aucun nom de file d'attente à signaler.
 
 ## Stockage des jobs en échec
 
@@ -1450,6 +1650,20 @@ n'affecte que cette file. **`resume_all` n'efface pas une pause propre
 une reprise globale, comme dans Laravel. Effacez-la explicitement avec
 `Queue::resume(&connection, "billing")`.
 
+Un worker en pause le dit aussi. `queue:work` imprime une ligne par
+transition :
+
+```text
+  2026-08-25 14:03:11 Queue billing PAUSED
+  2026-08-25 14:07:44 Queue billing RESUMED
+```
+
+Un worker démarré sans `--queue` n'a aucun nom de file d'attente à
+signaler : une pause globale imprime donc `All queues PAUSED` à la
+place. Les deux lignes proviennent des événements `WorkerQueuePaused` /
+`WorkerQueueResumed`, si bien que vous pouvez les écouter vous-même et
+les router là où vivent vos alertes.
+
 Les deux signaux vivent dans `Cache`, à côté du signal de redémarrage
 ci-dessus :
 
@@ -1568,6 +1782,15 @@ pour `assert_pushed_on_queue`/`assert_pushed_on_connection` et
 `pushed_with_overrides`, les assertions qui le couvrent. En mode fake,
 `push_unique` enregistre toujours le push comme nouveau - la
 déduplication n'a pas de sens quand aucun driver n'est câblé.
+
+Un push avec debounce se comporte de la même façon : le fake n'écrit
+rien dans le cache, si bien qu'aucune fenêtre n'est armée et que
+l'`available_at` enregistré ne porte aucun délai de debounce.
+`assert_pushed_later` le voit comme non différé. Ce que le fake attrape
+malgré tout, c'est un job qui déclare à la fois `debounce_for` et
+`unique_id` - cette paire ne peut pas tenir quel que soit
+l'environnement, si bien que le push retourne une erreur sous
+`Queue::fake()` exactement comme il le ferait en production.
 
 ## L'idempotence est le contrat du worker envers vous
 

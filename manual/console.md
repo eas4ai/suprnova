@@ -114,6 +114,11 @@ The framework registers a small set of commands itself. Linking the framework in
 
 `db:seed` runs whatever you've registered in `bootstrap::register()` with `suprnova::seed::register::<MySeeder>()`. On an empty registry it prints a warning and returns `Ok(())` - invoking `db:seed` before registering seeders is a benign user mistake, not a programmer error.
 
+`db:seed` reports progress on a targeted run using
+`suprnova::two_column_detail`, which renders a name, a dot leader, and a
+status as one 80-column line. Your own commands can call it for the same
+look.
+
 > The worker daemons (`queue:work`, `schedule:run`, `schedule:work`, `schedule:list`, `workflow:work`) are **not** on the console binary. They live on the app/server binary's clap parser (the same binary that serves HTTP). The global `suprnova` CLI shells into `cargo run --quiet -- <name>` for those. See the [Asymmetry section](#asymmetry-with-suprnova-migrate) below.
 
 ## Defining Commands
@@ -268,6 +273,7 @@ Console handlers print to stdout for human-readable output. If a downstream tool
 | `suprnova::console::dispatch_argv_with_init(argv, init)` | Same as `dispatch_argv` but runs the `init` closure between clap's argv parse and the matched handler. The init only fires when a real subcommand matches - `--help` / `--version` / parse-error paths skip it. This is what the scaffolded `console` binary uses. |
 | `suprnova::console::set_version(&'static str)` | Register the version string surfaced via `--version` and in `--help`. Call once at the start of `main`. First registration wins. |
 | `suprnova::console::find(name)`           | Look up a registered command by exact name.   |
+| `suprnova::two_column_detail(left, right)` | Render a name, a dot leader, and a status word as one 80-column progress line. Mirrors Laravel's `$this->components->twoColumnDetail(...)`. |
 | `suprnova::console::list()`               | All registered commands, sorted by name.      |
 | `suprnova::CommandEntry`                  | Inventory record: `{ name, description, clap_builder, handler }`. Submitted by both macros. |
 | `suprnova::CommandHandler`                | The handler fn-pointer type: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`. |

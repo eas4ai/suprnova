@@ -243,6 +243,56 @@ Laravel 会在处理程序返回之后，就释放一个*普通*唯一作业的�
 
 Suprnova 还从不强行释放一把唯一性锁。对于一次不携带所有者令牌的首次尝试，Laravel 会回退到强行释放。在 Suprnova 里，唯一那些不带令牌就到达工作进程的信封，是在这个令牌存在之前就已入队的信封，而它们保持 TTL 过期，而不是去冒一个删掉更新那次分发的锁的风险。
 
+### 防抖 - 保住最后一次分发，而不是第一次
+
+`push_unique` 压制掉一个重复项，保住的是**第一次**分发。防抖正好相反：它保住的是**最后一次**。二十个“这个订单变了”的事件汇成一次重新索引，在第二十次之后的一个窗口时长处发生，带着最新的那份载荷。
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReindexOrder {
+    order_id: u32,
+}
+
+#[async_trait]
+impl Job for ReindexOrder {
+    fn job_name() -> &'static str { "reindex-order" }
+    fn debounce_for() -> Option<Duration> { Some(Duration::from_secs(30)) }
+    fn max_debounce_wait() -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn debounce_id(&self) -> Option<String> { Some(self.order_id.to_string()) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+- `debounce_for` 就是那个窗口：每一次分发都会把它重新武装起来，所以这次运行发生在*最近一次*分发之后 30 秒。
+- `max_debounce_wait` 阻止一阵连绵不断的分发把这份工作永远推迟下去。一旦这一阵已经推迟了五分钟，下一次分发就会不带延迟地入队。这个窗口随后重新开始，所以每一阵都是从它自己的第一次分发开始计量它的最大等待时长的。
+- `debounce_id` 给这个窗口划定范围。对订单 7 的二十次更新汇成一次运行；对订单 8 的一次更新不受它们影响。省略它，这个作业的每一次分发就共用一个窗口。
+
+每一次分发仍然会入队。合并是在工作进程那边结算的：每一次推送都会覆盖掉一个缓存令牌，而工作进程会丢掉任何令牌已经被一次更新的分发替换掉的信封，把它确认掉，并发出 `JobDebounced`。正是这一点，让活下来的那次运行携带的是最新的载荷，而不是最旧的。如果这个令牌已经过期或者被淘汰了，这个作业就会运行 - 防抖是失败开放的，因为一个丢失的令牌，并不能证明这个窗口归别人所有。
+
+[`sync` 驱动程序](#驱动程序)没有工作进程，所以它会内联地运行每一次分发，什么都不会被合并掉。Laravel 的 sync 驱动程序也是同样的行为。`Queue::bulk` 是在驱动程序层面推送的，同样不会武装任何窗口，所以一个以批量方式推送的防抖作业，每一份副本都会运行。Laravel 的 `Queue::bulk` 出于同样的理由，也跳过了它自己那次防抖锁的获取。
+
+当这个窗口属于调用方时，请改在调用点设置它：
+
+```rust
+use suprnova::queue::DebounceOptions;
+
+Queue::push_debounced(
+    ReindexOrder { order_id: 7 },
+    DebounceOptions::new(Duration::from_secs(30))
+        .max_wait(Duration::from_secs(300))
+        .id("7"),
+)
+.await?;
+```
+
+一个作业不能同时声明 `debounce_for` 和 `unique_id`：唯一性保住的是一阵分发里的第一次，而防抖保住的是最后一次，所以这次推送会返回一个把两者都点了名的错误。链和批次拒绝一个防抖的作业，理由与此相关 - 一个被取代的链环会被丢掉，那会把这条链的其余部分晾在那里；而一个被丢掉的批次作业，会让这个批次的待办计数永远停在零以上，于是它的回调永远不会触发。
+
 ### 使用 `EnvelopeOverrides` 的逐次推送覆盖
 
 `Queue::push_with` 和 `Queue::later_with` 会连同作业接收一个 `EnvelopeOverrides`，供这一次分发使用与作业自身默认值不同的队列、连接、超时或重试行为：
@@ -459,11 +509,46 @@ Queue::route::<SendInvoice>(Some("redis"), Some("billing"));
 
 一个没有路由的作业属于 `default`，所以 `--queue=default` 排空的是未路由的工作，而不会把它搁置不管。
 
+### 转发一整个队列
+
+`Queue::route` 是按作业类型定键的。当您想把一个池子的工作通过另一个池子排空时 - 退役一个队列、吸收一批积压、把工作从一个您即将下线的池子上挪走 - 就改成按队列名字给这次重定向定键：
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::forward("default", "high");
+Queue::forward_on("exports", "heavy", "redis");   // 只在 `redis` 连接上
+```
+
+`forward_on` 里的那个连接是用来把关的，它比较的对象是这个进程的连接名字 - 如果您设置过 `Queue::set_connection_name`，就是它，否则就是驱动程序自己的名字。它不会拿去和这个作业的 `Job::connection`、某条 `Queue::route` 的连接，或者一次逐次推送的 `EnvelopeOverrides` 连接相比：那些点名的是生命周期事件报告的东西，而一个工作进程手上只有进程名字这一个值，能拿来给它的认领列表把关。这次重定向的两半都是按同一个值把关的，所以一次转发永远不可能挪动了推送却不挪动认领。
+
+这次重定向在两侧都生效，这正是它不会把工作搁置不管的原因：
+
+- **在推送这一侧**，这个名字是在路由和作业自己的 `Job::queue` 都说完话之后被改写的，也在一次逐次推送的 `EnvelopeOverrides` 队列（如果您传了的话）之后。
+- **在弹出这一侧**，一个以 `--queue=default` 启动的工作进程会去排空 `high`。没有这一半，目的队列就会攒下没有任何工作进程认领的作业。
+
+一个完全不带 `--queue` 启动的工作进程本来就排空所有东西，所以一次转发对它什么都不改变。转发 `default` 会捕获那些没有点名任何队列的作业，因为一个未路由的作业属于 `default`。
+
+一次转发是一次单一的查找，绝不成链。在注册了 `a -> b` 和 `b -> c` 的情况下，一次解析到了 `a` 的推送会落在 `b` 上。因此，在一条已有的 `a -> b` 之上再注册 `b -> a`，是一次说得通的池子对调，而不是一个环：推送到 `a` 的仍然落在 `b` 上，推送到 `b` 的现在落在 `a` 上，而一个以其中任一个名字启动的工作进程会去认领另一个 - 什么都不成链，所以什么都不会被搁置。在更多队列名字之间做一次更长的轮换，解析方式完全相同，一次一跳，各跳互不相干。Laravel 的 `Queue::forward` 同样没有环检测，理由也一样：它的解析器就是这同一次单一查找。把一个队列转发到它自己的名字上是一次恒等映射 - 根本没有重定向 - 这正是您用来让一条已经注册过的转发失效的办法。
+
+只有将来的推送会挪动。已经躺在源队列上的信封会留在那里，而那个过去排空它们的工作进程，现在正在认领目的队列，所以请在转发一个池子之前先把源池子排空。同样的道理也适用于 `queue:retry`：一个失败的作业会被重新入队到它死在的那个队列上。
+
+暂停是在这次重定向之前求值的，按的是这个工作进程启动时所用的那些名字。`Queue::pause(&connection, "default")` 仍然会停住一个以 `--queue=default` 启动的工作进程，哪怕 `default` 正被转发到 `high`。反过来也成立：暂停这次转发的*目的地* - `Queue::pause(&connection, "high")` - 并不会停住一个以 `--queue=default` 启动的工作进程，因为要够到那个工作进程，靠的是它的源名字，而不是那个被改写过的名字。这次转变所引发的 `WorkerQueuePaused` 事件携带的是 `queue: default`，也就是那个配置上的名字，绝不是 `high` - Laravel 给这个事件排的顺序、报告的内容，都和这里一样。
+
+那几个检查调用刻意不跟随转发：`Queue::pending_jobs(Some("default"))` 列出的是字面上在 `default` 上的东西，而不是在 `high` 上的东西，您正是靠这一点才能看见一个刚刚被您转发掉的源队列上遗留下来的积压。Laravel 在那里也会解析这次转发；参见下方的分歧说明。
+
+用 `Queue::forward_for("default")` 把一条注册过的转发读回来，它会在 `queue` 里返回目的地，在 `connection` 里返回那个把关用的连接。
+
 ### 为什么 Suprnova 有所不同
 
 Laravel 的 `Queue::route(...)` 接受一个类字符串；Suprnova 把这个作业当作一个类型参数来接受，所以一个被重命名或删除的作业，会是一个编译错误，而不是一条静默地不再匹配的路由。
 
 更大的分歧在于，当一个驱动程序不能过滤时会发生什么。`QueueDriver::pop_from` 会**拒绝**一个它无法遵守的队列过滤器，而不是回退成排空所有东西。一个被告知只排空 `billing` 却悄悄排空了所有队列的工作进程，看起来和一个正常工作的部署毫无区别，直到错的池子消费了错的作业 - 所以这个配置错误，会在第一次轮询时就变得醒目。内存和数据库驱动程序原生支持过滤；一个不支持的驱动程序 - Redis 驱动程序就是一个，因为单个流的消费者组没有逐队列的存储 - 会报错，而不会误导。
+
+`Queue::forward` 把 Laravel 的 `Queue::forward` 里队列到队列的那一半完整地移植了过来，也只移植了那一半。Laravel 的第三个参数可以把一个被转发的队列挪到一个不同的*连接*上，因为它的队列管理器是按连接名字解析驱动程序的。Suprnova 只有一个进程级全局的驱动程序，而一个连接名字只是给生命周期事件贴标签，所以 `Queue::forward_on(from, to, connection)` 把这个连接当作一个**把关的条件**来对待 - 由它决定这次按队列名字的重定向是否生效 - 而绝不当作一个目的地。出于同样的理由，这里的 `to` 是必需的，而 Laravel 的那个是可选的：在 Laravel 里省略 `to` 意味着“只挪动连接”，而那恰恰是 Suprnova 无法遵守的那个维度，所以一次 `forward(from, None)` 会是一个装扮成配置变更的空操作。
+
+Laravel 的那几个检查调用会跟随一次转发，因为 `pendingJobs($queue)` 及其兄弟方法走的是和推送、弹出同一个驱动程序层的 `getQueue()`。Suprnova 的 `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` 报告的则是您点名的那个字面上的队列。在只有一个进程级全局驱动程序的情况下，这种字面上的视图是唯一的办法，能让您看见那些留在一个刚刚被您转发走的队列上的信封 - 也就是本节告诉您要先排空的那批积压。想看新的工作正落在哪里，就按名字去问目的队列。
 
 ### `jobs` 表
 
@@ -585,6 +670,7 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | `JobQueueing` | 在这个信封到达驱动程序之前 |
 | `JobQueued` | 在驱动程序接受之后 |
 | `UniqueJobSkipped` | `push_unique` 在 `unique_for` 窗口内压制了重复项 |
+| `JobDebounced` | 工作进程丢掉了一个被更新的防抖分发所取代的信封 |
 | `JobProcessing` | 工作进程弹出了它，即将分发 |
 | `JobProcessed` | 处理程序返回了 `Ok` |
 | `JobAttempted` | 每一次终态结算（成功、失败、超时） |
@@ -600,12 +686,16 @@ fn middleware() -> Vec<Arc<dyn JobMiddleware>> {
 | `QueueResumed` | `Queue::resume` 清除一个队列自身的开关 |
 | `QueuesPaused` | `Queue::pause_all` 设置全局开关 |
 | `QueuesResumed` | `Queue::resume_all` 清除全局开关 |
+| `WorkerQueuePaused` | 一个正在运行的工作进程第一次观察到某个队列处于暂停状态 |
+| `WorkerQueueResumed` | 一个正在运行的工作进程看到一个暂停的队列重新变得可认领 |
 
 用普通的 `Event::listen` API 来订阅。这些事件是尽力而为的 - 没有监听器的 `Event::dispatch` 是一次空操作式的 `Ok(())`，所以在没有 `Event::init()` 的部署里，工作进程不会为此付出任何代价。
 
 `UniqueJobSkipped` 是唯一在*推送端*而非工作端触发的事件，也是唯一报告非失败的事件。它携带 `job_name`、`unique_id` 和 `connection` - 去重决策发生在信封存在之前，因此没有要报告的信封 id。推送仍返回 `Ok(false)`；该事件让原本不可见的压制变得可观察。
 
 `QueuePaused` / `QueueResumed` / `QueuesPaused` / `QueuesResumed` 也以相同方式触发 - 来自 `Queue::pause` / `resume` / `pause_all` / `resume_all` 自身，而非工作循环。它们同样不携带信封身份；完整契约参见下文“暂停队列”。
+
+`WorkerQueuePaused` / `WorkerQueueResumed` 是工作进程那一侧的一对，它们才是告诉您*某一个特定的工作进程为什么安静下来了*的那一对。它们在工作循环内部，为每一次状态转变各触发一次，携带这个工作进程正在排空的那个连接，也携带队列名字 - 或者是 `None`，当一个未加过滤的工作进程因为一次全局暂停而空闲、没有队列名字可以报告时。
 
 ## 失败作业存储
 
@@ -903,6 +993,15 @@ Queue::resume_all().await?;
 
 暂停的工作进程会完成已经弹出的内容 - 暂停从不打断飞行中的作业 - 然后停止认领新工作，直到恢复。`pause_all` / `resume_all` 是全局开关；暂停（或恢复）命名队列仅影响该队列。**`resume_all` 不会清除逐队列暂停** - 单独暂停的队列在全局恢复后仍保持暂停，这与 Laravel 一致。请通过 `Queue::resume(&connection, "billing")` 显式清除。
 
+一个被暂停的工作进程也会把这件事说出来。`queue:work` 会为每一次状态转变打印一行：
+
+```text
+  2026-08-25 14:03:11 Queue billing PAUSED
+  2026-08-25 14:07:44 Queue billing RESUMED
+```
+
+一个不带 `--queue` 启动的工作进程没有队列名字可以报告，所以一次全局暂停打印的是 `All queues PAUSED`。这两行都来自 `WorkerQueuePaused` / `WorkerQueueResumed` 事件，所以您也可以自己去监听它们，把它们路由到您的告警系统所在的地方。
+
 两个信号位于 `Cache` 中，与上面的重启信号并列：
 
 | 键 | 含义 |
@@ -922,7 +1021,7 @@ Queue::resume_all().await?;
 
 ### 为什么 Suprnova 有所不同
 
-无法访问的缓存会**开放失败**：无法读取暂停键的工作进程表现为“未暂停”，并继续排空 - 与上面的工作进程重启信号已采用的开放失败契约相同。瞬时缓存中断应使工作进程群降级为“忽略暂停”，而绝不能成为“每个工作进程悄然冻结” - 暂停状态是显式选择加入的信号，它自身不可用不应成为隐藏的终止开关。
+无法访问的缓存会**失败开放**：无法读取暂停键的工作进程表现为“未暂停”，并继续排空 - 与上面的工作进程重启信号已采用的失败开放契约相同。瞬时缓存中断应使工作进程群降级为“忽略暂停”，而绝不能成为“每个工作进程悄然冻结” - 暂停状态是显式选择加入的信号，它自身不可用不应成为隐藏的终止开关。
 
 ## 优雅关闭
 
@@ -963,6 +1062,8 @@ suprnova::queue::testing::assert_pushed_later::<SendWelcomeEmail>(|j, at| {
 ```
 
 这个伪造实现的守卫通过一个进程级互斥锁将并行测试串行化；它为每次推送捕获 `(payload, available_at, overrides)`，并在 `Drop` 时清除。除 `push_with`/`later_with` 外，所有入口点的 `overrides` 字段均为 `EnvelopeOverrides::default()` - 有关其断言 `assert_pushed_on_queue`/`assert_pushed_on_connection` 和 `pushed_with_overrides`，参见[模拟](mocking.md#queue---queuetestinginstall_fake)。在伪造模式下，`push_unique` 始终将推送记录为新鲜项 - 未接入驱动程序时去重没有意义。
+
+一次防抖的推送也是同样的行为：这个伪造实现什么都不往缓存里写，所以没有任何窗口被武装起来，记录下来的 `available_at` 也不带防抖延迟。`assert_pushed_later` 会把它看成没有延迟的。这个伪造实现仍然会抓住的，是一个同时声明了 `debounce_for` 和 `unique_id` 的作业 - 无论环境如何，那一对都不可能成立，所以在 `Queue::fake()` 之下这次推送会返回一个错误，和它在生产环境里的行为一模一样。
 
 ## 幂等性是工作进程和您之间的契约
 

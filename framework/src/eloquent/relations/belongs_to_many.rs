@@ -37,6 +37,15 @@
 //! - [`first`](BelongsToMany::first) - `.get().into_iter().next()`.
 //! - [`count`](BelongsToMany::count) - `SELECT COUNT(*) FROM pivot WHERE
 //!   pivot_foreign_key = ?`.
+//! - [`where_pivot`](BelongsToMany::where_pivot) and family - constrain
+//!   the pivot side of a read. Applies to `get` / `first` / `count`;
+//!   the mutators refuse to run while a filter is set, because Suprnova
+//!   builds its pivot DELETE by hand and a read predicate silently not
+//!   narrowing a write is a difference the caller cannot see. Eager
+//!   loading (`User::with(["roles"])`) goes through the macro-emitted
+//!   `__eager_load` arm, which never constructs a `BelongsToMany` and
+//!   therefore carries no pivot filter - use the relation accessor for
+//!   a filtered read.
 //!
 //! Eager loading happens through the parent model's `__eager_load`
 //! match arm - emitted by `#[suprnova::model]` and exercised by
@@ -52,9 +61,10 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use crate::database::transaction::ExecutorChoice;
 use crate::eloquent::EloquentModel;
 use crate::eloquent::attrs::Attrs;
-use crate::eloquent::builder::Builder;
+use crate::eloquent::builder::{Builder, IntoColumn, IntoVal, WhereTerm};
 use crate::eloquent::collection::Collection;
 use crate::eloquent::model::{Model, json_value_to_sea_value};
+use crate::eloquent::relations::pivot_filters::{PivotFilters, pivot_filter_methods};
 use crate::eloquent::relations::{Relation, RelationKind};
 use crate::error::FrameworkError;
 
@@ -143,6 +153,13 @@ where
     /// [`BelongsTo::scope_rewrite`](super::belongs_to::BelongsTo) for
     /// the matching closure-erasure pattern.
     scope_rewrite: Option<ScopeRewrite<R>>,
+    /// Pivot-side WHERE terms accumulated by the `where_pivot*` family.
+    /// Applied to the pivot scan in [`Self::get`] and to
+    /// [`Self::count`]; the mutators refuse to run while it is
+    /// non-empty. Empty by default, and an empty set renders no SQL at
+    /// all, so an unfiltered relation issues exactly the statements it
+    /// issued before pivot filtering existed.
+    pivot_filters: PivotFilters,
     /// PhantomData carries `L`, `R`, `P` so the [`Relation`] impl can
     /// name `type Parent = L` / `type Target = R` without runtime
     /// fields. `fn() -> (L, R, P)` keeps the type covariant +
@@ -207,6 +224,7 @@ where
             pivot_columns: Vec::new(),
             with_timestamps: false,
             scope_rewrite: None,
+            pivot_filters: PivotFilters::default(),
             _phantom: PhantomData,
         }
     }
@@ -271,6 +289,8 @@ where
         self
     }
 
+    pivot_filter_methods!(P);
+
     /// Validate all three SQL identifiers that flow unquoted into every
     /// raw-SQL statement this relation builds. Called at the top of
     /// every terminal method so a misconfigured key (e.g. one set via
@@ -320,6 +340,7 @@ where
         related_id: impl Into<serde_json::Value>,
         extra: Attrs,
     ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         // Resolve through ExecutorChoice so the pivot INSERT lands on
         // the ambient transaction connection when CURRENT_TX is active,
@@ -367,6 +388,7 @@ where
         self,
         related_id: impl Into<serde_json::Value>,
     ) -> Result<(), FrameworkError> {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         // Resolve through ExecutorChoice so the pivot DELETE lands on
         // the ambient transaction connection when CURRENT_TX is active,
@@ -420,6 +442,7 @@ where
         I: IntoIterator<Item = V>,
         V: Into<serde_json::Value>,
     {
+        self.pivot_filters.reject_mutation()?;
         self.validate_meta()?;
         use std::collections::{HashMap, HashSet};
 
@@ -615,18 +638,23 @@ where
             DatabaseBackend::Postgres => "$1".to_string(),
             _ => "?".to_string(),
         };
+        let mut id_values: Vec<sea_orm::Value> =
+            vec![json_value_to_sea_value(&self.parent_key_value)];
+        // The parent key is bind 1; PostgreSQL placeholders are
+        // positional, so the filter renderer must continue from there.
+        let mut id_bind_index: usize = 1;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut id_values, &mut id_bind_index)?;
         let id_sql = format!(
-            "SELECT {rk} AS __sn_related FROM {table} WHERE {fk} = {ph}",
+            "SELECT {rk} AS __sn_related FROM {table} WHERE {fk} = {ph}{pivot_predicates}",
             rk = self.pivot_related_key,
             table = self.pivot_table,
             fk = self.pivot_foreign_key,
             ph = id_ph,
+            pivot_predicates = pivot_predicates,
         );
-        let id_stmt = Statement::from_sql_and_values(
-            backend,
-            &id_sql,
-            vec![json_value_to_sea_value(&self.parent_key_value)],
-        );
+        let id_stmt = Statement::from_sql_and_values(backend, &id_sql, id_values);
         let id_rows = exec
             .query_all(id_stmt)
             .await
@@ -656,12 +684,15 @@ where
             q.get().await?.into_vec()
         };
 
-        // Fetch the pivot rows attached to this parent.
-        let pivot_rows: Vec<P> = P::query()
-            .filter(
+        // Fetch the pivot rows attached to this parent, under the same
+        // predicates the id scan used - otherwise a filtered read could
+        // stamp `__pivot` from a row the filter excluded.
+        let pivot_rows: Vec<P> = self
+            .pivot_filters
+            .apply(P::query().filter(
                 self.pivot_foreign_key.as_str(),
                 self.parent_key_value.clone(),
-            )
+            ))
             .get()
             .await?
             .into_vec();
@@ -719,17 +750,19 @@ where
             DatabaseBackend::Postgres => "$1".to_string(),
             _ => "?".to_string(),
         };
+        let mut values: Vec<sea_orm::Value> = vec![json_value_to_sea_value(&self.parent_key_value)];
+        let mut bind_index: usize = 1;
+        let pivot_predicates =
+            self.pivot_filters
+                .render_and(backend, &mut values, &mut bind_index)?;
         let sql = format!(
-            "SELECT COUNT(*) AS __sn_count FROM {table} WHERE {fk} = {ph}",
+            "SELECT COUNT(*) AS __sn_count FROM {table} WHERE {fk} = {ph}{pivot_predicates}",
             table = self.pivot_table,
             fk = self.pivot_foreign_key,
             ph = ph,
+            pivot_predicates = pivot_predicates,
         );
-        let stmt = Statement::from_sql_and_values(
-            backend,
-            &sql,
-            vec![json_value_to_sea_value(&self.parent_key_value)],
-        );
+        let stmt = Statement::from_sql_and_values(backend, &sql, values);
         let row = exec
             .query_one(stmt)
             .await

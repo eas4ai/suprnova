@@ -250,9 +250,41 @@ pub struct PostResource {
 Uma solicitação que nomeia um caminho de include fora da allowlist
 deste recurso recebe um envelope de erros 400 do JSON:API.
 
+### Limite de profundidade
+
+Um caminho de include pode carregar no máximo cinco segmentos.
+`?include=a.b.c.d.e.f` é truncado para `a.b.c.d.e` antes de qualquer
+coisa percorrê-lo, correspondendo ao
+`JsonApiResource::$maxRelationshipDepth` do Laravel. Mude o teto uma
+vez, no boot:
+
+```rust
+// Em bootstrap::register()
+suprnova::max_relationship_depth(3);
+```
+
+O limite importa porque um grafo de relacionamentos pode ser cíclico:
+`?include=author.posts.author.posts...` custa mais trabalho a cada
+segmento que um cliente digita, e nada além do tamanho da query string
+o delimita. O truncamento só remove segmentos, nunca acrescenta, e cada
+nível ainda confere a própria allowlist antes de descer - então um
+caminho truncado nunca consegue alcançar dados que o caminho completo
+não alcançaria.
+
+Vale conhecer uma consequência: um segmento além do limite é descartado
+antes de a allowlist vê-lo. Com um limite de 2,
+`?include=author.posts.secrets` retorna 200 com `author` e `posts`
+incluídos, em vez do 400 que o caminho completo renderia, porque
+`secrets` já não existe no momento em que algo o valida.
+
+`max_relationship_depth(0)` desliga os includes por completo. O 0 do
+Laravel ainda emite o primeiro salto, porque o clamp dele só se aplica
+à cauda depois que o segmento inicial já foi separado; o 0 do Suprnova
+significa nenhum relacionamento.
+
 ### Por que Suprnova diverge
 
-Duas divergências visíveis do `JsonApiResource` do Laravel:
+Três divergências visíveis do `JsonApiResource` do Laravel:
 
 1. **Negação padrão estrita para `?include=`.** A camada de recursos
    do Laravel ignora silenciosamente caminhos de include que não se
@@ -270,6 +302,13 @@ Duas divergências visíveis do `JsonApiResource` do Laravel:
    resposta - `.created()` quando é isso que você quer dizer,
    `.status(204)` quando a resposta é vazia, e assim por diante. Um
    único mutador se mantém honesto sob qualquer fluxo.
+
+3. **Um limite de profundidade de `0` desliga os includes por
+   completo.** O Laravel limita apenas a cauda de um caminho, depois
+   que o segmento inicial já foi separado, então o `0` dele ainda emite
+   o primeiro salto. O Suprnova trunca o caminho inteiro, então
+   `max_relationship_depth(0)` significa nenhum relacionamento - veja
+   Limite de profundidade acima.
 
 ## Paginação
 

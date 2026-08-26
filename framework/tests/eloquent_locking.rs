@@ -190,3 +190,37 @@ fn lock_appears_once_after_union_postgres() {
         "lock clause must be last, got: {sql}"
     );
 }
+
+// ---- refresh_for_update composition -----------------------------------
+//
+// `Model::refresh_for_update` builds
+// `query().without_global_scopes().where_key(pk).lock_for_update().first()`.
+// These pin the rendered shape of that composition on the backends that
+// actually take a row lock; the behavioral half lives in
+// `framework/tests/eloquent_model.rs`.
+
+#[test]
+fn locked_pk_reload_renders_postgres_for_update() {
+    let sql = T9Order::query()
+        .where_key(42i64)
+        .lock_for_update()
+        .to_sql_for(DatabaseBackend::Postgres);
+    assert!(sql.contains("id = $1"), "got: {sql}");
+    assert!(
+        sql.trim_end().ends_with("FOR UPDATE"),
+        "the lock clause closes the statement; got: {sql}"
+    );
+}
+
+#[test]
+fn locked_pk_reload_renders_mysql_for_update() {
+    let sql = T9Order::query()
+        .where_key(42i64)
+        .lock_for_update()
+        .to_sql_for(DatabaseBackend::MySql);
+    assert!(sql.contains("id = ?"), "got: {sql}");
+    assert!(
+        sql.trim_end().ends_with("FOR UPDATE"),
+        "the lock clause closes the statement; got: {sql}"
+    );
+}

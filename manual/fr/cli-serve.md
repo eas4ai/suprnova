@@ -92,6 +92,21 @@ Utile pour travailler sur l'UI sans payer le coût d'une recompilation
 Rust à chaque sauvegarde, ou quand le backend s'exécute dans un autre
 shell (ou dans Docker).
 
+### Projet API uniquement
+
+Un projet scaffoldé avec `suprnova new --api` n'a pas de répertoire
+`frontend/`. Lancez `serve` exactement comme vous le feriez partout
+ailleurs :
+
+```bash
+suprnova serve
+```
+
+`serve` ne voit aucun `frontend/package.json`, saute le panneau Vite et
+la génération TypeScript qui l'alimente, et exécute le backend.
+`--frontend-only` reste une erreur sur un tel projet : il réclame le
+seul panneau qui n'existe pas.
+
 ### Ignorer la génération de types
 
 ```bash
@@ -110,24 +125,29 @@ Quand vous exécutez `suprnova serve`, le CLI :
 1. Charge `.env` depuis le répertoire courant.
 2. Résout les ports backend et frontend (flag CLI → variable d'env → défaut).
 3. Vérifie que vous êtes dans un projet Suprnova - `Cargo.toml` doit exister
-   (sauf `--frontend-only`) et un répertoire `frontend/` doit exister (sauf
-   `--backend-only`).
+   (sauf `--frontend-only`), et `--frontend-only` exige un répertoire
+   `frontend/` doté d'un `package.json`. Un projet qui n'en a pas est servi
+   en backend seul plutôt que refusé.
 4. Régénère les types TypeScript à partir de toute struct
    `#[derive(InertiaProps)]` trouvée dans `src/`, en les écrivant dans
-   `frontend/src/types/inertia-props.ts`.
+   `frontend/src/types/inertia-props.ts`. Ignoré quand le projet n'a pas de
+   frontend.
 5. Installe `cargo-watch` via `cargo install --locked --version "^8.5"
    cargo-watch` si elle n'est pas déjà sur le PATH (une seule fois, avec un
    avis "Installing..."). Ignoré sous `--frontend-only`. La version est bornée
    parce que `serve` pilote `cargo watch -x`, dont le sens n'est pas garanti
    d'un bump de version majeure à l'autre ; `--locked` construit l'arbre de
    dépendances publié par cargo-watch plutôt que de le réanalyser au moment de
-   l'installation.
+   l'installation. Une commande qui installe un logiciel comme effet de bord du
+   démarrage d'un serveur de développement ne devrait pas en plus choisir les
+   versions à votre place.
 6. Exécute `npm install` dans `frontend/` si `node_modules` n'existe pas encore.
-   Ignoré sous `--backend-only`.
+   Ignoré sous `--backend-only`, et quand le projet n'a pas de frontend.
 7. Lance `cargo watch -x 'run --bin <package-name>'` pour le backend.
    `cargo-watch` réexécute le binaire à chaque changement d'un fichier `.rs`.
 8. Lance `npm run dev` dans `frontend/` pour Vite, ce qui donne le HMR pour les
-   composants Svelte/React/Vue et les classes Tailwind.
+   composants Svelte/React/Vue et les classes Tailwind. Ignoré sous
+   `--backend-only`, et quand le projet n'a pas de frontend.
 9. Lance chaque processus supplémentaire déclaré dans le `Suprnova.toml` du
    projet (voir [Processus de dev supplémentaires](#processus-de-dev-supplémentaires)
    ci-dessous), chacun avec son préfixe `[name]` - workers de file d'attente,
@@ -135,12 +155,13 @@ Quand vous exécutez `suprnova serve`, le CLI :
    dans un autre terminal.
 10. Démarre un surveilleur de fichiers sur `src/` qui réexécute le générateur
     de types chaque fois qu'un fichier `.rs` change, une fois que la salve de
-    sauvegardes s'est tue pendant 500 ms. Le debounce se déclenche en fin de
-    salve, si bien qu'une salve - `cargo fmt`, formatage à la sauvegarde sur
-    plusieurs fichiers, un changement de branche - se fond en exactement une
-    régénération qui s'exécute *après* la dernière écriture, plutôt qu'une
-    régénération qui se déclencherait dès le premier fichier et manquerait le
-    reste.
+    sauvegardes s'est tue pendant 500 ms. Ignoré quand le projet n'a pas de
+    frontend, comme la génération de types au démarrage à l'étape 4. Le
+    debounce se déclenche en fin de salve, si bien qu'une salve - `cargo fmt`,
+    formatage à la sauvegarde sur plusieurs fichiers, un changement de
+    branche - se fond en exactement une régénération qui s'exécute *après* la
+    dernière écriture, plutôt qu'une régénération qui se déclencherait dès le
+    premier fichier et manquerait le reste.
 11. Redirige le stdout/stderr de chaque processus enfant vers votre terminal
     avec un préfixe `[name]` (`[backend]`, `[frontend]`, ou le nom configuré du
     processus), éventuellement horodaté avec `--timestamps` - ou, avec

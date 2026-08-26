@@ -43,6 +43,11 @@
 //! DB_MIN_CONNECTIONS=1
 //! DB_CONNECT_TIMEOUT=30
 //! DB_LOGGING=false
+//! DB_IDLE_TIMEOUT=600
+//! DB_MAX_LIFETIME=1800
+//! DB_ACQUIRE_TIMEOUT=30
+//! DB_TEST_BEFORE_ACQUIRE=true
+//! DB_PING_AFTER_IDLE=30
 //! ```
 
 pub(crate) mod after_commit;
@@ -134,6 +139,25 @@ use crate::{App, Config};
 
 pub(crate) fn unsupported_database_backend(backend: sea_orm::DatabaseBackend) -> FrameworkError {
     FrameworkError::database(format!("unsupported database backend: {backend:?}"))
+}
+
+/// A `where_binary` clause reached a backend that has no byte-exact
+/// comparison operator.
+///
+/// MySQL and MariaDB spell it as the `binary` operator modifier;
+/// Postgres and SQLite have no equivalent. The builder refuses at
+/// render time rather than emitting a plain `=`, because a plain `=`
+/// compares under the column's collation and would quietly return rows
+/// the caller asked to exclude - a wrong answer is worse than an error.
+///
+/// `param` (not `database`) because this is builder misuse detected
+/// before any I/O, the same class as an invalid identifier.
+pub(crate) fn binary_comparison_unsupported(backend: sea_orm::DatabaseBackend) -> FrameworkError {
+    FrameworkError::param(format!(
+        "where_binary is not supported on {backend:?}: byte-exact comparison is a \
+         MySQL/MariaDB feature. Use a case-sensitive collation on the column, or \
+         `filter_raw` with a backend-specific expression."
+    ))
 }
 
 /// Database facade - main entry point for database operations

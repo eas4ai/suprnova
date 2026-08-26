@@ -114,6 +114,8 @@ Tokioは `current_thread` フレーバーで動作します - ワンショット
 
 `db:seed` は、`suprnova::seed::register::<MySeeder>()` で `bootstrap::register()` の中に登録したものを、何であれ実行します。レジストリが空であれば警告を出力して `Ok(())` を返します - シーダーを登録する前に `db:seed` を呼び出すのは、罪のないユーザーの誤りであって、プログラマーの誤りではありません。
 
+`db:seed` は、対象を絞った実行の進捗を `suprnova::two_column_detail` を使って報告します。これは、名前、ドットリーダー、そしてステータスを、80カラムの1行として描画します。あなた自身のコマンドからも、同じ見た目を得るためにこれを呼び出せます。
+
 > ワーカーデーモン（`queue:work`、`schedule:run`、`schedule:work`、`schedule:list`、`workflow:work`）は、コンソールバイナリの上には**ありません**。それらは、app/serverバイナリのclapパーサー上に存在します（HTTPを提供するのと同じバイナリです）。グローバルな `suprnova` CLIは、それらについては `cargo run --quiet -- <name>` へシェルアウトします。下の[非対称性のセクション](#suprnova-migrate-との非対称性)を参照してください。
 
 ## コマンドを定義する
@@ -268,6 +270,7 @@ pub async fn users_purge(args: Vec<String>) -> Result<(), FrameworkError> {
 | `suprnova::console::dispatch_argv_with_init(argv, init)` | `dispatch_argv` と同じだが、clapのargvパースとマッチしたハンドラの間で `init` クロージャを実行する。initが発火するのは、実際のサブコマンドがマッチしたときだけ - `--help` / `--version` / パースエラーの各経路はそれをスキップする。スキャフォルドされた `console` バイナリが使っているのはこちら。 |
 | `suprnova::console::set_version(&'static str)` | `--version` と `--help` の中で表に出るバージョン文字列を登録する。`main` の先頭で一度だけ呼ぶ。最初の登録が勝つ。 |
 | `suprnova::console::find(name)`           | 正確な名前で、登録済みのコマンドを引く。   |
+| `suprnova::two_column_detail(left, right)` | 名前、ドットリーダー、そしてステータスの語を、80カラムの1行の進捗行として描画する。Laravelの `$this->components->twoColumnDetail(...)` を映している。 |
 | `suprnova::console::list()`               | 登録済みのすべてのコマンドを、名前順に並べたもの。      |
 | `suprnova::CommandEntry`                  | インベントリのレコード: `{ name, description, clap_builder, handler }`。両方のマクロによって提出される。 |
 | `suprnova::CommandHandler`                | ハンドラの関数ポインタ型: `fn(&clap::ArgMatches) -> Pin<Box<dyn Future<...>>>`。 |

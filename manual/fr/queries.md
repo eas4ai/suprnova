@@ -76,6 +76,29 @@ DB::table("audit_log")
 `uuid::Uuid` et `serde_json::Value` - tous les types de colonne
 que le backend comprend.
 
+#### Comparaison octet à octet
+
+`where_binary` compare les octets bruts d'une colonne au lieu de faire
+correspondre sous sa collation : `"Alice"` ne correspond donc pas à
+`"alice"` ni à `"ALICE"` :
+
+```rust
+DB::table("users").where_binary("email", submitted).get().await?;
+DB::table("users").where_not_binary("email", submitted).get().await?;
+```
+
+C'est une fonctionnalité MySQL et MariaDB - elle émet leur modificateur
+d'opérateur `binary`, `email = binary ?`. Postgres et SQLite n'ont pas
+d'équivalent : sur ces backends, chaque terminal retourne donc une
+erreur au moment où l'instruction est rendue, avant qu'aucune requête
+ne s'exécute. Suprnova refuse plutôt que de retomber sur un `=` simple,
+parce qu'un repli comparerait sous la collation de la colonne et
+retournerait des lignes que vous aviez demandé d'exclure.
+
+S'il vous faut une correspondance sensible à la casse sur Postgres ou
+SQLite, posez une collation sensible à la casse sur la colonne, ou
+utilisez `DB::select` avec une expression propre au backend.
+
 ### Sélectionner des colonnes
 
 ```rust
@@ -464,6 +487,13 @@ modèle livre les deux - `update` et `delete` correspondent au
 `DB::table($t)->update(...)` et `->delete()` de Laravel à la lettre ;
 `update_all` et `delete_all` correspondent à la convention que les
 utilisateurs de `M` ont déjà dans les doigts.
+
+`where_binary` retourne une erreur sur Postgres et SQLite là où Laravel
+lève une `RuntimeException` depuis la grammaire de base. La raison est
+la même et seul le mécanisme diffère : le code de surface publique de
+Suprnova retourne `Result` au lieu de paniquer, si bien que le refus
+arrive sous forme d'`Err` depuis le terminal plutôt que d'exception
+depuis la grammaire.
 
 ## Suivant
 

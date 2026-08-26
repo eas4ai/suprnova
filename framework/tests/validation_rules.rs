@@ -3,9 +3,10 @@
 
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, Value};
 use suprnova::rules::{
-    Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, Confirmed, Different, Distinct, Email,
-    HttpUrl, In, Integer, Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless,
-    RequiredWith, Same, Url, UrlProtocols, Uuid,
+    Alpha, AlphaDash, AlphaNum, ArrayKeys, Between, Boolean, CompareWith, Confirmed, Contains,
+    Different, Distinct, DoesntContain, Email, Gt, Gte, HttpUrl, In, InArray, Integer, Lt, Lte,
+    Max, Min, NotIn, Numeric, Required, RequiredIf, RequiredUnless, RequiredWith, Same, Url,
+    UrlProtocols, Uuid,
 };
 use suprnova::testing::TestContainer;
 use suprnova::{AsyncRule, ContextualRule, DbConnection, FormContext, Rule, Unique, ValueRule};
@@ -686,6 +687,375 @@ fn distinct_ignore_case_and_strict_flags_change_comparison() {
         strict.passes(&serde_json::json!([1, 1.0])).is_ok(),
         "strict keeps representations apart"
     );
+}
+
+// --- membership rules (in_array, contains, doesnt_contain) ---
+
+#[test]
+fn in_array_matches_a_sibling_list_exactly() {
+    let allowed = ["red".to_string(), "green".to_string()];
+    let rule = InArray(&allowed);
+    assert!(rule.passes("red").is_ok());
+    assert!(rule.passes("green").is_ok());
+    assert!(rule.passes("blue").is_err());
+}
+
+#[test]
+fn in_array_accepts_a_str_slice_haystack_and_never_coerces() {
+    let rule = InArray(&["1", "2"]);
+    assert!(rule.passes("1").is_ok());
+    assert!(
+        rule.passes("01").is_err(),
+        "membership is exact string equality, not numeric equality"
+    );
+    assert!(
+        rule.passes(" 1").is_err(),
+        "the value is compared verbatim; nothing is trimmed"
+    );
+    assert!(
+        rule.passes("1abc").is_err(),
+        "the PHP prefix-coercion bypass #61146 closed has no analogue here"
+    );
+}
+
+#[test]
+fn in_array_fails_an_empty_haystack_without_calling_it_a_construction_error() {
+    let empty: [String; 0] = [];
+    let err = InArray(&empty).passes("red").unwrap_err();
+    assert!(
+        err.is_keyed(),
+        "an empty sibling list is ordinary data, so the failure stays translatable"
+    );
+    assert_eq!(err.key, "validation-in-array");
+}
+
+#[test]
+fn in_array_never_echoes_the_submitted_haystack_into_its_message() {
+    let allowed = ["s3cret-tier".to_string()];
+    let err = InArray(&allowed).passes("public").unwrap_err();
+    assert!(
+        err.args.is_empty(),
+        "no request data may reach the message arguments"
+    );
+    assert!(!err.to_string().contains("s3cret-tier"));
+}
+
+#[test]
+fn contains_requires_every_listed_value() {
+    let rule = Contains(&["admin", "editor"]);
+    assert!(
+        rule.passes(&serde_json::json!(["admin", "editor", "viewer"]))
+            .is_ok(),
+        "extra elements are fine; all parameters must be present"
+    );
+    assert!(
+        rule.passes(&serde_json::json!(["admin"])).is_err(),
+        "one missing parameter fails the rule"
+    );
+    assert!(
+        rule.passes(&serde_json::json!("admin")).is_err(),
+        "a non-array fails, matching Laravel's !is_array guard"
+    );
+}
+
+#[test]
+fn contains_compares_json_strings_only() {
+    let rule = Contains(&["1"]);
+    assert!(rule.passes(&serde_json::json!(["1"])).is_ok());
+    assert!(
+        rule.passes(&serde_json::json!([1])).is_err(),
+        "a JSON number is not the string that spells it"
+    );
+    assert!(
+        rule.passes(&serde_json::json!([true])).is_err(),
+        "nor is a JSON boolean"
+    );
+}
+
+#[test]
+fn contains_with_an_empty_list_is_a_construction_error() {
+    let err = Contains(&[])
+        .passes(&serde_json::json!(["admin"]))
+        .unwrap_err();
+    assert!(
+        !err.is_keyed(),
+        "an empty parameter list is a programming error, not a translatable one"
+    );
+    assert!(err.to_string().contains("at least one"));
+}
+
+#[test]
+fn doesnt_contain_rejects_any_listed_value() {
+    let rule = DoesntContain(&["admin", "root"]);
+    assert!(
+        rule.passes(&serde_json::json!(["viewer", "editor"]))
+            .is_ok()
+    );
+    assert!(
+        rule.passes(&serde_json::json!(["viewer", "admin"]))
+            .is_err()
+    );
+    assert!(
+        rule.passes(&serde_json::json!("viewer")).is_err(),
+        "a non-array fails closed, exactly as Laravel's !is_array guard does"
+    );
+}
+
+#[test]
+fn doesnt_contain_compares_json_strings_only() {
+    let rule = DoesntContain(&["1"]);
+    assert!(
+        rule.passes(&serde_json::json!([1])).is_ok(),
+        "a JSON number is not the string that spells it, so it is not forbidden"
+    );
+    assert!(rule.passes(&serde_json::json!(["1"])).is_err());
+}
+
+#[test]
+fn doesnt_contain_with_an_empty_list_is_a_construction_error() {
+    let err = DoesntContain(&[])
+        .passes(&serde_json::json!(["admin"]))
+        .unwrap_err();
+    assert!(!err.is_keyed());
+    assert!(err.to_string().contains("at least one"));
+}
+
+#[test]
+fn membership_rules_mix_in_one_validate_row_list() {
+    use suprnova::{ValidationErrors, validate};
+
+    struct RoleForm {
+        role: String,
+        allowed_roles: Vec<String>,
+        tags: serde_json::Value,
+    }
+
+    impl RoleForm {
+        fn check(&self) -> Result<(), ValidationErrors> {
+            validate! { self =>
+                role => InArray(&self.allowed_roles);
+                tags => Contains(&["rust"]), DoesntContain(&["banned"]);
+            }
+        }
+    }
+
+    let ok = RoleForm {
+        role: "editor".into(),
+        allowed_roles: vec!["editor".into(), "viewer".into()],
+        tags: serde_json::json!(["rust", "web"]),
+    };
+    assert!(ok.check().is_ok());
+
+    let bad = RoleForm {
+        role: "admin".into(),
+        allowed_roles: vec!["editor".into()],
+        tags: serde_json::json!(["banned"]),
+    };
+    let errs = bad.check().unwrap_err();
+    assert!(
+        errs.errors.contains_key("role"),
+        "a borrowed-haystack Rule must dispatch through RuleCheck<str>"
+    );
+    assert!(
+        errs.errors.contains_key("tags"),
+        "a ValueRule row must dispatch through RuleCheck<serde_json::Value>"
+    );
+}
+
+// --- comparison rules (gt, gte, lt, lte) ---
+
+#[test]
+fn gt_and_lt_compare_against_a_literal_number() {
+    let none = ctx(&[]);
+    assert!(Gt(CompareWith::Number(0.0)).passes("1", &none).is_ok());
+    let err = Gt(CompareWith::Number(0.0)).passes("0", &none).unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-gt");
+    assert!(Lt(CompareWith::Number(10.0)).passes("9.5", &none).is_ok());
+    let err = Lt(CompareWith::Number(10.0))
+        .passes("10", &none)
+        .unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-lt");
+}
+
+#[test]
+fn gte_and_lte_admit_the_boundary() {
+    let none = ctx(&[]);
+    assert!(Gte(CompareWith::Number(5.0)).passes("5", &none).is_ok());
+    let err = Gte(CompareWith::Number(5.0))
+        .passes("4.999", &none)
+        .unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-gte");
+    assert!(Lte(CompareWith::Number(5.0)).passes("5", &none).is_ok());
+    let err = Lte(CompareWith::Number(5.0))
+        .passes("5.001", &none)
+        .unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-lte");
+}
+
+#[test]
+fn a_numeric_field_operand_reads_the_sibling() {
+    let form = ctx(&[("max_price", "100")]);
+    let rule = Lte(CompareWith::NumericField("max_price"));
+    assert!(rule.passes("99", &form).is_ok());
+    assert!(rule.passes("100", &form).is_ok());
+    let err = rule.passes("101", &form).unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-lte");
+    assert!(
+        rule.passes(" 99 ", &form).is_ok(),
+        "both operands are trimmed before parsing, matching Laravel's trim()"
+    );
+}
+
+#[test]
+fn a_length_field_operand_counts_characters_not_numbers() {
+    let form = ctx(&[("summary", "abcd")]);
+    // "9" is one character and "abcd" is four, so the shorter one wins
+    // even though 9 is the larger number.
+    assert!(
+        Lt(CompareWith::LengthField("summary"))
+            .passes("9", &form)
+            .is_ok()
+    );
+    let err = Gt(CompareWith::LengthField("summary"))
+        .passes("9", &form)
+        .unwrap_err();
+    assert!(err.is_keyed());
+    assert_eq!(err.key, "validation-gt");
+    assert!(
+        Gt(CompareWith::LengthField("summary"))
+            .passes("abcde", &form)
+            .is_ok()
+    );
+    assert!(
+        Gte(CompareWith::LengthField("summary"))
+            .passes("héllo", &form)
+            .is_ok(),
+        "multi-byte characters count once each, like Min and Max"
+    );
+}
+
+#[test]
+fn an_unparseable_value_fails_the_rule_instead_of_panicking() {
+    let none = ctx(&[]);
+    let err = Gt(CompareWith::Number(0.0))
+        .passes("abc", &none)
+        .unwrap_err();
+    assert_eq!(err.key, "validation-gt");
+    assert!(Lt(CompareWith::Number(1.0)).passes("", &none).is_err());
+}
+
+#[test]
+fn non_finite_values_and_operands_fail_closed() {
+    let none = ctx(&[]);
+    assert!(
+        Gt(CompareWith::Number(1.0)).passes("1e400", &none).is_err(),
+        "a magnitude that overflows to infinity is rejected, exactly as Numeric rejects it"
+    );
+    assert!(Lt(CompareWith::Number(1.0)).passes("NaN", &none).is_err());
+    assert!(Gt(CompareWith::Number(1.0)).passes("inf", &none).is_err());
+    assert!(
+        Gt(CompareWith::Number(f64::NAN))
+            .passes("5", &none)
+            .is_err(),
+        "a non-finite literal is a broken rule, so the field fails"
+    );
+    assert!(
+        Lt(CompareWith::Number(f64::INFINITY))
+            .passes("5", &none)
+            .is_err(),
+        "the rule refuses to invent an answer rather than passing everything"
+    );
+}
+
+#[test]
+fn a_missing_sibling_field_fails_the_rule() {
+    let none = ctx(&[]);
+    assert!(
+        Lte(CompareWith::NumericField("max_price"))
+            .passes("1", &none)
+            .is_err(),
+        "a missing operand is a failure, the posture Same already takes"
+    );
+    assert!(
+        Gt(CompareWith::LengthField("summary"))
+            .passes("abc", &none)
+            .is_err()
+    );
+    let unparseable = ctx(&[("max_price", "lots")]);
+    assert!(
+        Lte(CompareWith::NumericField("max_price"))
+            .passes("1", &unparseable)
+            .is_err(),
+        "a sibling that is not a number cannot be compared numerically"
+    );
+}
+
+#[test]
+fn comparison_messages_name_the_operand_never_the_siblings_value() {
+    let form = ctx(&[("max_price", "100")]);
+    let err = Lte(CompareWith::NumericField("max_price"))
+        .passes("101", &form)
+        .unwrap_err();
+    assert_eq!(err.key, "validation-lte");
+    assert_eq!(
+        err.args.get("other"),
+        Some(&serde_json::json!("max_price")),
+        "the message names the field, not what was submitted into it"
+    );
+    assert!(
+        !err.to_string().contains("100"),
+        "the sibling's submitted value must not reach the message"
+    );
+
+    let err = Gt(CompareWith::Number(2.5))
+        .passes("1", &ctx(&[]))
+        .unwrap_err();
+    assert_eq!(err.key, "validation-gt");
+    assert_eq!(err.args.get("other"), Some(&serde_json::json!("2.5")));
+}
+
+#[test]
+fn comparison_rules_run_from_a_validate_row() {
+    use suprnova::{ValidationErrors, validate};
+
+    struct PriceForm {
+        price: String,
+        max_price: String,
+    }
+
+    impl PriceForm {
+        fn check(&self) -> Result<(), ValidationErrors> {
+            let mut ctx = FormContext::new();
+            ctx.insert("max_price".to_string(), self.max_price.clone());
+            validate! { self =>
+                price => Gt(CompareWith::Number(0.0)) => with ctx,
+                         Lte(CompareWith::NumericField("max_price")) => with ctx;
+            }
+        }
+    }
+
+    let ok = PriceForm {
+        price: "50".into(),
+        max_price: "100".into(),
+    };
+    assert!(ok.check().is_ok());
+
+    let over = PriceForm {
+        price: "150".into(),
+        max_price: "100".into(),
+    };
+    assert!(over.check().unwrap_err().errors.contains_key("price"));
+
+    let negative = PriceForm {
+        price: "-1".into(),
+        max_price: "100".into(),
+    };
+    assert!(negative.check().unwrap_err().errors.contains_key("price"));
 }
 
 // --- validate! macro ---

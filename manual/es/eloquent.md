@@ -425,6 +425,7 @@ WHERE de la cadena).
 ```php
 // Laravel
 $user->refresh();                          // recarga desde la BD
+$user->refreshForUpdate();                 // recarga bajo un bloqueo de fila
 $copy = $user->fresh();                    // obtiene una copia y la devuelve
 $replica = $user->replicate();             // clon sin guardar con PK nueva
 $replica = $user->replicate(['email']);    // omite un campo
@@ -433,15 +434,32 @@ $replica = $user->replicate(['email']);    // omite un campo
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
 `refresh` muta en el sitio; `fresh` devuelve una copia obtenida por
-separado. `replicate` construye un clon en memoria con la PK
-reiniciada (`Default::default()` para el tipo de la clave). Quien
-llama la guarda explícitamente.
+separado. `refresh_for_update` es `refresh` bajo un bloqueo de fila
+`SELECT ... FOR UPDATE` - úsalo dentro de una transacción cuando
+necesites los valores actuales de la fila y el bloqueo exclusivo en una
+sola sentencia. A diferencia de `refresh`, `refresh_for_update` se salta
+todos los scopes globales registrados Y el filtro de
+`#[model(soft_deletes)]`: recarga también una fila descartada, y
+`deleted_at` vuelve con valor. La recarga es una búsqueda por clave
+primaria bajo un bloqueo - acotarla como se acota una lectura corriente
+les daría a las herramientas de administración y a quienes llaman desde
+otro tenant un falso resultado de fila no encontrada para una fila de la
+que ya tienen una referencia. `replicate` construye un clon en memoria
+con la PK reiniciada (`Default::default()` para el tipo de la clave).
+Quien llama la guarda explícitamente.
+
+Tanto `refresh` como `refresh_for_update` devuelven un error cuando la
+fila ya no existe, en lugar de dejar el modelo con valores obsoletos.
+SQLite no tiene bloqueo a nivel de fila, así que allí
+`refresh_for_update` recarga sin bloqueo - véase
+[Bloqueo de filas](#bloqueo-de-filas).
 
 ### Evento `Replicating`
 
@@ -595,6 +613,8 @@ cualquiera de las dos.
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | Igualdad |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | Operador arbitrario |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | Filtro de PK como disyunto |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | Filtro de PK negado como disyunto |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -609,6 +629,10 @@ cualquiera de las dos.
 | `->whereTime(col, '12:30')` | `.filter_time(col, NaiveTime)` | `.where_time(col, NaiveTime)` | |
 | `->whereLike(col, pattern)` | `.filter_like(col, pattern)` | `.where_like(col, pattern)` | |
 | `->whereNotLike(col, pattern)` | `.filter_not_like(col, pattern)` | `.where_not_like(col, pattern)` | |
+| `->whereBinary(col, val)` | `.filter_binary(col, val)` | `.where_binary(col, val)` | Byte a byte; solo MySQL y MariaDB |
+| `->orWhereBinary(col, val)` | `.or_filter_binary(col, val)` | `.or_where_binary(col, val)` | |
+| `->whereNotBinary(col, val)` | `.filter_not_binary(col, val)` | `.where_not_binary(col, val)` | |
+| `->orWhereNotBinary(col, val)` | `.or_filter_not_binary(col, val)` | `.or_where_not_binary(col, val)` | |
 | `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | Según el backend |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
 | `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | Comparación columna a columna |
@@ -617,6 +641,13 @@ cualquiera de las dos.
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | (10B) |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
+
+La familia `binary` compara los bytes en crudo en lugar de casar bajo la
+intercalación de la columna. MySQL y MariaDB emiten `col = binary ?`;
+Postgres y SQLite no tienen un operador equivalente, así que en esos
+backends un terminal devuelve un error al renderizar la sentencia en lugar
+de recurrir a un `=` dependiente de la intercalación. Véase
+[Comparación byte a byte](queries.md#byte-exact-comparison).
 
 Los predicados en bruto vinculados usan marcadores `?` portables en
 SQLite, MySQL y PostgreSQL:
@@ -665,6 +696,50 @@ let users = User::query().in_random_order().get().await?;
 
 `Direction::Asc` / `Direction::Desc` es el enum de Suprnova
 reexportado desde SeaORM.
+
+#### Ordenar por una secuencia explícita
+
+`in_order_of` ordena las filas en el orden que enumeras. Todo aquello
+cuyo valor no esté en la lista se ordena después de todo lo que sí lo
+está.
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnova lo renderiza como una expresión `CASE` con valores vinculados,
+así que los valores son parámetros y es seguro tomarlos de los datos de
+la solicitud:
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+El nombre de la columna es un identificador SQL, no un parámetro.
+Escríbelo fijo o elígelo de una lista de permitidos, igual que cualquier
+otro argumento de columna. Una lista de valores vacía no añade ordenación
+alguna, así que puedes construir la secuencia de forma condicional sin
+tratar aparte el caso vacío.
+
+Para una columna que usa el cast `AsEnum<E>`, pasa cada variante por
+`as_ref()`. Esa es la cadena exacta que almacena el cast:
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` se publica en la superficie tipada `Builder<M>`. El builder
+sin modelo `DB::table(...)` solo ordena por columna y dirección.
 
 ### Agrupación + having
 
@@ -809,6 +884,19 @@ declaración compuesta - después de cada rama `UNION`, cada
 `ORDER BY`, cada `LIMIT` / `OFFSET`. Un `union(...)` de dos
 builders seguido de `.lock_for_update()` emite exactamente **un**
 `FOR UPDATE` en el ámbito exterior, no uno por rama.
+
+Para recargar un modelo que ya tienes en la mano y tomar el bloqueo en
+la misma sentencia, usa `refresh_for_update`:
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### Uso dentro de una transacción
 
@@ -3941,7 +4029,10 @@ puede hacer.
 // Filtros de PK.
 User::query().where_key(7).first().await?;        // azúcar para filter("id", 7)
 User::query().where_key_not(7).get().await?;      // azúcar para filter_op("id", "!=", 7)
-// Alias idiomáticos de Rust: filter_key / filter_key_not.
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// Alias idiomáticos de Rust: filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not.
 
 // Ordenar por created_at.
 Post::query().latest().get().await?;              // ORDER BY created_at DESC

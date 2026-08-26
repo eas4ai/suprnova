@@ -1345,6 +1345,18 @@ where
         println!("  Stop with Ctrl+C or SIGTERM (in-flight jobs will drain)");
         println!("==============================================");
 
+        // Registered after the banner so the first transition prints below it.
+        // A worker that goes quiet because somebody paused its queue now says
+        // so, instead of looking hung.
+        crate::events::EventFacade::listen::<crate::queue::events::WorkerQueuePaused, _>(
+            std::sync::Arc::new(WorkerQueuePausedPrinter),
+        )
+        .await;
+        crate::events::EventFacade::listen::<crate::queue::events::WorkerQueueResumed, _>(
+            std::sync::Arc::new(WorkerQueueResumedPrinter),
+        )
+        .await;
+
         let cancel_for_worker = cancel.clone();
         let mut worker = tokio::spawn(async move {
             crate::queue::worker::run_worker(driver, cfg, cancel_for_worker).await;
@@ -1636,6 +1648,66 @@ where
             eprintln!("suprnova: localization bootstrap failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// One line of `queue:work` output for a queue that paused or resumed.
+///
+/// Split from the listener so the shape can be pinned by a unit test - the
+/// listener itself writes to stdout from inside a long-lived daemon. Mirrors
+/// Laravel's `WorkCommand::writeQueueStatus` output, minus its ANSI colors
+/// (the worker's other lines are uncolored too) and minus its `--json` mode,
+/// which `queue:work` does not have.
+fn format_worker_queue_status(
+    queue: Option<&str>,
+    paused: bool,
+    at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let status = if paused { "PAUSED" } else { "RESUMED" };
+    let stamp = at.format("%Y-%m-%d %H:%M:%S");
+    match queue {
+        Some(name) => format!("  {stamp} Queue {name} {status}"),
+        None => format!("  {stamp} All queues {status}"),
+    }
+}
+
+/// Prints one line whenever the running worker observes a queue pausing.
+///
+/// Registered by `queue:work` only. Without it a paused worker produces no
+/// output at all, which is indistinguishable from a hung one - the operability
+/// hole Laravel closed in #61142.
+struct WorkerQueuePausedPrinter;
+
+#[crate::async_trait]
+impl crate::events::Listener<crate::queue::events::WorkerQueuePaused> for WorkerQueuePausedPrinter {
+    async fn handle(
+        &self,
+        event: &crate::queue::events::WorkerQueuePaused,
+    ) -> Result<(), crate::FrameworkError> {
+        println!(
+            "{}",
+            format_worker_queue_status(event.queue.as_deref(), true, chrono::Utc::now())
+        );
+        Ok(())
+    }
+}
+
+/// The mirror of [`WorkerQueuePausedPrinter`], for the way back.
+struct WorkerQueueResumedPrinter;
+
+#[crate::async_trait]
+impl crate::events::Listener<crate::queue::events::WorkerQueueResumed>
+    for WorkerQueueResumedPrinter
+{
+    async fn handle(
+        &self,
+        event: &crate::queue::events::WorkerQueueResumed,
+    ) -> Result<(), crate::FrameworkError> {
+        println!(
+            "{}",
+            format_worker_queue_status(event.queue.as_deref(), false, chrono::Utc::now())
+        );
+        Ok(())
     }
 }
 
@@ -1940,6 +2012,46 @@ mod queue_pause_target_tests {
         let err = resolve_pause_target(Some("   ".to_string()), false)
             .expect_err("a blank queue name must be refused, matching Laravel's falsy check");
         assert!(err.contains("--all"));
+    }
+}
+
+#[cfg(test)]
+mod worker_queue_status_tests {
+    //! `format_worker_queue_status` is what the `queue:work` listener prints
+    //! when the worker observes a queue pausing or resuming. Tested here for
+    //! the reason `queue_pause_target_tests` above documents: the listener
+    //! itself writes to stdout from inside a long-lived daemon, so the shape
+    //! of the line is the only part worth pinning, and it is a private free
+    //! function invisible to an integration-test crate.
+    use super::format_worker_queue_status;
+    use chrono::TimeZone;
+
+    fn at() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 8, 25, 14, 3, 11)
+            .single()
+            .expect("fixed clock")
+    }
+
+    #[test]
+    fn a_named_queue_is_reported_by_name() {
+        assert_eq!(
+            format_worker_queue_status(Some("billing"), true, at()),
+            "  2026-08-25 14:03:11 Queue billing PAUSED"
+        );
+        assert_eq!(
+            format_worker_queue_status(Some("billing"), false, at()),
+            "  2026-08-25 14:03:11 Queue billing RESUMED"
+        );
+    }
+
+    #[test]
+    fn an_unfiltered_worker_reports_every_queue() {
+        assert_eq!(
+            format_worker_queue_status(None, true, at()),
+            "  2026-08-25 14:03:11 All queues PAUSED",
+            "an unfiltered worker has no queue name, and must not invent one"
+        );
     }
 }
 

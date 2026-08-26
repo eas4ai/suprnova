@@ -374,6 +374,79 @@ envelopes that reach a Suprnova worker without one are envelopes queued before
 the token existed, and those keep TTL expiry rather than risking a release that
 deletes a newer dispatch's lock.
 
+### Debouncing - keep the last dispatch, not the first
+
+`push_unique` suppresses a duplicate and keeps the **first** dispatch.
+Debouncing is the opposite: it keeps the **last**. A burst of twenty "this
+order changed" events becomes one reindex, one window after the twentieth,
+carrying the newest payload.
+
+```rust
+use std::time::Duration;
+use suprnova::{FrameworkError, Job, async_trait};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReindexOrder {
+    order_id: u32,
+}
+
+#[async_trait]
+impl Job for ReindexOrder {
+    fn job_name() -> &'static str { "reindex-order" }
+    fn debounce_for() -> Option<Duration> { Some(Duration::from_secs(30)) }
+    fn max_debounce_wait() -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn debounce_id(&self) -> Option<String> { Some(self.order_id.to_string()) }
+
+    async fn handle(self) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+```
+
+- `debounce_for` is the window: each dispatch re-arms it, so the run happens
+  30 seconds after the *most recent* one.
+- `max_debounce_wait` stops a continuous burst from deferring the work forever.
+  Once the burst has been deferring for five minutes, the next dispatch is
+  queued with no delay. The window then restarts, so each burst measures its
+  maximum wait from its own first dispatch.
+- `debounce_id` scopes the window. Twenty updates to order 7 become one run;
+  an update to order 8 is untouched by them. Omit it and every dispatch of the
+  job shares one window.
+
+Every dispatch is still enqueued. The collapse is settled at the worker: each
+push overwrites a cache token, and the worker drops any envelope whose token a
+newer dispatch has replaced, acknowledging it and emitting `JobDebounced`. That
+is what makes the surviving run carry the newest payload rather than the oldest.
+If the token has expired or been evicted, the job runs - debouncing fails open,
+because a lost token is not evidence that somebody else owns the window.
+
+The [`sync` driver](#drivers) has no worker, so it runs every dispatch inline
+and nothing is ever collapsed. Laravel's sync driver behaves the same way.
+`Queue::bulk` pushes at the driver level and does not arm a window either, so a
+debounced job pushed in bulk runs every copy. Laravel's `Queue::bulk` skips its
+own debounce acquisition for the same reason.
+
+Set the window at the call site instead when it belongs to the caller:
+
+```rust
+use suprnova::queue::DebounceOptions;
+
+Queue::push_debounced(
+    ReindexOrder { order_id: 7 },
+    DebounceOptions::new(Duration::from_secs(30))
+        .max_wait(Duration::from_secs(300))
+        .id("7"),
+)
+.await?;
+```
+
+A job cannot declare both `debounce_for` and `unique_id`: uniqueness keeps the
+first dispatch of a burst and debouncing keeps the last, so the push returns an
+error naming both. Chains and batches refuse a debounced job for a related
+reason - a superseded link is dropped, which would strand the rest of a chain,
+and a dropped batch job leaves the batch's pending count above zero so its
+callbacks never fire.
+
 ### Per-push overrides with `EnvelopeOverrides`
 
 `Queue::push_with` and `Queue::later_with` take an `EnvelopeOverrides`
@@ -689,6 +762,74 @@ Then dedicate a worker to it:
 A job with no route belongs to `default`, so `--queue=default` drains
 unrouted work rather than stranding it.
 
+### Forwarding a whole queue
+
+`Queue::route` is keyed by job type. When you want to drain one pool through
+another - retiring a queue, absorbing a backlog, moving work off a pool you are
+about to take down - key the redirect by queue name instead:
+
+```rust
+// bootstrap::register()
+use suprnova::Queue;
+
+Queue::forward("default", "high");
+Queue::forward_on("exports", "heavy", "redis");   // only on the `redis` connection
+```
+
+The connection in `forward_on` is a gate, and it is compared against this
+process's connection name - `Queue::set_connection_name` if you set one, the
+driver's own name otherwise. It is not compared against the job's
+`Job::connection`, a `Queue::route`'s connection, or a per-push
+`EnvelopeOverrides` connection: those name what the lifecycle events report, and
+a worker has only the process name to gate its claim list on. Both halves of the
+redirect gate on that one value, so a forward can never move the push without
+moving the claim.
+
+The redirect applies on both sides, which is what keeps it from stranding work:
+
+- **On the push side**, the name is rewritten after routing and the job's own
+  `Job::queue` have had their say, and after a per-push `EnvelopeOverrides`
+  queue if you passed one.
+- **On the pop side**, a worker started with `--queue=default` drains `high`.
+  Without that half, the destination queue would collect jobs no worker claims.
+
+A worker started with no `--queue` at all already drains everything, so a
+forward changes nothing for it. Forwarding `default` catches jobs that named no
+queue, because an unrouted job belongs to `default`.
+
+A forward is a single lookup, never a chain. With `a -> b` and `b -> c`
+registered, a push that resolved to `a` lands on `b`. Registering `b -> a` on
+top of an existing `a -> b` is therefore a coherent pool swap, not a loop: a
+push to `a` still lands on `b`, a push to `b` now lands on `a`, and a worker
+started on either name claims the other - nothing chains, so nothing strands. A
+longer rotation among more queue names resolves the same way, one independent
+hop at a time. Laravel's `Queue::forward` has no cycle check either, for the
+same reason: its resolver is this same single lookup. Forwarding a queue onto
+its own name is the identity - no redirect at all - which is how you neutralize
+a forward you already registered.
+
+Only future pushes move. Envelopes already sitting on the source queue stay
+there, and the worker that used to drain them is now claiming the destination,
+so drain the source pool before you forward it. The same applies to
+`queue:retry`: a failed job is re-enqueued onto the queue it died on.
+
+Pausing is evaluated before the redirect, on the names the worker was started
+with. `Queue::pause(&connection, "default")` still stops a worker started on
+`--queue=default`, even while `default` is forwarded to `high`. The converse
+also holds: pausing the forward's *destination* - `Queue::pause(&connection,
+"high")` - does not stop a worker started on `--queue=default`, because that
+worker is reached through its source name, not the rewritten one. The
+`WorkerQueuePaused` event this transition raises carries `queue: default`,
+the configured name, never `high` - Laravel orders and reports it the same way.
+
+The inspection calls are deliberately not forwarded: `Queue::pending_jobs(
+Some("default"))` lists what is literally on `default`, not what is on `high`,
+which is how you see the backlog stranded on a source queue you have just
+forwarded. Laravel resolves the forward there too; see the divergence note below.
+
+Read a registered forward back with `Queue::forward_for("default")`, which
+returns the destination in `queue` and the connection gate in `connection`.
+
 ### Why Suprnova diverges
 
 Laravel's `Queue::route(...)` takes a class string; Suprnova takes the job as a
@@ -703,6 +844,25 @@ wrong pool consumes the wrong jobs - so the misconfiguration is made loud at
 the first poll. The memory and database drivers filter natively; a driver that
 doesn't - the Redis driver is one, since a single stream consumer group has no
 per-queue storage - will error rather than mislead.
+
+`Queue::forward` ports the queue-to-queue half of Laravel's `Queue::forward`
+in full, and only that half. Laravel's third argument can move a forwarded queue
+onto a different *connection*, because its queue manager resolves a driver per
+connection name. Suprnova has one process-global driver and a connection name
+only labels lifecycle events, so `Queue::forward_on(from, to, connection)`
+treats the connection as a **gate** - it decides whether the queue-name redirect
+applies - and never as a destination. For the same reason `to` is required here,
+while Laravel's is optional: an omitted `to` in Laravel means "move only the
+connection", which is precisely the dimension Suprnova cannot honor, so a
+`forward(from, None)` would be a no-op dressed as a configuration change.
+
+Laravel's inspection calls follow a forward, because `pendingJobs($queue)` and
+its siblings run through the same driver-level `getQueue()` the push and the pop
+do. Suprnova's `Queue::pending_jobs` / `delayed_jobs` / `reserved_jobs` report
+the literal queue you name instead. With one process-global driver, the literal
+view is the only way to see the envelopes that stayed behind on a queue you have
+just forwarded away - the backlog this section tells you to drain first. Ask for
+the destination queue by name to see where new work is landing.
 
 ### The `jobs` table
 
@@ -890,6 +1050,7 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `JobQueueing` | before the envelope hits the driver |
 | `JobQueued` | after the driver accepts |
 | `UniqueJobSkipped` | `push_unique` suppressed a duplicate inside the `unique_for` window |
+| `JobDebounced` | the worker dropped an envelope a newer debounced dispatch superseded |
 | `JobProcessing` | worker popped, about to dispatch |
 | `JobProcessed` | handler returned `Ok` |
 | `JobAttempted` | every terminal settlement (success, fail, timeout) |
@@ -905,6 +1066,8 @@ as a `String` since `FrameworkError` doesn't derive `Clone`.
 | `QueueResumed` | `Queue::resume` cleared one queue's own switch |
 | `QueuesPaused` | `Queue::pause_all` set the global switch |
 | `QueuesResumed` | `Queue::resume_all` cleared the global switch |
+| `WorkerQueuePaused` | a running worker first observed a queue as paused |
+| `WorkerQueueResumed` | a running worker saw a paused queue become claimable |
 
 Subscribe with the normal `Event::listen` API. Events are best-effort -
 `Event::dispatch` with no listeners is a no-op `Ok(())`, so workers in
@@ -921,6 +1084,12 @@ invisible suppression observable.
 same way - from `Queue::pause` / `resume` / `pause_all` / `resume_all`
 themselves, not from the worker loop. They carry no envelope identity
 either; see "Pausing queues" below for the full contract.
+
+`WorkerQueuePaused` / `WorkerQueueResumed` are the worker-side pair, and they
+are the ones that tell you *why a particular worker went quiet*. They fire once
+per transition from inside the worker loop, carry the connection the worker is
+draining, and carry the queue name - or `None`, when an unfiltered worker is
+idle on a global pause and has no queue names to report.
 
 ## Failed-jobs storage
 
@@ -1341,6 +1510,18 @@ per-queue pause** - a queue paused individually stays paused after a
 global resume, matching Laravel. Clear it explicitly with
 `Queue::resume(&connection, "billing")`.
 
+A paused worker also says so. `queue:work` prints one line per transition:
+
+```text
+  2026-08-25 14:03:11 Queue billing PAUSED
+  2026-08-25 14:07:44 Queue billing RESUMED
+```
+
+A worker started without `--queue` has no queue names to report, so a global
+pause prints `All queues PAUSED` instead. Both lines come from the
+`WorkerQueuePaused` / `WorkerQueueResumed` events, so you can listen for them
+yourself and route them wherever your alerting lives.
+
 Both signals live in `Cache`, next to the restart signal above:
 
 | Key | Meaning |
@@ -1446,6 +1627,14 @@ every entry point except `push_with`/`later_with` - see
 `pushed_with_overrides`, the assertions over it. In fake mode,
 `push_unique` always records the push as fresh - dedupe is irrelevant
 when no driver is wired.
+
+A debounced push behaves the same way: the fake writes nothing to the
+cache, so no window is armed and the recorded `available_at` carries no
+debounce delay. `assert_pushed_later` sees it as undelayed. What the
+fake does still catch is a job declaring both `debounce_for` and
+`unique_id` - that pair cannot hold whatever the environment is, so the
+push returns an error under `Queue::fake()` exactly as it would in
+production.
 
 ## Idempotency is the contract between the worker and you
 

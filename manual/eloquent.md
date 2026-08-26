@@ -407,6 +407,7 @@ WHERE clauses).
 ```php
 // Laravel
 $user->refresh();                          // reload from DB
+$user->refreshForUpdate();                 // reload under a row lock
 $copy = $user->fresh();                    // fetch + return copy
 $replica = $user->replicate();             // unsaved clone with fresh PK
 $replica = $user->replicate(['email']);    // skip a field
@@ -415,14 +416,29 @@ $replica = $user->replicate(['email']);    // skip a field
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
 `refresh` mutates in place; `fresh` returns a separately-fetched
-copy. `replicate` builds an in-memory clone with the PK reset
-(`Default::default()` for the key type). Caller saves explicitly.
+copy. `refresh_for_update` is `refresh` under a `SELECT ... FOR UPDATE`
+row lock - use it inside a transaction when you need the row's current
+values and the exclusive lock in one statement. Unlike `refresh`,
+`refresh_for_update` bypasses every registered global scope AND the
+`#[model(soft_deletes)]` filter: it reloads a trashed row too, with
+`deleted_at` coming back set. The reload is a lookup by primary key
+under a lock - scoping it the way an ordinary read is scoped would
+hand admin tooling and cross-tenant callers a false not-found for a
+row they already hold a reference to. `replicate` builds an
+in-memory clone with the PK reset (`Default::default()` for the key
+type). Caller saves explicitly.
+
+`refresh` and `refresh_for_update` both return an error when the row no
+longer exists, rather than leaving the model holding stale values.
+SQLite has no row-level locking, so `refresh_for_update` reloads without
+a lock there - see [Row locking](#row-locking).
 
 ### Replicating event
 
@@ -570,6 +586,8 @@ so rustdoc search finds either.
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | Equality |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | Arbitrary operator |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | PK filter as a disjunct |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | Negated PK filter as a disjunct |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -584,6 +602,10 @@ so rustdoc search finds either.
 | `->whereTime(col, '12:30')` | `.filter_time(col, NaiveTime)` | `.where_time(col, NaiveTime)` | |
 | `->whereLike(col, pattern)` | `.filter_like(col, pattern)` | `.where_like(col, pattern)` | |
 | `->whereNotLike(col, pattern)` | `.filter_not_like(col, pattern)` | `.where_not_like(col, pattern)` | |
+| `->whereBinary(col, val)` | `.filter_binary(col, val)` | `.where_binary(col, val)` | Byte-exact; MySQL and MariaDB only |
+| `->orWhereBinary(col, val)` | `.or_filter_binary(col, val)` | `.or_where_binary(col, val)` | |
+| `->whereNotBinary(col, val)` | `.filter_not_binary(col, val)` | `.where_not_binary(col, val)` | |
+| `->orWhereNotBinary(col, val)` | `.or_filter_not_binary(col, val)` | `.or_where_not_binary(col, val)` | |
 | `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | Backend-dispatched |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
 | `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | Column-to-column compare |
@@ -592,6 +614,12 @@ so rustdoc search finds either.
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | (10B) |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | (10B) |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
+
+The `binary` family compares raw bytes instead of matching under the
+column's collation. MySQL and MariaDB emit `col = binary ?`; Postgres
+and SQLite have no equivalent operator, so a terminal on those backends
+returns an error when the statement renders rather than falling back to
+a collation-dependent `=`. See [Byte-exact comparison](queries.md#byte-exact-comparison).
 
 Bound raw predicates use portable `?` markers on SQLite, MySQL, and PostgreSQL:
 
@@ -635,6 +663,47 @@ let users = User::query().in_random_order().get().await?;
 
 `Direction::Asc` / `Direction::Desc` is the Suprnova enum
 re-exported from SeaORM.
+
+#### Ordering by an explicit sequence
+
+`in_order_of` sorts rows into the order you list. Anything whose value
+is not in the list sorts after everything that is.
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnova renders this as a bound `CASE` expression, so the values are
+parameters and are safe to take from request data:
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+The column name is an SQL identifier, not a parameter. Hardcode it or
+pick it from an allowlist, the same as every other column argument. An
+empty value list adds no ordering at all, so you can build the sequence
+conditionally without special-casing the empty case.
+
+For a column that uses the `AsEnum<E>` cast, pass each variant through
+`as_ref()`. That is the exact string the cast stores:
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` ships on the typed `Builder<M>` surface. The model-less
+`DB::table(...)` builder orders by column and direction only.
 
 ### Grouping + having
 
@@ -773,6 +842,19 @@ statement - after every `UNION` arm, every `ORDER BY`, every
 `LIMIT` / `OFFSET`. A `union(...)` of two builders followed by
 `.lock_for_update()` emits exactly **one** `FOR UPDATE` at the
 outer scope, not one per arm.
+
+To reload a model you already hold and take the lock in the same
+statement, use `refresh_for_update`:
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### Use inside a transaction
 
@@ -3736,7 +3818,10 @@ builder, which the loosely-typed `whereHasMorph` cannot.
 // PK filters.
 User::query().where_key(7).first().await?;        // sugar for filter("id", 7)
 User::query().where_key_not(7).get().await?;      // sugar for filter_op("id", "!=", 7)
-// Rust-idiomatic aliases: filter_key / filter_key_not.
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// Rust-idiomatic aliases: filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not.
 
 // Order by created_at.
 Post::query().latest().get().await?;              // ORDER BY created_at DESC

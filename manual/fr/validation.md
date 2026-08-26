@@ -30,13 +30,14 @@ Une règle est une valeur qui implémente l'un de quatre traits :
 | `AsyncRule` | `async passes(&self, value)` | vérification qui fait un `.await` (BD, HTTP) |
 
 `Rule`s intégrées : `Required`, `Email`, `Min`, `Max`, `Between`, `In`,
-`NotIn`, `Integer`, `Numeric`, `Boolean`, `Alpha`, `AlphaNum`, `Url`,
-`UrlProtocols`, `HttpUrl`, `Uuid`,
+`NotIn`, `InArray`, `Integer`, `Numeric`, `Boolean`, `Alpha`,
+`AlphaNum`, `AlphaDash`, `Url`, `UrlProtocols`, `HttpUrl`, `Uuid`,
 [`Password`](#robustesse-du-mot-de-passe) (vérifications de robustesse
-seulement). `ValueRule`s intégrées : `ArrayKeys`, `Distinct`.
-`ContextualRule`s intégrées : `RequiredIf`, `RequiredWith`,
-`RequiredUnless`, `Same`, `Different`, `Confirmed`. `AsyncRule`s
-intégrées : [`Unique`](#la-règle-unique) et
+seulement). `ValueRule`s intégrées : `ArrayKeys`, `Distinct`,
+`Contains`, `DoesntContain`. `ContextualRule`s intégrées :
+`RequiredIf`, `RequiredWith`, `RequiredUnless`, `Same`, `Different`,
+`Confirmed`, `Gt`, `Gte`, `Lt`, `Lte`. `AsyncRule`s intégrées :
+[`Unique`](#la-règle-unique) et
 [`Password`](#robustesse-du-mot-de-passe) (robustesse plus sa
 vérification HIBP `uncompromised()` - la seule règle intégrée à
 implémenter à la fois `Rule` et `AsyncRule`).
@@ -286,6 +287,75 @@ corps JSON. Les lignes `validate!` acceptent des `Rule`s et des
 déterminé par celui que le type de la règle implémente, pas par ce que
 vous écrivez dans la ligne.
 
+### Règles d'appartenance
+
+Trois règles répondent à « cette valeur est-elle dans cette liste ? »,
+chacune sur la forme dont elle a besoin :
+
+```rust
+use suprnova::{Rule, ValueRule, rules::{Contains, DoesntContain, InArray}};
+
+// Le in_array:allowed_roles.* de Laravel - la valeur doit apparaître dans
+// la liste d'un autre champ. Passez la liste elle-même : un champ
+// Vec<String> comme un littéral &[&str] fonctionnent.
+InArray(&form.allowed_roles).passes(&form.role)?;
+
+// Le contains:rust,web de Laravel - le tableau doit contenir chaque valeur listée.
+Contains(&["rust", "web"]).passes(&form.tags)?;
+
+// Le doesnt_contain:banned de Laravel - le tableau ne doit en contenir aucune.
+DoesntContain(&["banned"]).passes(&form.tags)?;
+```
+
+Chaque comparaison est exacte. `InArray` compare les chaînes avec `==`,
+et `Contains` comme `DoesntContain` ne font correspondre un paramètre
+qu'à un élément JSON de type chaîne : `["1"]` contient donc `"1"` et
+`[1]` non. Une valeur qui n'est pas un tableau échoue d'emblée à
+`Contains` et à `DoesntContain`.
+
+`Contains` et `DoesntContain` rejettent une liste de paramètres vide
+comme une erreur de construction sans clé, de la même façon que
+`ArrayKeys` - une liste sans rien dedans ne contraint rien. Une liste
+de recherche vide passée à `InArray` est un autre cas : un champ voisin
+peut légitimement être vide à l'exécution, si bien que la valeur échoue,
+tout simplement.
+
+Le message d'échec d'`InArray` ne nomme aucune valeur, parce que sa
+liste vient de la requête et qu'un message de validation est rendu dans
+un corps de réponse.
+
+### Règles de comparaison
+
+`Gt`, `Gte`, `Lt` et `Lte` comparent un champ à un nombre ou à un autre
+champ. `CompareWith` nomme l'opérande et la mesure ensemble :
+
+```rust
+use suprnova::{ContextualRule, FormContext, rules::{CompareWith, Gt, Lte}};
+
+let mut ctx = FormContext::new();
+ctx.insert("max_price".to_string(), form.max_price.clone());
+
+// Le gt:0 de Laravel - un opérande littéral, comparé numériquement.
+Gt(CompareWith::Number(0.0)).passes(&form.price, &ctx)?;
+
+// Le lte:max_price de Laravel - un champ voisin, comparé numériquement.
+Lte(CompareWith::NumericField("max_price")).passes(&form.price, &ctx)?;
+
+// Le gt:summary de Laravel sur deux champs chaîne - comparé par nombre de caractères.
+Gt(CompareWith::LengthField("summary")).passes(&form.body, &ctx)?;
+```
+
+Toutes les quatre lisent des champs voisins : ce sont donc des
+`ContextualRule`s, et chaque ligne `validate!` porte `=> with ctx` - y
+compris une ligne dont le seul opérande est un littéral, où le contexte
+n'est jamais lu. Passez-y un `FormContext` vide.
+
+Tout ce que la règle ne peut pas mesurer fait échouer le champ : une
+valeur qui n'est pas un nombre fini sous une comparaison numérique, un
+voisin que le formulaire n'a jamais envoyé, un voisin qui n'est pas un
+nombre, ou un littéral non fini tel que `f64::NAN`. Aucun de ces cas ne
+panique, et aucun ne passe.
+
 ### Pourquoi Suprnova diverge
 
 Le `distinct:strict` de Laravel s'appuie sur le `==` coercitif de PHP. Les
@@ -293,6 +363,35 @@ valeurs JSON sont déjà typées, si bien que le `strict` de Suprnova ne
 change que le fait que deux *nombres* de représentations internes
 différentes (`1` face à `1.0`) comptent comme égaux - il ne rend jamais
 une chaîne et un nombre « identiques », dans aucun des deux modes.
+
+Laravel écrit l'autre champ dans une chaîne de règle -
+`in_array:allowed_roles.*` - et le validateur l'extrait par glob des
+données de la requête à l'exécution. Suprnova n'a pas d'analyseur de
+chaînes de règles : vous passez la liste directement à `InArray`, et le
+compilateur vérifie que le champ existe.
+
+Laravel 13.27 a durci `in`, `in_array` et `doesnt_contain` vers la
+comparaison stricte, parce que le `==` de PHP faisait correspondre
+`"1abc"`, `true` et `"0x1"`. Suprnova n'a jamais eu ce trou - `In` et
+`NotIn` comparent des `&str` avec `==` - et les nouvelles règles font
+correspondre les valeurs JSON variante par variante. Le `contains` de
+Laravel est resté lâche ; celui de Suprnova ne l'est pas. Le coût est
+que ces règles ne peuvent pas vérifier un tableau de nombres :
+`Contains(&["1"])` ne correspond pas à `[1]`.
+
+La famille `gt` de Laravel choisit sa mesure à l'exécution : le nombre
+lui-même pour les numériques, `count()` pour les tableaux, les
+kilo-octets pour les fichiers et le nombre de caractères pour tout le
+reste, la branche numérique étant conditionnée au fait que le champ
+porte aussi `numeric` ou `integer`. Suprnova écrit la mesure dans la
+règle à la place, parce qu'ici une règle ne peut pas voir les autres
+règles posées sur son champ, et que renifler la forme de la valeur est
+justement l'habitude de coercition que ces règles existent pour éviter.
+Deux des quatre mesures de Laravel n'ont aucune contrepartie : une
+règle ne reçoit jamais qu'une chaîne, si bien qu'un champ voisin à
+valeur de tableau ne peut pas être lu, et les uploads n'atteignent
+jamais la surface des règles - l'analyseur multipart plafonne leur
+taille avant qu'un handler ne les voie.
 
 ## La macro `validate!`
 

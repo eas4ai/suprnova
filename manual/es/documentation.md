@@ -122,6 +122,6 @@
     - [Variables de entorno](env-vars.md)
     - [Glosario](glossary.md)
 
----
 *[Documentación de la API (rustdoc)](https://docs.rs/suprnova) - una vez publicada.*
+---
 

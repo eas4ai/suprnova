@@ -300,6 +300,9 @@ impl RedisQueueDriver {
         let now = Utc::now().timestamp();
         let stream_name = self.stream_key.name();
         let script = redis::Script::new(PROMOTE_DUE_SCRIPT);
+        // Never retried: the script XADDs promoted entries onto the stream, so
+        // a second execution after a dropped connection would deliver the same
+        // delayed job twice.
         let mut conn = self.conn.clone();
         script
             .key(&self.delayed_key)
@@ -837,24 +840,33 @@ impl RedisQueueDriver {
     /// `XLEN <stream>` - total entries currently held by the stream
     /// (including acknowledged-but-not-trimmed ones).
     async fn xlen_stream(&self) -> Result<u64, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let n: i64 = redis::cmd("XLEN")
-            .arg(self.stream_key.name())
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("redis XLEN: {e}")))?;
+        // XLEN is a pure read.
+        let n: i64 = crate::redis_retry::retry_read("queue XLEN", || {
+            let mut conn = self.conn.clone();
+            let stream = self.stream_key.name().to_string();
+            async move { redis::cmd("XLEN").arg(&stream).query_async(&mut conn).await }
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("redis XLEN: {e}")))?;
         Ok(n.max(0) as u64)
     }
 
     /// `ZCARD <stream>:delayed` - entries parked awaiting their
     /// `available_at` deadline.
     async fn zcard_delayed(&self) -> Result<u64, FrameworkError> {
-        let mut conn = self.conn.clone();
-        let n: i64 = redis::cmd("ZCARD")
-            .arg(&self.delayed_key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| FrameworkError::internal(format!("redis ZCARD delayed: {e}")))?;
+        // ZCARD is a pure read.
+        let n: i64 = crate::redis_retry::retry_read("queue ZCARD", || {
+            let mut conn = self.conn.clone();
+            let delayed_key = self.delayed_key.clone();
+            async move {
+                redis::cmd("ZCARD")
+                    .arg(&delayed_key)
+                    .query_async(&mut conn)
+                    .await
+            }
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("redis ZCARD delayed: {e}")))?;
         Ok(n.max(0) as u64)
     }
 
@@ -879,28 +891,40 @@ impl RedisQueueDriver {
     /// jobs and dead-letter work that never failed, which is worse than
     /// the bug this exists to fix.
     async fn redelivery_count(&self, entry_id: &str) -> u32 {
-        let mut conn = self.conn.clone();
-        let resp: redis::Value = match redis::cmd("XPENDING")
-            .arg(self.stream_key.name())
-            .arg(&self.group_name)
-            .arg("IDLE")
-            .arg(0)
-            .arg(entry_id)
-            .arg(entry_id)
-            .arg(1)
-            .query_async(&mut conn)
+        // The XPENDING lookup is a pure read, so a dropped connection no
+        // longer silently under-counts deliveries - the under-count is what
+        // leaves a poison job un-dead-letterable.
+        let resp: redis::Value =
+            match crate::redis_retry::retry_read("queue XPENDING entry", || {
+                let mut conn = self.conn.clone();
+                let stream = self.stream_key.name().to_string();
+                let group = self.group_name.clone();
+                let entry_id = entry_id.to_string();
+                async move {
+                    redis::cmd("XPENDING")
+                        .arg(&stream)
+                        .arg(&group)
+                        .arg("IDLE")
+                        .arg(0)
+                        .arg(&entry_id)
+                        .arg(&entry_id)
+                        .arg(1)
+                        .query_async(&mut conn)
+                        .await
+                }
+            })
             .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    entry_id,
-                    "XPENDING lookup failed; treating this as a first delivery"
-                );
-                return 1;
-            }
-        };
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        entry_id,
+                        "XPENDING lookup failed; treating this as a first delivery"
+                    );
+                    return 1;
+                }
+            };
 
         // [[id, consumer, idle-ms, delivery-count]]
         let rows = match resp {
@@ -925,18 +949,26 @@ impl RedisQueueDriver {
     /// not yet acked). Returns 0 if the group does not exist (cleared
     /// stream, never-popped driver instance).
     async fn xpending_count(&self) -> Result<u64, FrameworkError> {
-        let mut conn = self.conn.clone();
         // XPENDING summary form returns
         //   [count, smallest-id, largest-id, [[consumer, count], ...]]
         // or all-nil when the group is empty. We only need the first cell.
-        let resp: redis::Value = redis::cmd("XPENDING")
-            .arg(self.stream_key.name())
-            .arg(&self.group_name)
-            .query_async(&mut conn)
-            .await
-            // The group may not exist yet (no `pop` has run on a fresh stream),
-            // which surfaces as a Redis error. Treat that as "0 reserved".
-            .unwrap_or(redis::Value::Nil);
+        // The summary is a pure read, so it is retried on a transient failure.
+        let resp: redis::Value = crate::redis_retry::retry_read("queue XPENDING summary", || {
+            let mut conn = self.conn.clone();
+            let stream = self.stream_key.name().to_string();
+            let group = self.group_name.clone();
+            async move {
+                redis::cmd("XPENDING")
+                    .arg(&stream)
+                    .arg(&group)
+                    .query_async(&mut conn)
+                    .await
+            }
+        })
+        .await
+        // The group may not exist yet (no `pop` has run on a fresh stream),
+        // which surfaces as a Redis error. Treat that as "0 reserved".
+        .unwrap_or(redis::Value::Nil);
         let count = match resp {
             redis::Value::Array(parts) | redis::Value::Set(parts) => match parts.first() {
                 Some(redis::Value::Int(n)) => (*n).max(0) as u64,

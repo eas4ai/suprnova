@@ -227,6 +227,35 @@ EventFacade::listen::<UserRegistered, _>(Arc::new(
 O `QueuedListener` só precisa que o evento seja um evento síncrono
 comum - a durabilidade mora na fila, não no dispatcher.
 
+### Fazendo debounce de um listener em fila
+
+Um `QueuedListener` é canalizado por `Queue::push`, então um listener
+sofre debounce no momento em que o **job** dele declara
+`Job::debounce_for` - nada a mais para conectar, e `Job::debounce_id`
+te dá uma janela por entidade.
+
+Quando a janela pertence ao registro, e não ao job, use
+`DebouncedListener` e derive a chave a partir do evento:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use suprnova::events::{DebouncedListener, EventFacade};
+
+EventFacade::listen::<OrderUpdated, _>(Arc::new(
+    DebouncedListener::<OrderUpdated, ReindexOrder>::new(
+        Duration::from_secs(30),
+        |e| ReindexOrder { order_id: e.order_id },
+    )
+    .max_wait(Duration::from_secs(300))
+    .keyed_by(|e| e.order_id.to_string()),
+))
+.await;
+```
+
+Quatro eventos `OrderUpdated` para o pedido 55 enfileiram quatro jobs e
+executam um. Veja [Filas](queues.md) para o contrato completo.
+
 ## Drenagem no shutdown
 
 Listeners em processo em fila spawnam em um `JoinSet` rastreado pelo

@@ -376,6 +376,62 @@ Isso evita duas armadilhas:
   dos dois caminhos de rejeição é alcançável a partir do código do
   usuário.
 
+### Retentativas de comandos transitórios
+
+Um socket derrubado costumava fazer falhar qualquer `Cache::get` que
+estivesse em voo. O gerenciador de conexões do Redis reconecta
+sozinho, mas o comando que atingiu o socket morto ainda devolve o erro
+dele a você.
+
+Comandos com formato de leitura agora tentam de novo uma vez: `GET`,
+`EXISTS` e as páginas de `SCAN` / `SSCAN` por trás de `Cache::flush` e
+`Cache::flush_tags`. As leituras de `XLEN`, `ZCARD` e `XPENDING` do
+driver de filas e o cálculo de `Retry-After` do limitador de taxa
+tentam de novo do mesmo jeito. Defina `REDIS_COMMAND_RETRIES` para
+acrescentar retentativas além da que já vem embutida.
+
+Faça o orçamento da retentativa em segundos, não na pausa de 50 ms que
+a antecede. Depois que uma conexão cai, a próxima tentativa espera pela
+conexão substituta antes de conseguir enviar qualquer coisa, então ela
+paga todo o orçamento de conexão do driver e, na sequência, o timeout
+de resposta dele:
+
+- O driver de cache permite até 3 retentativas de conexão, separadas
+  por no máximo 500 ms, cada uma limitada por um timeout de conexão de
+  2 s, com um timeout de resposta de 5 s.
+- Os drivers de fila e de limitação de taxa adotam os padrões do
+  redis-rs: até 6 retentativas de conexão com um atraso exponencial sem
+  limite começando em 100 ms, cada uma limitada por um timeout de
+  conexão de 1 s, com um timeout de resposta de 500 ms.
+
+`REDIS_COMMAND_RETRIES` é limitado em 10, e esse limite delimita
+tentativas, não segundos: no máximo, uma única leitura faz 12
+tentativas, o que contra um Redis fora do ar são dezenas de segundos a
+minutos em uma só chamada. Um comando que sofre timeout conta como
+transitório tanto quanto um que foi derrubado, então um Redis meramente
+lento faz cada leitura envolvida emitir até essa quantidade de comandos
+em vez de um. Aumente a configuração apenas onde quem chama pode se dar
+ao luxo de esperar.
+
+Escritas nunca tentam de novo, em nenhuma configuração. Um erro
+transitório significa que a conexão falhou, não que o servidor tenha
+recusado o comando - o servidor pode já tê-lo executado -, então tentar
+de novo um `SET`, um `INCR`, uma aquisição de lock, um hit de limitação
+de taxa ou um pop de fila arrisca uma segunda execução. Esses comandos
+expõem a falha a você, e a sua decisão de tentar de novo é a decisão
+informada.
+
+### Por que Suprnova diverge
+
+A configuração `command_retries` do Laravel aumenta o orçamento de
+retentativas para todo comando Redis, porque o método `command()` dele
+é um único ponto de passagem que sabe qual comando está executando e
+consulta uma allowlist somente leitura de 60 entradas. Os drivers do
+Suprnova chamam comandos tipados diretamente, então a allowlist vira
+uma decisão por local de chamada, e `REDIS_COMMAND_RETRIES` só consegue
+aprofundar as retentativas para comandos que já são seguros de repetir.
+Não existe configuração que faça um pop de fila tentar de novo.
+
 ## Testes
 
 Vincule um `InMemoryCache` ao `TestContainer` e a facade o resolve
@@ -402,6 +458,23 @@ async fn cache_round_trips() {
 paralelos não vazam estado de cache uns nos outros. Veja o capítulo
 [Contêiner de serviços](container.md) para o modelo de lookup em três
 camadas.
+
+### Suítes com Redis real
+
+Os testes de Redis do próprio framework são marcados com `#[ignore]`,
+então `cargo test` nunca precisa de um servidor. Execute-os com
+`-- --ignored` e aponte-os para uma instância:
+
+- `cache_redis_integration` lê `CACHE_REDIS_TEST_URL`, recaindo para
+  `REDIS_URL` e depois para `redis://127.0.0.1:6379`. Cada teste se
+  restringe a um prefixo de chave único, então é seguro rodá-lo contra
+  um Redis de desenvolvimento compartilhado.
+- `cache_redis_retry` cobre a retentativa de comandos transitórios e
+  exige `CACHE_REDIS_TEST_URL` explicitamente, sem fallback. Ele emite
+  `CLIENT KILL TYPE normal`, que desconecta todos os outros clientes da
+  instância, então precisa receber um servidor descartável. Com a
+  variável não definida, ele imprime uma linha de skip e passa sem
+  conectar.
 
 ## Padrões
 

@@ -44,6 +44,11 @@ pub enum UrlSource {
 /// - `DB_MIN_CONNECTIONS` - Minimum pool connections (default: 1)
 /// - `DB_CONNECT_TIMEOUT` - Connection timeout in seconds (default: 30)
 /// - `DB_LOGGING` - Enable SQL logging (default: false)
+/// - `DB_IDLE_TIMEOUT` - Seconds before an idle pooled connection is closed (default: sqlx's 600; `0` disables)
+/// - `DB_MAX_LIFETIME` - Seconds a pooled connection may live (default: sqlx's 1800; `0` disables)
+/// - `DB_ACQUIRE_TIMEOUT` - Seconds to wait for a free connection (default: falls back to `DB_CONNECT_TIMEOUT`)
+/// - `DB_TEST_BEFORE_ACQUIRE` - Ping a connection before handing it out (default: true)
+/// - `DB_PING_AFTER_IDLE` - Ping only after this many idle seconds; setting it disables `DB_TEST_BEFORE_ACQUIRE` (default: unset)
 ///
 /// # Example
 ///
@@ -73,6 +78,42 @@ pub struct DatabaseConfig {
     pub connect_timeout: u64,
     /// Enable SQL query logging
     pub logging: bool,
+    /// Seconds a pooled connection may sit idle before the pool closes
+    /// it. `None` leaves sqlx's 600-second default in place; `Some(0)`
+    /// means never reap on idleness.
+    ///
+    /// This is half the answer to a connection a NAT or firewall killed
+    /// while nobody was using it: sqlx 0.9 exposes no libpq
+    /// `keepalives_*` equivalent, so the socket cannot be kept warm and
+    /// the pool has to stop trusting old connections instead.
+    pub idle_timeout: Option<u64>,
+    /// Maximum total lifetime of a pooled connection, in seconds.
+    /// `None` leaves sqlx's 1800-second default; `Some(0)` means never
+    /// recycle on age.
+    ///
+    /// Bounds the blast radius of anything that goes stale on a
+    /// long-lived connection - a rotated credential, a failed-over
+    /// replica, a middlebox that expires state on a schedule.
+    pub max_lifetime: Option<u64>,
+    /// Seconds to wait for a free pooled connection before erroring.
+    /// `None` means the pool inherits [`Self::connect_timeout`], which
+    /// is what SeaORM maps onto sqlx's `acquire_timeout` when this is
+    /// unset. Setting it overrides that mapping.
+    pub acquire_timeout: Option<u64>,
+    /// Ping a pooled connection before handing it out. `true` is sqlx's
+    /// default and the framework's existing behavior. Turn it off only
+    /// when the per-checkout round trip is measurably too expensive and
+    /// [`Self::ping_after_idle`] is not enough.
+    pub test_before_acquire: bool,
+    /// Ping a pooled connection only once it has been idle this many
+    /// seconds, instead of on every checkout.
+    ///
+    /// Cheaper than [`Self::test_before_acquire`] under load: a hot
+    /// connection is handed out untouched, and only a connection idle
+    /// long enough to have plausibly been dropped pays for a round
+    /// trip. Setting it forces `test_before_acquire` off - sqlx would
+    /// otherwise run both hooks and ping on every acquire anyway.
+    pub ping_after_idle: Option<u64>,
     /// Where [`Self::url`] came from - env var, dev-fallback default,
     /// or an explicit programmatic value. Used by
     /// [`Self::validate_for_environment`] to refuse the silent
@@ -105,6 +146,11 @@ impl DatabaseConfig {
             min_connections: env("DB_MIN_CONNECTIONS", 1),
             connect_timeout: env("DB_CONNECT_TIMEOUT", 30),
             logging: env("DB_LOGGING", false),
+            idle_timeout: env_optional("DB_IDLE_TIMEOUT"),
+            max_lifetime: env_optional("DB_MAX_LIFETIME"),
+            acquire_timeout: env_optional("DB_ACQUIRE_TIMEOUT"),
+            test_before_acquire: env("DB_TEST_BEFORE_ACQUIRE", true),
+            ping_after_idle: env_optional("DB_PING_AFTER_IDLE"),
             url_source,
         }
     }
@@ -175,6 +221,12 @@ impl DatabaseConfig {
     ///   means the pool can never warm itself up.
     /// - `connect_timeout == 0` - the first call would error
     ///   immediately on any latency.
+    /// - `acquire_timeout == Some(0)` - a zero-second pool checkout wait
+    ///   fails every call the moment the pool is contended.
+    ///
+    /// `idle_timeout == Some(0)` and `max_lifetime == Some(0)` are
+    /// deliberately left alone - `0` is the documented "never reap"
+    /// spelling for those two knobs, not a misconfiguration.
     ///
     /// Called from [`DbConnection::connect`](crate::database::DbConnection)
     /// so both [`DB::init`](crate::DB::init) and
@@ -198,6 +250,12 @@ impl DatabaseConfig {
                 "DB_CONNECT_TIMEOUT must be > 0; a zero-second timeout fails immediately on any latency",
             ));
         }
+        if self.acquire_timeout == Some(0) {
+            return Err(FrameworkError::param(
+                "DB_ACQUIRE_TIMEOUT must be > 0; a zero-second acquire timeout fails every \
+                 checkout the moment the pool is contended",
+            ));
+        }
         Ok(())
     }
 }
@@ -216,6 +274,11 @@ pub struct DatabaseConfigBuilder {
     min_connections: Option<u32>,
     connect_timeout: Option<u64>,
     logging: Option<bool>,
+    idle_timeout: Option<u64>,
+    max_lifetime: Option<u64>,
+    acquire_timeout: Option<u64>,
+    test_before_acquire: Option<bool>,
+    ping_after_idle: Option<u64>,
 }
 
 impl DatabaseConfigBuilder {
@@ -249,6 +312,40 @@ impl DatabaseConfigBuilder {
         self
     }
 
+    /// Seconds before an idle pooled connection is closed. `0` disables
+    /// idle reaping.
+    pub fn idle_timeout(mut self, seconds: u64) -> Self {
+        self.idle_timeout = Some(seconds);
+        self
+    }
+
+    /// Seconds a pooled connection may live before the pool recycles
+    /// it. `0` disables lifetime recycling.
+    pub fn max_lifetime(mut self, seconds: u64) -> Self {
+        self.max_lifetime = Some(seconds);
+        self
+    }
+
+    /// Seconds to wait for a free pooled connection. Overrides
+    /// [`Self::connect_timeout`] for the checkout wait.
+    pub fn acquire_timeout(mut self, seconds: u64) -> Self {
+        self.acquire_timeout = Some(seconds);
+        self
+    }
+
+    /// Ping a pooled connection before handing it out.
+    pub fn test_before_acquire(mut self, enabled: bool) -> Self {
+        self.test_before_acquire = Some(enabled);
+        self
+    }
+
+    /// Ping a pooled connection only after it has been idle this many
+    /// seconds. Setting this disables the per-checkout ping.
+    pub fn ping_after_idle(mut self, seconds: u64) -> Self {
+        self.ping_after_idle = Some(seconds);
+        self
+    }
+
     /// Build the configuration.
     ///
     /// `url`: if [`Self::url`] was called the resulting config
@@ -270,6 +367,13 @@ impl DatabaseConfigBuilder {
             min_connections: self.min_connections.unwrap_or(defaults.min_connections),
             connect_timeout: self.connect_timeout.unwrap_or(defaults.connect_timeout),
             logging: self.logging.unwrap_or(defaults.logging),
+            idle_timeout: self.idle_timeout.or(defaults.idle_timeout),
+            max_lifetime: self.max_lifetime.or(defaults.max_lifetime),
+            acquire_timeout: self.acquire_timeout.or(defaults.acquire_timeout),
+            test_before_acquire: self
+                .test_before_acquire
+                .unwrap_or(defaults.test_before_acquire),
+            ping_after_idle: self.ping_after_idle.or(defaults.ping_after_idle),
             url_source,
         }
     }

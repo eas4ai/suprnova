@@ -41,6 +41,69 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
+### Vivacidade do pool
+
+Um gateway NAT, um load balancer ou um firewall vai derrubar
+silenciosamente uma conexão TCP que ficou ociosa por tempo demais. O
+pool não fica sabendo. A próxima consulta naquela conexão falha, e ela
+falha em uma solicitação que não tinha nada a ver com a interrupção.
+
+O Laravel responde a isso com as opções de DSN `keepalives`,
+`keepalives_idle`, `keepalives_interval` e `keepalives_count` da libpq,
+que mantêm o socket aquecido. **Elas não são alcançáveis a partir do
+Suprnova.** O sqlx 0.9 parseia de uma URL de Postgres apenas `sslmode`,
+`application_name`, `options` e o tamanho do cache de statements, e não
+carrega nenhum setter de keepalive TCP em camada alguma, então não há
+para onde encaminhá-las.
+
+O que o Suprnova te dá no lugar é a resposta do lado do pool: pare de
+confiar em conexões velhas.
+
+```bash
+# Fecha uma conexão que ficou ociosa por dois minutos.
+DB_IDLE_TIMEOUT=120
+# Recicla toda conexão depois de quinze minutos, de todo jeito.
+DB_MAX_LIFETIME=900
+# Faz ping em uma conexão antes de entregá-la, mas só depois que ela
+# ficou ociosa por trinta segundos. Conexões quentes pulam o round trip.
+DB_PING_AFTER_IDLE=30
+```
+
+Ou programaticamente:
+
+```rust
+Config::register(
+    DatabaseConfig::builder()
+        .url(std::env::var("DATABASE_URL")?)
+        .idle_timeout(120)
+        .max_lifetime(900)
+        .ping_after_idle(30)
+        .build(),
+);
+```
+
+Todo ajuste vem sem valor definido por padrão, o que significa que o
+pool mantém os próprios padrões do sqlx: conexões fecham depois de 600
+segundos ociosas, reciclam depois de 1800 segundos e sofrem ping antes
+de cada checkout. Defina `DB_IDLE_TIMEOUT=0` ou `DB_MAX_LIFETIME=0`
+para desligar por completo essa forma de coleta.
+
+`DB_PING_AFTER_IDLE` e `DB_TEST_BEFORE_ACQUIRE` são alternativas, não
+um par: definir um limiar desliga o ping por checkout, porque executar
+os dois faria ping a cada aquisição e tornaria o limiar sem sentido.
+
+### Por que Suprnova diverge
+
+Keepalives e reciclagem de pool resolvem a mesma falha por pontas
+opostas. Keepalives impedem que um middlebox expire a conexão; a
+reciclagem aceita que ele vai expirar e garante que o pool nunca
+entregue uma conexão velha o bastante para ter sido expirada. A segunda
+é o que a pilha de drivers expõe, e ela também cobre falhas que
+keepalives não cobrem - uma réplica que assumiu num failover, uma
+credencial rotacionada, uma desconexão por ociosidade do lado do
+servidor. Se você precisa especificamente das opções da libpq, isso é
+uma mudança no sqlx, não no Suprnova.
+
 ## Consultas brutas
 
 A facade `DB` traz a superfície completa de escape bruto do Laravel 13. Todo
@@ -641,11 +704,11 @@ listener, o log de consulta) devem ser anotados
 | `DB::table(name)` → `DbTableBuilder` | `DB::table($name)` |
 | `DB::select` / `select_one` / `scalar` / `insert` / `update` / `delete` / `statement` / `affecting_statement` / `unprepared` | `DB::select` / `selectOne` / `scalar` / `insert` / `update` / `delete` / `statement` / `affectingStatement` / `unprepared` |
 | `DB::transaction` / `transaction_with_attempts` / `begin_transaction` | `DB::transaction($cb, $attempts)` / `DB::beginTransaction` |
-| `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / savepoint helpers |
+| `Transaction::commit` / `rollback` / `savepoint` / `rollback_to` | `DB::commit` / `rollBack` / helpers de savepoint |
 | `DB::listen(callback)` | `DB::listen` |
 | `DB::enable_query_log` / `disable_query_log` / `get_query_log` / `flush_query_log` / `logging` | `DB::enableQueryLog` / `disableQueryLog` / `getQueryLog` / `flushQueryLog` / `logging` |
 | `DB::database_name` / `driver_name` / `driver_title` / `server_version` | `getDatabaseName` / `getDriverName` / `getDriverTitle` / `getServerVersion` |
-| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | multi-connection `DB::connection($name)` |
+| `DB::register_named` / `named` / `select_on` / `table_on` / `statement_on` / `affecting_statement_on` | `DB::connection($name)` com múltiplas conexões |
 | `QueryExecuted` / `TransactionBeginning` / `TransactionCommitted` / `TransactionRolledBack` / `ConnectionEstablished` / `DatabaseBusy` | `Illuminate\Database\Events\*` |
-| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` | `config/database.php` |
-| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | `RefreshDatabase` testing trait |
+| `DatabaseConfig::builder()` / `from_env` / `validate_for_environment` / `idle_timeout` / `max_lifetime` / `acquire_timeout` / `test_before_acquire` / `ping_after_idle` | `config/database.php` |
+| `TestDatabase::fresh::<M>` / `sqlite_memory` / `execute_unprepared` / `fetch_one` / `fetch_all` | trait de teste `RefreshDatabase` |

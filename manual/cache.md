@@ -365,6 +365,52 @@ That avoids two pitfalls:
 - `Duration::ZERO` is clamped to 1 ms before the call, so neither
   rejection path is reachable from user code.
 
+### Transient command retries
+
+A dropped socket used to fail whatever `Cache::get` happened to be in flight.
+The Redis connection manager reconnects on its own, but the command that hit
+the dead socket still returns its error to you.
+
+Read-shaped commands now retry once: `GET`, `EXISTS`, and the `SCAN` / `SSCAN`
+pages behind `Cache::flush` and `Cache::flush_tags`. The queue driver's `XLEN`,
+`ZCARD`, and `XPENDING` reads and the rate limiter's `Retry-After` computation
+retry the same way. Set `REDIS_COMMAND_RETRIES` to add further retries on top
+of the built-in one.
+
+Budget the retry in seconds, not in the 50 ms pause that precedes it. Once a
+connection has dropped, the next attempt waits for the replacement connection
+before it can send anything, so it pays the driver's whole connect budget and
+then its response timeout:
+
+- The cache driver allows up to 3 connect retries, at most 500 ms apart, each
+  capped by a 2 s connect timeout, with a 5 s response timeout.
+- The queue and rate-limit drivers take the redis-rs defaults: up to 6 connect
+  retries with an uncapped exponential delay starting at 100 ms, each capped by
+  a 1 s connect timeout, with a 500 ms response timeout.
+
+`REDIS_COMMAND_RETRIES` is clamped at 10, and that clamp bounds attempts, not
+seconds: at the maximum a single read makes 12 attempts, which against a down
+Redis is tens of seconds to minutes on one call. A timed-out command counts as
+transient as well as a dropped one, so a merely slow Redis makes every wrapped
+read issue up to that many commands rather than one. Raise the setting only
+where the caller can afford to wait.
+
+Writes never retry, at any setting. A transient error means the connection
+failed, not that the server declined the command - the server may already have
+run it - so retrying a `SET`, an `INCR`, a lock acquisition, a rate-limit hit,
+or a queue pop risks a second execution. Those commands surface the failure to
+you, and your retry decision is the informed one.
+
+### Why Suprnova diverges
+
+Laravel's `command_retries` config raises the retry budget for every Redis
+command, because its `command()` method is a single choke point that knows
+which command it is running and consults a 60-entry read-only allowlist.
+Suprnova's drivers call typed commands directly, so the allowlist becomes a
+per-call-site decision, and `REDIS_COMMAND_RETRIES` can only deepen the retries
+for commands that are already safe to repeat. There is no setting that makes a
+queue pop retry.
+
 ## Testing
 
 Bind an `InMemoryCache` into the `TestContainer` and the facade
@@ -391,6 +437,20 @@ async fn cache_round_trips() {
 tests do not leak cache state into each other. See the
 [Service Container](container.md) chapter for the three-layer lookup
 model.
+
+### Live-Redis suites
+
+The framework's own Redis tests are `#[ignore]`d, so `cargo test` never needs a
+server. Run them with `-- --ignored` and point them at an instance:
+
+- `cache_redis_integration` reads `CACHE_REDIS_TEST_URL`, falling back to
+  `REDIS_URL` and then to `redis://127.0.0.1:6379`. Every test scopes itself to
+  a unique key prefix, so it is safe against a shared development Redis.
+- `cache_redis_retry` covers the transient-command retry and requires
+  `CACHE_REDIS_TEST_URL` explicitly, with no fallback. It issues
+  `CLIENT KILL TYPE normal`, which disconnects every other client on the
+  instance, so it must be given a throwaway server. With the variable unset it
+  prints a skip line and passes without connecting.
 
 ## Patterns
 

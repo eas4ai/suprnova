@@ -403,8 +403,13 @@ cada solicitud. Las solicitudes reciben un 503 (configurable vía
 cualquier solicitud que incluya el secreto. `up` elimina el marcador.
 
 El secreto es una credencial bearer: a quien visite `/<secret>` se le
-emite una cookie de bypass de 12 horas. Tanto la coincidencia de la URL
-como la de la cookie son comparaciones en tiempo constante, así que la
+emite una cookie de bypass válida durante 12 horas. El plazo va sellado
+dentro de la cookie cifrada y se vuelve a comprobar en cada solicitud,
+así que una cookie capturada deja de funcionar a su hora aunque el
+navegador ignore su `max-age`. Una cookie cuyo plazo llegue más allá de
+un TTL se rechaza, con un pequeño margen para las diferencias de reloj
+entre hosts. Tanto la coincidencia de la URL como la comparación del
+secreto de la cookie se ejecutan en tiempo constante, así que la
 temporización de la respuesta no le revela a quien sondea qué longitud
 de prefijo acertó. Prefiere `--with-secret`, que acuña uno por ti (16
 bytes aleatorios, 32 caracteres hexadecimales) e imprime la URL de

@@ -252,10 +252,105 @@ let roles = user.roles().get().await?;
 
 // Chaque rôle porte le contexte pivot que la macro a rendu accessible :
 for r in &roles {
-    let pivot = r.pivot::<RoleUser>().expect("loaded via BelongsToMany");
+    let pivot = r.pivot::<RoleUser>();
     println!("{} assigned at {:?}", r.name, pivot.assigned_at);
 }
 ```
+
+### Filtrer sur les colonnes du pivot
+
+`where_pivot` et sa famille contraignent la table *pivot*, pas la table
+liée. Employez-les quand la ligne de jointure porte un état sur lequel
+vous voulez filtrer - un flag `active`, un horodatage d'expiration, une
+colonne de cantonnement. Les exemples ci-dessous supposent que le pivot
+`RoleUser` ci-dessus déclare aussi des colonnes `active`, `pinned` et
+`note` :
+
+```rust
+// Les rôles dont la ligne pivot est encore active.
+let active = user.roles().where_pivot("active", 1i64).get().await?;
+
+// Les rôles attribués dans une fenêtre, ou explicitement épinglés.
+let visible = user
+    .roles()
+    .where_pivot_between("assigned_at", start..=end)
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+
+// Un groupe imbriqué : (active = 1 AND note IS NOT NULL) OR pinned = 1.
+let complex = user
+    .roles()
+    .where_pivot_group(|q| q.filter("active", 1i64).filter_not_null("note"))
+    .or_where_pivot("pinned", 1i64)
+    .get()
+    .await?;
+```
+
+La famille complète :
+
+| Méthode | SQL |
+|---|---|
+| `where_pivot(col, val)` | `col = ?` |
+| `where_pivot_op(col, op, val)` | `col <op> ?` |
+| `where_pivot_in(col, vals)` | `col IN (...)` |
+| `where_pivot_not_in(col, vals)` | `col NOT IN (...)` |
+| `where_pivot_null(col)` | `col IS NULL` |
+| `where_pivot_not_null(col)` | `col IS NOT NULL` |
+| `where_pivot_between(col, low..=high)` | `col BETWEEN ? AND ?` |
+| `where_pivot_not_between(col, low..=high)` | `col NOT BETWEEN ? AND ?` |
+| `where_pivot_group(\|q\| ...)` | `(... AND ...)` |
+
+Chaque méthode a une jumelle `or_` qui se fond en une disjonction avec
+le terme qui la précède, de la même façon que `or_where` sur `Builder`.
+Un groupe en closure reste atomique à l'intérieur de cette disjonction,
+si bien que `.where_pivot_null("note").or_where_pivot_group(|q| ...)`
+se lit `note IS NULL OR (...)` et non comme une chaîne aplatie.
+
+Les noms de colonnes s'interpolent dans l'instruction pivot comme des
+identifiants SQL bruts, le même contrat que `Builder::filter`. Ne les
+prenez jamais dans les données de la requête. Les valeurs, elles, se
+lient comme paramètres : celles-là peuvent sans danger venir des
+données de la requête.
+
+La forme en closure s'exécute sur la même instruction, si bien qu'un
+`where_raw` ou un `where_has` à l'intérieur atterrit tel quel dans le
+SQL du pivot - la liste blanche d'identifiants saute délibérément
+l'échappatoire brute. Traitez la closure comme vous traitez
+`Builder::where_raw` : ne construisez jamais ses fragments à partir
+d'entrées non fiables.
+
+La même famille est disponible sur `MorphToMany` et `MorphedByMany`.
+
+### Pourquoi Suprnova diverge : les filtres de pivot sont en lecture seule
+
+Deux frontières, toutes deux délibérées.
+
+**Un filtre de pivot ne restreint jamais une écriture.** Laravel fond
+les contraintes `wherePivot` dans `detach()`, si bien que
+`->wherePivot('active', 1)->detach()` ne supprime que les lignes de
+jointure actives. Suprnova construit son `DELETE` de pivot à la main,
+et un prédicat de lecture qui atteint ou n'atteint pas silencieusement
+une suppression est une différence que le site d'appel ne laisse pas
+voir. Aussi `attach`, `attach_with`, `detach` et `sync` retournent-ils
+une erreur tant qu'un filtre est posé. Séparez les deux intentions :
+
+```rust
+// Lisez ce qui correspond, puis agissez dessus explicitement.
+let stale = user.roles().where_pivot("active", 0i64).get().await?;
+for role in &stale {
+    user.roles().detach(role.id).await?;
+}
+```
+
+**Le chargement hâtif ne transporte pas les filtres de pivot.**
+`user_query.with(["roles"])` passe par le chemin de chargement hâtif
+généré par la relation, qui parcourt la table pivot pour tout le lot de
+parents d'un coup et applique une closure `with_where` à la table
+*liée*. Ce chemin n'a pas d'emplacement pour un prédicat de pivot.
+Quand il vous faut une lecture plusieurs-à-plusieurs filtrée, appelez
+l'accesseur de relation parent par parent
+(`user.roles().where_pivot(...).get()`) au lieu du chargement hâtif.
 
 ### Pourquoi Suprnova diverge : le pivot est un vrai modèle
 
@@ -613,8 +708,8 @@ requête retourne sûrement rien.
 
 L'ancien moteur `has` / `whereHas` de Laravel émettait des JOIN et
 dupliquait les lignes parentes ; la réécriture en EXISTS corrélé est
-arrivée dans Laravel
-9. Suprnova livre EXISTS depuis le premier jour.
+arrivée dans Laravel 9.
+Suprnova livre EXISTS depuis le premier jour.
 Les avantages : aucun doublon dans le jeu de résultats, aucun
 contournement par GROUP BY pour les agrégats, aucun besoin de
 `DISTINCT`, et l'optimiseur de la base de données voit une vraie

@@ -6,20 +6,22 @@
 //! - [`Rule`] - pure sync check on a single value. Built-ins:
 //!   [`rules::Required`], [`rules::Email`], [`rules::Min`],
 //!   [`rules::Max`], [`rules::Between`], [`rules::In`],
-//!   [`rules::NotIn`], [`rules::Integer`], [`rules::Numeric`],
-//!   [`rules::Boolean`], [`rules::Alpha`], [`rules::AlphaNum`],
-//!   [`rules::AlphaDash`], [`rules::Url`], [`rules::UrlProtocols`],
-//!   [`rules::HttpUrl`], [`rules::Uuid`], [`rules::Password`]
-//!   (strength checks only - see [`AsyncRule`] below for its
-//!   `uncompromised()` half).
+//!   [`rules::NotIn`], [`rules::InArray`], [`rules::Integer`],
+//!   [`rules::Numeric`], [`rules::Boolean`], [`rules::Alpha`],
+//!   [`rules::AlphaNum`], [`rules::AlphaDash`], [`rules::Url`],
+//!   [`rules::UrlProtocols`], [`rules::HttpUrl`], [`rules::Uuid`],
+//!   [`rules::Password`] (strength checks only - see [`AsyncRule`] below
+//!   for its `uncompromised()` half).
 //! - [`ValueRule`] - pure sync check on a JSON-shaped value (array or
 //!   object), for rules a bare string can't carry enough structure for.
-//!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
+//!   Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`],
+//!   [`rules::Contains`], [`rules::DoesntContain`].
 //! - [`ContextualRule`] - sync check that can read sibling fields
 //!   (think Laravel `required_if:other,value`). Built-ins:
 //!   [`rules::RequiredIf`], [`rules::RequiredWith`],
 //!   [`rules::RequiredUnless`], [`rules::Same`],
-//!   [`rules::Different`], [`rules::Confirmed`].
+//!   [`rules::Different`], [`rules::Confirmed`], [`rules::Gt`],
+//!   [`rules::Gte`], [`rules::Lt`], [`rules::Lte`].
 //! - [`AsyncRule`] - async check (DB queries - [`async_rules::Unique`]
 //!   lives here; HTTP - [`rules::Password`]'s `uncompromised()` speaks
 //!   the Have I Been Pwned k-anonymity API here).
@@ -130,7 +132,8 @@ pub trait Rule {
 /// dispatches to `Rule` or `ValueRule` automatically, by whichever
 /// trait the rule's type implements.
 ///
-/// Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`].
+/// Built-ins: [`rules::ArrayKeys`], [`rules::Distinct`],
+/// [`rules::Contains`], [`rules::DoesntContain`].
 ///
 /// [`validate!`]: crate::validate
 pub trait ValueRule {
@@ -1553,6 +1556,280 @@ pub mod rules {
                 }
             }
             Ok(())
+        }
+    }
+
+    /// Laravel `in_array:other.*` - the value must appear in a list taken
+    /// from elsewhere in the form.
+    ///
+    /// Laravel names the other field in a rule string and the validator
+    /// globs it out of the request data at run time. Suprnova has no
+    /// rule-string parser - a rule is a value you construct - so you hand
+    /// the list over directly and the compiler checks the field exists:
+    /// `InArray(&self.allowed_roles)`. `S: AsRef<str>` on the impl so a
+    /// `Vec<String>` field and a `&[&str]` literal both work.
+    ///
+    /// Comparison is exact `str` equality, like [`In`]. Nothing is
+    /// coerced, so `"1"` matches only `"1"`.
+    ///
+    /// An empty haystack is ordinary data - a sibling field can be empty
+    /// at run time - so the value fails with the normal keyed message
+    /// rather than the construction error [`ArrayKeys`] reports for its
+    /// empty allow-list.
+    pub struct InArray<'a, S>(pub &'a [S]);
+    impl<S: AsRef<str>> Rule for InArray<'_, S> {
+        fn passes(&self, value: &str) -> Result<(), ValidationMessage> {
+            if self.0.iter().any(|allowed| allowed.as_ref() == value) {
+                Ok(())
+            } else {
+                // The haystack is submitted data. Naming its contents here
+                // would reflect request input into a response body, which
+                // is the same reason `validation-must-match` deliberately
+                // drops its `$other` parameter.
+                Err(ValidationMessage::keyed("validation-in-array")
+                    .fallback("must be one of the allowed values"))
+            }
+        }
+    }
+
+    /// Laravel `contains:foo,bar` - the value must be a JSON array holding
+    /// every listed parameter.
+    ///
+    /// An element matches a parameter only when the element is a JSON
+    /// string equal to it: `["1"]` contains `"1"` and `[1]` does not. JSON
+    /// is already typed, and PHP's coercing `in_array` is the bug class
+    /// #61318/#61319 closed upstream - Suprnova does not reintroduce it
+    /// for the sake of matching Laravel's `validateContains`, which is
+    /// still loose. A value that is not an array fails, matching Laravel's
+    /// own `! is_array($value)` guard.
+    ///
+    /// An empty parameter list can never usefully constrain an array, so
+    /// `passes` reports it as a **keyless** message - a construction error
+    /// to fix, not a translatable failure - the pattern [`ArrayKeys`] uses.
+    pub struct Contains(pub &'static [&'static str]);
+    impl ValueRule for Contains {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            if self.0.is_empty() {
+                return Err(
+                    "Contains requires at least one value; an empty list can never \
+                     usefully constrain an array"
+                        .into(),
+                );
+            }
+            let fail = || {
+                ValidationMessage::keyed("validation-contains")
+                    .fallback("is missing a required value")
+            };
+            let Some(items) = value.as_array() else {
+                return Err(fail());
+            };
+            let held = |wanted: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, Value::String(s) if s == wanted))
+            };
+            if self.0.iter().all(|wanted| held(wanted)) {
+                Ok(())
+            } else {
+                Err(fail())
+            }
+        }
+    }
+
+    /// Laravel `doesnt_contain:foo,bar` - the value must be a JSON array
+    /// holding none of the listed parameters.
+    ///
+    /// Matching is the same exact string comparison [`Contains`] uses, so
+    /// `[1]` does not contain the forbidden value `"1"`. A value that is
+    /// not an array fails, matching Laravel's `! is_array($value)` guard -
+    /// the rule states "this array holds none of these," and a non-array
+    /// cannot make that true.
+    ///
+    /// An empty parameter list is a keyless construction error, as in
+    /// [`Contains`].
+    pub struct DoesntContain(pub &'static [&'static str]);
+    impl ValueRule for DoesntContain {
+        fn passes(&self, value: &Value) -> Result<(), ValidationMessage> {
+            if self.0.is_empty() {
+                return Err(
+                    "DoesntContain requires at least one value; an empty list can never \
+                     usefully constrain an array"
+                        .into(),
+                );
+            }
+            let fail = || {
+                ValidationMessage::keyed("validation-doesnt-contain")
+                    .fallback("contains a forbidden value")
+            };
+            let Some(items) = value.as_array() else {
+                return Err(fail());
+            };
+            let held = |forbidden: &str| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, Value::String(s) if s == forbidden))
+            };
+            if self.0.iter().any(|forbidden| held(forbidden)) {
+                Err(fail())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// The right-hand operand of a comparison rule ([`Gt`], [`Gte`],
+    /// [`Lt`], [`Lte`]), and the measure applied to both sides.
+    ///
+    /// Laravel infers the measure from the attribute's *other* rules
+    /// (`getSize`, `ValidatesAttributes.php:2817-2835`). A Suprnova rule
+    /// has no view of the other rules on its field, and guessing from the
+    /// string's shape is the coercion habit the 13.27 strictness fixes
+    /// were closing - so the measure is part of the operand. Pairing them
+    /// in one enum also makes the meaningless combination unwritable:
+    /// there is no literal-plus-length variant, because comparing a value
+    /// against the length of the digits you typed is not a check anyone
+    /// wants (use [`Min`] or [`Max`] for that), and Laravel refuses it too.
+    pub enum CompareWith<'a> {
+        /// A literal number. Both sides must be finite: the value has to
+        /// parse as a finite `f64`, and a non-finite literal fails the
+        /// field rather than comparing against infinity.
+        Number(f64),
+        /// A sibling field compared numerically. Both the value and the
+        /// sibling must parse as finite `f64`.
+        NumericField(&'a str),
+        /// A sibling field compared by Unicode scalar count - the same
+        /// measure [`Min`] and [`Max`] use.
+        LengthField(&'a str),
+    }
+
+    /// Parse a finite `f64`, rejecting `NaN`, `inf`, and magnitudes that
+    /// overflow to infinity - the contract [`Numeric`] already enforces,
+    /// kept identical so the two rules agree on what a number is.
+    fn finite_number(raw: &str) -> Option<f64> {
+        match raw.trim().parse::<f64>() {
+            Ok(n) if n.is_finite() => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Measure both sides of a comparison and order them.
+    ///
+    /// `None` means the comparison cannot be made at all: an unparseable
+    /// or non-finite operand, or a sibling field the form never supplied.
+    /// Every caller turns `None` into its own failure message, so an
+    /// unusable operand fails the field instead of panicking or passing.
+    /// Both sides are finite by the time `partial_cmp` runs, so it never
+    /// returns `None` there.
+    fn compare_sides(
+        value: &str,
+        with: &CompareWith<'_>,
+        ctx: &FormContext,
+    ) -> Option<std::cmp::Ordering> {
+        match with {
+            CompareWith::Number(operand) if operand.is_finite() => {
+                finite_number(value)?.partial_cmp(operand)
+            }
+            CompareWith::Number(_) => None,
+            CompareWith::NumericField(other) => {
+                let lhs = finite_number(value)?;
+                let rhs = finite_number(ctx.get(*other)?)?;
+                lhs.partial_cmp(&rhs)
+            }
+            CompareWith::LengthField(other) => {
+                let rhs = ctx.get(*other)?.chars().count();
+                Some(value.chars().count().cmp(&rhs))
+            }
+        }
+    }
+
+    /// How an operand is named in a failure message: a literal renders as
+    /// its own number, a field operand as the field's **name**.
+    ///
+    /// Never the sibling's value. A validation message is rendered into a
+    /// response body, and the sibling's value is submitted data - the same
+    /// reason `validation-must-match` deliberately drops its `$other`
+    /// parameter.
+    fn operand_label(with: &CompareWith<'_>) -> String {
+        match with {
+            CompareWith::Number(n) => n.to_string(),
+            CompareWith::NumericField(other) | CompareWith::LengthField(other) => {
+                (*other).to_string()
+            }
+        }
+    }
+
+    /// Laravel `gt:field_or_value` - the value must be greater than its
+    /// operand.
+    ///
+    /// [`CompareWith`] carries both the operand and the measure. An
+    /// operand that cannot be measured - a non-numeric value under a
+    /// numeric comparison, a sibling the form never sent, a non-finite
+    /// literal - fails the field with this rule's message. Arrays and
+    /// files have no comparison here: a rule only ever sees a string, and
+    /// upload sizes are capped by the multipart parser instead.
+    pub struct Gt<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Gt<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Greater) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-gt")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be greater than {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `gte:field_or_value` - the value must be greater than or
+    /// equal to its operand. See [`Gt`] for the operand and failure rules.
+    pub struct Gte<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Gte<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-gte")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be greater than or equal to {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `lt:field_or_value` - the value must be less than its
+    /// operand. See [`Gt`] for the operand and failure rules.
+    pub struct Lt<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Lt<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Less) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-lt")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be less than {other}")))
+                }
+            }
+        }
+    }
+
+    /// Laravel `lte:field_or_value` - the value must be less than or equal
+    /// to its operand. See [`Gt`] for the operand and failure rules.
+    pub struct Lte<'a>(pub CompareWith<'a>);
+    impl ContextualRule for Lte<'_> {
+        fn passes(&self, value: &str, ctx: &FormContext) -> Result<(), ValidationMessage> {
+            match compare_sides(value, &self.0, ctx) {
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => Ok(()),
+                _ => {
+                    let other = operand_label(&self.0);
+                    Err(ValidationMessage::keyed("validation-lte")
+                        .arg("other", other.clone())
+                        .fallback(format!("must be less than or equal to {other}")))
+                }
+            }
         }
     }
 }

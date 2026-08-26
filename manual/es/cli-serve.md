@@ -92,6 +92,20 @@ suprnova serve --frontend-only
 Rust en cada guardado, o cuando el backend se está ejecutando en otra
 shell (o en Docker).
 
+### Proyecto solo API
+
+Un proyecto con andamiaje de `suprnova new --api` no tiene directorio
+`frontend/`. Ejecuta `serve` exactamente igual que en cualquier otro sitio:
+
+```bash
+suprnova serve
+```
+
+`serve` no ve ningún `frontend/package.json`, se salta el panel de Vite y
+la generación de TypeScript que lo alimenta, y ejecuta el backend.
+`--frontend-only` sigue siendo un error en un proyecto así: pide el único
+panel que no existe.
+
 ### Omitir la generación de tipos
 
 ```bash
@@ -111,11 +125,13 @@ Cuando ejecutas `suprnova serve`, la CLI:
 2. Resuelve los puertos del backend y del frontend (flag de la CLI →
    variable de entorno → valor por defecto).
 3. Verifica que estés en un proyecto de Suprnova - `Cargo.toml` debe
-   existir (a menos que se use `--frontend-only`) y debe existir un
-   directorio `frontend/` (a menos que se use `--backend-only`).
+   existir (a menos que se use `--frontend-only`), y `--frontend-only`
+   necesita un directorio `frontend/` con un `package.json`. Un proyecto
+   que no lo tenga se sirve solo con el backend en lugar de rechazarse.
 4. Regenera los tipos de TypeScript a partir de cualquier estructura
    `#[derive(InertiaProps)]` que encuentre en `src/`, y los escribe en
-   `frontend/src/types/inertia-props.ts`.
+   `frontend/src/types/inertia-props.ts`. Se omite cuando el proyecto no
+   tiene frontend.
 5. Instala `cargo-watch` mediante `cargo install --locked --version
    "^8.5" cargo-watch` si todavía no está en el PATH (una sola vez,
    con el aviso "Installing..."). Se omite bajo `--frontend-only`.
@@ -127,12 +143,15 @@ Cuando ejecutas `suprnova serve`, la CLI:
    secundario de iniciar un servidor de desarrollo no debería,
    además, elegir las versiones por ti.
 6. Ejecuta `npm install` en `frontend/` si `node_modules` todavía no
-   existe. Se omite bajo `--backend-only`.
+   existe. Se omite bajo `--backend-only`, y cuando el proyecto no tiene
+   frontend.
 7. Lanza `cargo watch -x 'run --bin <package-name>'` para el backend.
    `cargo-watch` vuelve a ejecutar el binario cada vez que cambia un
    archivo `.rs`.
 8. Lanza `npm run dev` en `frontend/` para Vite, lo que te da HMR
    para los componentes de Svelte/React/Vue y las clases de Tailwind.
+   Se omite bajo `--backend-only`, y cuando el proyecto no tiene
+   frontend.
 9. Inicia cada proceso adicional declarado en el `Suprnova.toml` del proyecto
    (consulta [Procesos de desarrollo adicionales](#procesos-de-desarrollo-adicionales)
    más abajo), cada uno con su propio prefijo `[name]` - workers de cola,
@@ -141,7 +160,9 @@ Cuando ejecutas `suprnova serve`, la CLI:
 10. Inicia un monitor de archivos sobre `src/` que vuelve a ejecutar el
     generador de tipos cada vez que cambia un archivo `.rs`, una vez
     que la ráfaga de guardados ha estado en silencio durante 500 ms.
-    El antirrebote espera hasta el final de la ráfaga, así que una ráfaga -
+    Se omite cuando el proyecto no tiene frontend, igual que la
+    generación de tipos del arranque del paso 4. El antirrebote espera
+    hasta el final de la ráfaga, así que una ráfaga -
     `cargo fmt`, formatear al guardar en varios archivos, un cambio de rama -
     se agrupa en una única regeneración que se ejecuta *después* de la
     última escritura, en lugar de una que se dispara con el primer archivo
@@ -211,7 +232,6 @@ tipos vuelve a ejecutar el generador. Si aparecen nuevas estructuras
 `#[derive(InertiaProps)]` (o las existentes cambian de forma), el
 `frontend/src/types/inertia-props.ts` regenerado dispara el HMR de Vite para
 el componente que las importa.
-
 
 ## Procesos de desarrollo adicionales
 

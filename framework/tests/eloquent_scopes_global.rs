@@ -499,3 +499,77 @@ async fn find_and_all_bypass_global_scopes() {
     let many = T4Pk::find_many([row1.id, row2.id, row3.id]).await.unwrap();
     assert_eq!(many.len(), 3);
 }
+
+// ============================================================
+// Test 7: `refresh_for_update` bypasses global scopes and the
+// soft-delete filter.
+//
+// It reloads by primary key under a lock, not through the scoped
+// read path `query()` uses - so a row outside the active tenant
+// scope, and a trashed row, both reload successfully even though
+// neither is reachable through `query()`. Reuses `T4SoftArticle` /
+// `T4SoftTenantScope` from Test 6 rather than inventing a new
+// fixture - it already combines a registered global scope with
+// `#[model(soft_deletes)]`, exactly what this test needs.
+// ============================================================
+
+#[tokio::test]
+async fn refresh_for_update_bypasses_global_scope_and_soft_delete() {
+    let db = TestDatabase::sqlite_memory().await.unwrap();
+    db.execute_unprepared(
+        "CREATE TABLE t4_soft_articles (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            tenant_id INTEGER NOT NULL, \
+            title TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL, \
+            deleted_at TEXT NULL\
+         )",
+    )
+    .await
+    .unwrap();
+
+    let live_t1 = T4SoftArticle::create(suprnova::attrs! { tenant_id: 1, title: "live-t1" })
+        .await
+        .unwrap();
+    let other_tenant = T4SoftArticle::create(suprnova::attrs! { tenant_id: 2, title: "t2-row" })
+        .await
+        .unwrap();
+    let mut other_tenant_handle = other_tenant.clone();
+    let trashed = T4SoftArticle::create(suprnova::attrs! { tenant_id: 1, title: "trashed-row" })
+        .await
+        .unwrap();
+    let mut trashed_handle = trashed.clone();
+
+    // Mutate the other-tenant row through a second handle, and trash
+    // the third row, before the active scope is even registered - so
+    // both `refresh_for_update` calls below prove a real reload, not
+    // just "no error".
+    other_tenant
+        .update(suprnova::attrs! { title: "t2-row-renamed" })
+        .await
+        .unwrap();
+    trashed.delete().await.unwrap();
+
+    ScopeRegistry::register::<T4SoftArticle, _>(T4SoftTenantScope);
+
+    // The active scope is tenant=1, and the soft-delete filter drops
+    // trashed rows - only `live_t1` is reachable through query().
+    let scoped = T4SoftArticle::query().get().await.unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].id, live_t1.id);
+
+    // refresh_for_update reaches the other-tenant row anyway - it
+    // reloads by primary key under a lock, not through the scoped
+    // read path, and picks up the rename made above.
+    other_tenant_handle.refresh_for_update().await.unwrap();
+    assert_eq!(other_tenant_handle.title, "t2-row-renamed");
+
+    // A trashed row reloads too, with deleted_at coming back set.
+    trashed_handle.refresh_for_update().await.unwrap();
+    assert!(
+        trashed_handle.deleted_at.is_some(),
+        "a trashed row must still reload through refresh_for_update, \
+         with deleted_at set"
+    );
+}

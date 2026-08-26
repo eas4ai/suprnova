@@ -353,6 +353,7 @@ User::filter("plan", "free").increment("quota_reset_count", 1).await?;
 ```php
 // Laravel
 $user->refresh();                          // 从数据库重新加载
+$user->refreshForUpdate();                 // 在一把行级锁之下重新加载
 $copy = $user->fresh();                    // 获取并返回一个副本
 $replica = $user->replicate();             // 未保存的克隆，带着一个全新的主键
 $replica = $user->replicate(['email']);    // 跳过一个字段
@@ -361,12 +362,15 @@ $replica = $user->replicate(['email']);    // 跳过一个字段
 ```rust
 // Suprnova
 user.refresh().await?;
+user.refresh_for_update().await?;
 let copy: User = user.fresh().await?;
 let replica: User = user.replicate().await?;
 let replica: User = user.replicate_except(["email"]).await?;
 ```
 
-`refresh` 是原地变更；`fresh` 返回一个另外取出来的副本。`replicate` 会构建一个内存中的克隆，并把主键重置（对这个键类型调用 `Default::default()`）。调用者需要自行显式保存。
+`refresh` 是原地变更；`fresh` 返回一个另外取出来的副本。`refresh_for_update` 就是在一把 `SELECT ... FOR UPDATE` 行级锁之下的 `refresh` - 当您需要在一条语句里同时拿到这一行的当前值和那把排他锁时，请在一个事务内部用它。和 `refresh` 不一样，`refresh_for_update` 会绕过每一个注册过的全局作用域，也绕过 `#[model(soft_deletes)]` 的过滤：它连一行被丢进回收站的记录也会重新加载，而且 `deleted_at` 会带着值回来。这次重新加载是一次在锁之下的按主键查找 - 要是像给一次普通读取那样给它加上作用域，就等于给管理工具和跨租户的调用方，对一行他们本来就握着引用的记录，交回一个假的“找不到”。`replicate` 会构建一个内存中的克隆，并把主键重置（对这个键类型调用 `Default::default()`）。调用者需要自行显式保存。
+
+当这一行已经不存在时，`refresh` 和 `refresh_for_update` 都会返回一个错误，而不是让这个模型继续握着陈旧的值。SQLite 没有行级锁，所以 `refresh_for_update` 在那里是不加锁地重新加载的 - 参见[行锁](#行锁)。
 
 ### Replicating 事件
 
@@ -490,6 +494,8 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->where(col, val)` | `.filter(col, val)` | `.db_where(col, val)` | 等值判断 |
 | `->where(col, op, val)` | `.filter_op(col, op, val)` | `.db_where_op(col, op, val)` | 任意运算符 |
 | `->orWhere(...)` | `.or_filter(...)` | `.or_where(...)` | |
+| `->orWhereKey(id)` | `.or_filter_key(id)` | `.or_where_key(id)` | 作为一个“或”分支的主键过滤 |
+| `->orWhereKeyNot(id)` | `.or_filter_key_not(id)` | `.or_where_key_not(id)` | 作为一个“或”分支的取反主键过滤 |
 | `->whereNot(col, val)` | `.filter_not(col, val)` | `.where_not(col, val)` | |
 | `->whereIn(col, vals)` | `.filter_in(col, vals)` | `.where_in(col, vals)` | |
 | `->whereNotIn(col, vals)` | `.filter_not_in(col, vals)` | `.where_not_in(col, vals)` | |
@@ -504,6 +510,10 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->whereTime(col, '12:30')` | `.filter_time(col, NaiveTime)` | `.where_time(col, NaiveTime)` | |
 | `->whereLike(col, pattern)` | `.filter_like(col, pattern)` | `.where_like(col, pattern)` | |
 | `->whereNotLike(col, pattern)` | `.filter_not_like(col, pattern)` | `.where_not_like(col, pattern)` | |
+| `->whereBinary(col, val)` | `.filter_binary(col, val)` | `.where_binary(col, val)` | 逐字节精确；仅限 MySQL 和 MariaDB |
+| `->orWhereBinary(col, val)` | `.or_filter_binary(col, val)` | `.or_where_binary(col, val)` | |
+| `->whereNotBinary(col, val)` | `.filter_not_binary(col, val)` | `.where_not_binary(col, val)` | |
+| `->orWhereNotBinary(col, val)` | `.or_filter_not_binary(col, val)` | `.or_where_not_binary(col, val)` | |
 | `->whereJsonContains(col, v)` | `.filter_json_contains(col, v)` | `.where_json_contains(col, v)` | 按后端分发 |
 | `->whereJsonLength(col, op, n)` | `.filter_json_length(col, op, n)` | `.where_json_length(col, op, n)` | |
 | `->whereColumn(a, b)` | `.filter_column(a, b)` | `.where_column(a, b)` | 列对列比较 |
@@ -512,6 +522,8 @@ let users = User::query().where_like("email", "%@example.com").get().await?;
 | `->whereDoesntHave(rel)` | `.filter_doesnt_have(rel)` | `.where_doesnt_have(rel)` | （10B） |
 | `->whereRelation(rel, col, op, v)` | `.filter_relation(...)` | `.where_relation(...)` | （10B） |
 | `->whereRaw(sql, bindings)` | `.filter_raw(sql, bindings)` | `.where_raw(sql, bindings)` | |
+
+`binary` 这一家子比较的是原始字节，而不是在这个列的排序规则之下做匹配。MySQL 和 MariaDB 发出 `col = binary ?`；Postgres 和 SQLite 没有对应的运算符，所以在那些后端上，一个终结方法会在这条语句渲染时返回一个错误，而不是回退成一个取决于排序规则的 `=`。参见[逐字节精确的比较](queries.md#byte-exact-comparison)。
 
 带绑定参数的原始谓词，在 SQLite、MySQL 和 PostgreSQL 上都用可移植的 `?` 占位符：
 
@@ -547,6 +559,40 @@ let users = User::query().in_random_order().get().await?;
 ```
 
 `Direction::Asc` / `Direction::Desc` 是从 SeaORM 重新导出的那个 Suprnova 枚举。
+
+#### 按一个明确的序列排序
+
+`in_order_of` 会把行按您列出的顺序排好。任何值不在这个列表里的行，都排在所有在列表里的行之后。
+
+```php
+$users = User::inOrderOf('role', ['admin', 'member', 'guest'])->get();
+```
+
+```rust
+let users = User::query()
+    .in_order_of("role", ["admin", "member", "guest"])
+    .get()
+    .await?;
+```
+
+Suprnova 会把这一句渲染成一个带绑定参数的 `CASE` 表达式，所以这些值是参数，从请求数据里取也是安全的：
+
+```sql
+ORDER BY CASE WHEN role = ? THEN 0 WHEN role = ? THEN 1 WHEN role = ? THEN 2 ELSE 3 END
+```
+
+列名是一个 SQL 标识符，不是一个参数。请把它写死，或者从一份允许列表里挑，和其他每一个列参数一样。一个空的值列表根本不会添加任何排序，所以您可以有条件地把这个序列拼出来，而不必给空的情况开特例。
+
+对于一个使用了 `AsEnum<E>` 转换的列，请把每一个变体都过一遍 `as_ref()`。那才是这个转换实际存下去的那个字符串：
+
+```rust
+let users = User::query()
+    .in_order_of("role", [Role::Admin.as_ref(), Role::Member.as_ref()])
+    .get()
+    .await?;
+```
+
+`in_order_of` 只发布在带类型的 `Builder<M>` 表面上。不带模型的 `DB::table(...)` 构造器只按列和方向排序。
 
 ### 分组 + having
 
@@ -663,6 +709,18 @@ let inventory = Inventory::query()
 | SQLite   | （没有 SQL，见下文） | （没有 SQL，见下文）    |
 
 这个锁子句会被追加在这条复合语句的最末尾 - 在每一个 `UNION` 分支、每一个 `ORDER BY`、每一个 `LIMIT` / `OFFSET` 之后。两个构造器的 `union(...)`，接上 `.lock_for_update()`，会在最外层恰好发出**一个** `FOR UPDATE`，不是每个分支各发一个。
+
+要把一个您已经握在手里的模型重新加载，并在同一条语句里拿到那把锁，请用 `refresh_for_update`：
+
+```rust
+DB::transaction(|tx| async move {
+    let mut order = Order::find_or_fail(42).await?;
+    order.refresh_for_update().await?;   // SELECT ... WHERE id = ? FOR UPDATE
+    order.status = "processed".into();
+    order.save_with_tx(&tx).await?;
+    Ok(())
+}).await?;
+```
 
 ### 在事务内部使用
 
@@ -2958,7 +3016,10 @@ Comment::query()
 // 主键过滤。
 User::query().where_key(7).first().await?;        // filter("id", 7) 的语法糖
 User::query().where_key_not(7).get().await?;      // filter_op("id", "!=", 7) 的语法糖
-// 符合 Rust 惯用法的别名：filter_key / filter_key_not。
+User::query().filter("name", n).or_where_key(7).get().await?;      // ... OR id = 7
+User::query().filter("name", n).or_where_key_not(7).get().await?;  // ... OR id != 7
+// 符合 Rust 惯用法的别名：filter_key / filter_key_not /
+// or_filter_key / or_filter_key_not。
 
 // 按 created_at 排序。
 Post::query().latest().get().await?;              // ORDER BY created_at DESC

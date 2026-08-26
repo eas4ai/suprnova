@@ -76,6 +76,16 @@ suprnova serve --frontend-only
 
 适合专心做 UI，而不用为每次保存都付出一次 Rust 重新编译的代价，或者后端已经在另一个 shell 里跑着（或者跑在 Docker 里）的时候。
 
+### 纯 API 项目
+
+用 `suprnova new --api` 脚手架出来的项目没有 `frontend/` 目录。像在别处一样照常运行 `serve` 就可以：
+
+```bash
+suprnova serve
+```
+
+`serve` 看不到 `frontend/package.json`，就会跳过 Vite 那一格，以及喂给它的那次 TypeScript 生成，然后把后端跑起来。在这样的项目上，`--frontend-only` 仍然是一个错误：它要的恰恰是那一格并不存在的东西。
+
 ### 跳过类型生成
 
 ```bash
@@ -90,14 +100,14 @@ suprnova serve --skip-types
 
 1. 从当前目录加载 `.env`。
 2. 解析后端和前端的端口（CLI 标志 → 环境变量 → 默认值）。
-3. 验证您确实在一个 Suprnova 项目里 - `Cargo.toml` 必须存在（除非传了 `--frontend-only`），`frontend/` 目录也必须存在（除非传了 `--backend-only`）。
-4. 从它在 `src/` 里找到的任何 `#[derive(InertiaProps)]` 结构体重新生成 TypeScript 类型，写入 `frontend/src/types/inertia-props.ts`。
+3. 验证您确实在一个 Suprnova 项目里 - `Cargo.toml` 必须存在（除非传了 `--frontend-only`），而 `--frontend-only` 需要一个带 `package.json` 的 `frontend/` 目录。一个没有前端的项目会以仅后端的方式跑起来，而不是被拒绝。
+4. 从它在 `src/` 里找到的任何 `#[derive(InertiaProps)]` 结构体重新生成 TypeScript 类型，写入 `frontend/src/types/inertia-props.ts`。在项目没有前端时会被跳过。
 5. 如果 `cargo-watch` 还不在 PATH 上，就通过 `cargo install --locked --version "^8.5" cargo-watch` 安装它（只做一次，带一条「Installing...」提示）。在 `--frontend-only` 下会被跳过。这个版本号之所以被限定，是因为 `serve` 驱动的是 `cargo watch -x`，它的含义在一次大版本跳跃之间并不保证不变；`--locked` 会构建 cargo-watch 发布时的那份依赖树，而不是在安装时重新解析它。一条会作为启动开发服务器的副作用去安装软件的命令，不该同时还替您挑版本。
-6. 如果 `node_modules` 还不存在，就在 `frontend/` 里运行 `npm install`。在 `--backend-only` 下会被跳过。
+6. 如果 `node_modules` 还不存在，就在 `frontend/` 里运行 `npm install`。在 `--backend-only` 下，以及在项目没有前端时，会被跳过。
 7. 为后端 spawn 一个 `cargo watch -x 'run --bin <package-name>'`。每当一个 `.rs` 文件发生变化，`cargo-watch` 就会重新运行这个二进制文件。
-8. 为 Vite 在 `frontend/` 里 spawn 一个 `npm run dev`，这会给您 Svelte/React/Vue 组件和 Tailwind 类的 HMR。
+8. 为 Vite 在 `frontend/` 里 spawn 一个 `npm run dev`，这会给您 Svelte/React/Vue 组件和 Tailwind 类的 HMR。在 `--backend-only` 下，以及在项目没有前端时，会被跳过。
 9. spawn 项目 `Suprnova.toml` 中声明的每个额外进程（见下方[额外开发进程](#额外开发进程)），每个都有自己的 `[name]` 前缀 - 队列工作进程、日志 tailer，或任何您否则要在另一个终端中调度的东西。
-10. 在 `src/` 上启动一个文件监视器，每当一个 `.rs` 文件变化，并且这一连串保存已经安静了 500 毫秒之后，就重新运行这个类型生成器。这个防抖是后沿触发的，所以一连串的变更 - `cargo fmt`、跨多个文件的保存时格式化、一次分支切换 - 会合并成恰好一次再生成，在最后一次写入*之后*运行，而不是在第一个文件上就触发、错过剩下的文件。
+10. 在 `src/` 上启动一个文件监视器，每当一个 `.rs` 文件变化，并且这一连串保存已经安静了 500 毫秒之后，就重新运行这个类型生成器。在项目没有前端时会被跳过，和第 4 步里启动时的类型生成一样。这个防抖是后沿触发的，所以一连串的变更 - `cargo fmt`、跨多个文件的保存时格式化、一次分支切换 - 会合并成恰好一次再生成，在最后一次写入*之后*运行，而不是在第一个文件上就触发、错过剩下的文件。
 11. 把每个子进程的 stdout/stderr 都转发到您的终端，带着 `[name]` 前缀（`[backend]`、`[frontend]`，或进程的配置名称），可选择用 `--timestamps` 加上时间戳 - 或者使用 `--json` 时改为 NDJSON 事件（见下方[JSON 输出](#json-输出)）。
 
 `Ctrl+C` 会通知这个管理器去设置它的关闭标志、杀掉每个子进程，然后退出。如果一个子进程自己退出了 - 一次 `cargo watch` 无法恢复的严重 Rust 编译错误、崩溃的 Vite 进程、失败的 `Suprnova.toml` 进程 - 它会在短暂退避后重新 spawn（200ms，每次连续崩溃翻倍，上限为 5s；持续运行 30s 的进程会重置该爬升），而不是拆掉会话。传递 `--no-restart` 可恢复旧行为：任一子进程退出会立即关闭整个会话。
@@ -108,7 +118,7 @@ suprnova serve --skip-types
 
 Laravel 用户通常会用 `php artisan serve` 跑后端，在另一个终端里跑 `npm run dev`，大多数团队会用一个 `Procfile` 加 `foreman`/`overmind` 来掩盖这种两个终端的割裂。Suprnova 把这个多路复用器当作一个一等的 CLI 命令来发布。您得到的是一个终端、一次 `Ctrl+C`、自动的工具链引导（`cargo-watch`、`npm install`），以及一座类型化的 Inertia 桥，它会随时再生成 `frontend/src/types/inertia-props.ts`，这样您的 Svelte/React/Vue 组件永远能看到当前的 prop 形态，不需要手动同步类型。
 
-Laravel 的 `dev` 命令也提供 `--tabs` 和 `--stream` 模式，两者都通过一个小型 Node TUI（`@laravel/multiplex`）渲染输出。Suprnova 不提供该 TUI：带前缀的单终端输出是 Rust 开发工具生态（`cargo watch`、`bacon`、`just`）的常态，带彩色前缀的进程注册表已提供 TUI 所提供的“哪个进程说了这句话”信号。`--stream` 的底层工作 - 一个可脚本化的实时事件流 - 作为 `--json` 提供（见[JSON 输出](#json-输出)）；`--tabs` 的多窗格 TUI 是刻意不做，不是缺口 - 对本页已经解决的问题，第二种交互模型以及第二个需要跨终端保持可用的库是不值得的。参见[兼容性](parity.md#what-we-won-t-ship-and-why)中的相应行。
+Laravel 的 `dev` 命令也提供 `--tabs` 和 `--stream` 模式，两者都通过一个小型 Node TUI（`@laravel/multiplex`）渲染输出。Suprnova 不提供该 TUI：带前缀的单终端输出是 Rust 开发工具生态（`cargo watch`、`bacon`、`just`）的常态，带彩色前缀的进程注册表已提供 TUI 所提供的“哪个进程说了这句话”信号。`--stream` 的底层工作 - 一个可脚本化的实时事件流 - 作为 `--json` 提供（见[JSON 输出](#json-输出)）；`--tabs` 的多窗格 TUI 是刻意不做，不是缺口 - 对本页已经解决的问题，第二种交互模型以及第二个需要跨终端保持可用的库是不值得的。参见[Laravel 对等映射](parity.md#what-we-won-t-ship-and-why)中的相应行。
 
 ## 热重载
 
