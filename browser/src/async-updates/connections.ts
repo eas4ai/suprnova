@@ -1001,6 +1001,7 @@ interface LogicalMembership {
   pendingAuthorizationKind: "initial" | "successor" | null;
   provedTransportGeneration: number;
   quarantinedDescriptorBinding: string | null;
+  quarantinedGroup: PhysicalGroup | null;
   quarantinedTransportGeneration: number;
   recoveryRequestGeneration: number;
   requiresInitialAuthorization: boolean;
@@ -1232,6 +1233,7 @@ export class DocumentConnectionPool {
       pendingAuthorizationKind: pendingAuthorization === null ? null : "initial",
       provedTransportGeneration: -1,
       quarantinedDescriptorBinding: null,
+      quarantinedGroup: null,
       quarantinedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       requiresInitialAuthorization: pendingAuthorization !== null,
@@ -1296,6 +1298,7 @@ export class DocumentConnectionPool {
     for (const membership of this.#memberships.values()) {
       this.#cancelMembershipAttachment(membership);
       this.#discardPendingAuthorization(membership);
+      this.#clearMembershipQuarantine(membership);
       membership.group = null;
       membership.authenticatedTransportGeneration = -1;
       membership.pendingProofMembershipGeneration = -1;
@@ -1346,6 +1349,7 @@ export class DocumentConnectionPool {
     for (const membership of this.#memberships.values()) {
       membership.active = false;
       this.#discardPendingAuthorization(membership);
+      this.#clearMembershipQuarantine(membership);
       membership.group = null;
       this.#safeState(membership, "closed");
     }
@@ -1510,6 +1514,7 @@ export class DocumentConnectionPool {
     if (membership.authenticatedTransportGeneration !== generation) {
       if (
         membership.logicallyDegraded &&
+        membership.quarantinedGroup === group &&
         membership.quarantinedTransportGeneration === generation &&
         membership.quarantinedDescriptorBinding === membership.authorization.descriptorBinding
       ) {
@@ -1557,6 +1562,7 @@ export class DocumentConnectionPool {
     group.recoveryGeneration += 1;
     for (const membership of group.memberships.values()) {
       membership.authenticatedTransportGeneration = -1;
+      this.#clearMembershipQuarantine(membership);
       membership.pendingProofMembershipGeneration = -1;
       membership.pendingObservedTransportGeneration = -1;
       membership.recoveryRequestGeneration = -1;
@@ -1611,6 +1617,7 @@ export class DocumentConnectionPool {
     membership.generation += 1;
     this.#cancelMembershipAttachment(membership);
     this.#discardPendingAuthorization(membership);
+    this.#clearMembershipQuarantine(membership);
     this.#memberships.delete(membership.authorization.subscriptionId);
     const group = membership.group;
     membership.group = null;
@@ -1645,12 +1652,14 @@ export class DocumentConnectionPool {
     for (const membership of group.memberships.values()) {
       this.#cancelMembershipAttachment(membership);
       this.#discardPendingAuthorization(membership);
+      this.#clearMembershipQuarantine(membership);
       membership.authenticatedTransportGeneration = -1;
       membership.pendingObservedTransportGeneration = -1;
     }
     for (const membership of group.recovering.values()) {
       this.#cancelMembershipAttachment(membership);
       this.#discardPendingAuthorization(membership);
+      this.#clearMembershipQuarantine(membership);
       membership.authenticatedTransportGeneration = -1;
       membership.pendingObservedTransportGeneration = -1;
     }
@@ -1918,6 +1927,7 @@ export class DocumentConnectionPool {
     this.#cancelMembershipAttachment(membership);
     this.#discardPendingAuthorization(membership);
     membership.quarantinedDescriptorBinding = membership.authorization.descriptorBinding;
+    membership.quarantinedGroup = group;
     membership.quarantinedTransportGeneration = transportGeneration;
     membership.authenticatedTransportGeneration = -1;
     membership.pendingProofMembershipGeneration = -1;
@@ -2139,8 +2149,7 @@ export class DocumentConnectionPool {
       }
     }
     membership.authenticatedTransportGeneration = transportGeneration;
-    membership.quarantinedDescriptorBinding = null;
-    membership.quarantinedTransportGeneration = -1;
+    this.#clearMembershipQuarantine(membership);
     if (
       staged !== null &&
       staged.proof !== null &&
@@ -2172,6 +2181,12 @@ export class DocumentConnectionPool {
     } catch {
       // A dropped stage has no authority and cleanup is best-effort.
     }
+  }
+
+  #clearMembershipQuarantine(membership: LogicalMembership): void {
+    membership.quarantinedDescriptorBinding = null;
+    membership.quarantinedGroup = null;
+    membership.quarantinedTransportGeneration = -1;
   }
 
   #effectiveAuthorization(membership: LogicalMembership): AuthorizedLogicalSubscription {

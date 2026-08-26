@@ -166,11 +166,15 @@ Acceptance criteria:
   closes the pooled physical source, degrades a sibling membership, or requests
   sibling reauthorization; subscribe admission failure may still fail the
   transport when its authentication contract requires it.
-- After presentation failure, the exact active membership retains its prior
-  authenticated transport generation and descriptor binding as a local degraded
-  lane fence. Frames for only that known lane are discarded while successor
-  acknowledgment is pending; foreign, never-authenticated, wrong-generation, or
-  wrong-binding traffic retains the physical authorization-failure contract.
+- After presentation failure, the exact active membership retains its physical
+  document-transport identity, subscription identity, prior authenticated
+  transport generation, and descriptor binding as a local degraded-lane fence.
+  Frames for only that same physical group and known lane are discarded while
+  successor acknowledgment is pending. Suspend, replacement, removal, or close
+  clears the fence, so a replacement group cannot inherit it merely because its
+  numeric generation collides; foreign, never-authenticated, wrong-group,
+  wrong-generation, or wrong-binding traffic retains the physical
+  authorization-failure contract.
 - Fresh-render scheduler exhaustion is a distinct `resource_exhausted`
   presentation outcome. It degrades and reauthorizes only the exact membership,
   reports one bounded resource diagnostic, activates the signed hybrid fallback,
@@ -617,7 +621,9 @@ UX flow:
   until successor acknowledgment without failing pooled siblings. Fresh-render
   capacity exhaustion remains a distinct exact-membership `resource_exhausted`
   lifecycle outcome with one diagnostic and ordinary hybrid/push-only fallback
-  semantics.
+  semantics. The degraded-lane quarantine is bound to the exact physical
+  document-transport identity as well as subscription, descriptor, and generation,
+  preventing a replacement group's reused numeric generation from inheriting it.
 - 2026-08-26 -- Closed the remaining Task 8 review findings. Registered-event
   dispatch now snapshots the complete caller candidate and nested payload once
   before validation, and final delivery rechecks the post-construction connected

@@ -288,6 +288,92 @@ describe("reviewed reconnect authority", () => {
     expect(sources).toHaveLength(1);
   });
 
+  it("does not inherit a degraded-lane quarantine across a generation-colliding group replacement", async () => {
+    const { pool, sources } = harness();
+    const successor = authorization(1, { descriptorBinding: "binding-1-successor" });
+    const first = sink(() => Promise.resolve(successor));
+    const firstHandle = pool.subscribe(authorization(1), first);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+
+    firstHandle.presentationFailed();
+    pool.suspend();
+    await pool.resume();
+    expect(sources).toHaveLength(2);
+    expect(sources[0]?.request.transportGeneration).toBe(1);
+    expect(sources[1]?.request.transportGeneration).toBe(1);
+    let acknowledge!: (value: DocumentMembershipOutcome) => void;
+    sources[1]?.subscribe.mockImplementationOnce(
+      () =>
+        new Promise<DocumentMembershipOutcome>((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    sources[1]?.open();
+
+    sources[0]?.emit(heartbeat(1, 1));
+    expect(sources[1]?.close).not.toHaveBeenCalled();
+    expect(first.envelope).not.toHaveBeenCalled();
+
+    sources[1]?.emit(heartbeat(1, 1));
+
+    expect(sources[1]?.close).toHaveBeenCalledExactlyOnceWith("transport_replaced");
+    expect(first.state).toHaveBeenLastCalledWith("degraded");
+    expect(first.envelope).not.toHaveBeenCalled();
+    acknowledge(
+      Object.freeze({
+        descriptorBinding: successor.descriptorBinding,
+        kind: "authenticated" as const,
+        stream: successor.stream,
+        subscriptionId: successor.subscriptionId,
+        transportGeneration: 1,
+      }),
+    );
+    await settle();
+    expect(first.state).toHaveBeenLastCalledWith("degraded");
+    pool.dispose();
+  });
+
+  it("accepts only the replacement group's exact successor acknowledgment before resuming traffic", async () => {
+    const { pool, sources } = harness();
+    const successor = authorization(1, { descriptorBinding: "binding-1-successor" });
+    const first = sink(() => Promise.resolve(successor));
+    const firstHandle = pool.subscribe(authorization(1), first);
+    sources[0]?.open();
+    firstHandle.continuityProved();
+
+    firstHandle.presentationFailed();
+    pool.suspend();
+    await pool.resume();
+    let acknowledge!: (value: DocumentMembershipOutcome) => void;
+    sources[1]?.subscribe.mockImplementationOnce(
+      () =>
+        new Promise<DocumentMembershipOutcome>((resolve) => {
+          acknowledge = resolve;
+        }),
+    );
+    sources[1]?.open();
+    sources[0]?.emit(heartbeat(1, 1));
+    expect(first.envelope).not.toHaveBeenCalled();
+
+    acknowledge(
+      Object.freeze({
+        descriptorBinding: successor.descriptorBinding,
+        kind: "authenticated" as const,
+        stream: successor.stream,
+        subscriptionId: successor.subscriptionId,
+        transportGeneration: sources[1]?.request.transportGeneration ?? -1,
+      }),
+    );
+    await settle();
+    sources[1]?.emit(heartbeat(1, 1));
+
+    expect(first.state).toHaveBeenLastCalledWith("current");
+    expect(first.envelope).toHaveBeenCalledExactlyOnceWith(heartbeat(1, 1));
+    expect(sources[1]?.close).not.toHaveBeenCalled();
+    pool.dispose();
+  });
+
   it("reauthorizes every ordinary reconnect before opening a replacement transport", async () => {
     const { pool, sources, timers } = harness();
     const rotated = authorization(1, { descriptorBinding: "rotated-binding" });
