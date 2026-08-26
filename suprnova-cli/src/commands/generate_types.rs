@@ -832,12 +832,33 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// What one generation pass did.
+///
+/// The count alone could not distinguish "wrote five types" from "emitted
+/// the same five types that were already on disk and left the file alone",
+/// so every caller reported both as `Generated <path>`. That is a claim
+/// about the filesystem, and it was false half the time.
+pub struct GenerationOutcome {
+    /// How many items the pass emitted: structs, or message ids.
+    pub count: usize,
+    /// Whether the output file on disk actually changed - written, or
+    /// removed when it went stale. `false` means the emitted content was
+    /// byte-identical to what was already there.
+    pub wrote: bool,
+}
+
 /// Generate types and write to the output file
-pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result<usize, String> {
+pub fn generate_types_to_file(
+    project_path: &Path,
+    output_path: &Path,
+) -> Result<GenerationOutcome, String> {
     let structs = scan_inertia_props(project_path);
 
     if structs.is_empty() {
-        return Ok(0);
+        return Ok(GenerationOutcome {
+            count: 0,
+            wrote: false,
+        });
     }
 
     // Surface prop fields that reference un-generatable types (degraded to
@@ -851,9 +872,12 @@ pub fn generate_types_to_file(project_path: &Path, output_path: &Path) -> Result
     }
 
     let typescript = generate_typescript(&structs);
-    write_if_changed(output_path, &typescript)?;
+    let wrote = write_if_changed(output_path, &typescript)?;
 
-    Ok(structs.len())
+    Ok(GenerationOutcome {
+        count: structs.len(),
+        wrote,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1200,7 +1224,7 @@ fn collect_lang_message_ids(project_path: &Path, locale: &str) -> Vec<String> {
 pub fn generate_lang_keys_to_file(
     project_path: &Path,
     output_path: &Path,
-) -> Result<usize, String> {
+) -> Result<GenerationOutcome, String> {
     let locale = resolve_default_locale(project_path);
     let parents = resolve_locale_parents(project_path);
     let chain = locale_chain(&locale, &parents);
@@ -1213,11 +1237,17 @@ pub fn generate_lang_keys_to_file(
     ids.dedup();
 
     if ids.is_empty() {
-        if output_path.exists() {
+        // Removing a stale file is a change to the output path too, so it
+        // counts as having written.
+        let removed = output_path.exists();
+        if removed {
             fs::remove_file(output_path)
                 .map_err(|e| format!("Failed to remove stale {}: {}", output_path.display(), e))?;
         }
-        return Ok(0);
+        return Ok(GenerationOutcome {
+            count: 0,
+            wrote: removed,
+        });
     }
 
     if let Some(parent) = output_path.parent() {
@@ -1226,9 +1256,27 @@ pub fn generate_lang_keys_to_file(
     }
 
     let contents = render_lang_keys_file(&ids, &chain);
-    write_if_changed(output_path, &contents)?;
+    let wrote = write_if_changed(output_path, &contents)?;
 
-    Ok(ids.len())
+    Ok(GenerationOutcome {
+        count: ids.len(),
+        wrote,
+    })
+}
+
+/// Report what a generation pass did to its output file.
+///
+/// `Generated <path>` is a statement about the filesystem, so it is only
+/// made when the file actually changed. A rerun that emitted identical
+/// content left the file untouched on purpose - that is what keeps
+/// `serve`'s backend watcher from restarting on a no-op - and telling the
+/// user it was generated would contradict the thing the tool just did.
+fn report_generation(output_path: &Path, outcome: &GenerationOutcome) {
+    if outcome.wrote {
+        ui::success(&format!("Generated {}", output_path.display()));
+    } else {
+        ui::info(&format!("{} is up to date", output_path.display()));
+    }
 }
 
 /// Main entry point for the generate-types command
@@ -1249,12 +1297,12 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
     ui::info("Scanning for InertiaProps structs...");
 
     match generate_types_to_file(project_path, &output_path) {
-        Ok(0) => {
+        Ok(outcome) if outcome.count == 0 => {
             ui::warning("No InertiaProps structs found.");
         }
-        Ok(count) => {
-            ui::info(&format!("Found {} InertiaProps struct(s)", count));
-            ui::success(&format!("Generated {}", output_path.display()));
+        Ok(outcome) => {
+            ui::info(&format!("Found {} InertiaProps struct(s)", outcome.count));
+            report_generation(&output_path, &outcome);
         }
         Err(e) => {
             ui::error(&e);
@@ -1269,10 +1317,10 @@ pub fn run(output: Option<String>, watch: bool, routes: bool) {
     // single run forever.
     let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
     match generate_lang_keys_to_file(project_path, &lang_keys_output) {
-        Ok(0) => {}
-        Ok(count) => {
-            ui::info(&format!("Found {} message id(s) in lang/", count));
-            ui::success(&format!("Generated {}", lang_keys_output.display()));
+        Ok(outcome) if outcome.count == 0 => {}
+        Ok(outcome) => {
+            ui::info(&format!("Found {} message id(s) in lang/", outcome.count));
+            report_generation(&lang_keys_output, &outcome);
         }
         Err(e) => {
             ui::error(&e);
@@ -1389,8 +1437,11 @@ fn start_watcher(
         if due.rust {
             ui::hint("Detected changes, regenerating types...");
             match generate_types_to_file(&project_path, &output_path) {
-                Ok(count) => {
-                    ui::success(&format!("Regenerated {} type(s)", count));
+                Ok(outcome) if outcome.wrote => {
+                    ui::success(&format!("Regenerated {} type(s)", outcome.count));
+                }
+                Ok(_) => {
+                    ui::hint(&format!("{} is up to date", output_path.display()));
                 }
                 Err(e) => {
                     ui::error(&format!("Failed to regenerate: {}", e));
@@ -1401,11 +1452,14 @@ fn start_watcher(
         if due.ftl {
             ui::hint("Detected lang/ changes, regenerating lang-keys...");
             match generate_lang_keys_to_file(&project_path, &lang_keys_output) {
-                Ok(0) => {
+                Ok(outcome) if outcome.count == 0 => {
                     ui::hint("lang-keys.ts removed (no message ids)");
                 }
-                Ok(count) => {
-                    ui::success(&format!("Regenerated {} message id(s)", count));
+                Ok(outcome) if outcome.wrote => {
+                    ui::success(&format!("Regenerated {} message id(s)", outcome.count));
+                }
+                Ok(_) => {
+                    ui::hint(&format!("{} is up to date", lang_keys_output.display()));
                 }
                 Err(e) => {
                     ui::error(&format!("Failed to regenerate lang-keys: {}", e));
@@ -1474,7 +1528,9 @@ mod watch_loop_tests {
         while rx.recv_timeout(Duration::from_millis(200)).is_ok() {}
 
         assert_eq!(
-            generate_types_to_file(dir.path(), &out).expect("first run"),
+            generate_types_to_file(dir.path(), &out)
+                .expect("first run")
+                .count,
             1
         );
 
@@ -1700,16 +1756,18 @@ mod write_if_changed_tests {
         .expect("seed props.rs");
         let out = dir.path().join("frontend/src/types/inertia-props.ts");
 
-        assert_eq!(
-            generate_types_to_file(dir.path(), &out).expect("first run"),
-            1
-        );
+        let first_run = generate_types_to_file(dir.path(), &out).expect("first run");
+        assert_eq!(first_run.count, 1);
+        assert!(first_run.wrote, "a first run really does write the file");
         let first = fs::read_to_string(&out).expect("read output");
         let before = set_old_mtime(&out);
 
-        assert_eq!(
-            generate_types_to_file(dir.path(), &out).expect("second run"),
-            1
+        let second_run = generate_types_to_file(dir.path(), &out).expect("second run");
+        assert_eq!(second_run.count, 1, "the same struct is still emitted");
+        assert!(
+            !second_run.wrote,
+            "the pass must report that it wrote nothing, or the CLI cannot \
+             tell the user the truth about what it did"
         );
         assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
         assert_eq!(fs::read_to_string(&out).expect("read output"), first);
@@ -1723,16 +1781,14 @@ mod write_if_changed_tests {
         fs::write(lang.join("app.ftl"), "welcome = Hello\n").expect("seed app.ftl");
         let out = dir.path().join("frontend/src/types/lang-keys.ts");
 
-        assert_eq!(
-            generate_lang_keys_to_file(dir.path(), &out).expect("first run"),
-            1
-        );
+        let first_run = generate_lang_keys_to_file(dir.path(), &out).expect("first run");
+        assert_eq!(first_run.count, 1);
+        assert!(first_run.wrote);
         let before = set_old_mtime(&out);
 
-        assert_eq!(
-            generate_lang_keys_to_file(dir.path(), &out).expect("second run"),
-            1
-        );
+        let second_run = generate_lang_keys_to_file(dir.path(), &out).expect("second run");
+        assert_eq!(second_run.count, 1);
+        assert!(!second_run.wrote, "an identical rerun wrote nothing");
         assert_eq!(mtime(&out), before, "an identical rerun must not rewrite");
     }
 }
@@ -1980,8 +2036,9 @@ mod lang_keys_tests {
         .expect("write messages.ftl");
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 2);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -2000,9 +2057,13 @@ mod lang_keys_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
 
-        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+        let outcome = generate_lang_keys_to_file(dir.path(), &output_path)
             .expect("a non-localized project is not an error");
-        assert_eq!(count, 0);
+        assert_eq!(outcome.count, 0);
+        assert!(
+            !outcome.wrote,
+            "there was no file to write and none to remove"
+        );
         assert!(
             !output_path.exists(),
             "non-localized projects must see no new artifact"
@@ -2020,9 +2081,13 @@ mod lang_keys_tests {
         // No lang/ dir this run (e.g. it was deleted, or every catalog now
         // declares zero messages) - the stale file must be cleaned up, not
         // left around asserting keys that no longer exist.
-        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+        let outcome = generate_lang_keys_to_file(dir.path(), &output_path)
             .expect("removing a stale file is not an error");
-        assert_eq!(count, 0);
+        assert_eq!(outcome.count, 0);
+        assert!(
+            outcome.wrote,
+            "deleting the artifact changes the output path just as writing it does"
+        );
         assert!(!output_path.exists(), "the stale file must be removed");
     }
 
@@ -2053,8 +2118,9 @@ mod lang_keys_tests {
         .expect("write pt-BR messages.ftl");
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 3);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -2090,8 +2156,9 @@ mod lang_keys_tests {
         fs::write(&output_path, "export type MessageKey =\n  | \"stale\";\n")
             .expect("seed a stale lang-keys.ts");
 
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 1);
         assert!(
             output_path.exists(),
@@ -2122,8 +2189,9 @@ mod lang_keys_tests {
         }
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
-        let count =
-            generate_lang_keys_to_file(dir.path(), &output_path).expect("generation must succeed");
+        let count = generate_lang_keys_to_file(dir.path(), &output_path)
+            .expect("generation must succeed")
+            .count;
         assert_eq!(count, 3);
 
         let written = fs::read_to_string(&output_path).expect("read generated file");
@@ -2156,7 +2224,8 @@ mod lang_keys_tests {
 
         let output_path = dir.path().join("frontend/src/types/lang-keys.ts");
         let count = generate_lang_keys_to_file(dir.path(), &output_path)
-            .expect("a cycle must not be a hard error");
+            .expect("a cycle must not be a hard error")
+            .count;
         assert_eq!(count, 2, "both cycle members are walked exactly once");
 
         let written = fs::read_to_string(&output_path).expect("read generated file");

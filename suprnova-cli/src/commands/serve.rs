@@ -1032,16 +1032,16 @@ pub fn run(
             ui::info("Generating TypeScript types...");
         }
         match super::generate_types::generate_types_to_file(project_path, &output_path) {
-            Ok(0) => {
+            Ok(outcome) if outcome.count == 0 => {
                 if !json {
                     ui::hint("No InertiaProps structs found (skipping type generation)");
                 }
             }
-            Ok(count) => {
+            Ok(outcome) => {
                 if !json {
                     ui::success(&format!(
                         "Generated {} type(s) → {}",
-                        count,
+                        outcome.count,
                         output_path.display()
                     ));
                 }
@@ -1058,12 +1058,12 @@ pub fn run(
         // permanent noise for the common case.
         let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
         match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output) {
-            Ok(0) => {}
-            Ok(count) => {
+            Ok(outcome) if outcome.count == 0 => {}
+            Ok(outcome) => {
                 if !json {
                     ui::success(&format!(
                         "Generated {} message id(s) → {}",
-                        count,
+                        outcome.count,
                         lang_keys_output.display()
                     ));
                 }
@@ -1366,18 +1366,22 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 
         if due.rust {
             match super::generate_types::generate_types_to_file(project_path, &output_path) {
-                Ok(count) if count > 0 => {
+                Ok(outcome) if outcome.count > 0 => {
                     if mode.is_json() {
                         emit_event(
                             mode,
                             DevEvent::TypesRegenerated {
                                 ts: now_ts(),
                                 artifact: TypesArtifact::InertiaProps,
-                                count: count as u32,
+                                count: outcome.count as u32,
                             },
                         );
                     } else {
-                        println!("{} Regenerated {} type(s)", style("[types]").blue(), count);
+                        println!(
+                            "{} Regenerated {} type(s)",
+                            style("[types]").blue(),
+                            outcome.count
+                        );
                     }
                 }
                 Ok(_) => {} // No types found, stay quiet
@@ -1390,21 +1394,21 @@ fn start_type_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
         if due.ftl {
             match super::generate_types::generate_lang_keys_to_file(project_path, &lang_keys_output)
             {
-                Ok(count) if count > 0 => {
+                Ok(outcome) if outcome.count > 0 => {
                     if mode.is_json() {
                         emit_event(
                             mode,
                             DevEvent::TypesRegenerated {
                                 ts: now_ts(),
                                 artifact: TypesArtifact::LangKeys,
-                                count: count as u32,
+                                count: outcome.count as u32,
                             },
                         );
                     } else {
                         println!(
                             "{} Regenerated {} message id(s)",
                             style("[types]").blue(),
-                            count
+                            outcome.count
                         );
                     }
                 }

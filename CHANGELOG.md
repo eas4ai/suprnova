@@ -8,13 +8,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
-- **`suprnova serve` no longer rebuilds a project nobody has touched.** The type
-  watcher classified a filesystem event by its path alone, and the generator reads
-  every `.rs` file under the same `src/` tree that watcher is watching - so on
-  Linux, where the kernel reports those reads, each regeneration scheduled the
-  next one. A freshly scaffolded project regenerated its types and restarted its
-  backend every half second, forever, without a single source edit. Only events
-  that mean the bytes on disk actually changed count now. The generator also
+- **`suprnova serve` no longer rebuilds a project nobody has touched, and
+  neither does `suprnova generate-types --watch`.** Both watchers classified a
+  filesystem event by its path alone, and the generator reads every `.rs` file
+  under the same `src/` tree they are watching - so on Linux, where the kernel
+  reports those reads, each regeneration scheduled the next one. A freshly
+  scaffolded project regenerated its types and restarted its backend every half
+  second, forever, without a single source edit. Only events that mean the bytes
+  on disk actually changed count now. `generate-types --watch` also had no
+  debounce at all, so it acted on the first file of a burst rather than the last;
+  it now shares `serve`'s 500 ms trailing edge, and both watchers share one
+  implementation so the next fix cannot land in only one of them. The generator
   compares before it writes, so a regeneration whose output is byte-identical
   leaves the file, and its mtime, alone.
 
@@ -34,6 +38,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   warned out of the box. It now emits a recursive `JsonValue` alias, declared once
   at the top of the generated file and only when something references it. A bare
   `Value` maps there too, unless the project defines a `Value` struct of its own.
+
+- **`generate-types` no longer reports a file it did not write as generated.**
+  Because a pass now writes only when the emitted content differs, `Generated
+  <path>` was a claim about the filesystem that was false on every rerun of an
+  unchanged project. A pass that wrote nothing says `<path> is up to date`
+  instead, in both one-shot and `--watch` mode.
 
 ## 1.3.4 - 2026-08-25
 
