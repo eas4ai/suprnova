@@ -453,7 +453,7 @@ async fn an_api_client_asking_for_json_keeps_the_json_body() {
 
     assert_eq!(status, 403);
     assert!(
-        headers.get("x-inertia").is_none(),
+        !headers.contains_key("x-inertia"),
         "an API client never asked for a page; got {headers:?}"
     );
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
@@ -474,7 +474,7 @@ async fn error_page_off_leaves_the_denial_byte_for_byte() {
     let (status, headers, body) = request(addr, "GET", "/admin/articles", &inertia_visit()).await;
 
     assert_eq!(status, 403);
-    assert!(headers.get("x-inertia").is_none());
+    assert!(!headers.contains_key("x-inertia"));
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
     assert_eq!(parsed["message"], "This action is unauthorized.");
     assert!(
@@ -590,7 +590,7 @@ async fn a_panicking_handler_is_out_of_reach_of_the_error_page() {
     let (status, headers, body) = request(addr, "GET", "/panic", &inertia_visit()).await;
 
     assert_eq!(status, 500);
-    assert!(headers.get("x-inertia").is_none());
+    assert!(!headers.contains_key("x-inertia"));
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON error body");
     assert_eq!(parsed["message"], "Internal Server Error");
 }
