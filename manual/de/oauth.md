@@ -86,6 +86,41 @@ Das Framework re-exportiert den `OAuthProvider`-Contract, die fünf First-Party-
 
 `MagnetarConfig` erstellt sein Schema, wenn `apply_migrations` aktiviert ist, was der Standard ist. Verwenden Sie `.apply_migrations(false)` nur, wenn die Bereitstellung dasselbe Schema separat vorbereitet. Eine zweite Initialisierung gibt einen Fehler zurück, statt eine installierte Engine zu ersetzen.
 
+### Bestehende Benutzer- und Sitzungsverwaltung beibehalten
+
+Eine Anwendung kann Magnetar für OAuth-Zeremonien und Provider-Nachweise
+verwenden, ohne Magnetar zur maßgeblichen Instanz für Passwörter, Passkeys,
+Framework-Sitzungen oder Remember-me-Zustand zu machen. Erstellen Sie dieselbe
+`MagnetarOAuthHostConfig` und installieren Sie sie dann mit dem reinen
+OAuth-Initialisierer:
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+Starten Sie die Zeremonie wie gewohnt mit `Auth::oauth(provider).begin()`.
+Rufen Sie im Callback `verify_oauth_identity(code, state)` auf, ordnen Sie den
+verifizierten Provider-Subject der eigenen Benutzertabelle der Anwendung zu
+und erstellen Sie die bestehende Framework-Sitzung mit `Auth::login`. Rufen
+Sie in diesem Modus nicht `complete` auf: `complete` verwendet die
+standardmäßige Konto- und Sitzungszuordnung von Magnetar, während die reine
+OAuth-Initialisierung diese Entscheidungen bei der Anwendung belässt.
+
+Die reine OAuth-Initialisierung und die vollständige Standardinitialisierung
+sind Alternativen. Ein zweiter Initialisierer schlägt fehl, statt zwei
+Sitzungsautoritäten zu vermischen.
+
 ### GitHub-Provider-Anforderungen
 
 Der REST-Benutzerendpunkt von GitHub erfordert einen `User-Agent`; ein Community-Provider fügt ihn, und jeden benötigten Media-Type-`Accept`-Wert, über `OAuthProvider::userinfo_headers` hinzu. Suprnova fügt den Bearer-`Authorization`-Header separat hinzu und weist Versuche von Providern zurück, ihn zu überschreiben.

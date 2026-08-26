@@ -59,15 +59,14 @@ Der Routen-Pfad-String wird zur Compile-Zeit geprüft -
 [Routing](routing.md) für die vollständige Expansion und
 [WebSockets](websockets.md) für `ws!`.
 
-## Handler und Requests
+## Handler und Anfragen
 
 ### `#[handler]`
 
-Schreibt eine Controller-Funktion so um, dass sie typisierte
-Parameter (über `FromRequest`) direkt aus der eingehenden Anfrage
-extrahieren kann - statt Felder manuell von `Request` abzugreifen,
-deklarieren Sie, was der Handler braucht, und das Makro verdrahtet
-es.
+Schreibt eine Controller-Funktion so um, dass sie typisierte Parameter
+(über `FromRequest`) direkt aus der eingehenden Anfrage extrahieren
+kann - statt Felder von Hand aus `Request` zu ziehen, deklarieren Sie,
+was der Handler braucht, und das Makro verdrahtet es.
 
 ```rust
 use suprnova::{handler, Response, json_response, request};
@@ -83,7 +82,7 @@ pub struct CreateUserRequest {
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` ist bereits validiert - bei Fehlschlag wird automatisch 422 geliefert
+    // `form` ist bereits validiert - bei einem Fehlschlag wird automatisch 422 zurückgegeben
     json_response!({ "email": form.email })
 }
 ```
@@ -93,40 +92,39 @@ Identitätsfall akzeptiert. Siehe [Controller](controllers.md).
 
 ### `#[request]` und `#[derive(FormRequest)]`
 
-`#[request]` ist der empfohlene Weg, einen validierten Request-Typ
-zu deklarieren. Es leitet automatisch `Deserialize`, `Validate` und
-`FormRequest` ab, sodass die Struktur sowohl mit
-`application/json`- als auch mit
-`application/x-www-form-urlencoded`-Bodies funktioniert.
+`#[request]` ist der empfohlene Weg, einen validierten Request-Typ zu
+deklarieren. Es leitet `Deserialize`, `Validate` und `FormRequest`
+automatisch ab, sodass die Struktur sowohl mit `application/json`- als
+auch mit `application/x-www-form-urlencoded`-Rümpfen funktioniert.
 
-`#[derive(FormRequestDerive)]` ist das zugrunde liegende Derive,
-falls Sie auf das Attribut verzichten möchten (Sie müssen dann
-`Deserialize` und `Validate` selbst ableiten). Wir empfehlen das
-Attribut; das Derive existiert für den Sonderfall. Siehe
-[Anfragen](requests.md) und [Validierung](validation.md).
+`#[derive(FormRequestDerive)]` ist das darunterliegende Derive, falls
+Sie auf das Attribut verzichten wollen (dann müssen Sie `Deserialize`
+und `Validate` selbst ableiten). Empfohlen ist das Attribut; das Derive
+gibt es für den Randfall. Siehe [Anfragen](requests.md) und
+[Validierung](validation.md).
 
 ### `#[derive(MultipartRequest)]`
 
-Stark typisierter Extractor für `multipart/form-data` - binden Sie
-Textfelder und hochgeladene Dateien in einer Struktur, mit
-Typ-Level-Validatoren pro Feld.
+Stark typisierter Extraktor für `multipart/form-data` - bindet
+Textfelder und hochgeladene Dateien in einer Struktur, mit Validatoren
+auf Typebene pro Feld.
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-Eingebaute Validatoren (`Image`, `MimeAllowlist<…>`, `MaxSize<…>`,
-`MimeType<…>`) lassen sich über Tupel kombinieren. Siehe
+Die eingebauten Validatoren (`ImageFile`, `MimeAllowlist<…>`,
+`MaxSize<…>`, `MimeType<…>`) lassen sich über Tupel kombinieren. Siehe
 [Anfragen](requests.md).
 
 ## Antworten

@@ -6,7 +6,7 @@ scaffolé en fonctionnement. Si vous y êtes déjà, allez directement au
 
 ## Prérequis
 
-- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.3.2 exige également Rust 1.94.0 au minimum. Installez-le via [rustup](https://rustup.rs/) :
+- **Rust 1.94.0+** pour la branche `main` actuelle (le workspace utilise l’édition 2024). La version étiquetée v1.3.3 exige également Rust 1.94.0 au minimum. Installez-le via [rustup](https://rustup.rs/) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -34,7 +34,7 @@ CLI tire le framework depuis git (pas depuis crates.io - voir la
 [note de pré-lancement](#pre-launch-note) ci-dessous) :
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v1.3.3 suprnova-cli
 ```
 
 Cela compile le binaire `suprnova` et le dépose dans `~/.cargo/bin`.
@@ -165,7 +165,7 @@ Le CLI vit dans votre `~/.cargo/bin`. Pour passer à la dernière
 version :
 
 ```bash
-cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.2 suprnova-cli
+cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v1.3.3 suprnova-cli
 ```
 
 `--force` fait écraser le binaire existant par Cargo.
@@ -176,7 +176,7 @@ Une application scaffoldée dépend de la crate du framework
 `suprnova` via une dépendance git dans `Cargo.toml` :
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
 ```
 
 Pour récupérer les dernières modifications du framework :
@@ -198,7 +198,7 @@ Suprnova est distribué par git, pas par crates.io - le framework comme le
 CLI s'installent depuis GitHub. Chaque version fait l'objet d'une
 publication GitHub étiquetée (p. ex. `v1.2.4`), et c'est de l'étiquette que
 dépend votre application : un `Cargo.toml` scaffoldé épingle
-`tag = "v1.3.2"`, et `Cargo.lock` enregistre le commit exact que cette
+`tag = "v1.3.3"`, et `Cargo.lock` enregistre le commit exact que cette
 étiquette a résolu, si bien que les builds sont reproductibles jusqu'à ce
 que vous décidiez d'en changer. La mise à jour est délibérée, jamais
 accidentelle - incrémentez l'étiquette et lancez

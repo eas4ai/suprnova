@@ -18,7 +18,7 @@ Suprnovaは、2つの補完し合う経路でリクエスト入力をバリデ�
 | `ContextualRule` | `passes(&self, value, ctx)` | 兄弟フィールドを読むチェック |
 | `AsyncRule` | `async passes(&self, value)` | `.await` するチェック（DB、HTTP） |
 
-組み込みの `Rule` は、`Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid` です。組み込みの `ValueRule` は、`ArrayKeys`、`Distinct` です。組み込みの `ContextualRule` は、`RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed` です。組み込みの `AsyncRule` は、[`Unique`](#unique-ルール)です。
+組み込みの `Rule`: `Required`、`Email`、`Min`、`Max`、`Between`、`In`、`NotIn`、`Integer`、`Numeric`、`Boolean`、`Alpha`、`AlphaNum`、`Url`、`UrlProtocols`、`HttpUrl`、`Uuid`、[`Password`](#パスワードの強度)（強度のチェックのみ）。組み込みの `ValueRule`: `ArrayKeys`、`Distinct`。組み込みの `ContextualRule`: `RequiredIf`、`RequiredWith`、`RequiredUnless`、`Same`、`Different`、`Confirmed`。組み込みの `AsyncRule`: [`Unique`](#unique-ルール) と [`Password`](#パスワードの強度)（強度に加えて、その `uncompromised()` のHIBPチェック - `Rule` と `AsyncRule` の両方を実装する唯一の組み込みルールです）。
 
 ```rust
 use suprnova::{Rule, rules::Email};
@@ -30,9 +30,9 @@ Email.passes("user@example.com")?; // Ok(())
 
 ### URLのスキーム
 
-`Url` が受け付けるのは、URLとしてパースでき、そのスキームがLaravelの許可リスト - `Illuminate\Support\Str::isUrl` が使うのと同じリスト - に載っており、`://` が続き、**さらに**その後に空でないホストが続く値です。これは、Laravelの `^(PROTOCOLS)://HOST` というパターンと形が一致します（Laravelのホストのグループには `?` がありません - ホストが存在しないか空である場合は、決してマッチしません）。スキームのリストと、`://` に加えてホストという要件は、Laravelそのままです。ホストはLaravelの正規表現ではなく `url` クレートによってパースされるため、範囲外のポートは、Laravelなら受け付けるところをここでは拒否されます。3つすべてが成り立たなければなりません: `mailto:`、`tel:`、`data:` は名前としては許可リストに載っていますが、authority成分をまったく持たないため、`Url` はそれらを拒否します。そして `file:///etc/passwd` は3番目の理由で失敗します - `://` はありますが、3番目と4番目の `/` の間には何もなく、何もないものはホストではないからです。`javascript:` と `vbscript:` は、はっきりと拒否されます。そもそも許可リストに載っていません。
+`Url` が受け付けるのは、URLとしてパースでき、そのスキームがLaravelの許可リスト - `Illuminate\Support\Str::isUrl` が使うのと同じ一覧です - に載っていて、`://` が続き、**さらに**その後に空でないホストが続く値です。これはLaravelの `^(PROTOCOLS)://HOST` というパターンと形が一致します（Laravelのホストのグループには `?` がありません - ホストが欠けている、あるいは空の場合は決して一致しません）。スキームの一覧と、`://` に加えてホストを要求する点は、Laravelそのままです。ホストはLaravelの正規表現ではなく `url` クレートによってパースされるため、Laravelなら受け付ける範囲外のポートが、ここでは拒否されます。3つすべてが成り立たなければなりません: `mailto:`、`tel:`、`data:` は名前としては許可リストに載っていますが、authorityの構成要素をまったく持たないため、`Url` はそれらを拒否します。そして `file:///etc/passwd` は3つ目の理由で失敗します - `://` はありますが、3つ目と4つ目の `/` のあいだには何もなく、何もないものはホストではありません。`javascript:` と `vbscript:` は端から拒否されます。そもそも許可リストに載っていません。
 
-`ftp://host/x` と `ssh://host` - 本物のホストであり、ただWebのスキームではないだけです - は、それでも通ります。そのため、`Url` は「これはWebページである」というチェックではなく、そのURLがどこへ解決するかについては何も言いません。`javascript:` を拒否することは、検証済みの値を `href` に入れても安全にしますが、取得しても安全にするわけではありません。webhookやコールバックの宛先には、依然として `HttpUrl`（またはあなた自身のスキームとSSRFのチェック）が必要です。`Url` だけでは、そこはカバーできません。
+`ftp://host/x` と `ssh://host` - 本物のホストで、ただウェブのスキームではないだけのもの - は今も通過します。したがって `Url` は「これはウェブページである」というチェックではなく、そのURLがどこへ解決されるかについては何も語りません。`javascript:` を拒否することは、検証された値を `href` に入れても安全にしますが、取得しても安全にするわけではありません。webhookやコールバックの宛先には、依然として `HttpUrl`（またはあなた自身のスキーム + SSRFのチェック）が必要です。`Url` だけでは、そこはカバーされません。
 
 より狭い集合が欲しいときは、望むスキームを名指ししてください:
 
@@ -43,16 +43,80 @@ use suprnova::{Rule, rules::Url};
 Url::protocols(&["https"]).passes("https://example.com")?;   // Ok
 Url::protocols(&["https"]).passes("http://example.com");     // Err
 
-// 同じことを、名前を付けた形で
+// 同じことを、名前付きで
 use suprnova::rules::HttpUrl;
 HttpUrl.passes("https://example.com")?;
 ```
 
-`Url::protocols(...)` は、許可リストを狭めるのではなく**置き換え**ます。そのため、アプリは、フレームワークに意見を持たれることなく、自分自身のディープリンクのスキーム（`myapp://…`）を受け付けられます - `://` に加えてホストという要件は、そのカスタムのスキームにも引き続き適用されます。コールバック、webhook、アバターの入力には `HttpUrl`（あるいは `Url::protocols(&["https"])`）を使ってください - `ftp://internal-host/` に解決されるwebhookの宛先も `Url` としてはパースされますが、`ftp:` の宛先はwebhookの宛先ではありません。
+`Url::protocols(...)` は許可リストを狭めるのではなく**置き換える**ため、アプリケーションはフレームワークに意見を持たせることなく、自身のディープリンクのスキーム（`myapp://…`）を受け付けられます - `://` に加えてホストを要求する点は、そのカスタムのスキームにも適用されます。コールバック、webhook、アバターの入力には `HttpUrl`（あるいは `Url::protocols(&["https"])`）を使ってください - `ftp://internal-host/` へ解決されるwebhookの宛先も `Url` としてはパースできてしまいますが、`ftp:` の宛先はwebhookの宛先ではありません。
 
-### 自分自身のルールを書く
+### パスワードの強度
 
-カスタムのルールは、1つの実装を持つユニット構造体（あるいはデータを運ぶ構造体）です。トレイトが `check()` を無償で与えてくれます - これは、名前を指定されたフィールドの下で、失敗メッセージを `ValidationErrors` のバッグへ積み上げます - そのため、そのルールは `validate!` と `after_validation` のフックへ、そのまま差し込めます:
+`Password` は長さと文字クラスの強度を、加えて省略可能な Have I Been Pwned の `uncompromised()` チェックを行います - Laravelの `Password` ルールオブジェクトの移植です。`Password::min(n)` で組み立て、強度のビルダーをチェーンしてください:
+
+```rust
+use suprnova::{Password, Rule};
+
+let rule = Password::min(8).letters().mixed_case().numbers().symbols();
+Rule::passes(&rule, "Str0ng! Pass")?; // Ok(())
+Rule::passes(&rule, "weak");          // Err - 短すぎ、数字なし、記号なし
+```
+
+| ビルダー | 要求するもの | Laravelの正規表現 |
+|---|---|---|
+| `.min(n)`（`Password::min` 経由） | 少なくとも `n` 文字（下限は1） | 長さのチェック |
+| `.max(n)` | 多くとも `n` 文字 | 長さのチェック |
+| `.letters()` | 少なくとも1つのUnicodeの文字 | `/\pL/u` |
+| `.mixed_case()` | 大文字と小文字を1つずつ、順序は問いません | `/(\p{Ll}+.*\p{Lu})\|(\p{Lu}+.*\p{Ll})/u` |
+| `.numbers()` | 少なくとも1つのUnicodeの数字 | `/\pN/u` |
+| `.symbols()` | 少なくとも1つの区切り文字、記号、または句読点 - **素の空白も数えます** | `/\p{Z}\|\p{S}\|\p{P}/u` |
+
+`bootstrap::register()` から一度だけ呼び出す `Password::defaults_with(|| Password::min(12).letters().mixed_case().numbers())` は、ほかのあらゆる場所で `Password::defaults()` が返す、プロセス全体のデフォルトを設定します - Laravelの `Password::defaults(fn () => ...)` です。2回目の呼び出しは、最初のアプリケーションが選んだポリシーを黙って置き換えるのではなく、（`tracing::warn!` を伴って）無視されます。
+
+#### `uncompromised()` - 強度だけでは足りないから
+
+`.uncompromised()`（または `.uncompromised_with_threshold(n)`）は、Have I Been Pwned の漏洩コーパスに対するチェックを、そのk匿名性のレンジAPIを使って追加します: プロセスの外へ出るのは、パスワードの大文字のSHA-1ハッシュの**最初の5文字**だけであり - `GET https://api.pwnedpasswords.com/range/{prefix}` です - 完全なハッシュとの照合は、そのプレフィックスに対してAPIが返す `SUFFIX:COUNT` の行に対して、ローカルで行われます。サービスがパスワードを見ることも、その完全なハッシュを見ることさえもありません。しきい値の比較は厳密で（`count > threshold`）、そのためデフォルトの `uncompromised()`（しきい値 `0`）は、少しでも出現すれば失敗します。そしてネットワークの失敗、タイムアウト、2xx以外のレスポンスは**フェイルオープン**します - Have I Been Pwned の障害のあいだ、すべてのサインアップを止めるのではなく、そのパスワードを問題なしとして扱います。これはLaravelの `NotPwnedVerifier` と正確に一致します。
+
+このチェックはHTTPの往復であるため、`uncompromised()` は、強度のチェックだけなら使えるsyncの `Rule` ではなく `AsyncRule` を必要とします。[`Unique`](#unique-ルール) が使うのと同じ手順で、`after_validation_async` を通じて配線してください:
+
+```rust
+use suprnova::{AsyncRule, FormRequest, Password, ValidationErrors, async_trait};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct Register {
+    pub password: String,
+}
+
+#[async_trait]
+impl FormRequest for Register {
+    async fn after_validation_async(&self) -> Result<(), ValidationErrors> {
+        let mut errs = ValidationErrors::new();
+        Password::defaults()
+            .uncompromised()
+            .check_async(&self.password, &mut errs, "password")
+            .await;
+        errs.into_result()
+    }
+}
+```
+
+`uncompromised()` が設定された `Password` に対してsyncの `Rule::passes` を呼び出すことは、黙って飛ばされるのではなく**はっきりとしたエラー**になります - 静かに何もしないセキュリティのチェックは、はじめから存在しなかったものより悪いからです。エラーメッセージは、直し方として `after_validation_async` を名指しします。
+
+`HIBP_TIMEOUT_SECS`（デフォルトは `30`）がリクエストのタイムアウトを制御します - [環境変数](env-vars.md)を参照してください。
+
+`Err` を返すカスタムの検証器は、チェックが失敗した場合とは別のケースです: そのエラーのテキストは `error` レベルでログに記録され、クライアントには決して届きません。そしてレスポンスは、代わりに `validation-password-unverifiable` というカタログキーを運びます（"The { $field } could not be checked against known data leaks. Please try again."）。自分自身のバリデーションカタログを出荷しているなら、そのキーを追加してください。
+
+### Suprnovaが異なる設計を選んだ理由: Password
+
+- Laravelの `Password` は、失敗した強度のチェックをすべて1つの配列に集めます。Suprnovaの `Rule` の契約は単一の `ValidationMessage` を返すため、`Rule::passes` が報告するのは最初に失敗したチェックであり、その順序は min、max、mixed case、letters、symbols、numbers です - 一覧全体を先に見るのではなく、1つずつ直していくことになります。
+- Laravelのsyncのバリデーターは `uncompromised()` を直接呼び出せます。PHPのリクエストは、ブロッキングのHTTP呼び出しを許容するイベントループの内側にすでにいるからです。Suprnovaの `Rule::passes` は契約上同期であるため、そこからHIBPのリクエストを走らせる安全な場所がありません。チェックを黙って飛ばすこと - セキュリティに関わるルールにとって、唯一受け入れられない結末です - をするのではなく、Suprnovaの `Rule::passes` は、直し方として `after_validation_async` を名指しする、はっきりとした開発者向けのエラーを返します。
+- `Password::defaults_with` はクロージャではなく素の `fn` ポインタを受け取るため、設定されたデフォルトは `Copy` のままでヒープの割り当てを必要としません - Laravelの `Closure` からの、意図的な絞り込みです。
+
+### 自分のルールを書く
+
+カスタムのルールは、1つのimplを持つユニット構造体（あるいはデータを運ぶ構造体）です。トレイトが `check()` を無償で与えてくれます - これは失敗メッセージがあれば、名指しされたフィールドの下で `ValidationErrors` のバッグへ積み上げます - そのため、そのルールは `validate!` と `after_validation` のフックへ、そのまま差し込めます:
 
 ```rust
 use suprnova::{Rule, ValidationMessage};
@@ -75,20 +139,20 @@ StartsWith("acct_").passes("acct_1234")?;
 //   stripe_id => Required, StartsWith("acct_");
 ```
 
-`String` は、そのままレンダリングされる `ValidationMessage` へ変換されます。単一言語のアプリに必要なのは、これだけです。メッセージをロケールごとに翻訳させたい場合は、代わりに*キー付き*のメッセージ - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` - を返し、そのidを `lang/<locale>/validation.ftl` の中で定義してください。[ローカライゼーション](localization.md)を参照してください。そこでは、組み込みのルールのメッセージを上書きすることや、`field-<name>` という命名の慣例も扱われています。
+`String` は、そのままレンダリングされる `ValidationMessage` へ変換されます。単一言語のアプリケーションに必要なのは、これだけです。メッセージをロケールごとに翻訳させるには、代わりに*キー付きの*メッセージを返し - `ValidationMessage::keyed("validation-starts-with").arg("prefix", self.0).fallback(…)` です - そのidを `lang/<locale>/validation.ftl` に定義してください。[ローカライゼーション](localization.md)を参照してください。そこでは、組み込みのルールのメッセージを上書きする方法と、`field-<name>` という命名規約も扱っています。
 
-フィールドを横断するロジックには、代わりに [`ContextualRule`] を実装してください - `passes` メソッドは、検査対象の値と並んで `&FormContext`（兄弟フィールドの値を持つ `HashMap<String, String>`）を受け取ります。データベースを裏付けとするチェックには、[`AsyncRule`] を実装し、`after_validation_async` からそれを使ってください。
+フィールドを横断するロジックには、代わりに [`ContextualRule`] を実装してください - `passes` メソッドは、検査対象の値と並んで `&FormContext`（兄弟フィールドの値の `HashMap<String, String>`）を受け取ります。データベースに支えられたチェックには [`AsyncRule`] を実装し、それを `after_validation_async` から使ってください。
 
-### 値形状のルール
+### 値の形をしたルール
 
-`Rule` が見るのは常に `&str` です。二つの組み込みルールには文字列が運ぶ以上の構造が必要なため、代わりに `&serde_json::Value` に対する `ValueRule` を実装します:
+`Rule` が見るのは、いつでも `&str` だけです。2つの組み込みルールは、文字列が運べるより多くの構造を必要とするため、代わりに `&serde_json::Value` の上で `ValueRule` を実装しています:
 
 ```rust
 use suprnova::{ValueRule, rules::{ArrayKeys, Distinct}};
 
-// Laravelの array:keys - 許可集合外のキーを拒否する。列挙した
-// キーがすべて存在する必要はない。許可リストが空なのはプログラマーの
-// エラーで、キーなしのメッセージとして報告される。
+// Laravelの array:keys - 許された集合の外側にあるキーを拒否します。
+// 挙げられたキーがすべて存在している必要はありません。許可の一覧が空
+// であることはプログラミングのエラーであり、キーなしのメッセージとして報告されます。
 ArrayKeys(&["name", "email"]).passes(&serde_json::json!({"name": "Ada"}))?;
 
 // Laravelの distinct / distinct:ignore_case / distinct:strict。
@@ -96,11 +160,11 @@ Distinct { ignore_case: false, strict: false }
     .passes(&serde_json::json!(["a", "b", "c"]))?;
 ```
 
-`ValueRule` でバリデーションするフィールドは、`serde_json::Value` 自身（または `?:` / `?=>` 行用の `Option<serde_json::Value>`）を保持しなければなりません。通常はJSONボディからそのまま取り出したリクエストフィールドです。`validate!` の行は同じフィールドリストで `Rule` と `ValueRule` を受け付けます。どのトレイトが実行されるかは、行に書く何かではなく、そのルール型が実装するものから自動的に解決されます。
+`ValueRule` によって検証されるフィールドは、`serde_json::Value` そのもの（あるいは `?:`/`?=>` の行のためには `Option<serde_json::Value>`）を保持していなければなりません - 通常は、JSONのボディから直接引き出したリクエストのフィールドです。`validate!` の行は、同じフィールドの一覧の中で `Rule` と `ValueRule` の両方を受け付けます。どちらのトレイトが走るかは、そのルールの型がどちらを実装しているかによって解決され、行の中にあなたが書く何かによって決まるのではありません。
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelの `distinct:strict` はPHPの強制変換する `==` に依拠します。JSON値はすでに型付けされているため、Suprnovaの `strict` は、内部表現が異なる二つの*数値*（`1` と `1.0`）を等しいと数えるかだけを変更します。どちらのモードでも文字列と数値を「同じ」にはしません。
+Laravelの `distinct:strict` は、PHPの型を強制変換する `==` に寄りかかっています。JSONの値はすでに型付きであるため、Suprnovaの `strict` が変えるのは、内部表現の異なる2つの*数*（`1` と `1.0`）を等しいと数えるかどうかだけです - どちらのモードでも、文字列と数を「同じもの」にすることは決してありません。
 
 ## `validate!` マクロ
 

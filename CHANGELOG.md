@@ -281,6 +281,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   affects it and the error says as much. A 300-frame animation is unaffected;
   a 4100-frame one is refused. [Images](manual/images.md#one-bound-is-not-configurable)
 
+- **OAuth can now be installed without replacing an application's existing
+  password and session authority.** `MagnetarOAuthOnlyConfig` and
+  `init_magnetar_oauth_only` install the default ceremony and provider engine
+  while leaving the password and passkey slots empty. Applications with an
+  existing `users` table can call `verify_oauth_identity`, map the verified
+  provider subject themselves, and establish their normal framework session.
+
 ### Changed
 
 - **`DB::transaction` can now return `Err` after a successful commit**, when an
@@ -315,6 +322,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   QR-code rendering. The new image subsystem is built on the OxideAV crates
   behind the `media` feature instead.
 
+### Fixed
+
+- **Installing OAuth no longer forces provider-backed applications into
+  Magnetar web-binding validation.** The full `init_magnetar` path remains
+  atomic and unchanged. The OAuth-only path reserves the engine slots during
+  construction, publishes only OAuth, and fails rather than mixing two
+  authentication authorities.
+
 ### Upgrading
 
 - **`Image` is a different type now; the upload validator is `ImageFile`.**
@@ -338,6 +353,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   are deliberately carrying a uniqueness lock across the push. Code that only
   reads envelopes, or builds them through `Queue::push` and its siblings, needs
   no change.
+
+- Use `init_magnetar_oauth_only` instead of `init_magnetar` when the application
+  already owns users, passwords, framework sessions, and remember-me state.
+  OAuth-only callbacks use `verify_oauth_identity`; full Magnetar applications
+  continue to use `complete`.
 
 ## 1.3.2 - 2026-08-25
 

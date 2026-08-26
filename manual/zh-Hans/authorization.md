@@ -267,10 +267,10 @@ Gate::define_async::<User, Post, _, _>("publish", |user, post| {
 
 ## 更丰富的判定结果：`Response`、`inspect`、`raw`
 
-一个朴素的 `bool` 门只能回答允许/拒绝。如果一次拒绝需要携带一条*消息*、一个机器可读的*code*，或者一个非 403 的 HTTP *状态码*，就用 `define_with`（或者 `define_async_with`）注册这个门，并返回一个 `Response`：
+一个朴素的 `bool` 门只回答允许/拒绝。如果一次拒绝要携带一条*消息*、一个机器可读的*代码*，或者一个非 403 的 HTTP *状态码*，请用 `define_with`（或者 `define_async_with`）来注册这个门，并返回一个 `Response`：
 
 ```rust
-use suprnova::authorization::Response;  // 在 crate 根部重导出为 `GateResponse`
+use suprnova::authorization::Response;  // 在 crate 根部以 `GateResponse` 之名重导出
 
 Gate::define_with::<User, Post>("update", |user, post| {
     if post.author_id == user.id {
@@ -285,12 +285,12 @@ Gate::define_with::<User, Secret>("view", |user, secret| {
     if user.can_see(secret) {
         Response::allow()
     } else {
-        Response::deny_as_not_found()  // 是 404，不是 403
+        Response::deny_as_not_found()  // 一个 404，不是 403
     }
 });
 ```
 
-用 `Gate::inspect`（同步）/ `Gate::inspect_async` 来查看完整的判定结果：
+用 `Gate::inspect`（同步）/ `Gate::inspect_async` 来检视完整的判定结果：
 
 ```rust
 let decision = Gate::inspect("update", &user, &post);
@@ -299,49 +299,66 @@ decision.message();   // Option<&str> - Some("You do not own this post.")
 decision.status();    // Option<u16> - 这里是 None；deny_as_not_found 之后是 Some(404)
 ```
 
-`Response` 的构造函数镜照 Laravel：`allow()`、`deny()`、`deny_with(msg)`、`deny_with_status(status, msg)`、`deny_as_not_found()`，再加上 `with_message` / `with_code` / `with_status` / `as_not_found` 这几个构建器方法。
+`Response` 的构造函数与 Laravel 对应：`allow()`、`deny()`、`deny_with(msg)`、`deny_with_status(status, msg)`、`deny_as_not_found()`，外加 `with_message` / `with_code` / `with_status` / `as_not_found` 这几个构建器方法。
 
-### 一次拒绝如何变成一个错误
+### 一次拒绝是怎么变成一个错误的
 
-`Gate::authorize` 会通过 `Response::authorize()` 把这个判定结果收拢起来：
+`Gate::authorize` 会通过 `Response::authorize()` 把判定结果坍缩掉：
 
 | 判定结果 | `authorize` 的结果 |
 |---|---|
 | 允许 | `Ok(())` |
-| 朴素的 `deny()`（没有 message/code/status） | `FrameworkError::Unauthorized`（403，`"This action is unauthorized."`） |
-| 更丰富的拒绝（设置了 message 和/或 status） | `FrameworkError::Domain { message, status_code }` |
+| 朴素的 `deny()`（没有消息/代码/状态码）- 也就是一个未经配置的默认拒绝响应会回退到的那个 | `FrameworkError::Unauthorized`（403，`"This action is unauthorized."`） |
+| 更丰富的拒绝（设了消息和/或状态码）- 包括一个携带了这些的、已配置的默认拒绝响应 | `FrameworkError::Domain { message, status_code }` |
 
-所以 `deny_as_not_found()` 会以 404 的形式出现，`deny_with_status(422, "…")` 是 422，而 `deny_with("…")` 是携带您那条消息的 403。这个 `code` 在被检视的 `Response` 上是可读的，但**不会**随着 `authorize` 一起传递过去 - `FrameworkError` 没有 code 字段；如果您需要它，请从 `inspect()` 里读。
+所以 `deny_as_not_found()` 会浮现为一个 404，`deny_with_status(422, "…")` 浮现为一个 422，而 `deny_with("…")` 浮现为一个带着您那条消息的 403。这个 `code` 在被检视的那个 `Response` 上是可读的，但它**不会**穿过 `authorize` - `FrameworkError` 没有 code 字段；如果您需要它，请从 `inspect()` 里读。
 
-### `raw`：“拒绝”对比“未定义”
+### `raw`：“已拒绝”与“未定义”之别
 
-`Gate::raw`（以及 `raw_async`）返回 `Option<Response>`：`None` 意味着*没有规则被应用* - 没有 `before` 钩子触发，没有门被注册，也没有 `after` 钩子填入结果 - 这和一次明确的 `Some(deny)` 是不同的。`inspect` 会把这个 `None` 规范化成默认拒绝；`raw` 则为诊断保留它原来的样子（“这个动作到底有没有被治理？”）。
+`Gate::raw`（以及 `raw_async`）返回 `Option<Response>`：`None` 表示*没有规则适用* - 没有 `before` 钩子开火，没有注册过门，也没有 `after` 钩子来补位 - 这和一个明确的 `Some(deny)` 是有区别的。`inspect` 会把那个 `None` 规范化成已配置的默认拒绝响应（除非 `Gate::default_denial_response` 设过别的，否则就是一次朴素的拒绝）；而 `raw` 会把那个 `None` 保留下来，用于诊断（“这个动作到底有没有被管起来？”）。
+
+### 默认拒绝响应
+
+Laravel 的 `Gate::defaultDenialResponse($response)` 会重塑一次*未经判定*的拒绝长什么样 - 不是每一次拒绝，而只是那些本来会回退到朴素 `Response::deny()` 的拒绝。设置一次就行，通常在 `bootstrap::register()` 里：
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+那次调用之后，有两类结果会采用这个新形状：一个朴素的 `false` - 来自一个 bool 门（`define`/`define_async`，包括一个返回 `bool` 的 `#[policy]` 方法），或者来自一个判定为 `false` 的 `before`/`after` 钩子 - 以及一次根本没有任何东西做出过判定的求值：一个未定义的能力，而且钩子也没有意见。这些以前全都会浮现为一个朴素的 `Response::deny()`（一个 403）；现在它们会浮现为交给 `default_denial_response` 的那个东西 - 在上面的例子里就是一个 404。这就是那个标准的“把资源的存在，对一个可能无权查看它的用户隐藏起来”的招数（参见本章前面那个 `Secret` 例子），只不过是为整个应用一次性做掉，而不是一个门一个门地做。
+
+这个默认值**只作用于朴素的 `false`**。一个用 `define_with`（或者 `define_async_with`）注册的门已经返回了它想要的那个 `Response` - `Response::deny_with("…")`、`Response::deny_as_not_found()`，甚至是一个明确的、朴素的 `Response::deny()` - 而它们中的每一个都会原封不动地穿过 `inspect`。这与 Laravel 自己的规则一致：`Gate::inspect` 只会为一个真正为假的回调结果替上默认值，绝不会为一个回调自己构建出来的 `Response` 对象替。
 
 ## `before` / `after` 钩子
 
-`Gate::before` 注册一个在任何门*之前*运行的检查；第一个返回 `Some(decision)` 的钩子会让其余一切都短路。典型的用法是一个全局的覆盖：
+`Gate::before` 注册一个在任何门*之前*运行的检查；第一个返回 `Some(decision)` 的钩子会让其余的一切短路。最典型的用法是一次全局覆盖：
 
 ```rust
 // 管理员可以做任何事。
 Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
 ```
 
-`Gate::after` 在门*之后*运行。遵循 Laravel `??=` 那种语义，一个 after 钩子只能**填入**一个尚未决定的结果（没有门匹配上，也没有 before 钩子触发过） - 它永远不能覆盖一个已经产出的允许/拒绝。每一个 after 钩子都总是会运行，所以它同时也是审计日志的接缝：
+`Gate::after` 在门*之后*运行。遵循 Laravel 的 `??=` 语义，一个 after 钩子只能给一个未经判定的结果**补位**（没有门匹配上，也没有 before 钩子开火）- 它永远无法覆盖一个已经产生出来的允许/拒绝。每一个 after 钩子仍然都会运行，所以它同时也充当审计日志的那道接缝：
 
 ```rust
 Gate::after::<User>(|user, action, decided| {
-    audit_log(user.id, action, decided);   // 观察每一次评估
-    None                                    // 只记录；不改变结果
+    audit_log(user.id, action, decided);   // 观察每一次求值
+    None                                    // 只做记录；不要改变结果
 });
 ```
 
-钩子是按**用户类型** `U` 建立索引的，不是按资源 - 一个钩子会为每一个 `(action, U, R)` 触发。请把资源相关的逻辑放进门里。钩子是同步的判定函数，但也适用于异步的评估路径；对于异步的授权逻辑，请用 `define_async` / `define_async_with`。
+钩子是按**用户类型** `U` 来建索引的，而不是按资源 - 一个钩子会为每一个 `(action, U, R)` 开火。请把资源相关的逻辑放进门里。钩子是同步的谓词，并且对异步的求值路径同样适用；对于异步的授权逻辑，请用 `define_async` / `define_async_with`。
 
 ### 为什么 Suprnova 有所不同
 
-Laravel 的 `Gate::forUser($user)->allows(...)` 会重新绑定这个门*隐式*的当前用户解析器，让下一次检查按那个用户来求值。Suprnova 的门在每一次调用上都**显式地**接受用户，所以“换一个用户来检查”，就只是 `Gate::allows(action, &other_user, &resource)`。这里没有一个隐式的解析器需要重新绑定 - 这个显式的 API 严格来说更通用，这让 `forUser` 变得多余，而不是缺失。
+Laravel 的 `Gate::forUser($user)->allows(...)` 会重新绑定门那个*隐式的*当前用户解析器，好让下一次检查以那个用户的身份来求值。Suprnova 的门在每一次调用上都**显式地**接收用户，所以“以另一个用户的身份来检查”不过就是 `Gate::allows(action, &other_user, &resource)`。这里没有隐式解析器可供重新绑定 - 显式的那个 API 严格来说更通用，这就使得 `forUser` 是多余的，而不是缺失的。
 
-同样的道理也适用于 Laravel 按类名做的策略自动发现。Suprnova 在注册时就把策略方法绑定到了那个类型擦除后的 `(action, U, R)` 键上，所以一个 `Post` 策略和一个 `Comment` 策略即便有相同的方法名，也会注册成两个不同的门，不需要任何命名约定或者发现扫描。
+同样的道理也适用于 Laravel 那套按类名自动发现策略的做法。Suprnova 在注册的时候就把策略方法系在类型擦除的 `(action, U, R)` 键上，所以一个 `Post` 策略和一个 `Comment` 策略即使方法名相同，也会注册成两个各自独立的门，不需要命名约定，也不需要一次发现式的扫描。
+
+`Gate::default_denial_response` 在一个方面也与 Laravel 有分歧：给它传一个形如允许的 `Response::allow()`，会被记录日志并忽略掉，而不是被接受。Laravel 的 `defaultDenialResponse` 没有这样一道防护，但这是一个*拒绝*的默认值 - 接受一个形如允许的默认值，会悄悄把每一个朴素 `false` 的门结果都反转成允许，而那正是这块表面上唯一那个失败开放的方向。
 
 ## 下一步
 

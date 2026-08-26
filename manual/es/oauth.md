@@ -83,6 +83,41 @@ El framework reexporta el contrato `OAuthProvider`, los cinco proveedores propio
 
 `MagnetarConfig` crea su esquema cuando `apply_migrations` está habilitado, que es el valor predeterminado. Use `.apply_migrations(false)` solo cuando el despliegue prepare el mismo esquema por separado. Una segunda inicialización devuelve un error en lugar de reemplazar cualquier motor instalado.
 
+### Conservar los usuarios y las sesiones existentes
+
+Una aplicación puede usar Magnetar para las ceremonias OAuth y la prueba del
+proveedor sin convertir a Magnetar en la autoridad de contraseñas, passkeys,
+sesiones del framework o estado de recordarme. Construye el mismo
+`MagnetarOAuthHostConfig` y después instálalo mediante el inicializador de solo
+OAuth:
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+Inicia la ceremonia normalmente con `Auth::oauth(provider).begin()`. En el
+callback, llama a `verify_oauth_identity(code, state)`, asigna el subject
+verificado del proveedor a la tabla de usuarios de la aplicación y establece
+la sesión existente del framework con `Auth::login`. No llames a `complete` en
+este modo: `complete` aplica la asignación predeterminada de cuentas y sesiones
+de Magnetar, mientras que la inicialización de solo OAuth deja esas decisiones
+en manos de la aplicación.
+
+La inicialización de solo OAuth y la inicialización predeterminada completa son
+alternativas. Un segundo inicializador falla en lugar de mezclar dos
+autoridades de sesión.
+
 ### Requisitos del proveedor de GitHub
 
 El endpoint REST de usuario de GitHub requiere un `User-Agent`; un proveedor de la comunidad lo añade, junto con cualquier valor de `Accept` de tipo de medio que necesite, mediante `OAuthProvider::userinfo_headers`. Suprnova añade por separado la cabecera bearer `Authorization` y rechaza los intentos del proveedor de sobrescribirla.

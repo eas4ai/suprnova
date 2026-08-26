@@ -183,25 +183,41 @@ kill).
 
 ## schedule:list
 
-Imprime toda tarefa registrada com sua expressão cron e descrição.
+Imprime toda tarefa registrada com sua expressão cron, próximo horário de
+execução e descrição.
 
 ```bash
 suprnova schedule:list
+suprnova schedule:list --timezone=Asia/Tokyo
 ```
 
 ### Saída de exemplo
 
 ```
 Registered scheduled tasks:
-  cleanup:logs [0 3 * * *] - Removes logs older than 30 days
-  send:reminders [0 9 * * *] - Sends daily reminder emails
-  backup:database [0 0 * * 0] - Weekly database backup
-  heartbeat [* * * * *]
+  cleanup:logs [0 3 * * *] next: 2026-05-29 03:00 UTC
+  send:reminders [0 9 * * *] next: 2026-05-28 09:00 UTC
+  heartbeat [* * * * *] next: 2026-05-28 12:01 UTC
+  report:generate [0 6 * * *] (UTC) next: 2026-05-29 06:00 UTC
 ```
 
 Tarefas com um `.description(...)` encadeado no builder incluem a
-descrição depois da expressão cron; tarefas sem descrição mostram só
-o cron.
+descrição depois do próximo horário de execução; tarefas sem descrição
+mostram só o cron e a próxima execução.
+
+O `next:` é o primeiro minuto depois de agora em que a expressão casa; uma
+expressão que nunca pode casar imprime `next: never`. Os horários são
+mostrados em UTC, a menos que `--timezone` nomeie outro fuso IANA, e um
+nome de fuso desconhecido sai com erro antes de qualquer coisa ser
+impressa.
+
+Uma tarefa que fixou o próprio fuso com `.timezone(...)` tem a sua
+expressão reescrita para o fuso da listagem e rotulada com ele - o
+`report:generate` acima pediu `02:00 America/New_York`. Tarefas sem fuso
+fixado são impressas como escritas e não carregam rótulo. Veja
+[Agendamento](scheduling.md) para as regras de fuso horário por completo,
+incluindo quando uma reescrita é recusada e quando uma tarefa pode ocupar
+várias linhas.
 
 Quando nada está registrado (a chamada `.schedule(...)` do builder
 está faltando, ou `schedule::register` é um no-op):

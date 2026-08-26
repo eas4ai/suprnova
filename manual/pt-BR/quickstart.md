@@ -9,7 +9,7 @@ coisa que Suprnova faz.
 Isto assume que você seguiu [Instalação](installation.md) e tem a CLI
 `suprnova` no seu `PATH`.
 
-## 1. Scaffold
+## 1. Faça scaffold
 
 ```bash
 suprnova new links --frontend svelte --no-interaction

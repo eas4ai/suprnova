@@ -247,7 +247,7 @@ because "wrote it and lost the acknowledgement" is indistinguishable from
 "never took it". Both copies carry the same job id. That is the
 framework's at-least-once delivery contract, the same one that makes
 handler idempotency a requirement everywhere else - see
-[Idempotency is the worker's contract with you](#idempotency-is-the-workers-contract-with-you).
+[Idempotency is the contract between the worker and you](#idempotency-is-the-contract-between-the-worker-and-you).
 
 ### Why Suprnova diverges
 
@@ -1627,7 +1627,7 @@ fake does still catch is a job declaring both `debounce_for` and
 push returns an error under `Queue::fake()` exactly as it would in
 production.
 
-## Idempotency is the worker's contract with you
+## Idempotency is the contract between the worker and you
 
 Redis-backed queue drivers can't make `nack` atomic - `XADD` and `XACK`
 are separate commands. A crash between them re-delivers the message via

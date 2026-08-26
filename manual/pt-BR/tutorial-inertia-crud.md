@@ -18,7 +18,7 @@ apagar. Sem uma API JSON separada: o Inertia serializa as props e a
 página Svelte as consome como `$props()` - o mesmo struct flui do Rust
 até o navegador.
 
-## 1. Scaffold
+## 1. Faça scaffold
 
 ```bash
 suprnova new todo-app --frontend svelte --no-interaction

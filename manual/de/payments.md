@@ -41,8 +41,8 @@ statt über crates.io bezogen:
 ```toml
 # Cargo.toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
 ```
 
 Registrieren Sie den Provider und den Webhook-Router beim Boot. Der
@@ -138,7 +138,7 @@ rendern - siehe
 
 ```toml
 # Cargo.toml
-suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova-payments-stripe = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
 ```
 
 Erforderliche Umgebungsvariablen:
@@ -173,7 +173,7 @@ liefern `Some`.
 
 ```toml
 # Cargo.toml
-suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.2" }
+suprnova-payments-paddle = { git = "https://github.com/eas4ai/suprnova.git", tag = "v1.3.3" }
 ```
 
 Erforderliche Umgebungsvariablen:

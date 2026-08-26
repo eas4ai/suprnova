@@ -379,8 +379,8 @@ além dos builders `with_message` / `with_code` / `with_status` /
 | Decisão | Resultado de `authorize` |
 |---|---|
 | permitida | `Ok(())` |
-| `deny()` nu (sem message/code/status) | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
-| negação rica (message e/ou status definidos) | `FrameworkError::Domain { message, status_code }` |
+| `deny()` nu (sem message/code/status) - para onde recai uma resposta de negação padrão não configurada | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
+| negação rica (message e/ou status definidos) - incluindo uma resposta de negação padrão configurada que carregue uma | `FrameworkError::Domain { message, status_code }` |
 
 Então `deny_as_not_found()` surge como um 404, `deny_with_status(422,
 "…")` como um 422, e `deny_with("…")` como um 403 carregando a sua
@@ -393,9 +393,43 @@ partir de `inspect()` se precisar dele.
 `Gate::raw` (e `raw_async`) retorna `Option<Response>`: `None` significa
 *nenhuma regra aplicada* - nenhum hook `before` disparou, nenhum gate está
 registrado, nenhum hook `after` preencheu nada - o que é distinto de um
-`Some(deny)` explícito. `inspect` normaliza esse `None` para uma negação
-padrão; `raw` o preserva para diagnóstico ("essa ação é governada por
-alguma regra?").
+`Some(deny)` explícito. `inspect` normaliza esse `None` para a resposta de
+negação padrão configurada (uma negação nua, a menos que o
+`Gate::default_denial_response` tenha definido outra coisa); `raw` preserva
+o `None` para diagnóstico ("essa ação é governada por alguma regra?").
+
+### Resposta de negação padrão
+
+O `Gate::defaultDenialResponse($response)` do Laravel remodela como é uma
+negação *indecisa* - não toda negação, só aquelas que de outra forma
+recairiam no `Response::deny()` nu. Defina-a uma vez, normalmente em
+`bootstrap::register()`:
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+Depois dessa chamada, dois tipos de desfecho assumem o formato novo: um
+`false` nu - vindo de um gate booleano (`define`/`define_async`, incluindo um método
+`#[policy]` que retorna `bool`), ou de um hook `before`/`after` que decidiu
+`false` - e uma avaliação que mais nada decidiu: uma habilidade indefinida
+sem opinião de hook também. Tudo isso antes surgia como um
+`Response::deny()` nu (um 403); agora surge como aquilo que foi dado a
+`default_denial_response` - um 404 no exemplo acima. Essa é a jogada padrão
+de "esconder a existência do recurso de um usuário que talvez não possa
+vê-lo" (veja o exemplo do `Secret` antes neste capítulo), aplicada uma vez
+para a aplicação inteira em vez de gate a gate.
+
+O padrão se aplica **somente ao `false` nu**. Um gate registrado com
+`define_with` (ou `define_async_with`) já retornou o `Response` que queria -
+`Response::deny_with("…")`, `Response::deny_as_not_found()`, até um
+`Response::deny()` nu explícito - e cada um deles passa pelo `inspect`
+intocado. Isso espelha a regra do próprio Laravel: o `Gate::inspect` só
+substitui pelo padrão um resultado de callback genuinamente falso, nunca um
+objeto `Response` que o callback montou por conta própria.
 
 ## Hooks `before` / `after`
 
@@ -443,6 +477,14 @@ type-erased `(action, U, R)` no momento do registro, então uma política de
 `Post` e uma política de `Comment` com o mesmo nome de método registram
 dois gates distintos, sem uma convenção de nomenclatura ou um scan de
 descoberta.
+
+O `Gate::default_denial_response` também diverge do Laravel em um ponto:
+passar a ele um `Response::allow()`, no formato de permissão, é registrado
+em log e ignorado em vez de aceito. O `defaultDenialResponse` do Laravel
+não tem salvaguarda desse tipo, mas este é um padrão de *negação* - aceitar
+um no formato de permissão inverteria em silêncio todo resultado de gate
+`false` nu para permitido, a única direção de falha aberta nesta
+superfície.
 
 ## Próximos passos
 

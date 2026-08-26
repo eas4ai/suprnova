@@ -81,6 +81,37 @@ pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
 
 `MagnetarConfig` は `apply_migrations` が有効な場合にスキーマを作成します。これはデフォルトです。デプロイが同じスキーマを別途準備する場合にのみ `.apply_migrations(false)` を使用してください。2 回目の初期化は、インストール済みエンジンを置き換えるのではなくエラーを返します。
 
+### 既存のユーザーとセッションの仕組みを維持する
+
+アプリケーションは、Magnetar をパスワード、パスキー、フレームワークセッション、
+remember-me 状態の権限元にせず、OAuth セレモニーとプロバイダー証明だけに利用できます。
+同じ `MagnetarOAuthHostConfig` を構築し、OAuth 専用の初期化関数でインストールします。
+
+```rust,no_run
+use suprnova::{
+    MagnetarOAuthOnlyConfig, init_magnetar_oauth_only,
+};
+
+let database = DB::connection()?;
+init_magnetar_oauth_only(
+    MagnetarOAuthOnlyConfig::from_sea_orm(
+        database.inner().clone(),
+        oauth,
+    ),
+)
+.await?;
+```
+
+セレモニーは通常どおり `Auth::oauth(provider).begin()` で開始します。コールバックでは
+`verify_oauth_identity(code, state)` を呼び、検証済みのプロバイダー subject を
+アプリケーション自身のユーザーテーブルへ対応付け、`Auth::login` で既存の
+フレームワークセッションを確立します。このモードでは `complete` を呼び出さないで
+ください。`complete` は Magnetar の既定のアカウントおよびセッション対応付けを
+適用しますが、OAuth 専用初期化の目的は、それらの判断をアプリケーションに残すことです。
+
+OAuth 専用初期化と完全な既定初期化は代替関係です。2 つ目の初期化関数は、異なる
+セッション権限を混在させる代わりに失敗します。
+
 ### GitHub プロバイダーの要件
 
 GitHub の REST ユーザーエンドポイントには `User-Agent` が必要です。コミュニティプロバイダーは、必要な任意のメディアタイプの `Accept` 値とともに、`OAuthProvider::userinfo_headers` を通じてそれを追加します。Suprnova は bearer `Authorization` ヘッダーを別途追加し、プロバイダーがそれを上書きしようとする試みを拒否します。

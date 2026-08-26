@@ -267,10 +267,10 @@ Syncのゲートは、asyncの経路から透過的に機能します（`Gate::a
 
 ## 詳細な判定: `Response`、`inspect`、`raw`
 
-素の `bool` ゲートは、allow/denyにしか答えません。*メッセージ*、機械可読な*コード*、あるいは403以外のHTTP*ステータス*を運ぶ拒否のためには、`define_with`（または `define_async_with`）でゲートを登録し、`Response` を返してください:
+素の `bool` のゲートは、allow/denyしか答えられません。*メッセージ*、機械可読の*コード*、あるいは403以外のHTTP*ステータス*を運ぶ拒否のためには、`define_with`（または `define_async_with`）でゲートを登録し、`Response` を返してください:
 
 ```rust
-use suprnova::authorization::Response;  // クレートのルートでは `GateResponse` として再公開されている
+use suprnova::authorization::Response;  // クレートルートでは `GateResponse` として再エクスポートされています
 
 Gate::define_with::<User, Post>("update", |user, post| {
     if post.author_id == user.id {
@@ -280,68 +280,85 @@ Gate::define_with::<User, Post>("update", |user, post| {
     }
 });
 
-// リソースが存在すると認めるのではなく、その存在を隠す:
+// リソースの存在を認めるのではなく、隠します:
 Gate::define_with::<User, Secret>("view", |user, secret| {
     if user.can_see(secret) {
         Response::allow()
     } else {
-        Response::deny_as_not_found()  // a 404, not a 403
+        Response::deny_as_not_found()  // 403ではなく404
     }
 });
 ```
 
-完全な判定を `Gate::inspect`（sync）/ `Gate::inspect_async` で調べてください:
+`Gate::inspect`（sync）/ `Gate::inspect_async` で、完全な判定を調べられます:
 
 ```rust
 let decision = Gate::inspect("update", &user, &post);
 decision.allowed();   // bool
 decision.message();   // Option<&str> - Some("You do not own this post.")
-decision.status();    // Option<u16> - None here; Some(404) after deny_as_not_found
+decision.status();    // Option<u16> - ここではNone。deny_as_not_found の後は Some(404)
 ```
 
-`Response` のコンストラクタはLaravelを反映しています: `allow()`、`deny()`、`deny_with(msg)`、`deny_with_status(status, msg)`、`deny_as_not_found()`、そして `with_message` / `with_code` / `with_status` / `as_not_found` のビルダーです。
+`Response` のコンストラクターはLaravelを映しています: `allow()`、`deny()`、`deny_with(msg)`、`deny_with_status(status, msg)`、`deny_as_not_found()`、それに `with_message` / `with_code` / `with_status` / `as_not_found` のビルダーです。
 
 ### 拒否がどのようにエラーになるか
 
-`Gate::authorize` は、`Response::authorize()` を通じて判定を1つに収束させます:
+`Gate::authorize` は、`Response::authorize()` を通じて判定を畳み込みます:
 
 | 判定 | `authorize` の結果 |
 |---|---|
 | 許可 | `Ok(())` |
-| 素の `deny()`（メッセージ/コード/ステータスなし） | `FrameworkError::Unauthorized`（403、`"This action is unauthorized."`） |
-| 詳細な拒否（メッセージまたはステータスが設定されている） | `FrameworkError::Domain { message, status_code }` |
+| 素の `deny()`（メッセージ/コード/ステータスなし） - 設定されていないデフォルトの拒否レスポンスがフォールバックする先 | `FrameworkError::Unauthorized`（403、`"This action is unauthorized."`） |
+| 詳細な拒否（メッセージやステータス、あるいはその両方が設定されている） - それを運ぶデフォルトの拒否レスポンスが設定されている場合も含みます | `FrameworkError::Domain { message, status_code }` |
 
-そのため `deny_as_not_found()` は404として、`deny_with_status(422, "…")` は422として、`deny_with("…")` はあなたのメッセージを運ぶ403として表面化します。`code` は、調べた `Response` の上では読み取れますが、`authorize` を通じては**運ばれません** - `FrameworkError` にはcodeフィールドがありません。必要であれば `inspect()` から読み取ってください。
+したがって `deny_as_not_found()` は404として、`deny_with_status(422, "…")` は422として、`deny_with("…")` はあなたのメッセージを運ぶ403として表面化します。`code` はinspectした `Response` からは読めますが、`authorize` を通じては**伝わりません** - `FrameworkError` にコードのフィールドはないため、必要なら `inspect()` から読んでください。
 
-### `raw`: 「拒否」対「未定義」
+### `raw`: 「拒否」と「未定義」
 
-`Gate::raw`（および `raw_async`）は `Option<Response>` を返します: `None` は*何のルールも適用されなかった*ことを意味します - `before` フックも発火せず、ゲートも登録されておらず、`after` フックも何も埋めなかった、ということです - これは、明示的な `Some(deny)` とは区別されます。`inspect` はその `None` をデフォルトの拒否へ正規化しますが、`raw` は診断のためにそれを保存します（「このアクションはそもそも統治されているのか?」）。
+`Gate::raw`（および `raw_async`）は `Option<Response>` を返します: `None` は*どのルールも適用されなかった*ことを意味し - `before` フックは発火せず、ゲートは登録されておらず、`after` フックも埋めていない - 明示的な `Some(deny)` とは区別されます。`inspect` はその `None` を、設定されたデフォルトの拒否レスポンス（`Gate::default_denial_response` が別のものを設定していなければ素の拒否）へ正規化します。`raw` は診断のために `None` を保ちます（「このアクションはそもそも統制されているのか?」）。
+
+### デフォルトの拒否レスポンス
+
+Laravelの `Gate::defaultDenialResponse($response)` は、*判定されなかった*拒否の見え方を作り変えます - すべての拒否ではなく、そうでなければ素の `Response::deny()` へフォールバックしていたものだけです。通常は `bootstrap::register()` で、一度だけ設定します:
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+この呼び出しの後、2種類の結果が新しい形を受け取ります: 素の `false` - boolのゲート（`define`/`define_async`。`bool` を返す `#[policy]` のメソッドを含みます）から、あるいは `false` と判定した `before`/`after` フックから - と、ほかに何も判定しなかった評価、すなわちフックの意見もない未定義の権限です。これらはすべて、以前は素の `Response::deny()`（403）として表面化していました。今は `default_denial_response` に与えられたもの - 上の例では404 - として表面化します。これは「見てよいとは限らないユーザーからリソースの存在を隠す」という標準的な手（本章の前半の `Secret` の例を参照）を、ゲートごとにではなくアプリケーション全体へ一度だけ適用するものです。
+
+デフォルトが適用されるのは**素の `false` だけ**です。`define_with`（または `define_async_with`）で登録されたゲートは、望む `Response` - `Response::deny_with("…")`、`Response::deny_as_not_found()`、明示的な素の `Response::deny()` さえ - をすでに返しており、そのいずれもが `inspect` を手つかずで通過します。これはLaravel自身の規則を映しています: `Gate::inspect` がデフォルトで置き換えるのは、本当にfalsyなコールバックの結果だけであり、コールバック自身が組み立てた `Response` オブジェクトを置き換えることは決してありません。
 
 ## `before` / `after` フック
 
-`Gate::before` は、あらゆるゲートより*前に*実行されるチェックを登録します。`Some(decision)` を最初に返したフックが、すべてをショートサーキットします。典型的な使い方は、グローバルな上書きです:
+`Gate::before` は、どのゲートよりも*前*に走るチェックを登録します。最初に `Some(decision)` を返したフックが、すべてをショートサーキットします。典型的な用途はグローバルな上書きです:
 
 ```rust
-// 管理者は何でも行えます。
+// 管理者は何でもできます。
 Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
 ```
 
-`Gate::after` はゲートの*後に*実行されます。Laravelの `??=` のセマンティクスに従い、afterフックは未決定の結果（どのゲートもマッチせず、beforeフックも発火しなかった場合）を**埋める**ことしかできません - すでに生成されたallow/denyを上書きすることは決してありません。すべてのafterフックはそれでも実行されるため、監査ログの継ぎ目としても機能します:
+`Gate::after` はゲートの*後*に走ります。Laravelの `??=` のセマンティクスに従い、afterフックは未判定の結果（どのゲートにも一致せず、beforeフックも発火しなかった場合）を**埋める**ことしかできません - すでに生じたallow/denyを上書きすることは決してできません。afterフックはすべて必ず走るため、監査ログの継ぎ目としても働きます:
 
 ```rust
 Gate::after::<User>(|user, action, decided| {
-    audit_log(user.id, action, decided);   // すべての評価を観測する
-    None                                    // 記録のみ。結果は変更しない
+    audit_log(user.id, action, decided);   // すべての評価を観測します
+    None                                    // 記録のみ。結果は変えません
 });
 ```
 
-フックは、リソースではなく**ユーザー型** `U` によってキー付けされます - フックは、あらゆる `(action, U, R)` に対して発火します。リソース固有のロジックはゲートに置いてください。フックは同期の述語であり、async評価の経路にも適用されます。async認可のロジックには `define_async` / `define_async_with` を使ってください。
+フックは、リソースではなく**ユーザー型** `U` をキーとします - フックはすべての `(action, U, R)` に対して発火します。リソース固有のロジックはゲートに置いてください。フックはsyncの述語であり、asyncの評価経路にも適用されます。asyncな認可ロジックには、`define_async` / `define_async_with` を使ってください。
 
 ### Suprnovaが異なる設計を選んだ理由
 
-Laravelの `Gate::forUser($user)->allows(...)` は、ゲートの*暗黙の*現在ユーザーリゾルバを再束縛し、次のチェックがそのユーザーとして評価されるようにします。Suprnovaのゲートは、すべての呼び出しでユーザーを**明示的に**取るため、「別のユーザーとしてチェックする」は、単に `Gate::allows(action, &other_user, &resource)` です。再束縛すべき暗黙のリゾルバは存在しません - 明示的なAPIは厳密により汎用的であり、そのため `forUser` は欠けているのではなく不要になっています。
+Laravelの `Gate::forUser($user)->allows(...)` は、ゲートの*暗黙の*現在ユーザーのリゾルバーを差し替え、次のチェックをそのユーザーとして評価させます。Suprnovaのゲートは呼び出しのたびにユーザーを**明示的に**受け取るため、「別のユーザーとしてチェックする」は単に `Gate::allows(action, &other_user, &resource)` です。差し替えるべき暗黙のリゾルバーは存在しません - 明示的なAPIのほうが厳密に一般的であり、そのため `forUser` は欠けているのではなく冗長なのです。
 
-同じ理屈が、Laravelのクラス名によるポリシーの自動発見にも当てはまります。Suprnovaは、登録時点でポリシーのメソッドを型消去された `(action, U, R)` というキーに結び付けるため、同じメソッド名を持つ `Post` のポリシーと `Comment` のポリシーは、命名規則や発見スキャンなしに、2つの別々のゲートとして登録されます。
+同じ理屈が、Laravelのクラス名によるポリシーの自動検出にも当てはまります。Suprnovaは登録の時点で、ポリシーのメソッドを型消去された `(action, U, R)` のキーへ結び付けます。そのため、同じメソッド名を持つ `Post` のポリシーと `Comment` のポリシーは、命名規約も検出のためのスキャンもなしに、2つの異なるゲートとして登録されます。
+
+`Gate::default_denial_response` も、1点でLaravelとは異なります: allowの形をした `Response::allow()` を渡すと、受け入れられるのではなくログに記録されて無視されます。Laravelの `defaultDenialResponse` にそうした保護機構はありませんが、これは*拒否*のデフォルトです - allowの形をしたものを受け入れれば、素の `false` を返すすべてのゲートの結果が黙って許可へ反転してしまいます。この表面において、唯一のフェイルオープン方向です。
 
 ## 次のステップ
 

@@ -341,14 +341,13 @@ bricht den Prozess niemals ab.
 
 ## Reichhaltige Entscheidungen: `Response`, `inspect`, `raw`
 
-Ein bloßes `bool`-Gate beantwortet nur Allow/Deny. Für eine
-Ablehnung, die eine *Nachricht*, einen maschinenlesbaren *Code*
-oder einen von 403 abweichenden HTTP-*Status* trägt, registrieren
-Sie das Gate mit `define_with` (oder `define_async_with`) und geben
-Sie eine `Response` zurück:
+Ein bloßes `bool`-Gate beantwortet nur Erlauben/Ablehnen. Für eine
+Ablehnung, die eine *Nachricht*, einen maschinenlesbaren *Code* oder einen
+HTTP-*Status* ungleich 403 trägt, registrieren Sie das Gate mit
+`define_with` (oder `define_async_with`) und geben eine `Response` zurück:
 
 ```rust
-use suprnova::authorization::Response;  // am Crate-Root re-exportiert als `GateResponse`
+use suprnova::authorization::Response;  // an der Crate-Wurzel als `GateResponse` re-exportiert
 
 Gate::define_with::<User, Post>("update", |user, post| {
     if post.author_id == user.id {
@@ -368,101 +367,138 @@ Gate::define_with::<User, Secret>("view", |user, secret| {
 });
 ```
 
-Untersuchen Sie die vollständige Entscheidung mit `Gate::inspect`
-(sync) / `Gate::inspect_async`:
+Untersuchen Sie die vollständige Entscheidung mit `Gate::inspect` (synchron)
+/ `Gate::inspect_async`:
 
 ```rust
 let decision = Gate::inspect("update", &user, &post);
 decision.allowed();   // bool
 decision.message();   // Option<&str> - Some("You do not own this post.")
-decision.status();    // Option<u16> - None here; Some(404) after deny_as_not_found
+decision.status();    // Option<u16> - hier None; Some(404) nach deny_as_not_found
 ```
 
-`Response`-Konstruktoren spiegeln Laravel: `allow()`, `deny()`,
-`deny_with(msg)`, `deny_with_status(status, msg)`,
-`deny_as_not_found()`, plus die Builder `with_message` /
-`with_code` / `with_status` / `as_not_found`.
+Die `Response`-Konstruktoren spiegeln Laravel: `allow()`, `deny()`,
+`deny_with(msg)`, `deny_with_status(status, msg)`, `deny_as_not_found()`,
+dazu die Builder `with_message` / `with_code` / `with_status` /
+`as_not_found`.
 
-### Wie eine Ablehnung zu einem Fehler wird
+### Wie aus einer Ablehnung ein Fehler wird
 
-`Gate::authorize` kollabiert die Entscheidung über
-`Response::authorize()`:
+`Gate::authorize` faltet die Entscheidung über `Response::authorize()`
+zusammen:
 
 | Entscheidung | Ergebnis von `authorize` |
 |---|---|
 | erlaubt | `Ok(())` |
-| bloßes `deny()` (ohne Nachricht/Code/Status) | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
-| reichhaltige Ablehnung (Nachricht und/oder Status gesetzt) | `FrameworkError::Domain { message, status_code }` |
+| bloßes `deny()` (ohne Nachricht/Code/Status) - worauf eine nicht konfigurierte Standard-Ablehnungs-Response zurückfällt | `FrameworkError::Unauthorized` (403, `"This action is unauthorized."`) |
+| reichhaltige Ablehnung (Nachricht und/oder Status gesetzt) - einschließlich einer konfigurierten Standard-Ablehnungs-Response, die so etwas trägt | `FrameworkError::Domain { message, status_code }` |
 
-So erscheint `deny_as_not_found()` als 404,
-`deny_with_status(422, "…")` als 422 und `deny_with("…")` als 403
-mit Ihrer Nachricht. Der `code` ist auf der untersuchten `Response`
-lesbar, reist aber **nicht** durch `authorize` hindurch -
-`FrameworkError` hat kein Code-Feld; lesen Sie ihn aus `inspect()`,
-falls Sie ihn brauchen.
+`deny_as_not_found()` taucht also als 404 auf, `deny_with_status(422, "…")`
+als 422 und `deny_with("…")` als 403 mit Ihrer Nachricht. Der `code` ist auf
+der untersuchten `Response` lesbar, reist aber **nicht** durch `authorize` -
+`FrameworkError` hat kein Code-Feld; lesen Sie ihn aus `inspect()`, wenn Sie
+ihn brauchen.
 
-### `raw`: "abgelehnt" vs. "nicht definiert"
+### `raw`: „abgelehnt“ vs. „undefiniert“
 
-`Gate::raw` (und `raw_async`) liefert `Option<Response>`: `None`
-bedeutet *keine Regel angewendet* - kein `before`-Hook hat
-gefeuert, kein Gate ist registriert, kein `after`-Hook hat
-aufgefüllt - im Unterschied zu einem expliziten `Some(deny)`.
-`inspect` normalisiert dieses `None` zu einer Standardablehnung;
-`raw` bewahrt es für Diagnosen ("ist diese Aktion überhaupt
-geregelt?").
+`Gate::raw` (und `raw_async`) gibt `Option<Response>` zurück: `None`
+bedeutet, dass *keine Regel gegriffen hat* - kein `before`-Hook hat
+gefeuert, kein Gate ist registriert, kein `after`-Hook hat etwas ergänzt -,
+im Unterschied zu einem expliziten `Some(deny)`. `inspect` normalisiert
+dieses `None` auf die konfigurierte Standard-Ablehnungs-Response (eine
+bloße Ablehnung, sofern `Gate::default_denial_response` nichts anderes
+gesetzt hat); `raw` bewahrt das `None` für die Diagnose („wird diese Aktion
+überhaupt geregelt?“).
+
+### Standard-Ablehnungs-Response
+
+Laravels `Gate::defaultDenialResponse($response)` formt um, wie eine
+*unentschiedene* Ablehnung aussieht - nicht jede Ablehnung, nur
+diejenigen, die sonst auf das bloße `Response::deny()` zurückfielen. Setzen
+Sie sie einmal, typischerweise in `bootstrap::register()`:
+
+```rust
+use suprnova::authorization::Response;
+use suprnova::Gate;
+
+Gate::default_denial_response(Response::deny_as_not_found());
+```
+
+Nach diesem Aufruf nehmen zwei Arten von Ausgang die neue Form an: ein
+bloßes `false` - aus einem Bool-Gate (`define`/`define_async`, einschließlich einer
+`#[policy]`-Methode, die `bool` zurückgibt) oder aus einem
+`before`/`after`-Hook, der sich für `false` entschieden hat - und eine
+Auswertung, über die überhaupt nichts anderes entschieden hat: eine
+undefinierte Fähigkeit, zu der auch kein Hook eine Meinung hatte. All das
+tauchte früher als bloßes `Response::deny()` (ein 403) auf; jetzt taucht es
+als das auf, was `default_denial_response` mitgegeben wurde - im Beispiel
+oben ein 404. Das ist der übliche Zug „die Existenz der Ressource vor einem
+Benutzer verbergen, der sie nicht sehen darf“ (siehe das `Secret`-Beispiel
+weiter oben in diesem Kapitel), einmal für die ganze Anwendung angewandt
+statt Gate für Gate.
+
+Der Standard gilt **nur für ein bloßes `false`**. Ein mit `define_with`
+(oder `define_async_with`) registriertes Gate hat die gewünschte `Response`
+bereits zurückgegeben - `Response::deny_with("…")`,
+`Response::deny_as_not_found()`, sogar ein explizites bloßes
+`Response::deny()` -, und jede einzelne davon geht unangetastet durch
+`inspect`. Das spiegelt Laravels eigene Regel: `Gate::inspect` setzt den
+Standard nur für ein wirklich falsches Callback-Ergebnis ein, nie für ein
+`Response`-Objekt, das der Callback selbst gebaut hat.
 
 ## `before`- / `after`-Hooks
 
-`Gate::before` registriert eine Prüfung, die *vor* jedem Gate
-läuft; der erste Hook, der `Some(decision)` zurückgibt, bricht
-alles per Short-Circuit ab. Die kanonische Verwendung ist eine
-globale Übersteuerung:
+`Gate::before` registriert eine Prüfung, die *vor* jedem Gate läuft; der
+erste Hook, der `Some(decision)` zurückgibt, kürzt alles ab. Der kanonische
+Einsatz ist ein globaler Override:
 
 ```rust
 // Administratoren dürfen alles.
 Gate::before::<User>(|user, _action| user.is_admin.then_some(true));
 ```
 
-`Gate::after` läuft *nach* dem Gate. Nach Laravels
-`??=`-Semantik kann ein After-Hook ein unentschiedenes Ergebnis nur
-**auffüllen** (kein Gate hat gematcht und kein Before-Hook hat
-gefeuert) - er kann niemals ein bereits erzeugtes Allow/Deny
-überschreiben. Jeder After-Hook läuft trotzdem, sodass er zugleich
-als Nahtstelle für Audit-Logging dient:
+`Gate::after` läuft *nach* dem Gate. Der Semantik von Laravels `??=` folgend
+kann ein After-Hook ein unentschiedenes Ergebnis nur **ergänzen** (kein Gate
+hat gegriffen und kein Before-Hook hat gefeuert) - überschreiben kann er ein
+bereits erzeugtes Erlauben/Ablehnen nie. Jeder After-Hook läuft trotzdem, er
+dient also zugleich als Naht für die Audit-Protokollierung:
 
 ```rust
 Gate::after::<User>(|user, action, decided| {
     audit_log(user.id, action, decided);   // jede Auswertung beobachten
-    None                                    // nur aufzeichnen; das Ergebnis nicht verändern
+    None                                    // nur aufzeichnen; das Ergebnis nicht ändern
 });
 ```
 
-Hooks werden über den **Benutzertyp** `U` geschlüsselt, nicht über
-die Ressource - ein Hook feuert für jedes `(action, U, R)`. Legen
-Sie ressourcenspezifische Logik ins Gate. Hooks sind synchrone
-Prädikate und gelten auch für den asynchronen Auswertungspfad; für
-asynchrone Autorisierungslogik verwenden Sie `define_async` /
-`define_async_with`.
+Hooks werden über den **Benutzertyp** `U` geschlüsselt, nicht über die
+Ressource - ein Hook feuert für jedes `(action, U, R)`. Ressourcenspezifische
+Logik gehört ins Gate. Hooks sind synchrone Prädikate und gelten auch für
+den asynchronen Auswertungspfad; für asynchrone Autorisierungslogik nehmen
+Sie `define_async` / `define_async_with`.
 
 ### Warum Suprnova abweicht
 
 Laravels `Gate::forUser($user)->allows(...)` bindet den *impliziten*
-Resolver des Gates für den aktuellen Benutzer neu, sodass die
-nächste Prüfung als dieser Benutzer ausgewertet wird. Suprnovas
-Gate nimmt den Benutzer bei jedem Aufruf **explizit** entgegen,
-sodass "als anderer Benutzer prüfen" einfach
-`Gate::allows(action, &other_user, &resource)` ist. Es gibt keinen
-impliziten Resolver, den man neu binden müsste - die explizite API
-ist strikt allgemeiner, was `forUser` überflüssig statt fehlend
-macht.
+Resolver des Gates für den aktuellen Benutzer neu, sodass die nächste
+Prüfung als dieser Benutzer ausgewertet wird. Suprnovas Gate nimmt den
+Benutzer bei jedem Aufruf **explizit** entgegen, „als anderer Benutzer
+prüfen“ ist also einfach `Gate::allows(action, &other_user, &resource)`. Es
+gibt keinen impliziten Resolver, den man neu binden müsste - die explizite
+API ist strikt allgemeiner, was `forUser` überflüssig statt fehlend macht.
 
-Dieselbe Überlegung gilt für Laravels automatische
-Policy-Erkennung anhand des Klassennamens. Suprnova bindet
-Policy-Methoden zur Registrierungszeit an den typgelöschten
-`(action, U, R)`-Schlüssel, sodass eine `Post`-Policy und eine
-`Comment`-Policy mit demselben Methodennamen zwei eigenständige
-Gates registrieren, ohne eine Namenskonvention oder einen
-Discovery-Scan zu benötigen.
+Dieselbe Überlegung gilt für Laravels automatische Policy-Erkennung über den
+Klassennamen. Suprnova bindet Policy-Methoden bei der Registrierung an den
+typgelöschten Schlüssel `(action, U, R)`, sodass eine `Post`-Policy und eine
+`Comment`-Policy mit demselben Methodennamen zwei verschiedene Gates
+registrieren, ganz ohne Namenskonvention und ohne Erkennungslauf.
+
+`Gate::default_denial_response` weicht in einem Punkt ebenfalls von Laravel
+ab: Ihr ein erlaubnisförmiges `Response::allow()` zu übergeben wird
+protokolliert und ignoriert statt akzeptiert. Laravels
+`defaultDenialResponse` hat keine solche Absicherung, aber das hier ist ein
+Standard für die *Ablehnung* - einen erlaubnisförmigen zu akzeptieren würde
+stillschweigend jedes bloße `false`-Gate-Ergebnis auf erlaubt drehen, die
+eine Richtung auf dieser Oberfläche, in der ein Fehler zu weit öffnet.
 
 ## Nächste Schritte
 

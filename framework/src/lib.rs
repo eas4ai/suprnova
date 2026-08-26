@@ -190,8 +190,10 @@ pub use magnetar_integration::{
 };
 #[cfg(feature = "magnetar-oauth")]
 pub use magnetar_integration::{
+    MagnetarOAuthOnlyConfig,
     abuse_limiter::FrameworkAbuseLimiter,
     engine::{MagnetarOAuthHostConfig, MagnetarOAuthProviderConfig},
+    init_magnetar_oauth_only,
     oauth_transport::ReqwestOAuthTransport,
 };
 #[cfg(feature = "magnetar-oauth")]

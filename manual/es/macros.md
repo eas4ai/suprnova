@@ -55,9 +55,9 @@ expansión completa y [WebSockets](websockets.md) para `ws!`.
 ### `#[handler]`
 
 Reescribe una función de controlador para que pueda extraer parámetros
-tipados (mediante `FromRequest`) directamente de la solicitud entrante -
-en lugar de extraer campos manualmente de `Request`, declaras lo que
-el handler necesita y la macro lo cablea.
+tipados (mediante `FromRequest`) directamente de la solicitud entrante:
+en lugar de sacar campos de `Request` a mano, declaras lo que el handler
+necesita y la macro lo conecta.
 
 ```rust
 use suprnova::{handler, Response, json_response, request};
@@ -73,49 +73,49 @@ pub struct CreateUserRequest {
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` ya está validado - se devuelve 422 automáticamente ante un fallo
+    // `form` ya viene validado - ante un fallo se devuelve un 422 automáticamente
     json_response!({ "email": form.email })
 }
 ```
 
-Un primer parámetro con forma `Request` sigue aceptándose como el caso
-identidad. Consulta [Controladores](controllers.md).
+Un primer parámetro con forma de `Request` se sigue aceptando como el
+caso identidad. Consulta [Controladores](controllers.md).
 
 ### `#[request]` y `#[derive(FormRequest)]`
 
 `#[request]` es la forma recomendada de declarar un tipo de solicitud
 validado. Deriva automáticamente `Deserialize`, `Validate` y
-`FormRequest`, de modo que el struct funciona tanto con cuerpos
+`FormRequest`, así que el struct funciona tanto con cuerpos
 `application/json` como `application/x-www-form-urlencoded`.
 
 `#[derive(FormRequestDerive)]` es el derive subyacente si quieres
-prescindir del atributo (tendrás que derivar `Deserialize` y
-`Validate` tú mismo). El atributo es lo que recomendamos; el derive
-existe para el caso extremo. Consulta [Solicitudes](requests.md) y
+prescindir del atributo (tendrás que derivar `Deserialize` y `Validate`
+por tu cuenta). El atributo es lo que recomendamos; el derive existe para
+el caso límite. Consulta [Solicitudes](requests.md) y
 [Validación](validation.md).
 
 ### `#[derive(MultipartRequest)]`
 
-Extractor fuertemente tipado para `multipart/form-data` - vincula
-campos de texto y archivos subidos en un solo struct, con validadores
-a nivel de tipo por campo.
+Extractor fuertemente tipado para `multipart/form-data`: vincula campos
+de texto y archivos subidos en un mismo struct, con validadores a nivel
+de tipo por campo.
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-Los validadores integrados (`Image`, `MimeAllowlist<…>`, `MaxSize<…>`,
-`MimeType<…>`) se componen mediante tuplas. Consulta
+Los validadores integrados (`ImageFile`, `MimeAllowlist<…>`,
+`MaxSize<…>`, `MimeType<…>`) se componen mediante tuplas. Consulta
 [Solicitudes](requests.md).
 
 ## Respuestas

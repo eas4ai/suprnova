@@ -236,11 +236,29 @@ DB::transaction(|_tx| {
 
 Commit em `Ok(_)`. Rollback + propaga o erro em `Err(_)`.
 
+Um `Err` nem sempre é um rollback. Se um callback
+[pós-commit](queues.md#after-commit-dispatch) falha, o commit já
+aconteceu e é durável; o `DB::transaction` ainda assim retorna `Err`, e a
+mensagem diz `after-commit callback failed (the transaction itself
+committed): <o erro do callback>`. O valor de retorno da closure se perde,
+as escritas dela não, e só um dispatch adiado falhou. Todo callback
+registrado ainda roda, e o erro que você recebe é o primeiro deles. O
+`DB::transaction_with_attempts` nunca repete esse erro, por mais cara de
+deadlock que ele tenha: reexecutar uma closure cujas escritas já são
+duráveis as aplicaria duas vezes.
+
 Operações dentro da closure pegam a transação ativa automaticamente
 via um `tokio::task_local` - você NÃO precisa passar um handle `&tx`
 através de toda chamada de model. Um `DB::transaction` aninhado
 retorna um erro de banco de dados; use `tx.savepoint(...)` para
 comportamento de rollback aninhado.
+
+A forma de closure também é a única forma capaz de adiar trabalho para o
+commit. Um job cujo tipo declara `Job::after_commit()` (ou um dispatch
+feito com `Queue::push_after_commit`) espera dentro desta closure e só
+chega ao driver de fila quando o commit tem sucesso; um rollback o
+descarta. Veja
+[Dispatch pós-commit](queues.md#after-commit-dispatch).
 
 Para agregado tipado ou SQL customizado que precisa executar na
 mesma conexão fixada, use o handle da transação diretamente:
@@ -316,6 +334,12 @@ vida; pré-carregue qualquer linha que você precise ler ANTES da
 chamada `begin_transaction()`, especialmente no SQLite (conexão
 única compartilhada).
 
+Como o modo manual não instala task-local, ele também não tem commit em
+que um dispatch adiado possa se pendurar: um job
+[pós-commit](queues.md#after-commit-dispatch) enviado dentro de uma
+transação manual é enviado imediatamente. Use a forma de closure quando um
+dispatch tiver de esperar pelo commit.
+
 ### Savepoints
 
 ```rust
@@ -335,6 +359,29 @@ DB::transaction(|tx| {
 
 Os três backends de primeira classe suportam `SAVEPOINT` /
 `ROLLBACK TO SAVEPOINT` - SQLite incluso.
+
+Um rollback de savepoint também desfaz o
+[registry pós-commit](queues.md#after-commit-dispatch). Um push de fila
+adiado para o commit dentro do savepoint é descartado junto com as linhas
+que ele descrevia, e a compensação registrada com ele roda imediatamente,
+então o lock de deduplicação de um `push_unique` adiado volta e um
+re-dispatch dentro da mesma transação pode ganhá-lo. Qualquer coisa
+registrada antes do savepoint fica intocada, e um savepoint que você
+libera, ou em que simplesmente nunca faz rollback, mantém tudo que foi
+registrado dentro dele.
+
+Repetir um nome de savepoint é permitido, e o registry segue o banco de
+dados: `ROLLBACK TO SAVEPOINT x` desfaz até o `x` mais recente e destrói os
+savepoints estabelecidos depois dele. Transações manuais não têm registry
+pós-commit, então os savepoints delas fazem rollback de linhas e de mais
+nada.
+
+Só o `Transaction::savepoint` marca o registry. Um savepoint que você cria
+com SQL bruto é invisível para ele, então o `rollback_to` faz rollback
+daquelas linhas, registra um aviso e deixa no lugar todo dispatch adiado
+registrado dentro dele - descartar um no chute seria a falha pior. Use o
+`Transaction::savepoint` quando os dispatches adiados devem ser desfeitos
+junto com as linhas.
 
 ## Observabilidade
 

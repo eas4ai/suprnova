@@ -41,7 +41,7 @@ routes! {
 
 ### `#[handler]`
 
-コントローラー関数を書き換え、（`FromRequest` を介して）型付きのパラメータを、受信したリクエストから直接抽出できるようにします - `Request` から手作業でフィールドを取り出す代わりに、ハンドラが必要とするものを宣言すれば、マクロがその配線を行います。
+コントローラーの関数を書き換えて、受信したリクエストから型付きのパラメータを（`FromRequest` を介して）直接取り出せるようにします - `Request` からフィールドを手作業で取り出す代わりに、ハンドラが必要とするものを宣言すれば、マクロがそれを配線します。
 
 ```rust
 use suprnova::{handler, Response, json_response, request};
@@ -57,38 +57,38 @@ pub struct CreateUserRequest {
 
 #[handler]
 pub async fn store(form: CreateUserRequest) -> Response {
-    // `form` はすでにバリデーション済みです - 失敗した場合は自動的に422が返ります
+    // `form` はすでに検証済みです - 失敗時には自動的に422が返されます
     json_response!({ "email": form.email })
 }
 ```
 
-`Request` 形の第一引数も、恒等的なケースとして引き続き受け付けられます。[コントローラー](controllers.md)を参照してください。
+`Request` の形をした第1引数は、変換を行わない恒等のケースとして、今も受け付けられます。[コントローラー](controllers.md)を参照してください。
 
 ### `#[request]` と `#[derive(FormRequest)]`
 
-`#[request]` は、バリデーション済みのリクエスト型を宣言するための推奨される方法です。`Deserialize`、`Validate`、`FormRequest` を自動的に導出するため、この構造体は `application/json` と `application/x-www-form-urlencoded` の両方のボディで機能します。
+`#[request]` は、検証されるリクエスト型を宣言する、推奨される方法です。`Deserialize`、`Validate`、`FormRequest` を自動で導出するため、この構造体は `application/json` と `application/x-www-form-urlencoded` のどちらのボディでも機能します。
 
-このアトリビュートを使わずに済ませたい場合の、背後にあるderiveが `#[derive(FormRequestDerive)]` です（その場合、`Deserialize` と `Validate` は自分で導出する必要があります）。私たちが推奨するのはこのアトリビュートであり、deriveはエッジケースのために存在しています。[リクエスト](requests.md)と[バリデーション](validation.md)を参照してください。
+`#[derive(FormRequestDerive)]` は、そのアトリビュートを使わずに済ませたい場合の、基礎となる導出マクロです（`Deserialize` と `Validate` は自分で導出する必要があります）。推奨するのはアトリビュートのほうで、導出マクロはエッジケースのために存在します。[リクエスト](requests.md)と[バリデーション](validation.md)を参照してください。
 
 ### `#[derive(MultipartRequest)]`
 
-`multipart/form-data` 向けの、強く型付けされたエクストラクタです - テキストフィールドとアップロードされたファイルを1つの構造体にまとめて束ね、フィールドごとに型レベルのバリデータを付けられます。
+`multipart/form-data` のための、強く型付けされたエクストラクターです - テキストのフィールドとアップロードされたファイルを1つの構造体にバインドし、フィールドごとに型レベルのバリデーターを付けられます。
 
 ```rust
 use suprnova::{MultipartRequest};
-use suprnova::http::upload::{Image, MaxSize, UploadedFile};
+use suprnova::http::upload::{ImageFile, MaxSize, UploadedFile};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>,
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
 
     #[field("caption")]
     pub caption: Option<String>,
 }
 ```
 
-組み込みのバリデータ（`Image`、`MimeAllowlist<…>`、`MaxSize<…>`、`MimeType<…>`）は、タプルによって合成できます。[リクエスト](requests.md)を参照してください。
+組み込みのバリデーター（`ImageFile`、`MimeAllowlist<…>`、`MaxSize<…>`、`MimeType<…>`）は、タプルによって合成されます。[リクエスト](requests.md)を参照してください。
 
 ## レスポンス
 

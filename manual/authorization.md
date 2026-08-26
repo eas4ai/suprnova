@@ -401,9 +401,10 @@ use suprnova::Gate;
 Gate::default_denial_response(Response::deny_as_not_found());
 ```
 
-After that call, two kinds of outcome pick up the new shape: a bare `false`
-- from a bool gate (`define`/`define_async`, including a `#[policy]` method
-returning `bool`), or from a `before`/`after` hook that decided `false` -
+After that call, two kinds of outcome pick up the new shape: a bare
+`false` - from a bool gate (`define`/`define_async`, including a `#[policy]`
+method returning `bool`), or from a `before`/`after` hook that decided
+`false` -
 and an evaluation nothing else decided at all: an undefined ability with no
 hook opinion either. All of those used to surface as a bare
 `Response::deny()` (a 403); now they surface as whatever

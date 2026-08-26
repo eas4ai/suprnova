@@ -415,12 +415,12 @@ pub async fn store(form: CreateUserRequest) -> Response {
 ```rust
 use suprnova::{handler, json_response, MultipartRequest, Response};
 use suprnova::http::upload::UploadedFile;
-use suprnova::http::upload::validators::{Image, MaxSize};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
 
 #[derive(MultipartRequest)]
 pub struct AvatarUpload {
     #[field("avatar")]
-    pub avatar: UploadedFile<(Image, MaxSize<5_242_880>)>, // 5 MiB 上限
+    pub avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>, // 5 MiB 上限
     #[field("caption")]
     pub caption: Option<String>,
 }
@@ -448,11 +448,11 @@ pub async fn upload_avatar(form: AvatarUpload) -> Response {
 `suprnova::http::upload::validators` 里的内置验证器：
 
 - `MaxSize<N>` - 当累计总量超过 `N` 字节时，就在那个字节边界上短路（HTTP 413）。
-- `Image` - 拒绝那些魔数字节没有声称自己是 `image/*` 的分段。
+- `ImageFile` - 拒绝那些魔数字节没有声称自己是 `image/*` 的分段。（名字取自 Laravel 自己那条规则；朴素的 `Image` 这个名字属于那条操作图像的管道 - 参见[图像](images.md)。）
 - `MimeType<L>` - 接受一份由您自己的 `MimeAllowlist` 类型提供的固定允许列表。
 - `()` - 空操作；`UploadedFile<()>` 接受任意字节。
 
-验证器以元组的形式组合起来：`(Image, MaxSize<5_242_880>)` 会把两个都跑一遍，并在第一个失败处短路。
+验证器以元组的形式组合起来：`(ImageFile, MaxSize<5_242_880>)` 会把两个都跑一遍，并在第一个失败处短路。
 
 ### 逐字段上限与数组数量上限
 

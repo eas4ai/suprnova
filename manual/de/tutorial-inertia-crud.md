@@ -18,7 +18,7 @@ Bearbeiten und Löschen. Keine separate JSON-API: Inertia serialisiert
 Props, und die Svelte-Seite konsumiert sie als `$props()` - dieselbe
 Struktur fließt von Rust zum Browser.
 
-## 1. Scaffold
+## 1. Scaffold anlegen
 
 ```bash
 suprnova new todo-app --frontend svelte --no-interaction

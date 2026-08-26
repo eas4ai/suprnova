@@ -30,6 +30,8 @@ use crate::error::FrameworkError;
 
 pub use crate::auth::{LockoutStatus, Session, SessionToken, User, UserId};
 pub use default_engine::{MagnetarConfig, init_magnetar};
+#[cfg(feature = "magnetar-oauth")]
+pub use default_engine::{MagnetarOAuthOnlyConfig, init_magnetar_oauth_only};
 
 pub(crate) fn bind_issued_session(
     issued: &engine::MagnetarIssuedSession,
@@ -173,6 +175,33 @@ impl EngineInstallReservation {
         }
         #[cfg(not(feature = "magnetar-oauth"))]
         let _ = oauth;
+        guard.reserved = false;
+        self.active = false;
+        Ok(())
+    }
+
+    #[cfg(feature = "magnetar-oauth")]
+    pub(crate) fn install_oauth_only(
+        mut self,
+        oauth: Arc<dyn engine::MagnetarOAuthAuthEngine>,
+    ) -> Result<(), FrameworkError> {
+        let mut guard = engine_install_guard()?;
+        if !self.active || !guard.reserved {
+            return Err(FrameworkError::internal(
+                "Magnetar engine installation reservation is not active",
+            ));
+        }
+        if MAGNETAR_PASSWORD_ENGINE.get().is_some()
+            || MAGNETAR_PASSKEY_ENGINE.get().is_some()
+            || MAGNETAR_OAUTH_ENGINE.get().is_some()
+        {
+            return Err(FrameworkError::internal(
+                "Magnetar authentication engines are already installed",
+            ));
+        }
+        MAGNETAR_OAUTH_ENGINE
+            .set(oauth)
+            .map_err(|_| FrameworkError::internal("Magnetar OAuth engine installation raced"))?;
         guard.reserved = false;
         self.active = false;
         Ok(())
