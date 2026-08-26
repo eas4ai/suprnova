@@ -674,6 +674,17 @@
   rejection, timeout, loss, cancellation, and late/foreign/duplicate outcomes
   cannot reset retry state.
 
+  Initial and reconnect replay, no-tail evidence, event capability rotation,
+  and sequence advancement remain staged and effect-free until that exact
+  acknowledgment. SSE outcomes echo an opaque per-connection non-authority
+  handle plus the exact control and membership bindings; local promise
+  completion is not authentication. A first gap fences the old transport and
+  coalesces one recovery from the last committed position. Scheduled physical
+  handshakes own deadlines that release the shared per-origin permit. Published
+  declarations expose the same asynchronous membership contract, and ordinary
+  clean-checkout artifact budgets do not require ignored local benchmark
+  candidates; explicit binding/release mode does.
+
 - [x] Register the real async feature from ESM/classic entry points. Run feature-host, lifecycle, continuity, diagnostics, and artifact budget tests.
 - [x] Commit: `feat(browser): establish bounded subscription continuity`.
 

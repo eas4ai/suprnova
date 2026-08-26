@@ -17,6 +17,8 @@ export interface ReplayOutcome {
   readonly through: StreamPosition;
 }
 
+export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
+
 export class AsyncSubscription {
   #authorization: AuthorizedLogicalSubscription;
   readonly #clock: AsyncClock;
@@ -82,6 +84,27 @@ export class AsyncSubscription {
     this.#continuity.connected();
   }
 
+  preflightReauthorization(
+    authorization: AuthorizedLogicalSubscription,
+    encoded: readonly string[],
+  ): AsyncContinuityProof {
+    const position = this.#continuity.position();
+    if (
+      !validExpiration(authorization.expiresAt) ||
+      authorization.subscriptionId !== this.#authorization.subscriptionId ||
+      authorization.stream !== this.#authorization.stream ||
+      authorization.baseline.epoch !== position.epoch ||
+      authorization.baseline.sequence !== position.sequence
+    ) {
+      throw new Error("async_reauthorization_invalid");
+    }
+    return this.#preflightReplay(encoded, authorization);
+  }
+
+  preflightInitialReplay(encoded: readonly string[]): AsyncContinuityProof {
+    return this.#preflightReplay(encoded, this.#authorization);
+  }
+
   receive(encoded: string): AsyncReceiveDisposition {
     this.#assertCurrentAuthority();
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
@@ -126,6 +149,32 @@ export class AsyncSubscription {
     }
     this.#continuity.finishReplay();
     return Object.freeze({ applied, through: this.#continuity.position() });
+  }
+
+  #preflightReplay(
+    encoded: readonly string[],
+    authorization: AuthorizedLogicalSubscription,
+  ): AsyncContinuityProof {
+    const now = this.#clock.now();
+    if (!Number.isSafeInteger(now) || now < 0 || now >= authorization.expiresAt) {
+      throw new Error("async_membership_expired");
+    }
+    if (encoded.length === 0) {
+      this.#continuity.validateAuthoritativeBaseline(authorization.baseline);
+      return "authoritative_no_tail";
+    }
+    if (encoded.length > 1_024) throw new Error("async_replay_invalid");
+    let replayBytes = 0;
+    for (const value of encoded) {
+      replayBytes += new TextEncoder().encode(value).byteLength;
+      if (replayBytes > MAX_REPLAY_BYTES) throw new Error("async_replay_too_large");
+    }
+    const transcript = encoded.map((value) => decodeAsyncEnvelope(value, authorization));
+    if (transcript.some(({ payload }) => payload.kind === "complete")) {
+      throw new Error("async_replay_invalid");
+    }
+    this.#continuity.validateReplay(transcript.map(({ position }) => position));
+    return "complete_replay";
   }
 
   proveAuthoritativeBaseline(position: StreamPosition): void {

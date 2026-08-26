@@ -637,10 +637,23 @@ export type DocumentTransportFailure =
 export interface DocumentTransportConnectRequest {
   readonly authorization: AsyncTransportAuthorization;
   readonly key: DocumentTransportKey;
+  readonly transportGeneration: number;
   failed(reason: DocumentTransportFailure): void;
   message(encoded: string): void;
   opened(): void;
 }
+export interface DocumentMembershipAcknowledgment {
+  readonly descriptorBinding: string;
+  readonly kind: "authenticated";
+  readonly stream: string;
+  readonly subscriptionId: string;
+  readonly transportGeneration: number;
+}
+export interface DocumentMembershipRejection {
+  readonly kind: "rejected";
+  readonly reason: "authorization_lost" | "capacity" | "closed" | "timeout";
+}
+export type DocumentMembershipOutcome = DocumentMembershipAcknowledgment | DocumentMembershipRejection;
 export interface AsyncAuthorizationRequest {
   readonly identity: Readonly<{ component: string; documentKey: string; slot: string }>;
   readonly position: StreamPosition | null;
@@ -659,10 +672,29 @@ export interface AsyncAuthorityPort {
     | Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
 }
 export interface DocumentTransportPort {
-  subscribe(subscription: AuthorizedLogicalSubscription): void;
+  subscribe(subscription: AuthorizedLogicalSubscription): DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
   unsubscribe(subscriptionId: string): void;
   close(reason: "page_suspended" | "document_retired" | "transport_replaced" | "subscription_empty"): void;
 }
+const sseConnectionBrand: unique symbol;
+export interface SseConnectionHandle {
+  readonly [sseConnectionBrand]: true;
+}
+export interface SseMembershipControlRequest {
+  readonly connection: SseConnectionHandle;
+  readonly controlNonce: string;
+  readonly key: DocumentTransportKey;
+  readonly operation: "subscribe" | "unsubscribe";
+  readonly signal: AbortSignal;
+  readonly subscription: AuthorizedLogicalSubscription;
+  readonly transportGeneration: number;
+}
+export interface SseMembershipAcknowledgment extends DocumentMembershipAcknowledgment {
+  readonly connection: SseConnectionHandle;
+  readonly controlNonce: string;
+  readonly operation: "subscribe" | "unsubscribe";
+}
+export type SseMembershipOutcome = SseMembershipAcknowledgment | DocumentMembershipRejection;
 export interface AsyncTransportPorts {
   eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort;
   webSocket(connect: DocumentTransportConnectRequest): DocumentTransportPort;
@@ -684,11 +716,8 @@ export interface BrowserAsyncTransportOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly membershipTimeoutMs: number;
   readonly sseMembership: (
-    operation: "subscribe" | "unsubscribe",
-    subscription: AuthorizedLogicalSubscription,
-    key: AuthorizedLogicalSubscription["document"],
-    signal: AbortSignal,
-  ) => Promise<void> | void;
+    request: SseMembershipControlRequest,
+  ) => SseMembershipOutcome | Promise<SseMembershipOutcome>;
   readonly timers: AsyncTimerPort;
   readonly webSocket: (url: string) => { close(code?: number, reason?: string): void; send(data: string): void };
 }

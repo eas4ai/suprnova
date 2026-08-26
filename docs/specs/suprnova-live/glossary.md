@@ -578,8 +578,10 @@ _Avoid_: island socket, global shared socket, subscription authority, event bus
 Bounded post-commit proof that one exact logical subscription and signed
 descriptor binding were authenticated on the current physical document
 transport generation. WebSocket additionally binds the exact stream and a
-one-connection control nonce; control queueing, socket send success, or ambient
-membership presence is never this proof.
+one-connection control nonce. SSE additionally echoes the exact opaque
+non-authority physical connection handle, operation, and control nonce; local
+promise completion is not authority. Control queueing, socket send success, or
+ambient membership presence is never this proof.
 _Avoid_: queued control, sent frame, open socket, connection acknowledgment, continuity proof
 
 **WebSocket membership commit receipt**:

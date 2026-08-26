@@ -455,6 +455,16 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Staged initial and reconnect authorization, replay, event
+  capability rotation, and authoritative-no-tail evidence behind the exact
+  physical membership acknowledgment. Preflight cannot mutate island sequence
+  or dispatch refresh, signal, or event effects. SSE control outcomes echo an
+  opaque non-authority physical connection handle, control nonce, operation,
+  subscription, stream, descriptor binding, and transport generation; a
+  locally completed promise is not authentication. The first gap immediately
+  fences the old generation and coalesces one recovery from the last committed
+  position. Every scheduled physical handshake owns a bounded deadline that
+  releases its per-origin permit even when the transport never opens.
 - 2026-08-26 -- Required a typed, bounded, generation-fenced transport
   membership acknowledgment before replay or authoritative-no-tail evidence may
   prove physical continuity. SSE acknowledges only after its host control

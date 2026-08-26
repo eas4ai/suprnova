@@ -1,7 +1,7 @@
 # Suprnova Live -- Conventions
 
 Status: Normative
-Last revised: 2026-08-25
+Last revised: 2026-08-26
 
 ## Authority and application
 
@@ -500,13 +500,18 @@ fixtures.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Ordinary clean-checkout browser budgets always reproduce and
+  hash the production artifacts and enforce deterministic size ceilings without
+  requiring ignored local benchmark evidence. Explicit binding mode and release
+  mode require a fresh artifact-matched candidate with at least three
+  independent runs and compare it only with the prior approved baseline.
 - 2026-08-25 -- Separated the approved binding browser benchmark from ignored
-  candidate measurements. The current production artifact is always measured
-  into a distinct candidate file and compared with the prior approved baseline
-  under the 15-percent confirmation policy; an artifact hash mismatch is
-  reported rather than "fixed" by self-baselining. The runner rejects identical
-  baseline/output paths, and replacing the binding baseline requires explicit
-  approval plus independent evidence.
+  candidate measurements. In explicit binding or release mode, the current
+  production artifact is measured into a distinct candidate file and compared
+  with the prior approved baseline under the 15-percent confirmation policy; an
+  artifact hash mismatch is reported rather than "fixed" by self-baselining.
+  The runner rejects identical baseline/output paths, and replacing the binding
+  baseline requires explicit approval plus independent evidence.
 - 2026-08-24 -- Approved exact `imagesize` 0.15.0 with default features disabled
   and only PNG/JPEG/GIF/WebP dimension probes enabled. The 2026-08-24 provenance
   review recorded MIT licensing, no normal transitive dependencies, upstream

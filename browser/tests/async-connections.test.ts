@@ -131,13 +131,30 @@ function logicalSink(
 ) {
   return {
     envelope,
-    reauthorize: async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) =>
-      Object.freeze({
+    reauthorize: async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) => {
+      const subscription = await reauthorize(prior, signal);
+      return Object.freeze({
+        commit: () => "committed" as const,
+        discard: () => undefined,
         proof: "authoritative_no_tail" as const,
-        subscription: await reauthorize(prior, signal),
-      }),
+        subscription,
+      });
+    },
     state,
   };
+}
+
+function sseAcknowledgment(request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0]) {
+  return Object.freeze({
+    connection: request.connection,
+    controlNonce: request.controlNonce,
+    descriptorBinding: request.subscription.descriptorBinding,
+    kind: "authenticated" as const,
+    operation: request.operation,
+    stream: request.subscription.stream,
+    subscriptionId: request.subscription.subscriptionId,
+    transportGeneration: request.transportGeneration,
+  });
 }
 
 describe("multiplexed document transports", () => {
@@ -163,6 +180,46 @@ describe("multiplexed document transports", () => {
     });
     sources[0]?.emit(encoded);
     expect(deliveries).toEqual([encoded]);
+  });
+
+  it("releases a never-opening handshake so the ninth document can proceed", () => {
+    const scheduler = new OriginHandshakeScheduler(8);
+    const timers = new FakeTimers();
+    const sources: FakeEventSource[] = [];
+    const pools: DocumentConnectionPool[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const pool = new DocumentConnectionPool({
+        handshakeScheduler: scheduler,
+        handshakeTimeoutMs: 100,
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeEventSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      });
+      pools.push(pool);
+      pool.subscribe(authorized(index, `scope-${String(index)}`), logicalSink());
+    }
+
+    expect(sources).toHaveLength(8);
+    expect(scheduler.active("https://app.example.test")).toBe(8);
+    timers.flush();
+    expect(sources).toHaveLength(9);
+    expect(scheduler.active("https://app.example.test")).toBe(1);
+    sources[8]?.open();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
+    sources[0]?.open();
+    sources[0]?.fail();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
+    for (const pool of pools) pool.dispose();
+    expect(scheduler.active("https://app.example.test")).toBe(0);
   });
 
   it("routes an envelope only to its exact active subscription", () => {
@@ -291,7 +348,7 @@ describe("browser SSE authorization adapters", () => {
   it("uses native EventSource only for the scoped session-cookie contract", () => {
     const native = vi.fn<BrowserAsyncTransportOptions["eventSource"]>(() => ({ close: vi.fn() }));
     const fetchPort = vi.fn<typeof globalThis.fetch>();
-    const membership = vi.fn<BrowserAsyncTransportOptions["sseMembership"]>();
+    const membership = vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(sseAcknowledgment);
     const ports = new BrowserAsyncTransportPorts({
       eventSource: native,
       fetch: fetchPort,
@@ -310,7 +367,7 @@ describe("browser SSE authorization adapters", () => {
     expect(native.mock.calls[0]?.[0]).toBe("https://app.example.test/__live/async/events");
     expect(native.mock.calls[0]?.[1]).toEqual({ withCredentials: true });
     expect(fetchPort).not.toHaveBeenCalled();
-    expect(membership.mock.calls.map(([operation]) => operation)).toEqual([
+    expect(membership.mock.calls.map(([request]) => request.operation)).toEqual([
       "subscribe",
       "unsubscribe",
     ]);
@@ -406,8 +463,8 @@ describe("browser SSE authorization adapters", () => {
       eventSource: () => ({ close: vi.fn() }),
       fetch: vi.fn<typeof globalThis.fetch>(),
       membershipTimeoutMs: 5_000,
-      sseMembership(_operation, _subscription, _key, signal) {
-        signals.push(signal);
+      sseMembership(request) {
+        signals.push(request.signal);
         return new Promise(() => undefined);
       },
       timers: timers.port,
@@ -436,8 +493,8 @@ describe("browser SSE authorization adapters", () => {
       eventSource: () => ({ close: vi.fn() }),
       fetch: vi.fn<typeof globalThis.fetch>(),
       membershipTimeoutMs: 5_000,
-      sseMembership(_operation, _subscription, _key, signal) {
-        membershipSignal = signal;
+      sseMembership(request) {
+        membershipSignal = request.signal;
         return new Promise(() => undefined);
       },
       timers: timers.port,
@@ -455,6 +512,47 @@ describe("browser SSE authorization adapters", () => {
     expect(failed).toHaveBeenCalledWith("authorization_lost");
     expect(timers.pending.size).toBe(0);
     port.close("transport_replaced");
+  });
+
+  it("rejects an SSE acknowledgment echoed by a different physical document connection", async () => {
+    const timers = new FakeTimers();
+    const controls: {
+      request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0];
+      resolve(value: ReturnType<typeof sseAcknowledgment>): void;
+    }[] = [];
+    const leftFailed = vi.fn();
+    const rightFailed = vi.fn();
+    const ports = new BrowserAsyncTransportPorts({
+      eventSource: () => ({ close: vi.fn() }),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        return new Promise((resolve) => controls.push({ request, resolve }));
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const left = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed: leftFailed }),
+    );
+    const right = ports.eventSource(
+      connectRequest(Object.freeze({ kind: "session_cookie" as const }), { failed: rightFailed }),
+    );
+    const leftOutcome = left.subscribe(authorized(1));
+    const rightOutcome = right.subscribe(authorized(1));
+    const leftControl = controls[0];
+    const rightControl = controls[1];
+    if (leftControl === undefined || rightControl === undefined) throw new Error("missing_control");
+
+    expect(Object.keys(leftControl.request.connection)).toEqual([]);
+    expect(leftControl.request.connection).not.toBe(rightControl.request.connection);
+    leftControl.resolve(sseAcknowledgment(rightControl.request));
+    rightControl.resolve(sseAcknowledgment(rightControl.request));
+
+    await expect(leftOutcome).resolves.toEqual({ kind: "rejected", reason: "authorization_lost" });
+    await expect(rightOutcome).resolves.toMatchObject({ kind: "authenticated" });
+    expect(leftFailed).toHaveBeenCalledWith("authorization_lost");
+    expect(rightFailed).not.toHaveBeenCalled();
   });
 
   it("binds a WebSocket membership acknowledgment to the exact signed descriptor", async () => {

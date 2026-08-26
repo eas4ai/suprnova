@@ -21,6 +21,7 @@ const MAX_SSE_RECORD_BYTES = 65_536;
 const MAX_WEBSOCKET_ACK_BYTES = 512;
 const ASYNC_EVENT_PATH = "/__live/async/events";
 const WEBSOCKET_CONTROL_NONCE = /^[0-9a-z]{16}$/u;
+const SSE_CONNECTION_BRAND = Symbol("suprnova.live.async.sse.connection");
 const WEBSOCKET_ACK_LIMITS: CanonicalLimits = Object.freeze({
   maxBytes: MAX_WEBSOCKET_ACK_BYTES,
   maxDepth: 2,
@@ -67,6 +68,28 @@ export interface DocumentMembershipRejection {
 export type DocumentMembershipOutcome =
   DocumentMembershipAcknowledgment | DocumentMembershipRejection;
 
+export interface SseConnectionHandle {
+  readonly [SSE_CONNECTION_BRAND]: true;
+}
+
+export interface SseMembershipControlRequest {
+  readonly connection: SseConnectionHandle;
+  readonly controlNonce: string;
+  readonly key: DocumentTransportKey;
+  readonly operation: "subscribe" | "unsubscribe";
+  readonly signal: AbortSignal;
+  readonly subscription: AuthorizedLogicalSubscription;
+  readonly transportGeneration: number;
+}
+
+export interface SseMembershipAcknowledgment extends DocumentMembershipAcknowledgment {
+  readonly connection: SseConnectionHandle;
+  readonly controlNonce: string;
+  readonly operation: "subscribe" | "unsubscribe";
+}
+
+export type SseMembershipOutcome = SseMembershipAcknowledgment | DocumentMembershipRejection;
+
 export type EventSourcePort = DocumentTransportPort;
 export type WebSocketPort = DocumentTransportPort;
 
@@ -85,18 +108,22 @@ export interface LogicalSubscriptionSink {
 }
 
 export interface ReauthorizedLogicalSubscription {
-  readonly proof: "authoritative_no_tail" | "complete_replay";
+  commit(): "committed" | "degraded" | "stale";
+  discard(): void;
+  readonly proof: "authoritative_no_tail" | "complete_replay" | null;
   readonly subscription: AuthorizedLogicalSubscription;
 }
 
 export interface LogicalSubscriptionHandle {
   close(): void;
+  continuityLost(): void;
   continuityProved(): void;
   heartbeatLost(): void;
 }
 
 export interface DocumentConnectionPoolOptions {
   readonly handshakeScheduler: OriginHandshakeScheduler;
+  readonly handshakeTimeoutMs?: number;
   readonly randomness: AsyncRandomness;
   readonly reauthorizationConcurrency?: number;
   readonly reauthorizationTimeoutMs?: number;
@@ -121,11 +148,8 @@ export interface BrowserAsyncTransportOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly membershipTimeoutMs: number;
   readonly sseMembership: (
-    operation: "subscribe" | "unsubscribe",
-    subscription: AuthorizedLogicalSubscription,
-    key: DocumentTransportKey,
-    signal: AbortSignal,
-  ) => Promise<void> | void;
+    request: SseMembershipControlRequest,
+  ) => SseMembershipOutcome | Promise<SseMembershipOutcome>;
   readonly timers: AsyncTimerPort;
   readonly webSocket: (url: string) => NativeWebSocketLike;
 }
@@ -204,6 +228,7 @@ interface PendingMembershipControl {
 }
 
 interface QueuedMembershipControl {
+  readonly controlNonce: string;
   readonly operation: "subscribe" | "unsubscribe";
   resolve(outcome: DocumentMembershipOutcome): void;
   readonly subscription: AuthorizedLogicalSubscription;
@@ -214,7 +239,7 @@ interface MembershipControlCompletion {
 }
 
 type MembershipControlSettlement =
-  | Readonly<{ kind: "authenticated" }>
+  | Readonly<{ acknowledgment: SseMembershipAcknowledgment; kind: "authenticated" }>
   | Readonly<{
       kind: "rejected";
       reason: DocumentMembershipRejection["reason"];
@@ -227,23 +252,32 @@ function completeMembershipControl(
   completion.settle?.(outcome);
 }
 
-function membershipAcknowledgment(
-  subscription: AuthorizedLogicalSubscription,
-  transportGeneration: number,
-): DocumentMembershipAcknowledgment {
-  return Object.freeze({
-    descriptorBinding: subscription.descriptorBinding,
-    kind: "authenticated",
-    stream: subscription.stream,
-    subscriptionId: subscription.subscriptionId,
-    transportGeneration,
-  });
-}
-
 function membershipRejection(
   reason: DocumentMembershipRejection["reason"],
 ): DocumentMembershipRejection {
   return Object.freeze({ kind: "rejected", reason });
+}
+
+function membershipRejectionReason(outcome: unknown): DocumentMembershipRejection["reason"] | null {
+  if ((typeof outcome !== "object" && typeof outcome !== "function") || outcome === null) {
+    return null;
+  }
+  try {
+    const reason: unknown = Reflect.get(outcome, "reason");
+    return Reflect.get(outcome, "kind") === "rejected" &&
+      (reason === "authorization_lost" ||
+        reason === "capacity" ||
+        reason === "closed" ||
+        reason === "timeout")
+      ? reason
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function sseConnectionHandle(): SseConnectionHandle {
+  return Object.freeze({ [SSE_CONNECTION_BRAND]: true as const });
 }
 
 function validateTransportGeneration(request: DocumentTransportConnectRequest): void {
@@ -253,6 +287,7 @@ function validateTransportGeneration(request: DocumentTransportConnectRequest): 
 }
 
 class SseMembershipControls {
+  readonly #connection: SseConnectionHandle;
   readonly #membership: BrowserAsyncTransportOptions["sseMembership"];
   readonly #pending = new Set<PendingMembershipControl>();
   readonly #queue: QueuedMembershipControl[] = [];
@@ -260,17 +295,20 @@ class SseMembershipControls {
   readonly #timeoutMs: number;
   readonly #timers: AsyncTimerPort;
   #closed = false;
+  #nextControl = 0;
 
   constructor(
     request: DocumentTransportConnectRequest,
     membership: BrowserAsyncTransportOptions["sseMembership"],
     timers: AsyncTimerPort,
     timeoutMs: number,
+    connection: SseConnectionHandle,
   ) {
     this.#request = request;
     this.#membership = membership;
     this.#timers = timers;
     this.#timeoutMs = timeoutMs;
+    this.#connection = connection;
   }
 
   request(
@@ -287,7 +325,13 @@ class SseMembershipControls {
         this.#request.failed("authorization_lost");
         return;
       }
-      this.#queue.push({ operation, resolve, subscription });
+      this.#nextControl += 1;
+      this.#queue.push({
+        controlNonce: this.#nextControl.toString(36).padStart(16, "0"),
+        operation,
+        resolve,
+        subscription,
+      });
       this.#pump();
     });
   }
@@ -321,15 +365,20 @@ class SseMembershipControls {
       control.abort?.abort();
       completeMembershipControl(completion, { kind: "rejected", reason: "timeout" });
     }, this.#timeoutMs);
-    let pending: Promise<void> | void;
+    let pending: unknown;
     try {
       const abort = control.abort;
       if (abort === null) return;
       pending = this.#membership(
-        request.operation,
-        request.subscription,
-        this.#request.key,
-        abort.signal,
+        Object.freeze({
+          connection: this.#connection,
+          controlNonce: request.controlNonce,
+          key: this.#request.key,
+          operation: request.operation,
+          signal: abort.signal,
+          subscription: request.subscription,
+          transportGeneration: this.#request.transportGeneration,
+        }),
       );
     } catch {
       completeMembershipControl(completion, {
@@ -339,8 +388,15 @@ class SseMembershipControls {
       return;
     }
     void Promise.resolve(pending).then(
-      () => {
-        completeMembershipControl(completion, { kind: "authenticated" });
+      (outcome) => {
+        if (this.#validAcknowledgment(outcome, request)) {
+          completeMembershipControl(completion, { acknowledgment: outcome, kind: "authenticated" });
+        } else {
+          completeMembershipControl(completion, {
+            kind: "rejected",
+            reason: membershipRejectionReason(outcome) ?? "authorization_lost",
+          });
+        }
       },
       () => {
         completeMembershipControl(completion, {
@@ -374,9 +430,7 @@ class SseMembershipControls {
     this.#pending.delete(control);
     if (request !== null) {
       if (outcome.kind === "authenticated") {
-        request.resolve(
-          membershipAcknowledgment(request.subscription, this.#request.transportGeneration),
-        );
+        request.resolve(outcome.acknowledgment);
       } else {
         request.resolve(membershipRejection(outcome.reason));
       }
@@ -386,6 +440,29 @@ class SseMembershipControls {
       return;
     }
     this.#pump();
+  }
+
+  #validAcknowledgment(
+    outcome: unknown,
+    request: QueuedMembershipControl,
+  ): outcome is SseMembershipAcknowledgment {
+    if ((typeof outcome !== "object" && typeof outcome !== "function") || outcome === null) {
+      return false;
+    }
+    try {
+      return (
+        Reflect.get(outcome, "kind") === "authenticated" &&
+        Reflect.get(outcome, "connection") === this.#connection &&
+        Reflect.get(outcome, "controlNonce") === request.controlNonce &&
+        Reflect.get(outcome, "operation") === request.operation &&
+        Reflect.get(outcome, "subscriptionId") === request.subscription.subscriptionId &&
+        Reflect.get(outcome, "descriptorBinding") === request.subscription.descriptorBinding &&
+        Reflect.get(outcome, "stream") === request.subscription.stream &&
+        Reflect.get(outcome, "transportGeneration") === this.#request.transportGeneration
+      );
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -403,7 +480,13 @@ class NativeEventSourceAdapter implements EventSourcePort {
     membershipTimeoutMs: number,
   ) {
     validateTransportGeneration(request);
-    this.#controls = new SseMembershipControls(request, membership, timers, membershipTimeoutMs);
+    this.#controls = new SseMembershipControls(
+      request,
+      membership,
+      timers,
+      membershipTimeoutMs,
+      sseConnectionHandle(),
+    );
     const url = new URL(ASYNC_EVENT_PATH, request.key.origin).href;
     this.#native = create(url, Object.freeze({ withCredentials: true }));
     setHandler(this.#native, "onopen", () => {
@@ -459,7 +542,13 @@ class FetchEventSourceAdapter implements EventSourcePort {
   ) {
     validateTransportGeneration(request);
     this.#request = request;
-    this.#controls = new SseMembershipControls(request, membership, timers, membershipTimeoutMs);
+    this.#controls = new SseMembershipControls(
+      request,
+      membership,
+      timers,
+      membershipTimeoutMs,
+      sseConnectionHandle(),
+    );
     const authorization = request.authorization;
     if (authorization.kind !== "bearer" || authorization.credential.length === 0) {
       throw new Error("async_transport_authorization_invalid");
@@ -896,6 +985,7 @@ interface LogicalMembership {
   generation: number;
   pendingProofMembershipGeneration: number;
   pendingObservedTransportGeneration: number;
+  pendingAuthorization: ReauthorizedLogicalSubscription | null;
   provedTransportGeneration: number;
   recoveryRequestGeneration: number;
 }
@@ -913,6 +1003,7 @@ interface PhysicalGroup {
   generation: number;
   port: DocumentTransportPort | null;
   handshake: HandshakeRequest | null;
+  handshakeTimer: number | null;
   releaseHandshake: VoidFunction | null;
   reconnectAttempt: number;
   reconnectTimer: number | null;
@@ -952,6 +1043,14 @@ function completeReauthorization(
   current: ReauthorizedLogicalSubscription | null,
 ): void {
   completion.settle?.(current);
+}
+
+function discardReauthorization(current: ReauthorizedLogicalSubscription | null): void {
+  try {
+    current?.discard();
+  } catch {
+    // A rejected stage is inert even when its cleanup callback is hostile.
+  }
 }
 
 function normalizedKey(key: DocumentTransportKey): DocumentTransportKey {
@@ -1047,6 +1146,7 @@ function commonAuthorization(
 
 export class DocumentConnectionPool {
   readonly #handshakes: OriginHandshakeScheduler;
+  readonly #handshakeTimeoutMs: number;
   readonly #randomness: AsyncRandomness;
   readonly #reauthorizationConcurrency: number;
   readonly #reauthorizationTimeoutMs: number;
@@ -1062,13 +1162,22 @@ export class DocumentConnectionPool {
   constructor(options: DocumentConnectionPoolOptions) {
     const concurrency = options.reauthorizationConcurrency ?? 8;
     const timeout = options.reauthorizationTimeoutMs ?? 5_000;
+    const handshakeTimeout = options.handshakeTimeoutMs ?? 5_000;
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) {
       throw new RangeError("async_reauthorization_concurrency_invalid");
     }
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) {
       throw new RangeError("async_reauthorization_timeout_invalid");
     }
+    if (
+      !Number.isSafeInteger(handshakeTimeout) ||
+      handshakeTimeout < 1 ||
+      handshakeTimeout > 30_000
+    ) {
+      throw new RangeError("async_handshake_timeout_invalid");
+    }
     this.#handshakes = options.handshakeScheduler;
+    this.#handshakeTimeoutMs = handshakeTimeout;
     this.#randomness = options.randomness;
     this.#reauthorizationConcurrency = concurrency;
     this.#reauthorizationTimeoutMs = timeout;
@@ -1079,6 +1188,7 @@ export class DocumentConnectionPool {
   subscribe(
     authorization: AuthorizedLogicalSubscription,
     sink: LogicalSubscriptionSink,
+    pendingAuthorization: ReauthorizedLogicalSubscription | null = null,
   ): LogicalSubscriptionHandle {
     if (this.#state === "retired") throw new Error("async_document_retired");
     if (this.#memberships.size >= MAX_LOGICAL_SUBSCRIPTIONS) {
@@ -1086,6 +1196,9 @@ export class DocumentConnectionPool {
     }
     if (this.#memberships.has(authorization.subscriptionId)) {
       throw new Error("async_subscription_duplicate");
+    }
+    if (pendingAuthorization !== null && pendingAuthorization.subscription !== authorization) {
+      throw new Error("async_subscription_stage_invalid");
     }
     const membership: LogicalMembership = {
       active: true,
@@ -1096,6 +1209,7 @@ export class DocumentConnectionPool {
       group: null,
       pendingProofMembershipGeneration: -1,
       pendingObservedTransportGeneration: -1,
+      pendingAuthorization,
       provedTransportGeneration: -1,
       recoveryRequestGeneration: -1,
       sink,
@@ -1116,6 +1230,16 @@ export class DocumentConnectionPool {
       continuityProved: () => {
         const group = membership.group;
         if (group !== null) this.#proveContinuity(group, membership, group.generation);
+      },
+      continuityLost: () => {
+        const group = membership.group;
+        if (
+          membership.active &&
+          group !== null &&
+          (group.state === "open" || group.state === "connecting")
+        ) {
+          this.#failed(group, group.generation, "transport_lost");
+        }
       },
       heartbeatLost: () => {
         const group = membership.group;
@@ -1144,6 +1268,7 @@ export class DocumentConnectionPool {
     this.#groups.clear();
     for (const membership of this.#memberships.values()) {
       this.#cancelMembershipAttachment(membership);
+      this.#discardPendingAuthorization(membership);
       membership.group = null;
       membership.authenticatedTransportGeneration = -1;
       membership.pendingProofMembershipGeneration = -1;
@@ -1162,17 +1287,18 @@ export class DocumentConnectionPool {
       memberships.map(async (membership) => {
         const current = await this.#requestReauthorization(membership, generation);
         if (!this.#resumeCurrent(generation)) return;
-        const accepted =
-          current === null ? null : this.#acceptedReauthorization(membership, current);
-        if (accepted === null) {
+        const staged = current === null ? null : this.#acceptedReauthorization(membership, current);
+        const accepted = staged?.subscription ?? null;
+        if (accepted === null || staged === null) {
+          discardReauthorization(current);
           if (membership.active) this.#safeState(membership, "degraded");
           return;
         }
-        membership.authorization = accepted;
-        membership.pendingProofMembershipGeneration = membership.generation;
+        membership.pendingAuthorization = staged;
         try {
           this.#attach(membership);
         } catch {
+          this.#discardPendingAuthorization(membership);
           this.#safeState(membership, "degraded");
         }
       }),
@@ -1189,6 +1315,7 @@ export class DocumentConnectionPool {
     this.#groups.clear();
     for (const membership of this.#memberships.values()) {
       membership.active = false;
+      this.#discardPendingAuthorization(membership);
       membership.group = null;
       this.#safeState(membership, "closed");
     }
@@ -1209,6 +1336,7 @@ export class DocumentConnectionPool {
         continuityTransportGeneration: -1,
         generation: 0,
         handshake: null,
+        handshakeTimer: null,
         key,
         keyValue: encodedKey,
         memberships: new Map(),
@@ -1224,12 +1352,14 @@ export class DocumentConnectionPool {
       };
       this.#groups.set(encodedKey, group);
     } else {
-      const readySubscriptions = [...group.memberships.values()].map(
-        ({ authorization }) => authorization,
+      const readySubscriptions = [...group.memberships.values()].map((candidate) =>
+        this.#effectiveAuthorization(candidate),
       );
       const subscriptions = [
         ...readySubscriptions,
-        ...[...group.recovering.values()].map(({ authorization }) => authorization),
+        ...[...group.recovering.values()].map((candidate) =>
+          this.#effectiveAuthorization(candidate),
+        ),
         membership.authorization,
       ];
       try {
@@ -1285,9 +1415,12 @@ export class DocumentConnectionPool {
         return;
       }
       group.releaseHandshake = release;
+      group.handshakeTimer = this.#timers.timeout(() => {
+        group.handshakeTimer = null;
+        this.#failed(group, generation, "transport_lost");
+      }, this.#handshakeTimeoutMs);
       if (group.memberships.size === 0) {
-        release();
-        group.releaseHandshake = null;
+        this.#releaseHandshake(group);
         return;
       }
       const request: DocumentTransportConnectRequest = Object.freeze({
@@ -1355,6 +1488,7 @@ export class DocumentConnectionPool {
     group.handshake = null;
     for (const membership of group.memberships.values()) {
       this.#cancelMembershipAttachment(membership);
+      this.#discardPendingAuthorization(membership);
     }
     try {
       group.port?.close("transport_replaced");
@@ -1420,6 +1554,7 @@ export class DocumentConnectionPool {
     membership.active = false;
     membership.generation += 1;
     this.#cancelMembershipAttachment(membership);
+    this.#discardPendingAuthorization(membership);
     this.#memberships.delete(membership.authorization.subscriptionId);
     const group = membership.group;
     membership.group = null;
@@ -1453,11 +1588,13 @@ export class DocumentConnectionPool {
     group.handshake = null;
     for (const membership of group.memberships.values()) {
       this.#cancelMembershipAttachment(membership);
+      this.#discardPendingAuthorization(membership);
       membership.authenticatedTransportGeneration = -1;
       membership.pendingObservedTransportGeneration = -1;
     }
     for (const membership of group.recovering.values()) {
       this.#cancelMembershipAttachment(membership);
+      this.#discardPendingAuthorization(membership);
       membership.authenticatedTransportGeneration = -1;
       membership.pendingObservedTransportGeneration = -1;
     }
@@ -1488,8 +1625,10 @@ export class DocumentConnectionPool {
     const poolGeneration = this.#generation;
     void this.#requestReauthorization(membership, poolGeneration).then((current) => {
       if (!this.#recoveryCurrent(group, membership, recoveryGeneration)) return;
-      const accepted = current === null ? null : this.#acceptedReauthorization(membership, current);
-      if (accepted === null || !sameKey(accepted.document, group.key)) {
+      const staged = current === null ? null : this.#acceptedReauthorization(membership, current);
+      const accepted = staged?.subscription ?? null;
+      if (accepted === null || staged === null || !sameKey(accepted.document, group.key)) {
+        discardReauthorization(current);
         group.recovering.delete(membership.authorization.subscriptionId);
         membership.group = null;
         if (membership.active) this.#safeState(membership, "degraded");
@@ -1497,7 +1636,9 @@ export class DocumentConnectionPool {
         return;
       }
       const subscriptions = [
-        ...[...group.memberships.values()].map(({ authorization }) => authorization),
+        ...[...group.memberships.values()].map((candidate) =>
+          this.#effectiveAuthorization(candidate),
+        ),
         accepted,
       ];
       let authorization: AsyncTransportAuthorization;
@@ -1506,12 +1647,12 @@ export class DocumentConnectionPool {
         authorization = commonAuthorization(subscriptions);
         policy = aggregatePolicy(subscriptions);
       } catch {
+        discardReauthorization(staged);
         this.#retireConflictedGroup(group);
         return;
       }
       group.recovering.delete(membership.authorization.subscriptionId);
-      membership.authorization = accepted;
-      membership.pendingProofMembershipGeneration = membership.generation;
+      membership.pendingAuthorization = staged;
       membership.provedTransportGeneration = -1;
       group.memberships.set(accepted.subscriptionId, membership);
       group.authorization = authorization;
@@ -1555,7 +1696,7 @@ export class DocumentConnectionPool {
   #acceptedReauthorization(
     membership: LogicalMembership,
     result: ReauthorizedLogicalSubscription,
-  ): AuthorizedLogicalSubscription | null {
+  ): ReauthorizedLogicalSubscription | null {
     let current: unknown;
     let proof: unknown;
     try {
@@ -1574,8 +1715,10 @@ export class DocumentConnectionPool {
     const authorization = current as AuthorizedLogicalSubscription;
     return membership.active &&
       authorization.subscriptionId === membership.authorization.subscriptionId &&
-      authorization.stream === membership.authorization.stream
-      ? authorization
+      authorization.stream === membership.authorization.stream &&
+      typeof result.commit === "function" &&
+      typeof result.discard === "function"
+      ? result
       : null;
   }
 
@@ -1686,7 +1829,9 @@ export class DocumentConnectionPool {
   }
 
   #refreshGroupAuthority(group: PhysicalGroup): void {
-    const subscriptions = [...group.memberships.values()].map(({ authorization }) => authorization);
+    const subscriptions = [...group.memberships.values()].map((membership) =>
+      this.#effectiveAuthorization(membership),
+    );
     group.authorization = commonAuthorization(subscriptions);
     group.policy = aggregatePolicy(subscriptions);
   }
@@ -1705,6 +1850,10 @@ export class DocumentConnectionPool {
   }
 
   #releaseHandshake(group: PhysicalGroup): void {
+    if (group.handshakeTimer !== null) {
+      this.#timers.clearTimeout(group.handshakeTimer);
+      group.handshakeTimer = null;
+    }
     const release = group.releaseHandshake;
     group.releaseHandshake = null;
     release?.();
@@ -1756,12 +1905,18 @@ export class DocumentConnectionPool {
     membership.attachmentCompletion = completion;
     let pending: DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
     try {
-      pending = port.subscribe(membership.authorization);
+      pending = port.subscribe(this.#effectiveAuthorization(membership));
     } catch {
       completeMembershipAttachment(completion, null);
       return;
     }
-    if (this.#isMembershipAcknowledgment(pending, membership.authorization, transportGeneration)) {
+    if (
+      this.#isMembershipAcknowledgment(
+        pending,
+        this.#effectiveAuthorization(membership),
+        transportGeneration,
+      )
+    ) {
       completeMembershipAttachment(completion, pending);
       return;
     }
@@ -1798,14 +1953,42 @@ export class DocumentConnectionPool {
     if (
       !this.#isMembershipAcknowledgment(
         acknowledgment,
-        membership.authorization,
+        this.#effectiveAuthorization(membership),
         transportGeneration,
       )
     ) {
       this.#failed(group, transportGeneration, "authorization_lost");
       return;
     }
+    const staged = membership.pendingAuthorization;
+    if (staged !== null) {
+      membership.pendingAuthorization = null;
+      const outcome: ReturnType<ReauthorizedLogicalSubscription["commit"]> = (() => {
+        try {
+          return staged.commit();
+        } catch {
+          return "stale";
+        }
+      })();
+      if (outcome === "stale") {
+        discardReauthorization(staged);
+        this.#safeState(membership, "degraded");
+        return;
+      }
+      membership.authorization = staged.subscription;
+      if (outcome === "committed" && staged.proof !== null) {
+        membership.pendingProofMembershipGeneration = membership.generation;
+      }
+    }
     membership.authenticatedTransportGeneration = transportGeneration;
+    if (
+      staged !== null &&
+      staged.proof !== null &&
+      membership.pendingProofMembershipGeneration !== membership.generation
+    ) {
+      this.#safeState(membership, "degraded");
+      return;
+    }
     this.#consumeContinuityProof(group, membership, transportGeneration);
     if (membership.pendingObservedTransportGeneration === transportGeneration) {
       membership.pendingObservedTransportGeneration = -1;
@@ -1817,6 +2000,21 @@ export class DocumentConnectionPool {
     const completion = membership.attachmentCompletion;
     membership.attachmentCompletion = null;
     if (completion !== null) completion.settle = null;
+  }
+
+  #discardPendingAuthorization(membership: LogicalMembership): void {
+    const staged = membership.pendingAuthorization;
+    membership.pendingAuthorization = null;
+    if (staged === null) return;
+    try {
+      discardReauthorization(staged);
+    } catch {
+      // A dropped stage has no authority and cleanup is best-effort.
+    }
+  }
+
+  #effectiveAuthorization(membership: LogicalMembership): AuthorizedLogicalSubscription {
+    return membership.pendingAuthorization?.subscription ?? membership.authorization;
   }
 
   #isMembershipAcknowledgment(

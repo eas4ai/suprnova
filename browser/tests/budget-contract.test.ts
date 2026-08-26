@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
@@ -93,6 +94,38 @@ describe("role-aware production artifact budgets", () => {
 });
 
 describe("browser benchmark provenance", () => {
+  it("keeps ordinary clean-checkout budgets independent of ignored binding evidence", () => {
+    const script = new URL("../scripts/check-budget.mjs", import.meta.url);
+    const buildScript = new URL("../scripts/build.mjs", import.meta.url);
+    const missing = new URL("../benchmarks/local/intentionally-absent.json", import.meta.url);
+    const environment = {
+      ...process.env,
+      SUPRNOVA_LIVE_BROWSER_BUDGET_CANDIDATE: missing.pathname,
+    };
+    const built = spawnSync(process.execPath, [buildScript.pathname], {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      env: environment,
+    });
+    expect(`${built.stdout}${built.stderr}`).toBe("");
+    expect(built.status).toBe(0);
+    const ordinary = spawnSync(process.execPath, [script.pathname], {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      env: environment,
+    });
+    expect(`${ordinary.stdout}${ordinary.stderr}`).toContain("browser_binding=skipped");
+    expect(ordinary.status).toBe(0);
+
+    const binding = spawnSync(process.execPath, [script.pathname, "--binding"], {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      env: environment,
+    });
+    expect(binding.status).not.toBe(0);
+    expect(`${binding.stdout}${binding.stderr}`).toContain("browser_budget_candidate_missing");
+  }, 30_000);
+
   it("keeps the declared runner arguments identical to the runtime parser", () => {
     const parsed: BrowserBudgetArguments = argumentsFrom([
       "--baseline",

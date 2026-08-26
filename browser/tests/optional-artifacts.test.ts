@@ -252,12 +252,51 @@ describe("role-typed optional production artifacts", () => {
         asyncRegistration,
         configureAsync,
         type AsyncFeatureOptions,
+        type AsyncTransportPorts,
+        type BrowserAsyncTransportOptions,
+        type DocumentMembershipOutcome,
+        type DocumentTransportConnectRequest,
+        type DocumentTransportPort,
+        type SseMembershipAcknowledgment,
+        type SseMembershipControlRequest,
       } from "@suprnova/live/async";
       const liveApi: SuprnovaLivePublicApi = live;
       const runtimeApi: SuprnovaLivePublicApi = runtime;
       const upload: RuntimeFeature = uploads;
       const asynchronousFeature: RuntimeFeature = asynchronous;
       const asyncOptions = null as AsyncFeatureOptions | null;
+      const customTransport: AsyncTransportPorts = {
+        eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort {
+          return {
+            close() {},
+            subscribe(subscription): DocumentMembershipOutcome {
+              return {
+                descriptorBinding: subscription.descriptorBinding,
+                kind: "authenticated",
+                stream: subscription.stream,
+                subscriptionId: subscription.subscriptionId,
+                transportGeneration: connect.transportGeneration,
+              };
+            },
+            unsubscribe() {},
+          };
+        },
+        webSocket(connect: DocumentTransportConnectRequest): DocumentTransportPort {
+          return this.eventSource(connect);
+        },
+      };
+      const sseMembership: BrowserAsyncTransportOptions["sseMembership"] = (
+        request: SseMembershipControlRequest,
+      ): SseMembershipAcknowledgment => ({
+        connection: request.connection,
+        controlNonce: request.controlNonce,
+        descriptorBinding: request.subscription.descriptorBinding,
+        kind: "authenticated",
+        operation: request.operation,
+        stream: request.subscription.stream,
+        subscriptionId: request.subscription.subscriptionId,
+        transportGeneration: request.transportGeneration,
+      });
       const classicSurface = null as ClassicFeatureSurface | null;
       const stimulusOutcome: RuntimeFeatureRegistrationOutcome = stimulus;
       const uploadApplication = null as UploadApplicationPort | null;
@@ -334,6 +373,8 @@ describe("role-typed optional production artifacts", () => {
         upload,
         asynchronousFeature,
         asyncOptions,
+        customTransport,
+        sseMembership,
         classicSurface,
         stimulusOutcome,
         uploadApplication,
@@ -359,6 +400,38 @@ describe("role-typed optional production artifacts", () => {
     );
     expect(`${allowed.stdout}${allowed.stderr}`).toBe("");
     expect(allowed.status).toBe(0);
+
+    await writeFile(
+      join(consumer, "consumer.ts"),
+      `import type {
+        DocumentTransportConnectRequest,
+        DocumentTransportPort,
+      } from "@suprnova/live/async";
+      const voidSubscribe: DocumentTransportPort = {
+        close() {},
+        subscribe() {},
+        unsubscribe() {},
+      };
+      const missingGeneration: DocumentTransportConnectRequest = {
+        authorization: { kind: "session_cookie" },
+        key: { authorizationScope: "scope", origin: "https://app.test", transport: "sse" },
+        failed() {},
+        message() {},
+        opened() {},
+      };
+      void [voidSubscribe, missingGeneration];
+      `,
+      "utf8",
+    );
+    const invalidAsyncPort = spawnSync(
+      process.execPath,
+      [typeScript.pathname, "--project", "tsconfig.json", "--pretty", "false"],
+      { cwd: consumer, encoding: "utf8" },
+    );
+    const invalidAsyncDiagnostics = `${invalidAsyncPort.stdout}${invalidAsyncPort.stderr}`;
+    expect(invalidAsyncPort.status).toBe(2);
+    expect(invalidAsyncDiagnostics).toContain("Type 'void' is not assignable");
+    expect(invalidAsyncDiagnostics).toContain("transportGeneration");
 
     await writeFile(
       join(consumer, "consumer.ts"),

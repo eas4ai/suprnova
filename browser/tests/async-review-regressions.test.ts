@@ -121,14 +121,30 @@ function sink(
 ) {
   return {
     envelope: vi.fn(),
-    reauthorize: vi.fn(async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) =>
-      Object.freeze({
+    reauthorize: vi.fn(async (prior: AuthorizedLogicalSubscription, signal: AbortSignal) => {
+      const subscription = await reauthorize(prior, signal);
+      return Object.freeze({
+        commit: () => "committed" as const,
+        discard: () => undefined,
         proof,
-        subscription: await reauthorize(prior, signal),
-      }),
-    ),
+        subscription,
+      });
+    }),
     state: vi.fn(),
   } satisfies LogicalSubscriptionSink;
+}
+
+function sseAcknowledgment(request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0]) {
+  return Object.freeze({
+    connection: request.connection,
+    controlNonce: request.controlNonce,
+    descriptorBinding: request.subscription.descriptorBinding,
+    kind: "authenticated" as const,
+    operation: request.operation,
+    stream: request.subscription.stream,
+    subscriptionId: request.subscription.subscriptionId,
+    transportGeneration: request.transportGeneration,
+  });
 }
 
 async function settle(): Promise<void> {
@@ -544,9 +560,15 @@ describe("reviewed SSE membership ownership", () => {
         },
         fetch: vi.fn<typeof globalThis.fetch>(),
         membershipTimeoutMs: 5_000,
-        sseMembership(_operation, _subscription, _key, signal) {
-          return new Promise<void>((resolve, reject) => {
-            controls.push({ reject, resolve, signal });
+        sseMembership(request) {
+          return new Promise((resolve, reject) => {
+            controls.push({
+              reject,
+              resolve: () => {
+                resolve(sseAcknowledgment(request));
+              },
+              signal: request.signal,
+            });
           });
         },
         timers: timers.port,
@@ -616,9 +638,15 @@ describe("reviewed SSE membership ownership", () => {
         },
         fetch: vi.fn<typeof globalThis.fetch>(),
         membershipTimeoutMs: 5_000,
-        sseMembership(_operation, _subscription, _key, signal) {
-          return new Promise<void>((resolve, reject) => {
-            controls.push({ reject, resolve, signal });
+        sseMembership(request) {
+          return new Promise((resolve, reject) => {
+            controls.push({
+              reject,
+              resolve: () => {
+                resolve(sseAcknowledgment(request));
+              },
+              signal: request.signal,
+            });
           });
         },
         timers: timers.port,
@@ -668,14 +696,14 @@ describe("reviewed SSE membership ownership", () => {
       },
       fetch: vi.fn<typeof globalThis.fetch>(),
       membershipTimeoutMs: 5_000,
-      sseMembership() {
+      sseMembership(request) {
         started += 1;
         active += 1;
         maximumActive = Math.max(maximumActive, active);
-        return new Promise<void>((resolve) => {
+        return new Promise((resolve) => {
           releases.push(() => {
             active -= 1;
-            resolve();
+            resolve(sseAcknowledgment(request));
           });
         });
       },

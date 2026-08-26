@@ -7,8 +7,10 @@ import {
   type AsyncAuthorizationRequest,
 } from "../src/async-updates/feature.js";
 import {
+  BrowserAsyncTransportPorts,
   DocumentConnectionPool,
   type AsyncTransportPorts,
+  type BrowserAsyncTransportOptions,
   type DocumentTransportConnectRequest,
   type EventSourcePort,
 } from "../src/async-updates/connections.js";
@@ -146,11 +148,14 @@ describe("async feature lifecycle", () => {
     const originalSubscribe = DocumentConnectionPool.prototype.subscribe;
     const subscribe = vi
       .spyOn(DocumentConnectionPool.prototype, "subscribe")
-      .mockImplementation(function (this: DocumentConnectionPool, authorized, sink) {
-        const handle = originalSubscribe.call(this, authorized, sink);
+      .mockImplementation(function (this: DocumentConnectionPool, authorized, sink, pending) {
+        const handle = originalSubscribe.call(this, authorized, sink, pending);
         return Object.freeze({
           close: () => {
             handle.close();
+          },
+          continuityLost: () => {
+            handle.continuityLost();
           },
           continuityProved: () => {
             continuityProved();
@@ -212,7 +217,7 @@ describe("async feature lifecycle", () => {
     }
   });
 
-  it("applies a complete initial replay from the signed baseline before transport delivery", async () => {
+  it("applies a complete initial replay only after physical membership authentication", async () => {
     const sources: FakeSource[] = [];
     const refresh = vi.fn(() => "queued" as const);
     const root = Object.freeze({}) as Element;
@@ -259,8 +264,10 @@ describe("async feature lifecycle", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(refresh).toHaveBeenCalledOnce();
     expect(sources).toHaveLength(1);
+    expect(refresh).not.toHaveBeenCalled();
+    sources[0]?.open();
+    expect(refresh).toHaveBeenCalledOnce();
     owner.dispose();
   });
 
@@ -360,8 +367,9 @@ describe("async feature lifecycle", () => {
       sequence: 3n,
     });
     expect(sources).toHaveLength(2);
-    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledOnce();
     sources[1]?.open();
+    expect(refresh).toHaveBeenCalledTimes(2);
     sources[0]?.emit(envelope(4n, { kind: "refresh", name: "refresh" }));
     expect(refresh).toHaveBeenCalledTimes(2);
     sources[1]?.emit(envelope(5n, { kind: "refresh", name: "refresh" }));
@@ -506,7 +514,7 @@ describe("async feature lifecycle", () => {
     owner.dispose();
   });
 
-  it("recovers an ordinary reconnect tail before opening the replacement transport", async () => {
+  it("stages an ordinary reconnect tail until the replacement membership authenticates", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();
     const requests: AsyncAuthorizationRequest[] = [];
@@ -566,11 +574,269 @@ describe("async feature lifecycle", () => {
     for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 
     expect(requests[1]?.position).toEqual({ epoch: 1n, sequence: 1n });
-    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).not.toHaveBeenCalled();
     expect(sources).toHaveLength(2);
     sources[1]?.open();
+    expect(refresh).toHaveBeenCalledOnce();
     sources[1]?.emit(envelope(3n, { kind: "refresh", name: "refresh" }));
     expect(refresh).toHaveBeenCalledTimes(2);
+    owner.dispose();
+  });
+
+  it("coalesces the first gap into one immediate reconnect from the last committed position", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const requests: AsyncAuthorizationRequest[] = [];
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            requests.push(request);
+            const current = authorization(request.position?.sequence ?? 0n);
+            return request.prior === null
+              ? current
+              : Object.freeze({ replay: Object.freeze([]), subscription: current });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: () => "queued",
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-gap",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sources[0]?.open();
+
+    sources[0]?.emit(envelope(3n, { kind: "heartbeat" }));
+    sources[0]?.emit(envelope(4n, { kind: "heartbeat" }));
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+    expect(requests).toHaveLength(1);
+    timers.fire(50);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.position).toEqual({ epoch: 1n, sequence: 0n });
+    sources[0]?.emit(envelope(5n, { kind: "heartbeat" }));
+    expect(requests).toHaveLength(2);
+    owner.dispose();
+  });
+
+  it("keeps initial replay inert through the real SSE adapter until its exact control acknowledgment", async () => {
+    const timers = new FakeTimers();
+    const native: {
+      close: ReturnType<typeof vi.fn>;
+      onerror?: VoidFunction;
+      onopen?: VoidFunction;
+    }[] = [];
+    const controls: {
+      request: Parameters<BrowserAsyncTransportOptions["sseMembership"]>[0];
+      resolve(value: unknown): void;
+    }[] = [];
+    const transports = new BrowserAsyncTransportPorts({
+      eventSource() {
+        const source = { close: vi.fn() };
+        native.push(source);
+        return source;
+      },
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership(request) {
+        return new Promise((resolve) => controls.push({ request, resolve }));
+      },
+      timers: timers.port,
+      webSocket: vi.fn<BrowserAsyncTransportOptions["webSocket"]>(),
+    });
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize(request) {
+            const position = request.position?.sequence ?? 0n;
+            return Object.freeze({
+              replay: Object.freeze([
+                envelope(position + 1n, { kind: "refresh", name: "refresh" }),
+              ]),
+              subscription: authorization(position),
+            });
+          },
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-real-sse",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    native[0]?.onopen?.();
+    expect(refresh).not.toHaveBeenCalled();
+    const control = controls[0];
+    if (control === undefined) throw new Error("missing_control");
+    control.resolve({
+      connection: control.request.connection,
+      controlNonce: control.request.controlNonce,
+      descriptorBinding: control.request.subscription.descriptorBinding,
+      kind: "authenticated",
+      operation: control.request.operation,
+      stream: control.request.subscription.stream,
+      subscriptionId: control.request.subscription.subscriptionId,
+      transportGeneration: control.request.transportGeneration,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledOnce();
+
+    native[0]?.onerror?.();
+    timers.fire(50);
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    native[1]?.onopen?.();
+    expect(refresh).toHaveBeenCalledOnce();
+    const reconnectControl = controls[1];
+    if (reconnectControl === undefined) throw new Error("missing_reconnect_control");
+    reconnectControl.resolve({
+      connection: reconnectControl.request.connection,
+      controlNonce: reconnectControl.request.controlNonce,
+      descriptorBinding: reconnectControl.request.subscription.descriptorBinding,
+      kind: "authenticated",
+      operation: reconnectControl.request.operation,
+      stream: reconnectControl.request.subscription.stream,
+      subscriptionId: reconnectControl.request.subscription.subscriptionId,
+      transportGeneration: reconnectControl.request.transportGeneration,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    owner.dispose();
+  });
+
+  it("keeps initial replay inert through the real WebSocket adapter until its exact ACK", async () => {
+    const timers = new FakeTimers();
+    const sent: string[] = [];
+    const sockets: {
+      close: ReturnType<typeof vi.fn>;
+      onmessage?: (event?: unknown) => void;
+      onopen?: VoidFunction;
+      send(data: string): void;
+    }[] = [];
+    const transports = new BrowserAsyncTransportPorts({
+      eventSource: vi.fn<BrowserAsyncTransportOptions["eventSource"]>(),
+      fetch: vi.fn<typeof globalThis.fetch>(),
+      membershipTimeoutMs: 5_000,
+      sseMembership: vi.fn<BrowserAsyncTransportOptions["sseMembership"]>(),
+      timers: timers.port,
+      webSocket() {
+        const socket = {
+          close: vi.fn(),
+          send(data: string) {
+            sent.push(data);
+          },
+        };
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const refresh = vi.fn(() => "queued" as const);
+    const root = Object.freeze({}) as Element;
+    const websocketAuthorization = authorization(0n, {
+      document: Object.freeze({
+        authorizationScope: "document-scope",
+        origin: "https://app.example.test",
+        transport: "websocket" as const,
+      }),
+    });
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: {
+          authorize: () =>
+            Object.freeze({
+              replay: Object.freeze([envelope(1n, { kind: "refresh", name: "refresh" })]),
+              subscription: websocketAuthorization,
+            }),
+        },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports,
+      },
+    );
+    owner.connectIsland({
+      authorizeRegisteredEvents: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: refresh,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-real-websocket",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      proposeUploadHandle: () => "accepted",
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    sockets[0]?.onopen?.();
+    expect(refresh).not.toHaveBeenCalled();
+    const request = JSON.parse(sent[0] ?? "null") as Record<string, unknown>;
+    sockets[0]?.onmessage?.({
+      data: canonicalize({
+        control_nonce: String(request["control_nonce"]),
+        descriptor_binding: String(request["descriptor_binding"]),
+        kind: "membership_authenticated",
+        stream: String(request["stream"]),
+        subscription: String(request["subscription"]),
+        transport_generation: Number(request["transport_generation"]),
+      }),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledOnce();
     owner.dispose();
   });
 

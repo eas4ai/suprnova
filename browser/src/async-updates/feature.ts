@@ -73,11 +73,6 @@ type AuthorityOutcome =
     }>
   | Readonly<{ kind: "rejected"; reason: string }>;
 
-interface AppliedAuthorization {
-  readonly proof: ReauthorizedLogicalSubscription["proof"] | null;
-  readonly subscription: AuthorizedLogicalSubscription;
-}
-
 function completeAuthority(completion: AuthorityCompletion, outcome: AuthorityOutcome): void {
   completion.settle?.(outcome);
 }
@@ -332,12 +327,25 @@ class AsyncIslandController implements FeatureIslandController {
     if (resume) this.#state = "resuming";
     try {
       const current = await this.#authorize(prior, signal);
-      if (current.proof === null) throw new Error("async_continuity_proof_required");
-      if (resume) {
-        if (!this.#resuming()) throw new Error("async_authorization_stale");
-        this.#state = "active";
-      }
-      return Object.freeze({ proof: current.proof, subscription: current.subscription });
+      let settled = false;
+      return Object.freeze({
+        commit: () => {
+          if (settled) return "stale";
+          settled = true;
+          const outcome = current.commit();
+          if (outcome !== "stale" && resume && this.#resuming()) this.#state = "active";
+          else if (resume && this.#state === "resuming") this.#state = "suspended";
+          return outcome;
+        },
+        discard: () => {
+          if (settled) return;
+          settled = true;
+          current.discard();
+          if (resume && this.#state === "resuming") this.#state = "suspended";
+        },
+        proof: current.proof,
+        subscription: current.subscription,
+      });
     } catch (error: unknown) {
       if (resume && this.#state === "resuming") this.#state = "suspended";
       throw error;
@@ -371,7 +379,7 @@ class AsyncIslandController implements FeatureIslandController {
   async #authorize(
     prior: AuthorizedLogicalSubscription | null,
     externalSignal?: AbortSignal,
-  ): Promise<AppliedAuthorization> {
+  ): Promise<ReauthorizedLogicalSubscription> {
     const generation = ++this.#generation;
     this.#authorizationAbort?.abort();
     const abort = new AbortController();
@@ -402,7 +410,9 @@ class AsyncIslandController implements FeatureIslandController {
     }
     let current: AuthorizedLogicalSubscription;
     let replay: readonly string[];
+    let carriesContinuityEvidence = false;
     if (isAuthorizationResult(resolved)) {
+      carriesContinuityEvidence = true;
       current = resolved.subscription;
       replay = resolved.replay;
     } else {
@@ -419,28 +429,13 @@ class AsyncIslandController implements FeatureIslandController {
     ) {
       throw new Error("async_authorization_stale");
     }
-    let proof: ReauthorizedLogicalSubscription["proof"] | null = null;
     if (prior === null) {
-      this.#install(current);
-      if (replay.length !== 0) this.#subscription?.receiveReplay(replay);
-    } else {
-      const subscription = this.#subscription;
-      if (subscription === null || position === null) throw new Error("async_subscription_retired");
-      subscription.reauthorize(current);
-      this.#eventCapability = this.#port.authorizeRegisteredEvents(
-        Object.freeze({ descriptorBinding: current.descriptorBinding, events: current.events }),
-      );
-      this.#currentAuthorization = current;
-      this.#owner.remember(this, current);
-      if (replay.length !== 0) {
-        subscription.receiveReplay(replay);
-        proof = "complete_replay";
-      } else {
-        subscription.proveAuthoritativeBaseline(position);
-        proof = "authoritative_no_tail";
-      }
+      return this.#install(current, replay, generation, carriesContinuityEvidence);
     }
-    return Object.freeze({ proof, subscription: current });
+    const subscription = this.#subscription;
+    if (subscription === null || position === null) throw new Error("async_subscription_retired");
+    const proof = subscription.preflightReauthorization(current, replay);
+    return this.#stageAuthorization(current, replay, proof, generation);
   }
 
   #authorization(): AuthorizedLogicalSubscription | null {
@@ -451,16 +446,15 @@ class AsyncIslandController implements FeatureIslandController {
     return this.#state === "resuming";
   }
 
-  #install(authorization: AuthorizedLogicalSubscription): void {
+  #install(
+    authorization: AuthorizedLogicalSubscription,
+    replay: readonly string[],
+    generation: number,
+    carriesContinuityEvidence: boolean,
+  ): ReauthorizedLogicalSubscription {
     if (this.#subscription !== null || this.#handle !== null) {
       throw new Error("async_subscription_duplicate");
     }
-    const eventCapability = this.#port.authorizeRegisteredEvents(
-      Object.freeze({
-        descriptorBinding: authorization.descriptorBinding,
-        events: authorization.events,
-      }),
-    );
     const dispatch: AsyncDispatchPort = Object.freeze({
       browserEvent: (event: Extract<AsyncPayload, { kind: "browser_event" }>) => {
         const contract = this.#currentAuthorization?.events.find(
@@ -490,29 +484,97 @@ class AsyncIslandController implements FeatureIslandController {
     });
     const subscription = new AsyncSubscription(authorization, dispatch, this.#clock);
     this.#subscription = subscription;
-    this.#eventCapability = eventCapability;
-    this.#currentAuthorization = authorization;
-    this.#owner.remember(this, authorization);
-    this.#handle = this.#owner.subscribe(authorization, {
-      envelope: (encoded) => {
+    const preflight = subscription.preflightInitialReplay(replay);
+    const proof = carriesContinuityEvidence ? preflight : null;
+    const staged = this.#stageAuthorization(authorization, replay, proof, generation, true);
+    try {
+      this.#handle = this.#owner.subscribe(
+        authorization,
+        {
+          envelope: (encoded) => {
+            try {
+              const disposition = subscription.receive(encoded);
+              if (
+                (disposition === "applied" || disposition === "duplicate") &&
+                subscription.state() === "current"
+              ) {
+                this.#handle?.continuityProved();
+              } else if (disposition === "gap" || disposition === "continuity_required") {
+                this.#handle?.continuityLost();
+              }
+              this.#armHeartbeat(this.#heartbeatTimeout());
+            } catch {
+              subscription.authorizationUncertain();
+              report(this.#context, "operation_rejected");
+            }
+          },
+          reauthorize: (prior, signal) => this.reauthorize(prior, signal),
+          state: (state) => {
+            this.#transportState(state);
+          },
+        },
+        staged,
+      );
+    } catch (error: unknown) {
+      staged.discard();
+      this.#subscription = null;
+      throw error;
+    }
+    return staged;
+  }
+
+  #stageAuthorization(
+    authorization: AuthorizedLogicalSubscription,
+    replay: readonly string[],
+    proof: ReauthorizedLogicalSubscription["proof"],
+    generation: number,
+    initial = false,
+  ): ReauthorizedLogicalSubscription {
+    const subscription = this.#subscription;
+    if (subscription === null) throw new Error("async_subscription_retired");
+    let settled = false;
+    return Object.freeze({
+      commit: () => {
+        if (
+          settled ||
+          this.#state === "disposed" ||
+          this.#generation !== generation ||
+          this.#subscription !== subscription
+        ) {
+          return "stale";
+        }
+        settled = true;
+        let capability: RegisteredBrowserEventCapability;
+        let installed = false;
         try {
-          const disposition = subscription.receive(encoded);
-          if (
-            (disposition === "applied" || disposition === "duplicate") &&
-            subscription.state() === "current"
-          ) {
-            this.#handle?.continuityProved();
+          capability = this.#port.authorizeRegisteredEvents(
+            Object.freeze({
+              descriptorBinding: authorization.descriptorBinding,
+              events: authorization.events,
+            }),
+          );
+          if (!initial) subscription.reauthorize(authorization);
+          this.#eventCapability = capability;
+          this.#currentAuthorization = authorization;
+          this.#owner.remember(this, authorization);
+          installed = true;
+          if (replay.length === 0) {
+            if (proof !== null) subscription.proveAuthoritativeBaseline(authorization.baseline);
+          } else {
+            subscription.receiveReplay(replay);
           }
-          this.#armHeartbeat(this.#heartbeatTimeout());
+          return "committed";
         } catch {
           subscription.authorizationUncertain();
           report(this.#context, "operation_rejected");
+          return installed ? "degraded" : "stale";
         }
       },
-      reauthorize: (prior, signal) => this.reauthorize(prior, signal),
-      state: (state) => {
-        this.#transportState(state);
+      discard: () => {
+        settled = true;
       },
+      proof,
+      subscription: authorization,
     });
   }
 
@@ -610,8 +672,9 @@ export class AsyncDocumentOwner {
   subscribe(
     authorization: AuthorizedLogicalSubscription,
     sink: Parameters<DocumentConnectionPool["subscribe"]>[1],
+    pendingAuthorization: ReauthorizedLogicalSubscription | null = null,
   ): LogicalSubscriptionHandle {
-    return this.#pool.subscribe(authorization, sink);
+    return this.#pool.subscribe(authorization, sink, pendingAuthorization);
   }
 
   remember(controller: AsyncIslandController, authorization: AuthorizedLogicalSubscription): void {

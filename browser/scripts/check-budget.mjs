@@ -10,7 +10,10 @@ import { buildRuntimeAssets } from "./build.mjs";
 
 const browserRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baselinePath = resolve(browserRoot, "benchmarks/baselines/browser-budget-v1.json");
-const candidatePath = resolve(browserRoot, "benchmarks/local/latest.json");
+const candidatePath = resolve(
+  process.env["SUPRNOVA_LIVE_BROWSER_BUDGET_CANDIDATE"] ??
+    resolve(browserRoot, "benchmarks/local/latest.json"),
+);
 const COMPATIBLE_CORE = ">=0.1.0 <0.2.0";
 const ROLE_CEILINGS = new Map([
   ["core-esm", null],
@@ -109,7 +112,7 @@ async function boundedBenchmarkJson(path, missingAllowed) {
   }
 }
 
-async function checkBudgets(release) {
+async function checkBudgets(release, binding) {
   const fixtureUrl = new URL("../../fixtures/v1/snapshot-success.json", import.meta.url);
   const fixtures = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const instance = fixtures.cases.find((fixture) => fixture.id === "instance-v1");
@@ -169,6 +172,13 @@ async function checkBudgets(release) {
   const runtimeSha256 = createHash("sha256").update(runtime).digest("hex");
   const brotliBytes = runtimeAsset.brotliBytes;
 
+  if (!binding) {
+    console.log(
+      `budget ok control_overhead=${controlOverhead} snapshot_overhead=${snapshotOverhead} core_brotli=${brotliBytes} browser_binding=skipped`,
+    );
+    return;
+  }
+
   const compiled = await build({
     absWorkingDir: browserRoot,
     bundle: true,
@@ -217,8 +227,9 @@ const invokedPath = process.argv[1] === undefined ? "" : resolve(process.argv[1]
 if (invokedPath === fileURLToPath(import.meta.url)) {
   const arguments_ = process.argv.slice(2);
   const release = arguments_.includes("--release");
-  if (arguments_.some((argument) => argument !== "--release")) {
-    throw new Error("usage: node scripts/check-budget.mjs [--release]");
+  const binding = release || arguments_.includes("--binding");
+  if (arguments_.some((argument) => argument !== "--release" && argument !== "--binding")) {
+    throw new Error("usage: node scripts/check-budget.mjs [--binding] [--release]");
   }
-  await checkBudgets(release);
+  await checkBudgets(release, binding);
 }

@@ -92,6 +92,13 @@ export class ContinuityMachine {
   }
 
   proveAuthoritativeBaseline(position: StreamPosition): void {
+    this.validateAuthoritativeBaseline(position);
+    this.#requiredHighWater = null;
+    this.#proofRequired = false;
+    this.#state = "current";
+  }
+
+  validateAuthoritativeBaseline(position: StreamPosition): void {
     if (
       this.#state === "closed" ||
       comparePosition(position, this.#position) !== 0 ||
@@ -99,9 +106,6 @@ export class ContinuityMachine {
     ) {
       throw new Error("async_replay_incomplete");
     }
-    this.#requiredHighWater = null;
-    this.#proofRequired = false;
-    this.#state = "current";
   }
 
   #recordHighWater(candidate: StreamPosition): void {
