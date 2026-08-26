@@ -111,20 +111,34 @@ impl ChainLink {
 
     fn to_envelope_with_id(&self, id: uuid::Uuid) -> Envelope {
         let now = chrono::Utc::now();
+        // Mirrors `routing::resolve_queue`: a centrally registered route
+        // wins, then the queue the job declared for itself (captured into
+        // `self.queue` at chain-build time, because the job is stored
+        // type-erased here), then the driver default. Without the captured
+        // fallback, `Job::queue()` was silently dropped for every chained
+        // job - routed to a dedicated pool when pushed directly, dumped on
+        // `default` when dispatched as part of a chain.
+        let mut queue = crate::queue::routing::route_for(&self.job_name)
+            .and_then(|r| r.queue)
+            .or_else(|| self.queue.clone());
+        // A chain reifies its own envelopes rather than going through
+        // `build_envelope`, so the forwards map has to be applied here as well.
+        // Without it a chained job is pushed to the source queue while every
+        // worker started on that source queue is already claiming the
+        // destination - work stranded on a queue nobody drains. The gate is the
+        // process connection name, the same value the push path and the
+        // worker's claim list use, so the two halves cannot disagree.
+        if crate::queue::routing::has_forwards() {
+            queue = crate::queue::routing::forwarded_queue(
+                queue.as_deref(),
+                &crate::queue::Queue::connection_name(),
+            );
+        }
         Envelope {
             schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
             id,
             job_name: self.job_name.clone(),
-            // Mirrors `routing::resolve_queue`: a centrally registered route
-            // wins, then the queue the job declared for itself (captured into
-            // `self.queue` at chain-build time, because the job is stored
-            // type-erased here), then the driver default. Without the captured
-            // fallback, `Job::queue()` was silently dropped for every chained
-            // job - routed to a dedicated pool when pushed directly, dumped on
-            // `default` when dispatched as part of a chain.
-            queue: crate::queue::routing::route_for(&self.job_name)
-                .and_then(|r| r.queue)
-                .or_else(|| self.queue.clone()),
+            queue,
             payload: self.payload.clone(),
             dispatched_at: now,
             available_at: now,

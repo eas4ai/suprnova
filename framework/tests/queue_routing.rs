@@ -303,3 +303,382 @@ async fn routed_envelope_carries_the_queue_on_the_wire() {
         "a routed job must carry its queue so the driver can honor it"
     );
 }
+
+// ============================================================================
+// Queue::forward - name-keyed redirects (Laravel #61188)
+// ============================================================================
+
+job!(ForwardedJob, "routing::ForwardedJob", queue = "fwd_src");
+job!(
+    ForwardRoutedJob,
+    "routing::ForwardRoutedJob",
+    queue = "fwd_declared"
+);
+job!(
+    ForwardScopedJob,
+    "routing::ForwardScopedJob",
+    queue = "fwd_scoped_src"
+);
+job!(ForwardDefaultJob, "routing::ForwardDefaultJob");
+job!(
+    ForwardChainedJob,
+    "routing::ForwardChainedJob",
+    queue = "fwd_chain_src"
+);
+
+#[tokio::test]
+#[serial]
+async fn a_forward_moves_the_push_to_the_destination_queue() {
+    Queue::forward("fwd_src", "fwd_dest");
+    let env = pushed_envelope(ForwardedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_dest"),
+        "a forwarded queue name must reach the driver rewritten"
+    );
+    let fwd = Queue::forward_for("fwd_src").expect("forward should be registered");
+    assert_eq!(fwd.queue.as_deref(), Some("fwd_dest"));
+    assert_eq!(fwd.connection, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_route_resolves_first_and_the_forward_rewrites_its_result() {
+    // The job declares `fwd_declared`; the operator routes it to `fwd_routed`;
+    // `fwd_routed` is then forwarded to `fwd_final`. Only the last hop applies
+    // to the route's output - forwards are a single lookup, never a chain.
+    Queue::route::<ForwardRoutedJob>(None, Some("fwd_routed"));
+    Queue::forward("fwd_routed", "fwd_final");
+    Queue::forward("fwd_declared", "fwd_never");
+    let env = pushed_envelope(ForwardRoutedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_final"),
+        "the forward applies to what routing resolved, not to the job's own declaration"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_forward_scoped_to_another_connection_is_inert() {
+    Queue::forward_on("fwd_scoped_src", "fwd_scoped_dest", "some-other-connection");
+    let env = pushed_envelope(ForwardScopedJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_scoped_src"),
+        "a forward gated on a connection this push is not on must not fire"
+    );
+}
+
+/// Restores `default` to pass-through on the way out, panic or not.
+///
+/// `default` is the one source name a test cannot make unique, the forwards
+/// registry is process-global, and there is no un-forward - so a leaked
+/// `default` forward would rewrite the unrouted push in every other test in
+/// this binary. Re-registering the identity is the documented way to neutralize
+/// a forward, and running it from `Drop` means a failed assertion cleans up too.
+struct DefaultForwardGuard;
+
+impl Drop for DefaultForwardGuard {
+    fn drop(&mut self) {
+        Queue::forward("default", "default");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn forwarding_the_default_queue_catches_jobs_that_named_none() {
+    let _restore_default = DefaultForwardGuard;
+
+    Queue::forward("default", "fwd_from_default");
+    let env = pushed_envelope(ForwardDefaultJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_from_default"),
+        "an envelope with no queue means `default`, which a forward on `default` must catch"
+    );
+
+    // The identity form, asserted rather than only relied on by the guard.
+    Queue::forward("default", "default");
+    let env = pushed_envelope(ForwardDefaultJob).await;
+    assert_eq!(
+        env.queue, None,
+        "a forward onto a queue's own name is the identity, so an envelope that \
+         named no queue must still put no queue on the wire"
+    );
+}
+
+/// A chain builds its envelopes through `ChainLink`, not through
+/// `build_envelope`, so the forward has to be applied there too. Without it a
+/// chained job would be pushed to the source queue while every worker started
+/// on that source queue is claiming the destination - the exact stranding this
+/// feature exists to prevent.
+#[tokio::test]
+#[serial]
+async fn a_chained_job_follows_the_forward_too() {
+    Queue::forward("fwd_chain_src", "fwd_chain_dest");
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::chain()
+        .add(ForwardChainedJob)
+        .expect("add link")
+        .dispatch()
+        .await
+        .expect("dispatch chain");
+    let env = driver
+        .pop(Duration::from_secs(60))
+        .await
+        .expect("pop should succeed")
+        .expect("chain head should be queued")
+        .envelope;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_chain_dest"),
+        "a chained job must follow the forward, or the chain strands on a queue \
+         no worker claims"
+    );
+}
+
+/// The half that makes forwarding usable rather than a way to strand work: a
+/// worker told to drain the source queue must follow the forward, or the
+/// destination accumulates jobs nobody claims.
+#[tokio::test]
+#[serial]
+async fn a_worker_started_on_the_source_queue_drains_the_destination() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use suprnova::App;
+    use suprnova::cache::{Cache, CacheStore, InMemoryCache};
+    use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Serialize, Deserialize)]
+    struct ForwardDrainJob;
+    static DRAIN_RUNS: AtomicU32 = AtomicU32::new(0);
+
+    #[suprnova::async_trait]
+    impl Job for ForwardDrainJob {
+        fn job_name() -> &'static str {
+            "routing::ForwardDrainJob"
+        }
+        fn queue() -> Option<&'static str> {
+            Some("fwd_drain_src")
+        }
+        async fn handle(self) -> Result<(), FrameworkError> {
+            DRAIN_RUNS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    if !Cache::is_initialized() {
+        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    }
+    DRAIN_RUNS.store(0, Ordering::SeqCst);
+    register_job::<ForwardDrainJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    Queue::forward("fwd_drain_src", "fwd_drain_dest");
+    Queue::push(ForwardDrainJob).await.expect("push");
+
+    // The envelope now carries `fwd_drain_dest`, so a worker that honored its
+    // `--queue` list literally would never see it.
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: vec!["fwd_drain_src".to_string()],
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..300 {
+        if DRAIN_RUNS.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    handle.abort();
+    assert_eq!(
+        DRAIN_RUNS.load(Ordering::SeqCst),
+        1,
+        "a forward must move the worker's claim too, or the destination queue \
+         accumulates work nobody drains"
+    );
+}
+
+job!(
+    ForwardProcessConnJob,
+    "routing::ForwardProcessConnJob",
+    queue = "fwd_pconn_src",
+    connection = "fwd-pconn-declared"
+);
+job!(
+    ForwardDeclaredGateJob,
+    "routing::ForwardDeclaredGateJob",
+    queue = "fwd_declared_gate_src",
+    connection = "fwd-pconn-declared"
+);
+
+/// The gate a connection-scoped forward is compared against is the *process*
+/// connection name and nothing else - not the job's `Job::connection`, not a
+/// per-push `EnvelopeOverrides::connection`. A worker has only the process name
+/// to gate its claim list on, so gating the push on anything else would move one
+/// half of the redirect and leave the other claiming the source queue.
+#[tokio::test]
+#[serial]
+async fn a_scoped_forward_gates_on_the_process_connection_name() {
+    use suprnova::queue::EnvelopeOverrides;
+
+    async fn push_on<J: Job>(job: J, connection: &str) -> suprnova::queue::Envelope {
+        let driver = Arc::new(MemoryQueueDriver::new());
+        Queue::set_driver(driver.clone());
+        Queue::push_with(
+            job,
+            EnvelopeOverrides {
+                connection: Some(connection.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("push should succeed");
+        driver
+            .pop(Duration::from_secs(60))
+            .await
+            .expect("pop should succeed")
+            .expect("an envelope should be queued")
+            .envelope
+    }
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver);
+    // Read the process connection name rather than setting one:
+    // `set_connection_name` has no un-set, and the point of the test is that
+    // whatever this process's name happens to be is the value every half of the
+    // redirect gates on.
+    let process_connection = Queue::connection_name();
+    assert_ne!(
+        process_connection, "fwd-pconn-declared",
+        "the fixture needs the job to declare a connection this process is not on"
+    );
+
+    // Gated on the process name: fires, even though the job declares another
+    // connection entirely.
+    Queue::forward_on("fwd_pconn_src", "fwd_pconn_dest", &process_connection);
+    let env = pushed_envelope(ForwardProcessConnJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_pconn_dest"),
+        "the gate is the process connection name, not the job's `Job::connection`"
+    );
+
+    // ...and a per-push connection override does not move it either: that field
+    // renames what the lifecycle events report, not what the forward is gated on.
+    let env = push_on(ForwardProcessConnJob, "fwd-pconn-override").await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_pconn_dest"),
+        "a per-push connection override must not move the gate off the process name"
+    );
+
+    // The other direction. A forward gated on the connection the *job* declares
+    // is inert, because that is not the name a worker would gate on either.
+    Queue::forward_on(
+        "fwd_declared_gate_src",
+        "fwd_declared_gate_dest",
+        "fwd-pconn-declared",
+    );
+    let env = pushed_envelope(ForwardDeclaredGateJob).await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_declared_gate_src"),
+        "a forward gated on the job's declared connection must stay inert"
+    );
+
+    // And it stays inert when the push names that connection explicitly.
+    let env = push_on(ForwardDeclaredGateJob, "fwd-pconn-declared").await;
+    assert_eq!(
+        env.queue.as_deref(),
+        Some("fwd_declared_gate_src"),
+        "naming the gated connection per push must not fire a forward the worker \
+         would not follow"
+    );
+}
+
+/// The claim-list half of the same rule, end to end: a worker gates on the
+/// process connection name, so a forward gated on that name must move its
+/// `--queue` list even though the job that filled the queue declares a
+/// different connection. If the push gate and the claim gate disagreed, this
+/// job would sit on the destination with nothing draining it.
+#[tokio::test]
+#[serial]
+async fn a_scoped_forward_moves_the_claim_list_on_the_process_connection() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use suprnova::App;
+    use suprnova::cache::{Cache, CacheStore, InMemoryCache};
+    use suprnova::queue::worker::{WorkerConfig, register_job, run_worker};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Serialize, Deserialize)]
+    struct ForwardGateDrainJob;
+    static GATE_DRAIN_RUNS: AtomicU32 = AtomicU32::new(0);
+
+    #[suprnova::async_trait]
+    impl Job for ForwardGateDrainJob {
+        fn job_name() -> &'static str {
+            "routing::ForwardGateDrainJob"
+        }
+        fn queue() -> Option<&'static str> {
+            Some("fwd_gate_drain_src")
+        }
+        fn connection() -> Option<&'static str> {
+            Some("fwd-pconn-declared")
+        }
+        async fn handle(self) -> Result<(), FrameworkError> {
+            GATE_DRAIN_RUNS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    if !Cache::is_initialized() {
+        App::bind::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    }
+    GATE_DRAIN_RUNS.store(0, Ordering::SeqCst);
+    register_job::<ForwardGateDrainJob>();
+
+    let driver = Arc::new(MemoryQueueDriver::new());
+    Queue::set_driver(driver.clone());
+    let process_connection = Queue::connection_name();
+    Queue::forward_on(
+        "fwd_gate_drain_src",
+        "fwd_gate_drain_dest",
+        &process_connection,
+    );
+    Queue::push(ForwardGateDrainJob).await.expect("push");
+
+    let handle = tokio::spawn(run_worker(
+        driver.clone(),
+        WorkerConfig {
+            visibility_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_jobs: None,
+            queues: vec!["fwd_gate_drain_src".to_string()],
+        },
+        CancellationToken::new(),
+    ));
+    for _ in 0..300 {
+        if GATE_DRAIN_RUNS.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    handle.abort();
+    assert_eq!(
+        GATE_DRAIN_RUNS.load(Ordering::SeqCst),
+        1,
+        "the push gate and the claim gate must be the same value, or a scoped \
+         forward moves one half and strands the work on the other"
+    );
+}

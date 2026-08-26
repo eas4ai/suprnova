@@ -8,6 +8,24 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **`Queue::forward` redirects a whole queue by name.** Where `Queue::route` is
+  keyed by job type, `Queue::forward("default", "high")` is keyed by queue name -
+  the lever for retiring a pool, absorbing a backlog, or moving work off a pool you
+  are about to take down, without touching a single job or route. It applies on
+  both sides: new pushes that resolved to `default` land on `high`, *and* a worker
+  started with `--queue=default` drains `high`, so the destination cannot collect
+  work nobody claims. Forwarding `default` catches jobs that named no queue. A
+  forward is a single lookup, never a chain, and a forward that closes a loop is
+  refused. Pausing is still evaluated on the names a worker was started with, so
+  `Queue::pause(&connection, "default")` stops that worker even while `default` is
+  forwarded. `Queue::forward_on(from, to, connection)` restricts a forward to one
+  connection name, compared against this process's connection name rather than a
+  job's declared connection, so both halves of the redirect gate on the same
+  value. `Queue::forward_for(from)` reads a forward back, and `Queue::try_forward`
+  is the fallible sibling. The inspection calls (`Queue::pending_jobs` and its
+  siblings) deliberately do not follow a forward, so a backlog left behind on a
+  forwarded queue stays visible.
+
 - **Read-shaped Redis commands retry a transient failure instead of surfacing it.**
   The connection manager already reconnected in the background, but the command
   that hit the dead socket still failed your call. `GET`, `EXISTS`, the `SCAN`

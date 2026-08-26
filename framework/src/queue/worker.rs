@@ -574,6 +574,15 @@ pub async fn run_worker(
             continue;
         };
 
+        // Follow any registered forward. Deliberately after the pause gate:
+        // pausing is evaluated on the names this worker was started with, so
+        // `Queue::pause(conn, "default")` still stops a worker on
+        // `--queue=default` while `default` is forwarded elsewhere. Laravel
+        // orders it the same way - `getPausedQueues` sees the raw list, and the
+        // driver's `getQueue()` applies the forward at the pop.
+        let active_queues =
+            crate::queue::routing::forward_active_queues(&connection, active_queues);
+
         // Pop OR cancel - whichever happens first. `biased` makes cancel win
         // a tie so a queue under load can still exit promptly.
         let popped = tokio::select! {
