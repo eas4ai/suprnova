@@ -1138,9 +1138,11 @@ pub fn run(
         ];
 
         let run_cmd = format!("run --bin {}", package_name);
+        let watch_args = backend_watch_args(Path::new("."), &run_cmd);
+        let watch_args: Vec<&str> = watch_args.iter().map(String::as_str).collect();
         if let Err(e) = manager.spawn_with_prefix(
             "cargo",
-            &["watch", "-x", &run_cmd],
+            &watch_args,
             None,
             &backend_env,
             "[backend] ",
@@ -1225,6 +1227,43 @@ pub fn run(
     if !json {
         ui::success("Servers stopped.");
     }
+}
+
+/// Paths, relative to the project root, whose contents the backend
+/// process actually depends on - in the order they are handed to
+/// `cargo watch`.
+///
+/// `src`, `Cargo.toml`, and `Cargo.lock` are the build inputs. `.env` is
+/// read once by `Config::init` at boot, and `lang/` once by
+/// `Localization::bootstrap`, which compiles every `lang/<locale>/*.ftl`
+/// catalog into the translator - neither is re-read at request time, so a
+/// change to either only takes effect on a restart.
+const BACKEND_WATCH_PATHS: [&str; 5] = ["src", "Cargo.toml", "Cargo.lock", ".env", "lang"];
+
+/// Build the `cargo watch` argument list for the backend pane.
+///
+/// Without any `-w`, cargo-watch watches the whole non-gitignored project,
+/// which means every Vite component save and every regenerated
+/// `frontend/src/types/*.ts` restarted the backend - a full framework
+/// rebuild triggered by editing a `.svelte` file. Naming the paths the
+/// backend is actually built from is the entire fix; no `-i` ignore list
+/// is needed once the scope is right.
+///
+/// A `-w` path that does not exist makes cargo-watch refuse to start, so
+/// each candidate is included only when it is present at spawn time. A
+/// project that grows a `lang/` directory later needs a `serve` restart to
+/// pick it up, the same watcher-registration-time gap the type watcher has.
+fn backend_watch_args(project: &Path, run_cmd: &str) -> Vec<String> {
+    let mut args = vec!["watch".to_string()];
+    for candidate in BACKEND_WATCH_PATHS {
+        if project.join(candidate).exists() {
+            args.push("-w".to_string());
+            args.push(candidate.to_string());
+        }
+    }
+    args.push("-x".to_string());
+    args.push(run_cmd.to_string());
+    args
 }
 
 /// What one filesystem event asks the type watcher to regenerate.
@@ -1611,6 +1650,74 @@ mod tests {
         // The Cargo.toml half of the check is all that is left, and it
         // does not care about the frontend at all.
         assert!(validate_suprnova_project(true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod backend_watch_args_tests {
+    use super::*;
+
+    const RUN: &str = "run --bin app";
+
+    #[test]
+    fn a_bare_project_watches_only_what_it_actually_has() {
+        // cargo-watch refuses to start when a `-w` path does not exist,
+        // so a project without a lockfile, a `.env`, or `lang/` must not
+        // be handed those paths.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec!["watch", "-w", "src", "-w", "Cargo.toml", "-x", RUN]
+        );
+    }
+
+    #[test]
+    fn a_full_project_watches_sources_manifests_env_and_catalogs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+        std::fs::write(dir.path().join("Cargo.lock"), "\n").expect("create lockfile");
+        std::fs::write(dir.path().join(".env"), "APP_KEY=x\n").expect("create .env");
+        std::fs::create_dir(dir.path().join("lang")).expect("create lang");
+
+        assert_eq!(
+            backend_watch_args(dir.path(), RUN),
+            vec![
+                "watch",
+                "-w",
+                "src",
+                "-w",
+                "Cargo.toml",
+                "-w",
+                "Cargo.lock",
+                "-w",
+                ".env",
+                "-w",
+                "lang",
+                "-x",
+                RUN
+            ]
+        );
+    }
+
+    #[test]
+    fn the_frontend_and_the_generated_types_are_never_watched() {
+        // This is the whole point of scoping: a Vite component save, and
+        // the `.ts` the type generator writes, must not restart the
+        // backend.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("src")).expect("create src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("create manifest");
+        std::fs::create_dir_all(dir.path().join("frontend/src/types")).expect("create frontend");
+
+        let args = backend_watch_args(dir.path(), RUN);
+        assert!(
+            !args.iter().any(|a| a.contains("frontend")),
+            "frontend must stay out of the backend watch scope: {args:?}"
+        );
     }
 }
 

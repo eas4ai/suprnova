@@ -135,8 +135,14 @@ When you run `suprnova serve`, the CLI:
    starting a dev server should not also be choosing versions for you.
 6. Runs `npm install` in `frontend/` if `node_modules` doesn't exist yet.
    Skipped under `--backend-only`, and when the project has no frontend.
-7. Spawns `cargo watch -x 'run --bin <package-name>'` for the backend.
-   `cargo-watch` re-runs the binary whenever a `.rs` file changes.
+7. Spawns `cargo watch` for the backend, scoped with `-w` to the paths the
+   server is actually built from: `src/`, `Cargo.toml`, `Cargo.lock`,
+   `.env`, and `lang/`. Each is passed only when it exists, because
+   cargo-watch refuses to start on a `-w` path that doesn't. On a
+   scaffolded project the full invocation is `cargo watch -w src -w
+   Cargo.toml -w Cargo.lock -w .env -w lang -x 'run --bin <package-name>'`.
+   Frontend edits and the generated `frontend/src/types/*.ts` are outside
+   that scope, so they never restart the backend.
 8. Spawns `npm run dev` in `frontend/` for Vite, which gives you HMR for
    Svelte/React/Vue components and Tailwind classes. Skipped under
    `--backend-only`, and when the project has no frontend.
@@ -146,6 +152,9 @@ When you run `suprnova serve`, the CLI:
    otherwise juggle in another terminal.
 10. Starts a file watcher on `src/` that re-runs the type generator whenever
     a `.rs` file changes, once the burst of saves has been quiet for 500 ms.
+    Only real changes count - a creation, a write, or a deletion. Reads do
+    not, which matters because the generator reads every `.rs` file under
+    the tree it is watching on each run.
     Skipped when the project has no frontend, the same as the startup type
     generation in step 4. The debounce is trailing-edge, so a burst -
     `cargo fmt`, format-on-save across several files, a branch switch -
@@ -199,10 +208,15 @@ solves. See the corresponding row in
 
 ## Hot reload
 
-**Backend.** `cargo watch -x 'run --bin <package>'` is the loop. It rebuilds
-and restarts the server on every `.rs` change in the project. Cold rebuilds
-after touching a heavy crate can take several seconds; incremental changes
-in a single file are usually sub-second.
+**Backend.** `cargo watch` is the loop, scoped to the paths the server is
+built from. It rebuilds and restarts on a change under `src/`, to
+`Cargo.toml`, `Cargo.lock`, or `.env`, or under `lang/` - `.env` is read
+once by `Config::init` at boot and the Fluent catalogs once at bootstrap,
+so a change to either only takes effect on a restart. Saving a component,
+or regenerating `frontend/src/types/inertia-props.ts`, is outside that
+scope and leaves the backend running. Cold rebuilds after touching a heavy
+crate can take several seconds; incremental changes in a single file are
+usually sub-second.
 
 **Frontend.** Vite's HMR injects component changes in place without a full
 reload, preserving component state. Tailwind classes update live via the
@@ -211,7 +225,10 @@ Tailwind v4 watcher.
 **TypeScript types.** Whenever a `.rs` file changes, the type watcher re-runs
 the generator. If new `#[derive(InertiaProps)]` structs appear (or existing
 ones change shape), the regenerated `frontend/src/types/inertia-props.ts`
-triggers Vite's HMR for the component that imports them.
+triggers Vite's HMR for the component that imports them. When the emitted
+TypeScript is byte-identical to what's already on disk the file is left
+untouched, so a regeneration that changed nothing isn't a change anything
+downstream has to react to.
 
 ## Extra dev processes
 
