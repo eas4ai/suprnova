@@ -450,6 +450,15 @@ export class RegisteredEventAuthority {
           skipped += 1;
           continue;
         }
+        if (!authority.resolver.current())
+          return dispatched === 0
+            ? "retired"
+            : partial(dispatched, targets.length - dispatched, "source_retired");
+        if (this.#current.get(authority.owner) !== token) {
+          return dispatched === 0
+            ? "rejected"
+            : partial(dispatched, targets.length - dispatched, "capability_rotated");
+        }
         target.dispatch(domEvent);
         dispatched += 1;
       }

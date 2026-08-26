@@ -885,8 +885,23 @@ export class DocumentRuntime {
       return;
     }
     this.#featureDriverClaims.add(record);
+    const sourceParent = record.element.parentNode;
+    const sourceScope = sourceParent === null ? null : this.#ownership.ownerForNode(sourceParent);
     const current = (): boolean =>
-      this.#state === "running" && record.active() && record.element.isConnected;
+      this.#state === "running" &&
+      record.active() &&
+      record.element.isConnected &&
+      record.element.ownerDocument === this.#document &&
+      this.#records.get(record.element) === record &&
+      this.#ownership.ownerForNode(record.element) === record &&
+      record.element.parentNode !== null &&
+      this.#ownership.ownerForNode(record.element.parentNode) === sourceScope &&
+      record.element.getAttribute("data-suprnova-live-island") === "" &&
+      record.element.getAttribute("data-suprnova-live-component") === record.metadata.component &&
+      record.element.getAttribute("data-suprnova-live-document-key") ===
+        record.metadata.documentKey &&
+      record.element.getAttribute("data-suprnova-live-slot") === record.metadata.slot &&
+      record.element.getAttribute("data-suprnova-live-root") === record.metadata.slot;
     const port: RuntimeFeatureDriverIslandPort = Object.freeze({
       authorizeRegisteredEvents: (registration: RegisteredBrowserEventRegistration) =>
         this.#registeredEvents.replace(record, registration, {

@@ -354,6 +354,36 @@ describe("core registered-event authority", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("rechecks source authority after the target guard immediately before DOM dispatch", () => {
+    const authority = new RegisteredEventAuthority();
+    const owner = {};
+    let sourceCurrent = true;
+    const dispatch = vi.fn(() => true);
+    const capability = authority.replace(owner, registration([contract()]), {
+      current: () => sourceCurrent,
+      event: (type) => ({ type }) as Event,
+      targets: () => [
+        {
+          current: () => {
+            sourceCurrent = false;
+            return true;
+          },
+          dispatch,
+        },
+      ],
+    });
+
+    expect(
+      authority.dispatch(owner, capability, {
+        event: "orders.updated",
+        payload: {},
+        schemaVersion: 1,
+        target: "self",
+      }),
+    ).toBe("retired");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it("enforces resolved fanout without trusting a caller-supplied maximum", () => {
     const authority = new RegisteredEventAuthority();
     const owner = {};
