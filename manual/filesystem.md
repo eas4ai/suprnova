@@ -96,6 +96,62 @@ means an app that stores files locally or on S3 never carries that crate.
 S3 is deliberately *not* gated - its signer never depended on `rsa`, so
 gating it would break the most-used cloud backend and remove nothing.
 
+### Atomic local writes
+
+On a local disk, every operation that publishes bytes at a path publishes them
+in one step. `disk.write(...)`, `disk.writer(...)`, and `disk.copy(...)` all
+land in `<root>/.suprnova-atomic/` first, are flushed and synced there, and are
+then renamed onto the target; `disk.rename(...)` is already a single step. A
+concurrent reader therefore sees either the previous object or the finished new
+one and never a partial length, and a process that dies mid-write leaves the
+target untouched rather than truncated at the live path.
+
+`append` is the one in-place operation, because staging an append would mean
+copying the whole object first. That holds for the append that *creates* the
+object as much as for every append after it, so two writers appending to the
+same new object both land. Being in place is also what an append costs you: one
+that fails or is aborted leaves the object behind, empty or short, exactly as an
+append onto an existing object always has.
+
+A conditional write is published with `link(2)` rather than a rename, which
+keeps it a real exclusive create rather than a check followed by an overwrite:
+
+```rust,ignore
+// Exactly one of any number of racing callers gets Ok here. Every other one
+// gets an `ErrorKind::ConditionNotMatch` error and writes nothing.
+disk.write_with("locks/import.json", body).if_not_exists(true).await?;
+```
+
+That publish needs a filesystem with hard links. On FAT, exFAT, and some network
+filesystems `link(2)` is unsupported, and a conditional write fails there rather
+than silently degrading into a check followed by an overwrite - which would hand
+you an exclusivity guarantee that does not hold. Every other operation is
+unaffected.
+
+Publishing by rename replaces the object's inode. A rewrite therefore does not
+preserve the previous file's mode, owner, or hard links, and a reader holding
+an open descriptor keeps reading the old content instead of seeing the new
+bytes. That is the usual trade for atomic publishing, but it is a change if you
+were relying on either.
+
+A path that reaches the disk through a symlink the guard cannot resolve - a
+dangling one, whose target does not exist - is refused rather than treated as a
+free name to create. Creating through such a link would create the link's
+target, anywhere on the host, so the guard cannot tell a harmless dangling link
+apart from an escape and refuses both.
+
+The `.suprnova-atomic` name is reserved at the root of every local disk. Any
+path whose first component is that name is refused with a permission error, and
+so is any path that *resolves* into the directory through a symlink, so you
+cannot read another writer's staging file, write into the directory, or delete
+it. The entry is filtered out of `files`, `directories`, `all_files`, and
+`all_directories`, so it never shows up as an object. The name is exported as
+`suprnova::ATOMIC_STAGING_DIR` because backup and sync tooling needs it:
+exclude the directory the way you would exclude a lock directory. It holds
+in-flight temp files plus whatever a process that died mid-publish left behind,
+and nothing sweeps those, so a host in a crash loop will grow it until someone
+empties it - which is safe to do while nothing is writing.
+
 ### Path-traversal guard
 
 Local filesystem disks have a `PathGuardLayer` applied before any user-supplied
@@ -413,9 +469,10 @@ If the stream fails partway, the writer is aborted and a destination the
 transfer created is deleted before the error reaches you, so a failed transfer
 is not observable as a truncated object. A destination that was already there
 is left alone - a failed copy must not be the thing that destroys an object it
-never wrote. On a local-filesystem primary that guarantee is weaker than it
-looks: the driver opens the target itself and truncates it, so a pre-existing
-local destination is already gone by the time a transfer can fail.
+never wrote. A local-filesystem primary honors that too, because it stages the
+transfer under `.suprnova-atomic/` and only renames on success; aborting the
+writer removes the staged file, so a failed transfer leaves neither a partial
+destination nor a leftover temp file.
 
 ### Versioned and conditional reads
 

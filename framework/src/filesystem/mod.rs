@@ -48,6 +48,67 @@ use crate::FrameworkError;
 use opendal::{Operator, services};
 use std::path::Path;
 
+/// Directory name reserved inside every local-filesystem disk root.
+///
+/// A local-filesystem disk stages every write and every `copy` as a temp file
+/// under `<root>/.suprnova-atomic/` and publishes it onto the target in one
+/// step, so a reader never observes a half-written object and a crash never
+/// leaves a truncated one. `append` is the exception and writes in place. The
+/// staging directory has to live *inside* the root: a sibling of the root can
+/// sit on a different filesystem when the root is a mount point, and then every
+/// rename fails with `EXDEV`.
+///
+/// Living inside the root is why the name is reserved rather than merely
+/// conventional. `Storage::disk(..)` refuses any path whose first component is
+/// this name - read, write, delete, stat, list alike - and refuses any path
+/// that *resolves* into the directory through a symlink, so a caller can
+/// neither reach into another writer's staging file nor collide with the name.
+/// The entry is filtered out of listings so it never shows up as an object.
+///
+/// Exported because backup and sync tooling needs to name it: exclude it the
+/// way you would exclude a lock directory. It holds in-flight temp files, plus
+/// whatever a process that died mid-publish left behind - nothing sweeps those,
+/// so an operator watching a crash loop should expect it to grow.
+pub const ATOMIC_STAGING_DIR: &str = ".suprnova-atomic";
+
+/// Build the `opendal` local-filesystem service for `root` with atomic writes
+/// configured.
+///
+/// Shared by [`Storage::register_fs_with`] and the `read_through` tests so both
+/// exercise the same staging configuration; a disk built any other way takes
+/// opendal's non-atomic quick path and writes in place.
+///
+/// `root` must already be valid UTF-8. The staging path is `root` joined with
+/// [`ATOMIC_STAGING_DIR`], which is pure ASCII, so the re-encode only fails if
+/// the caller broke that contract - reported rather than lossily converted,
+/// since a mangled staging path would silently stage somewhere else.
+pub(crate) fn atomic_fs_service(root: &str) -> Result<services::Fs, FrameworkError> {
+    let staging = Path::new(root).join(ATOMIC_STAGING_DIR);
+    // opendal creates the staging directory only when the path is missing; a
+    // regular *file* of that name satisfies its `metadata` probe and
+    // canonicalizes fine, so registration would succeed and the first write
+    // would fail deep inside the driver with an opaque `create_dir_all` error.
+    // A *symlink* there is worse: opendal canonicalizes `atomic_write_dir`, so
+    // every staging file would land somewhere that is neither reserved nor
+    // filtered from listings, defeating the reservation for the whole disk. Both
+    // are refused here, where the message can say what to do - and the probe is
+    // `symlink_metadata`, because `metadata` follows the link and would report
+    // the symlink case as an ordinary directory.
+    if let Ok(existing) = std::fs::symlink_metadata(&staging)
+        && !existing.is_dir()
+    {
+        return Err(FrameworkError::internal(format!(
+            "storage fs root '{root}' already holds a '{ATOMIC_STAGING_DIR}' \
+             entry that is not a real directory; that name is reserved for \
+             staging atomic writes, so move it aside before registering the disk"
+        )));
+    }
+    let staging = staging.to_str().ok_or_else(|| {
+        FrameworkError::internal("storage fs atomic staging directory path is not valid UTF-8")
+    })?;
+    Ok(services::Fs::default().root(root).atomic_write_dir(staging))
+}
+
 /// Static facade for the named-disk storage system.
 ///
 /// `Storage` itself holds no state; all disks live in a process-global
@@ -333,6 +394,28 @@ impl Storage {
     /// passed to subsequent `disk.write(...)`, `disk.read(...)`, etc. are
     /// resolved relative to this root.
     ///
+    /// # Atomic writes
+    ///
+    /// Every operation that publishes bytes at a path publishes them
+    /// indivisibly. `write` and `writer` are staged as a temp file under
+    /// [`ATOMIC_STAGING_DIR`] inside the root and `rename(2)`d onto the target;
+    /// `copy` is staged the same way; `rename` is already one step. A
+    /// concurrent reader therefore sees either the previous object or the new
+    /// one - never a partial length - and a crash mid-write leaves no truncated
+    /// object at the live path. The staging directory is created at
+    /// registration, reserved, and hidden from listings.
+    ///
+    /// A `write_with(..).if_not_exists(true)` is published with `link(2)`
+    /// rather than a rename, so it stays a genuine exclusive create: racing
+    /// writers cannot all succeed, and every loser gets `ConditionNotMatch`.
+    /// That needs a filesystem with hard links. On FAT, exFAT, and some network
+    /// filesystems the publish fails rather than silently giving up
+    /// exclusivity; every other operation is unaffected.
+    ///
+    /// `append` is the one in-place operation - staging an append would mean
+    /// copying the whole object first - and that holds for the append that
+    /// creates the object too, so two appenders racing to create one both land.
+    ///
     /// Equivalent to [`Storage::register_fs_with`] with an identity closure.
     ///
     /// # Testing
@@ -350,6 +433,9 @@ impl Storage {
 
     /// Register a local filesystem disk with a custom layer stack applied to
     /// the underlying [`Operator`] before it lands in the registry.
+    ///
+    /// Writes are atomic and [`ATOMIC_STAGING_DIR`] is reserved; see
+    /// [`Storage::register_fs`].
     ///
     /// # Available layers
     ///
@@ -401,7 +487,7 @@ impl Storage {
             .as_ref()
             .to_str()
             .ok_or_else(|| FrameworkError::internal("storage fs root path is not valid UTF-8"))?;
-        let builder = services::Fs::default().root(root_str);
+        let builder = atomic_fs_service(root_str)?;
         // `PathGuardLayer` is applied to the raw FS operator before the user's
         // `layer_fn` runs, so the traversal guard sits closest to the backend
         // and the caller's own layers (retry, logging, tracing) wrap it. The

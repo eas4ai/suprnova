@@ -4,6 +4,23 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 1.3.5 - 2026-08-26
+
+### Fixed
+
+- **Local-filesystem disks publish every object in one step.** `Storage::register_fs` and `register_fs_with` now stage `disk.write(...)`, `disk.writer(...)`, and `disk.copy(...)` as a temp file under `<root>/.suprnova-atomic/` and publish it onto the target with a single `rename(2)`, so none of them is ever observable at a partial length. Before this, the driver opened the target with `create + truncate` and streamed into it in place: a concurrent reader got an empty or half-written object for the whole duration of the write, and a crash mid-write left a truncated object at the live path. `abort()` on a writer now discards the staged file instead of failing with `Unsupported`.
+- **`write_with(..).if_not_exists(true)` is a true exclusive create on a local disk.** It is published with `link(2)`, which fails atomically in the kernel when the target exists, so exactly one of any number of racing callers succeeds and every other one gets `ConditionNotMatch` having written nothing. A staged write published by a plain rename would have degraded the condition to a check followed by an overwrite, silently discarding all but the last writer - which is the opposite of what the primitive is reached for.
+- **An `append` that creates the object is still an append.** Appends are the one in-place operation on a local disk, and that now holds for the first one too, so two writers appending to the same missing object both land instead of one staging its own copy and overwriting the other.
+
+### Upgrading
+
+- **`.suprnova-atomic` is reserved at the root of every local disk.** The staging directory has to live inside the root - a sibling of the root can be on a different filesystem when the root is a mount point, and every rename would fail with `EXDEV` - so the name is reserved rather than merely conventional. Any path whose first component is `.suprnova-atomic` is now refused with a permission error (read, write, delete, stat, list alike), as is any path that resolves into the directory through a symlink, and the entry is filtered out of `files`, `directories`, `all_files`, and `all_directories`. If a disk root already contains a `.suprnova-atomic` entry of your own, it is no longer reachable through that disk: move it aside before upgrading. A regular file of that name is refused at registration with a message saying so, rather than failing later inside the driver. The name is exported as `suprnova::ATOMIC_STAGING_DIR` so backup and sync tooling can exclude it.
+- **Publishing by rename replaces the target's inode.** Rewriting an object on a local disk no longer preserves its mode, owner, or hard links, and a reader holding an open descriptor keeps the old content instead of seeing the new bytes. That is the standard cost of atomic publishing, but it is a behavior change if you were relying on either.
+- **A conditional write needs a filesystem with hard links.** `if_not_exists` is published with `link(2)`, which is unsupported on FAT, exFAT, and some network filesystems. There it fails outright rather than falling back to a check followed by an overwrite, because a fallback would hand you an exclusivity guarantee that does not hold. Nothing else on the disk is affected.
+- **A first `append` that fails leaves an empty object.** An append is the one operation that is not published in a single step, so the object is created before the bytes land; a failed or aborted first append leaves it behind, exactly as an append onto an existing object always has.
+- **A dangling symlink in the disk root is refused, not overwritten.** A path whose symlink target does not exist can no longer be written, appended to, copied onto, moved onto, or deleted through the disk. `1.3.4` replaced such a link with a regular file; the guard cannot prove where an unresolvable link leads, and creating through one creates the link's target anywhere on the host, so it now refuses. Remove the link outside the disk if you meant to write there.
+- **Nothing sweeps the staging directory.** It holds in-flight temp files plus whatever a process that died mid-publish left behind, so a host in a crash loop grows it without bound. Emptying it while nothing is writing to the disk is safe; excluding it from backups is recommended.
+
 ## 1.3.4 - 2026-08-25
 
 ### Added

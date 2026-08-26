@@ -26,7 +26,25 @@
 //! parent directory is canonicalized instead, so the destination directory
 //! cannot itself be a symlink leading out of the root. Anything that resolves
 //! outside the root is rejected.
+//!
+//! # The reserved staging directory
+//!
+//! A local-filesystem disk stages every non-append write under
+//! [`ATOMIC_STAGING_DIR`] inside its own root and renames the result onto the
+//! target. That directory therefore sits in the caller's namespace, where it
+//! would otherwise be an ordinary object: readable, writable, deletable, and
+//! visible in a listing. None of that is acceptable - reading another writer's
+//! temp file exposes a half-written object, writing into the directory can
+//! collide with a name opendal is about to rename away, and deleting it breaks
+//! every subsequent write. So the guard reserves the name: any path whose first
+//! component is [`ATOMIC_STAGING_DIR`] is refused, and the entry is filtered out
+//! of listings ([`PathGuardLister`]) so it never appears as an object.
+//!
+//! The staging writes themselves are unaffected: opendal opens the temp file
+//! inside the FS backend, below this layer, so they never pass through the
+//! reservation check.
 
+use super::ATOMIC_STAGING_DIR;
 use opendal::raw::{
     Layer, OpCopier, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
     OpWrite, RpCreateDir, RpPresign, RpRead, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
@@ -34,8 +52,9 @@ use opendal::raw::{
 use opendal::{
     Buffer, BytesRange, Capability, Error, ErrorKind, Metadata, OperationContext, Result,
 };
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Reject any path that could escape the local-filesystem disk root.
 ///
@@ -78,22 +97,65 @@ fn validate_storage_path(path: &str) -> Result<()> {
             ),
         ));
     }
+
+    if reaches_staging_directory(path) {
+        return Err(staging_reservation_error(path));
+    }
+
     Ok(())
 }
 
-/// Build the `PermissionDenied` error returned when a path resolves outside the
-/// disk root via a symlink (or any other on-disk indirection).
-fn symlink_escape_error(path: &str) -> Error {
+/// Build the `PermissionDenied` error returned when a path targets the reserved
+/// atomic-write staging directory - whether it spells the name out or resolves
+/// into the directory through a symlink.
+fn staging_reservation_error(path: &str) -> Error {
     tracing::warn!(
         path = %path,
-        "rejected storage path that resolves outside the disk root (symlink escape) \
-         on local-filesystem disk"
+        "rejected storage path targeting the reserved atomic-write staging \
+         directory on local-filesystem disk"
     );
     Error::new(
         ErrorKind::PermissionDenied,
         format!(
             "path '{path}' is not allowed on a local-filesystem disk: \
-             it resolves (via a symlink) outside the disk root"
+             '{ATOMIC_STAGING_DIR}' at the disk root is reserved for staging \
+             atomic writes"
+        ),
+    )
+}
+
+/// True when `path`'s first meaningful component is the reserved staging
+/// directory - the directory itself or anything under it.
+///
+/// Only the *first* component is reserved: the staging directory exists at the
+/// disk root and nowhere else, so `reports/.suprnova-atomic/june.csv` is an
+/// ordinary object and must stay reachable. Empty segments (from a leading or
+/// doubled separator) and `.` segments are skipped so `./.suprnova-atomic/x`
+/// and `//.suprnova-atomic` cannot slip past by punctuation alone. The split is
+/// separator-agnostic for the same reason [`validate_storage_path`]'s is.
+fn reaches_staging_directory(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .find(|segment| !segment.is_empty() && *segment != ".")
+        .is_some_and(|first| first == ATOMIC_STAGING_DIR)
+}
+
+/// Build the `PermissionDenied` error returned when a path goes through a
+/// symlink this disk cannot confine: one that resolves outside the disk root, or
+/// a dangling one, whose target cannot be resolved at all and so cannot be shown
+/// to be inside it.
+fn symlink_escape_error(path: &str) -> Error {
+    tracing::warn!(
+        path = %path,
+        "rejected storage path that goes through a symlink this disk cannot \
+         confine - it resolves outside the disk root, or at a target that does \
+         not exist - on local-filesystem disk"
+    );
+    Error::new(
+        ErrorKind::PermissionDenied,
+        format!(
+            "path '{path}' is not allowed on a local-filesystem disk: \
+             it goes through a symlink to somewhere this disk cannot confine - \
+             outside the disk root, or at a target that does not exist"
         ),
     )
 }
@@ -160,7 +222,24 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
                 resolved = Some(resolved_ancestor);
                 break;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // `canonicalize` also reports `NotFound` for a *dangling*
+                // symlink - the link is there, its target is not - and treating
+                // that as "nothing here yet, safe to create" is an escape, not a
+                // gap. `open(.., O_CREAT)` follows the link and creates the
+                // link's *target*, so a planted `link -> /outside/anything`
+                // turns a write into a write at an arbitrary path; `rename(2)`
+                // does not follow it, but nothing in this layer may depend on
+                // which publish mechanism a given operation happens to use.
+                // `symlink_metadata` does not follow the link, so it tells the
+                // two cases apart: a node that exists here but cannot be
+                // resolved is refused like any other escape, because nothing at
+                // this point can prove where it leads.
+                if tokio::fs::symlink_metadata(ancestor).await.is_ok() {
+                    return Err(symlink_escape_error(path));
+                }
+                continue;
+            }
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Unexpected,
@@ -175,6 +254,19 @@ async fn validate_resolved_path(root: &str, path: &str) -> Result<()> {
     // gone, but `canonical_root` above already required it to exist, so fall back
     // to the canonical root for the prefix check.
     let resolved = resolved.unwrap_or_else(|| canonical_root.clone());
+
+    // The lexical reservation only sees the string the caller supplied. A
+    // symlink inside the root that points at the staging directory resolves
+    // *inside* the root, so the escape check below waves it through - and a read
+    // through it discloses another writer's in-flight object, a delete through
+    // it makes that writer's publish fail with ENOENT, and a list through it
+    // enumerates the staging directory. This is the module's own threat model
+    // (an uploaded or extracted symlink, then an operation through it) aimed at
+    // the one directory the disk owns, so the reservation has to be enforced on
+    // what the path resolves to, not only on how it is spelled.
+    if resolved.starts_with(canonical_root.join(ATOMIC_STAGING_DIR)) {
+        return Err(staging_reservation_error(path));
+    }
 
     if is_within_root(&canonical_root, &resolved) {
         Ok(())
@@ -197,6 +289,152 @@ fn is_within_root(canonical_root: &Path, resolved: &Path) -> bool {
 /// [`opendal::raw::AccessorInfo::root`].
 fn inner_root_string(inner: &Servicer) -> String {
     inner.info().root().as_ref().to_string()
+}
+
+/// A unique storage path inside the staging directory, for a publish this layer
+/// performs itself.
+///
+/// It is a *storage* path - relative to the disk root - because it is handed to
+/// the inner accessor rather than to the OS. The basename keeps the file
+/// recognizable while the random suffix keeps two concurrent publishes of the
+/// same key apart. The name never reaches a caller: the reservation refuses it
+/// and the lister filters it out.
+fn staging_path_for(path: &str) -> String {
+    let name = path
+        .trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    format!(
+        "{ATOMIC_STAGING_DIR}/{name}.{}.stage",
+        Uuid::new_v4().simple()
+    )
+}
+
+/// The on-disk path a storage path names under `root`.
+///
+/// `root` is the inner accessor's already-canonicalized root, and `path` has
+/// been through [`validate_storage_path`], so this join cannot leave the root.
+fn on_disk_path(root: &str, path: &str) -> PathBuf {
+    Path::new(root).join(path.trim_end_matches('/'))
+}
+
+/// Wrap a filesystem failure raised while this layer publishes a staged write.
+fn publish_error(what: &str, path: &str, e: std::io::Error) -> Error {
+    Error::new(
+        ErrorKind::Unexpected,
+        format!("{what} while publishing '{path}' on a local-filesystem disk"),
+    )
+    .set_source(e)
+}
+
+/// Create the target's parent directories, which the inner accessor would have
+/// created had it been given the caller's path rather than a staging path.
+async fn ensure_parent_dir(target: &Path, path: &str) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| publish_error("creating the parent directory failed", path, e))?;
+    }
+    Ok(())
+}
+
+/// Materialize `path` as an empty object if it is missing, without truncating
+/// one that is already there.
+///
+/// opendal writes an append in place only once the object exists; the append
+/// that *creates* it is staged and published by rename instead. Two appenders
+/// racing to create the same object therefore each stage their own copy and one
+/// rename wins, so one append is lost outright - the opposite of what an append
+/// means. Creating the object first turns that first append into an ordinary
+/// in-place `O_APPEND` write, which is what every append after it already gets.
+///
+/// The cost is that a first append which then fails, or is aborted, leaves an
+/// empty object where it previously left nothing. That matches what an append
+/// onto an existing object has always done - an append is the one operation
+/// here that is not published in a single step - so the two cases stay
+/// consistent rather than one of them being quietly atomic.
+async fn ensure_target_exists(root: &str, path: &str) -> Result<()> {
+    let target = on_disk_path(root, path);
+    ensure_parent_dir(&target, path).await?;
+    // `create_new` is `O_CREAT | O_EXCL`, and POSIX requires that combination to
+    // fail when the final component is a symlink - dangling or not. That matters
+    // because this is the only create in this layer that would otherwise follow
+    // one: plain `O_CREAT` on a dangling link creates the link's *target*, so a
+    // link planted in the root becomes a write at an arbitrary path.
+    // `validate_resolved_path` already refuses that path above, but a check
+    // followed by a create is a race, and `O_EXCL` closes it in the kernel
+    // instead of narrowing it - with no extra dependency and nothing
+    // platform-specific.
+    match tokio::fs::OpenOptions::new()
+        .append(true)
+        .create_new(true)
+        .open(&target)
+        .await
+    {
+        Ok(_) => Ok(()),
+        // Something is already at the path: an ordinary object, or a symlink
+        // `O_EXCL` refused to follow. Either way this function has nothing left
+        // to do - it exists only to materialize a target that is genuinely
+        // missing - so the write proceeds into opendal exactly as it would have
+        // without this call. For an existing object that is the in-place append
+        // this function is here to guarantee; for a symlink it is opendal's own
+        // staged write, which publishes by `rename(2)` and stays in the root.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(publish_error("creating the append target failed", path, e)),
+    }
+}
+
+/// Publish `staged` at `target` with `link(2)`.
+///
+/// This is what keeps `if_not_exists` an exclusive create. opendal publishes a
+/// staged write with an unconditional `rename(2)`, so its `if_not_exists`
+/// degrades to a `try_exists` check followed by a clobber: every racing writer
+/// passes the check and the last rename wins, silently discarding the rest.
+/// `link(2)` fails with `EEXIST` instead, atomically and in the kernel, so
+/// exactly one racer can claim the path. The staging directory lives inside the
+/// disk root, so the link never crosses a filesystem.
+async fn link_exclusive(staged: &Path, target: &Path, path: &str) -> Result<()> {
+    ensure_parent_dir(target, path).await?;
+    match tokio::fs::hard_link(staged, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(Error::new(
+            ErrorKind::ConditionNotMatch,
+            format!("'{path}' already exists, doesn't match the condition if_not_exists"),
+        )),
+        Err(e) => Err(publish_error("linking the staged write failed", path, e)),
+    }
+}
+
+/// Remove a staging file, logging rather than failing: the caller is either
+/// returning an error that matters more or has already published the bytes
+/// under their real name.
+async fn remove_staged(staged: &Path) {
+    match tokio::fs::remove_file(staged).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            path = %staged.display(),
+            error = %e,
+            "failed to remove an atomic-write staging file"
+        ),
+    }
+}
+
+/// How a [`PathGuardWriter`] publishes what the inner writer staged.
+enum Publish {
+    /// The inner writer holds the caller's path and opendal's own staging
+    /// publishes it. Nothing for this layer to do.
+    Inner,
+    /// The inner writer is filling a staging file this layer named, to be
+    /// published with `link(2)` so the create stays exclusive.
+    ExclusiveLink {
+        /// Storage path of the staging file, until it is linked or discarded.
+        staged: String,
+        /// Whether it has already been settled, so publish and discard are each
+        /// idempotent and cannot undo one another.
+        settled: bool,
+    },
 }
 
 /// [`Layer`] that wraps a local-filesystem accessor so every path-bearing
@@ -263,12 +501,36 @@ impl Service for PathGuardService {
     fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         validate_storage_path(path)?;
         let root = inner_root_string(&self.inner);
-        let inner = self.inner.write(ctx, path, args)?;
+        // `if_not_exists` has to stay an exclusive create, and opendal's staged
+        // write cannot be one: it checks, then publishes with an unconditional
+        // rename. Give it a staging file of our own and publish that with
+        // `link(2)`. Every other write keeps opendal's staging unchanged.
+        let exclusive = args.if_not_exists();
+        // An append writes in place only once the object exists, so the append
+        // that creates it would otherwise be staged. See `ensure_target_exists`.
+        // A conditional append is excluded: it takes the exclusive path above,
+        // where creating the target first would defeat the condition.
+        let append_in_place = args.append() && !exclusive;
+        let publish = if exclusive {
+            Publish::ExclusiveLink {
+                staged: staging_path_for(path),
+                settled: false,
+            }
+        } else {
+            Publish::Inner
+        };
+        let inner_path = match &publish {
+            Publish::ExclusiveLink { staged, .. } => staged.as_str(),
+            Publish::Inner => path,
+        };
+        let inner = self.inner.write(ctx, inner_path, args)?;
         Ok(PathGuardWriter {
             inner,
             root,
             path: path.to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place,
+            publish,
         })
     }
 
@@ -301,13 +563,20 @@ impl Service for PathGuardService {
         validate_storage_path(from)?;
         validate_storage_path(to)?;
         let root = inner_root_string(&self.inner);
-        let inner = self.inner.copy(ctx, from, to, args, opts)?;
+        // The fs driver copies straight into the destination, so the
+        // destination is observable at every intermediate length and a crash
+        // leaves it truncated - the identical defect atomic writes fix for
+        // `write`. Copy into a staging file and rename that onto the
+        // destination, which is the same publish an ordinary write gets.
+        let staged = staging_path_for(to);
+        let inner = self.inner.copy(ctx, from, &staged, args, opts)?;
         Ok(PathGuardCopier {
             inner,
             root,
             from: from.to_owned(),
             to: to.to_owned(),
             validated: false,
+            staged: Some(staged),
         })
     }
 
@@ -358,35 +627,89 @@ pub(crate) struct PathGuardWriter<W> {
     inner: W,
     root: String,
     path: String,
-    validated: bool,
+    prepared: bool,
+    /// Materialize the target before the first write so opendal appends in
+    /// place rather than staging the append.
+    append_in_place: bool,
+    publish: Publish,
 }
 
 impl<W> PathGuardWriter<W> {
-    async fn validate_once(&mut self) -> Result<()> {
-        if !self.validated {
-            validate_resolved_path(&self.root, &self.path).await?;
-            self.validated = true;
+    /// Validate the caller's path once, and do the one-time preparation this
+    /// write needs before the inner writer touches the filesystem.
+    async fn prepare_once(&mut self) -> Result<()> {
+        if self.prepared {
+            return Ok(());
         }
+        validate_resolved_path(&self.root, &self.path).await?;
+        if self.append_in_place {
+            ensure_target_exists(&self.root, &self.path).await?;
+        }
+        self.prepared = true;
         Ok(())
+    }
+
+    /// Claim the staging file, if this write has one and it is still unsettled.
+    fn take_staged(&mut self) -> Option<String> {
+        match &mut self.publish {
+            Publish::ExclusiveLink { staged, settled } if !*settled => {
+                *settled = true;
+                Some(staged.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Publish an exclusive write by linking its staging file onto the target.
+    async fn publish(&mut self) -> Result<()> {
+        let Some(staged) = self.take_staged() else {
+            return Ok(());
+        };
+        let staged = on_disk_path(&self.root, &staged);
+        let target = on_disk_path(&self.root, &self.path);
+        let linked = link_exclusive(&staged, &target, &self.path).await;
+        // The staging name belongs to this layer either way. When the link
+        // succeeded the target names the same inode, so dropping the staging
+        // name publishes nothing and leaks nothing.
+        remove_staged(&staged).await;
+        linked
+    }
+
+    /// Drop the staging file without publishing it.
+    async fn discard(&mut self) {
+        if let Some(staged) = self.take_staged() {
+            remove_staged(&on_disk_path(&self.root, &staged)).await;
+        }
     }
 }
 
 impl<W: oio::Write> oio::Write for PathGuardWriter<W> {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
-        self.validate_once().await?;
+        self.prepare_once().await?;
         self.inner.write(buffer).await
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.validate_once().await?;
-        self.inner.close().await
+        self.prepare_once().await?;
+        match self.inner.close().await {
+            Ok(meta) => {
+                self.publish().await?;
+                Ok(meta)
+            }
+            Err(e) => {
+                self.discard().await;
+                Err(e)
+            }
+        }
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Aborting cannot create or expose data. Always forward it so an inner
         // writer can release resources even when the path disappears after
         // activation or validation can no longer complete.
-        self.inner.abort().await
+        let aborted = self.inner.abort().await;
+        self.discard().await;
+        aborted
     }
 }
 
@@ -413,7 +736,19 @@ impl<L: oio::List> oio::List for PathGuardLister<L> {
         // root and does not follow each entry's symlink target. The caller's
         // requested list root is the confinement boundary to validate once.
         self.validate_once().await?;
-        self.inner.next().await
+
+        // Drop the reserved staging directory before it reaches the caller.
+        // Entry paths are relative to the disk root, not to the requested list
+        // prefix, so the same first-component test works at every depth. This
+        // is also what stops a recursive listing from descending into staging:
+        // opendal's FS lister is not recursive, so the recursion happens above
+        // this layer and only follows directory entries it is handed.
+        loop {
+            match self.inner.next().await? {
+                Some(entry) if reaches_staging_directory(entry.path()) => continue,
+                other => return Ok(other),
+            }
+        }
     }
 }
 
@@ -423,6 +758,9 @@ pub(crate) struct PathGuardCopier<C> {
     from: String,
     to: String,
     validated: bool,
+    /// Storage path of the staging file the copy is filling, until it is
+    /// renamed onto `to` or discarded. `None` once it is settled.
+    staged: Option<String>,
 }
 
 impl<C> PathGuardCopier<C> {
@@ -434,6 +772,36 @@ impl<C> PathGuardCopier<C> {
         }
         Ok(())
     }
+
+    /// Publish the copy by renaming its staging file onto the destination.
+    /// `rename(2)` replaces whatever is there, so a copy still overwrites.
+    async fn publish(&mut self) -> Result<()> {
+        let Some(staged) = self.staged.take() else {
+            return Ok(());
+        };
+        let staged = on_disk_path(&self.root, &staged);
+        let target = on_disk_path(&self.root, &self.to);
+        if let Err(e) = ensure_parent_dir(&target, &self.to).await {
+            remove_staged(&staged).await;
+            return Err(e);
+        }
+        if let Err(e) = tokio::fs::rename(&staged, &target).await {
+            remove_staged(&staged).await;
+            return Err(publish_error(
+                "renaming the staged copy failed",
+                &self.to,
+                e,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drop the staging file without publishing it.
+    async fn discard(&mut self) {
+        if let Some(staged) = self.staged.take() {
+            remove_staged(&on_disk_path(&self.root, &staged)).await;
+        }
+    }
 }
 
 impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
@@ -444,12 +812,23 @@ impl<C: oio::Copy> oio::Copy for PathGuardCopier<C> {
 
     async fn close(&mut self) -> Result<Metadata> {
         self.validate_once().await?;
-        self.inner.close().await
+        match self.inner.close().await {
+            Ok(meta) => {
+                self.publish().await?;
+                Ok(meta)
+            }
+            Err(e) => {
+                self.discard().await;
+                Err(e)
+            }
+        }
     }
 
     async fn abort(&mut self) -> Result<()> {
         // Abort is cleanup-only and must never be suppressed by path validation.
-        self.inner.abort().await
+        let aborted = self.inner.abort().await;
+        self.discard().await;
+        aborted
     }
 }
 
@@ -476,11 +855,11 @@ impl<D: oio::Delete> oio::Delete for PathGuardDeleter<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PathGuardCopier, PathGuardLister, PathGuardWriter, validate_resolved_path,
-        validate_storage_path,
+        ATOMIC_STAGING_DIR, PathGuardCopier, PathGuardLister, PathGuardWriter,
+        ensure_target_exists, validate_resolved_path, validate_storage_path,
     };
     use opendal::raw::oio::{self, Copy as _, List as _, Write as _};
-    use opendal::{Buffer, EntryMode, Metadata, Result};
+    use opendal::{Buffer, EntryMode, ErrorKind, Metadata, Result};
 
     #[derive(Default)]
     struct RecordingWriter {
@@ -593,6 +972,128 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // The reserved atomic-write staging directory.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn rejects_every_spelling_of_the_reserved_staging_directory() {
+        for bad in [
+            ATOMIC_STAGING_DIR,
+            ".suprnova-atomic/",
+            ".suprnova-atomic/leaked.tmp",
+            ".suprnova-atomic/nested/leaked.tmp",
+            // Punctuation that opendal's own normalization may or may not have
+            // collapsed by the time the path reaches this layer.
+            "./.suprnova-atomic/leaked.tmp",
+            ".suprnova-atomic\\leaked.tmp",
+        ] {
+            let err = match validate_storage_path(bad) {
+                Ok(()) => panic!("the reserved staging directory must be refused: {bad:?}"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.kind(),
+                ErrorKind::PermissionDenied,
+                "the refusal for {bad:?} must be PermissionDenied, got: {err}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+                "the refusal for {bad:?} must name the reservation, got: {message}"
+            );
+        }
+
+        // A leading separator is refused a step earlier, by the absolute-path
+        // gate, so it never reaches the reservation branch. Still refused.
+        assert!(
+            validate_storage_path("//.suprnova-atomic").is_err(),
+            "a leading-separator spelling must still be refused"
+        );
+    }
+
+    #[test]
+    fn allows_the_reserved_name_anywhere_but_the_first_component() {
+        // The staging directory exists at the disk root and nowhere else, so
+        // reserving the name deeper down would refuse ordinary objects.
+        for ok in [
+            "reports/.suprnova-atomic",
+            "reports/.suprnova-atomic/june.csv",
+            ".suprnova-atomic-backup.txt",
+            ".suprnova-atomicx/file.txt",
+            "a/b/.suprnova-atomic/c",
+        ] {
+            assert!(
+                validate_storage_path(ok).is_ok(),
+                "must allow the reserved name below the root: {ok:?}"
+            );
+        }
+    }
+
+    /// A lister that replays a fixed sequence of entry paths, so the filter can
+    /// be observed without a real filesystem.
+    struct SequenceLister {
+        entries: std::vec::IntoIter<&'static str>,
+    }
+
+    impl SequenceLister {
+        fn new(entries: Vec<&'static str>) -> Self {
+            Self {
+                entries: entries.into_iter(),
+            }
+        }
+    }
+
+    impl oio::List for SequenceLister {
+        async fn next(&mut self) -> Result<Option<oio::Entry>> {
+            Ok(self.entries.next().map(|path| {
+                let mode = if path.ends_with('/') {
+                    EntryMode::DIR
+                } else {
+                    EntryMode::FILE
+                };
+                oio::Entry::new(path, Metadata::new(mode))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn lister_drops_the_reserved_staging_directory_at_every_depth() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let mut lister = PathGuardLister {
+            inner: SequenceLister::new(vec![
+                ".suprnova-atomic/",
+                "visible.txt",
+                ".suprnova-atomic/big.bin.a1b2c3d4",
+                "reports/.suprnova-atomic/june.csv",
+                "real-dir/",
+            ]),
+            root: canonical_root(&root),
+            path: "/".to_owned(),
+            validated: false,
+        };
+
+        let mut seen = Vec::new();
+        while let Some(entry) = lister.next().await.expect("the listing advances") {
+            seen.push(entry.path().to_owned());
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                "visible.txt".to_string(),
+                // Only the *first* component is reserved, so this one is an
+                // ordinary object and must survive the filter.
+                "reports/.suprnova-atomic/june.csv".to_string(),
+                "real-dir/".to_string(),
+            ],
+            "the staging directory and its contents must never reach the caller"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Symlink confinement (`validate_resolved_path`). The lexical gate is
     // clean for every path below - these escapes only manifest once the
     // on-disk symlink is followed, which is exactly what the resolved check
@@ -686,6 +1187,156 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn symlink_resolving_into_the_staging_directory_is_rejected() {
+        // The lexical reservation only sees the spelling. A symlink to the
+        // staging directory resolves *inside* the root, so the escape check
+        // alone would allow it - and reading through it hands the caller
+        // another writer's in-flight object.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let staging = root.join(ATOMIC_STAGING_DIR);
+        std::fs::create_dir_all(&staging).expect("create the staging directory");
+        std::fs::write(staging.join("victim.tmp"), b"in flight").expect("plant a staging file");
+        std::os::unix::fs::symlink(&staging, root.join("link"))
+            .expect("create a symlink into the staging directory");
+
+        let root_str = canonical_root(&root);
+        for through in ["link", "link/", "link/victim.tmp", "link/not-there.tmp"] {
+            let err = match validate_resolved_path(&root_str, through).await {
+                Ok(()) => panic!("a path resolving into staging must be refused: {through:?}"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.kind(),
+                ErrorKind::PermissionDenied,
+                "the refusal for {through:?} must be PermissionDenied, got: {err}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(ATOMIC_STAGING_DIR) && message.contains("reserved"),
+                "the refusal for {through:?} must name the reservation, got: {message}"
+            );
+        }
+
+        // A sibling directory whose name merely starts with the reserved one is
+        // not the staging directory and must stay reachable.
+        let neighbor = root.join(".suprnova-atomicals");
+        std::fs::create_dir_all(&neighbor).expect("create the neighbor directory");
+        std::fs::write(neighbor.join("ok.txt"), b"ordinary").expect("write an ordinary object");
+        assert!(
+            validate_resolved_path(&root_str, ".suprnova-atomicals/ok.txt")
+                .await
+                .is_ok(),
+            "a name that only shares a prefix with the reservation is an ordinary object"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_symlink_at_an_intermediate_component_is_rejected() {
+        // Both new integration tests put the dangling link at the *leaf*. This
+        // is the other shape the walk has to handle, and the one whose
+        // correctness is least obvious: the leaf cannot be lstat'd either,
+        // because its parent does not resolve, so the walk has to climb one
+        // more level before it finds the node that exists but cannot be
+        // canonicalized.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("a")).expect("create the intermediate directory");
+        let dangling_target = tmp.path().join("gone");
+        std::os::unix::fs::symlink(&dangling_target, root.join("a/link"))
+            .expect("plant a dangling symlink one level above the leaf");
+
+        let root_str = canonical_root(&root);
+        let err = match validate_resolved_path(&root_str, "a/link/b.txt").await {
+            Ok(()) => panic!("a path under a dangling intermediate symlink must be refused"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            ErrorKind::PermissionDenied,
+            "the refusal must be PermissionDenied, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal must name the symlink, got: {err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&dangling_target).is_err(),
+            "validating a path must never create anything"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_leaf_under_a_symlinked_directory_inside_root_is_allowed() {
+        // The half `symlink_pointing_inside_root_is_allowed` does not cover: a
+        // leaf that does not exist yet. That is the case the append pre-create
+        // touches, and refusing it would break every legitimate layout that
+        // symlinks a directory inside the root.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("create the real directory");
+        std::os::unix::fs::symlink(&real, root.join("dir_link"))
+            .expect("plant a legitimate directory symlink");
+
+        let root_str = canonical_root(&root);
+        assert!(
+            validate_resolved_path(&root_str, "dir_link/new.txt")
+                .await
+                .is_ok(),
+            "a new leaf under a symlinked directory that resolves inside the \
+             root must be allowed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_target_exists_creates_nothing_through_a_dangling_symlink() {
+        // The second lock on the append pre-create, tested on its own terms:
+        // `validate_resolved_path` refuses this path before the pre-create ever
+        // runs, so nothing else in the suite can observe what the pre-create
+        // does when handed one.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).expect("create root");
+        let victim = tmp.path().join("victim-outside-the-root");
+        std::os::unix::fs::symlink(&victim, root.join("innocent.txt"))
+            .expect("plant a dangling symlink aimed out of the root");
+
+        let root_str = canonical_root(&root);
+        ensure_target_exists(&root_str, "innocent.txt")
+            .await
+            .expect("an occupied path is left for opendal rather than erroring");
+        assert!(
+            std::fs::symlink_metadata(&victim).is_err(),
+            "the pre-create must never create the symlink's target at {victim:?}"
+        );
+
+        // The ordinary case it exists for still works.
+        ensure_target_exists(&root_str, "fresh.txt")
+            .await
+            .expect("a genuinely missing path is materialized");
+        assert!(
+            root.join("fresh.txt").is_file(),
+            "a missing append target must be created"
+        );
+
+        // And it is idempotent, without truncating what it finds.
+        std::fs::write(root.join("fresh.txt"), b"kept").expect("give it content");
+        ensure_target_exists(&root_str, "fresh.txt")
+            .await
+            .expect("an existing object is left alone");
+        assert_eq!(
+            std::fs::read(root.join("fresh.txt")).expect("read it back"),
+            b"kept",
+            "the pre-create must never truncate"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn symlink_pointing_inside_root_is_allowed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("root");
@@ -764,7 +1415,10 @@ mod tests {
             inner: RecordingWriter::default(),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place: false,
+            // These cases drive validation forwarding, not publishing.
+            publish: super::Publish::Inner,
         };
 
         writer
@@ -795,7 +1449,10 @@ mod tests {
             inner: RecordingWriter::default(),
             root: canonical_root(&root),
             path: "file.txt".to_owned(),
-            validated: false,
+            prepared: false,
+            append_in_place: false,
+            // These cases drive validation forwarding, not publishing.
+            publish: super::Publish::Inner,
         };
 
         writer
@@ -850,6 +1507,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -883,6 +1542,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         assert_eq!(copier.next().await.expect("activate copier"), Some(4));
@@ -909,6 +1570,8 @@ mod tests {
             from: "source.txt".to_owned(),
             to: "destination.txt".to_owned(),
             validated: false,
+            // These cases drive validation forwarding, not publishing.
+            staged: None,
         };
 
         std::fs::remove_dir_all(&root).expect("remove root before activation");

@@ -579,11 +579,11 @@ impl ReadThroughReader {
     /// half-written.
     ///
     /// Where the primary advertises a `rename`, the bytes are staged at a
-    /// unique sibling and renamed onto the target, because that backend - the
-    /// local filesystem - creates the target file first and fills it in place.
-    /// Where it does not, the write itself is the atomic publish and runs
-    /// directly, conditional on the object not already existing so two
-    /// concurrent readers do not both promote.
+    /// unique sibling and renamed onto the target. That covers any primary
+    /// whose write is not itself an indivisible publish, whatever the backend
+    /// stages underneath. Where the primary has no `rename`, the write itself
+    /// is the atomic publish and runs directly, conditional on the object not
+    /// already existing so two concurrent readers do not both promote.
     ///
     /// The staged form cannot use that condition: its path is unique, so the
     /// condition would be vacuous. It re-checks the primary immediately before
@@ -616,11 +616,10 @@ impl ReadThroughReader {
             .write_options(&staged, contents.clone(), options)
             .await
         {
-            // A backend that creates the target before filling it - the local
-            // filesystem does - leaves a partial staging object behind when the
-            // write fails part-way, and nothing else ever sweeps it. Deleting a
-            // path that was never created is a no-op, so this is safe either
-            // way.
+            // A backend that creates the target before filling it leaves a
+            // partial staging object behind when the write fails part-way, and
+            // nothing else ever sweeps it. Deleting a path that was never
+            // created is a no-op, so this is safe either way.
             self.discard(&staged).await;
             return Err(e);
         }
@@ -841,10 +840,13 @@ async fn stream_across(
 /// `to` for the whole transfer and deleting it would destroy data the transfer
 /// never wrote. When it was already there, it is left alone.
 ///
-/// The local filesystem is the asymmetry: without an atomic write directory it
-/// opens the target itself with `O_TRUNC`, so a pre-existing destination is
-/// already gone by the time a transfer can fail, and nothing here can bring it
-/// back.
+/// A local-filesystem primary registered through `Storage::register_fs` behaves
+/// the same way, because it stages the write under
+/// [`crate::filesystem::ATOMIC_STAGING_DIR`] and only renames on success; the
+/// `abort` above is what removes the staged file. An fs operator built without
+/// that staging directory is the asymmetry: it opens the target itself with
+/// `O_TRUNC`, so a pre-existing destination is already gone by the time a
+/// transfer can fail, and nothing here can bring it back.
 async fn discard_partial(
     primary: &Operator,
     writer: &mut opendal::Writer,
@@ -863,8 +865,9 @@ async fn discard_partial(
         tracing::warn!(
             path = %to,
             "a read-through transfer failed onto a destination that already \
-             existed; leaving it in place, though a local-filesystem primary \
-             will have truncated it when the writer opened"
+             existed; leaving it in place, though a primary that opens the \
+             target in place rather than staging the write will have \
+             truncated it when the writer opened"
         );
         return;
     }
@@ -1733,12 +1736,15 @@ mod tests {
     /// than once and a failure can land between chunks.
     const TWO_CHUNK_BYTES: usize = CROSS_DISK_CHUNK_BYTES + 4096;
 
-    /// An operator over a real local-filesystem directory.
+    /// An operator over a real local-filesystem directory, configured exactly
+    /// as `Storage::register_fs` configures one - atomic staging included, so
+    /// these tests see the same write path an application does.
     fn fs_operator(root: &std::path::Path) -> Operator {
-        Operator::new(
-            services::Fs::default().root(root.to_str().expect("a tempdir path is valid UTF-8")),
+        let service = crate::filesystem::atomic_fs_service(
+            root.to_str().expect("a tempdir path is valid UTF-8"),
         )
-        .expect("the fs service builds over an existing directory")
+        .expect("a tempdir path stays valid UTF-8 once the staging name is joined");
+        Operator::new(service).expect("the fs service builds over an existing directory")
     }
 
     /// Compose a read-through disk over a *real* primary and a stub fallback.
@@ -1804,9 +1810,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_transfer_cleans_up_a_partial_destination() {
-        // A local-filesystem primary without an atomic write directory opens
-        // the target itself, so a transfer that dies part-way leaves a real,
-        // truncated file unless the cleanup removes it.
+        // A local-filesystem primary stages every non-append write under
+        // `ATOMIC_STAGING_DIR` and renames it into place, so a transfer that
+        // dies part-way never publishes the destination at all. What it can
+        // leave behind is the temp file it opened, and only the writer's
+        // `abort` removes that - so both are the assertion.
         let tmp = tempfile::tempdir().expect("tempdir");
         let primary = fs_operator(tmp.path());
 
@@ -1822,8 +1830,25 @@ mod tests {
                 .exists("warm.txt")
                 .await
                 .expect("primary exists answers"),
-            "a partial destination this transfer created has to go; nothing \
-             else sweeps it and a listing shows it forever"
+            "a failed transfer must publish nothing at the destination; \
+             nothing else sweeps a partial and a listing shows it forever"
+        );
+
+        let staging = tmp.path().join(crate::filesystem::ATOMIC_STAGING_DIR);
+        let staged: Vec<String> = std::fs::read_dir(&staging)
+            .unwrap_or_else(|e| panic!("the staging directory at {staging:?} must exist: {e}"))
+            .map(|entry| {
+                entry
+                    .expect("a staging directory entry reads")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            staged.is_empty(),
+            "a failed transfer must not leave its temp file under the staging \
+             directory either, found: {staged:?}"
         );
     }
 
