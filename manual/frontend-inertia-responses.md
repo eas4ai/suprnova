@@ -1032,7 +1032,7 @@ a new project is covered without doing anything.
 | Prop | Type | Always present | What it is |
 |---|---|---|---|
 | `status` | `number` | yes | The original HTTP status - `403`, `404`, `500`. |
-| `message` | `string` | yes | The error body's `message`, or the status's reason phrase when it carried none. Already sanitized: a `5xx` reads `"Internal Server Error"`, never the underlying error. |
+| `message` | `string` | yes | The error body's `message`, or the status's reason phrase when it carried none. Already sanitized: a `5xx` reads `"Internal Server Error"`, never the underlying error - and that holds under `APP_DEBUG=true` too. The dev-only `debug_message` field the JSON path adds there is deliberately not read, so the raw error stays in the log and the JSON response and never renders into a page. |
 | `request_id` | `string` | no | Present only when the error body carried one. The same id the structured log records, so the page can show a reference the operator can search. |
 
 ```svelte
@@ -1073,6 +1073,15 @@ arrive intact. The rule is stated as what gets dropped rather than what
 gets kept, so a header the framework has never heard of survives instead
 of silently disappearing.
 
+One consequence to know about: the page that replaces the body is
+user-specific - it carries your shared props, `auth.user` and flash
+included - while the error body it replaced was not. `Cache-Control` is
+not representation metadata, so it carries over; if your app or a CDN
+shim marked an error response `Cache-Control: public`, that response is
+now publicly cacheable **with per-user content in it**. Nothing in the
+framework sets a cacheable `Cache-Control` on an error, so this needs a
+deliberate act on your side - but if you made one, revisit it.
+
 Both audiences are covered. An Inertia XHR visit gets the JSON page
 object with `X-Inertia: true`; a hard navigation - someone pasting
 `/admin/articles` into the address bar - gets the full HTML shell, the
@@ -1098,12 +1107,36 @@ alone:
   visit or a browser navigation gets a page.
 - **Responses that already are Inertia pages.** A handler that rendered
   its own page and gave it a `410` keeps its own component.
-- **Bodies your app authored.** Your own HTML error page, or a JSON
-  envelope in some other shape, is a considered answer; the framework
-  does not overrule it.
+- **Bodies that are not the framework's error shape.** Your own HTML
+  error page, plain text that is not the router's own `404 Not Found`, or
+  a JSON envelope keyed differently - none of those is overruled.
 - **Everything, when `error_page` is unset.** The middleware is not
   registered at all, so an app that has not opted in runs exactly the
   code it ran before.
+
+### Which bodies get rewritten
+
+The gate is the **shape of the body**, not who wrote it. At a `400`-`599`
+status, exactly three shapes are replaced:
+
+- an empty body;
+- a JSON object whose `message` is a string - the framework's own error
+  envelope, and anything else shaped like it;
+- the router's fixed `404 Not Found` plain-text body.
+
+Everything else passes through. That means a `401` a middleware of yours
+answers with `HttpResponse::json(json!({ "message": "Unauthenticated." }))`
+**does** become the error page - which is the point, since that is exactly
+the response the client would otherwise modal - and it means only
+`message` and `request_id` survive into the props. An envelope carrying
+`errors`, `code`, or anything else loses those fields when it becomes a
+page.
+
+If a middleware of yours must keep its own JSON body on an error status,
+give it a shape the gate does not match - key the human-readable text as
+something other than `message` - or set `X-Inertia: true` on the response
+yourself, which marks it as already being an Inertia response and takes
+it out of scope. Both are one line at the point that builds the response.
 
 One gap worth knowing: a handler that **panics** is out of reach. The
 panic net wraps the whole middleware chain, so the synthesized `500` is
@@ -1128,9 +1161,10 @@ rewrites by hand, usually after seeing the modal in production first.
 Here it is one config line, because the decision is the same for every
 app: an Inertia visit or a browser navigation gets a page, an API client
 gets JSON, and everything another contract owns is left alone. The
-escape hatch is the same either way - a route middleware of your own,
-registered inside this one, can answer with whatever it likes and the
-error-page middleware will leave that body alone.
+trade is that the rule is a fixed one rather than a `match` you write, so
+opting a particular response out means giving it a body the gate does not
+recognize, or marking it as already-Inertia - see
+[Which bodies get rewritten](#which-bodies-get-rewritten).
 
 ## Server-driven `<head>` elements
 

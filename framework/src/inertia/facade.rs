@@ -267,6 +267,14 @@ mod tests {
         // registration is idempotent per type and process-global: two
         // tests each measuring their own delta would race over which of
         // them registered the four shared types.
+        //
+        // Known side effect: `TestContainer::fake` scopes
+        // `set_installed_config`, but `register_global_middleware` really
+        // is process-global, so from here on every test in this binary
+        // that builds a chain from `get_global_middleware()` carries an
+        // error-page rewrite. Nothing depends on its absence today; if
+        // something ever does, the fix is a registry the container owns,
+        // not moving this assertion somewhere it would race.
         Inertia::install(
             &InertiaConfig::new()
                 .version("test-version")

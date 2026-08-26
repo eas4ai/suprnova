@@ -10,6 +10,14 @@ interface ErrorProps {
   request_id?: string
 }
 
+// The two chrome strings below are deliberately not routed through
+// `t()` the way every other page's are. This page renders from the
+// error-page middleware, which `Inertia::install` registers ahead of
+// `LocaleMiddleware` in `src/bootstrap.rs` - so by the time it renders,
+// the request's locale scope has already exited and the `lang` share
+// names the app's default catalog, not the visitor's. `t()` here would
+// look localized while serving the fallback. Move the call inside the
+// locale middleware first if you want this page translated.
 export default function ErrorPage({ status, message, request_id }: ErrorProps) {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">

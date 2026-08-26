@@ -479,8 +479,9 @@ async fn an_api_client_asking_for_json_keeps_the_json_body() {
 async fn error_page_off_leaves_the_denial_byte_for_byte() {
     // No error-page middleware in the chain at all - which is exactly
     // what `Inertia::install` produces when `error_page` is unset. The
-    // gate itself is pinned by `install_registers_the_error_page_middleware_only_when_configured`
-    // in `framework/src/inertia/facade.rs`.
+    // gate itself is pinned by the install-delta assertion inside
+    // `install_registers_the_protocol_middlewares` in
+    // `framework/src/inertia/facade.rs`.
     let _db = seed_member().await;
     let addr = spawn_server(router(), MiddlewareRegistry::new(), 2).await;
 

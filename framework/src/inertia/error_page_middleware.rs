@@ -363,9 +363,18 @@ enum ReplaceableBody {
 
 /// Classify the body, or refuse to touch it.
 ///
-/// The gate is deliberately narrow. Anything a handler authored itself -
-/// its own HTML error page, its own JSON envelope - is a considered
-/// answer, and replacing it would be the framework overruling the app.
+/// The gate is the **shape** of the body, not its author. It cannot be
+/// otherwise: the brief's own 401 case is a body some middleware wrote by
+/// hand, and it has to become a page for the same reason the framework's
+/// own does - the client would modal it either way. So an
+/// `application/json` object carrying a string `message` is replaceable
+/// whoever built it, and only `message` and `request_id` survive into the
+/// props.
+///
+/// What that leaves as the opt-out, and what the manual documents: a body
+/// in any other shape - an app's own HTML error page, plain text that is
+/// not the router's own `404`, a JSON envelope keyed differently - passes
+/// through untouched, as does a response already marked `X-Inertia`.
 fn replaceable_body(content_type: Option<&str>, body: &[u8]) -> Option<ReplaceableBody> {
     if body.is_empty() {
         return Some(ReplaceableBody::Empty);
@@ -416,9 +425,9 @@ fn quality_for(accept: &str, media_type: &str, subtype: &str) -> u16 {
 
     for range in accept.split(',') {
         let mut parts = range.split(';');
-        let Some(name) = parts.next().map(str::trim) else {
-            continue;
-        };
+        // `split` always yields at least one item, so this names the
+        // whole range when it carries no parameters.
+        let name = parts.next().unwrap_or(range).trim();
         let (range_type, range_subtype) = match name.split_once('/') {
             Some(pair) => pair,
             None => continue,
@@ -578,7 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn a_body_the_app_authored_is_never_overruled() {
+    fn a_body_in_any_other_shape_is_left_alone() {
+        // The gate is the body's shape, not its author - so what is left
+        // alone is everything that is not an error envelope.
+        //
         // A handler's own HTML error page.
         assert_eq!(
             decide(&facts(404, "text/html; charset=utf-8", b"<h1>gone</h1>")),

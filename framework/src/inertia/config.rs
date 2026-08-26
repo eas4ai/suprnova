@@ -300,7 +300,11 @@ pub struct InertiaConfig {
     /// - `message` (`String`) - the error body's `message`, or the
     ///   status's reason phrase when the body carried none. Already
     ///   sanitized: a `5xx` message is the generic
-    ///   `"Internal Server Error"`, never the underlying error.
+    ///   `"Internal Server Error"`, never the underlying error. That holds
+    ///   under `APP_DEBUG=true` as well - the dev-only `debug_message`
+    ///   field the JSON path adds there is deliberately not read, so the
+    ///   raw error stays in the log and the JSON response rather than
+    ///   rendering into a page.
     /// - `request_id` (`String`, optional) - present only when the error
     ///   body carried one, so the page can show the same id the operator
     ///   sees in the logs.
