@@ -84,8 +84,7 @@ pub async fn register_auth() -> Result<(), suprnova::FrameworkError> {
 ### 既存のユーザーとセッションの仕組みを維持する
 
 アプリケーションは、Magnetar をパスワード、パスキー、フレームワークセッション、
-remember-me 状態の権限元にせず、OAuth セレモニーとプロバイダー証明だけに利用できます。
-同じ `MagnetarOAuthHostConfig` を構築し、OAuth 専用の初期化関数でインストールします。
+remember-me 状態の権限元にせず、OAuth セレモニーとプロバイダー証明だけに利用できます。同じ `MagnetarOAuthHostConfig` を構築し、OAuth 専用の初期化関数でインストールします。
 
 ```rust,no_run
 use suprnova::{
@@ -103,14 +102,9 @@ init_magnetar_oauth_only(
 ```
 
 セレモニーは通常どおり `Auth::oauth(provider).begin()` で開始します。コールバックでは
-`verify_oauth_identity(code, state)` を呼び、検証済みのプロバイダー subject を
-アプリケーション自身のユーザーテーブルへ対応付け、`Auth::login` で既存の
-フレームワークセッションを確立します。このモードでは `complete` を呼び出さないで
-ください。`complete` は Magnetar の既定のアカウントおよびセッション対応付けを
-適用しますが、OAuth 専用初期化の目的は、それらの判断をアプリケーションに残すことです。
+`verify_oauth_identity(code, state)` を呼び、検証済みのプロバイダー subject をアプリケーション自身のユーザーテーブルへ対応付け、`Auth::login` で既存のフレームワークセッションを確立します。このモードでは `complete` を呼び出さないでください。`complete` は Magnetar の既定のアカウントおよびセッション対応付けを適用しますが、OAuth 専用初期化の目的は、それらの判断をアプリケーションに残すことです。
 
-OAuth 専用初期化と完全な既定初期化は代替関係です。2 つ目の初期化関数は、異なる
-セッション権限を混在させる代わりに失敗します。
+OAuth 専用初期化と完全な既定初期化は代替関係です。2 つ目の初期化関数は、異なるセッション権限を混在させる代わりに失敗します。
 
 ### GitHub プロバイダーの要件
 
