@@ -338,6 +338,27 @@ function trackResource(
   });
 }
 
+function bestEffortCleanup(dispose: VoidFunction): void {
+  try {
+    dispose();
+  } catch {
+    // Registration failure preserves the original bounded-resource diagnostic.
+  }
+}
+
+function trackAcquiredResource(
+  context: RuntimeFeatureDocumentContext,
+  kind: CoreResourceKind,
+  dispose: VoidFunction,
+): Disposable {
+  try {
+    return trackResource(context, kind, dispose);
+  } catch (error: unknown) {
+    bestEffortCleanup(dispose);
+    throw error;
+  }
+}
+
 function trackedTimers(
   context: RuntimeFeatureDocumentContext,
   timers: AsyncTimerPort,
@@ -361,7 +382,7 @@ function trackedTimers(
         resource?.dispose();
         callback();
       }, milliseconds);
-      const resource = trackResource(context, "timer", () => {
+      const resource = trackAcquiredResource(context, "timer", () => {
         active.delete(handle);
         timers.clearTimeout(handle);
       });
@@ -380,7 +401,7 @@ function trackedPollEnvironment(
     isVisible: () => environment.isVisible(),
     subscribe(listener: VoidFunction): VoidFunction {
       const dispose = environment.subscribe(listener);
-      const resource = trackResource(context, "listener", dispose);
+      const resource = trackAcquiredResource(context, "listener", dispose);
       return () => {
         resource.dispose();
       };
@@ -425,11 +446,17 @@ function trackedTransport(
   transport: "sse" | "websocket",
 ): DocumentTransportPort {
   let closeReason: DocumentTransportCloseReason = "document_retired";
-  const transportResource = trackResource(context, "transport", () => {
-    port.close(closeReason);
-  });
-  const bufferResource =
-    transport === "sse" ? trackResource(context, "buffer", () => undefined) : null;
+  let transportResource: Disposable | null = null;
+  let bufferResource: Disposable | null = null;
+  try {
+    transportResource = trackAcquiredResource(context, "transport", () => {
+      port.close(closeReason);
+    });
+    bufferResource = transport === "sse" ? trackResource(context, "buffer", () => undefined) : null;
+  } catch (error: unknown) {
+    transportResource?.dispose();
+    throw error;
+  }
   let closed = false;
   return Object.freeze({
     close(reason: DocumentTransportCloseReason) {

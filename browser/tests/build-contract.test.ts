@@ -104,6 +104,8 @@ describe("deterministic production assets", () => {
     expect(declarations).toContain("unload(...identifiers: readonly string[]): void");
     expect(declarations).toContain("readonly stimulus?: StimulusBootstrapOptions");
     expect(declarations).toContain("runEffect(owner: Element, invocation: EffectInvocation)");
+    expect(declarations).not.toContain("LifecycleTestProbe");
+    expect(declarations).not.toContain("lifecycleTestProbe");
   });
 
   it("records exact versions, hashes, serving intent, cache policy, and bundled provenance", async () => {
@@ -250,6 +252,7 @@ describe("deterministic production assets", () => {
       readonly supportedProtocolVersions: readonly number[];
       readonly RUNTIME_SYMBOL: symbol;
       readonly boot: unknown;
+      readonly lifecycleTestProbe?: unknown;
     };
     const classicWindow: Record<string, unknown> = {};
     vm.runInNewContext(await readFile(join(outputDirectory, "suprnova-live.classic.js"), "utf8"), {
@@ -264,6 +267,7 @@ describe("deterministic production assets", () => {
     expect(classic.runtimeContractVersion).toBe(esm.runtimeContractVersion);
     expect(classic.supportedProtocolVersions).toEqual(esm.supportedProtocolVersions);
     expect(typeof esm.boot).toBe("function");
+    expect(esm).not.toHaveProperty("lifecycleTestProbe");
     expect(typeof classic.boot).toBe("function");
     expect(descriptor).toMatchObject({ configurable: false, writable: false });
   });

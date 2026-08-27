@@ -9,8 +9,6 @@ export const version = ENGINE_VERSION;
 export const runtimeContractVersion = RUNTIME_CONTRACT_VERSION;
 export const supportedProtocolVersions = SUPPORTED_PROTOCOL_VERSIONS;
 export { boot, RUNTIME_SYMBOL };
-export { lifecycleTestProbe } from "./lifecycle/testing.js";
-export type { LifecycleTestProbe } from "./lifecycle/testing.js";
 export type {
   BootstrapOptions,
   RuntimeHandle,

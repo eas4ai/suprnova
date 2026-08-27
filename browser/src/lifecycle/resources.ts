@@ -65,6 +65,7 @@ const RESOURCE_KINDS = [
 
 const DEFAULT_MAX_RESOURCES = 2_048;
 const RESOURCE_LEDGERS = new WeakMap<object, ResourceLedger>();
+const INTERNAL_RESOURCE_COUNTS = Symbol.for("suprnova.live.internal.resource-counts.v1");
 
 function invoke(callback: (() => void) | undefined): void {
   try {
@@ -150,4 +151,16 @@ export function bindResourceLedger(owner: object, ledger: ResourceLedger): void 
 
 export function boundResourceLedger(owner: object): ResourceLedger | null {
   return RESOURCE_LEDGERS.get(owner) ?? null;
+}
+
+export function installInternalResourceCountProbe(owner: object, ledger: ResourceLedger): void {
+  if (Object.prototype.hasOwnProperty.call(owner, INTERNAL_RESOURCE_COUNTS)) {
+    throw new Error("resource_count_probe_duplicate");
+  }
+  Object.defineProperty(owner, INTERNAL_RESOURCE_COUNTS, {
+    configurable: false,
+    enumerable: false,
+    value: () => ledger.counts(),
+    writable: false,
+  });
 }

@@ -15,7 +15,11 @@ import { IdiomorphAdapter } from "../morph/idiomorph.js";
 import { BrowserRestoreCompatibility } from "../lifecycle/bfcache.js";
 import { DocumentLifecycle } from "../lifecycle/document.js";
 import { supportsDocumentFreezeResume } from "../lifecycle/events.js";
-import { bindResourceLedger, ResourceLedgerImpl } from "../lifecycle/resources.js";
+import {
+  bindResourceLedger,
+  installInternalResourceCountProbe,
+  ResourceLedgerImpl,
+} from "../lifecycle/resources.js";
 import type { BootstrapOptions } from "./types.js";
 import type {
   RuntimeFeatureDriver,
@@ -53,6 +57,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverR
   constructor(context: RuntimeContext) {
     const ledger = new ResourceLedgerImpl();
     bindResourceLedger(this, ledger);
+    installInternalResourceCountProbe(this, ledger);
     this.#effects = new EffectRegistry({
       diagnostics: context.diagnostics,
       scheduler: context.ports.scheduler,

@@ -4,7 +4,19 @@ import {
   BrowserAsyncTransportPorts,
   configureAsync,
 } from "http://127.0.0.1:4173/assets/suprnova-live.async.esm.js";
-import { boot, lifecycleTestProbe } from "http://127.0.0.1:4173/assets/suprnova-live.esm.js";
+import { boot } from "http://127.0.0.1:4173/assets/suprnova-live.esm.js";
+
+const INTERNAL_RESOURCE_COUNTS = Symbol.for("suprnova.live.internal.resource-counts.v1");
+
+function runtimeResourceCounts(runtime) {
+  const inspect = Reflect.get(runtime, INTERNAL_RESOURCE_COUNTS);
+  if (typeof inspect !== "function") throw new Error("runtime_resource_probe_missing");
+  const counts = Reflect.apply(inspect, runtime, []);
+  if (typeof counts !== "object" || counts === null) {
+    throw new Error("runtime_resource_probe_invalid");
+  }
+  return counts;
+}
 
 const rustOrigin = "http://127.0.0.1:4174";
 const identityFacts = Object.freeze({
@@ -574,7 +586,7 @@ Reflect.set(
     snapshot() {
       return structuredClone({
         ...observations,
-        runtimeResources: lifecycleTestProbe(runtime).counts,
+        runtimeResources: runtimeResourceCounts(runtime),
       });
     },
   }),
