@@ -207,11 +207,30 @@ pub struct AsyncReferenceAuthority {
     next_credential: u64,
     next_transport: u64,
     open_transports: BTreeSet<u64>,
+    subscription_id: String,
+    origin: String,
 }
 
 impl AsyncReferenceAuthority {
     /// Creates one complete reference authority with a production descriptor codec.
     pub fn new(now: UnixMillis) -> Self {
+        Self::new_with_subscription(
+            now,
+            AsyncReferenceScenario::lifecycle()
+                .subscription_id
+                .to_owned(),
+        )
+    }
+
+    pub(crate) fn new_with_subscription(now: UnixMillis, subscription_id: String) -> Self {
+        Self::new_with_origin_subscription(now, ASYNC_REFERENCE_ORIGIN.to_owned(), subscription_id)
+    }
+
+    pub(crate) fn new_with_origin_subscription(
+        now: UnixMillis,
+        origin: String,
+        subscription_id: String,
+    ) -> Self {
         let active = KeyRecord::new(
             KeyId::parse("task9-async-key").expect("static key id"),
             RootKey::new(vec![0x91; 32]).expect("static test key"),
@@ -230,7 +249,40 @@ impl AsyncReferenceAuthority {
             next_credential: 1,
             next_transport: 1,
             open_transports: BTreeSet::new(),
+            subscription_id,
+            origin,
         }
+    }
+
+    pub(crate) fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub(crate) fn install_external_authority(
+        &mut self,
+        descriptor: String,
+        binding: String,
+        credential: String,
+        expires_at: UnixMillis,
+    ) -> Result<(), &'static str> {
+        let parsed =
+            SubscriptionDescriptor::parse(&descriptor).map_err(|_| "descriptor_invalid")?;
+        let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(parsed.as_str().as_bytes()));
+        if expected != binding || expires_at <= UnixMillis::new(1_000) {
+            return Err("authority_issue_failed");
+        }
+        self.issued = Some(IssuedAuthority {
+            binding,
+            credential,
+            descriptor,
+            expires_at: expires_at.get(),
+            ever_opened: false,
+            membership_open: false,
+            open_transport: None,
+            transport_generation: 0,
+            used_control_nonces: BTreeSet::new(),
+        });
+        Ok(())
     }
 
     /// Returns the current authoritative sequence.
@@ -247,7 +299,7 @@ impl AsyncReferenceAuthority {
         transport_generation: u64,
         now: UnixMillis,
     ) -> Result<u64, &'static str> {
-        if origin != ASYNC_REFERENCE_ORIGIN {
+        if origin != self.origin {
             return Err("origin_mismatch");
         }
         let issued = self.issued.as_mut().ok_or("authority_missing")?;
@@ -292,7 +344,7 @@ impl AsyncReferenceAuthority {
         }
         let observed = match (&request.prior_subscription_id, &request.position) {
             (None, None) => self.current_sequence,
-            (Some(prior), Some(position)) if prior == scenario.subscription_id => {
+            (Some(prior), Some(position)) if prior == &self.subscription_id => {
                 parse_position(position)?
             }
             _ => return Err("continuity_facts_invalid"),
@@ -363,7 +415,7 @@ impl AsyncReferenceAuthority {
                     "minimum_delay_ms": 250
                 },
                 "stream": scenario.stream,
-                "subscription_id": scenario.subscription_id
+                "subscription_id": self.subscription_id
             }
         }))
     }
@@ -380,7 +432,7 @@ impl AsyncReferenceAuthority {
         let scenario = AsyncReferenceScenario::lifecycle();
         if (request.operation != "subscribe" && request.operation != "unsubscribe")
             || request.stream != scenario.stream
-            || request.subscription_id != scenario.subscription_id
+            || request.subscription_id != self.subscription_id
             || request.control_nonce.is_empty()
             || request.control_nonce.len() > 128
             || request.transport_generation == 0
@@ -422,7 +474,7 @@ impl AsyncReferenceAuthority {
             "kind": "authenticated",
             "operation": request.operation,
             "stream": scenario.stream,
-            "subscriptionId": scenario.subscription_id,
+            "subscriptionId": self.subscription_id,
             "transportGeneration": request.transport_generation
         }))
     }
@@ -435,9 +487,7 @@ impl AsyncReferenceAuthority {
         request: &AsyncReferencePollRequest,
         now: UnixMillis,
     ) -> Result<Value, &'static str> {
-        if origin != ASYNC_REFERENCE_ORIGIN
-            || request.subscription_id != AsyncReferenceScenario::lifecycle().subscription_id
-        {
+        if origin != self.origin || request.subscription_id != self.subscription_id {
             return Err("poll_authority_invalid");
         }
         let issued = self.issued.as_ref().ok_or("poll_authority_invalid")?;
@@ -476,11 +526,21 @@ impl AsyncReferenceAuthority {
 
     /// Emits a genuine `N + 2` gap while retaining `N + 1` and `N + 2` for complete replay.
     pub fn sequence_gap(&mut self) -> (u64, String) {
-        let scenario = AsyncReferenceScenario::lifecycle();
         let missing = self.current_sequence.saturating_add(1);
         let gap = self.current_sequence.saturating_add(2);
-        self.record_history(missing, scenario.heartbeat(missing));
-        let refresh = scenario.refresh(gap);
+        self.record_history(
+            missing,
+            envelope_for(
+                &self.subscription_id,
+                missing,
+                json!({ "kind": "heartbeat" }),
+            ),
+        );
+        let refresh = envelope_for(
+            &self.subscription_id,
+            gap,
+            json!({ "kind": "refresh", "name": "refresh" }),
+        );
         self.record_history(gap, refresh.clone());
         self.current_sequence = gap;
         (gap, refresh)
@@ -489,7 +549,11 @@ impl AsyncReferenceAuthority {
     /// Advances the authoritative sequence by one heartbeat.
     pub fn next_heartbeat(&mut self) -> (u64, String) {
         self.current_sequence = self.current_sequence.saturating_add(1);
-        let envelope = AsyncReferenceScenario::lifecycle().heartbeat(self.current_sequence);
+        let envelope = envelope_for(
+            &self.subscription_id,
+            self.current_sequence,
+            json!({ "kind": "heartbeat" }),
+        );
         self.record_history(self.current_sequence, envelope.clone());
         (self.current_sequence, envelope)
     }
@@ -497,7 +561,11 @@ impl AsyncReferenceAuthority {
     /// Advances the authoritative sequence by one terminal completion.
     pub fn completion(&mut self) -> (u64, String) {
         self.current_sequence = self.current_sequence.saturating_add(1);
-        let envelope = AsyncReferenceScenario::lifecycle().completion(self.current_sequence);
+        let envelope = envelope_for(
+            &self.subscription_id,
+            self.current_sequence,
+            json!({ "kind": "complete", "reason": "server_shutdown" }),
+        );
         self.record_history(self.current_sequence, envelope.clone());
         (self.current_sequence, envelope)
     }
@@ -539,7 +607,7 @@ impl AsyncReferenceAuthority {
         principal: &str,
         scope: &str,
     ) -> Result<(), &'static str> {
-        if origin != ASYNC_REFERENCE_ORIGIN {
+        if origin != self.origin {
             return Err("origin_mismatch");
         }
         if session != ASYNC_REFERENCE_SESSION
@@ -550,6 +618,17 @@ impl AsyncReferenceAuthority {
         }
         Ok(())
     }
+}
+
+fn envelope_for(subscription_id: &str, sequence: u64, payload: Value) -> String {
+    serde_json::to_string(&json!({
+        "payload": payload,
+        "position": { "epoch": "1", "sequence": sequence.to_string() },
+        "protocol_version": 1,
+        "stream": AsyncReferenceScenario::lifecycle().stream,
+        "subscription": subscription_id,
+    }))
+    .expect("static async reference envelope serializes")
 }
 
 fn parse_position(position: &AsyncReferencePosition) -> Result<u64, &'static str> {

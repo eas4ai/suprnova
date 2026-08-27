@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use axum::body::Body;
 use http_body_util::BodyExt as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use suprnova_live::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
 use suprnova_live::host::{
@@ -41,6 +42,9 @@ use crate::{
     SyntheticLiveRequestContextBuilder, TokioFileQuarantineStore,
 };
 
+use super::faults::ReferenceFaultSchedule;
+use super::{ResourceCounter, ResourceLease};
+
 const CREATED_AT: UnixMillis = UnixMillis::new(1_000);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,7 +63,8 @@ struct StoredUpload {
     mode: TransferMode,
     grant: TransferGrant,
     revision: UploadRevision,
-    whole_checksum: Option<UploadChecksum>,
+    whole_hasher: Sha256,
+    active_lease: Option<ResourceLease>,
 }
 
 #[derive(Deserialize)]
@@ -87,10 +92,17 @@ pub(super) struct UploadRuntime {
     uploads: Mutex<HashMap<String, StoredUpload>>,
     next_handle: AtomicU64,
     service_calls: AtomicUsize,
+    fault: ReferenceFaultSchedule,
+    fault_applied: AtomicBool,
+    active_uploads: Arc<ResourceCounter>,
 }
 
 impl UploadRuntime {
-    pub(super) async fn open(root: &std::path::Path) -> Result<Self, String> {
+    pub(super) async fn open(
+        root: &std::path::Path,
+        fault: ReferenceFaultSchedule,
+        active_uploads: Arc<ResourceCounter>,
+    ) -> Result<Self, String> {
         let limits = UploadLimits::new(UploadLimitConfig::reference())
             .map_err(|error| format!("upload limits: {error:?}"))?;
         let store = Arc::new(
@@ -131,6 +143,9 @@ impl UploadRuntime {
             uploads: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             service_calls: AtomicUsize::new(0),
+            fault,
+            fault_applied: AtomicBool::new(false),
+            active_uploads,
         })
     }
 
@@ -151,6 +166,10 @@ impl UploadRuntime {
             "direct" => TransferMode::Direct,
             _ => return Err(UploadError::new(UploadErrorKind::InvalidField)),
         };
+        let active_lease = self
+            .active_uploads
+            .acquire()
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
         let sequence = self.next_handle.fetch_add(1, Ordering::SeqCst);
         let encoded = format!("018f47c1-2af0-7cc4-a001-{sequence:012x}");
         let handle = UploadHandle::parse(&encoded)?;
@@ -223,7 +242,8 @@ impl UploadRuntime {
                 mode,
                 grant: grant.clone(),
                 revision,
-                whole_checksum: None,
+                whole_hasher: Sha256::new(),
+                active_lease: Some(active_lease),
             },
         );
         let mut response = json!({
@@ -274,7 +294,10 @@ impl UploadRuntime {
             return Err(UploadError::new(UploadErrorKind::InputTooLarge));
         }
         let checksum = UploadChecksum::parse(checksum)?;
-        let mut chunks = AxumChunkBody::new(body);
+        let interrupt_after_first = self.fault == ReferenceFaultSchedule::UploadBodyInterruptedOnce
+            && !self.fault_applied.swap(true, Ordering::SeqCst);
+        let mut chunks =
+            AxumChunkBody::new(body, upload.whole_hasher.clone(), interrupt_after_first);
         let receipt = self
             .file
             .write_chunk(
@@ -282,6 +305,7 @@ impl UploadRuntime {
                 &mut chunks,
             )
             .await?;
+        upload.whole_hasher = chunks.into_hasher();
         upload.received_bytes = upload
             .received_bytes
             .checked_add(receipt.bytes())
@@ -297,9 +321,6 @@ impl UploadRuntime {
             &format!("put-{part}"),
         )
         .await?;
-        if upload.received_bytes == upload.expected_bytes {
-            upload.whole_checksum = Some(checksum);
-        }
         Ok(status_json(upload))
     }
 
@@ -338,10 +359,7 @@ impl UploadRuntime {
         {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
-        let checksum = upload
-            .whole_checksum
-            .clone()
-            .ok_or_else(|| UploadError::new(UploadErrorKind::ChecksumMismatch))?;
+        let checksum = UploadChecksum::parse(&hex_digest(upload.whole_hasher.clone().finalize()))?;
         self.transition(upload, UploadTransition::Complete, "complete")
             .await?;
         self.file
@@ -349,6 +367,7 @@ impl UploadRuntime {
             .await?;
         self.transition(upload, UploadTransition::Accept, "accept")
             .await?;
+        drop(upload.active_lease.take());
         Ok(status_json(upload))
     }
 
@@ -364,6 +383,7 @@ impl UploadRuntime {
         }
         self.transition(upload, UploadTransition::Cancel, "cancel")
             .await?;
+        drop(upload.active_lease.take());
         Ok(status_json(upload))
     }
 
@@ -373,7 +393,8 @@ impl UploadRuntime {
         let upload = uploads
             .get_mut(handle)
             .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
-        self.service
+        let current = self
+            .service
             .status(
                 &self.context,
                 upload.grant.clone(),
@@ -382,6 +403,8 @@ impl UploadRuntime {
                 CREATED_AT,
             )
             .await?;
+        upload.state = current.state();
+        upload.revision = current.revision();
         let scope = TransferGrantScope::new(
             upload.handle.clone(),
             self.context.mount().component().clone(),
@@ -394,19 +417,22 @@ impl UploadRuntime {
             CREATED_AT,
         )?;
         upload.grant = issued.grant().clone();
-        Ok(json!({
-            "handle": handle,
-            "grant": upload.grant.expose_bearer(),
-            "state": upload.state.as_str(),
-        }))
+        let mut response = status_json(upload);
+        response["grant"] = Value::String(upload.grant.expose_bearer().to_owned());
+        Ok(response)
     }
 
     pub(super) fn service_calls(&self) -> usize {
         self.service_calls.load(Ordering::SeqCst)
     }
 
-    pub(super) fn retire(&self) {
+    pub(super) fn fault_count(&self) -> usize {
+        usize::from(self.fault_applied.load(Ordering::SeqCst))
+    }
+
+    pub(super) async fn retire(&self) {
         self.file.retire();
+        self.uploads.lock().await.clear();
     }
 
     fn record_call(&self) {
@@ -603,11 +629,23 @@ fn deterministic_bytes<const LENGTH: usize>(start: u8) -> [u8; LENGTH] {
 
 struct AxumChunkBody {
     body: Body,
+    hasher: Sha256,
+    interrupt_after_first: bool,
+    yielded_chunks: usize,
 }
 
 impl AxumChunkBody {
-    fn new(body: Body) -> Self {
-        Self { body }
+    fn new(body: Body, hasher: Sha256, interrupt_after_first: bool) -> Self {
+        Self {
+            body,
+            hasher,
+            interrupt_after_first,
+            yielded_chunks: 0,
+        }
+    }
+
+    fn into_hasher(self) -> Sha256 {
+        self.hasher
     }
 }
 
@@ -617,6 +655,9 @@ impl ChunkBody for AxumChunkBody {
         maximum_bytes: usize,
     ) -> suprnova_live::upload::UploadFuture<'a, Result<Option<QuarantineBytes>, UploadError>> {
         Box::pin(async move {
+            if self.interrupt_after_first && self.yielded_chunks > 0 {
+                return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
+            }
             while let Some(frame) = self.body.frame().await {
                 let frame =
                     frame.map_err(|_| UploadError::new(UploadErrorKind::BodyInterrupted))?;
@@ -627,10 +668,20 @@ impl ChunkBody for AxumChunkBody {
                     if data.len() > maximum_bytes {
                         return Err(UploadError::new(UploadErrorKind::InputTooLarge));
                     }
+                    self.hasher.update(&data);
+                    self.yielded_chunks = self.yielded_chunks.saturating_add(1);
                     return Ok(Some(QuarantineBytes::copy_from_slice(&data)));
                 }
             }
             Ok(None)
         })
     }
+}
+
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

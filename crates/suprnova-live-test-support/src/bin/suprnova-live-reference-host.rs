@@ -32,10 +32,12 @@ async fn run() -> Result<(), String> {
         .transpose()
         .map_err(|_| "SUPRNOVA_LIVE_REFERENCE_PORT must be a decimal u16".to_owned())?
         .unwrap_or(DEFAULT_PORT);
+    let configured_fault = std::env::var("SUPRNOVA_LIVE_REFERENCE_FAULT").ok();
+    let fault_schedule = parse_fault_schedule(configured_fault.as_deref())?;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let host = ReferenceHost::start(
         ReferenceHostConfig::new(address, artifact_root, quarantine_root)
-            .with_fault_schedule(ReferenceFaultSchedule::None),
+            .with_fault_schedule(fault_schedule),
     )
     .await?;
     println!("{{\"origin\":\"{}\",\"ready\":true}}", host.origin());
@@ -54,4 +56,39 @@ fn environment_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn parse_fault_schedule(value: Option<&str>) -> Result<ReferenceFaultSchedule, String> {
+    match value {
+        None | Some("") | Some("none") => Ok(ReferenceFaultSchedule::None),
+        Some("sequence-gap-once") => Ok(ReferenceFaultSchedule::SequenceGapOnce),
+        Some("upload-body-interrupted-once") => {
+            Ok(ReferenceFaultSchedule::UploadBodyInterruptedOnce)
+        }
+        Some(_) => {
+            Err("SUPRNOVA_LIVE_REFERENCE_FAULT must name a compiled fault schedule".to_owned())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReferenceFaultSchedule, parse_fault_schedule};
+
+    #[test]
+    fn launcher_accepts_only_closed_compiled_fault_names() {
+        assert_eq!(
+            parse_fault_schedule(None).expect("default schedule"),
+            ReferenceFaultSchedule::None
+        );
+        assert_eq!(
+            parse_fault_schedule(Some("sequence-gap-once")).expect("sequence schedule"),
+            ReferenceFaultSchedule::SequenceGapOnce
+        );
+        assert_eq!(
+            parse_fault_schedule(Some("upload-body-interrupted-once")).expect("upload schedule"),
+            ReferenceFaultSchedule::UploadBodyInterruptedOnce
+        );
+        assert!(parse_fault_schedule(Some("../../browser-selected")).is_err());
+    }
 }

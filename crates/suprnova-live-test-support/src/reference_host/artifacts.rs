@@ -1,6 +1,6 @@
 //! Validation and exact serving of production browser artifacts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -20,6 +20,74 @@ const EXPECTED_ROLES: [&str; 8] = [
     "uploads-esm",
     "async-classic",
     "async-esm",
+];
+
+#[derive(Clone, Copy)]
+struct ExpectedAsset {
+    role: &'static str,
+    file: &'static str,
+    capability: &'static str,
+    script_kind: &'static str,
+    preload_rel: &'static str,
+}
+
+const EXPECTED_ASSETS: [ExpectedAsset; 8] = [
+    ExpectedAsset {
+        role: "core-classic",
+        file: "suprnova-live.classic.js",
+        capability: "core@1",
+        script_kind: "classic",
+        preload_rel: "preload",
+    },
+    ExpectedAsset {
+        role: "core-esm",
+        file: "suprnova-live.esm.js",
+        capability: "core@1",
+        script_kind: "module",
+        preload_rel: "modulepreload",
+    },
+    ExpectedAsset {
+        role: "stimulus-classic",
+        file: "suprnova-live.stimulus.classic.js",
+        capability: "stimulus@1",
+        script_kind: "classic",
+        preload_rel: "preload",
+    },
+    ExpectedAsset {
+        role: "stimulus-esm",
+        file: "suprnova-live.stimulus.esm.js",
+        capability: "stimulus@1",
+        script_kind: "module",
+        preload_rel: "modulepreload",
+    },
+    ExpectedAsset {
+        role: "uploads-classic",
+        file: "suprnova-live.uploads.classic.js",
+        capability: "uploads@1",
+        script_kind: "classic",
+        preload_rel: "preload",
+    },
+    ExpectedAsset {
+        role: "uploads-esm",
+        file: "suprnova-live.uploads.esm.js",
+        capability: "uploads@1",
+        script_kind: "module",
+        preload_rel: "modulepreload",
+    },
+    ExpectedAsset {
+        role: "async-classic",
+        file: "suprnova-live.async.classic.js",
+        capability: "async@1",
+        script_kind: "classic",
+        preload_rel: "preload",
+    },
+    ExpectedAsset {
+        role: "async-esm",
+        file: "suprnova-live.async.esm.js",
+        capability: "async@1",
+        script_kind: "module",
+        preload_rel: "modulepreload",
+    },
 ];
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -74,26 +142,38 @@ impl ValidatedArtifacts {
             .map_err(|error| format!("asset manifest: {error}"))?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|error| format!("asset manifest JSON: {error}"))?;
-        if manifest.schema_version != 2 || manifest.assets.len() != EXPECTED_ROLES.len() {
+        if manifest.schema_version != 2
+            || manifest.engine_version != "0.1.0"
+            || manifest.runtime_contract_version != 1
+            || manifest.protocol_versions != [1, 2]
+            || manifest.snapshot_versions != [1]
+            || manifest.assets.len() != EXPECTED_ROLES.len()
+        {
             return Err("asset manifest has an unsupported schema or asset count".to_owned());
-        }
-        let roles = manifest
-            .assets
-            .iter()
-            .map(|asset| asset.role.as_str())
-            .collect::<BTreeSet<_>>();
-        if roles != EXPECTED_ROLES.into_iter().collect() {
-            return Err("asset manifest does not contain the exact production roles".to_owned());
         }
 
         let mut assets = BTreeMap::new();
         for selected in &manifest.assets {
             validate_file_name(&selected.file)?;
+            let expected = EXPECTED_ASSETS
+                .iter()
+                .find(|expected| expected.role == selected.role)
+                .ok_or_else(|| {
+                    "asset manifest does not contain the exact production roles".to_owned()
+                })?;
             if selected.content_type != "text/javascript; charset=utf-8"
                 || selected.cache_control != "public, max-age=31536000, immutable"
-                || !matches!(selected.script_kind.as_str(), "classic" | "module")
+                || selected.file != expected.file
+                || selected.capability != expected.capability
+                || selected.capability_version != 1
+                || selected.compatible_core != ">=0.1.0 <0.2.0"
+                || selected.script_kind != expected.script_kind
+                || selected.preload_rel != expected.preload_rel
             {
-                return Err(format!("invalid production metadata for {}", selected.file));
+                return Err(format!(
+                    "invalid production manifest metadata for {}",
+                    selected.file
+                ));
             }
             let path = root.join(&selected.file);
             let canonical = path

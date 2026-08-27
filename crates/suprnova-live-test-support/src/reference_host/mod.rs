@@ -2,9 +2,11 @@
 
 mod artifacts;
 mod async_updates;
+mod engine_async;
 mod faults;
 mod uploads;
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,9 +23,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use suprnova_live::limits::InputLimits;
+use suprnova_live::protocol::{
+    OperationV2, ProtocolLimitConfig, ProtocolLimits, VersionedUpdateRequest,
+    parse_versioned_update_request,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 
 use artifacts::ValidatedArtifacts;
 use async_updates::{AsyncRuntime, MembershipRequest, PollRequest, TransportCreateRequest};
@@ -117,16 +125,76 @@ pub struct ReferenceHostInspection {
     pub logical_memberships: usize,
 }
 
+const RESOURCE_RETIRED: usize = 1 << (usize::BITS - 1);
+
+#[derive(Default)]
+pub(super) struct ResourceCounter {
+    state: AtomicUsize,
+}
+
+impl ResourceCounter {
+    fn acquire(self: &Arc<Self>) -> Option<ResourceLease> {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                if state & RESOURCE_RETIRED != 0
+                    || state & !RESOURCE_RETIRED == RESOURCE_RETIRED - 1
+                {
+                    None
+                } else {
+                    Some(state + 1)
+                }
+            })
+            .ok()
+            .map(|_| ResourceLease {
+                counter: Arc::clone(self),
+            })
+    }
+
+    fn current(&self) -> usize {
+        self.state.load(Ordering::Acquire) & !RESOURCE_RETIRED
+    }
+
+    fn retire(&self) {
+        self.state.fetch_or(RESOURCE_RETIRED, Ordering::AcqRel);
+    }
+}
+
+pub(super) struct ResourceLease {
+    counter: Arc<ResourceCounter>,
+}
+
+impl Drop for ResourceLease {
+    fn drop(&mut self) {
+        let previous = self.counter.state.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous & !RESOURCE_RETIRED > 0);
+    }
+}
+
+#[derive(Clone, Default)]
+struct ResourceCounters {
+    open_sockets: Arc<ResourceCounter>,
+    open_files: Arc<ResourceCounter>,
+    open_timers: Arc<ResourceCounter>,
+    active_uploads: Arc<ResourceCounter>,
+    logical_memberships: Arc<ResourceCounter>,
+}
+
+impl ResourceCounters {
+    fn retire(&self) {
+        self.open_sockets.retire();
+        self.open_files.retire();
+        self.open_timers.retire();
+        self.active_uploads.retire();
+        self.logical_memberships.retire();
+    }
+}
+
 #[derive(Default)]
 struct InspectionState {
     physical_sse_connections: AtomicUsize,
     physical_websocket_connections: AtomicUsize,
     rejected_arbitrary_fault_selectors: AtomicUsize,
-    open_sockets: AtomicUsize,
-    open_files: AtomicUsize,
-    open_timers: AtomicUsize,
-    active_uploads: AtomicUsize,
-    logical_memberships: AtomicUsize,
+    resources: ResourceCounters,
 }
 
 /// Cloneable observer retained across reference-host shutdown.
@@ -164,16 +232,19 @@ impl HostState {
                 .physical_websocket_connections
                 .load(Ordering::SeqCst),
             maximum_logical_memberships: self.async_runtime.maximum_memberships(),
-            compiled_faults_applied: self.async_runtime.fault_count(),
+            compiled_faults_applied: self
+                .async_runtime
+                .fault_count()
+                .saturating_add(self.uploads.fault_count()),
             rejected_arbitrary_fault_selectors: self
                 .inspection
                 .rejected_arbitrary_fault_selectors
                 .load(Ordering::SeqCst),
-            open_sockets: self.inspection.open_sockets.load(Ordering::SeqCst),
-            open_files: self.inspection.open_files.load(Ordering::SeqCst),
-            open_timers: self.inspection.open_timers.load(Ordering::SeqCst),
-            active_uploads: self.inspection.active_uploads.load(Ordering::SeqCst),
-            logical_memberships: self.inspection.logical_memberships.load(Ordering::SeqCst),
+            open_sockets: self.inspection.resources.open_sockets.current(),
+            open_files: self.inspection.resources.open_files.current(),
+            open_timers: self.inspection.resources.open_timers.current(),
+            active_uploads: self.inspection.resources.active_uploads.current(),
+            logical_memberships: self.inspection.resources.logical_memberships.current(),
         }
     }
 }
@@ -194,7 +265,13 @@ impl ReferenceHost {
         tokio::fs::create_dir_all(&config.quarantine_root)
             .await
             .map_err(|error| format!("quarantine root: {error}"))?;
-        let uploads = UploadRuntime::open(&config.quarantine_root).await?;
+        let inspection = InspectionState::default();
+        let uploads = UploadRuntime::open(
+            &config.quarantine_root,
+            config.fault_schedule,
+            Arc::clone(&inspection.resources.active_uploads),
+        )
+        .await?;
         let listener = TcpListener::bind(config.address)
             .await
             .map_err(|error| format!("reference host bind: {error}"))?;
@@ -205,16 +282,28 @@ impl ReferenceHost {
             return Err("reference host did not bind the configured deterministic port".to_owned());
         }
         let origin = format!("http://{address}");
+        let async_runtime = AsyncRuntime::new(
+            config.fault_schedule,
+            Arc::clone(&inspection.resources.logical_memberships),
+        )
+        .await?;
         let state = Arc::new(HostState {
             origin: origin.clone(),
             artifacts,
             uploads,
-            async_runtime: AsyncRuntime::new(config.fault_schedule),
-            inspection: InspectionState::default(),
+            async_runtime,
+            inspection,
         });
         let router = router(state.clone());
         let (shutdown, receiver) = oneshot::channel();
+        let listener_lease = state
+            .inspection
+            .resources
+            .open_sockets
+            .acquire()
+            .ok_or_else(|| "reference host resources retired before serve".to_owned())?;
         let server = tokio::spawn(async move {
+            let _listener_lease = listener_lease;
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     let _ = receiver.await;
@@ -258,7 +347,8 @@ impl ReferenceHost {
 
     /// Retires owned services and waits for the listening socket to close.
     pub async fn shutdown(mut self) -> Result<(), String> {
-        self.state.uploads.retire();
+        self.state.inspection.resources.retire();
+        self.state.uploads.retire().await;
         self.state.async_runtime.retire().await;
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -269,20 +359,6 @@ impl ReferenceHost {
                 .map_err(|error| format!("reference host task: {error}"))?
                 .map_err(|error| format!("reference host server: {error}"))?;
         }
-        self.state
-            .inspection
-            .open_sockets
-            .store(0, Ordering::SeqCst);
-        self.state.inspection.open_files.store(0, Ordering::SeqCst);
-        self.state.inspection.open_timers.store(0, Ordering::SeqCst);
-        self.state
-            .inspection
-            .active_uploads
-            .store(0, Ordering::SeqCst);
-        self.state
-            .inspection
-            .logical_memberships
-            .store(0, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -337,13 +413,7 @@ async fn create_upload(
         return response;
     }
     match state.uploads.create(request).await {
-        Ok(value) => {
-            state
-                .inspection
-                .active_uploads
-                .fetch_add(1, Ordering::SeqCst);
-            (StatusCode::CREATED, Json(value)).into_response()
-        }
+        Ok(value) => (StatusCode::CREATED, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
 }
@@ -364,9 +434,13 @@ async fn upload_chunk(
         return error(StatusCode::BAD_REQUEST, "chunk_checksum_missing");
     };
     let content_length = headers
-        .get("content-length")
+        .get("x-live-chunk-bytes")
+        .or_else(|| headers.get("content-length"))
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
+    let Some(_file_lease) = state.inspection.resources.open_files.acquire() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+    };
     match state
         .uploads
         .write_chunk(
@@ -408,13 +482,7 @@ async fn upload_complete(
         return response;
     }
     match state.uploads.complete(&handle, request).await {
-        Ok(value) => {
-            state
-                .inspection
-                .active_uploads
-                .fetch_sub(1, Ordering::SeqCst);
-            (StatusCode::OK, Json(value)).into_response()
-        }
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
 }
@@ -428,13 +496,7 @@ async fn upload_cancel(
         return response;
     }
     match state.uploads.cancel(&handle).await {
-        Ok(value) => {
-            state
-                .inspection
-                .active_uploads
-                .fetch_sub(1, Ordering::SeqCst);
-            (StatusCode::OK, Json(value)).into_response()
-        }
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
 }
@@ -462,7 +524,7 @@ async fn transport_create(
         return response;
     }
     async_result(
-        state.async_runtime.create(request).await,
+        state.async_runtime.create(request, &state.origin).await,
         StatusCode::CREATED,
     )
 }
@@ -481,13 +543,7 @@ async fn transport_membership(
         .membership(&transport, &subscription, request)
         .await
     {
-        Ok(value) => {
-            state
-                .inspection
-                .logical_memberships
-                .store(1, Ordering::SeqCst);
-            (StatusCode::OK, Json(value)).into_response()
-        }
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(code) => error(StatusCode::UNAUTHORIZED, code),
     }
 }
@@ -495,28 +551,63 @@ async fn transport_membership(
 async fn poll(
     State(state): State<Arc<HostState>>,
     headers: HeaderMap,
-    Json(value): Json<Value>,
+    body: axum::body::Bytes,
 ) -> Response {
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    if value.get("action").is_some() {
-        return error(StatusCode::BAD_REQUEST, "poll_never_names_action");
-    }
-    let request = match serde_json::from_value::<PollRequest>(value) {
-        Ok(request) => request,
-        Err(_) => return error(StatusCode::BAD_REQUEST, "poll_facts_invalid"),
+    let Some(subscription) = header(&headers, "x-live-subscription") else {
+        return error(StatusCode::UNAUTHORIZED, "poll_authority_invalid");
     };
-    match state.async_runtime.poll(request).await {
+    let Some(authority) = header(&headers, "x-live-subscription-authority") else {
+        return error(StatusCode::UNAUTHORIZED, "poll_authority_invalid");
+    };
+    let parsed = match parse_versioned_update_request(&body, &reference_protocol_limits()) {
+        Ok(VersionedUpdateRequest::V2(request))
+            if request.operations() == [OperationV2::FreshRender] =>
+        {
+            request
+        }
+        Ok(_) | Err(_) => return error(StatusCode::BAD_REQUEST, "poll_facts_invalid"),
+    };
+    debug_assert!(parsed.operations()[0].is_recovery_without_replay());
+    match state
+        .async_runtime
+        .poll(PollRequest {
+            subscription: subscription.to_owned(),
+            authority: authority.to_owned(),
+        })
+        .await
+    {
         Ok(value) => {
             let mut response = (StatusCode::OK, Json(value)).into_response();
             response
                 .headers_mut()
                 .insert("x-live-operation", HeaderValue::from_static("fresh-render"));
             response
+                .headers_mut()
+                .insert("x-live-action-executed", HeaderValue::from_static("false"));
+            response
         }
         Err(code) => error(StatusCode::UNAUTHORIZED, code),
     }
+}
+
+fn reference_protocol_limits() -> ProtocolLimits {
+    ProtocolLimits::new(ProtocolLimitConfig {
+        input: InputLimits::new(64 * 1024, 12, 512, 40 * 1024)
+            .expect("reference protocol input limits"),
+        max_snapshot_bytes: 32 * 1024,
+        max_html_bytes: 32 * 1024,
+        max_model_proposals: 8,
+        max_operations: 8,
+        max_arguments: 16,
+        max_validation_entries: 16,
+        max_events: 8,
+        max_effects: 8,
+        max_extensions: 8,
+    })
+    .expect("reference protocol limits")
 }
 
 async fn sse(
@@ -527,16 +618,44 @@ async fn sse(
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    let Some(authority) = header(&headers, "x-live-subscription-authority") else {
-        return error(StatusCode::UNAUTHORIZED, "transport_authority_missing");
-    };
-    match state.async_runtime.sse_event(&transport, authority).await {
-        Ok(event) => {
+    match state.async_runtime.sse_batch(&transport).await {
+        Ok(first_event) => {
+            let Some(socket_lease) = state.inspection.resources.open_sockets.acquire() else {
+                return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+            };
+            let Some(timer_lease) = state.inspection.resources.open_timers.acquire() else {
+                return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+            };
             state
                 .inspection
                 .physical_sse_connections
                 .fetch_add(1, Ordering::SeqCst);
-            let mut response = Response::new(Body::from(event));
+            let stream_state = state.clone();
+            let stream_transport = transport.clone();
+            let stream = futures_util::stream::unfold(
+                (Some(first_event), socket_lease, timer_lease),
+                move |(first, socket_lease, timer_lease)| {
+                    let state = stream_state.clone();
+                    let transport = stream_transport.clone();
+                    async move {
+                        let event = match first {
+                            Some(event) => event,
+                            None => {
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                match state.async_runtime.sse_batch(&transport).await {
+                                    Ok(event) => event,
+                                    Err(_) => return None,
+                                }
+                            }
+                        };
+                        Some((
+                            Ok::<_, Infallible>(axum::body::Bytes::from(event)),
+                            (None, socket_lease, timer_lease),
+                        ))
+                    }
+                },
+            );
+            let mut response = Response::new(Body::from_stream(stream));
             *response.status_mut() = StatusCode::OK;
             response.headers_mut().insert(
                 CONTENT_TYPE,
@@ -569,12 +688,20 @@ async fn websocket(
         .inspection
         .physical_websocket_connections
         .fetch_add(1, Ordering::SeqCst);
+    let Some(socket_lease) = state.inspection.resources.open_sockets.acquire() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+    };
     upgrade
-        .on_upgrade(move |socket| websocket_session(state, transport, socket))
+        .on_upgrade(move |socket| websocket_session(state, transport, socket, socket_lease))
         .into_response()
 }
 
-async fn websocket_session(state: Arc<HostState>, transport: String, mut socket: WebSocket) {
+async fn websocket_session(
+    state: Arc<HostState>,
+    transport: String,
+    mut socket: WebSocket,
+    _socket_lease: ResourceLease,
+) {
     let mut accepted = 0_usize;
     while let Some(Ok(message)) = socket.next().await {
         let Message::Text(text) = message else {
@@ -593,12 +720,14 @@ async fn websocket_session(state: Arc<HostState>, transport: String, mut socket:
             .websocket_control(&transport, text.as_bytes())
             .await
         {
-            Ok(response) => {
-                let Ok(response) = String::from_utf8(response) else {
-                    break;
-                };
-                if socket.send(Message::Text(response)).await.is_err() {
-                    break;
+            Ok(outcome) => {
+                for response in outcome.messages {
+                    let Ok(response) = String::from_utf8(response) else {
+                        return;
+                    };
+                    if socket.send(Message::Text(response)).await.is_err() {
+                        return;
+                    }
                 }
             }
             Err(_) => {

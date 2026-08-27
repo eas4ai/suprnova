@@ -15,6 +15,10 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use suprnova_live::limits::InputLimits;
+use suprnova_live::protocol::{
+    ProtocolLimitConfig, ProtocolLimits, VersionedUpdateResponse, parse_versioned_update_response,
+};
 use suprnova_live_test_support::{
     REFERENCE_AUTHORIZATION, ReferenceFaultSchedule, ReferenceHost, ReferenceHostConfig,
 };
@@ -27,6 +31,10 @@ const UPLOAD_PORT: u16 = 4_182;
 const ASYNC_PORT: u16 = 4_174;
 const SHUTDOWN_PORT: u16 = 4_184;
 const INVALID_MANIFEST_PORT: u16 = 4_186;
+const UPLOAD_CURSOR_PORT: u16 = 4_187;
+const UPLOAD_FAULT_PORT: u16 = 4_188;
+const FORGED_MANIFEST_PORT: u16 = 4_189;
+const FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
 
@@ -263,6 +271,183 @@ async fn invalid_production_manifest_fails_before_the_port_is_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forged_manifest_relationships_fail_before_the_port_is_bound() {
+    for (label, mutation) in [
+        ("role-filename-swap", 0_u8),
+        ("capability-forgery", 1),
+        ("format-forgery", 2),
+        ("protocol-forgery", 3),
+    ] {
+        let artifact_root = TestRoot::new(label);
+        let quarantine_root = TestRoot::new(&format!("{label}-quarantine"));
+        let source = browser_dist();
+        let manifest_bytes =
+            std::fs::read(source.join("suprnova-live.assets.json")).expect("read source manifest");
+        let mut manifest: Value = serde_json::from_slice(&manifest_bytes).expect("source manifest");
+        for asset in manifest["assets"].as_array().expect("manifest assets") {
+            let file = asset["file"].as_str().expect("asset file");
+            std::fs::copy(source.join(file), artifact_root.path().join(file)).expect("copy asset");
+        }
+        match mutation {
+            0 => {
+                let assets = manifest["assets"].as_array_mut().expect("manifest assets");
+                let first = assets[0]["role"].clone();
+                assets[0]["role"] = assets[2]["role"].clone();
+                assets[2]["role"] = first;
+            }
+            1 => manifest["assets"][0]["capability"] = json!("forged@99"),
+            2 => {
+                manifest["assets"][0]["script_kind"] = json!("module");
+                manifest["assets"][0]["preload_rel"] = json!("modulepreload");
+            }
+            3 => manifest["protocol_versions"] = json!([99]),
+            _ => unreachable!("closed manifest mutation"),
+        }
+        std::fs::write(
+            artifact_root.path().join("suprnova-live.assets.json"),
+            serde_json::to_vec_pretty(&manifest).expect("forged manifest bytes"),
+        )
+        .expect("write forged manifest");
+
+        let address = SocketAddr::from(([127, 0, 0, 1], FORGED_MANIFEST_PORT));
+        let result = ReferenceHost::start(ReferenceHostConfig::new(
+            address,
+            artifact_root.path().to_path_buf(),
+            quarantine_root.path().to_path_buf(),
+        ))
+        .await;
+        match result {
+            Ok(host) => {
+                host.shutdown().await.expect("unexpected host shutdown");
+                panic!("{label} unexpectedly started")
+            }
+            Err(error) => assert!(error.contains("manifest"), "{label}: {error}"),
+        }
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("forged manifest never bound the configured port");
+        drop(listener);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_reacquire_returns_the_authoritative_partial_multipart_cursor() {
+    let root = TestRoot::new("upload-cursor");
+    let host = start_host(UPLOAD_CURSOR_PORT, &root, ReferenceFaultSchedule::None).await;
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "multipart.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 10,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("upload handle");
+    let grant = created["grant"].as_str().expect("upload grant");
+    let response = chunked_upload(&host, handle, grant, 0, &[b"abc", b"de"]).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    let (status, _, reacquired) = json_request(
+        &host,
+        Method::POST,
+        &format!("/example/uploads/{handle}/reacquire"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reacquired}");
+    assert_eq!(reacquired["received_bytes"], 5);
+    assert_eq!(reacquired["next_part"], 1);
+    assert_eq!(reacquired["revision"], 4);
+    assert_ne!(reacquired["grant"], grant);
+
+    host.shutdown().await.expect("clean upload cursor shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multipart_completion_verifies_the_truthful_whole_quarantine_digest() {
+    let root = TestRoot::new("upload-whole-digest");
+    let host = start_host(4_190, &root, ReferenceFaultSchedule::None).await;
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "different-parts.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 10,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("upload handle");
+    let grant = created["grant"].as_str().expect("upload grant");
+    let first = chunked_upload(&host, handle, grant, 0, &[b"al", b"pha"]).await;
+    assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+    let second = chunked_upload(&host, handle, grant, 1, &[b"om", b"ega"]).await;
+    assert!(second.starts_with("HTTP/1.1 200"), "{second}");
+
+    let (status, _, completed) = json_request(
+        &host,
+        Method::POST,
+        &format!("/__live/uploads/{handle}/complete"),
+        json!({"grant": grant}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["state"], "ready");
+    host.shutdown()
+        .await
+        .expect("clean multipart digest shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_compiled_upload_interrupt_is_consumed_once_by_the_physical_body() {
+    let root = TestRoot::new("upload-interrupt");
+    let host = start_host(
+        UPLOAD_FAULT_PORT,
+        &root,
+        ReferenceFaultSchedule::UploadBodyInterruptedOnce,
+    )
+    .await;
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "interrupted.txt",
+            "content_type": "text/plain",
+            "expected_bytes": 6,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("upload handle");
+    let grant = created["grant"].as_str().expect("upload grant");
+    let interrupted = chunked_upload(&host, handle, grant, 0, &[b"abc", b"def"]).await;
+    assert!(interrupted.starts_with("HTTP/1.1 409"), "{interrupted}");
+    assert!(
+        interrupted.contains("upload_bodyinterrupted"),
+        "{interrupted}"
+    );
+    let retried = chunked_upload(&host, handle, grant, 0, &[b"abc", b"def"]).await;
+    assert!(retried.starts_with("HTTP/1.1 200"), "{retried}");
+    assert_eq!(host.inspection().compiled_faults_applied, 1);
+    host.shutdown()
+        .await
+        .expect("clean upload interrupt shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructions() {
     let root = TestRoot::new("uploads");
     let host = start_host(UPLOAD_PORT, &root, ReferenceFaultSchedule::None).await;
@@ -284,7 +469,7 @@ async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructio
     let handle = created["handle"].as_str().expect("upload handle");
     let grant = created["grant"].as_str().expect("upload grant");
 
-    let response = chunked_upload(&host, handle, grant, &[b"hello ", b"world"]).await;
+    let response = chunked_upload(&host, handle, grant, 0, &[b"hello ", b"world"]).await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     let (status, _, upload) = json_request(
@@ -378,27 +563,45 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{transport}");
     let transport_id = transport["transport"].as_str().expect("transport");
-    let subscription = transport["subscription"].as_str().expect("subscription");
-    let authority = transport["authority"].as_str().expect("authority");
+    let memberships = transport["memberships"].as_array().expect("memberships");
+    assert_eq!(memberships.len(), 2);
+    for (index, membership) in memberships.iter().enumerate() {
+        let subscription = membership["subscription"].as_str().expect("subscription");
+        let membership_path =
+            format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}");
+        let (status, _, acknowledgment) = json_request(
+            &host,
+            Method::POST,
+            &membership_path,
+            json!({
+                "authority": membership["authority"],
+                "control_nonce": format!("sse-subscribe-{index}"),
+                "operation": "subscribe"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{acknowledgment}");
+        assert_eq!(acknowledgment["operation"], "subscribe");
+    }
+    let subscription = memberships[0]["subscription"]
+        .as_str()
+        .expect("subscription");
+    let authority = memberships[0]["authority"].as_str().expect("authority");
 
-    let membership_path =
-        format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}");
-    let (status, _, membership) = json_request(
-        &host,
-        Method::POST,
-        &membership_path,
-        json!({"authority": authority}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{membership}");
-
-    let (status, headers, poll) = json_request(
+    let (status, headers, poll_bytes) = request(
         &host,
         Method::POST,
         "/__live/async/poll",
-        json!({"subscription": subscription, "authority": authority}),
+        &[
+            (CONTENT_TYPE.as_str(), "application/json"),
+            (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+            ("x-live-subscription", subscription),
+            ("x-live-subscription-authority", authority),
+        ],
+        FRESH_RENDER_REQUEST,
     )
     .await;
+    let poll: Value = serde_json::from_slice(&poll_bytes).expect("poll JSON");
     assert_eq!(status, StatusCode::OK, "{poll}");
     assert_eq!(
         headers
@@ -406,43 +609,121 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
             .and_then(|value| value.to_str().ok()),
         Some("fresh-render")
     );
+    assert_eq!(poll["outcome"], "accepted");
+    assert_eq!(poll["render"]["kind"], "html");
+    assert_eq!(
+        headers
+            .get("x-live-action-executed")
+            .and_then(|value| value.to_str().ok()),
+        Some("false")
+    );
     assert!(
-        poll["render"]
+        poll["render"]["html"]
             .as_str()
             .unwrap()
-            .contains("data-live-poll-generation")
+            .contains("data-live-render-source=\"component-harness\"")
     );
-    let (status, _, _) = json_request(
+    let parsed = parse_versioned_update_response(&poll_bytes, &protocol_limits())
+        .expect("poll is one accepted Live response");
+    assert!(matches!(parsed, VersionedUpdateResponse::V2(_)));
+    let forged_action = FRESH_RENDER_REQUEST.replace(
+        "{\"kind\":\"fresh_render\"}",
+        "{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"forbidden\"}",
+    );
+    let (status, _, _) = request(
         &host,
         Method::POST,
         "/__live/async/poll",
-        json!({
-            "subscription": subscription,
-            "authority": authority,
-            "action": "forbidden"
-        }),
+        &[
+            (CONTENT_TYPE.as_str(), "application/json"),
+            (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+            ("x-live-subscription", subscription),
+            ("x-live-subscription-authority", authority),
+        ],
+        forged_action,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let sse = read_sse_event(&host, transport_id, authority).await;
+    let (mut sse_stream, sse) = read_sse_event(&host, transport_id).await;
     assert!(sse.starts_with("HTTP/1.1 200"), "{sse}");
     assert!(sse.contains("content-type: text/event-stream"), "{sse}");
     assert!(sse.contains("event:suprnova-live-async"), "{sse}");
-    assert!(sse.contains("\"sequence\":\"3\""), "{sse}");
+    for membership in memberships {
+        assert!(
+            sse.contains(membership["subscription"].as_str().expect("subscription")),
+            "{sse}"
+        );
+    }
+    let removed = &memberships[1];
+    let removed_subscription = removed["subscription"].as_str().expect("subscription");
+    let membership_path =
+        format!("/__live/async/transports/{transport_id}/subscriptions/{removed_subscription}");
+    let (status, _, acknowledgment) = json_request(
+        &host,
+        Method::POST,
+        &membership_path,
+        json!({
+            "authority": removed["authority"],
+            "control_nonce": "sse-unsubscribe-1",
+            "operation": "unsubscribe"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{acknowledgment}");
+    assert_eq!(acknowledgment["operation"], "unsubscribe");
+    let next_sse = read_stream_text(&mut sse_stream).await;
+    assert!(next_sse.contains(subscription), "{next_sse}");
+    assert!(!next_sse.contains(removed_subscription), "{next_sse}");
 
     let rejected = websocket_upgrade(&host, "https://cross-site.example", transport_id).await;
     assert!(rejected.starts_with("HTTP/1.1 403"), "{rejected}");
-    let websocket = websocket_subscribe(&host, transport_id, subscription).await;
+    let (status, _, websocket_transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{websocket_transport}");
+    let websocket_transport_id = websocket_transport["transport"]
+        .as_str()
+        .expect("transport");
+    let websocket_membership = &websocket_transport["memberships"][0];
+    let websocket = websocket_subscribe(&host, websocket_transport_id, websocket_membership).await;
     assert!(websocket.contains("101 Switching Protocols"), "{websocket}");
-    assert!(websocket.contains("\"kind\":\"subscribed\""), "{websocket}");
+    assert!(
+        websocket.contains("\"kind\":\"membership_authenticated\""),
+        "{websocket}"
+    );
+    assert!(websocket.contains("\"protocol_version\":1"), "{websocket}");
+    assert!(
+        websocket.contains("\"kind\":\"unsubscribed\""),
+        "{websocket}"
+    );
 
     let inspection = host.inspection();
     assert_eq!(inspection.physical_sse_connections, 1);
     assert_eq!(inspection.physical_websocket_connections, 1);
-    assert_eq!(inspection.maximum_logical_memberships, 1);
+    assert_eq!(inspection.maximum_logical_memberships, 2);
     assert_eq!(inspection.compiled_faults_applied, 1);
     host.shutdown().await.expect("clean async-host shutdown");
+}
+
+fn protocol_limits() -> ProtocolLimits {
+    ProtocolLimits::new(ProtocolLimitConfig {
+        input: InputLimits::new(64 * 1024, 12, 512, 40 * 1024).expect("input limits"),
+        max_snapshot_bytes: 32 * 1024,
+        max_html_bytes: 32 * 1024,
+        max_model_proposals: 8,
+        max_operations: 8,
+        max_arguments: 16,
+        max_validation_entries: 16,
+        max_events: 8,
+        max_effects: 8,
+        max_extensions: 8,
+    })
+    .expect("protocol limits")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -450,6 +731,95 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     let root = TestRoot::new("shutdown");
     let host = start_host(SHUTDOWN_PORT, &root, ReferenceFaultSchedule::None).await;
     let inspection = host.inspection_handle();
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "pending.bin",
+            "content_type": "application/octet-stream",
+            "expected_bytes": 8,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let upload_handle = created["handle"].as_str().expect("upload handle");
+    let upload_grant = created["grant"].as_str().expect("upload grant");
+    let (status, _, transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "sse", "subscription": "orders"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{transport}");
+    let transport_id = transport["transport"].as_str().expect("transport");
+    let membership = &transport["memberships"][0];
+    let subscription = membership["subscription"].as_str().expect("subscription");
+    let path = format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}");
+    let (status, _, _) = json_request(
+        &host,
+        Method::POST,
+        &path,
+        json!({
+            "authority": membership["authority"],
+            "control_nonce": "shutdown-subscribe",
+            "operation": "subscribe"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_sse_stream, _) = read_sse_event(&host, transport_id).await;
+    let upload_bytes = b"abcdefgh";
+    let upload_checksum = Sha256::digest(upload_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut upload_stream = TcpStream::connect(host.address())
+        .await
+        .expect("connect mid-flight upload");
+    upload_stream
+        .write_all(
+            format!(
+                "POST /__live/uploads/{upload_handle}/chunks/0 HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Upload-Grant: {upload_grant}\r\nX-Live-Chunk-Sha256: {upload_checksum}\r\nX-Live-Chunk-Bytes: 8\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n4\r\nabcd\r\n",
+                host.address()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("start mid-flight upload body");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if inspection.snapshot().open_files > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("file lease became observable");
+    let midflight = inspection.snapshot();
+    assert!(midflight.open_sockets > 0, "{midflight:?}");
+    assert!(midflight.open_files > 0, "{midflight:?}");
+    assert!(midflight.open_timers > 0, "{midflight:?}");
+    assert!(midflight.active_uploads > 0, "{midflight:?}");
+    assert!(midflight.logical_memberships > 0, "{midflight:?}");
+    upload_stream
+        .write_all(b"4\r\nefgh\r\n0\r\n\r\n")
+        .await
+        .expect("finish mid-flight upload body");
+    let mut upload_response = Vec::new();
+    upload_stream
+        .read_to_end(&mut upload_response)
+        .await
+        .expect("mid-flight upload response");
+    assert!(
+        String::from_utf8_lossy(&upload_response).starts_with("HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&upload_response)
+    );
     timeout(Duration::from_secs(2), host.shutdown())
         .await
         .expect("shutdown deadline")
@@ -460,12 +830,15 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     assert_eq!(final_state.open_timers, 0);
     assert_eq!(final_state.active_uploads, 0);
     assert_eq!(final_state.logical_memberships, 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(inspection.snapshot(), final_state, "late resource revival");
 }
 
 async fn chunked_upload(
     host: &ReferenceHost,
     handle: &str,
     grant: &str,
+    part: u32,
     chunks: &[&[u8]],
 ) -> String {
     let mut stream = TcpStream::connect(host.address())
@@ -477,8 +850,9 @@ async fn chunked_upload(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let request = format!(
-        "POST /__live/uploads/{handle}/chunks/0 HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Upload-Grant: {grant}\r\nX-Live-Chunk-Sha256: {checksum}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-        host.address()
+        "POST /__live/uploads/{handle}/chunks/{part} HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Upload-Grant: {grant}\r\nX-Live-Chunk-Sha256: {checksum}\r\nX-Live-Chunk-Bytes: {}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+        host.address(),
+        bytes.len()
     );
     stream.write_all(request.as_bytes()).await.unwrap();
     for chunk in chunks {
@@ -495,12 +869,12 @@ async fn chunked_upload(
     String::from_utf8(response).expect("HTTP response")
 }
 
-async fn read_sse_event(host: &ReferenceHost, transport: &str, authority: &str) -> String {
+async fn read_sse_event(host: &ReferenceHost, transport: &str) -> (TcpStream, String) {
     let mut stream = TcpStream::connect(host.address())
         .await
         .expect("connect SSE");
     let request = format!(
-        "GET /__live/async/sse/{transport} HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Subscription-Authority: {authority}\r\nAccept: text/event-stream\r\n\r\n",
+        "GET /__live/async/sse/{transport} HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nAccept: text/event-stream\r\n\r\n",
         host.address()
     );
     stream.write_all(request.as_bytes()).await.unwrap();
@@ -509,7 +883,19 @@ async fn read_sse_event(host: &ReferenceHost, transport: &str, authority: &str) 
         .await
         .expect("SSE response deadline")
         .expect("SSE response");
-    String::from_utf8(response[..size].to_vec()).expect("SSE UTF-8")
+    (
+        stream,
+        String::from_utf8(response[..size].to_vec()).expect("SSE UTF-8"),
+    )
+}
+
+async fn read_stream_text(stream: &mut TcpStream) -> String {
+    let mut response = vec![0_u8; 16 * 1024];
+    let size = timeout(Duration::from_secs(1), stream.read(&mut response))
+        .await
+        .expect("stream response deadline")
+        .expect("stream response");
+    String::from_utf8_lossy(&response[..size]).into_owned()
 }
 
 async fn websocket_upgrade(host: &ReferenceHost, origin: &str, transport: &str) -> String {
@@ -529,7 +915,7 @@ async fn websocket_upgrade(host: &ReferenceHost, origin: &str, transport: &str) 
     String::from_utf8_lossy(&response[..size]).into_owned()
 }
 
-async fn websocket_subscribe(host: &ReferenceHost, transport: &str, subscription: &str) -> String {
+async fn websocket_subscribe(host: &ReferenceHost, transport: &str, membership: &Value) -> String {
     let mut stream = TcpStream::connect(host.address())
         .await
         .expect("connect WebSocket");
@@ -547,9 +933,30 @@ async fn websocket_subscribe(host: &ReferenceHost, transport: &str, subscription
     let headers = String::from_utf8_lossy(&headers[..size]).into_owned();
     assert!(headers.contains("101 Switching Protocols"), "{headers}");
 
-    let payload = format!(r#"{{"kind":"subscribe","subscription":"{subscription}"}}"#);
+    let subscription = membership["subscription"].as_str().expect("subscription");
+    let binding = membership["descriptor_binding"].as_str().expect("binding");
+    let payload = format!(
+        r#"{{"control_nonce":"0000000000000001","descriptor_binding":"{binding}","kind":"subscribe","stream":"orders","subscription":"{subscription}","transport_generation":1}}"#
+    );
+    write_websocket_frame(&mut stream, &payload).await;
+    let mut buffered = Vec::new();
+    let authenticated = read_websocket_frame(&mut stream, &mut buffered).await;
+    let envelope = read_websocket_frame(&mut stream, &mut buffered).await;
+    let unsubscribe = format!(r#"{{"kind":"unsubscribe","subscription":"{subscription}"}}"#);
+    write_websocket_frame(&mut stream, &unsubscribe).await;
+    let unsubscribed = read_websocket_frame(&mut stream, &mut buffered).await;
+    format!("{headers}{authenticated}{envelope}{unsubscribed}")
+}
+
+async fn write_websocket_frame(stream: &mut TcpStream, payload: &str) {
     let mask = [0x11, 0x22, 0x33, 0x44];
-    let mut frame = vec![0x81, 0x80 | u8::try_from(payload.len()).unwrap()];
+    let mut frame = vec![0x81];
+    if payload.len() <= 125 {
+        frame.push(0x80 | u8::try_from(payload.len()).unwrap());
+    } else {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+    }
     frame.extend_from_slice(&mask);
     frame.extend(
         payload
@@ -558,16 +965,32 @@ async fn websocket_subscribe(host: &ReferenceHost, transport: &str, subscription
             .map(|(index, byte)| byte ^ mask[index % mask.len()]),
     );
     stream.write_all(&frame).await.unwrap();
-    let mut response = vec![0_u8; 4_096];
-    let size = timeout(Duration::from_secs(1), stream.read(&mut response))
-        .await
-        .expect("WebSocket response deadline")
-        .expect("WebSocket response");
-    let frame = &response[..size];
-    let payload_offset = 2;
-    let payload_len = usize::from(frame[1] & 0x7f);
-    format!(
-        "{headers}{}",
-        String::from_utf8_lossy(&frame[payload_offset..payload_offset + payload_len])
-    )
+}
+
+async fn read_websocket_frame(stream: &mut TcpStream, buffered: &mut Vec<u8>) -> String {
+    loop {
+        if buffered.len() >= 2 {
+            let marker = buffered[1] & 0x7f;
+            let (payload_offset, payload_len) = match marker {
+                0..=125 => (2, usize::from(marker)),
+                126 if buffered.len() >= 4 => (
+                    4,
+                    usize::from(u16::from_be_bytes([buffered[2], buffered[3]])),
+                ),
+                _ => (usize::MAX, usize::MAX),
+            };
+            if payload_offset != usize::MAX && buffered.len() >= payload_offset + payload_len {
+                let payload = buffered[payload_offset..payload_offset + payload_len].to_vec();
+                buffered.drain(..payload_offset + payload_len);
+                return String::from_utf8_lossy(&payload).into_owned();
+            }
+        }
+        let mut response = vec![0_u8; 4_096];
+        let size = timeout(Duration::from_secs(1), stream.read(&mut response))
+            .await
+            .expect("WebSocket response deadline")
+            .expect("WebSocket response");
+        assert!(size > 0, "WebSocket closed before a complete frame");
+        buffered.extend_from_slice(&response[..size]);
+    }
 }
