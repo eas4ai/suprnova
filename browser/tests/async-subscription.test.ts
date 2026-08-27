@@ -87,4 +87,50 @@ describe("browser logical async subscription", () => {
     expect(() => current.receive(envelope(11, "heartbeat"))).toThrow("async_membership_expired");
     expect(current.state()).toBe("degraded");
   });
+
+  it("reports real queued bytes, events, and refresh state without exposing payloads", () => {
+    const completions: ((outcome: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+    const observations: {
+      queuedBytes: number;
+      queuedEvents: number;
+      queuedRefreshes: number;
+      inFlightRefreshes: number;
+    }[] = [];
+    const current = new AsyncSubscription(
+      authorization(),
+      {
+        dispatch: (_value, completion) => {
+          if (completion !== undefined) completions.push(completion);
+          return "queued";
+        },
+      },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      (observation) => observations.push(observation),
+    );
+    current.connected();
+    const queuedRefresh = envelope(12, "refresh");
+    const queuedPresentation = envelope(13, "heartbeat");
+    expect(current.receive(envelope(11, "refresh"))).toBe("pending");
+    expect(current.receive(queuedRefresh)).toBe("pending");
+    expect(current.receive(queuedPresentation)).toBe("pending");
+    expect(observations[observations.length - 1]).toEqual({
+      queuedBytes:
+        new TextEncoder().encode(queuedRefresh).byteLength +
+        new TextEncoder().encode(queuedPresentation).byteLength,
+      queuedEvents: 2,
+      queuedRefreshes: 1,
+      inFlightRefreshes: 1,
+    });
+    expect(JSON.stringify(observations)).not.toContain("heartbeat");
+    completions.shift()?.("succeeded");
+    completions.shift()?.("succeeded");
+    expect(observations[observations.length - 1]).toEqual({
+      queuedBytes: 0,
+      queuedEvents: 0,
+      queuedRefreshes: 0,
+      inFlightRefreshes: 0,
+    });
+  });
 });

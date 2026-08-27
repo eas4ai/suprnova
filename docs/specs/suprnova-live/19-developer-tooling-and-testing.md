@@ -483,6 +483,23 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-27 -- Decision ID: iteration-004-task-10-async-evidence-integrity.
+  Release workload evidence now fetches, hashes, and executes the exact built
+  `suprnova-live.async.esm.js` artifact. A bounded count-only production port
+  observes real document queue depth and bytes plus per-island queued and
+  in-flight refresh counts; it exposes no payload, credential, subscription,
+  stream, component, or slot value. This correctness evidence produces
+  deterministic artifacts of 21,396 Brotli bytes for ESM (SHA-256
+  `df87769525273231bb905712d4c8c6e6fd12ea37a4dfba4d8c95ecf3b5c9bd83`)
+  and 19,156 Brotli bytes for classic. The classic candidate is 16.39 percent
+  above the newest reviewed baseline, so the policy correctly stops it for
+  explicit review. The increase is accepted production-correctness growth for
+  exact artifact binding and real bounded queue evidence, not authorization to
+  relax runtime caps. A reviewed baseline may append these measurements only
+  after this decision and its producing code exist in a prior immutable commit.
+  The checked workload baseline remains exploratory; release qualification
+  fails closed until a separately reviewed, environment-matching B1 workload
+  baseline exists and is compared with a B1 candidate.
 - 2026-08-26 -- Extended the reviewed browser workload baseline with measured
   `E100/1K` and `R100` evidence produced through the production connection
   pool, logical subscription, dispatcher, refresh scheduler, polling timer, and

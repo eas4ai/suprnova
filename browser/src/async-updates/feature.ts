@@ -265,6 +265,7 @@ export interface AsyncFeatureOptions {
   readonly clock: AsyncClock;
   readonly handshakeScheduler?: OriginHandshakeScheduler;
   readonly observeFreshness?: AsyncFreshnessObserver;
+  readonly observeQueuePressure?: AsyncQueuePressureObserver;
   readonly pollEnvironment?: PollEnvironment;
   readonly randomness: AsyncRandomness;
   readonly timers: AsyncTimerPort;
@@ -279,6 +280,15 @@ export interface AsyncFreshnessObservation {
 }
 
 export type AsyncFreshnessObserver = (observation: AsyncFreshnessObservation) => void;
+
+export interface AsyncQueuePressureObservation {
+  readonly documentQueuedBytes: number;
+  readonly documentQueuedEvents: number;
+  readonly islandInFlightRefreshes: number;
+  readonly islandQueuedRefreshes: number;
+}
+
+export type AsyncQueuePressureObserver = (observation: AsyncQueuePressureObservation) => void;
 
 interface AsyncStreamFeatureOptions extends AsyncFeatureOptions {
   readonly authority: AsyncAuthorityPort;
@@ -545,6 +555,8 @@ function validOptions(options: AsyncFeatureOptions): boolean {
       (streamPortsAbsent || streamPortsPresent) &&
       typeof options.clock.now === "function" &&
       (options.observeFreshness === undefined || typeof options.observeFreshness === "function") &&
+      (options.observeQueuePressure === undefined ||
+        typeof options.observeQueuePressure === "function") &&
       typeof pollEnvironment.isOnline === "function" &&
       typeof pollEnvironment.isVisible === "function" &&
       typeof pollEnvironment.subscribe === "function" &&
@@ -984,6 +996,8 @@ class AsyncIslandController implements FeatureIslandController {
       throw new Error("async_subscription_duplicate");
     }
     const dispatcher = new AsyncDispatcher(this.#port, () => this.#eventCapability);
+    let observedQueuedBytes = 0;
+    let observedQueuedEvents = 0;
     const subscription = new AsyncSubscription(
       authorization,
       dispatcher,
@@ -1016,6 +1030,16 @@ class AsyncIslandController implements FeatureIslandController {
             ? "resource_exhausted"
             : "operation_rejected",
         );
+      },
+      (observation) => {
+        this.#owner.observeQueuePressure(
+          observation.queuedBytes - observedQueuedBytes,
+          observation.queuedEvents - observedQueuedEvents,
+          observation.inFlightRefreshes,
+          observation.queuedRefreshes,
+        );
+        observedQueuedBytes = observation.queuedBytes;
+        observedQueuedEvents = observation.queuedEvents;
       },
     );
     this.#subscription = subscription;
@@ -1502,6 +1526,8 @@ export class AsyncDocumentOwner {
   readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool | null;
+  #queuedBytes = 0;
+  #queuedEvents = 0;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
 
   constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
@@ -1594,6 +1620,28 @@ export class AsyncDocumentOwner {
 
   authorization(controller: AsyncIslandController): AuthorizedLogicalSubscription | null {
     return this.#authorizations.get(controller) ?? null;
+  }
+
+  observeQueuePressure(
+    queuedByteDelta: number,
+    queuedEventDelta: number,
+    islandInFlightRefreshes: number,
+    islandQueuedRefreshes: number,
+  ): void {
+    this.#queuedBytes += queuedByteDelta;
+    this.#queuedEvents += queuedEventDelta;
+    try {
+      this.#options.observeQueuePressure?.(
+        Object.freeze({
+          documentQueuedBytes: this.#queuedBytes,
+          documentQueuedEvents: this.#queuedEvents,
+          islandInFlightRefreshes,
+          islandQueuedRefreshes,
+        }),
+      );
+    } catch {
+      // Count-only evidence cannot rewrite presentation or continuity authority.
+    }
   }
 
   retire(controller: AsyncIslandController): void {

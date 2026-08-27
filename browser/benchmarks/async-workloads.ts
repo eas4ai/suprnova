@@ -1,115 +1,25 @@
-import { canonicalize } from "../src/canonical.js";
-import {
-  DocumentConnectionPool,
-  OriginHandshakeScheduler,
-  type DocumentMembershipOutcome,
-  type DocumentTransportConnectRequest,
-  type DocumentTransportPort,
-  type LogicalSubscriptionHandle,
-  type LogicalSubscriptionSink,
-} from "../src/async-updates/connections.js";
-import { AsyncDispatcher } from "../src/async-updates/dispatch.js";
-import { PollTimer } from "../src/async-updates/poll.js";
-import { AsyncSubscription } from "../src/async-updates/subscription.js";
-import type {
-  AsyncTimerPort,
-  AuthorizedLogicalSubscription,
-  SubscriptionState,
-} from "../src/async-updates/types.js";
-import type {
-  AsyncRuntimeIslandPort,
-  RegisteredBrowserEventCapability,
-} from "../src/features/contract.js";
-import { createE100Workload, createR100Workload } from "./workloads.js";
-
-interface PendingTimer {
-  readonly callback: VoidFunction;
-  readonly due: number;
+export interface AsyncWorkloadInput {
+  readonly artifactUrl: string;
+  readonly expectedArtifactSha256: string;
+  readonly eventEnvelopeBytes: 1_024;
+  readonly multiDocumentCount: 16;
+  readonly presentationEventCount: 1_000;
+  readonly refreshInvalidationCount: 100;
+  readonly scheduledDurationMs: 10_000;
+  readonly subscriptionCount: 100;
 }
 
-class ControlledTimers implements AsyncTimerPort {
-  readonly #pending = new Map<number, PendingTimer>();
-  #next = 0;
-  #now = 0;
-
-  clearTimeout(handle: number): void {
-    this.#pending.delete(handle);
-  }
-
-  timeout(callback: VoidFunction, milliseconds: number): number {
-    this.#next += 1;
-    this.#pending.set(this.#next, Object.freeze({ callback, due: this.#now + milliseconds }));
-    return this.#next;
-  }
-
-  advanceTo(milliseconds: number): void {
-    if (!Number.isFinite(milliseconds) || milliseconds < this.#now) {
-      throw new Error("async_benchmark_clock_regression");
-    }
-    this.#now = milliseconds;
-  }
-
-  fireNext(): boolean {
-    const next = [...this.#pending].sort(
-      (left, right) => left[1].due - right[1].due || left[0] - right[0],
-    )[0];
-    if (next === undefined) return false;
-    this.#pending.delete(next[0]);
-    this.#now = next[1].due;
-    next[1].callback();
-    return true;
-  }
-
-  now(): number {
-    return this.#now;
-  }
+export interface AsyncWorkloadPreparationInput extends AsyncWorkloadInput {
+  readonly prepare: true;
 }
 
-class MeasuredSource implements DocumentTransportPort {
-  readonly #request: DocumentTransportConnectRequest;
-  #closed = false;
-
-  constructor(request: DocumentTransportConnectRequest) {
-    this.#request = request;
-  }
-
-  close(): void {
-    this.#closed = true;
-  }
-
-  emit(encoded: string): void {
-    if (this.#closed) throw new Error("async_benchmark_source_closed");
-    this.#request.message(encoded);
-  }
-
-  open(): void {
-    if (this.#closed) throw new Error("async_benchmark_source_closed");
-    this.#request.opened();
-  }
-
-  subscribe(subscription: AuthorizedLogicalSubscription): DocumentMembershipOutcome {
-    return Object.freeze({
-      descriptorBinding: subscription.descriptorBinding,
-      kind: "authenticated" as const,
-      stream: subscription.stream,
-      subscriptionId: subscription.subscriptionId,
-      transportGeneration: this.#request.transportGeneration,
-    });
-  }
-
-  unsubscribe(subscriptionId: string): void {
-    void subscriptionId;
-  }
-}
-
-interface LogicalFixture {
-  readonly authorization: AuthorizedLogicalSubscription;
-  readonly handle: LogicalSubscriptionHandle;
-  readonly subscription: AsyncSubscription;
+export interface AsyncWorkloadPreparation {
+  readonly artifactSha256: string;
 }
 
 export interface AsyncWorkloadMeasurement {
   readonly E100: Readonly<{
+    readonly artifactSha256: string;
     readonly dispatchEffectSamplesMs: readonly number[];
     readonly presentationEventCount: number;
     readonly refreshInvalidationCount: number;
@@ -123,6 +33,7 @@ export interface AsyncWorkloadMeasurement {
     readonly currentSubscriptionCount: number;
   }>;
   readonly R100: Readonly<{
+    readonly artifactSha256: string;
     readonly documentReconnectHandshakes: number;
     readonly recoverySamplesMs: readonly number[];
     readonly maximumRecoverySkewMs: number;
@@ -139,364 +50,675 @@ export interface AsyncWorkloadMeasurement {
   }>;
 }
 
-function authorization(index: number): AuthorizedLogicalSubscription {
-  const suffix = String(index).padStart(3, "0");
-  return Object.freeze({
-    authorization: Object.freeze({ kind: "session_cookie" as const }),
-    baseline: Object.freeze({ epoch: 1n, sequence: 0n }),
-    descriptorBinding: `benchmark-binding-${suffix}`,
-    document: Object.freeze({
-      authorizationScope: "benchmark-shared-document",
-      origin: location.origin,
-      transport: "sse" as const,
-    }),
-    events: Object.freeze([
-      Object.freeze({
-        cycle: Object.freeze({ kind: "forbid_repeated_island" as const }),
-        maximumFanout: 1,
-        name: "benchmark.presented",
-        order: "per_source_sequence" as const,
-        payloadContract: "benchmark.presented.v1",
-        schema: "json" as const,
-        source: "stream" as const,
-        targets: Object.freeze(["self"]),
-        version: 1,
-      }),
-    ]),
-    expiresAt: Number.MAX_SAFE_INTEGER,
-    fallbackPoll: Object.freeze({
-      initial: "wait" as const,
-      intervalMs: 30_000,
-      jitterRatio: 0.2,
-      visibility: "visible" as const,
-    }),
-    heartbeatTimeoutMs: 30_000,
-    presentationSignals: Object.freeze([]),
-    reconnect: Object.freeze({
-      kind: "resume_or_refresh" as const,
-      maximumAttempts: 4,
-      maximumDelayMs: 30_000,
-      minimumDelayMs: 250,
-    }),
-    stream: `benchmark-${suffix}`,
-    subscriptionId: `subscription-${suffix}`,
-  });
+interface BenchmarkAuthorization {
+  readonly authorization: Readonly<{ kind: "session_cookie" }>;
+  readonly baseline: Readonly<{ epoch: bigint; sequence: bigint }>;
+  readonly descriptorBinding: string;
+  readonly document: Readonly<{
+    authorizationScope: string;
+    origin: string;
+    transport: "sse";
+  }>;
+  readonly events: readonly Readonly<Record<string, unknown>>[];
+  readonly expiresAt: number;
+  readonly fallbackPoll: Readonly<Record<string, unknown>>;
+  readonly heartbeatTimeoutMs: number;
+  readonly presentationSignals: readonly Readonly<Record<string, unknown>>[];
+  readonly reconnect: Readonly<Record<string, unknown>>;
+  readonly stream: string;
+  readonly subscriptionId: string;
 }
 
-function exactPresentationEnvelope(
-  membership: AuthorizedLogicalSubscription,
-  sequence: number,
-): string {
-  const encode = (padding: string): string =>
-    canonicalize({
-      payload: {
-        event: "benchmark.presented",
-        kind: "browser_event",
-        payload: { index: sequence, padding },
-        schema_version: 1,
-        target: "self",
+interface BenchmarkConnectRequest {
+  readonly transportGeneration: number;
+  message(encoded: string): void;
+  opened(): void;
+  failed(reason: "transport_lost"): void;
+}
+
+interface BenchmarkSource {
+  readonly membershipCount: number;
+  emit(encoded: string): void;
+  fail(): void;
+  open(): void;
+}
+
+interface BenchmarkOwner {
+  connectIsland(port: Readonly<Record<string, unknown>>): { dispose(): void } | undefined;
+  dispose(): void;
+}
+
+interface BenchmarkAsyncArtifact {
+  readonly AsyncDocumentOwner: new (
+    context: Readonly<Record<string, unknown>>,
+    options: Readonly<Record<string, unknown>>,
+  ) => BenchmarkOwner;
+  readonly OriginHandshakeScheduler: new () => {
+    active(origin: string): number;
+    schedule(origin: string, start: (release: VoidFunction) => void): unknown;
+  };
+}
+
+/** Runs in Playwright; protocol behavior comes from the hashed dist module. */
+export function measureAsyncWorkloads(
+  input: AsyncWorkloadPreparationInput,
+): Promise<AsyncWorkloadPreparation>;
+export function measureAsyncWorkloads(input: AsyncWorkloadInput): Promise<AsyncWorkloadMeasurement>;
+export async function measureAsyncWorkloads(
+  input: AsyncWorkloadInput | AsyncWorkloadPreparationInput,
+): Promise<AsyncWorkloadMeasurement | AsyncWorkloadPreparation> {
+  function canonicalize(value: unknown): string {
+    const normalize = (candidate: unknown): unknown => {
+      if (Array.isArray(candidate)) return candidate.map(normalize);
+      if (typeof candidate !== "object" || candidate === null) return candidate;
+      const record = candidate as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.keys(record)
+          .sort()
+          .map((key) => [key, normalize(record[key])]),
+      );
+    };
+    const encoded = JSON.stringify(normalize(value));
+    return encoded;
+  }
+
+  class ControlledTimers {
+    readonly pending = new Map<number, Readonly<{ callback: VoidFunction; due: number }>>();
+    next = 0;
+    current = 0;
+
+    readonly port = Object.freeze({
+      clearTimeout: (handle: number) => {
+        this.pending.delete(handle);
       },
-      position: { epoch: "1", sequence: String(sequence) },
-      protocol_version: 1,
-      stream: membership.stream,
-      subscription: membership.subscriptionId,
+      timeout: (callback: VoidFunction, milliseconds: number) => {
+        this.next += 1;
+        this.pending.set(this.next, Object.freeze({ callback, due: this.current + milliseconds }));
+        return this.next;
+      },
     });
-  const empty = encode("");
-  const paddingBytes = 1_024 - new TextEncoder().encode(empty).byteLength;
-  if (paddingBytes < 0) throw new Error("e100_envelope_overflow");
-  const encoded = encode("x".repeat(paddingBytes));
-  if (new TextEncoder().encode(encoded).byteLength !== 1_024) {
-    throw new Error("e100_envelope_size");
+
+    advanceTo(milliseconds: number): void {
+      if (!Number.isFinite(milliseconds) || milliseconds < this.current) {
+        throw new Error("async_benchmark_clock_regression");
+      }
+      this.current = milliseconds;
+    }
+
+    fireEarliest(): void {
+      const next = [...this.pending].sort(
+        (left, right) => left[1].due - right[1].due || left[0] - right[0],
+      )[0];
+      if (next === undefined) throw new Error("r100_reconnect_timer_missing");
+      this.pending.delete(next[0]);
+      this.current = next[1].due;
+      next[1].callback();
+    }
   }
-  return encoded;
-}
 
-function refreshEnvelope(membership: AuthorizedLogicalSubscription, sequence: number): string {
-  return canonicalize({
-    payload: { kind: "refresh", name: "refresh" },
-    position: { epoch: "1", sequence: String(sequence) },
-    protocol_version: 1,
-    stream: membership.stream,
-    subscription: membership.subscriptionId,
-  });
-}
+  class MeasuredSource implements BenchmarkSource {
+    readonly subscriptions = new Set<string>();
+    closed = false;
 
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
-}
+    constructor(readonly request: BenchmarkConnectRequest) {}
 
-function multiDocumentEvidence(): AsyncWorkloadMeasurement["R100"]["multiDocument"] {
-  const workload = createR100Workload();
-  const scheduler = new OriginHandshakeScheduler();
-  const releases: VoidFunction[] = [];
-  let completed = 0;
-  let maximum = 0;
-  for (let index = 0; index < workload.multiDocumentCount; index += 1) {
-    scheduler.schedule(location.origin, (release) => {
-      maximum = Math.max(maximum, scheduler.active(location.origin));
-      releases.push(() => {
-        completed += 1;
-        release();
+    get membershipCount(): number {
+      return this.subscriptions.size;
+    }
+
+    close(): void {
+      this.closed = true;
+    }
+
+    emit(encoded: string): void {
+      if (this.closed) throw new Error("async_benchmark_source_closed");
+      this.request.message(encoded);
+    }
+
+    fail(): void {
+      if (this.closed) throw new Error("async_benchmark_source_closed");
+      this.request.failed("transport_lost");
+    }
+
+    open(): void {
+      if (this.closed) throw new Error("async_benchmark_source_closed");
+      this.request.opened();
+    }
+
+    subscribe(subscription: BenchmarkAuthorization): Readonly<Record<string, unknown>> {
+      this.subscriptions.add(subscription.subscriptionId);
+      return Object.freeze({
+        descriptorBinding: subscription.descriptorBinding,
+        kind: "authenticated",
+        stream: subscription.stream,
+        subscriptionId: subscription.subscriptionId,
+        transportGeneration: this.request.transportGeneration,
       });
-    });
+    }
+
+    unsubscribe(subscriptionId: string): void {
+      this.subscriptions.delete(subscriptionId);
+    }
   }
-  while (releases.length > 0) releases.shift()?.();
-  return Object.freeze({
-    documentCount: 16 as const,
-    completedHandshakes: completed,
-    maximumConcurrentHandshakes: maximum,
-  });
-}
 
-function pollingFanoutEvidence(): number {
-  const due = new Map<number, number>();
-  const timers: AsyncTimerPort = {
-    clearTimeout: () => undefined,
-    timeout: (_callback, milliseconds) => {
-      due.set(milliseconds, (due.get(milliseconds) ?? 0) + 1);
-      return due.size;
-    },
+  const settleUntil = async (predicate: () => boolean, code: string): Promise<void> => {
+    for (let turn = 0; turn < 2_048; turn += 1) {
+      if (predicate()) return;
+      await Promise.resolve();
+    }
+    throw new Error(code);
   };
-  const environment = {
-    isOnline: () => true,
-    isVisible: () => true,
-    subscribe: () => () => undefined,
-  };
-  const polls = Array.from(
-    { length: 100 },
-    (_, index) =>
-      new PollTimer({
-        enqueueFreshRender: () => "queued",
-        environment,
-        policy: Object.freeze({
-          initial: "wait" as const,
-          intervalMs: 30_000,
-          jitterRatio: 0.2,
-          mode: "poll_only" as const,
-          visibility: "visible" as const,
-        }),
-        randomness: { number: () => (index + 0.5) / 100 },
-        timers,
-      }),
-  );
-  for (const poll of polls) poll.start();
-  const maximum = Math.max(...due.values());
-  for (const poll of polls) poll.dispose();
-  return maximum;
-}
 
-export async function measureAsyncWorkloads(): Promise<AsyncWorkloadMeasurement> {
-  const e100 = createE100Workload();
+  const artifactUrl = input.artifactUrl;
+  const prepared = Reflect.get(globalThis, "__suprnovaBudgetAsyncPrepared") as
+    | Readonly<{
+        artifact: BenchmarkAsyncArtifact;
+        artifactSha256: string;
+        artifactUrl: string;
+      }>
+    | undefined;
+  let artifact: BenchmarkAsyncArtifact;
+  let artifactSha256: string;
+  if (
+    prepared?.artifactUrl === artifactUrl &&
+    prepared.artifactSha256 === input.expectedArtifactSha256
+  ) {
+    artifact = prepared.artifact;
+    artifactSha256 = prepared.artifactSha256;
+  } else {
+    const artifactResponse = await fetch(artifactUrl, { cache: "no-store" });
+    if (!artifactResponse.ok) throw new Error("async_benchmark_artifact_fetch_failed");
+    const artifactBytes = await artifactResponse.arrayBuffer();
+    const artifactDigest = await crypto.subtle.digest("SHA-256", artifactBytes);
+    artifactSha256 = [...new Uint8Array(artifactDigest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    if (artifactSha256 !== input.expectedArtifactSha256) {
+      throw new Error("async_benchmark_artifact_hash_mismatch");
+    }
+    const loaded: unknown = await import(artifactUrl);
+    artifact = loaded as BenchmarkAsyncArtifact;
+  }
+  if (
+    typeof artifact.AsyncDocumentOwner !== "function" ||
+    typeof artifact.OriginHandshakeScheduler !== "function"
+  ) {
+    throw new Error("async_benchmark_artifact_exports_missing");
+  }
+  if ("prepare" in input) {
+    Reflect.set(
+      globalThis,
+      "__suprnovaBudgetAsyncPrepared",
+      Object.freeze({ artifact, artifactSha256, artifactUrl }),
+    );
+    Reflect.set(globalThis, "__suprnovaBudgetAsyncMeasure", measureAsyncWorkloads);
+    return Object.freeze({ artifactSha256 });
+  }
+
   const timers = new ControlledTimers();
   const sources: MeasuredSource[] = [];
-  let handshakes = 0;
+  const authorizations = new Map<string, BenchmarkAuthorization>();
+  const states = new Map<string, string>();
+  const recoveryAt = new Map<string, number>();
+  const pendingStarts = new Map<number, number[]>();
+  const refreshCompletions = new Map<number, ((completion: "succeeded") => void)[]>();
+  const dispatchEffectSamplesMs: number[] = [];
+  let recoveryStarted = 0;
   let activeReauthorizations = 0;
   let maximumConcurrentReauthorizations = 0;
-  let maximumInFlightRefreshesPerIsland = 0;
+  let handshakes = 0;
+  let queuedEventPeak = 0;
+  let queuedBytePeak = 0;
   let maximumQueuedRefreshesPerIsland = 0;
-  const states = new Map<string, SubscriptionState>();
-  const recoveryAt = new Map<string, number>();
-  const recoveryStarted = { value: 0 };
-  const pool = new DocumentConnectionPool({
-    handshakeScheduler: new OriginHandshakeScheduler(),
-    randomness: { number: () => 0.5 },
-    reauthorizationConcurrency: 8,
-    timers,
-    transports: {
-      eventSource(request) {
-        handshakes += 1;
-        const source = new MeasuredSource(request);
-        sources.push(source);
-        return source;
-      },
-      webSocket() {
-        throw new Error("async_benchmark_unexpected_websocket");
-      },
-    },
-  });
-  const fixtures: LogicalFixture[] = [];
-  for (let index = 0; index < e100.subscriptionCount; index += 1) {
-    const current = authorization(index);
-    const root = document.querySelector(`[data-async-benchmark-index="${String(index)}"]`);
-    if (!(root instanceof HTMLElement)) throw new Error("e100_island_missing");
-    let inFlightRefreshes = 0;
-    const capability = Object.freeze({}) as RegisteredBrowserEventCapability;
-    const island: AsyncRuntimeIslandPort = {
-      consumeRegisteredEventCapability: () => capability,
-      dispatchRegisteredEvent: (_candidate, event) => {
-        root.dispatchEvent(new CustomEvent(event.event, { detail: event.payload }));
-        return "dispatched";
-      },
-      element: root,
-      enqueueFreshRender: (_reason, completion) => {
-        inFlightRefreshes += 1;
-        maximumInFlightRefreshesPerIsland = Math.max(
-          maximumInFlightRefreshesPerIsland,
-          inFlightRefreshes,
-        );
-        completion?.("succeeded");
-        inFlightRefreshes -= 1;
-        maximumQueuedRefreshesPerIsland = Math.max(maximumQueuedRefreshesPerIsland, 0);
-        return "queued";
-      },
-      identity: Object.freeze({
-        component: "benchmark.component",
-        documentKey: "benchmark-document",
-        slot: `benchmark-${String(index)}`,
+  let maximumInFlightRefreshesPerIsland = 0;
+
+  const makeAuthorization = (
+    index: number,
+    baseline: Readonly<{ epoch: bigint; sequence: bigint }>,
+    reconnect: boolean,
+  ): BenchmarkAuthorization => {
+    const suffix = String(index).padStart(3, "0");
+    return Object.freeze({
+      authorization: Object.freeze({ kind: "session_cookie" as const }),
+      baseline,
+      descriptorBinding: `benchmark-binding-${suffix}${reconnect ? "-reconnected" : ""}`,
+      document: Object.freeze({
+        authorizationScope: "benchmark-shared-document",
+        origin: location.origin,
+        transport: "sse" as const,
       }),
-      onDispose: () => undefined,
-      queryDirectiveOwnership: () => Object.freeze([]),
-      writePresentationSignal: (_scope, _name, value) => value,
-    };
-    const subscription = new AsyncSubscription(
-      current,
-      new AsyncDispatcher(island, () => capability),
-      { now: () => 1_000 },
-    );
-    const sink: LogicalSubscriptionSink = {
-      envelope: (encoded) => {
-        const disposition = subscription.receive(encoded);
-        if (disposition !== "applied" && disposition !== "pending") {
-          throw new Error(`e100_dispatch_${disposition}`);
-        }
-      },
-      reauthorize: async (prior) => {
-        if (prior === null) throw new Error("r100_prior_missing");
+      events: Object.freeze([
+        Object.freeze({
+          cycle: Object.freeze({ kind: "forbid_repeated_island" }),
+          maximumFanout: 1,
+          name: "benchmark.presented",
+          order: "per_source_sequence",
+          payloadContract: "benchmark.presented.v1",
+          schema: "json",
+          source: "stream",
+          targets: Object.freeze(["self"]),
+          version: 1,
+        }),
+      ]),
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      fallbackPoll: Object.freeze({
+        initial: "wait",
+        intervalMs: 30_000,
+        jitterRatio: 0.2,
+        visibility: "visible",
+      }),
+      heartbeatTimeoutMs: 30_000,
+      presentationSignals: Object.freeze([]),
+      reconnect: Object.freeze({
+        kind: "resume_or_refresh",
+        maximumAttempts: 4,
+        maximumDelayMs: 30_000,
+        minimumDelayMs: 250,
+      }),
+      stream: `benchmark-${suffix}`,
+      subscriptionId: `subscription-${suffix}`,
+    });
+  };
+
+  const authority = Object.freeze({
+    async authorize(request: Readonly<Record<string, unknown>>) {
+      const identity = request["identity"] as Readonly<Record<string, unknown>>;
+      const slot = String(identity["slot"]);
+      const index = Number.parseInt(slot.slice("benchmark-".length), 10);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= input.subscriptionCount) {
+        throw new Error("async_benchmark_authority_identity_invalid");
+      }
+      const prior = request["prior"] as BenchmarkAuthorization | null;
+      if (prior !== null) {
         activeReauthorizations += 1;
         maximumConcurrentReauthorizations = Math.max(
           maximumConcurrentReauthorizations,
           activeReauthorizations,
         );
-        await Promise.resolve();
-        activeReauthorizations -= 1;
-        const successor = Object.freeze({
-          ...prior,
-          baseline: subscription.position(),
-          descriptorBinding: `${prior.descriptorBinding}-reconnected`,
-        });
-        return Object.freeze({
-          commit: () => {
-            subscription.reauthorize(successor);
-            return "committed" as const;
-          },
-          discard: () => undefined,
-          proof: "authoritative_no_tail" as const,
-          subscription: successor,
-        });
-      },
-      state: (state) => {
-        states.set(current.subscriptionId, state);
-        if (state === "connecting" && subscription.state() === "disconnected") {
-          subscription.connected();
-        } else if (state === "reconnecting" && subscription.state() === "current") {
-          subscription.transportLost();
-        } else if (state === "current") {
-          if (subscription.state() === "connecting") {
-            subscription.proveAuthoritativeBaseline(subscription.position());
-          }
-          if (recoveryStarted.value > 0 && !recoveryAt.has(current.subscriptionId)) {
-            recoveryAt.set(current.subscriptionId, performance.now() - recoveryStarted.value);
-          }
+      }
+      await Promise.resolve();
+      if (prior !== null) activeReauthorizations -= 1;
+      const position = request["position"] as Readonly<{ epoch: bigint; sequence: bigint }> | null;
+      const current = makeAuthorization(
+        index,
+        position ?? Object.freeze({ epoch: 1n, sequence: 0n }),
+        prior !== null,
+      );
+      authorizations.set(current.subscriptionId, current);
+      return Object.freeze({ replay: Object.freeze([]), subscription: current });
+    },
+  });
+
+  const owner = new artifact.AsyncDocumentOwner(
+    Object.freeze({ diagnose: () => undefined, onDispose: () => undefined }),
+    Object.freeze({
+      authority,
+      clock: Object.freeze({ now: () => 1_000 }),
+      observeQueuePressure(observation: Readonly<Record<string, unknown>>) {
+        const queuedEvents = Number(observation["documentQueuedEvents"]);
+        const queuedBytes = Number(observation["documentQueuedBytes"]);
+        const queuedRefreshes = Number(observation["islandQueuedRefreshes"]);
+        const inFlightRefreshes = Number(observation["islandInFlightRefreshes"]);
+        if (
+          ![queuedEvents, queuedBytes, queuedRefreshes, inFlightRefreshes].every(
+            (value) => Number.isSafeInteger(value) && value >= 0,
+          )
+        ) {
+          throw new Error("async_benchmark_queue_observation_invalid");
         }
+        queuedEventPeak = Math.max(queuedEventPeak, queuedEvents);
+        queuedBytePeak = Math.max(queuedBytePeak, queuedBytes);
+        maximumQueuedRefreshesPerIsland = Math.max(
+          maximumQueuedRefreshesPerIsland,
+          queuedRefreshes,
+        );
+        maximumInFlightRefreshesPerIsland = Math.max(
+          maximumInFlightRefreshesPerIsland,
+          inFlightRefreshes,
+        );
       },
-    };
-    const fixture: LogicalFixture = Object.freeze({
-      authorization: current,
-      handle: pool.subscribe(current, sink),
-      subscription,
-    });
-    fixtures.push(fixture);
-  }
-  if (sources.length !== 1) throw new Error("e100_physical_connection_count");
-  sources[0]?.open();
-  await settle();
-  for (const fixture of fixtures) fixture.handle.continuityProved();
-  await settle();
-
-  const dispatchEffectSamplesMs: number[] = [];
-  const sequences = new Array<number>(e100.subscriptionCount).fill(0);
-  for (let event = 0; event < e100.presentationEventCount; event += 1) {
-    timers.advanceTo(((event + 1) * e100.scheduledDurationMs) / e100.presentationEventCount);
-    const index = event % e100.subscriptionCount;
-    const fixture = fixtures[index];
-    if (fixture === undefined) throw new Error("e100_fixture_missing");
-    const sequence = (sequences[index] ?? 0) + 1;
-    sequences[index] = sequence;
-    const started = performance.now();
-    sources[0]?.emit(exactPresentationEnvelope(fixture.authorization, sequence));
-    dispatchEffectSamplesMs.push(performance.now() - started);
-  }
-  const scheduledDurationMs = timers.now();
-  let refreshInvalidationCount = 0;
-  for (let refresh = 0; refresh < e100.refreshInvalidationCount; refresh += 1) {
-    const index = refresh % e100.subscriptionCount;
-    const fixture = fixtures[index];
-    if (fixture === undefined) throw new Error("e100_fixture_missing");
-    const sequence = (sequences[index] ?? 0) + 1;
-    sequences[index] = sequence;
-    sources[0]?.emit(refreshEnvelope(fixture.authorization, sequence));
-    refreshInvalidationCount += 1;
-  }
-  const e100Current = fixtures.filter(
-    ({ subscription }) => subscription.state() === "current",
-  ).length;
-
-  recoveryStarted.value = performance.now();
-  for (const fixture of fixtures) fixture.handle.continuityLost();
-  if (!timers.fireNext()) throw new Error("r100_reconnect_timer_missing");
-  await settle();
-  const reconnectSource = sources[1];
-  if (reconnectSource === undefined) throw new Error("r100_document_reconnect_handshakes");
-  reconnectSource.open();
-  await settle();
-  for (const fixture of fixtures) fixture.handle.continuityProved();
-  await settle();
-  const recovered = recoveryAt.size;
-  const boundedRecoveryEnd = performance.now() - recoveryStarted.value;
-  const recoverySamplesMs = fixtures.map(
-    ({ authorization: current }) => recoveryAt.get(current.subscriptionId) ?? boundedRecoveryEnd,
+      pollEnvironment: Object.freeze({
+        isOnline: () => true,
+        isVisible: () => true,
+        subscribe: () => () => undefined,
+      }),
+      randomness: Object.freeze({ number: () => 0.5 }),
+      timers: timers.port,
+      transports: Object.freeze({
+        eventSource(request: BenchmarkConnectRequest) {
+          handshakes += 1;
+          const source = new MeasuredSource(request);
+          sources.push(source);
+          return source;
+        },
+        webSocket() {
+          throw new Error("async_benchmark_unexpected_websocket");
+        },
+      }),
+    }),
   );
-  const r100Current = fixtures.filter(
-    ({ subscription }) => subscription.state() === "current",
-  ).length;
+
+  const streamOwnership = (root: Element, stream: string) =>
+    Object.freeze([
+      Object.freeze({
+        attributeName: "live:stream",
+        directive: Object.freeze({
+          capability: "async@1",
+          modifiers: Object.freeze([]),
+          name: "stream",
+          ok: true,
+          role: null,
+          value: stream,
+        }),
+        element: root,
+      }),
+    ]);
+
+  for (let index = 0; index < input.subscriptionCount; index += 1) {
+    const root = document.querySelector(`[data-async-benchmark-index="${String(index)}"]`);
+    if (!(root instanceof HTMLElement)) throw new Error("e100_island_missing");
+    pendingStarts.set(index, []);
+    refreshCompletions.set(index, []);
+    const stream = `benchmark-${String(index).padStart(3, "0")}`;
+    owner.connectIsland(
+      Object.freeze({
+        consumeRegisteredEventCapability: () => Object.freeze({}),
+        dispatchRegisteredEvent: (_capability: unknown, candidate: unknown) => {
+          const event = candidate as Readonly<{ event: string; payload: unknown }>;
+          const started = pendingStarts.get(index)?.shift();
+          if (started === undefined) throw new Error("e100_dispatch_start_missing");
+          root.dispatchEvent(new CustomEvent(event.event, { detail: event.payload }));
+          dispatchEffectSamplesMs.push(performance.now() - started);
+          return "dispatched";
+        },
+        element: root,
+        enqueueFreshRender: (_reason: unknown, completion?: (outcome: "succeeded") => void) => {
+          if (completion === undefined) throw new Error("e100_refresh_completion_missing");
+          refreshCompletions.get(index)?.push(completion);
+          return "queued";
+        },
+        identity: Object.freeze({
+          component: "benchmark.component",
+          documentKey: "benchmark-document",
+          slot: `benchmark-${String(index)}`,
+        }),
+        onDispose: () => undefined,
+        projectAsyncStatus: (state: string) => {
+          const subscriptionId = `subscription-${String(index).padStart(3, "0")}`;
+          states.set(subscriptionId, state);
+          if (recoveryStarted > 0 && state === "current" && !recoveryAt.has(subscriptionId)) {
+            recoveryAt.set(subscriptionId, performance.now() - recoveryStarted);
+          }
+        },
+        queryDirectiveOwnership: () => streamOwnership(root, stream),
+        writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
+      }),
+    );
+  }
+
+  await settleUntil(() => sources.length === 1, "e100_physical_connection_count");
+  const primarySource = sources[0];
+  if (primarySource === undefined) throw new Error("e100_source_missing");
+  primarySource.open();
+  await settleUntil(
+    () => primarySource.membershipCount === input.subscriptionCount,
+    "e100_membership_count",
+  );
+
+  const sequences = new Array<number>(input.subscriptionCount).fill(0);
+  let presentationEventCount = 0;
+  let refreshInvalidationCount = 0;
+  const nextSequence = (index: number): number => {
+    const next = (sequences[index] ?? 0) + 1;
+    sequences[index] = next;
+    return next;
+  };
+  const membership = (index: number): BenchmarkAuthorization => {
+    const value = authorizations.get(`subscription-${String(index).padStart(3, "0")}`);
+    if (value === undefined) throw new Error("e100_membership_missing");
+    return value;
+  };
+  const presentationEnvelope = (index: number, sequence: number, eventIndex: number): string => {
+    const current = membership(index);
+    const encode = (padding: string): string =>
+      canonicalize({
+        payload: {
+          event: "benchmark.presented",
+          kind: "browser_event",
+          payload: { index: eventIndex, padding },
+          schema_version: 1,
+          target: "self",
+        },
+        position: { epoch: "1", sequence: String(sequence) },
+        protocol_version: 1,
+        stream: current.stream,
+        subscription: current.subscriptionId,
+      });
+    const empty = encode("");
+    const padding = input.eventEnvelopeBytes - new TextEncoder().encode(empty).byteLength;
+    if (padding < 0) throw new Error("e100_envelope_overflow");
+    const encoded = encode("x".repeat(padding));
+    if (new TextEncoder().encode(encoded).byteLength !== input.eventEnvelopeBytes) {
+      throw new Error("e100_envelope_size");
+    }
+    return encoded;
+  };
+  const refreshEnvelope = (index: number, sequence: number): string => {
+    const current = membership(index);
+    return canonicalize({
+      payload: { kind: "refresh", name: "refresh" },
+      position: { epoch: "1", sequence: String(sequence) },
+      protocol_version: 1,
+      stream: current.stream,
+      subscription: current.subscriptionId,
+    });
+  };
+  const emitPresentation = (index: number): void => {
+    const next = presentationEventCount + 1;
+    timers.advanceTo((next * input.scheduledDurationMs) / input.presentationEventCount);
+    pendingStarts.get(index)?.push(performance.now());
+    primarySource.emit(presentationEnvelope(index, nextSequence(index), next));
+    presentationEventCount = next;
+  };
+  const emitRefresh = (index: number): void => {
+    primarySource.emit(refreshEnvelope(index, nextSequence(index)));
+    refreshInvalidationCount += 1;
+  };
+
+  for (let round = 0; round < 5; round += 1) {
+    for (let index = 0; index < input.subscriptionCount; index += 1) emitPresentation(index);
+  }
+  for (const first of [0, 25]) {
+    for (let index = first; index < first + 25; index += 1) {
+      emitRefresh(index);
+      emitRefresh(index);
+      emitPresentation(index);
+    }
+    for (let index = first; index < first + 25; index += 1) {
+      const completion = refreshCompletions.get(index)?.shift();
+      if (completion === undefined) throw new Error("e100_first_refresh_missing");
+      completion("succeeded");
+    }
+    for (let index = first; index < first + 25; index += 1) {
+      const completion = refreshCompletions.get(index)?.shift();
+      if (completion === undefined) throw new Error("e100_second_refresh_missing");
+      completion("succeeded");
+    }
+  }
+  for (let index = 0; index < input.subscriptionCount; index += 1) {
+    const remaining = index < 50 ? 4 : 5;
+    for (let count = 0; count < remaining; count += 1) emitPresentation(index);
+  }
+  if (
+    presentationEventCount !== input.presentationEventCount ||
+    dispatchEffectSamplesMs.length !== input.presentationEventCount ||
+    refreshInvalidationCount !== input.refreshInvalidationCount
+  ) {
+    throw new Error("e100_workload_shape_mismatch");
+  }
+  const currentBeforeRecovery = [...states.values()].filter((state) => state === "current").length;
+  const scheduledDurationMs = timers.current;
+  const physicalConnectionCount = sources.length;
+  const initialHandshakeCount = handshakes;
+
+  recoveryStarted = performance.now();
+  primarySource.fail();
+  timers.fireEarliest();
+  await settleUntil(() => sources.length === 2, "r100_document_reconnect_handshakes");
+  const successorSource = sources[1];
+  if (successorSource === undefined) throw new Error("r100_successor_source_missing");
+  successorSource.open();
+  await settleUntil(
+    () =>
+      successorSource.membershipCount === input.subscriptionCount &&
+      recoveryAt.size === input.subscriptionCount,
+    "r100_recovery_incomplete",
+  );
+  const recoverySamplesMs = Array.from(
+    { length: input.subscriptionCount },
+    (_, index) => recoveryAt.get(`subscription-${String(index).padStart(3, "0")}`) ?? Infinity,
+  );
   const minimumRecovery = Math.min(...recoverySamplesMs);
   const maximumRecovery = Math.max(...recoverySamplesMs);
+  const currentAfterRecovery = [...states.values()].filter((state) => state === "current").length;
 
-  // Keep the production pool reachable until the runner's post-workload heap sample. The page is
-  // dedicated to one measurement and is closed immediately after the sample.
-  (
-    window as Window & {
-      __suprnovaBudgetAsyncRetention?: DocumentConnectionPool;
-    }
-  ).__suprnovaBudgetAsyncRetention = pool;
+  const scheduler = new artifact.OriginHandshakeScheduler();
+  const releases: VoidFunction[] = [];
+  let completedHandshakes = 0;
+  let maximumConcurrentHandshakes = 0;
+  for (let index = 0; index < input.multiDocumentCount; index += 1) {
+    scheduler.schedule(location.origin, (release) => {
+      maximumConcurrentHandshakes = Math.max(
+        maximumConcurrentHandshakes,
+        scheduler.active(location.origin),
+      );
+      releases.push(() => {
+        completedHandshakes += 1;
+        release();
+      });
+    });
+  }
+  while (releases.length > 0) releases.shift()?.();
 
-  return Object.freeze({
+  const pollingDue = new Map<number, number>();
+  const pollingHandles = new Map<number, number>();
+  let pollingHandle = 0;
+  let pollingRandom = 0;
+  const pollingOwner = new artifact.AsyncDocumentOwner(
+    Object.freeze({ diagnose: () => undefined, onDispose: () => undefined }),
+    Object.freeze({
+      clock: Object.freeze({ now: () => 1_000 }),
+      pollEnvironment: Object.freeze({
+        isOnline: () => true,
+        isVisible: () => true,
+        subscribe: () => () => undefined,
+      }),
+      randomness: Object.freeze({
+        number: () => {
+          const value = (pollingRandom + 0.5) / input.subscriptionCount;
+          pollingRandom += 1;
+          return value;
+        },
+      }),
+      timers: Object.freeze({
+        clearTimeout(handle: number) {
+          const due = pollingHandles.get(handle);
+          if (due === undefined) return;
+          pollingHandles.delete(handle);
+          const count = pollingDue.get(due) ?? 0;
+          if (count <= 1) pollingDue.delete(due);
+          else pollingDue.set(due, count - 1);
+        },
+        timeout(_callback: VoidFunction, milliseconds: number) {
+          pollingHandle += 1;
+          pollingHandles.set(pollingHandle, milliseconds);
+          pollingDue.set(milliseconds, (pollingDue.get(milliseconds) ?? 0) + 1);
+          return pollingHandle;
+        },
+      }),
+    }),
+  );
+  for (let index = 0; index < input.subscriptionCount; index += 1) {
+    const root = document.querySelector(`[data-async-benchmark-index="${String(index)}"]`);
+    if (!(root instanceof HTMLElement)) throw new Error("r100_poll_island_missing");
+    pollingOwner.connectIsland(
+      Object.freeze({
+        consumeRegisteredEventCapability: () => Object.freeze({}),
+        dispatchRegisteredEvent: () => "dispatched",
+        element: root,
+        enqueueFreshRender: () => "queued",
+        identity: Object.freeze({
+          component: "benchmark.poll",
+          documentKey: `benchmark-poll-${String(index)}`,
+          slot: `poll-${String(index)}`,
+        }),
+        onDispose: () => undefined,
+        queryDirectiveOwnership: () =>
+          Object.freeze([
+            Object.freeze({
+              attributeName: "live:poll",
+              directive: Object.freeze({
+                capability: "async@1",
+                modifiers: Object.freeze([]),
+                name: "poll",
+                ok: true,
+                role: null,
+                value: "",
+              }),
+              element: root,
+            }),
+          ]),
+        writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
+      }),
+    );
+  }
+  const pollingMaximumSameTick = Math.max(...pollingDue.values());
+  pollingOwner.dispose();
+
+  const recoveredSubscriptionCount = recoveryAt.size;
+  const documentReconnectHandshakes = sources.length - physicalConnectionCount;
+  const measuredDispatchEffects = Object.freeze([...dispatchEffectSamplesMs]);
+  const measurement = Object.freeze({
     E100: Object.freeze({
-      dispatchEffectSamplesMs: Object.freeze(dispatchEffectSamplesMs),
-      presentationEventCount: dispatchEffectSamplesMs.length,
+      artifactSha256,
+      dispatchEffectSamplesMs: measuredDispatchEffects,
+      presentationEventCount,
       refreshInvalidationCount,
       scheduledDurationMs,
-      physicalConnectionCount: sources.length - 1,
-      handshakeCount: handshakes - 1,
-      queuedEventPeak: 0,
-      queuedBytePeak: 0,
+      physicalConnectionCount,
+      handshakeCount: initialHandshakeCount,
+      queuedEventPeak,
+      queuedBytePeak,
       maximumQueuedRefreshesPerIsland,
       maximumInFlightRefreshesPerIsland,
-      currentSubscriptionCount: e100Current,
+      currentSubscriptionCount: currentBeforeRecovery,
     }),
     R100: Object.freeze({
-      documentReconnectHandshakes: sources.length - 1,
+      artifactSha256,
+      documentReconnectHandshakes,
       recoverySamplesMs: Object.freeze(recoverySamplesMs),
-      maximumRecoverySkewMs:
-        Number.isFinite(minimumRecovery) && Number.isFinite(maximumRecovery)
-          ? maximumRecovery - minimumRecovery
-          : Number.POSITIVE_INFINITY,
-      recoveredSubscriptionCount: recovered,
-      currentSubscriptionCount: r100Current,
-      starvedSubscriptionCount: e100.subscriptionCount - recovered,
+      maximumRecoverySkewMs: maximumRecovery - minimumRecovery,
+      recoveredSubscriptionCount,
+      currentSubscriptionCount: currentAfterRecovery,
+      starvedSubscriptionCount: input.subscriptionCount - recoveredSubscriptionCount,
       maximumConcurrentReauthorizations,
-      pollingMaximumSameTick: pollingFanoutEvidence(),
-      multiDocument: multiDocumentEvidence(),
+      pollingMaximumSameTick,
+      multiDocument: Object.freeze({
+        documentCount: 16 as const,
+        completedHandshakes,
+        maximumConcurrentHandshakes,
+      }),
     }),
   });
+  // Evidence collectors are not product state and must not inflate the retained owner sample.
+  authorizations.clear();
+  dispatchEffectSamplesMs.length = 0;
+  pendingStarts.clear();
+  recoveryAt.clear();
+  refreshCompletions.clear();
+  sources.length = 0;
+  states.clear();
+  // The page closes immediately after the retained-heap read.
+  Reflect.set(globalThis, "__suprnovaBudgetAsyncRetention", owner);
+  return measurement;
 }

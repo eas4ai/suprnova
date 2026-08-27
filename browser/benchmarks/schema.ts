@@ -63,6 +63,7 @@ export interface BrowserBudgetResult {
     mainThreadTime: "cdp-performance-task-duration-v1";
     observerCount: "instrumented-runtime-observer-factory-v1";
     morphMeasurement: "bundled-production-morph-port-v1";
+    asyncMeasurement: "hashed-production-async-esm-v1";
     morphDeadlineMs: 10_000;
     correctnessEnabled: true;
     accessibilityEnabled: true;
@@ -92,6 +93,7 @@ export interface BrowserBudgetResult {
       morph: SampleSummary;
     }>;
     E100: Readonly<{
+      artifactSha256: string;
       subscriptionCount: 100;
       presentationEventCount: 1_000;
       eventEnvelopeBytes: 1_024;
@@ -109,6 +111,7 @@ export interface BrowserBudgetResult {
       currentSubscriptionCount: number;
     }>;
     R100: Readonly<{
+      artifactSha256: string;
       subscriptionCount: 100;
       simultaneousContinuityLosses: 100;
       documentReconnectHandshakes: number;
@@ -318,6 +321,7 @@ function validateMethodology(value: unknown) {
       "mainThreadTime",
       "observerCount",
       "morphMeasurement",
+      "asyncMeasurement",
       "morphDeadlineMs",
       "correctnessEnabled",
       "accessibilityEnabled",
@@ -330,6 +334,7 @@ function validateMethodology(value: unknown) {
     candidate["mainThreadTime"] !== "cdp-performance-task-duration-v1" ||
     candidate["observerCount"] !== "instrumented-runtime-observer-factory-v1" ||
     candidate["morphMeasurement"] !== "bundled-production-morph-port-v1" ||
+    candidate["asyncMeasurement"] !== "hashed-production-async-esm-v1" ||
     candidate["morphDeadlineMs"] !== 10_000 ||
     candidate["correctnessEnabled"] !== true ||
     candidate["accessibilityEnabled"] !== true ||
@@ -347,6 +352,7 @@ function validateMethodology(value: unknown) {
     mainThreadTime: "cdp-performance-task-duration-v1" as const,
     observerCount: "instrumented-runtime-observer-factory-v1" as const,
     morphMeasurement: "bundled-production-morph-port-v1" as const,
+    asyncMeasurement: "hashed-production-async-esm-v1" as const,
     morphDeadlineMs: 10_000 as const,
     correctnessEnabled: true as const,
     accessibilityEnabled: true as const,
@@ -417,6 +423,7 @@ function validateE100(value: unknown): BrowserBudgetResult["workloads"]["E100"] 
     candidate,
     [
       "subscriptionCount",
+      "artifactSha256",
       "presentationEventCount",
       "eventEnvelopeBytes",
       "scheduledDurationMs",
@@ -444,6 +451,7 @@ function validateE100(value: unknown): BrowserBudgetResult["workloads"]["E100"] 
     fail("e100_shape_invalid");
   }
   return Object.freeze({
+    artifactSha256: text(candidate["artifactSha256"], "e100_invalid", 64),
     subscriptionCount: 100 as const,
     presentationEventCount: 1_000 as const,
     eventEnvelopeBytes: 1_024 as const,
@@ -481,6 +489,7 @@ function validateR100(value: unknown): BrowserBudgetResult["workloads"]["R100"] 
     candidate,
     [
       "subscriptionCount",
+      "artifactSha256",
       "simultaneousContinuityLosses",
       "documentReconnectHandshakes",
       "recovery",
@@ -506,6 +515,7 @@ function validateR100(value: unknown): BrowserBudgetResult["workloads"]["R100"] 
   );
   if (multiDocument["documentCount"] !== 16) fail("r100_shape_invalid");
   return Object.freeze({
+    artifactSha256: text(candidate["artifactSha256"], "r100_invalid", 64),
     subscriptionCount: 100 as const,
     simultaneousContinuityLosses: 100 as const,
     documentReconnectHandshakes: nonnegativeInteger(
@@ -591,6 +601,12 @@ export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult
   const M5K = validateMorph(workloads["M5K"], "M5K");
   const E100 = validateE100(workloads["E100"]);
   const R100 = validateR100(workloads["R100"]);
+  if (
+    E100.artifactSha256 !== asyncArtifact["sha256"] ||
+    R100.artifactSha256 !== asyncArtifact["sha256"]
+  ) {
+    fail("async_workload_artifact_mismatch");
+  }
   const expectedSampleCount = methodology.measuredSamples * methodology.independentRuns;
   for (const item of [D100.connect, M1K.morph, M5K.morph, E100.dispatchEffect, R100.recovery]) {
     if (classification === "b1" && item.sampleCount < 30) fail("sample_count_b1");
@@ -636,7 +652,7 @@ export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult
     }),
     asyncArtifact: Object.freeze({
       file: "suprnova-live.async.esm.js" as const,
-      sha256: asyncArtifact["sha256"] as string,
+      sha256: asyncArtifact["sha256"],
       brotliBytes: positiveInteger(
         asyncArtifact["brotliBytes"],
         "async_artifact_invalid",
@@ -672,6 +688,24 @@ export function evaluateBrowserBudget(
     return Object.freeze({
       status: "unqualified",
       codes: Object.freeze(["b1_required"]),
+      regressions: Object.freeze(regressions),
+    });
+  }
+  if (options.release && baseline?.classification !== "b1") {
+    return Object.freeze({
+      status: "unqualified",
+      codes: Object.freeze(["b1_baseline_required"]),
+      regressions: Object.freeze(regressions),
+    });
+  }
+  if (
+    options.release &&
+    baseline !== undefined &&
+    !sameEnvironment(result.environment, baseline.environment)
+  ) {
+    return Object.freeze({
+      status: "unqualified",
+      codes: Object.freeze(["b1_baseline_environment_mismatch"]),
       regressions: Object.freeze(regressions),
     });
   }

@@ -109,10 +109,12 @@ describe("browser performance evidence contract", () => {
     expect(baseline.methodology.idleDurationMs).toBe(30_000);
     expect(baseline.methodology.retainedMemory).toBe("d100-minus-control-minus-fixed-runtime-v1");
     expect(baseline.methodology.morphMeasurement).toBe("bundled-production-morph-port-v1");
+    expect(baseline.methodology.asyncMeasurement).toBe("hashed-production-async-esm-v1");
     expect(baseline.methodology.morphDeadlineMs).toBe(10_000);
     expect(baseline.artifact.brotliBytes).toBeGreaterThan(0);
     expect(baseline.asyncArtifact).toMatchObject({ file: "suprnova-live.async.esm.js" });
     expect(baseline.workloads.E100).toMatchObject({
+      artifactSha256: baseline.asyncArtifact.sha256,
       subscriptionCount: 100,
       presentationEventCount: 1_000,
       eventEnvelopeBytes: 1_024,
@@ -122,6 +124,7 @@ describe("browser performance evidence contract", () => {
       currentSubscriptionCount: 100,
     });
     expect(baseline.workloads.R100).toMatchObject({
+      artifactSha256: baseline.asyncArtifact.sha256,
       subscriptionCount: 100,
       simultaneousContinuityLosses: 100,
       documentReconnectHandshakes: 1,
@@ -152,6 +155,72 @@ describe("browser performance evidence contract", () => {
       status: "unqualified",
       codes: ["b1_required"],
     });
+
+    const b1Environment = {
+      ...baseline.environment,
+      dedicated: true,
+      logicalCpuCount: 8,
+      memoryBytes: 16 * 1024 ** 3,
+      cpuGovernor: "performance",
+    };
+    const samples = (value: number) => summarizeSamples(Array.from({ length: 90 }, () => value));
+    const b1Evidence = (recordedAt: string, dispatchP95Ms: number) =>
+      validateBrowserBudgetResult({
+        ...baseline,
+        classification: "b1",
+        recordedAt,
+        environment: b1Environment,
+        methodology: { ...baseline.methodology, independentRuns: 3 },
+        workloads: {
+          D100: {
+            ...baseline.workloads.D100,
+            connect: samples(1),
+            idleMainThreadMs: 0,
+            retainedBytesPerIsland: 0,
+          },
+          M1K: { ...baseline.workloads.M1K, morph: samples(1) },
+          M5K: { ...baseline.workloads.M5K, morph: samples(1) },
+          E100: {
+            ...baseline.workloads.E100,
+            dispatchEffect: samples(dispatchP95Ms),
+            retainedBytesPerSubscription: 1,
+          },
+          R100: { ...baseline.workloads.R100, recovery: samples(1), retainedBytesPerIsland: 1 },
+        },
+        independentP95Ms: {
+          d100Connect: [1, 1, 1],
+          m1kMorph: [1, 1, 1],
+          m5kMorph: [1, 1, 1],
+          e100DispatchEffect: [dispatchP95Ms, dispatchP95Ms, dispatchP95Ms],
+          r100Recovery: [1, 1, 1],
+        },
+      });
+    const b1Candidate = b1Evidence("2026-08-27T00:00:00.000Z", 1.2);
+    expect(evaluateBrowserBudget(b1Candidate, baseline, { release: true })).toMatchObject({
+      status: "unqualified",
+      codes: ["b1_baseline_required"],
+    });
+    const foreignB1 = validateBrowserBudgetResult({
+      ...b1Evidence("2026-08-25T00:00:00.000Z", 1),
+      environment: { ...b1Environment, cpuModel: "Different reviewed B1 CPU" },
+    });
+    expect(evaluateBrowserBudget(b1Candidate, foreignB1, { release: true })).toMatchObject({
+      status: "unqualified",
+      codes: ["b1_baseline_environment_mismatch"],
+    });
+    const matchingB1 = b1Evidence("2026-08-25T00:00:00.000Z", 1);
+    const matchingB1Evaluation = evaluateBrowserBudget(b1Candidate, matchingB1, { release: true });
+    expect(matchingB1Evaluation.status).toBe("failed");
+    expect(matchingB1Evaluation.codes).toContain("e100DispatchEffect_regression_confirmed");
+    expect(() =>
+      validateBrowserBudgetResult({
+        ...baseline,
+        workloads: {
+          ...baseline.workloads,
+          E100: { ...baseline.workloads.E100, artifactSha256: "0".repeat(64) },
+        },
+      }),
+    ).toThrow(/async_workload_artifact_mismatch/u);
 
     const tooFew = {
       ...baseline,
@@ -223,19 +292,30 @@ describe("browser performance evidence contract", () => {
       },
       workloads: {
         ...baseline.workloads,
-        E100: { ...baseline.workloads.E100, physicalConnectionCount: 2 },
+        E100: {
+          ...baseline.workloads.E100,
+          physicalConnectionCount: 2,
+          queuedEventPeak: 65,
+          queuedBytePeak: 256 * 1024 + 1,
+          maximumQueuedRefreshesPerIsland: 2,
+          maximumInFlightRefreshesPerIsland: 2,
+        },
         R100: { ...baseline.workloads.R100, documentReconnectHandshakes: 2 },
       },
     };
     const invalidAsyncEvaluation = evaluateBrowserBudget(
       validateBrowserBudgetResult(invalidAsyncResourceEvidence),
-      undefined,
+      matchingB1,
       {
         release: true,
       },
     );
     expect(invalidAsyncEvaluation.status).toBe("failed");
     expect(invalidAsyncEvaluation.codes).toContain("e100_physical_connection_count");
+    expect(invalidAsyncEvaluation.codes).toContain("e100_queued_events_exceeded");
+    expect(invalidAsyncEvaluation.codes).toContain("e100_queued_bytes_exceeded");
+    expect(invalidAsyncEvaluation.codes).toContain("e100_refresh_queue_exceeded");
+    expect(invalidAsyncEvaluation.codes).toContain("e100_refresh_in_flight_exceeded");
     expect(invalidAsyncEvaluation.codes).toContain("r100_document_reconnect_handshakes");
   });
 });

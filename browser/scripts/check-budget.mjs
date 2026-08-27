@@ -321,6 +321,12 @@ export function evaluateBindingEvidence(
   ) {
     throw new Error("browser_budget_candidate_artifact_mismatch");
   }
+  if (
+    candidate.asyncArtifact.sha256 !== runtimeArtifact.asyncSha256 ||
+    candidate.asyncArtifact.brotliBytes !== runtimeArtifact.asyncBrotliBytes
+  ) {
+    throw new Error("browser_budget_candidate_async_artifact_mismatch");
+  }
   if (candidate.methodology.independentRuns < 3) {
     throw new Error("browser_budget_candidate_runs");
   }
@@ -408,6 +414,8 @@ async function checkBudgets(release, binding) {
   }
   const runtimeAsset = measured.find(({ role }) => role === "core-esm");
   if (runtimeAsset === undefined) throw new Error("artifact_budget:missing:core-esm");
+  const asyncRuntimeAsset = measured.find(({ role }) => role === "async-esm");
+  if (asyncRuntimeAsset === undefined) throw new Error("artifact_budget:missing:async-esm");
   const runtime = await readFile(resolve(browserRoot, "dist", runtimeAsset.file));
   const runtimeSha256 = createHash("sha256").update(runtime).digest("hex");
   const brotliBytes = runtimeAsset.brotliBytes;
@@ -444,7 +452,12 @@ async function checkBudgets(release, binding) {
   const evaluation = evaluateBindingEvidence(
     baseline,
     candidate,
-    { brotliBytes, sha256: runtimeSha256 },
+    {
+      brotliBytes,
+      sha256: runtimeSha256,
+      asyncBrotliBytes: asyncRuntimeAsset.brotliBytes,
+      asyncSha256: asyncRuntimeAsset.sha256,
+    },
     (candidate, baseline, options) => schema.evaluateBrowserBudget(candidate, baseline, options),
     release,
   );

@@ -505,6 +505,18 @@ describe("browser benchmark provenance", () => {
     );
   });
 
+  it("measures async workloads through the exact built ESM artifact, never a source bundle", async () => {
+    const runner = await readFile(new URL("../benchmarks/runner.ts", import.meta.url), "utf8");
+    const workload = await readFile(
+      new URL("../benchmarks/async-workloads.ts", import.meta.url),
+      "utf8",
+    );
+    expect(runner).not.toContain("asyncHarnessSource");
+    expect(runner).not.toContain("browser-budget-async-port.ts");
+    expect(workload).toContain("await import(artifactUrl)");
+    expect(workload).not.toMatch(/from\s+["']\.\.\/src\/async-updates/u);
+  });
+
   it("refuses to overwrite the binding baseline with its own candidate output", async () => {
     const loaded = (await import("../scripts/run-browser-budget.mjs")) as {
       readonly argumentsFrom: (arguments_: readonly string[]) => unknown;
@@ -532,26 +544,39 @@ describe("browser benchmark provenance", () => {
         baseline: {
           readonly recordedAt: string;
           readonly artifact: Readonly<{ sha256: string; brotliBytes: number }>;
+          readonly asyncArtifact: Readonly<{ sha256: string; brotliBytes: number }>;
         },
         candidate: {
           readonly recordedAt: string;
           readonly artifact: Readonly<{ sha256: string; brotliBytes: number }>;
+          readonly asyncArtifact: Readonly<{ sha256: string; brotliBytes: number }>;
           readonly methodology: Readonly<{ independentRuns: number }>;
         } | null,
-        runtime: Readonly<{ sha256: string; brotliBytes: number }>,
+        runtime: Readonly<{
+          sha256: string;
+          brotliBytes: number;
+          asyncSha256: string;
+          asyncBrotliBytes: number;
+        }>,
         evaluate: (candidate: unknown, baseline: unknown) => unknown,
       ) => unknown;
     };
     const baseline = {
       artifact: { brotliBytes: 100, sha256: "a".repeat(64) },
+      asyncArtifact: { brotliBytes: 80, sha256: "d".repeat(64) },
       recordedAt: "2026-08-25T00:00:00.000Z",
     };
     const current = {
       artifact: { brotliBytes: 101, sha256: "b".repeat(64) },
+      asyncArtifact: { brotliBytes: 81, sha256: "e".repeat(64) },
       methodology: { independentRuns: 3 },
       recordedAt: "2026-08-26T00:00:00.000Z",
     };
-    const runtime = current.artifact;
+    const runtime = {
+      ...current.artifact,
+      asyncSha256: current.asyncArtifact.sha256,
+      asyncBrotliBytes: current.asyncArtifact.brotliBytes,
+    };
 
     expect(() => loaded.evaluateBindingEvidence(baseline, null, runtime, () => null)).toThrow(
       "browser_budget_candidate_missing",
@@ -572,6 +597,17 @@ describe("browser benchmark provenance", () => {
         () => null,
       ),
     ).toThrow("browser_budget_candidate_artifact_mismatch");
+    expect(() =>
+      loaded.evaluateBindingEvidence(
+        baseline,
+        {
+          ...current,
+          asyncArtifact: { ...current.asyncArtifact, sha256: "f".repeat(64) },
+        },
+        runtime,
+        () => null,
+      ),
+    ).toThrow("browser_budget_candidate_async_artifact_mismatch");
     expect(() =>
       loaded.evaluateBindingEvidence(
         baseline,

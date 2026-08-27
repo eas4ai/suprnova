@@ -28,6 +28,7 @@ type ReplayDisposition = ReplayOutcome | "pending";
 
 interface RefreshSegment {
   count: number;
+  encodedBytes: number;
   readonly first: StreamPosition;
   readonly generation: number;
   readonly kind: "refresh";
@@ -36,10 +37,19 @@ interface RefreshSegment {
 }
 
 type PendingPresentation =
-  | Readonly<{ envelope: ValidatedAsyncEnvelope; kind: "envelope" }>
+  | Readonly<{ encodedBytes: number; envelope: ValidatedAsyncEnvelope; kind: "envelope" }>
   | (RefreshSegment & Readonly<{ kind: "refresh" }>);
 
 const MAX_PENDING_PRESENTATIONS = 1_024;
+
+export interface AsyncQueuePressureObservation {
+  readonly inFlightRefreshes: number;
+  readonly queuedBytes: number;
+  readonly queuedEvents: number;
+  readonly queuedRefreshes: number;
+}
+
+export type AsyncQueuePressureObserver = (observation: AsyncQueuePressureObservation) => void;
 
 export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
 
@@ -76,7 +86,9 @@ export class AsyncSubscription {
   readonly #dispatch: AsyncEnvelopeDispatcher;
   readonly #refreshCompletion: ((completion: FreshRenderCompletion) => void) | undefined;
   readonly #lifecycle: ((outcome: AsyncSubscriptionLifecycleOutcome) => void) | undefined;
+  readonly #queueObserver: AsyncQueuePressureObserver | undefined;
   readonly #pending: PendingPresentation[] = [];
+  #pendingBytes = 0;
   #activeRefresh: RefreshSegment | null = null;
   #observedPosition: StreamPosition;
   #pendingAdmissions = 0;
@@ -89,6 +101,7 @@ export class AsyncSubscription {
     clock: AsyncClock,
     refreshCompletion?: (completion: FreshRenderCompletion) => void,
     lifecycle?: (outcome: AsyncSubscriptionLifecycleOutcome) => void,
+    queueObserver?: AsyncQueuePressureObserver,
   ) {
     if (!validExpiration(authorization.expiresAt) || typeof clock.now !== "function") {
       throw new Error("async_subscription_invalid");
@@ -100,6 +113,7 @@ export class AsyncSubscription {
     this.#clock = clock;
     this.#refreshCompletion = refreshCompletion;
     this.#lifecycle = lifecycle;
+    this.#queueObserver = queueObserver;
   }
 
   state(): SubscriptionState {
@@ -203,7 +217,12 @@ export class AsyncSubscription {
   receive(encoded: string): AsyncReceiveDisposition {
     this.#assertCurrentAuthority();
     const envelope = decodeAsyncEnvelope(encoded, this.#authorization);
-    if (this.#activeRefresh !== null) return this.#enqueueWhileRefreshPending(envelope);
+    if (this.#activeRefresh !== null) {
+      return this.#enqueueWhileRefreshPending(
+        envelope,
+        new TextEncoder().encode(encoded).byteLength,
+      );
+    }
     const observation = this.#continuity.observe(envelope.position);
     if (observation !== "apply") return observation;
     this.#observedPosition = envelope.position;
@@ -214,6 +233,7 @@ export class AsyncSubscription {
     const active = this.#activeRefresh;
     if (active === null) return;
     this.#activeRefresh = null;
+    this.#observeQueuePressure();
     const terminal = active.generation === this.#lifecycleGeneration ? completion : "canceled";
     let notifyRecovery = terminal !== "succeeded";
     if (terminal === "succeeded") {
@@ -243,6 +263,7 @@ export class AsyncSubscription {
     if (envelope.payload.kind === "refresh") {
       this.#startRefresh({
         count: 1,
+        encodedBytes: 0,
         envelope,
         first: envelope.position,
         generation: this.#lifecycleGeneration,
@@ -276,6 +297,7 @@ export class AsyncSubscription {
 
   #startRefresh(segment: RefreshSegment): void {
     this.#activeRefresh = segment;
+    this.#observeQueuePressure();
     const synchronousTerminal: { value: FreshRenderCompletion | null } = { value: null };
     let dispatching = true;
     const disposition = this.#dispatch.dispatch(segment.envelope, (completion) => {
@@ -285,18 +307,23 @@ export class AsyncSubscription {
     dispatching = false;
     if (disposition === "exhausted") {
       this.#activeRefresh = null;
+      this.#observeQueuePressure();
       this.#failPresentation("resource_exhausted", segment.last);
       return;
     }
     if (disposition !== "queued" && disposition !== "coalesced") {
       this.#activeRefresh = null;
+      this.#observeQueuePressure();
       this.#failPresentation("presentation_rejected", segment.last);
       return;
     }
     if (synchronousTerminal.value !== null) this.#completeRefresh(synchronousTerminal.value);
   }
 
-  #enqueueWhileRefreshPending(envelope: ValidatedAsyncEnvelope): AsyncReceiveDisposition {
+  #enqueueWhileRefreshPending(
+    envelope: ValidatedAsyncEnvelope,
+    encodedBytes: number,
+  ): AsyncReceiveDisposition {
     const ordering = comparePosition(envelope.position, this.#observedPosition);
     if (ordering === 0) return "duplicate";
     if (ordering < 0 || envelope.position.epoch < this.#observedPosition.epoch) return "stale";
@@ -314,11 +341,13 @@ export class AsyncSubscription {
     const tail = this.#pending[this.#pending.length - 1];
     if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
       tail.count += 1;
+      tail.encodedBytes += encodedBytes;
       tail.envelope = envelope;
       tail.last = envelope.position;
     } else if (envelope.payload.kind === "refresh") {
       this.#pending.push({
         count: 1,
+        encodedBytes,
         envelope,
         first: envelope.position,
         generation: this.#lifecycleGeneration,
@@ -326,8 +355,10 @@ export class AsyncSubscription {
         last: envelope.position,
       });
     } else {
-      this.#pending.push(Object.freeze({ envelope, kind: "envelope" }));
+      this.#pending.push(Object.freeze({ encodedBytes, envelope, kind: "envelope" }));
     }
+    this.#pendingBytes += encodedBytes;
+    this.#observeQueuePressure();
     return "pending";
   }
 
@@ -335,7 +366,9 @@ export class AsyncSubscription {
     while (this.#pending.length !== 0 && this.#continuity.state() !== "closed") {
       const next = this.#pending.shift();
       if (next === undefined) break;
+      this.#pendingBytes -= next.encodedBytes;
       this.#pendingAdmissions -= next.kind === "refresh" ? next.count : 1;
+      this.#observeQueuePressure();
       if (next.kind === "refresh") {
         this.#startRefresh(next);
         return this.#activeRefresh === null
@@ -398,7 +431,9 @@ export class AsyncSubscription {
     this.#activeRefresh = null;
     this.#pending.length = 0;
     this.#pendingAdmissions = 0;
+    this.#pendingBytes = 0;
     this.#replayActive = false;
+    this.#observeQueuePressure();
   }
 
   #observeLifecycle(outcome: AsyncSubscriptionLifecycleOutcome): void {
@@ -426,18 +461,23 @@ export class AsyncSubscription {
       throw new Error("async_replay_pending");
     }
     this.#replayActive = true;
-    for (const envelope of transcript) {
+    for (const [index, envelope] of transcript.entries()) {
       this.#assertCurrentAuthority();
       this.#observedPosition = envelope.position;
       this.#pendingAdmissions += 1;
+      const value = encoded[index];
+      if (value === undefined) throw new Error("async_replay_invalid");
+      const encodedBytes = new TextEncoder().encode(value).byteLength;
       const tail = this.#pending[this.#pending.length - 1];
       if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
         tail.count += 1;
+        tail.encodedBytes += encodedBytes;
         tail.envelope = envelope;
         tail.last = envelope.position;
       } else if (envelope.payload.kind === "refresh") {
         this.#pending.push({
           count: 1,
+          encodedBytes,
           envelope,
           first: envelope.position,
           generation: this.#lifecycleGeneration,
@@ -445,8 +485,10 @@ export class AsyncSubscription {
           last: envelope.position,
         });
       } else {
-        this.#pending.push(Object.freeze({ envelope, kind: "envelope" }));
+        this.#pending.push(Object.freeze({ encodedBytes, envelope, kind: "envelope" }));
       }
+      this.#pendingBytes += encodedBytes;
+      this.#observeQueuePressure();
     }
     const drain = this.#drainPending();
     if (drain === "interrupted") {
@@ -505,6 +547,23 @@ export class AsyncSubscription {
     if (!Number.isSafeInteger(now) || now < 0 || now >= this.#authorization.expiresAt) {
       this.#continuity.degrade();
       throw new Error("async_membership_expired");
+    }
+  }
+
+  #observeQueuePressure(): void {
+    const observer = this.#queueObserver;
+    if (observer === undefined) return;
+    try {
+      observer(
+        Object.freeze({
+          inFlightRefreshes: this.#activeRefresh === null ? 0 : 1,
+          queuedBytes: this.#pendingBytes,
+          queuedEvents: this.#pendingAdmissions,
+          queuedRefreshes: this.#pending.some(({ kind }) => kind === "refresh") ? 1 : 0,
+        }),
+      );
+    } catch {
+      // Count-only observation cannot rewrite presentation or continuity authority.
     }
   }
 }

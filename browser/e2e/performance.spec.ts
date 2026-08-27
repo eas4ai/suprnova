@@ -51,8 +51,12 @@ test("canonical browser workloads remain executable without changing engine clai
   expect(result.workloads.E100).toMatchObject({
     currentSubscriptionCount: 100,
     handshakeCount: 1,
+    maximumInFlightRefreshesPerIsland: 1,
+    maximumQueuedRefreshesPerIsland: 1,
     physicalConnectionCount: 1,
   });
+  expect(result.workloads.E100.queuedEventPeak).toBeGreaterThan(0);
+  expect(result.workloads.E100.queuedBytePeak).toBeGreaterThan(0);
   expect(result.workloads.R100).toMatchObject({
     currentSubscriptionCount: 100,
     documentReconnectHandshakes: 1,

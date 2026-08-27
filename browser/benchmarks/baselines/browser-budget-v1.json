@@ -43,6 +43,7 @@
     "mainThreadTime": "cdp-performance-task-duration-v1",
     "observerCount": "instrumented-runtime-observer-factory-v1",
     "morphMeasurement": "bundled-production-morph-port-v1",
+    "asyncMeasurement": "hashed-production-async-esm-v1",
     "morphDeadlineMs": 10000,
     "correctnessEnabled": true,
     "accessibilityEnabled": true,
@@ -98,6 +99,7 @@
       }
     },
     "E100": {
+      "artifactSha256": "212a0c0df79a84ae3f9e8e3116cee17d015c87cd3d9600c5e8920c138427fd49",
       "subscriptionCount": 100,
       "presentationEventCount": 1000,
       "eventEnvelopeBytes": 1024,
@@ -123,6 +125,7 @@
       "currentSubscriptionCount": 100
     },
     "R100": {
+      "artifactSha256": "212a0c0df79a84ae3f9e8e3116cee17d015c87cd3d9600c5e8920c138427fd49",
       "subscriptionCount": 100,
       "simultaneousContinuityLosses": 100,
       "documentReconnectHandshakes": 1,

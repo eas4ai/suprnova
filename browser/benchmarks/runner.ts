@@ -15,7 +15,12 @@ import {
   type BrowserBudgetResult,
 } from "./schema.js";
 import { summarizeSamples } from "./statistics.js";
-import type { AsyncWorkloadMeasurement } from "./async-workloads.js";
+import {
+  measureAsyncWorkloads,
+  type AsyncWorkloadInput,
+  type AsyncWorkloadMeasurement,
+  type AsyncWorkloadPreparation,
+} from "./async-workloads.js";
 import {
   createD100Workload,
   createE100Workload,
@@ -46,6 +51,12 @@ interface MeasurementRun {
   readonly m5kMorphSamples: readonly number[];
   readonly async: AsyncWorkloadMeasurement;
   readonly asyncRetainedBytesPerIsland: number;
+}
+
+interface AsyncArtifactEvidence {
+  readonly brotliBytes: number;
+  readonly file: "suprnova-live.async.esm.js";
+  readonly sha256: string;
 }
 
 interface IdleMeasurement {
@@ -91,40 +102,9 @@ type BudgetWindow = Window &
         }>;
       }>,
     ): number;
-    __suprnovaBudgetAsync(): Promise<AsyncWorkloadMeasurement>;
   };
 
 let cachedMorphHarness: Promise<string> | null = null;
-let cachedAsyncHarness: Promise<string> | null = null;
-
-function asyncHarnessSource(): Promise<string> {
-  cachedAsyncHarness ??= build({
-    absWorkingDir: browserRoot,
-    bundle: true,
-    charset: "utf8",
-    format: "iife",
-    legalComments: "none",
-    minify: true,
-    platform: "browser",
-    stdin: {
-      contents: `
-        import { measureAsyncWorkloads } from "./benchmarks/async-workloads.js";
-        window.__suprnovaBudgetAsync = measureAsyncWorkloads;
-      `,
-      loader: "ts",
-      resolveDir: browserRoot,
-      sourcefile: "browser-budget-async-port.ts",
-    },
-    target: ["chrome111"],
-    treeShaking: true,
-    write: false,
-  }).then((result) => {
-    const output = result.outputFiles[0];
-    if (output === undefined) throw new Error("async_benchmark_harness_missing");
-    return output.text;
-  });
-  return cachedAsyncHarness;
-}
 
 function morphHarnessSource(): Promise<string> {
   cachedMorphHarness ??= build({
@@ -229,6 +209,18 @@ function exactRunValue(
   select: (run: MeasurementRun) => number,
   code: string,
 ): number {
+  const first = runs[0];
+  if (first === undefined) throw new Error("browser_budget_run_missing");
+  const expected = select(first);
+  if (!runs.every((run) => select(run) === expected)) throw new Error(code);
+  return expected;
+}
+
+function exactRunText(
+  runs: readonly MeasurementRun[],
+  select: (run: MeasurementRun) => string,
+  code: string,
+): string {
   const first = runs[0];
   if (first === undefined) throw new Error("browser_budget_run_missing");
   const expected = select(first);
@@ -359,6 +351,7 @@ async function measureAsyncWorkload(
   context: BrowserContext,
   baseUrl: string,
   cpuThrottleRate: number,
+  asyncEvidence: AsyncArtifactEvidence,
 ): Promise<Readonly<{ measurement: AsyncWorkloadMeasurement; retainedBytesPerIsland: number }>> {
   const workload = createE100Workload();
   const page = await context.newPage();
@@ -372,10 +365,32 @@ async function measureAsyncWorkload(
     { waitUntil: "domcontentloaded" },
   );
   const session = await cdpFor(page, cpuThrottleRate);
-  await page.addScriptTag({ content: await asyncHarnessSource() });
+  const asyncInput: AsyncWorkloadInput = {
+    artifactUrl: new URL("/assets/suprnova-live.async.esm.js", baseUrl).href,
+    expectedArtifactSha256: asyncEvidence.sha256,
+    eventEnvelopeBytes: workload.eventEnvelopeBytes,
+    multiDocumentCount: 16 as const,
+    presentationEventCount: workload.presentationEventCount,
+    refreshInvalidationCount: workload.refreshInvalidationCount,
+    scheduledDurationMs: workload.scheduledDurationMs,
+    subscriptionCount: workload.subscriptionCount,
+  };
+  const preparation = (await page.evaluate(measureAsyncWorkloads, {
+    ...asyncInput,
+    prepare: true as const,
+  })) as unknown as AsyncWorkloadPreparation;
+  if (preparation.artifactSha256 !== asyncEvidence.sha256) {
+    throw new Error("async_benchmark_artifact_hash_mismatch");
+  }
   await session.send("HeapProfiler.collectGarbage");
   const before = await session.send("Runtime.getHeapUsage");
-  const measurement = await page.evaluate(() => (window as BudgetWindow).__suprnovaBudgetAsync());
+  const measurement = await page.evaluate(async (workloadInput) => {
+    const candidate: unknown = Reflect.get(globalThis, "__suprnovaBudgetAsyncMeasure");
+    if (typeof candidate !== "function") throw new Error("async_benchmark_runner_missing");
+    return (candidate as (value: typeof workloadInput) => Promise<AsyncWorkloadMeasurement>)(
+      workloadInput,
+    );
+  }, asyncInput);
   await session.send("HeapProfiler.collectGarbage");
   const after = await session.send("Runtime.getHeapUsage");
   await session.detach();
@@ -558,14 +573,15 @@ async function measurementRun(
   cpuThrottleRate: number,
   warmupSamples: number,
   measuredSamples: number,
+  asyncEvidence: AsyncArtifactEvidence,
 ): Promise<MeasurementRun> {
   const m1k = createMorphWorkload("M1K");
   const m5k = createMorphWorkload("M5K");
   await measureD100Connect(context, baseUrl, cpuThrottleRate, warmupSamples);
   await measureMorph(context, baseUrl, cpuThrottleRate, m1k, warmupSamples);
   await measureMorph(context, baseUrl, cpuThrottleRate, m5k, warmupSamples);
-  await measureAsyncWorkload(context, baseUrl, cpuThrottleRate);
-  const async = await measureAsyncWorkload(context, baseUrl, cpuThrottleRate);
+  await measureAsyncWorkload(context, baseUrl, cpuThrottleRate, asyncEvidence);
+  const async = await measureAsyncWorkload(context, baseUrl, cpuThrottleRate, asyncEvidence);
   return Object.freeze({
     d100ConnectSamples: await measureD100Connect(
       context,
@@ -613,6 +629,7 @@ export async function runBrowserBudget(
     throw new Error("browser_budget_options_invalid");
   }
   await warmRuntimeCache(options.context, options.baseUrl);
+  const measuredAsyncArtifact = await asyncArtifact();
   const runs: MeasurementRun[] = [];
   for (let index = 0; index < options.independentRuns; index += 1) {
     runs.push(
@@ -622,6 +639,7 @@ export async function runBrowserBudget(
         options.cpuThrottleRate,
         options.warmupSamples,
         options.measuredSamples,
+        measuredAsyncArtifact,
       ),
     );
   }
@@ -651,7 +669,7 @@ export async function runBrowserBudget(
     classification: classifyBenchmarkEnvironment(environment),
     recordedAt: new Date().toISOString(),
     artifact: await artifact(),
-    asyncArtifact: await asyncArtifact(),
+    asyncArtifact: measuredAsyncArtifact,
     environment,
     methodology: {
       warmupSamples: options.warmupSamples,
@@ -662,6 +680,7 @@ export async function runBrowserBudget(
       mainThreadTime: "cdp-performance-task-duration-v1",
       observerCount: "instrumented-runtime-observer-factory-v1",
       morphMeasurement: "bundled-production-morph-port-v1",
+      asyncMeasurement: "hashed-production-async-esm-v1",
       morphDeadlineMs: BENCHMARK_MORPH_DEADLINE_MS,
       correctnessEnabled: true,
       accessibilityEnabled: true,
@@ -695,6 +714,11 @@ export async function runBrowserBudget(
         morph: m5kMorph,
       },
       E100: {
+        artifactSha256: exactRunText(
+          runs,
+          (run) => run.async.E100.artifactSha256,
+          "e100_artifact_hash_mismatch",
+        ),
         subscriptionCount: 100,
         presentationEventCount: exactRunValue(
           runs,
@@ -735,6 +759,11 @@ export async function runBrowserBudget(
         ),
       },
       R100: {
+        artifactSha256: exactRunText(
+          runs,
+          (run) => run.async.R100.artifactSha256,
+          "r100_artifact_hash_mismatch",
+        ),
         subscriptionCount: 100,
         simultaneousContinuityLosses: 100,
         documentReconnectHandshakes: Math.max(

@@ -14,6 +14,8 @@ export type {
   AsyncFeatureOptions,
   AsyncFreshnessObservation,
   AsyncFreshnessObserver,
+  AsyncQueuePressureObservation,
+  AsyncQueuePressureObserver,
 } from "./async-updates/feature.js";
 export type {
   AsyncTransportPorts,
