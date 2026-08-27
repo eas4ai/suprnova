@@ -19,32 +19,47 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | askama_parser | 0.16.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | askama | 0.16.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | async-trait | 0.1.92 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | atomic-waker | 1.1.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | autocfg | 1.5.1 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | axum-core | 0.4.5 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | axum | 0.7.9 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | base64 | 0.22.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | basic-toml | 0.1.10 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bit-set | 0.8.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bit-vec | 0.8.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bitflags | 2.13.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | block-buffer | 0.10.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | block-buffer | 0.12.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bumpalo | 3.20.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | byteorder | 1.5.0 | Workspace resolved | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | bytes | 1.11.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cc | 1.4.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cfg-if | 1.0.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cmov | 0.5.4 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | const-oid | 0.10.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | cpufeatures | 0.2.17 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cpufeatures | 0.3.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | crypto-common | 0.1.7 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | crypto-common | 0.2.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ctutils | 0.4.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | data-encoding | 2.11.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | deranged | 0.5.8 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | digest | 0.10.7 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | digest | 0.11.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | equivalent | 1.0.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | errno | 0.3.14 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | fastrand | 2.5.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | find-msvc-tools | 0.1.11 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | fnv | 1.0.7 | Workspace resolved | Apache-2.0 / MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | form_urlencoded | 1.2.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | futures-channel | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | futures-core | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | futures-macro | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | futures-sink | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | futures-task | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | futures-util | 0.3.34 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | generic-array | 0.14.7 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | getrandom | 0.2.17 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | getrandom | 0.3.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | getrandom | 0.4.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | glob | 0.3.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -53,8 +68,14 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | hkdf | 0.13.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | hmac | 0.13.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | html5ever | 0.39.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | http-body-util | 0.1.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | http-body | 1.1.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | http | 1.4.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | httparse | 1.10.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | httpdate | 1.0.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | hybrid-array | 0.4.14 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | hyper-util | 0.1.20 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | hyper | 1.9.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | imagesize | 0.15.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | indexmap | 2.14.0 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | itoa | 1.0.18 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -66,7 +87,10 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | lock_api | 0.4.14 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | log | 0.4.33 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | markup5ever | 0.39.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | matchit | 0.7.3 | Workspace resolved | MIT AND BSD-3-Clause | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | memchr | 2.8.3 | Workspace resolved | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | mime | 0.3.17 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | mio | 1.2.2 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | new_debug_unreachable | 1.0.6 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | num-conv | 0.2.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | num-traits | 0.2.19 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -90,9 +114,12 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | quote | 1.0.47 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | r-efi | 5.3.0 | Workspace resolved | MIT OR Apache-2.0 OR LGPL-2.1-or-later | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | r-efi | 6.0.0 | Workspace resolved | MIT OR Apache-2.0 OR LGPL-2.1-or-later | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | rand_chacha | 0.3.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rand_chacha | 0.9.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | rand_core | 0.6.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rand_core | 0.9.5 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rand_xorshift | 0.4.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | rand | 0.8.8 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rand | 0.9.5 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | redox_syscall | 0.5.18 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | regex-syntax | 0.8.11 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
@@ -101,44 +128,64 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | rustversion | 1.0.23 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | rusty-fork | 0.3.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ryu-js | 1.0.3 | Workspace resolved | Apache-2.0 OR BSL-1.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | ryu | 1.0.23 | Workspace resolved | Apache-2.0 OR BSL-1.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | scopeguard | 1.2.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde_core | 1.0.229 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde_derive | 1.0.229 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde_json_canonicalizer | 0.3.2 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde_json | 1.0.151 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | serde_path_to_error | 0.1.20 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde_spanned | 1.1.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | serde_urlencoded | 0.7.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | serde | 1.0.229 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | sha1 | 0.10.7 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | sha2 | 0.11.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | shlex | 2.0.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | siphasher | 1.0.3 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | slab | 0.4.12 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | smallvec | 1.15.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | socket2 | 0.6.5 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | string_cache_codegen | 0.6.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | string_cache | 0.9.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | syn | 2.0.117 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | syn | 2.0.119 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | syn | 3.0.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | sync_wrapper | 1.0.2 | Workspace resolved | Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | target-triple | 1.0.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | tempfile | 3.27.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | tendril | 0.5.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | termcolor | 1.4.1 | Workspace resolved | Unlicense OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | thiserror-impl | 1.0.69 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | thiserror-impl | 2.0.20 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | thiserror | 1.0.69 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | thiserror | 2.0.20 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | time-core | 0.1.8 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | time-macros | 0.2.27 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | time | 0.3.47 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | tokio-macros | 2.7.2 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tokio-tungstenite | 0.24.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | tokio | 1.53.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | toml_datetime | 1.1.1+spec-1.1.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | toml_parser | 1.1.3+spec-1.1.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | toml_writer | 1.1.2+spec-1.1.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | toml | 1.1.4+spec-1.1.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tower-layer | 0.3.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tower-service | 0.3.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tower | 0.5.3 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tracing-core | 0.1.36 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tracing | 0.1.44 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | try-lock | 0.2.5 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | trybuild | 1.0.120 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | tungstenite | 0.24.0 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | typenum | 1.20.1 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | unarray | 0.1.4 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | unicode-ident | 1.0.24 | Workspace resolved | (MIT OR Apache-2.0) AND Unicode-3.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | utf-8 | 0.7.6 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | uuid | 1.23.1 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | version_check | 0.9.5 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | wait-timeout | 0.2.1 | Workspace resolved | MIT/Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | want | 0.3.1 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | wasi | 0.11.1+wasi-snapshot-preview1 | Workspace resolved | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | wasip2 | 1.0.4+wasi-0.2.12 | Workspace resolved | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | wasm-bindgen-macro-support | 0.2.127 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | wasm-bindgen-macro | 0.2.127 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |

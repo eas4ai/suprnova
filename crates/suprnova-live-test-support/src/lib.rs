@@ -10,6 +10,7 @@ mod direct_provider;
 mod file_quarantine_store;
 mod harness;
 mod host;
+mod reference_host;
 mod trace;
 mod upload;
 
@@ -30,6 +31,12 @@ pub use harness::{
 pub use host::{
     ControlledAuthorization, ControlledClock, ControlledInstanceIds, ControlledSession,
     ControlledTransactions, ControlledValidation, HarnessServices, TransactionFault,
+};
+pub use reference_host::{
+    CREATE_UPLOAD, EXAMPLE_REACQUIRE, POLL, REFERENCE_AUTHORIZATION, ReferenceFaultSchedule,
+    ReferenceHost, ReferenceHostConfig, ReferenceHostInspection, ReferenceHostInspectionHandle,
+    SSE, TRANSPORT_CREATE, TRANSPORT_MEMBERSHIP, UPLOAD_CANCEL, UPLOAD_CHUNK, UPLOAD_COMPLETE,
+    UPLOAD_STATUS, WEBSOCKET,
 };
 pub use trace::{HarnessTrace, HarnessTraceEvent};
 pub use upload::{ControlledUploadAuthorization, MemoryCleanupObservation, MemoryUploadLedger};

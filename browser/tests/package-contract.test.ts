@@ -25,10 +25,12 @@ const EXPECTED_SCRIPTS = [
   "format:check",
   "generate",
   "generate:check",
+  "host:iteration-004",
   "lint",
   "test",
   "test:browser",
   "test:browser:install",
+  "test:host",
   "test:unit",
   "typecheck",
 ] as const;
@@ -81,6 +83,8 @@ describe("production browser package contract", () => {
     expect(manifest.scripts["test"]).toBe("npm run test:unit");
     expect(manifest.scripts["test:unit"]).toBe("node scripts/run-unit-tests.mjs");
     expect(manifest.scripts["budget:browser"]).toBe("node scripts/run-browser-budget.mjs");
+    expect(manifest.scripts["host:iteration-004"]).toContain("--bin suprnova-live-reference-host");
+    expect(manifest.scripts["test:host"]).toContain("--test reference_host");
 
     expect(manifest.dependencies).toEqual({ idiomorph: "0.7.4" });
     expect(manifest.dependencies).not.toHaveProperty("@hotwired/stimulus");
