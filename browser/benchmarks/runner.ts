@@ -15,7 +15,13 @@ import {
   type BrowserBudgetResult,
 } from "./schema.js";
 import { summarizeSamples } from "./statistics.js";
-import { createD100Workload, createMorphWorkload, type MorphWorkload } from "./workloads.js";
+import type { AsyncWorkloadMeasurement } from "./async-workloads.js";
+import {
+  createD100Workload,
+  createE100Workload,
+  createMorphWorkload,
+  type MorphWorkload,
+} from "./workloads.js";
 
 const VIEWPORT = Object.freeze({ width: 1280, height: 720 });
 const BENCHMARK_MORPH_DEADLINE_MS = 10_000;
@@ -38,6 +44,8 @@ interface MeasurementRun {
   readonly d100ConnectSamples: readonly number[];
   readonly m1kMorphSamples: readonly number[];
   readonly m5kMorphSamples: readonly number[];
+  readonly async: AsyncWorkloadMeasurement;
+  readonly asyncRetainedBytesPerIsland: number;
 }
 
 interface IdleMeasurement {
@@ -83,9 +91,40 @@ type BudgetWindow = Window &
         }>;
       }>,
     ): number;
+    __suprnovaBudgetAsync(): Promise<AsyncWorkloadMeasurement>;
   };
 
 let cachedMorphHarness: Promise<string> | null = null;
+let cachedAsyncHarness: Promise<string> | null = null;
+
+function asyncHarnessSource(): Promise<string> {
+  cachedAsyncHarness ??= build({
+    absWorkingDir: browserRoot,
+    bundle: true,
+    charset: "utf8",
+    format: "iife",
+    legalComments: "none",
+    minify: true,
+    platform: "browser",
+    stdin: {
+      contents: `
+        import { measureAsyncWorkloads } from "./benchmarks/async-workloads.js";
+        window.__suprnovaBudgetAsync = measureAsyncWorkloads;
+      `,
+      loader: "ts",
+      resolveDir: browserRoot,
+      sourcefile: "browser-budget-async-port.ts",
+    },
+    target: ["chrome111"],
+    treeShaking: true,
+    write: false,
+  }).then((result) => {
+    const output = result.outputFiles[0];
+    if (output === undefined) throw new Error("async_benchmark_harness_missing");
+    return output.text;
+  });
+  return cachedAsyncHarness;
+}
 
 function morphHarnessSource(): Promise<string> {
   cachedMorphHarness ??= build({
@@ -171,6 +210,30 @@ function morphHarnessSource(): Promise<string> {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function measuredSubset(samples: readonly number[], count: number): readonly number[] {
+  if (samples.length < count) throw new Error("async_benchmark_sample_count");
+  return Object.freeze(
+    Array.from({ length: count }, (_, index) => {
+      const selected = Math.floor(((index + 0.5) * samples.length) / count);
+      const sample = samples[Math.min(selected, samples.length - 1)];
+      if (sample === undefined) throw new Error("async_benchmark_sample_missing");
+      return sample;
+    }),
+  );
+}
+
+function exactRunValue(
+  runs: readonly MeasurementRun[],
+  select: (run: MeasurementRun) => number,
+  code: string,
+): number {
+  const first = runs[0];
+  if (first === undefined) throw new Error("browser_budget_run_missing");
+  const expected = select(first);
+  if (!runs.every((run) => select(run) === expected)) throw new Error(code);
+  return expected;
 }
 
 async function instrument(page: Page): Promise<void> {
@@ -290,6 +353,38 @@ async function measureMorph(
     measured.push(await measureMorphSample(context, baseUrl, cpuThrottleRate, workload));
   }
   return Object.freeze(measured);
+}
+
+async function measureAsyncWorkload(
+  context: BrowserContext,
+  baseUrl: string,
+  cpuThrottleRate: number,
+): Promise<Readonly<{ measurement: AsyncWorkloadMeasurement; retainedBytesPerIsland: number }>> {
+  const workload = createE100Workload();
+  const page = await context.newPage();
+  await page.setViewportSize(VIEWPORT);
+  await page.goto(new URL("/health", baseUrl).href);
+  await page.setContent(
+    `<!doctype html><html lang="en"><body>${Array.from(
+      { length: workload.subscriptionCount },
+      (_, index) => `<section data-async-benchmark-index="${String(index)}"></section>`,
+    ).join("")}</body></html>`,
+    { waitUntil: "domcontentloaded" },
+  );
+  const session = await cdpFor(page, cpuThrottleRate);
+  await page.addScriptTag({ content: await asyncHarnessSource() });
+  await session.send("HeapProfiler.collectGarbage");
+  const before = await session.send("Runtime.getHeapUsage");
+  const measurement = await page.evaluate(() => (window as BudgetWindow).__suprnovaBudgetAsync());
+  await session.send("HeapProfiler.collectGarbage");
+  const after = await session.send("Runtime.getHeapUsage");
+  await session.detach();
+  await page.close();
+  return Object.freeze({
+    measurement,
+    retainedBytesPerIsland:
+      Math.max(0, after.usedSize - before.usedSize) / workload.subscriptionCount,
+  });
 }
 
 function taskDuration(metrics: Awaited<ReturnType<CDPSession["send"]>>): number {
@@ -432,9 +527,18 @@ async function environmentFor(
 }
 
 async function artifact() {
-  const bytes = await readFile(new URL("../dist/suprnova-live.esm.js", import.meta.url));
+  return artifactAt("suprnova-live.esm.js");
+}
+
+async function asyncArtifact() {
+  const measured = await artifactAt("suprnova-live.async.esm.js");
+  return Object.freeze({ ...measured, file: "suprnova-live.async.esm.js" as const });
+}
+
+async function artifactAt(file: string) {
+  const bytes = await readFile(new URL(`../dist/${file}`, import.meta.url));
   return Object.freeze({
-    file: "suprnova-live.esm.js" as const,
+    file,
     sha256: createHash("sha256").update(bytes).digest("hex"),
     brotliBytes: brotliCompressSync(bytes, {
       params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
@@ -460,6 +564,8 @@ async function measurementRun(
   await measureD100Connect(context, baseUrl, cpuThrottleRate, warmupSamples);
   await measureMorph(context, baseUrl, cpuThrottleRate, m1k, warmupSamples);
   await measureMorph(context, baseUrl, cpuThrottleRate, m5k, warmupSamples);
+  await measureAsyncWorkload(context, baseUrl, cpuThrottleRate);
+  const async = await measureAsyncWorkload(context, baseUrl, cpuThrottleRate);
   return Object.freeze({
     d100ConnectSamples: await measureD100Connect(
       context,
@@ -469,6 +575,23 @@ async function measurementRun(
     ),
     m1kMorphSamples: await measureMorph(context, baseUrl, cpuThrottleRate, m1k, measuredSamples),
     m5kMorphSamples: await measureMorph(context, baseUrl, cpuThrottleRate, m5k, measuredSamples),
+    async: Object.freeze({
+      E100: Object.freeze({
+        ...async.measurement.E100,
+        dispatchEffectSamplesMs: measuredSubset(
+          async.measurement.E100.dispatchEffectSamplesMs,
+          measuredSamples,
+        ),
+      }),
+      R100: Object.freeze({
+        ...async.measurement.R100,
+        recoverySamplesMs: measuredSubset(
+          async.measurement.R100.recoverySamplesMs,
+          measuredSamples,
+        ),
+      }),
+    }),
+    asyncRetainedBytesPerIsland: async.retainedBytesPerIsland,
   });
 }
 
@@ -505,6 +628,10 @@ export async function runBrowserBudget(
   const connect = summarizeSamples(runs.flatMap((run) => run.d100ConnectSamples));
   const m1kMorph = summarizeSamples(runs.flatMap((run) => run.m1kMorphSamples));
   const m5kMorph = summarizeSamples(runs.flatMap((run) => run.m5kMorphSamples));
+  const e100DispatchEffect = summarizeSamples(
+    runs.flatMap((run) => run.async.E100.dispatchEffectSamplesMs),
+  );
+  const r100Recovery = summarizeSamples(runs.flatMap((run) => run.async.R100.recoverySamplesMs));
   const idle = await measureIdle(
     options.context,
     options.baseUrl,
@@ -524,6 +651,7 @@ export async function runBrowserBudget(
     classification: classifyBenchmarkEnvironment(environment),
     recordedAt: new Date().toISOString(),
     artifact: await artifact(),
+    asyncArtifact: await asyncArtifact(),
     environment,
     methodology: {
       warmupSamples: options.warmupSamples,
@@ -566,11 +694,89 @@ export async function runBrowserBudget(
         changedNodeCount: m5k.changedNodeCount,
         morph: m5kMorph,
       },
+      E100: {
+        subscriptionCount: 100,
+        presentationEventCount: exactRunValue(
+          runs,
+          (run) => run.async.E100.presentationEventCount,
+          "e100_presentation_count_mismatch",
+        ),
+        eventEnvelopeBytes: 1_024,
+        scheduledDurationMs: exactRunValue(
+          runs,
+          (run) => run.async.E100.scheduledDurationMs,
+          "e100_schedule_mismatch",
+        ),
+        refreshInvalidationCount: exactRunValue(
+          runs,
+          (run) => run.async.E100.refreshInvalidationCount,
+          "e100_refresh_count_mismatch",
+        ),
+        physicalConnectionCount: Math.max(
+          ...runs.map((run) => run.async.E100.physicalConnectionCount),
+        ),
+        handshakeCount: Math.max(...runs.map((run) => run.async.E100.handshakeCount)),
+        dispatchEffect: e100DispatchEffect,
+        peakRetainedAsyncBytes:
+          Math.max(...runs.map((run) => run.asyncRetainedBytesPerIsland)) * 100,
+        retainedBytesPerSubscription: Math.max(
+          ...runs.map((run) => run.asyncRetainedBytesPerIsland),
+        ),
+        queuedEventPeak: Math.max(...runs.map((run) => run.async.E100.queuedEventPeak)),
+        queuedBytePeak: Math.max(...runs.map((run) => run.async.E100.queuedBytePeak)),
+        maximumQueuedRefreshesPerIsland: Math.max(
+          ...runs.map((run) => run.async.E100.maximumQueuedRefreshesPerIsland),
+        ),
+        maximumInFlightRefreshesPerIsland: Math.max(
+          ...runs.map((run) => run.async.E100.maximumInFlightRefreshesPerIsland),
+        ),
+        currentSubscriptionCount: Math.min(
+          ...runs.map((run) => run.async.E100.currentSubscriptionCount),
+        ),
+      },
+      R100: {
+        subscriptionCount: 100,
+        simultaneousContinuityLosses: 100,
+        documentReconnectHandshakes: Math.max(
+          ...runs.map((run) => run.async.R100.documentReconnectHandshakes),
+        ),
+        recovery: r100Recovery,
+        maximumRecoverySkewMs: Math.max(...runs.map((run) => run.async.R100.maximumRecoverySkewMs)),
+        recoveredSubscriptionCount: Math.min(
+          ...runs.map((run) => run.async.R100.recoveredSubscriptionCount),
+        ),
+        currentSubscriptionCount: Math.min(
+          ...runs.map((run) => run.async.R100.currentSubscriptionCount),
+        ),
+        starvedSubscriptionCount: Math.max(
+          ...runs.map((run) => run.async.R100.starvedSubscriptionCount),
+        ),
+        maximumConcurrentReauthorizations: Math.max(
+          ...runs.map((run) => run.async.R100.maximumConcurrentReauthorizations),
+        ),
+        retainedBytesPerIsland: Math.max(...runs.map((run) => run.asyncRetainedBytesPerIsland)),
+        pollingMaximumSameTick: Math.max(
+          ...runs.map((run) => run.async.R100.pollingMaximumSameTick),
+        ),
+        multiDocument: {
+          documentCount: 16,
+          completedHandshakes: Math.min(
+            ...runs.map((run) => run.async.R100.multiDocument.completedHandshakes),
+          ),
+          maximumConcurrentHandshakes: Math.max(
+            ...runs.map((run) => run.async.R100.multiDocument.maximumConcurrentHandshakes),
+          ),
+        },
+      },
     },
     independentP95Ms: {
       d100Connect: runs.map((run) => summarizeSamples(run.d100ConnectSamples).p95Ms),
       m1kMorph: runs.map((run) => summarizeSamples(run.m1kMorphSamples).p95Ms),
       m5kMorph: runs.map((run) => summarizeSamples(run.m5kMorphSamples).p95Ms),
+      e100DispatchEffect: runs.map(
+        (run) => summarizeSamples(run.async.E100.dispatchEffectSamplesMs).p95Ms,
+      ),
+      r100Recovery: runs.map((run) => summarizeSamples(run.async.R100.recoverySamplesMs).p95Ms),
     },
   });
 }

@@ -15,6 +15,22 @@ const RUNTIME_CONFIG = `<script id="suprnova-live-config" type="application/json
 
 export type MorphWorkloadId = "M1K" | "M5K";
 
+export interface E100Workload {
+  readonly id: "E100/1K";
+  readonly subscriptionCount: 100;
+  readonly presentationEventCount: 1_000;
+  readonly eventEnvelopeBytes: 1_024;
+  readonly scheduledDurationMs: 10_000;
+  readonly refreshInvalidationCount: 100;
+}
+
+export interface R100Workload {
+  readonly id: "R100";
+  readonly subscriptionCount: 100;
+  readonly simultaneousContinuityLosses: 100;
+  readonly multiDocumentCount: 16;
+}
+
 export interface D100Workload {
   readonly id: "D100";
   readonly html: string;
@@ -122,6 +138,26 @@ export function createD100Workload(): D100Workload {
     html,
     documentBytes: DOCUMENT_BYTES,
     islandCount: D100_ISLANDS,
+  });
+}
+
+export function createE100Workload(): E100Workload {
+  return Object.freeze({
+    id: "E100/1K" as const,
+    subscriptionCount: 100 as const,
+    presentationEventCount: 1_000 as const,
+    eventEnvelopeBytes: 1_024 as const,
+    scheduledDurationMs: 10_000 as const,
+    refreshInvalidationCount: 100 as const,
+  });
+}
+
+export function createR100Workload(): R100Workload {
+  return Object.freeze({
+    id: "R100" as const,
+    subscriptionCount: 100 as const,
+    simultaneousContinuityLosses: 100 as const,
+    multiDocumentCount: 16 as const,
   });
 }
 

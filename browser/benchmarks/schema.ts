@@ -9,6 +9,14 @@ export const BROWSER_BUDGET_LIMITS = Object.freeze({
   retainedBytesPerIsland: 12 * 1024,
   m1kMorphP95Ms: 32,
   m5kMorphP95Ms: 100,
+  e100RetainedBytesPerSubscription: 8 * 1024,
+  e100QueuedEventsPerDocument: 64,
+  e100QueuedBytesPerDocument: 256 * 1024,
+  e100DispatchEffectP95Ms: 8,
+  e100RefreshQueuedPerIsland: 1,
+  e100RefreshInFlightPerIsland: 1,
+  r100RetainedBytesPerIsland: 12 * 1024,
+  r100OriginConcurrentHandshakes: 8,
 });
 
 export interface BenchmarkEnvironment {
@@ -37,6 +45,11 @@ export interface BrowserBudgetResult {
   readonly recordedAt: string;
   readonly artifact: Readonly<{
     file: "suprnova-live.esm.js";
+    sha256: string;
+    brotliBytes: number;
+  }>;
+  readonly asyncArtifact: Readonly<{
+    file: "suprnova-live.async.esm.js";
     sha256: string;
     brotliBytes: number;
   }>;
@@ -78,11 +91,48 @@ export interface BrowserBudgetResult {
       changedNodeCount: 500;
       morph: SampleSummary;
     }>;
+    E100: Readonly<{
+      subscriptionCount: 100;
+      presentationEventCount: 1_000;
+      eventEnvelopeBytes: 1_024;
+      scheduledDurationMs: 10_000;
+      refreshInvalidationCount: 100;
+      physicalConnectionCount: number;
+      handshakeCount: number;
+      dispatchEffect: SampleSummary;
+      peakRetainedAsyncBytes: number;
+      retainedBytesPerSubscription: number;
+      queuedEventPeak: number;
+      queuedBytePeak: number;
+      maximumQueuedRefreshesPerIsland: number;
+      maximumInFlightRefreshesPerIsland: number;
+      currentSubscriptionCount: number;
+    }>;
+    R100: Readonly<{
+      subscriptionCount: 100;
+      simultaneousContinuityLosses: 100;
+      documentReconnectHandshakes: number;
+      recovery: SampleSummary;
+      maximumRecoverySkewMs: number;
+      recoveredSubscriptionCount: number;
+      currentSubscriptionCount: number;
+      starvedSubscriptionCount: number;
+      maximumConcurrentReauthorizations: number;
+      retainedBytesPerIsland: number;
+      pollingMaximumSameTick: number;
+      multiDocument: Readonly<{
+        documentCount: 16;
+        completedHandshakes: number;
+        maximumConcurrentHandshakes: number;
+      }>;
+    }>;
   }>;
   readonly independentP95Ms: Readonly<{
     d100Connect: readonly number[];
     m1kMorph: readonly number[];
     m5kMorph: readonly number[];
+    e100DispatchEffect: readonly number[];
+    r100Recovery: readonly number[];
   }>;
 }
 
@@ -143,6 +193,17 @@ function positiveInteger(value: unknown, code: string, maximum = Number.MAX_SAFE
   return value as number;
 }
 
+function nonnegativeInteger(
+  value: unknown,
+  code: string,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > maximum) {
+    fail(code);
+  }
+  return value as number;
+}
+
 function boolean(value: unknown, code: string): boolean {
   if (typeof value !== "boolean") fail(code);
   return value;
@@ -154,10 +215,10 @@ function numberArray(value: unknown, code: string, maximum = 100): readonly numb
   return Object.freeze(result);
 }
 
-function summary(value: unknown, code: string): SampleSummary {
+function summary(value: unknown, code: string, maximumSamples = 100): SampleSummary {
   const candidate = record(value, code);
   exactKeys(candidate, ["samplesMs", "sampleCount", "p50Ms", "p95Ms"], code);
-  const samples = numberArray(candidate["samplesMs"], code);
+  const samples = numberArray(candidate["samplesMs"], code, maximumSamples);
   const calculated = summarizeSamples(samples);
   if (
     candidate["sampleCount"] !== calculated.sampleCount ||
@@ -350,6 +411,141 @@ function validateMorph(value: unknown, id: "M1K" | "M5K") {
   });
 }
 
+function validateE100(value: unknown): BrowserBudgetResult["workloads"]["E100"] {
+  const candidate = record(value, "e100_invalid");
+  exactKeys(
+    candidate,
+    [
+      "subscriptionCount",
+      "presentationEventCount",
+      "eventEnvelopeBytes",
+      "scheduledDurationMs",
+      "refreshInvalidationCount",
+      "physicalConnectionCount",
+      "handshakeCount",
+      "dispatchEffect",
+      "peakRetainedAsyncBytes",
+      "retainedBytesPerSubscription",
+      "queuedEventPeak",
+      "queuedBytePeak",
+      "maximumQueuedRefreshesPerIsland",
+      "maximumInFlightRefreshesPerIsland",
+      "currentSubscriptionCount",
+    ],
+    "e100_invalid",
+  );
+  if (
+    candidate["subscriptionCount"] !== 100 ||
+    candidate["presentationEventCount"] !== 1_000 ||
+    candidate["eventEnvelopeBytes"] !== 1_024 ||
+    candidate["scheduledDurationMs"] !== 10_000 ||
+    candidate["refreshInvalidationCount"] !== 100
+  ) {
+    fail("e100_shape_invalid");
+  }
+  return Object.freeze({
+    subscriptionCount: 100 as const,
+    presentationEventCount: 1_000 as const,
+    eventEnvelopeBytes: 1_024 as const,
+    scheduledDurationMs: 10_000 as const,
+    refreshInvalidationCount: 100 as const,
+    physicalConnectionCount: nonnegativeInteger(
+      candidate["physicalConnectionCount"],
+      "e100_invalid",
+    ),
+    handshakeCount: nonnegativeInteger(candidate["handshakeCount"], "e100_invalid"),
+    dispatchEffect: summary(candidate["dispatchEffect"], "e100_dispatch_effect_invalid", 10_000),
+    peakRetainedAsyncBytes: finite(candidate["peakRetainedAsyncBytes"], "e100_invalid"),
+    retainedBytesPerSubscription: finite(candidate["retainedBytesPerSubscription"], "e100_invalid"),
+    queuedEventPeak: nonnegativeInteger(candidate["queuedEventPeak"], "e100_invalid"),
+    queuedBytePeak: nonnegativeInteger(candidate["queuedBytePeak"], "e100_invalid"),
+    maximumQueuedRefreshesPerIsland: nonnegativeInteger(
+      candidate["maximumQueuedRefreshesPerIsland"],
+      "e100_invalid",
+    ),
+    maximumInFlightRefreshesPerIsland: nonnegativeInteger(
+      candidate["maximumInFlightRefreshesPerIsland"],
+      "e100_invalid",
+    ),
+    currentSubscriptionCount: nonnegativeInteger(
+      candidate["currentSubscriptionCount"],
+      "e100_invalid",
+      100,
+    ),
+  });
+}
+
+function validateR100(value: unknown): BrowserBudgetResult["workloads"]["R100"] {
+  const candidate = record(value, "r100_invalid");
+  exactKeys(
+    candidate,
+    [
+      "subscriptionCount",
+      "simultaneousContinuityLosses",
+      "documentReconnectHandshakes",
+      "recovery",
+      "maximumRecoverySkewMs",
+      "recoveredSubscriptionCount",
+      "currentSubscriptionCount",
+      "starvedSubscriptionCount",
+      "maximumConcurrentReauthorizations",
+      "retainedBytesPerIsland",
+      "pollingMaximumSameTick",
+      "multiDocument",
+    ],
+    "r100_invalid",
+  );
+  if (candidate["subscriptionCount"] !== 100 || candidate["simultaneousContinuityLosses"] !== 100) {
+    fail("r100_shape_invalid");
+  }
+  const multiDocument = record(candidate["multiDocument"], "r100_invalid");
+  exactKeys(
+    multiDocument,
+    ["documentCount", "completedHandshakes", "maximumConcurrentHandshakes"],
+    "r100_invalid",
+  );
+  if (multiDocument["documentCount"] !== 16) fail("r100_shape_invalid");
+  return Object.freeze({
+    subscriptionCount: 100 as const,
+    simultaneousContinuityLosses: 100 as const,
+    documentReconnectHandshakes: nonnegativeInteger(
+      candidate["documentReconnectHandshakes"],
+      "r100_invalid",
+    ),
+    recovery: summary(candidate["recovery"], "r100_recovery_invalid", 300),
+    maximumRecoverySkewMs: finite(candidate["maximumRecoverySkewMs"], "r100_invalid"),
+    recoveredSubscriptionCount: nonnegativeInteger(
+      candidate["recoveredSubscriptionCount"],
+      "r100_invalid",
+      100,
+    ),
+    currentSubscriptionCount: nonnegativeInteger(
+      candidate["currentSubscriptionCount"],
+      "r100_invalid",
+      100,
+    ),
+    starvedSubscriptionCount: nonnegativeInteger(
+      candidate["starvedSubscriptionCount"],
+      "r100_invalid",
+      100,
+    ),
+    maximumConcurrentReauthorizations: nonnegativeInteger(
+      candidate["maximumConcurrentReauthorizations"],
+      "r100_invalid",
+    ),
+    retainedBytesPerIsland: finite(candidate["retainedBytesPerIsland"], "r100_invalid"),
+    pollingMaximumSameTick: nonnegativeInteger(candidate["pollingMaximumSameTick"], "r100_invalid"),
+    multiDocument: Object.freeze({
+      documentCount: 16 as const,
+      completedHandshakes: nonnegativeInteger(multiDocument["completedHandshakes"], "r100_invalid"),
+      maximumConcurrentHandshakes: nonnegativeInteger(
+        multiDocument["maximumConcurrentHandshakes"],
+        "r100_invalid",
+      ),
+    }),
+  });
+}
+
 export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult {
   const candidate = record(value, "browser_budget_invalid");
   exactKeys(
@@ -359,6 +555,7 @@ export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult
       "classification",
       "recordedAt",
       "artifact",
+      "asyncArtifact",
       "environment",
       "methodology",
       "workloads",
@@ -375,32 +572,55 @@ export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult
   if (artifact["file"] !== "suprnova-live.esm.js" || !SHA256.test(String(artifact["sha256"]))) {
     fail("artifact_invalid");
   }
+  const asyncArtifact = record(candidate["asyncArtifact"], "async_artifact_invalid");
+  exactKeys(asyncArtifact, ["file", "sha256", "brotliBytes"], "async_artifact_invalid");
+  if (
+    asyncArtifact["file"] !== "suprnova-live.async.esm.js" ||
+    !SHA256.test(String(asyncArtifact["sha256"]))
+  ) {
+    fail("async_artifact_invalid");
+  }
   const environment = validateEnvironment(candidate["environment"]);
   const classification = classifyBenchmarkEnvironment(environment);
   if (candidate["classification"] !== classification) fail("classification_invalid");
   const methodology = validateMethodology(candidate["methodology"]);
   const workloads = record(candidate["workloads"], "workloads_invalid");
-  exactKeys(workloads, ["D100", "M1K", "M5K"], "workloads_invalid");
+  exactKeys(workloads, ["D100", "M1K", "M5K", "E100", "R100"], "workloads_invalid");
   const D100 = validateD100(workloads["D100"]);
   const M1K = validateMorph(workloads["M1K"], "M1K");
   const M5K = validateMorph(workloads["M5K"], "M5K");
-  for (const item of [D100.connect, M1K.morph, M5K.morph]) {
+  const E100 = validateE100(workloads["E100"]);
+  const R100 = validateR100(workloads["R100"]);
+  const expectedSampleCount = methodology.measuredSamples * methodology.independentRuns;
+  for (const item of [D100.connect, M1K.morph, M5K.morph, E100.dispatchEffect, R100.recovery]) {
     if (classification === "b1" && item.sampleCount < 30) fail("sample_count_b1");
-    if (item.sampleCount < methodology.measuredSamples) fail("sample_count_methodology");
+    if (item.sampleCount !== expectedSampleCount) fail("sample_count_methodology");
   }
   if (classification === "b1" && methodology.idleDurationMs !== 30_000) {
     fail("idle_duration_b1");
   }
 
   const independent = record(candidate["independentP95Ms"], "independent_runs_invalid");
-  exactKeys(independent, ["d100Connect", "m1kMorph", "m5kMorph"], "independent_runs_invalid");
+  exactKeys(
+    independent,
+    ["d100Connect", "m1kMorph", "m5kMorph", "e100DispatchEffect", "r100Recovery"],
+    "independent_runs_invalid",
+  );
   const d100Connect = numberArray(independent["d100Connect"], "independent_runs_invalid", 3);
   const m1kMorph = numberArray(independent["m1kMorph"], "independent_runs_invalid", 3);
   const m5kMorph = numberArray(independent["m5kMorph"], "independent_runs_invalid", 3);
+  const e100DispatchEffect = numberArray(
+    independent["e100DispatchEffect"],
+    "independent_runs_invalid",
+    3,
+  );
+  const r100Recovery = numberArray(independent["r100Recovery"], "independent_runs_invalid", 3);
   if (
     d100Connect.length !== methodology.independentRuns ||
     m1kMorph.length !== methodology.independentRuns ||
-    m5kMorph.length !== methodology.independentRuns
+    m5kMorph.length !== methodology.independentRuns ||
+    e100DispatchEffect.length !== methodology.independentRuns ||
+    r100Recovery.length !== methodology.independentRuns
   ) {
     fail("independent_runs_invalid");
   }
@@ -414,10 +634,25 @@ export function validateBrowserBudgetResult(value: unknown): BrowserBudgetResult
       sha256: artifact["sha256"] as string,
       brotliBytes: positiveInteger(artifact["brotliBytes"], "artifact_invalid", 4_194_304),
     }),
+    asyncArtifact: Object.freeze({
+      file: "suprnova-live.async.esm.js" as const,
+      sha256: asyncArtifact["sha256"] as string,
+      brotliBytes: positiveInteger(
+        asyncArtifact["brotliBytes"],
+        "async_artifact_invalid",
+        4_194_304,
+      ),
+    }),
     environment,
     methodology,
-    workloads: Object.freeze({ D100, M1K, M5K }),
-    independentP95Ms: Object.freeze({ d100Connect, m1kMorph, m5kMorph }),
+    workloads: Object.freeze({ D100, M1K, M5K, E100, R100 }),
+    independentP95Ms: Object.freeze({
+      d100Connect,
+      m1kMorph,
+      m5kMorph,
+      e100DispatchEffect,
+      r100Recovery,
+    }),
   });
 }
 
@@ -474,6 +709,46 @@ export function evaluateBrowserBudget(
       ],
       [result.workloads.M1K.morph.p95Ms, BROWSER_BUDGET_LIMITS.m1kMorphP95Ms, "m1k_morph_exceeded"],
       [result.workloads.M5K.morph.p95Ms, BROWSER_BUDGET_LIMITS.m5kMorphP95Ms, "m5k_morph_exceeded"],
+      [
+        result.workloads.E100.dispatchEffect.p95Ms,
+        BROWSER_BUDGET_LIMITS.e100DispatchEffectP95Ms,
+        "e100_dispatch_effect_exceeded",
+      ],
+      [
+        result.workloads.E100.retainedBytesPerSubscription,
+        BROWSER_BUDGET_LIMITS.e100RetainedBytesPerSubscription,
+        "e100_retained_memory_exceeded",
+      ],
+      [
+        result.workloads.E100.queuedEventPeak,
+        BROWSER_BUDGET_LIMITS.e100QueuedEventsPerDocument,
+        "e100_queued_events_exceeded",
+      ],
+      [
+        result.workloads.E100.queuedBytePeak,
+        BROWSER_BUDGET_LIMITS.e100QueuedBytesPerDocument,
+        "e100_queued_bytes_exceeded",
+      ],
+      [
+        result.workloads.E100.maximumQueuedRefreshesPerIsland,
+        BROWSER_BUDGET_LIMITS.e100RefreshQueuedPerIsland,
+        "e100_refresh_queue_exceeded",
+      ],
+      [
+        result.workloads.E100.maximumInFlightRefreshesPerIsland,
+        BROWSER_BUDGET_LIMITS.e100RefreshInFlightPerIsland,
+        "e100_refresh_in_flight_exceeded",
+      ],
+      [
+        result.workloads.R100.retainedBytesPerIsland,
+        BROWSER_BUDGET_LIMITS.r100RetainedBytesPerIsland,
+        "r100_retained_memory_exceeded",
+      ],
+      [
+        result.workloads.R100.multiDocument.maximumConcurrentHandshakes,
+        BROWSER_BUDGET_LIMITS.r100OriginConcurrentHandshakes,
+        "r100_origin_handshakes_exceeded",
+      ],
     ] as const;
     for (const [actual, limit, code] of caps) {
       if (actual > limit) {
@@ -481,12 +756,50 @@ export function evaluateBrowserBudget(
         status = "failed";
       }
     }
+    const exactEvidence = [
+      [result.workloads.E100.physicalConnectionCount, 1, "e100_physical_connection_count"],
+      [result.workloads.E100.handshakeCount, 1, "e100_handshake_count"],
+      [result.workloads.E100.currentSubscriptionCount, 100, "e100_subscription_state"],
+      [result.workloads.R100.documentReconnectHandshakes, 1, "r100_document_reconnect_handshakes"],
+      [result.workloads.R100.recoveredSubscriptionCount, 100, "r100_recovery_incomplete"],
+      [result.workloads.R100.currentSubscriptionCount, 100, "r100_subscription_state"],
+      [result.workloads.R100.starvedSubscriptionCount, 0, "r100_recovery_starvation"],
+      [
+        result.workloads.R100.multiDocument.completedHandshakes,
+        16,
+        "r100_multi_document_incomplete",
+      ],
+      [
+        result.workloads.R100.multiDocument.maximumConcurrentHandshakes,
+        8,
+        "r100_multi_document_fanout",
+      ],
+    ] as const;
+    for (const [actual, expected, code] of exactEvidence) {
+      if (actual !== expected) {
+        codes.push(code);
+        status = "failed";
+      }
+    }
+    if (result.workloads.R100.pollingMaximumSameTick >= 100) {
+      codes.push("r100_polling_synchronized_burst");
+      status = "failed";
+    }
+    if (result.workloads.R100.maximumConcurrentReauthorizations > 8) {
+      codes.push("r100_reauthorization_concurrency_exceeded");
+      status = "failed";
+    }
   }
   if (baseline !== undefined && sameEnvironment(result.environment, baseline.environment)) {
     const comparisons = [
       ["d100Connect", baseline.workloads.D100.connect.p95Ms, result.independentP95Ms.d100Connect],
       ["m1kMorph", baseline.workloads.M1K.morph.p95Ms, result.independentP95Ms.m1kMorph],
       ["m5kMorph", baseline.workloads.M5K.morph.p95Ms, result.independentP95Ms.m5kMorph],
+      [
+        "e100DispatchEffect",
+        baseline.workloads.E100.dispatchEffect.p95Ms,
+        result.independentP95Ms.e100DispatchEffect,
+      ],
     ] as const;
     for (const [name, baselineP95, runs] of comparisons) {
       const regression = classifyP95Regression(baselineP95, runs);

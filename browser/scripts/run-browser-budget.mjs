@@ -147,7 +147,7 @@ async function main() {
       baselineValue === null ? undefined : schema.validateBrowserBudgetResult(baselineValue);
     const evaluation = schema.evaluateBrowserBudget(result, baseline, { release: options.release });
     process.stdout.write(
-      `browser budget ${evaluation.status} classification=${result.classification} d100_p95=${String(result.workloads.D100.connect.p95Ms)}ms m1k_p95=${String(result.workloads.M1K.morph.p95Ms)}ms m5k_p95=${String(result.workloads.M5K.morph.p95Ms)}ms retained=${String(result.workloads.D100.retainedBytesPerIsland)}B output=${options.output}\n`,
+      `browser budget ${evaluation.status} classification=${result.classification} d100_p95=${String(result.workloads.D100.connect.p95Ms)}ms m1k_p95=${String(result.workloads.M1K.morph.p95Ms)}ms m5k_p95=${String(result.workloads.M5K.morph.p95Ms)}ms e100_dispatch_effect_p95=${String(result.workloads.E100.dispatchEffect.p95Ms)}ms e100_retained=${String(result.workloads.E100.retainedBytesPerSubscription)}B e100_connections=${String(result.workloads.E100.physicalConnectionCount)} r100_recovery_p95=${String(result.workloads.R100.recovery.p95Ms)}ms r100_reconnects=${String(result.workloads.R100.documentReconnectHandshakes)} r100_origin_fanout=${String(result.workloads.R100.multiDocument.maximumConcurrentHandshakes)} retained=${String(result.workloads.D100.retainedBytesPerIsland)}B output=${options.output}\n`,
     );
     if (evaluation.codes.length > 0) {
       process.stdout.write(`browser budget codes=${evaluation.codes.join(",")}\n`);

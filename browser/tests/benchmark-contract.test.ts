@@ -8,10 +8,15 @@ import {
   validateBrowserBudgetResult,
 } from "../benchmarks/schema.js";
 import { classifyP95Regression, summarizeSamples } from "../benchmarks/statistics.js";
-import { createD100Workload, createMorphWorkload } from "../benchmarks/workloads.js";
+import {
+  createD100Workload,
+  createE100Workload,
+  createMorphWorkload,
+  createR100Workload,
+} from "../benchmarks/workloads.js";
 
 describe("browser performance evidence contract", () => {
-  it("generates the exact D100, M1K, and M5K workload shapes", () => {
+  it("generates the exact D100, M1K, M5K, E100/1K, and R100 workload shapes", () => {
     const d100 = createD100Workload();
     expect(Buffer.byteLength(d100.html, "utf8")).toBe(64 * 1024);
     expect(d100.documentBytes).toBe(64 * 1024);
@@ -31,6 +36,21 @@ describe("browser performance evidence contract", () => {
     expect(m5k.changedNodeCount).toBe(500);
     expect(m5k.sourceHtml.match(/data-suprnova-live-key=/gu)).toHaveLength(5_000);
     expect(m5k.targetHtml.match(/data-suprnova-live-key=/gu)).toHaveLength(5_000);
+
+    expect(createE100Workload()).toMatchObject({
+      id: "E100/1K",
+      subscriptionCount: 100,
+      presentationEventCount: 1_000,
+      eventEnvelopeBytes: 1_024,
+      scheduledDurationMs: 10_000,
+      refreshInvalidationCount: 100,
+    });
+    expect(createR100Workload()).toMatchObject({
+      id: "R100",
+      subscriptionCount: 100,
+      simultaneousContinuityLosses: 100,
+      multiDocumentCount: 16,
+    });
   });
 
   it("calculates p50 and p95 from finite nonnegative measured samples", () => {
@@ -91,6 +111,29 @@ describe("browser performance evidence contract", () => {
     expect(baseline.methodology.morphMeasurement).toBe("bundled-production-morph-port-v1");
     expect(baseline.methodology.morphDeadlineMs).toBe(10_000);
     expect(baseline.artifact.brotliBytes).toBeGreaterThan(0);
+    expect(baseline.asyncArtifact).toMatchObject({ file: "suprnova-live.async.esm.js" });
+    expect(baseline.workloads.E100).toMatchObject({
+      subscriptionCount: 100,
+      presentationEventCount: 1_000,
+      eventEnvelopeBytes: 1_024,
+      refreshInvalidationCount: 100,
+      physicalConnectionCount: 1,
+      handshakeCount: 1,
+      currentSubscriptionCount: 100,
+    });
+    expect(baseline.workloads.R100).toMatchObject({
+      subscriptionCount: 100,
+      simultaneousContinuityLosses: 100,
+      documentReconnectHandshakes: 1,
+      recoveredSubscriptionCount: 100,
+      currentSubscriptionCount: 100,
+      starvedSubscriptionCount: 0,
+      multiDocument: {
+        documentCount: 16,
+        completedHandshakes: 16,
+        maximumConcurrentHandshakes: 8,
+      },
+    });
     expect(evaluateBrowserBudget(baseline, baseline, { release: false }).status).toBe("pass");
     expect(
       evaluateBrowserBudget(
@@ -129,5 +172,70 @@ describe("browser performance evidence contract", () => {
       },
     };
     expect(() => validateBrowserBudgetResult(tooFew)).toThrow(/sample_count_b1/u);
+
+    const mismatchedAsyncSampleCount = {
+      ...baseline,
+      workloads: {
+        ...baseline.workloads,
+        E100: {
+          ...baseline.workloads.E100,
+          dispatchEffect: summarizeSamples([
+            ...baseline.workloads.E100.dispatchEffect.samplesMs,
+            baseline.workloads.E100.dispatchEffect.p95Ms,
+          ]),
+        },
+      },
+    };
+    expect(() => validateBrowserBudgetResult(mismatchedAsyncSampleCount)).toThrow(
+      /sample_count_methodology/u,
+    );
+
+    const noisyRecoveryTiming = {
+      ...baseline,
+      workloads: {
+        ...baseline.workloads,
+        R100: {
+          ...baseline.workloads.R100,
+          recovery: summarizeSamples(
+            baseline.workloads.R100.recovery.samplesMs.map((sample) => sample * 2),
+          ),
+        },
+      },
+      independentP95Ms: {
+        ...baseline.independentP95Ms,
+        r100Recovery: baseline.independentP95Ms.r100Recovery.map((sample) => sample * 2),
+      },
+    };
+    expect(evaluateBrowserBudget(noisyRecoveryTiming, baseline, { release: false })).toMatchObject({
+      status: "pass",
+      codes: [],
+    });
+
+    const invalidAsyncResourceEvidence = {
+      ...baseline,
+      classification: "b1",
+      environment: {
+        ...baseline.environment,
+        dedicated: true,
+        logicalCpuCount: 8,
+        memoryBytes: 16 * 1024 ** 3,
+        cpuGovernor: "performance",
+      },
+      workloads: {
+        ...baseline.workloads,
+        E100: { ...baseline.workloads.E100, physicalConnectionCount: 2 },
+        R100: { ...baseline.workloads.R100, documentReconnectHandshakes: 2 },
+      },
+    };
+    const invalidAsyncEvaluation = evaluateBrowserBudget(
+      validateBrowserBudgetResult(invalidAsyncResourceEvidence),
+      undefined,
+      {
+        release: true,
+      },
+    );
+    expect(invalidAsyncEvaluation.status).toBe("failed");
+    expect(invalidAsyncEvaluation.codes).toContain("e100_physical_connection_count");
+    expect(invalidAsyncEvaluation.codes).toContain("r100_document_reconnect_handshakes");
   });
 });

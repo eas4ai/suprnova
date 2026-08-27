@@ -75,6 +75,7 @@ phase "browser dependency and conformance gates"
 
     if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
         rtk npm run compatibility:check
+        rtk npm run budget:browser -- --release --dedicated
         rtk npm run budget -- --release
     else
         rtk npm run compatibility:check -- --allow-unqualified

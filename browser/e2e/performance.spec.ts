@@ -48,6 +48,21 @@ test("canonical browser workloads remain executable without changing engine clai
   expect(result.workloads.D100.connect.sampleCount).toBeGreaterThan(0);
   expect(result.workloads.M1K.morph.sampleCount).toBeGreaterThan(0);
   expect(result.workloads.M5K.morph.sampleCount).toBeGreaterThan(0);
+  expect(result.workloads.E100).toMatchObject({
+    currentSubscriptionCount: 100,
+    handshakeCount: 1,
+    physicalConnectionCount: 1,
+  });
+  expect(result.workloads.R100).toMatchObject({
+    currentSubscriptionCount: 100,
+    documentReconnectHandshakes: 1,
+    recoveredSubscriptionCount: 100,
+    starvedSubscriptionCount: 0,
+  });
+  expect(result.workloads.R100.multiDocument).toMatchObject({
+    completedHandshakes: 16,
+    maximumConcurrentHandshakes: 8,
+  });
 
   const output = process.env["SUPRNOVA_BROWSER_BUDGET_OUTPUT"];
   if (output !== undefined) {

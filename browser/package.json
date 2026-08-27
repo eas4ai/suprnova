@@ -51,7 +51,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test:unit": "vitest run",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "test:browser": "playwright test",
     "test:browser:install": "playwright install chromium firefox webkit",
     "test": "npm run test:unit",

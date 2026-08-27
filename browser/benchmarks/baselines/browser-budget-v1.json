@@ -1,11 +1,16 @@
 {
   "schemaVersion": 1,
   "classification": "exploratory",
-  "recordedAt": "2026-08-25T06:47:22.682Z",
+  "recordedAt": "2026-08-27T03:39:52.746Z",
   "artifact": {
     "file": "suprnova-live.esm.js",
     "sha256": "7e7f790ec2e6feeaf4f6bdd15655754b21657b604b26ec6d4136d4eebb401869",
     "brotliBytes": 46947
+  },
+  "asyncArtifact": {
+    "file": "suprnova-live.async.esm.js",
+    "sha256": "212a0c0df79a84ae3f9e8e3116cee17d015c87cd3d9600c5e8920c138427fd49",
+    "brotliBytes": 21116
   },
   "environment": {
     "platform": "linux",
@@ -91,11 +96,64 @@
         "p50Ms": 568.7,
         "p95Ms": 584.4
       }
+    },
+    "E100": {
+      "subscriptionCount": 100,
+      "presentationEventCount": 1000,
+      "eventEnvelopeBytes": 1024,
+      "scheduledDurationMs": 10000,
+      "refreshInvalidationCount": 100,
+      "physicalConnectionCount": 1,
+      "handshakeCount": 1,
+      "dispatchEffect": {
+        "samplesMs": [
+          0.4, 0.2, 0.5, 0.7, 0.3, 0.1, 0.1, 0, 0, 0, 0.1, 0.8, 5.2, 0.3, 0.2, 0.6, 0.1, 0.7, 1.3,
+          0.6, 0.1, 0.1, 0.5, 0.7, 0.8, 0, 0, 0.1, 0, 0
+        ],
+        "sampleCount": 30,
+        "p50Ms": 0.2,
+        "p95Ms": 1.3
+      },
+      "peakRetainedAsyncBytes": 544292,
+      "retainedBytesPerSubscription": 5442.92,
+      "queuedEventPeak": 0,
+      "queuedBytePeak": 0,
+      "maximumQueuedRefreshesPerIsland": 0,
+      "maximumInFlightRefreshesPerIsland": 1,
+      "currentSubscriptionCount": 100
+    },
+    "R100": {
+      "subscriptionCount": 100,
+      "simultaneousContinuityLosses": 100,
+      "documentReconnectHandshakes": 1,
+      "recovery": {
+        "samplesMs": [
+          8.4, 8.4, 8.4, 8.4, 8.4, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.8,
+          8.8, 8.8, 8.8, 8.8, 8.8, 8.8, 8.9, 8.9, 8.9, 8.9, 8.9, 8.9
+        ],
+        "sampleCount": 30,
+        "p50Ms": 8.8,
+        "p95Ms": 8.9
+      },
+      "maximumRecoverySkewMs": 0.5,
+      "recoveredSubscriptionCount": 100,
+      "currentSubscriptionCount": 100,
+      "starvedSubscriptionCount": 0,
+      "maximumConcurrentReauthorizations": 8,
+      "retainedBytesPerIsland": 5442.92,
+      "pollingMaximumSameTick": 1,
+      "multiDocument": {
+        "documentCount": 16,
+        "completedHandshakes": 16,
+        "maximumConcurrentHandshakes": 8
+      }
     }
   },
   "independentP95Ms": {
     "d100Connect": [30.3],
     "m1kMorph": [136.9],
-    "m5kMorph": [584.4]
+    "m5kMorph": [584.4],
+    "e100DispatchEffect": [1.3],
+    "r100Recovery": [8.9]
   }
 }

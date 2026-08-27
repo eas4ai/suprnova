@@ -497,6 +497,14 @@ describe("browser benchmark provenance", () => {
     expect(argumentsFrom([]).runs).toBe(3);
   });
 
+  it("records the full async workload matrix before a release binding check", async () => {
+    const gate = await readFile(new URL("../../scripts/gate.sh", import.meta.url), "utf8");
+    expect(gate).toContain("npm run budget:browser -- --release --dedicated");
+    expect(gate.indexOf("npm run budget:browser -- --release --dedicated")).toBeLessThan(
+      gate.indexOf("npm run budget -- --release"),
+    );
+  });
+
   it("refuses to overwrite the binding baseline with its own candidate output", async () => {
     const loaded = (await import("../scripts/run-browser-budget.mjs")) as {
       readonly argumentsFrom: (arguments_: readonly string[]) => unknown;

@@ -483,6 +483,24 @@ unbounded framework memory, queues, connections, or diagnostic retention.
 
 ## Decisions and revisions
 
+- 2026-08-26 -- Extended the reviewed browser workload baseline with measured
+  `E100/1K` and `R100` evidence produced through the production connection
+  pool, logical subscription, dispatcher, refresh scheduler, polling timer, and
+  origin handshake scheduler. The retained `D100`/`M1K`/`M5K` evidence remains
+  unchanged. The added exploratory evidence is bound to async ESM SHA-256
+  `212a0c0df79a84ae3f9e8e3116cee17d015c87cd3d9600c5e8920c138427fd49`:
+  dispatch/effect p95 is 1.3 ms, recovery p95 is 8.9 ms, retained runtime is
+  5,442.92 bytes per subscription/island, one physical document connection and
+  one reconnect handshake serve all 100 memberships, and separate
+  multi-document evidence reaches but does not exceed eight handshakes per
+  origin. This checked record is the prior comparison source for later
+  candidates; it does not qualify B1 or replace the mandatory three-run B1
+  release measurement. `R100` recovery time remains recorded across independent
+  runs as diagnostic evidence, while release qualification gates its locked
+  completion, currentness, fairness, reconnect, memory, polling, and origin
+  fanout invariants. It has no invented latency cap and is not a 15-percent
+  comparison signal; `E100/1K` dispatch retains both its locked B1 cap and the
+  applicable performance-drift review.
 - 2026-08-26 -- Appended the Task 7 reviewed artifact baseline only after source
   commit `57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61` made the producing code and
   `iteration-004-task-7-membership-budget-policy` decision immutable. Exact
