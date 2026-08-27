@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-08-26
+Last revised: 2026-08-27
 
 ## Scope
 
