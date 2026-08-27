@@ -333,6 +333,32 @@ describe("multiplexed document transports", () => {
     expect(envelope).not.toHaveBeenCalled();
     expect(sources).toHaveLength(1);
   });
+
+  it("keeps an authenticated replay pending until its real presentation completes", () => {
+    const { pool, sources } = harness();
+    const subscription = authorized(1);
+    const state = vi.fn();
+    const commit = vi.fn(() => "pending" as const);
+    const handle = pool.subscribe(
+      subscription,
+      logicalSink(vi.fn(), state),
+      Object.freeze({
+        commit,
+        discard: vi.fn(),
+        proof: "complete_replay" as const,
+        subscription,
+      }),
+    );
+
+    sources[0]?.open();
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(state).not.toHaveBeenCalledWith("degraded");
+    expect(state).not.toHaveBeenCalledWith("current");
+
+    handle.continuityProved();
+    expect(state).toHaveBeenLastCalledWith("current");
+  });
 });
 
 describe("browser SSE authorization adapters", () => {

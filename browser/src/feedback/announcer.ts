@@ -26,7 +26,9 @@ export interface FeedbackAnnouncement {
 
 export type FeedbackAnnouncementSink = (announcement: FeedbackAnnouncement) => void;
 
-const MAX_ANNOUNCEMENTS = 256;
+const MAX_TRACKED_ANNOUNCEMENTS = 256;
+const DEFAULT_MAXIMUM_PER_WINDOW = 8;
+const DEFAULT_WINDOW_MS = 5_000;
 const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,192}$/u;
 const MESSAGES: Readonly<Record<FeedbackAnnouncementKind, string>> = Object.freeze({
   dirty: "Unsaved changes",
@@ -49,12 +51,35 @@ const MESSAGES: Readonly<Record<FeedbackAnnouncementKind, string>> = Object.free
 });
 
 export class FeedbackAnnouncer {
+  readonly #maximumPerWindow: number;
+  readonly #now: () => number;
   readonly #sink: FeedbackAnnouncementSink;
-  readonly #seen = new Set<string>();
-  readonly #order: string[] = [];
+  readonly #seenAt = new Map<string, number>();
+  readonly #acceptedAt: number[] = [];
+  readonly #windowMs: number;
 
-  constructor(sink: FeedbackAnnouncementSink) {
+  constructor(
+    sink: FeedbackAnnouncementSink,
+    options: Readonly<{
+      maximumPerWindow?: number;
+      now?: () => number;
+      windowMs?: number;
+    }> = {},
+  ) {
     this.#sink = sink;
+    this.#maximumPerWindow = options.maximumPerWindow ?? DEFAULT_MAXIMUM_PER_WINDOW;
+    this.#now = options.now ?? Date.now;
+    this.#windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
+    if (
+      !Number.isSafeInteger(this.#maximumPerWindow) ||
+      this.#maximumPerWindow < 1 ||
+      this.#maximumPerWindow > 32 ||
+      !Number.isSafeInteger(this.#windowMs) ||
+      this.#windowMs < 1 ||
+      this.#windowMs > 60_000
+    ) {
+      throw new RangeError("feedback_announcement_policy_invalid");
+    }
   }
 
   announce(
@@ -64,18 +89,25 @@ export class FeedbackAnnouncer {
     politeness: FeedbackPoliteness,
   ): boolean {
     if (!SAFE_KEY.test(scope) || !SAFE_KEY.test(transition)) return false;
-    const key = `${scope}:${kind}:${transition}`;
-    if (this.#seen.has(key)) return false;
-    this.#seen.add(key);
-    this.#order.push(key);
-    if (this.#order.length > MAX_ANNOUNCEMENTS) {
-      const expired = this.#order.shift();
-      if (expired !== undefined) this.#seen.delete(expired);
+    const now = this.#now();
+    if (!Number.isSafeInteger(now) || now < 0) return false;
+    const threshold = now - this.#windowMs;
+    while ((this.#acceptedAt[0] ?? now) <= threshold) this.#acceptedAt.shift();
+    for (const [tracked, accepted] of this.#seenAt) {
+      if (accepted <= threshold) this.#seenAt.delete(tracked);
     }
+    const key = `${scope}:${kind}:${transition}`;
+    if (this.#seenAt.has(key) || this.#acceptedAt.length >= this.#maximumPerWindow) return false;
     try {
       this.#sink(Object.freeze({ message: MESSAGES[kind], politeness }));
     } catch {
       return false;
+    }
+    this.#seenAt.set(key, now);
+    this.#acceptedAt.push(now);
+    if (this.#seenAt.size > MAX_TRACKED_ANNOUNCEMENTS) {
+      const expired = this.#seenAt.keys().next().value;
+      if (typeof expired === "string") this.#seenAt.delete(expired);
     }
     return true;
   }

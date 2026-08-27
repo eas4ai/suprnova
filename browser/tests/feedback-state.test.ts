@@ -213,4 +213,34 @@ describe("feedback announcements", () => {
       "assertive:Request failed",
     ]);
   });
+
+  it("uses a bounded time window so a later meaningful reconnect cycle can announce again", () => {
+    const messages: string[] = [];
+    let now = 1_000;
+    const announcer = new FeedbackAnnouncer(
+      (announcement) => {
+        messages.push(`${announcement.politeness}:${announcement.message}`);
+      },
+      { maximumPerWindow: 3, now: () => now, windowMs: 1_000 },
+    );
+
+    expect(announcer.announce("stream:orders", "stream_degraded", "degraded", "polite")).toBe(true);
+    expect(announcer.announce("stream:orders", "stream_degraded", "degraded", "polite")).toBe(
+      false,
+    );
+    expect(
+      announcer.announce("stream:orders", "stream_reconnecting", "reconnecting", "polite"),
+    ).toBe(true);
+    expect(announcer.announce("stream:orders", "stream_current", "current", "polite")).toBe(true);
+    expect(announcer.announce("stream:orders", "stream_closed", "closed", "polite")).toBe(false);
+
+    now += 1_001;
+    expect(announcer.announce("stream:orders", "stream_degraded", "degraded", "polite")).toBe(true);
+    expect(messages).toEqual([
+      "polite:Updates degraded",
+      "polite:Reconnecting to updates",
+      "polite:Updates current",
+      "polite:Updates degraded",
+    ]);
+  });
 });

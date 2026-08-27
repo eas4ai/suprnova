@@ -297,6 +297,7 @@ const server = createServer(async (request, response) => {
     try {
       const body = await readFile(new URL("test-host/async-lifecycle.mjs", browserRoot));
       respond(response, 200, body, {
+        "access-control-allow-origin": "http://127.0.0.1:4174",
         "cache-control": "public, max-age=31536000, immutable",
         "content-type": "text/javascript; charset=utf-8",
       });
@@ -360,6 +361,7 @@ const server = createServer(async (request, response) => {
       const body = await readFile(join(dist.pathname, file));
       const contentType = extname(file) === ".json" ? "application/json" : "text/javascript";
       respond(response, 200, body, {
+        "access-control-allow-origin": "http://127.0.0.1:4174",
         "cache-control": "public, max-age=31536000, immutable",
         "content-type": `${contentType}; charset=utf-8`,
       });

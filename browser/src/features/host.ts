@@ -55,6 +55,8 @@ export interface RuntimeFeatureDriverIslandPort {
   authorizeRegisteredEvents(
     registration: RegisteredBrowserEventRegistration,
   ): RegisteredBrowserEventCapability;
+  captureAsyncStatusBaseline?(): void;
+  clearAsyncStatus?(): void;
   dispatchRegisteredEvent(
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,

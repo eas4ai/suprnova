@@ -1195,14 +1195,33 @@ function createAsyncIslandLifecycleController(
   let disposed = false;
   let morphPending = false;
 
+  const clearStatus = (): void => {
+    try {
+      port.clearAsyncStatus?.();
+    } catch {
+      report(context, "operation_rejected");
+    }
+  };
+
+  const captureStatusBaseline = (): void => {
+    try {
+      port.captureAsyncStatusBaseline?.();
+    } catch {
+      report(context, "operation_rejected");
+    }
+  };
+
   const reconcile = (): void => {
     const next = directiveState(port);
     if (next.kind === "invalid") {
       report(context, next.diagnostic);
     }
     if (next.kind === "invalid" || next.kind === "none") {
+      const ownedStream = active instanceof AsyncIslandController;
+      if (ownedStream) captureStatusBaseline();
       active?.dispose();
       active = null;
+      if (ownedStream) clearStatus();
       return;
     }
     if (next.kind === "poll") {
@@ -1210,7 +1229,10 @@ function createAsyncIslandLifecycleController(
         active.reconcileFreshness(next.policy);
         return;
       }
+      const ownedStream = active instanceof AsyncIslandController;
+      if (ownedStream) captureStatusBaseline();
       active?.dispose();
+      if (ownedStream) clearStatus();
       active = owner.activatePoll(port, next.policy);
       return;
     }
@@ -1218,7 +1240,10 @@ function createAsyncIslandLifecycleController(
       active.reconcileFreshness(next.pollModifiers, next.streamModifiers);
       return;
     }
+    const ownedStream = active instanceof AsyncIslandController;
+    if (ownedStream) captureStatusBaseline();
     active?.dispose();
+    if (ownedStream) clearStatus();
     active = owner.activateStream(port, next.stream, next.pollModifiers, next.streamModifiers);
   };
 
@@ -1239,8 +1264,10 @@ function createAsyncIslandLifecycleController(
       if (disposed) return;
       disposed = true;
       morphPending = false;
+      const ownedStream = active instanceof AsyncIslandController;
       active?.dispose();
       active = null;
+      if (ownedStream) clearStatus();
     },
     resume(): void {
       if (active instanceof PollingIslandController) active.resume();

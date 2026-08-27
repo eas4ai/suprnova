@@ -84,6 +84,8 @@ interface ValidatedAsyncDescriptorRecord {
 const VALIDATED_ASYNC_DESCRIPTORS = new WeakMap<object, ValidatedAsyncDescriptorRecord>();
 
 export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
+  captureAsyncStatusBaseline?(): void;
+  clearAsyncStatus?(): void;
   consumeRegisteredEventCapability(
     descriptor: ValidatedAsyncDescriptorCapability,
   ): RegisteredBrowserEventCapability;
@@ -520,6 +522,8 @@ function defineFeature(
             })
           : Object.freeze({
               ...sharedPort,
+              captureAsyncStatusBaseline: () => port.captureAsyncStatusBaseline?.(),
+              clearAsyncStatus: () => port.clearAsyncStatus?.(),
               consumeRegisteredEventCapability: (
                 descriptor: ValidatedAsyncDescriptorCapability,
               ) => {

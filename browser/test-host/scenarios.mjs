@@ -799,11 +799,14 @@ function asyncLifecycleScenario() {
       body: `<h1>Async order updates</h1>
         <p data-live-stream-status aria-label="Order updates">Updates disconnected</p>
         <p id="async-content">Server-rendered async content</p>
+        <output id="async-effect-count" aria-label="Applied async effects">0</output>
         <button id="keep-focus" type="button">Keep focus</button>
         <button id="degrade-stream" type="button">Degrade stream</button>
         <button id="reconnect-stream" type="button">Reconnect stream</button>
         <button id="close-stream" type="button">Close stream</button>
-        <button id="replace-island" type="button">Replace island contents</button>
+        <button id="replace-island" type="button" live:click.prevent="replace_stream">Replace island contents</button>
+        <button id="run-live-action" type="button" live:click.prevent="save">Run Live action</button>
+        <output id="async-action-result"></output>
         <button id="local-toggle" type="button" live:toggle="open">Local details</button>
         <p id="local-panel" hidden aria-hidden="true" inert live:show="open">Local signal remains available</p>`,
     })}
@@ -811,6 +814,7 @@ function asyncLifecycleScenario() {
       <form action="/navigation/post" method="post"><label>Native value <input name="value"></label><button type="submit">Submit normally</button></form>
       <a href="/scenario/lifecycleDestination">Native destination</a>`,
     '<script type="module" nonce="suprnova-async-test" src="/test-async/lifecycle.js"></script>',
+    { endpoint: "http://127.0.0.1:4174/live" },
   );
 }
 

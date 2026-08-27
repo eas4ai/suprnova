@@ -569,6 +569,7 @@ class FetchEventSourceAdapter implements EventSourcePort {
     const headers = new Headers({
       Accept: "text/event-stream",
       Authorization: `SuprnovaAsync ${authorization.credential}`,
+      "Suprnova-Transport-Generation": String(request.transportGeneration),
     });
     void this.#read(fetchPort, url, headers);
   }
@@ -2126,6 +2127,7 @@ export class DocumentConnectionPool {
       return;
     }
     const staged = membership.pendingAuthorization;
+    let presentationPending = false;
     if (staged !== null) {
       const stagedKind = membership.pendingAuthorizationKind;
       membership.pendingAuthorization = null;
@@ -2142,6 +2144,7 @@ export class DocumentConnectionPool {
         this.#safeState(membership, "degraded");
         return;
       }
+      presentationPending = outcome === "pending";
       membership.authorization = staged.subscription;
       if (stagedKind === "initial") membership.requiresInitialAuthorization = false;
       if (outcome === "committed" && staged.proof !== null) {
@@ -2155,6 +2158,7 @@ export class DocumentConnectionPool {
       staged.proof !== null &&
       membership.pendingProofMembershipGeneration !== membership.generation
     ) {
+      if (presentationPending) return;
       this.#safeState(membership, "degraded");
       return;
     }

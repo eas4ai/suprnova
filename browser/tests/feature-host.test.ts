@@ -770,6 +770,8 @@ describe("one driver claim and optional owner per island", () => {
       "queryDirectiveOwnership",
     ]);
     expect(Object.keys(asyncPort ?? {}).sort()).toEqual([
+      "captureAsyncStatusBaseline",
+      "clearAsyncStatus",
       "consumeRegisteredEventCapability",
       "dispatchRegisteredEvent",
       "element",

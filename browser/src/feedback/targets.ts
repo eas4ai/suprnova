@@ -335,9 +335,9 @@ interface StreamTargetBaseline {
 }
 
 interface StreamRootBaseline {
-  readonly busy: string | null;
-  readonly motion: string | null;
-  readonly state: string | null;
+  busy: string | null;
+  motion: string | null;
+  state: string | null;
 }
 
 const STREAM_STATUS_SELECTOR = "[data-live-stream-status]";
@@ -508,6 +508,33 @@ export class FeedbackRuntime {
         status,
         "polite",
       );
+    }
+  }
+
+  clearAsyncStatus(record: IslandRecord): void {
+    const state = this.#records.get(record);
+    if (!state?.streamState) return;
+    state.streamState = null;
+    state.streamAnnouncementGeneration += 1;
+    this.#restoreAsyncStatus(record, state);
+  }
+
+  captureAsyncStatusBaseline(record: IslandRecord): void {
+    const state = this.#records.get(record);
+    if (state === undefined) return;
+    state.streamRootBaseline.busy = record.element.getAttribute("aria-busy");
+    state.streamRootBaseline.motion = record.element.getAttribute("data-live-stream-motion");
+    state.streamRootBaseline.state = record.element.getAttribute("data-live-stream-state");
+    state.streamBaselines.clear();
+    for (const target of record.element.querySelectorAll(STREAM_STATUS_SELECTOR)) {
+      if (target.closest(ISLAND_ROOT_SELECTOR) !== record.element) continue;
+      state.streamBaselines.set(target, {
+        atomic: target.getAttribute("aria-atomic"),
+        live: target.getAttribute("aria-live"),
+        role: target.getAttribute("role"),
+        text: target.textContent,
+      });
+      if (state.streamBaselines.size >= MAX_STREAM_STATUS_TARGETS) break;
     }
   }
 

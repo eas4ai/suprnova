@@ -904,6 +904,14 @@ export class DocumentRuntime {
           targets: (target, maximumFanout) =>
             this.#registeredEventTargets(record, target, maximumFanout),
         }),
+      captureAsyncStatusBaseline: () => {
+        if (!current()) return;
+        this.#feedback.captureAsyncStatusBaseline(record);
+      },
+      clearAsyncStatus: () => {
+        if (!current()) return;
+        this.#feedback.clearAsyncStatus(record);
+      },
       dispatchRegisteredEvent: (
         capability: RegisteredBrowserEventCapability,
         event: RegisteredBrowserEventDispatch,

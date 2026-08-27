@@ -1089,6 +1089,62 @@ describe("async feature lifecycle", () => {
     owner.dispose();
   });
 
+  it("restores semantic stream projection when a committed morph drops stream ownership", async () => {
+    const sources: FakeSource[] = [];
+    const timers = new FakeTimers();
+    const root = Object.freeze({}) as Element;
+    let ownerships: readonly RuntimeFeatureDirectiveOwnership[] = Object.freeze([ownership(root)]);
+    const clearAsyncStatus = vi.fn();
+    const projectAsyncStatus = vi.fn();
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: { authorize: () => authorization(0n) },
+        clock: { now: () => 100 },
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    const controller = owner.connectIsland({
+      clearAsyncStatus,
+      consumeRegisteredEventCapability: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: successfulFreshRender,
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-projection-loss",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      projectAsyncStatus,
+      queryDirectiveOwnership: () => ownerships,
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await flushMicrotasks();
+    sources[0]?.open();
+    sources[0]?.emit(envelope(1n, { kind: "heartbeat" }));
+    expect(projectAsyncStatus).toHaveBeenCalledWith("current");
+
+    controller.beforeMorph?.();
+    ownerships = Object.freeze([pollOwnership(root, ["30s"])]);
+    controller.afterMorph?.();
+
+    expect(clearAsyncStatus).toHaveBeenCalledOnce();
+    expect(sources[0]?.close).toHaveBeenCalledOnce();
+    owner.dispose();
+  });
+
   it("does not report physical continuity for a duplicate while the logical stream is connecting", async () => {
     const sources: FakeSource[] = [];
     const continuityProved = vi.fn();

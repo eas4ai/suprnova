@@ -5,6 +5,8 @@ import { expectNoSeriousA11yViolations } from "./support/a11y.js";
 // Chromium disables the back/forward cache while Playwright tracing is active.
 test.use({ trace: "off" });
 
+const ASYNC_SCENARIO = "http://127.0.0.1:4174/scenario/asyncLifecycle";
+
 interface AsyncLifecycleSnapshot {
   readonly activeConnections: number;
   readonly announcements: readonly string[];
@@ -15,11 +17,33 @@ interface AsyncLifecycleSnapshot {
   readonly closeSignals: number;
   readonly connections: number;
   readonly continuityProofs: number;
+  readonly cspViolations: readonly Readonly<{ blocked: string; directive: string }>[];
   readonly currentSignals: number;
   readonly lateMessages: number;
+  readonly liveActions: number;
+  readonly liveRegionMutations: readonly string[];
+  readonly membershipControls: number;
   readonly pagehidePersisted: readonly boolean[];
   readonly pageshowPersisted: readonly boolean[];
   readonly states: readonly string[];
+  readonly resources: Readonly<{
+    activeAuthorizations: number;
+    buffers: number;
+    connections: number;
+    listeners: number;
+    observers: number;
+    queuedWork: number;
+    timers: number;
+  }>;
+  readonly resourcePeaks: Readonly<{
+    activeAuthorizations: number;
+    buffers: number;
+    connections: number;
+    listeners: number;
+    observers: number;
+    queuedWork: number;
+    timers: number;
+  }>;
 }
 
 async function lifecycleSnapshot(page: Page): Promise<AsyncLifecycleSnapshot> {
@@ -53,7 +77,7 @@ test("real async transport exposes bounded semantic feedback without stealing fo
 }, testInfo) => {
   test.skip(testInfo.project.name === "chrome-bfcache", "Covered by the normal Chromium project.");
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
 
   const island = page.locator("[data-suprnova-live-island]");
   await expectCurrentSignal(page, 1);
@@ -68,25 +92,40 @@ test("real async transport exposes bounded semantic feedback without stealing fo
     .poll(async () => (await lifecycleSnapshot(page)).states.includes("degraded"))
     .toBe(true);
   await expect(page.getByRole("button", { name: "Degrade stream" })).toBeFocused();
+  await expect(page.locator("#async-effect-count")).toHaveText("0");
   await page.getByRole("button", { name: "Reconnect stream" }).click();
   await expectCurrentSignal(page, 2);
+  await expect(page.locator("#async-effect-count")).toHaveText("1");
 
   const reconnectSnapshot = await lifecycleSnapshot(page);
   expect(reconnectSnapshot.states).toEqual(
     expect.arrayContaining(["disconnected", "connecting", "current", "degraded", "reconnecting"]),
   );
-  expect(reconnectSnapshot.announcements.length).toBeLessThanOrEqual(6);
-  expect(new Set(reconnectSnapshot.announcements).size).toBe(
+  expect(reconnectSnapshot.announcements.length).toBeLessThanOrEqual(8);
+  expect(reconnectSnapshot.liveRegionMutations.length).toBeGreaterThan(
     reconnectSnapshot.announcements.length,
   );
-  await expectNoSeriousA11yViolations(page, { sourceUrl: "/test-vendor/axe.js" });
+  expect(reconnectSnapshot.cspViolations).toEqual([]);
+  expect(reconnectSnapshot.resourcePeaks).toMatchObject({
+    activeAuthorizations: 1,
+    buffers: 1,
+    connections: 1,
+    listeners: 4,
+    observers: 2,
+  });
+  expect(reconnectSnapshot.resourcePeaks.queuedWork).toBeGreaterThanOrEqual(1);
+  expect(reconnectSnapshot.resourcePeaks.timers).toBeGreaterThanOrEqual(1);
+  await expectNoSeriousA11yViolations(page, {
+    sourceUrl: "http://127.0.0.1:4173/test-vendor/axe.js",
+  });
+  expect((await lifecycleSnapshot(page)).cspViolations).toEqual([]);
 });
 
 test("server completion exposes a closed status and retires the physical stream", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name === "chrome-bfcache", "Covered by the normal Chromium project.");
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
   await expectCurrentSignal(page, 1);
 
   const island = page.locator("[data-suprnova-live-island]");
@@ -110,7 +149,7 @@ test("actual bfcache restore reauthorizes and proves continuity before accepting
     testInfo.project.name !== "chrome-bfcache",
     "The exact persisted BFCache proof runs in dedicated stable Chrome.",
   );
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
   await expectCurrentSignal(page, 1);
   const before = await lifecycleSnapshot(page);
 
@@ -138,18 +177,30 @@ test("actual bfcache restore reauthorizes and proves continuity before accepting
   expect(restored.authorizations).toBe(before.authorizations + 1);
   expect(restored.continuityProofs).toBeGreaterThan(before.continuityProofs);
   expect(restored.activeConnections).toBe(1);
-  expect(restored.lateMessages).toBe(0);
+  expect(restored.lateMessages).toBeGreaterThanOrEqual(3);
+  expect(restored.resources).toMatchObject({
+    activeAuthorizations: 0,
+    buffers: 0,
+    connections: 1,
+    listeners: 4,
+    observers: 2,
+    queuedWork: 0,
+  });
+  expect(restored.cspViolations).toEqual([]);
 });
 
 test("native controls and local signals remain available beside async updates", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name === "chrome-bfcache", "Covered by the normal Chromium project.");
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
   await expectCurrentSignal(page, 1);
 
   await page.getByRole("button", { name: "Local details" }).click();
   await expect(page.getByText("Local signal remains available")).toBeVisible();
+  await page.getByRole("button", { name: "Run Live action" }).click();
+  await expect(page.locator("#async-action-result")).toHaveText("Live action committed");
+  await expect.poll(async () => (await lifecycleSnapshot(page)).liveActions).toBe(1);
   await page.getByRole("textbox", { name: "Native value" }).fill("ordinary-http");
   await page.getByRole("button", { name: "Submit normally" }).click();
   await expect(page).toHaveURL(/\/navigation\/post$/u);
@@ -160,42 +211,68 @@ test("morph replacement and island removal retire async resources exactly once",
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name === "chrome-bfcache", "Covered by the normal Chromium project.");
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
   const island = page.locator("[data-suprnova-live-island]");
   await expectCurrentSignal(page, 1);
 
   await page.getByRole("button", { name: "Replace island contents" }).click();
   await expect(page.getByText("Morphed async content")).toBeVisible();
-  await expect(island).toHaveAttribute("data-live-stream-state", "current");
+  await expect(island).not.toHaveAttribute("live:stream", /.+/u);
+  await expect(island).toHaveAttribute("live:poll", "");
+  await expect(island).not.toHaveAttribute("data-live-stream-state", /.+/u);
+  await expect(island).not.toHaveAttribute("data-live-stream-motion", /.+/u);
+  await expect(island).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByText("Server rendered status baseline")).toBeVisible();
   await page.getByRole("button", { name: "Remove island" }).click();
   await expect(island).toHaveCount(0);
+  await expect
+    .poll(async () => (await lifecycleSnapshot(page)).lateMessages)
+    .toBeGreaterThanOrEqual(3);
 
   const retired = await lifecycleSnapshot(page);
   expect(retired.activeConnections).toBe(0);
   expect(retired.closedConnections).toBe(retired.connections);
-  expect(retired.lateMessages).toBe(0);
+  expect(retired.lateMessages).toBeGreaterThanOrEqual(3);
+  expect(retired.resources).toMatchObject({
+    activeAuthorizations: 0,
+    buffers: 0,
+    connections: 0,
+    listeners: 4,
+    observers: 2,
+    queuedWork: 0,
+    timers: 0,
+  });
 });
 
 test("document shutdown is idempotent and leaves no async resource authority", async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name === "chrome-bfcache", "Covered by the normal Chromium project.");
-  await page.goto("/scenario/asyncLifecycle");
+  await page.goto(ASYNC_SCENARIO);
   await expectCurrentSignal(page, 1);
 
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     const probe: unknown = Reflect.get(window, "__suprnovaAsyncLifecycle");
     if (typeof probe !== "object" || probe === null) throw new Error("async_probe_missing");
     const shutdown: unknown = Reflect.get(probe, "shutdown");
     if (typeof shutdown !== "function") throw new Error("async_probe_shutdown_missing");
-    Reflect.apply(shutdown, probe, []);
-    Reflect.apply(shutdown, probe, []);
+    await Reflect.apply(shutdown, probe, []);
+    await Reflect.apply(shutdown, probe, []);
   });
 
   const stopped = await lifecycleSnapshot(page);
   expect(stopped.activeConnections).toBe(0);
   expect(stopped.closedConnections).toBe(stopped.connections);
-  expect(stopped.lateMessages).toBe(0);
+  expect(stopped.lateMessages).toBeGreaterThanOrEqual(3);
+  expect(stopped.resources).toMatchObject({
+    activeAuthorizations: 0,
+    buffers: 0,
+    connections: 0,
+    listeners: 4,
+    observers: 2,
+    queuedWork: 0,
+    timers: 0,
+  });
   const island = page.locator("[data-suprnova-live-island]");
   await expect(island).toHaveAttribute("aria-busy", "false");
   await expect(island).toHaveAttribute("data-live-stream-state", "disconnected");
