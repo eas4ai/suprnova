@@ -165,6 +165,15 @@ impl AsyncCodecLimits {
         }
     }
 
+    /// Returns the deliberately small hostile-input profile used by fuzz targets.
+    #[must_use]
+    pub fn hostile_test() -> Self {
+        match Self::new(512, 4, 16, 128, 256) {
+            Ok(limits) => limits,
+            Err(_) => unreachable!("locked hostile async limits are coherent"),
+        }
+    }
+
     const fn input(self) -> InputLimits {
         self.input
     }

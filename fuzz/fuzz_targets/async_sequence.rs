@@ -12,8 +12,8 @@ use suprnova_live::async_updates::{
     AsyncDeliveryDisposition, AsyncDispatchError, AsyncEnvelope, AsyncEnvelopeDispatchPort,
     AsyncEventSession, AsyncEventSource, AsyncPolicy, AsyncTransportError, AsyncTransportFuture,
     BaselineDisposition, BoundedDocumentTransportSession, BufferDisposition, CloseDisposition,
-    MAX_REPLAY_TRANSCRIPT_ENVELOPES, ResolvedAsyncDelivery, SequenceDisposition, StreamEpoch,
-    StreamPosition, StreamSequence, decode_async_envelope,
+    MAX_REPLAY_TRANSCRIPT_ENVELOPES, ResolvedAsyncDelivery, SequenceDisposition, SequenceState,
+    StreamEpoch, StreamPosition, StreamSequence, decode_async_envelope,
 };
 use suprnova_live::resource::{PermitPool, ResourceBounds};
 
@@ -152,7 +152,7 @@ fuzz_target!(|bytes: &[u8]| {
         },
     )
     .expect("fuzz bounded document");
-    let limits = AsyncCodecLimits::v1();
+    let limits = AsyncCodecLimits::hostile_test();
     let mut dispatcher = AcceptingDispatcher;
 
     for chunk in bytes[16..].chunks(17).take(MAX_TRANSITIONS) {
@@ -164,6 +164,9 @@ fuzz_target!(|bytes: &[u8]| {
         let before = bounded
             .sequence_position(&request)
             .expect("active fuzz sequence lane");
+        let state_before = bounded
+            .sequence_state(&request)
+            .expect("active fuzz sequence state");
         match operation {
             0 => {
                 queue
@@ -174,14 +177,37 @@ fuzz_target!(|bytes: &[u8]| {
                     support::block_on_ready(bounded.pump_next(registry.as_ref())),
                     Ok(Some(BufferDisposition::Queued | BufferDisposition::Coalesced))
                 ) {
-                    let result = bounded.dispatch_next(registry.as_ref(), &mut dispatcher);
-                    if matches!(
-                        result,
+                    match bounded.dispatch_next(registry.as_ref(), &mut dispatcher) {
                         Ok(Some(AsyncDeliveryDisposition::Sequence(
-                            SequenceDisposition::Apply
-                        )))
-                    ) {
-                        assert_eq!(bounded.sequence_position(&request), Some(position));
+                            SequenceDisposition::Apply,
+                        ))) => {
+                            assert_eq!(position.epoch(), before.epoch());
+                            assert_eq!(
+                                before.sequence().get().checked_add(1),
+                                Some(position.sequence().get()),
+                            );
+                            assert_eq!(bounded.sequence_position(&request), Some(position));
+                            assert_eq!(
+                                bounded.sequence_state(&request),
+                                Some(SequenceState::Current),
+                            );
+                        }
+                        Ok(Some(AsyncDeliveryDisposition::Sequence(
+                            SequenceDisposition::Degraded(_) | SequenceDisposition::AwaitingRecovery,
+                        ))) => {
+                            assert_eq!(bounded.sequence_position(&request), Some(before));
+                            assert_eq!(
+                                bounded.sequence_state(&request),
+                                Some(SequenceState::Degraded),
+                            );
+                        }
+                        Ok(Some(AsyncDeliveryDisposition::Sequence(_))) | Ok(None) | Err(_) => {
+                            assert_eq!(bounded.sequence_position(&request), Some(before));
+                            assert_eq!(bounded.sequence_state(&request), Some(state_before));
+                        }
+                        Ok(Some(AsyncDeliveryDisposition::Replay(_))) => {
+                            panic!("ordinary envelope dispatch returned a replay outcome");
+                        }
                     }
                 }
             }
@@ -193,6 +219,10 @@ fuzz_target!(|bytes: &[u8]| {
                 {
                     continue;
                 }
+                let expected_applied = usize::try_from(
+                    position.sequence().get() - before.sequence().get(),
+                )
+                .expect("fuzz replay is bounded to usize");
                 let transcript = (before.sequence().get() + 1..=position.sequence().get())
                     .map(|value| {
                         heartbeat(
@@ -206,7 +236,41 @@ fuzz_target!(|bytes: &[u8]| {
                     bounded.admit_replay(&request, transcript, registry.as_ref()),
                     Ok(BufferDisposition::Queued)
                 ) {
-                    let _ = bounded.dispatch_next(registry.as_ref(), &mut dispatcher);
+                    match bounded.dispatch_next(registry.as_ref(), &mut dispatcher) {
+                        Ok(Some(AsyncDeliveryDisposition::Replay(outcome))) => {
+                            assert_eq!(outcome.applied(), expected_applied);
+                            assert_eq!(outcome.current(), position);
+                            assert_eq!(outcome.state(), SequenceState::Current);
+                            assert_eq!(bounded.sequence_position(&request), Some(position));
+                            assert_eq!(
+                                bounded.sequence_state(&request),
+                                Some(SequenceState::Current),
+                            );
+                        }
+                        Err(error) => {
+                            if let Some(replay) = error.replay_error() {
+                                assert!(replay.applied() <= expected_applied);
+                                assert_eq!(replay.current().epoch(), before.epoch());
+                                assert_eq!(
+                                    replay.current().sequence().get(),
+                                    before.sequence().get() + replay.applied() as u64,
+                                );
+                                assert_eq!(
+                                    bounded.sequence_position(&request),
+                                    Some(replay.current()),
+                                );
+                            } else {
+                                assert_eq!(bounded.sequence_position(&request), Some(before));
+                                assert_eq!(bounded.sequence_state(&request), Some(state_before));
+                            }
+                        }
+                        Ok(None) => {
+                            assert_eq!(bounded.sequence_position(&request), Some(before));
+                        }
+                        Ok(Some(AsyncDeliveryDisposition::Sequence(_))) => {
+                            panic!("admitted replay dispatched as an ordinary envelope");
+                        }
+                    }
                 }
             }
             _ => {
@@ -222,8 +286,16 @@ fuzz_target!(|bytes: &[u8]| {
                     assert!(
                         position.epoch() > before.epoch()
                             || (position.epoch() == before.epoch()
-                                && position.sequence() >= before.sequence())
+                                  && position.sequence() >= before.sequence())
                     );
+                    assert_eq!(bounded.sequence_position(&request), Some(position));
+                    assert_eq!(
+                        bounded.sequence_state(&request),
+                        Some(SequenceState::Current),
+                    );
+                } else {
+                    assert_eq!(bounded.sequence_position(&request), Some(before));
+                    assert_eq!(bounded.sequence_state(&request), Some(state_before));
                 }
             }
         }
