@@ -300,7 +300,11 @@ describe("browser performance evidence contract", () => {
           maximumQueuedRefreshesPerIsland: 2,
           maximumInFlightRefreshesPerIsland: 2,
         },
-        R100: { ...baseline.workloads.R100, documentReconnectHandshakes: 2 },
+        R100: {
+          ...baseline.workloads.R100,
+          documentReconnectHandshakes: 2,
+          pollingMaximumSameTick: 100,
+        },
       },
     };
     const invalidAsyncEvaluation = evaluateBrowserBudget(
@@ -317,5 +321,6 @@ describe("browser performance evidence contract", () => {
     expect(invalidAsyncEvaluation.codes).toContain("e100_refresh_queue_exceeded");
     expect(invalidAsyncEvaluation.codes).toContain("e100_refresh_in_flight_exceeded");
     expect(invalidAsyncEvaluation.codes).toContain("r100_document_reconnect_handshakes");
+    expect(invalidAsyncEvaluation.codes).toContain("r100_polling_synchronized_burst");
   });
 });

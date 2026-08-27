@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { canonicalize } from "../src/canonical.js";
 import type { AsyncEnvelopeDispatcher } from "../src/async-updates/dispatch.js";
-import { AsyncSubscription } from "../src/async-updates/subscription.js";
+import { AsyncDocumentQueueBudget, AsyncSubscription } from "../src/async-updates/subscription.js";
 import type { AuthorizedLogicalSubscription } from "../src/async-updates/types.js";
 
 const SUBSCRIPTION = "subscription-lifecycle-001";
@@ -38,9 +38,14 @@ function authorization(): AuthorizedLogicalSubscription {
   });
 }
 
-function envelope(sequence: number, kind: "heartbeat" | "refresh"): string {
+function envelope(sequence: number, kind: "error" | "heartbeat" | "refresh"): string {
   return canonicalize({
-    payload: kind === "refresh" ? { kind, name: "refresh" } : { kind },
+    payload:
+      kind === "refresh"
+        ? { kind, name: "refresh" }
+        : kind === "error"
+          ? { code: "backpressure", kind }
+          : { kind },
     position: { epoch: "3", sequence: String(sequence) },
     protocol_version: 1,
     stream: "orders",
@@ -89,6 +94,7 @@ describe("browser logical async subscription", () => {
   });
 
   it("reports real queued bytes, events, and refresh state without exposing payloads", () => {
+    const documentQueue = new AsyncDocumentQueueBudget();
     const completions: ((outcome: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
     const observations: {
       queuedBytes: number;
@@ -108,6 +114,7 @@ describe("browser logical async subscription", () => {
       undefined,
       undefined,
       (observation) => observations.push(observation),
+      documentQueue,
     );
     current.connected();
     const queuedRefresh = envelope(12, "refresh");
@@ -132,5 +139,78 @@ describe("browser logical async subscription", () => {
       queuedRefreshes: 0,
       inFlightRefreshes: 0,
     });
+    expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
+  });
+
+  it("releases and observes the queued tail immediately when typed error interrupts drain", () => {
+    let completion:
+      ((outcome: "succeeded" | "failed" | "canceled" | "retired") => void) | undefined;
+    const documentQueue = new AsyncDocumentQueueBudget();
+    const observations: {
+      queuedBytes: number;
+      queuedEvents: number;
+      queuedRefreshes: number;
+      inFlightRefreshes: number;
+    }[] = [];
+    const current = new AsyncSubscription(
+      authorization(),
+      {
+        dispatch: (_value, candidate) => {
+          if (candidate !== undefined) completion = candidate;
+          return "queued";
+        },
+      },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      (observation) => observations.push(observation),
+      documentQueue,
+    );
+    current.connected();
+    expect(current.receive(envelope(11, "refresh"))).toBe("pending");
+    expect(current.receive(envelope(12, "heartbeat"))).toBe("pending");
+    expect(current.receive(envelope(13, "error"))).toBe("pending");
+    expect(current.receive(envelope(14, "heartbeat"))).toBe("pending");
+
+    completion?.("succeeded");
+
+    expect(current.state()).toBe("degraded");
+    expect(current.position().sequence).toBe(13n);
+    expect(observations[observations.length - 1]).toEqual({
+      inFlightRefreshes: 0,
+      queuedBytes: 0,
+      queuedEvents: 0,
+      queuedRefreshes: 0,
+    });
+    expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
+  });
+
+  it("releases the document reservation when an active refresh is canceled", () => {
+    let completion:
+      ((outcome: "succeeded" | "failed" | "canceled" | "retired") => void) | undefined;
+    const documentQueue = new AsyncDocumentQueueBudget();
+    const current = new AsyncSubscription(
+      authorization(),
+      {
+        dispatch: (_value, candidate) => {
+          if (candidate !== undefined) completion = candidate;
+          return "queued";
+        },
+      },
+      { now: () => 1_000 },
+      undefined,
+      undefined,
+      undefined,
+      documentQueue,
+    );
+    current.connected();
+    expect(current.receive(envelope(11, "refresh"))).toBe("pending");
+    expect(current.receive(envelope(12, "heartbeat"))).toBe("pending");
+    expect(documentQueue.current()).toMatchObject({ queuedEvents: 1 });
+
+    completion?.("canceled");
+
+    expect(current.state()).toBe("degraded");
+    expect(documentQueue.current()).toEqual({ queuedBytes: 0, queuedEvents: 0 });
   });
 });

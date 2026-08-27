@@ -154,6 +154,19 @@ export async function measureAsyncWorkloads(
       this.current = next[1].due;
       next[1].callback();
     }
+
+    scheduledCountAfter(minimumDue: number): number {
+      return [...this.pending.values()].filter(({ due }) => due >= minimumDue).length;
+    }
+
+    maximumSameDueAfter(minimumDue: number): number {
+      const counts = new Map<number, number>();
+      for (const { due } of this.pending.values()) {
+        if (due < minimumDue) continue;
+        counts.set(due, (counts.get(due) ?? 0) + 1);
+      }
+      return Math.max(0, ...counts.values());
+    }
   }
 
   class MeasuredSource implements BenchmarkSource {
@@ -271,6 +284,7 @@ export async function measureAsyncWorkloads(
   let queuedBytePeak = 0;
   let maximumQueuedRefreshesPerIsland = 0;
   let maximumInFlightRefreshesPerIsland = 0;
+  let pollingRandom = 0;
 
   const makeAuthorization = (
     index: number,
@@ -382,7 +396,13 @@ export async function measureAsyncWorkloads(
         isVisible: () => true,
         subscribe: () => () => undefined,
       }),
-      randomness: Object.freeze({ number: () => 0.5 }),
+      randomness: Object.freeze({
+        number: () => {
+          const value = ((pollingRandom % input.subscriptionCount) + 0.5) / input.subscriptionCount;
+          pollingRandom += 1;
+          return value;
+        },
+      }),
       timers: timers.port,
       transports: Object.freeze({
         eventSource(request: BenchmarkConnectRequest) {
@@ -563,6 +583,11 @@ export async function measureAsyncWorkloads(
 
   recoveryStarted = performance.now();
   primarySource.fail();
+  const pollingTimerMinimumDue = timers.current + 30_000;
+  if (timers.scheduledCountAfter(pollingTimerMinimumDue) !== input.subscriptionCount) {
+    throw new Error("r100_polling_membership_timer_count");
+  }
+  const pollingMaximumSameTick = timers.maximumSameDueAfter(pollingTimerMinimumDue);
   timers.fireEarliest();
   await settleUntil(() => sources.length === 2, "r100_document_reconnect_handshakes");
   const successorSource = sources[1];
@@ -599,81 +624,6 @@ export async function measureAsyncWorkloads(
     });
   }
   while (releases.length > 0) releases.shift()?.();
-
-  const pollingDue = new Map<number, number>();
-  const pollingHandles = new Map<number, number>();
-  let pollingHandle = 0;
-  let pollingRandom = 0;
-  const pollingOwner = new artifact.AsyncDocumentOwner(
-    Object.freeze({ diagnose: () => undefined, onDispose: () => undefined }),
-    Object.freeze({
-      clock: Object.freeze({ now: () => 1_000 }),
-      pollEnvironment: Object.freeze({
-        isOnline: () => true,
-        isVisible: () => true,
-        subscribe: () => () => undefined,
-      }),
-      randomness: Object.freeze({
-        number: () => {
-          const value = (pollingRandom + 0.5) / input.subscriptionCount;
-          pollingRandom += 1;
-          return value;
-        },
-      }),
-      timers: Object.freeze({
-        clearTimeout(handle: number) {
-          const due = pollingHandles.get(handle);
-          if (due === undefined) return;
-          pollingHandles.delete(handle);
-          const count = pollingDue.get(due) ?? 0;
-          if (count <= 1) pollingDue.delete(due);
-          else pollingDue.set(due, count - 1);
-        },
-        timeout(_callback: VoidFunction, milliseconds: number) {
-          pollingHandle += 1;
-          pollingHandles.set(pollingHandle, milliseconds);
-          pollingDue.set(milliseconds, (pollingDue.get(milliseconds) ?? 0) + 1);
-          return pollingHandle;
-        },
-      }),
-    }),
-  );
-  for (let index = 0; index < input.subscriptionCount; index += 1) {
-    const root = document.querySelector(`[data-async-benchmark-index="${String(index)}"]`);
-    if (!(root instanceof HTMLElement)) throw new Error("r100_poll_island_missing");
-    pollingOwner.connectIsland(
-      Object.freeze({
-        consumeRegisteredEventCapability: () => Object.freeze({}),
-        dispatchRegisteredEvent: () => "dispatched",
-        element: root,
-        enqueueFreshRender: () => "queued",
-        identity: Object.freeze({
-          component: "benchmark.poll",
-          documentKey: `benchmark-poll-${String(index)}`,
-          slot: `poll-${String(index)}`,
-        }),
-        onDispose: () => undefined,
-        queryDirectiveOwnership: () =>
-          Object.freeze([
-            Object.freeze({
-              attributeName: "live:poll",
-              directive: Object.freeze({
-                capability: "async@1",
-                modifiers: Object.freeze([]),
-                name: "poll",
-                ok: true,
-                role: null,
-                value: "",
-              }),
-              element: root,
-            }),
-          ]),
-        writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
-      }),
-    );
-  }
-  const pollingMaximumSameTick = Math.max(...pollingDue.values());
-  pollingOwner.dispose();
 
   const recoveredSubscriptionCount = recoveryAt.size;
   const documentReconnectHandshakes = sources.length - physicalConnectionCount;

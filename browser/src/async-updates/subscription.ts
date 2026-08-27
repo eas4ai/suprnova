@@ -18,6 +18,8 @@ import type {
 import type { FreshRenderCompletion } from "../features/contract.js";
 
 const MAX_REPLAY_BYTES = 256 * 1024;
+const MAX_DOCUMENT_QUEUED_BYTES = 256 * 1024;
+const MAX_DOCUMENT_QUEUED_EVENTS = 64;
 
 export interface ReplayOutcome {
   readonly applied: number;
@@ -50,6 +52,56 @@ export interface AsyncQueuePressureObservation {
 }
 
 export type AsyncQueuePressureObserver = (observation: AsyncQueuePressureObservation) => void;
+
+export interface AsyncQueueAdmissionPort {
+  current(): Readonly<{ queuedBytes: number; queuedEvents: number }>;
+  release(events: number, bytes: number): void;
+  reserve(events: number, bytes: number): boolean;
+}
+
+export class AsyncDocumentQueueBudget implements AsyncQueueAdmissionPort {
+  #queuedBytes = 0;
+  #queuedEvents = 0;
+
+  current(): Readonly<{ queuedBytes: number; queuedEvents: number }> {
+    return Object.freeze({ queuedBytes: this.#queuedBytes, queuedEvents: this.#queuedEvents });
+  }
+
+  reserve(events: number, bytes: number): boolean {
+    if (
+      !Number.isSafeInteger(events) ||
+      events <= 0 ||
+      !Number.isSafeInteger(bytes) ||
+      bytes <= 0
+    ) {
+      throw new Error("async_document_queue_admission_invalid");
+    }
+    if (
+      this.#queuedEvents + events > MAX_DOCUMENT_QUEUED_EVENTS ||
+      this.#queuedBytes + bytes > MAX_DOCUMENT_QUEUED_BYTES
+    ) {
+      return false;
+    }
+    this.#queuedEvents += events;
+    this.#queuedBytes += bytes;
+    return true;
+  }
+
+  release(events: number, bytes: number): void {
+    if (
+      !Number.isSafeInteger(events) ||
+      events <= 0 ||
+      !Number.isSafeInteger(bytes) ||
+      bytes <= 0 ||
+      events > this.#queuedEvents ||
+      bytes > this.#queuedBytes
+    ) {
+      throw new Error("async_document_queue_release_invalid");
+    }
+    this.#queuedEvents -= events;
+    this.#queuedBytes -= bytes;
+  }
+}
 
 export type AsyncContinuityProof = "authoritative_no_tail" | "complete_replay";
 
@@ -86,6 +138,7 @@ export class AsyncSubscription {
   readonly #dispatch: AsyncEnvelopeDispatcher;
   readonly #refreshCompletion: ((completion: FreshRenderCompletion) => void) | undefined;
   readonly #lifecycle: ((outcome: AsyncSubscriptionLifecycleOutcome) => void) | undefined;
+  readonly #queueAdmission: AsyncQueueAdmissionPort;
   readonly #queueObserver: AsyncQueuePressureObserver | undefined;
   readonly #pending: PendingPresentation[] = [];
   #pendingBytes = 0;
@@ -102,6 +155,7 @@ export class AsyncSubscription {
     refreshCompletion?: (completion: FreshRenderCompletion) => void,
     lifecycle?: (outcome: AsyncSubscriptionLifecycleOutcome) => void,
     queueObserver?: AsyncQueuePressureObserver,
+    queueAdmission: AsyncQueueAdmissionPort = new AsyncDocumentQueueBudget(),
   ) {
     if (!validExpiration(authorization.expiresAt) || typeof clock.now !== "function") {
       throw new Error("async_subscription_invalid");
@@ -114,6 +168,7 @@ export class AsyncSubscription {
     this.#refreshCompletion = refreshCompletion;
     this.#lifecycle = lifecycle;
     this.#queueObserver = queueObserver;
+    this.#queueAdmission = queueAdmission;
   }
 
   state(): SubscriptionState {
@@ -333,11 +388,15 @@ export class AsyncSubscription {
       return "gap";
     }
     this.#observedPosition = envelope.position;
-    this.#pendingAdmissions += 1;
-    if (this.#pendingAdmissions > MAX_PENDING_PRESENTATIONS) {
+    if (this.#pendingAdmissions >= MAX_PENDING_PRESENTATIONS) {
       this.#failPresentation("presentation_rejected", envelope.position);
       return "dispatch_failed";
     }
+    if (!this.#queueAdmission.reserve(1, encodedBytes)) {
+      this.#failPresentation("resource_exhausted", envelope.position);
+      return "dispatch_failed";
+    }
+    this.#pendingAdmissions += 1;
     const tail = this.#pending[this.#pending.length - 1];
     if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
       tail.count += 1;
@@ -366,6 +425,7 @@ export class AsyncSubscription {
     while (this.#pending.length !== 0 && this.#continuity.state() !== "closed") {
       const next = this.#pending.shift();
       if (next === undefined) break;
+      this.#queueAdmission.release(next.kind === "refresh" ? next.count : 1, next.encodedBytes);
       this.#pendingBytes -= next.encodedBytes;
       this.#pendingAdmissions -= next.kind === "refresh" ? next.count : 1;
       this.#observeQueuePressure();
@@ -379,9 +439,7 @@ export class AsyncSubscription {
       }
       if (this.#applyEnvelope(next.envelope) !== "applied") return "dispatch_failed";
       if (this.#continuity.state() === "degraded") {
-        this.#pending.length = 0;
-        this.#pendingAdmissions = 0;
-        this.#replayActive = false;
+        this.#clearPending();
         return "interrupted";
       }
     }
@@ -430,6 +488,9 @@ export class AsyncSubscription {
   #clearPending(): void {
     this.#activeRefresh = null;
     this.#pending.length = 0;
+    if (this.#pendingAdmissions > 0 || this.#pendingBytes > 0) {
+      this.#queueAdmission.release(this.#pendingAdmissions, this.#pendingBytes);
+    }
     this.#pendingAdmissions = 0;
     this.#pendingBytes = 0;
     this.#replayActive = false;
@@ -460,35 +521,46 @@ export class AsyncSubscription {
     if (this.#activeRefresh !== null || this.#pending.length !== 0) {
       throw new Error("async_replay_pending");
     }
+    const last = transcript[transcript.length - 1];
+    if (last === undefined) throw new Error("async_replay_invalid");
+    if (!this.#queueAdmission.reserve(transcript.length, replayBytes)) {
+      this.#failPresentation("resource_exhausted", last.position);
+      throw new Error("async_replay_resource_exhausted");
+    }
     this.#replayActive = true;
-    for (const [index, envelope] of transcript.entries()) {
-      this.#assertCurrentAuthority();
-      this.#observedPosition = envelope.position;
-      this.#pendingAdmissions += 1;
-      const value = encoded[index];
-      if (value === undefined) throw new Error("async_replay_invalid");
-      const encodedBytes = new TextEncoder().encode(value).byteLength;
-      const tail = this.#pending[this.#pending.length - 1];
-      if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
-        tail.count += 1;
-        tail.encodedBytes += encodedBytes;
-        tail.envelope = envelope;
-        tail.last = envelope.position;
-      } else if (envelope.payload.kind === "refresh") {
-        this.#pending.push({
-          count: 1,
-          encodedBytes,
-          envelope,
-          first: envelope.position,
-          generation: this.#lifecycleGeneration,
-          kind: "refresh",
-          last: envelope.position,
-        });
-      } else {
-        this.#pending.push(Object.freeze({ encodedBytes, envelope, kind: "envelope" }));
+    this.#pendingAdmissions = transcript.length;
+    this.#pendingBytes = replayBytes;
+    try {
+      for (const [index, envelope] of transcript.entries()) {
+        this.#assertCurrentAuthority();
+        this.#observedPosition = envelope.position;
+        const value = encoded[index];
+        if (value === undefined) throw new Error("async_replay_invalid");
+        const encodedBytes = new TextEncoder().encode(value).byteLength;
+        const tail = this.#pending[this.#pending.length - 1];
+        if (envelope.payload.kind === "refresh" && tail?.kind === "refresh") {
+          tail.count += 1;
+          tail.encodedBytes += encodedBytes;
+          tail.envelope = envelope;
+          tail.last = envelope.position;
+        } else if (envelope.payload.kind === "refresh") {
+          this.#pending.push({
+            count: 1,
+            encodedBytes,
+            envelope,
+            first: envelope.position,
+            generation: this.#lifecycleGeneration,
+            kind: "refresh",
+            last: envelope.position,
+          });
+        } else {
+          this.#pending.push(Object.freeze({ encodedBytes, envelope, kind: "envelope" }));
+        }
       }
-      this.#pendingBytes += encodedBytes;
       this.#observeQueuePressure();
+    } catch (error: unknown) {
+      this.#clearPending();
+      throw error;
     }
     const drain = this.#drainPending();
     if (drain === "interrupted") {

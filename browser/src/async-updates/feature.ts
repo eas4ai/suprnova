@@ -23,7 +23,7 @@ import {
   type ReauthorizedLogicalSubscription,
 } from "./connections.js";
 import { AsyncDispatcher } from "./dispatch.js";
-import { AsyncSubscription } from "./subscription.js";
+import { AsyncDocumentQueueBudget, AsyncSubscription } from "./subscription.js";
 import {
   PollTimer,
   resolvePollPolicy,
@@ -707,6 +707,8 @@ class AsyncIslandController implements FeatureIslandController {
   readonly #pollEnvironment: PollEnvironment;
   #pollModifiers: readonly string[] | null;
   readonly #port: AsyncRuntimeIslandPort;
+  readonly #queueAdmission: AsyncDocumentQueueBudget;
+  readonly #queuePressureObserver: AsyncQueuePressureObserver | undefined;
   readonly #randomness: AsyncRandomness;
   readonly #stream: string;
   #streamModifiers: readonly string[];
@@ -735,6 +737,7 @@ class AsyncIslandController implements FeatureIslandController {
     streamModifiers: readonly string[],
     options: AsyncStreamFeatureOptions,
     authorizationScheduler: AuthorizationInvocationScheduler,
+    queueAdmission: AsyncDocumentQueueBudget,
   ) {
     this.#authorizationScheduler = authorizationScheduler;
     this.#authority = options.authority;
@@ -745,6 +748,8 @@ class AsyncIslandController implements FeatureIslandController {
     this.#pollEnvironment = options.pollEnvironment ?? browserPollEnvironment;
     this.#pollModifiers = pollModifiers;
     this.#port = port;
+    this.#queueAdmission = queueAdmission;
+    this.#queuePressureObserver = options.observeQueuePressure;
     this.#randomness = options.randomness;
     this.#stream = stream;
     this.#streamModifiers = streamModifiers;
@@ -996,8 +1001,24 @@ class AsyncIslandController implements FeatureIslandController {
       throw new Error("async_subscription_duplicate");
     }
     const dispatcher = new AsyncDispatcher(this.#port, () => this.#eventCapability);
-    let observedQueuedBytes = 0;
-    let observedQueuedEvents = 0;
+    const queueObserver = this.#queuePressureObserver
+      ? (
+          observation: Readonly<{
+            inFlightRefreshes: number;
+            queuedRefreshes: number;
+          }>,
+        ) => {
+          const { queuedBytes, queuedEvents } = this.#queueAdmission.current();
+          this.#queuePressureObserver?.(
+            Object.freeze({
+              documentQueuedBytes: queuedBytes,
+              documentQueuedEvents: queuedEvents,
+              islandInFlightRefreshes: observation.inFlightRefreshes,
+              islandQueuedRefreshes: observation.queuedRefreshes,
+            }),
+          );
+        }
+      : undefined;
     const subscription = new AsyncSubscription(
       authorization,
       dispatcher,
@@ -1031,16 +1052,8 @@ class AsyncIslandController implements FeatureIslandController {
             : "operation_rejected",
         );
       },
-      (observation) => {
-        this.#owner.observeQueuePressure(
-          observation.queuedBytes - observedQueuedBytes,
-          observation.queuedEvents - observedQueuedEvents,
-          observation.inFlightRefreshes,
-          observation.queuedRefreshes,
-        );
-        observedQueuedBytes = observation.queuedBytes;
-        observedQueuedEvents = observation.queuedEvents;
-      },
+      queueObserver,
+      this.#queueAdmission,
     );
     this.#subscription = subscription;
     const preflight = subscription.preflightInitialReplay(replay);
@@ -1526,8 +1539,7 @@ export class AsyncDocumentOwner {
   readonly #authorizations = new Map<AsyncIslandController, AuthorizedLogicalSubscription>();
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool | null;
-  #queuedBytes = 0;
-  #queuedEvents = 0;
+  readonly #queue = new AsyncDocumentQueueBudget();
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
 
   constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
@@ -1598,6 +1610,7 @@ export class AsyncDocumentOwner {
       streamModifiers,
       configured,
       this.#authorizationScheduler,
+      this.#queue,
     );
     this.#controllers.add(controller);
     if (this.#state === "suspended" || this.#state === "resuming") controller.suspend();
@@ -1620,28 +1633,6 @@ export class AsyncDocumentOwner {
 
   authorization(controller: AsyncIslandController): AuthorizedLogicalSubscription | null {
     return this.#authorizations.get(controller) ?? null;
-  }
-
-  observeQueuePressure(
-    queuedByteDelta: number,
-    queuedEventDelta: number,
-    islandInFlightRefreshes: number,
-    islandQueuedRefreshes: number,
-  ): void {
-    this.#queuedBytes += queuedByteDelta;
-    this.#queuedEvents += queuedEventDelta;
-    try {
-      this.#options.observeQueuePressure?.(
-        Object.freeze({
-          documentQueuedBytes: this.#queuedBytes,
-          documentQueuedEvents: this.#queuedEvents,
-          islandInFlightRefreshes,
-          islandQueuedRefreshes,
-        }),
-      );
-    } catch {
-      // Count-only evidence cannot rewrite presentation or continuity authority.
-    }
   }
 
   retire(controller: AsyncIslandController): void {

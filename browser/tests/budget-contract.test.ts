@@ -515,6 +515,9 @@ describe("browser benchmark provenance", () => {
     expect(runner).not.toContain("browser-budget-async-port.ts");
     expect(workload).toContain("await import(artifactUrl)");
     expect(workload).not.toMatch(/from\s+["']\.\.\/src\/async-updates/u);
+    expect(workload).not.toContain("pollingOwner");
+    expect(workload).toContain("timers.scheduledCountAfter");
+    expect(workload).toContain("timers.maximumSameDueAfter");
   });
 
   it("refuses to overwrite the binding baseline with its own candidate output", async () => {
