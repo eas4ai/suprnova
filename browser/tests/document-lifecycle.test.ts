@@ -105,6 +105,25 @@ describe("resource ledger", () => {
     expect(probe.counts.observer).toBe(1);
     expect(probe.weak?.deref()).toBe(owner);
   });
+
+  test("released high-churn resources reuse the bounded active-resource capacity", () => {
+    const ledger = new ResourceLedgerImpl({ maxResources: 2 });
+    const disposed: number[] = [];
+
+    for (let index = 0; index < 8; index += 1) {
+      const timer = ledger.add("timer", () => disposed.push(index));
+      timer.dispose();
+    }
+
+    const transport = ledger.add("transport", () => disposed.push(8));
+    const buffer = ledger.add("buffer", () => disposed.push(9));
+    expect(() => ledger.add("authorization", () => undefined)).toThrow("resource_ledger_capacity");
+    transport.dispose();
+    buffer.dispose();
+
+    expect(disposed).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(Object.values(ledger.counts()).every((count) => count === 0)).toBe(true);
+  });
 });
 
 describe("document lifecycle", () => {

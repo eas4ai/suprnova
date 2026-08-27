@@ -3,6 +3,7 @@ import type { AsyncRegisteredEventContract, SubscriptionState } from "../async-u
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
+import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
 
 export type RuntimeFeatureRegistrationOutcome =
   "registered" | "already_registered" | "incompatible" | "conflict" | "registry_full";
@@ -47,6 +48,7 @@ export interface RegisteredBrowserEventDispatch {
 export interface RuntimeFeatureDriverDocumentPort {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
   readonly stimulus?: StimulusBootstrapOptions | undefined;
+  trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
 }
 
 export interface RuntimeFeatureDriverIslandPort {

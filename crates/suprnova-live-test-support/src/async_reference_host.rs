@@ -173,6 +173,18 @@ pub struct AsyncReferenceMembershipRequest {
     pub transport_generation: u64,
 }
 
+/// Exact fallback-poll facts checked against the current Rust-issued authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncReferencePollRequest {
+    /// Compact binding of the current signed descriptor.
+    pub descriptor_binding: String,
+    /// Browser-observed continuity position.
+    pub position: AsyncReferencePosition,
+    /// Current logical subscription identity.
+    pub subscription_id: String,
+}
+
 #[derive(Clone)]
 struct IssuedAuthority {
     binding: String,
@@ -415,6 +427,53 @@ impl AsyncReferenceAuthority {
         }))
     }
 
+    /// Authorizes one fallback poll and returns an exact replay or no-tail proof.
+    pub fn poll(
+        &self,
+        origin: &str,
+        bearer: &str,
+        request: &AsyncReferencePollRequest,
+        now: UnixMillis,
+    ) -> Result<Value, &'static str> {
+        if origin != ASYNC_REFERENCE_ORIGIN
+            || request.subscription_id != AsyncReferenceScenario::lifecycle().subscription_id
+        {
+            return Err("poll_authority_invalid");
+        }
+        let issued = self.issued.as_ref().ok_or("poll_authority_invalid")?;
+        if bearer != issued.credential
+            || request.descriptor_binding != issued.binding
+            || now.get() >= issued.expires_at
+        {
+            return Err("poll_authority_invalid");
+        }
+        let observed = parse_position(&request.position)?;
+        if observed > self.current_sequence {
+            return Err("future_position_rejected");
+        }
+        let envelopes = self
+            .history
+            .range(observed.saturating_add(1)..)
+            .map(|(_, envelope)| envelope.clone())
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "current_position": {
+                "epoch": "1",
+                "sequence": self.current_sequence.to_string()
+            },
+            "envelopes": envelopes,
+            "fallback": {
+                "interval_ms": 30_000,
+                "visibility": "visible"
+            },
+            "proof": if observed == self.current_sequence {
+                "authoritative_no_tail"
+            } else {
+                "complete_replay"
+            }
+        }))
+    }
+
     /// Emits a genuine `N + 2` gap while retaining `N + 1` and `N + 2` for complete replay.
     pub fn sequence_gap(&mut self) -> (u64, String) {
         let scenario = AsyncReferenceScenario::lifecycle();
@@ -448,6 +507,16 @@ impl AsyncReferenceAuthority {
         if let Some(issued) = self.issued.as_mut() {
             issued.membership_open = false;
         }
+    }
+
+    /// Returns whether one exact physical transport owns current authenticated membership.
+    #[must_use]
+    pub fn may_deliver_on(&self, transport: u64) -> bool {
+        self.issued.as_ref().is_some_and(|issued| {
+            issued.membership_open
+                && issued.open_transport == Some(transport)
+                && self.open_transports.contains(&transport)
+        })
     }
 
     /// Returns whether the exact physical transport remains authoritative.
@@ -542,7 +611,7 @@ mod tests {
     use super::{
         ASYNC_REFERENCE_ORIGIN, ASYNC_REFERENCE_PRINCIPAL, ASYNC_REFERENCE_SCOPE,
         ASYNC_REFERENCE_SESSION, AsyncReferenceAuthority, AsyncReferenceAuthorizationRequest,
-        AsyncReferenceMembershipRequest, AsyncReferencePosition,
+        AsyncReferenceMembershipRequest, AsyncReferencePollRequest, AsyncReferencePosition,
     };
     use serde_json::Value;
     use suprnova_live::identity::UnixMillis;
@@ -738,5 +807,121 @@ mod tests {
             )
             .expect("stale close cannot retire successor");
         assert!(authority.transport_is_open(successor_transport));
+    }
+
+    #[test]
+    fn delivery_requires_current_authenticated_membership_on_the_exact_transport() {
+        let now = UnixMillis::new(1_000_000);
+        let mut authority = AsyncReferenceAuthority::new(now);
+        let issued = authority
+            .authorize(ASYNC_REFERENCE_ORIGIN, &request(), now)
+            .expect("fresh authority");
+        let (credential, membership) =
+            membership_request(&issued, "control-delivery", "subscribe", 1);
+        let transport = authority
+            .open_transport(ASYNC_REFERENCE_ORIGIN, &credential, 1, now)
+            .expect("transport");
+
+        assert!(!authority.may_deliver_on(transport));
+        authority
+            .membership(ASYNC_REFERENCE_ORIGIN, &credential, &membership, now)
+            .expect("membership");
+        assert!(authority.may_deliver_on(transport));
+
+        let successor = authority
+            .authorize(
+                ASYNC_REFERENCE_ORIGIN,
+                &AsyncReferenceAuthorizationRequest {
+                    position: Some(AsyncReferencePosition {
+                        epoch: "1".to_owned(),
+                        sequence: "0".to_owned(),
+                    }),
+                    prior_subscription_id: Some("c3Vic2NyaXB0aW9uLTAwMQ".to_owned()),
+                    ..request()
+                },
+                now,
+            )
+            .expect("successor authority");
+        assert!(!authority.may_deliver_on(transport));
+
+        let (successor_credential, successor_membership) =
+            membership_request(&successor, "control-successor-delivery", "subscribe", 2);
+        let successor_transport = authority
+            .open_transport(ASYNC_REFERENCE_ORIGIN, &successor_credential, 2, now)
+            .expect("successor transport");
+        authority
+            .membership(
+                ASYNC_REFERENCE_ORIGIN,
+                &successor_credential,
+                &successor_membership,
+                now,
+            )
+            .expect("successor membership");
+        assert!(authority.may_deliver_on(successor_transport));
+        authority.close_transport(successor_transport);
+        assert!(!authority.may_deliver_on(successor_transport));
+    }
+
+    #[test]
+    fn poll_validates_current_authority_and_returns_authoritative_continuity() {
+        let now = UnixMillis::new(1_000_000);
+        let mut authority = AsyncReferenceAuthority::new(now);
+        let issued = authority
+            .authorize(ASYNC_REFERENCE_ORIGIN, &request(), now)
+            .expect("fresh authority");
+        let subscription = &issued["subscription"];
+        let credential = subscription["authorization"]["credential"]
+            .as_str()
+            .expect("credential");
+        let poll = AsyncReferencePollRequest {
+            descriptor_binding: subscription["descriptor_binding"]
+                .as_str()
+                .expect("binding")
+                .to_owned(),
+            position: AsyncReferencePosition {
+                epoch: "1".to_owned(),
+                sequence: "0".to_owned(),
+            },
+            subscription_id: "c3Vic2NyaXB0aW9uLTAwMQ".to_owned(),
+        };
+
+        let no_tail = authority
+            .poll(ASYNC_REFERENCE_ORIGIN, credential, &poll, now)
+            .expect("current poll");
+        assert_eq!(no_tail["proof"], "authoritative_no_tail");
+        assert_eq!(no_tail["envelopes"].as_array().expect("envelopes").len(), 0);
+
+        authority.next_heartbeat();
+        let replay = authority
+            .poll(ASYNC_REFERENCE_ORIGIN, credential, &poll, now)
+            .expect("replay poll");
+        assert_eq!(replay["proof"], "complete_replay");
+        assert_eq!(replay["envelopes"].as_array().expect("envelopes").len(), 1);
+
+        let mut forged_binding = poll.clone();
+        forged_binding.descriptor_binding = "forged".to_owned();
+        assert_eq!(
+            authority.poll(ASYNC_REFERENCE_ORIGIN, credential, &forged_binding, now),
+            Err("poll_authority_invalid")
+        );
+        let mut future = poll.clone();
+        future.position.sequence = "99".to_owned();
+        assert_eq!(
+            authority.poll(ASYNC_REFERENCE_ORIGIN, credential, &future, now),
+            Err("future_position_rejected")
+        );
+        assert_eq!(
+            authority.poll(ASYNC_REFERENCE_ORIGIN, "stale-credential", &poll, now),
+            Err("poll_authority_invalid")
+        );
+        assert_eq!(
+            authority.poll(
+                ASYNC_REFERENCE_ORIGIN,
+                credential,
+                &poll,
+                UnixMillis::new(1_061_000),
+            ),
+            Err("poll_authority_invalid")
+        );
     }
 }

@@ -51,6 +51,8 @@ export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverR
   readonly #lifecycle: DocumentLifecycle;
 
   constructor(context: RuntimeContext) {
+    const ledger = new ResourceLedgerImpl();
+    bindResourceLedger(this, ledger);
     this.#effects = new EffectRegistry({
       diagnostics: context.diagnostics,
       scheduler: context.ports.scheduler,
@@ -76,9 +78,8 @@ export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverR
       this.#calls,
       new IdiomorphAdapter(),
       context.stimulus,
+      ledger,
     );
-    const ledger = new ResourceLedgerImpl();
-    bindResourceLedger(this, ledger);
     ledger.add("extension", () => {
       this.#effects.dispose();
     });

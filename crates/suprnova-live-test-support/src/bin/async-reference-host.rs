@@ -16,7 +16,7 @@ use suprnova_live::async_updates::{SseEncoder, SseResponseContract};
 use suprnova_live::identity::UnixMillis;
 use suprnova_live_test_support::{
     ASYNC_REFERENCE_ORIGIN, AsyncReferenceAuthority, AsyncReferenceAuthorizationRequest,
-    AsyncReferenceMembershipRequest, AsyncReferenceScenario,
+    AsyncReferenceMembershipRequest, AsyncReferencePollRequest, AsyncReferenceScenario,
 };
 
 const ADDRESS: &str = "127.0.0.1:4174";
@@ -455,21 +455,20 @@ fn poll(
     request: &Request,
     state: &Mutex<HostState>,
 ) -> std::io::Result<()> {
-    if request_origin(request) != ASYNC_REFERENCE_ORIGIN || bearer(request).is_empty() {
-        return respond_error(stream, 403, "poll_authority_invalid");
-    }
+    let facts = match serde_json::from_slice::<AsyncReferencePollRequest>(&request.body) {
+        Ok(facts) => facts,
+        Err(_) => return respond_error(stream, 400, "poll_request_invalid"),
+    };
     let locked = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    respond_json(
-        stream,
-        200,
-        &json!({
-            "current_position": { "epoch": "1", "sequence": locked.authority.current_sequence().to_string() },
-            "envelopes": [],
-            "fallback": { "interval_ms": 30_000, "visibility": "visible" }
-        }),
-    )
+    match locked
+        .authority
+        .poll(request_origin(request), bearer(request), &facts, now())
+    {
+        Ok(value) => respond_json(stream, 200, &value),
+        Err(reason) => respond_error(stream, 403, reason),
+    }
 }
 
 fn live(
@@ -605,7 +604,7 @@ fn broadcast_gap(state: &Mutex<HostState>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sequence, encoded) = locked.authority.sequence_gap();
     locked.recovery_allowed = true;
-    broadcast(&mut locked.streams, sequence, &encoded);
+    broadcast_current(&mut locked, sequence, &encoded);
 }
 
 fn broadcast_next_heartbeat(state: &Mutex<HostState>) {
@@ -613,7 +612,7 @@ fn broadcast_next_heartbeat(state: &Mutex<HostState>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sequence, encoded) = locked.authority.next_heartbeat();
-    broadcast(&mut locked.streams, sequence, &encoded);
+    broadcast_current(&mut locked, sequence, &encoded);
 }
 
 fn broadcast_completion(state: &Mutex<HostState>) {
@@ -621,18 +620,28 @@ fn broadcast_completion(state: &Mutex<HostState>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sequence, encoded) = locked.authority.completion();
-    broadcast(&mut locked.streams, sequence, &encoded);
+    broadcast_current(&mut locked, sequence, &encoded);
 }
 
-fn broadcast(streams: &mut Vec<StreamRecord>, sequence: u64, encoded: &str) {
+fn broadcast_current(state: &mut HostState, sequence: u64, encoded: &str) {
+    broadcast(&state.authority, &mut state.streams, sequence, encoded);
+}
+
+fn broadcast(
+    authority: &AsyncReferenceAuthority,
+    streams: &mut Vec<StreamRecord>,
+    sequence: u64,
+    encoded: &str,
+) {
     streams.retain(|record| {
-        record
-            .sender
-            .send(StreamCommand::Envelope {
-                encoded: encoded.to_owned(),
-                sequence,
-            })
-            .is_ok()
+        !authority.may_deliver_on(record.id)
+            || record
+                .sender
+                .send(StreamCommand::Envelope {
+                    encoded: encoded.to_owned(),
+                    sequence,
+                })
+                .is_ok()
     });
 }
 
@@ -655,6 +664,9 @@ fn late_work(stream: &mut TcpStream, state: &Mutex<HostState>) -> std::io::Resul
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sequence = locked.authority.current_sequence().saturating_add(1);
     let encoded = AsyncReferenceScenario::lifecycle().heartbeat(sequence);
+    let record =
+        String::from_utf8(AsyncReferenceScenario::lifecycle().sse_record(sequence, &encoded))
+            .map_err(std::io::Error::other)?;
     let old_transport_attempted = locked.archived.iter().any(|sender| {
         let _ = sender.send(StreamCommand::Envelope {
             encoded: encoded.clone(),
@@ -662,14 +674,14 @@ fn late_work(stream: &mut TcpStream, state: &Mutex<HostState>) -> std::io::Resul
         });
         true
     });
-    locked.late_attempts = locked.late_attempts.saturating_add(3);
+    locked.late_attempts = locked.late_attempts.saturating_add(1);
     respond_json(
         stream,
         200,
         &json!({
-            "attempts": 3,
-            "kinds": ["old_transport_envelope", "old_membership_ack", "late_authorization_completion"],
-            "old_transport_attempted": old_transport_attempted
+            "old_transport_attempted": old_transport_attempted,
+            "record": record,
+            "sequence": sequence.to_string()
         }),
     )
 }
@@ -743,4 +755,55 @@ fn respond(
         .as_bytes(),
     )?;
     stream.write_all(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StreamRecord, broadcast};
+    use std::sync::mpsc;
+    use suprnova_live::identity::UnixMillis;
+    use suprnova_live_test_support::{
+        ASYNC_REFERENCE_ORIGIN, ASYNC_REFERENCE_PRINCIPAL, ASYNC_REFERENCE_SCOPE,
+        ASYNC_REFERENCE_SESSION, AsyncReferenceAuthority, AsyncReferenceAuthorizationRequest,
+    };
+
+    fn authorization_request() -> AsyncReferenceAuthorizationRequest {
+        AsyncReferenceAuthorizationRequest {
+            position: None,
+            prior_subscription_id: None,
+            principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
+            scope: ASYNC_REFERENCE_SCOPE.to_owned(),
+            session: ASYNC_REFERENCE_SESSION.to_owned(),
+            stream: "orders".to_owned(),
+        }
+    }
+
+    #[test]
+    fn broadcast_never_reaches_a_transport_before_authenticated_membership() {
+        let now = UnixMillis::new(1_000_000);
+        let mut authority = AsyncReferenceAuthority::new(now);
+        let issued = authority
+            .authorize(ASYNC_REFERENCE_ORIGIN, &authorization_request(), now)
+            .expect("authority");
+        let credential = issued["subscription"]["authorization"]["credential"]
+            .as_str()
+            .expect("credential");
+        let transport = authority
+            .open_transport(ASYNC_REFERENCE_ORIGIN, credential, 1, now)
+            .expect("transport");
+        let (sender, receiver) = mpsc::channel();
+        let mut streams = vec![StreamRecord {
+            id: transport,
+            sender,
+        }];
+        let (sequence, encoded) = authority.next_heartbeat();
+
+        broadcast(&authority, &mut streams, sequence, &encoded);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(streams.len(), 1);
+    }
 }

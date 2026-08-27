@@ -4,6 +4,7 @@ import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import { ISLAND_ROOT_SELECTOR } from "../islands/metadata.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
+import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
 import type { UploadHandleProposal, UploadHandleProposalDisposition } from "../uploads/types.js";
 import type {
   StimulusBootstrapOptions,
@@ -59,6 +60,7 @@ export interface RuntimeFeatureDirectiveOwnership {
 export interface RuntimeFeatureDocumentContext {
   diagnose(detail: RuntimeFeatureDiagnosticDetail): void;
   onDispose(dispose: () => void): void;
+  trackResource?(kind: CoreResourceKind, dispose: () => void): Disposable;
 }
 
 export interface RuntimeFeatureIslandPortBase {
@@ -452,6 +454,7 @@ function defineFeature(
       if (retired || connected || value === null || !("diagnose" in value)) return false;
       connected = true;
       const port = value;
+      const track = port.trackResource?.bind(port);
       const context: RuntimeFeatureDocumentContext = Object.freeze({
         diagnose: (detail: RuntimeFeatureDiagnosticDetail) => {
           port.diagnose(detail);
@@ -459,6 +462,12 @@ function defineFeature(
         onDispose: (dispose: VoidFunction) => {
           own(documentDisposers, dispose);
         },
+        ...(track === undefined
+          ? {}
+          : {
+              trackResource: (kind: CoreResourceKind, dispose: VoidFunction) =>
+                track.call(port, kind, dispose),
+            }),
       });
       let connectedDocument: NormalizedDocumentController;
       try {
@@ -762,11 +771,18 @@ export function createOptionalFeatureDriver(): OptionalFeatureDriver {
     const bit = 1 << entry[1];
     if (state !== 1 || (started & bit) !== 0 || documentPort === null) return;
     started |= bit;
+    const track = documentPort.trackResource?.bind(documentPort);
     const context: RuntimeFeatureDocumentContext = Object.freeze({
       diagnose: report,
       onDispose(dispose: VoidFunction) {
         if (typeof dispose !== "function") report("operation_rejected");
       },
+      ...(track === undefined
+        ? {}
+        : {
+            trackResource: (kind: CoreResourceKind, dispose: VoidFunction) =>
+              track.call(documentPort, kind, dispose),
+          }),
     });
     if (!run(entry, 0, context) || entries[entry[1]] !== entry) return;
     ready |= bit;

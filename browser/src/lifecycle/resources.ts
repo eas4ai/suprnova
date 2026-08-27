@@ -1,8 +1,12 @@
 export type CoreResourceKind =
+  | "authorization"
+  | "buffer"
   | "controller"
   | "extension"
   | "listener"
+  | "membership"
   | "observer"
+  | "queue"
   | "scheduler"
   | "signal"
   | "timer"
@@ -44,10 +48,14 @@ interface ResourceEntry {
 }
 
 const RESOURCE_KINDS = [
+  "authorization",
+  "buffer",
   "controller",
   "extension",
   "listener",
+  "membership",
   "observer",
+  "queue",
   "scheduler",
   "signal",
   "timer",
@@ -67,7 +75,7 @@ function invoke(callback: (() => void) | undefined): void {
 }
 
 export class ResourceLedgerImpl implements ResourceLedger {
-  readonly #entries: ResourceEntry[] = [];
+  readonly #entries = new Set<ResourceEntry>();
   readonly #maxResources: number;
   #state: LedgerState = "created";
 
@@ -85,15 +93,16 @@ export class ResourceLedgerImpl implements ResourceLedger {
 
   track(kind: CoreResourceKind, resource: LifecycleResource): Disposable {
     if (this.#state === "disposed") throw new Error("resource_ledger_disposed");
-    if (this.#entries.length >= this.#maxResources) throw new Error("resource_ledger_capacity");
+    if (this.#entries.size >= this.#maxResources) throw new Error("resource_ledger_capacity");
     const entry: ResourceEntry = { active: true, kind, resource };
-    this.#entries.push(entry);
+    this.#entries.add(entry);
     if (this.#state === "active") invoke(resource.resume);
     if (this.#state === "suspended") invoke(resource.suspend);
     return Object.freeze({
       dispose: () => {
         if (!entry.active) return;
         entry.active = false;
+        this.#entries.delete(entry);
         invoke(entry.resource.dispose);
       },
     });
@@ -101,9 +110,8 @@ export class ResourceLedgerImpl implements ResourceLedger {
 
   suspend(): void {
     if (this.#state !== "active") return;
-    for (let index = this.#entries.length - 1; index >= 0; index -= 1) {
-      const entry = this.#entries[index];
-      if (entry?.active === true) invoke(entry.resource.suspend);
+    for (const entry of [...this.#entries].reverse()) {
+      if (entry.active) invoke(entry.resource.suspend);
     }
     this.#state = "suspended";
   }
@@ -117,10 +125,10 @@ export class ResourceLedgerImpl implements ResourceLedger {
   dispose(): void {
     if (this.#state === "disposed") return;
     this.#state = "disposed";
-    for (let index = this.#entries.length - 1; index >= 0; index -= 1) {
-      const entry = this.#entries[index];
-      if (entry?.active !== true) continue;
+    for (const entry of [...this.#entries].reverse()) {
+      if (!entry.active) continue;
       entry.active = false;
+      this.#entries.delete(entry);
       invoke(entry.resource.dispose);
     }
   }

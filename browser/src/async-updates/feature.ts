@@ -9,10 +9,14 @@ import {
   sealValidatedAsyncDescriptor,
 } from "../features/contract.js";
 import { parseFeatureDirective } from "../features/directive-parser.js";
+import type { CoreResourceKind, Disposable } from "../lifecycle/resources.js";
 import {
   DocumentConnectionPool,
   OriginHandshakeScheduler,
   type AsyncTransportPorts,
+  type DocumentTransportConnectRequest,
+  type DocumentTransportCloseReason,
+  type DocumentTransportPort,
   type DocumentAuthorizationScheduler,
   type DocumentAuthorizationSource,
   type LogicalSubscriptionHandle,
@@ -151,10 +155,15 @@ function invokeAuthority(
 }
 
 class AuthorizationInvocationScheduler implements DocumentAuthorizationScheduler {
+  readonly #context: RuntimeFeatureDocumentContext;
   #active = 0;
   #next: DocumentAuthorizationSource = 0;
   #paused = false;
   readonly #queues: [VoidFunction[], VoidFunction[]] = [[], []];
+
+  constructor(context: RuntimeFeatureDocumentContext) {
+    this.#context = context;
+  }
 
   pause(): void {
     this.#paused = true;
@@ -184,10 +193,12 @@ class AuthorizationInvocationScheduler implements DocumentAuthorizationScheduler
     return new Promise((resolve, reject) => {
       let queued: typeof operation | null = operation;
       let queuedSignal: AbortSignal | null = signal;
+      const queuedResource = trackResource(this.#context, "queue", () => undefined);
       const abort = () => {
         queued = null;
         queuedSignal?.removeEventListener("abort", abort);
         queuedSignal = null;
+        queuedResource.dispose();
         reject(new Error("async_authorization_aborted"));
       };
       const start = () => {
@@ -196,6 +207,7 @@ class AuthorizationInvocationScheduler implements DocumentAuthorizationScheduler
         queuedSignal?.removeEventListener("abort", abort);
         const aborted = queuedSignal?.aborted === true;
         queuedSignal = null;
+        queuedResource.dispose();
         if (current === null) return;
         if (aborted) {
           reject(new Error("async_authorization_aborted"));
@@ -308,6 +320,167 @@ const browserPollEnvironment: PollEnvironment = Object.freeze({
     };
   },
 });
+
+function trackResource(
+  context: RuntimeFeatureDocumentContext,
+  kind: CoreResourceKind,
+  dispose: VoidFunction,
+): Disposable {
+  const tracked = context.trackResource?.(kind, dispose);
+  if (tracked !== undefined) return tracked;
+  let active = true;
+  return Object.freeze({
+    dispose: () => {
+      if (!active) return;
+      active = false;
+      dispose();
+    },
+  });
+}
+
+function trackedTimers(
+  context: RuntimeFeatureDocumentContext,
+  timers: AsyncTimerPort,
+): AsyncTimerPort {
+  const active = new Map<number, Disposable>();
+  return Object.freeze({
+    clearTimeout(handle: number) {
+      const resource = active.get(handle);
+      if (resource === undefined) {
+        timers.clearTimeout(handle);
+        return;
+      }
+      active.delete(handle);
+      resource.dispose();
+    },
+    timeout(callback: VoidFunction, milliseconds: number): number {
+      let handle = -1;
+      handle = timers.timeout(() => {
+        const resource = active.get(handle);
+        active.delete(handle);
+        resource?.dispose();
+        callback();
+      }, milliseconds);
+      const resource = trackResource(context, "timer", () => {
+        active.delete(handle);
+        timers.clearTimeout(handle);
+      });
+      active.set(handle, resource);
+      return handle;
+    },
+  });
+}
+
+function trackedPollEnvironment(
+  context: RuntimeFeatureDocumentContext,
+  environment: PollEnvironment,
+): PollEnvironment {
+  return Object.freeze({
+    isOnline: () => environment.isOnline(),
+    isVisible: () => environment.isVisible(),
+    subscribe(listener: VoidFunction): VoidFunction {
+      const dispose = environment.subscribe(listener);
+      const resource = trackResource(context, "listener", dispose);
+      return () => {
+        resource.dispose();
+      };
+    },
+  });
+}
+
+function trackedAuthority(
+  context: RuntimeFeatureDocumentContext,
+  authority: AsyncAuthorityPort,
+): AsyncAuthorityPort {
+  return Object.freeze({
+    authorize(request: AsyncAuthorizationRequest) {
+      const resource = trackResource(context, "authorization", () => undefined);
+      let pending: ReturnType<AsyncAuthorityPort["authorize"]>;
+      try {
+        pending = authority.authorize(request);
+      } catch (error: unknown) {
+        resource.dispose();
+        throw error;
+      }
+      if (pending instanceof Promise) {
+        void Promise.resolve(pending).then(
+          () => {
+            resource.dispose();
+          },
+          () => {
+            resource.dispose();
+          },
+        );
+        return pending;
+      }
+      resource.dispose();
+      return pending;
+    },
+  });
+}
+
+function trackedTransport(
+  context: RuntimeFeatureDocumentContext,
+  port: DocumentTransportPort,
+  transport: "sse" | "websocket",
+): DocumentTransportPort {
+  let closeReason: DocumentTransportCloseReason = "document_retired";
+  const transportResource = trackResource(context, "transport", () => {
+    port.close(closeReason);
+  });
+  const bufferResource =
+    transport === "sse" ? trackResource(context, "buffer", () => undefined) : null;
+  let closed = false;
+  return Object.freeze({
+    close(reason: DocumentTransportCloseReason) {
+      if (closed) return;
+      closed = true;
+      closeReason = reason;
+      bufferResource?.dispose();
+      transportResource.dispose();
+    },
+    subscribe(subscription: AuthorizedLogicalSubscription) {
+      const resource = trackResource(context, "membership", () => undefined);
+      let pending: ReturnType<DocumentTransportPort["subscribe"]>;
+      try {
+        pending = port.subscribe(subscription);
+      } catch (error: unknown) {
+        resource.dispose();
+        throw error;
+      }
+      if (pending instanceof Promise) {
+        void pending.then(
+          () => {
+            resource.dispose();
+          },
+          () => {
+            resource.dispose();
+          },
+        );
+        return pending;
+      }
+      resource.dispose();
+      return pending;
+    },
+    unsubscribe(subscriptionId: string) {
+      port.unsubscribe(subscriptionId);
+    },
+  });
+}
+
+function trackedTransports(
+  context: RuntimeFeatureDocumentContext,
+  transports: AsyncTransportPorts,
+): AsyncTransportPorts {
+  return Object.freeze({
+    eventSource(request: DocumentTransportConnectRequest) {
+      return trackedTransport(context, transports.eventSource(request), "sse");
+    },
+    webSocket(request: DocumentTransportConnectRequest) {
+      return trackedTransport(context, transports.webSocket(request), "websocket");
+    },
+  });
+}
 
 function report(
   context: RuntimeFeatureDocumentContext,
@@ -628,7 +801,7 @@ class AsyncIslandController implements FeatureIslandController {
       });
     } catch (error: unknown) {
       if (resume) this.#resumeCommittedFallback();
-      this.#projectStatus("degraded");
+      if (!this.#disposed()) this.#projectStatus("degraded");
       throw error;
     }
   }
@@ -768,6 +941,10 @@ class AsyncIslandController implements FeatureIslandController {
 
   #resuming(): boolean {
     return this.#state === "resuming";
+  }
+
+  #disposed(): boolean {
+    return this.#state === "disposed";
   }
 
   #install(
@@ -1291,7 +1468,7 @@ function freshnessObserver(
 }
 
 export class AsyncDocumentOwner {
-  readonly #authorizationScheduler = new AuthorizationInvocationScheduler();
+  readonly #authorizationScheduler: AuthorizationInvocationScheduler;
   readonly #context: RuntimeFeatureDocumentContext;
   readonly #controllers = new Set<AsyncIslandController>();
   readonly #pollControllers = new Set<PollingIslandController>();
@@ -1303,8 +1480,24 @@ export class AsyncDocumentOwner {
   constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
     if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
     this.#context = context;
-    this.#options = options;
-    const stream = streamOptions(options);
+    const timers = trackedTimers(context, options.timers);
+    const pollEnvironment = trackedPollEnvironment(
+      context,
+      options.pollEnvironment ?? browserPollEnvironment,
+    );
+    const authority =
+      options.authority === undefined ? undefined : trackedAuthority(context, options.authority);
+    const transports =
+      options.transports === undefined ? undefined : trackedTransports(context, options.transports);
+    this.#options = Object.freeze({
+      ...options,
+      ...(authority === undefined ? {} : { authority }),
+      pollEnvironment,
+      timers,
+      ...(transports === undefined ? {} : { transports }),
+    });
+    this.#authorizationScheduler = new AuthorizationInvocationScheduler(context);
+    const stream = streamOptions(this.#options);
     this.#pool =
       stream === null
         ? null
@@ -1312,7 +1505,7 @@ export class AsyncDocumentOwner {
             authorizationScheduler: this.#authorizationScheduler,
             handshakeScheduler: options.handshakeScheduler ?? new OriginHandshakeScheduler(),
             randomness: options.randomness,
-            timers: options.timers,
+            timers,
             transports: stream.transports,
           });
   }

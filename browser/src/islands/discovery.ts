@@ -14,6 +14,7 @@ import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../exte
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimePorts } from "../runtime/ports.js";
+import type { CoreResourceKind, ResourceLedger } from "../lifecycle/resources.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
 import { createFreshRenderIntent, createParamsChangedIntent } from "../scheduler/intent.js";
@@ -122,6 +123,7 @@ export class DocumentRuntime {
   readonly #transitions = new WeakMap<IslandRecord, TransitionLifecycle>();
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
+  readonly #resourceLedger: ResourceLedger | undefined;
   #featureDriver: InspectedRuntimeFeatureDriver | null = null;
   #featureDriverState: 0 | 1 | 2 = 0;
   #state: DocumentRuntimeState = "idle";
@@ -135,6 +137,7 @@ export class DocumentRuntime {
     calls: RuntimeCallRegistry,
     morph: MorphAdapter,
     stimulus?: StimulusBootstrapOptions,
+    resourceLedger?: ResourceLedger,
   ) {
     this.#document = document;
     this.#config = config;
@@ -160,9 +163,13 @@ export class DocumentRuntime {
       void this.#applyResponse(record, ticket);
     });
     this.#stimulus = stimulus;
+    this.#resourceLedger = resourceLedger;
     this.#lazy = new LazyCoordinator(ports.observers, ports.randomness);
     this.#observer = ports.observers.mutation((records) => {
       this.#mutations(records);
+    });
+    resourceLedger?.add("observer", () => {
+      this.#observer.disconnect();
     });
     this.#navigation = new NativeDocumentNavigation(document, ports);
   }
@@ -866,6 +873,18 @@ export class DocumentRuntime {
         );
       },
       stimulus: this.#stimulus,
+      trackResource: (kind: CoreResourceKind, dispose: VoidFunction) => {
+        const tracked = this.#resourceLedger?.add(kind, dispose);
+        if (tracked !== undefined) return tracked;
+        let active = true;
+        return Object.freeze({
+          dispose: () => {
+            if (!active) return;
+            active = false;
+            dispose();
+          },
+        });
+      },
     });
     if (!this.#invokeFeatureDriver(driver, 0, port)) return;
     // The optional callback can synchronously dispose this runtime; TypeScript cannot model that reentrant mutation.

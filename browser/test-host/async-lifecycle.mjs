@@ -4,7 +4,7 @@ import {
   BrowserAsyncTransportPorts,
   configureAsync,
 } from "http://127.0.0.1:4173/assets/suprnova-live.async.esm.js";
-import { boot } from "http://127.0.0.1:4173/assets/suprnova-live.esm.js";
+import { boot, lifecycleTestProbe } from "http://127.0.0.1:4173/assets/suprnova-live.esm.js";
 
 const rustOrigin = "http://127.0.0.1:4174";
 const identityFacts = Object.freeze({
@@ -35,12 +35,23 @@ const observations = {
   continuityProofs: 0,
   cspViolations: [],
   currentSignals: 0,
+  degradedSignals: 0,
+  effectCountsAtDegraded: [],
   lateMessages: 0,
+  lateCallbackAttempts: {
+    authorization: 0,
+    envelope: 0,
+    membershipAck: 0,
+  },
   liveActions: 0,
   liveRegionMutations: [],
   membershipControls: 0,
   pagehidePersisted: [],
   pageshowPersisted: [],
+  pendingLateCallbacks: {
+    authorizations: 0,
+    membershipAcks: 0,
+  },
   resources: {
     activeAuthorizations: 0,
     buffers: 0,
@@ -61,6 +72,22 @@ const observations = {
   },
   states: [],
 };
+
+const MAX_LATE_CALLBACKS = 8;
+const lateAuthorizationCallbacks = [];
+const lateEnvelopeCallbacks = [];
+const lateMembershipAckCallbacks = [];
+let holdNextAuthorization = false;
+let holdNextMembershipAck = false;
+
+function retainLateCallback(callbacks, callback) {
+  if (callbacks.length === MAX_LATE_CALLBACKS) callbacks.shift();
+  callbacks.push(callback);
+}
+
+function pushState(value) {
+  if (observations.states.at(-1) !== value) pushBounded(observations.states, value);
+}
 
 function pushBounded(values, value) {
   if (values.length === 64) values.shift();
@@ -88,11 +115,18 @@ const stateObserver = new MutationObserver((records) => {
     if (!(record.target instanceof HTMLElement)) continue;
     const previous = record.oldValue;
     const current = record.target.getAttribute("data-live-stream-state");
-    if (typeof previous === "string") pushBounded(observations.states, previous);
-    if (typeof current === "string") pushBounded(observations.states, current);
+    if (typeof previous === "string") pushState(previous);
+    if (typeof current === "string") pushState(current);
     if (current === "current" && previous !== "current") {
       observations.currentSignals += 1;
       observations.continuityProofs += 1;
+    }
+    if (current === "degraded" && previous !== "degraded") {
+      observations.degradedSignals += 1;
+      pushBounded(
+        observations.effectCountsAtDegraded,
+        document.querySelector("#async-effect-count")?.textContent ?? "missing",
+      );
     }
   }
 });
@@ -104,7 +138,7 @@ stateObserver.observe(document.documentElement, {
 });
 observations.resources.observers += 1;
 recordResourcePeak("observers");
-pushBounded(observations.states, currentRoot()?.getAttribute("data-live-stream-state") ?? "");
+pushState(currentRoot()?.getAttribute("data-live-stream-state") ?? "");
 
 const liveRegionObserver = new MutationObserver((records) => {
   for (const record of records) {
@@ -186,18 +220,37 @@ function trackedStreamResponse(response, close) {
   }
   const reader = response.body.getReader();
   let buffered = false;
+  let archived = false;
+  let inject = null;
+  const archive = () => {
+    if (archived || inject === null) return;
+    archived = true;
+    retainLateCallback(lateEnvelopeCallbacks, inject);
+  };
   const releaseBuffer = () => {
     if (!buffered) return;
     buffered = false;
     observations.resources.buffers = Math.max(0, observations.resources.buffers - 1);
   };
   const body = new ReadableStream({
+    start(controller) {
+      inject = (record) => {
+        observations.lateCallbackAttempts.envelope += 1;
+        observations.lateMessages += 1;
+        try {
+          controller.enqueue(new TextEncoder().encode(record));
+        } catch {
+          // A retired response body rejects the actual stale physical delivery attempt.
+        }
+      };
+    },
     async pull(controller) {
       releaseBuffer();
       try {
         const chunk = await reader.read();
         if (chunk.done) {
           releaseBuffer();
+          archive();
           close();
           controller.close();
         } else {
@@ -208,12 +261,14 @@ function trackedStreamResponse(response, close) {
         }
       } catch (error) {
         releaseBuffer();
+        archive();
         close();
         controller.error(error);
       }
     },
     async cancel(reason) {
       releaseBuffer();
+      archive();
       close();
       await reader.cancel(reason);
     },
@@ -344,7 +399,21 @@ async function authorize(request) {
       proof: value.proof,
       replay: value.replay.length,
     });
-    return authorizedSubscription(value);
+    const authorization = authorizedSubscription(value);
+    if (!holdNextAuthorization) return authorization;
+    holdNextAuthorization = false;
+    observations.pendingLateCallbacks.authorizations += 1;
+    return new Promise((resolve) => {
+      retainLateCallback(lateAuthorizationCallbacks, () => {
+        observations.pendingLateCallbacks.authorizations = Math.max(
+          0,
+          observations.pendingLateCallbacks.authorizations - 1,
+        );
+        observations.lateCallbackAttempts.authorization += 1;
+        observations.lateMessages += 1;
+        resolve(authorization);
+      });
+    });
   } catch (error) {
     observations.authorizationFailures += 1;
     throw error;
@@ -397,7 +466,20 @@ const transports = new BrowserAsyncTransportPorts({
           void control("current");
         });
       }
-      return acknowledgment;
+      if (!holdNextMembershipAck || request.operation !== "subscribe") return acknowledgment;
+      holdNextMembershipAck = false;
+      observations.pendingLateCallbacks.membershipAcks += 1;
+      return new Promise((resolve) => {
+        retainLateCallback(lateMembershipAckCallbacks, () => {
+          observations.pendingLateCallbacks.membershipAcks = Math.max(
+            0,
+            observations.pendingLateCallbacks.membershipAcks - 1,
+          );
+          observations.lateCallbackAttempts.membershipAck += 1;
+          observations.lateMessages += 1;
+          resolve(acknowledgment);
+        });
+      });
     } finally {
       queueFinish();
     }
@@ -431,7 +513,10 @@ async function control(name) {
 async function injectLate() {
   const response = await control("late");
   const result = await response.json();
-  observations.lateMessages += result.attempts;
+  if (typeof result.record !== "string") throw new Error("async_reference_late_record_invalid");
+  for (const callback of lateEnvelopeCallbacks.splice(0)) callback(result.record);
+  for (const callback of lateMembershipAckCallbacks.splice(0)) callback();
+  for (const callback of lateAuthorizationCallbacks.splice(0)) callback();
 }
 
 function onDocumentClick(event) {
@@ -446,9 +531,6 @@ function onDocumentClick(event) {
   }
   if (target.id === "remove-island") {
     currentRoot()?.remove();
-    timers.timeout(() => {
-      void injectLate();
-    }, 0);
   }
 }
 document.addEventListener("click", onDocumentClick);
@@ -464,11 +546,6 @@ recordResourcePeak("listeners");
 
 function onPageShow(event) {
   pushBounded(observations.pageshowPersisted, event.persisted === true);
-  if (event.persisted === true) {
-    timers.timeout(() => {
-      void injectLate();
-    }, 0);
-  }
 }
 window.addEventListener("pageshow", onPageShow);
 observations.resources.listeners += 1;
@@ -477,16 +554,28 @@ recordResourcePeak("listeners");
 async function shutdown() {
   runtime.stop();
   await new Promise((resolve) => window.setTimeout(resolve, 0));
-  await injectLate();
 }
 
 Reflect.set(
   window,
   "__suprnovaAsyncLifecycle",
   Object.freeze({
+    armLateAuthorization() {
+      holdNextAuthorization = true;
+    },
+    armLateMembershipAck() {
+      holdNextMembershipAck = true;
+    },
+    injectLate,
+    retirePush() {
+      return control("loss");
+    },
     shutdown,
     snapshot() {
-      return structuredClone(observations);
+      return structuredClone({
+        ...observations,
+        runtimeResources: lifecycleTestProbe(runtime).counts,
+      });
     },
   }),
 );

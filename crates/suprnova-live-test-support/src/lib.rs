@@ -17,8 +17,8 @@ pub use assertions::HarnessAssertions;
 pub use async_reference_host::{
     ASYNC_REFERENCE_ORIGIN, ASYNC_REFERENCE_PRINCIPAL, ASYNC_REFERENCE_SCOPE,
     ASYNC_REFERENCE_SESSION, AsyncReferenceAuthority, AsyncReferenceAuthorizationRequest,
-    AsyncReferenceFault, AsyncReferenceMembershipRequest, AsyncReferencePosition,
-    AsyncReferenceScenario,
+    AsyncReferenceFault, AsyncReferenceMembershipRequest, AsyncReferencePollRequest,
+    AsyncReferencePosition, AsyncReferenceScenario,
 };
 pub use context::SyntheticLiveRequestContextBuilder;
 pub use direct_provider::DirectProviderConformanceAdapter;

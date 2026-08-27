@@ -355,6 +355,25 @@ export interface RuntimeHandle {
   runEffect(owner: Element, invocation: EffectInvocation): Promise<EffectRunOutcome>;
   call(owner: Element, name: string, input: JsonValue): Promise<JsonValue>;
 }
+export interface RuntimeResourceCounts {
+  readonly authorization: number;
+  readonly buffer: number;
+  readonly controller: number;
+  readonly extension: number;
+  readonly listener: number;
+  readonly membership: number;
+  readonly observer: number;
+  readonly queue: number;
+  readonly scheduler: number;
+  readonly signal: number;
+  readonly timer: number;
+  readonly transition: number;
+  readonly transport: number;
+}
+export interface LifecycleTestProbe {
+  readonly counts: RuntimeResourceCounts;
+  readonly weak: Readonly<{ deref(): object | undefined }> | null;
+}
 export interface RuntimeClock { now(): number; }
 export interface RuntimeRandomness { randomBytes(length: number): Uint8Array; }
 export interface RuntimeConnectivity { isOnline(): boolean; }
@@ -456,6 +475,7 @@ export const runtimeContractVersion: 1;
 export const supportedProtocolVersions: readonly [1, 2];
 export const RUNTIME_SYMBOL: symbol;
 export function boot(options?: BootstrapOptions): RuntimeHandle;
+export function lifecycleTestProbe(owner: object): LifecycleTestProbe;
 const api: SuprnovaLivePublicApi;
 export default api;
 }
