@@ -214,9 +214,9 @@ describe("deterministic production assets", () => {
       `artifact_budget role=async-classic bytes=${String(classic)} ceiling=none baseline=${String(classicBaseline)} unreviewed_increase=${classicIncrease.toFixed(2)}% threshold=15%`,
     );
     expect(current.review).toMatchObject({
-      decision: "iteration-004-task-7-membership-budget-policy",
-      sourceCommit: "57eb8c260abe44f9aacd8c2cc03b1a54f3ceec61",
-      sourceDecision: "iteration-004-task-7-membership-budget-policy",
+      decision: "iteration-004-task-10-async-evidence-integrity",
+      sourceCommit: "6b2ccccbeb09b079c8ea19f3c26ae9f1b4b19f54",
+      sourceDecision: "iteration-004-task-10-async-evidence-integrity",
       sourceDecisionPath: "docs/specs/suprnova-live/19-developer-tooling-and-testing.md",
     });
     expect(
