@@ -24,6 +24,13 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 60_000,
     },
+    {
+      command:
+        "SUPRNOVA_LIVE_REFERENCE_PORT=4175 cargo run --manifest-path ../Cargo.toml -p suprnova-live-test-support --bin suprnova-live-reference-host",
+      url: "http://127.0.0.1:4175/suprnova-live.assets.json",
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
   ],
   projects: [
     {

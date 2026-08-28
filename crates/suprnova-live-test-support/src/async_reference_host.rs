@@ -173,6 +173,14 @@ pub struct AsyncReferenceMembershipRequest {
     pub transport_generation: u64,
 }
 
+/// Validated one-use membership authority pending an engine-side commit.
+pub(crate) struct PreparedAsyncReferenceMembership {
+    origin: String,
+    bearer: String,
+    request: AsyncReferenceMembershipRequest,
+    acknowledgment: Value,
+}
+
 /// Exact fallback-poll facts checked against the current Rust-issued authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -428,6 +436,51 @@ impl AsyncReferenceAuthority {
         request: &AsyncReferenceMembershipRequest,
         now: UnixMillis,
     ) -> Result<Value, &'static str> {
+        let prepared = self.prepare_membership(origin, bearer, request, now)?;
+        self.commit_membership(prepared, now)
+    }
+
+    /// Validates exact external authority without consuming its nonce or changing membership.
+    pub(crate) fn prepare_membership(
+        &self,
+        origin: &str,
+        bearer: &str,
+        request: &AsyncReferenceMembershipRequest,
+        now: UnixMillis,
+    ) -> Result<PreparedAsyncReferenceMembership, &'static str> {
+        let acknowledgment = self.validate_membership(origin, bearer, request, now)?;
+        Ok(PreparedAsyncReferenceMembership {
+            origin: origin.to_owned(),
+            bearer: bearer.to_owned(),
+            request: request.clone(),
+            acknowledgment,
+        })
+    }
+
+    /// Consumes a previously validated membership capability after engine commit succeeds.
+    pub(crate) fn commit_membership(
+        &mut self,
+        prepared: PreparedAsyncReferenceMembership,
+        now: UnixMillis,
+    ) -> Result<Value, &'static str> {
+        self.validate_membership(&prepared.origin, &prepared.bearer, &prepared.request, now)?;
+        let issued = self.issued.as_mut().ok_or("authority_missing")?;
+        issued.membership_open = prepared.request.operation == "subscribe";
+        issued.ever_opened = true;
+        issued.transport_generation = prepared.request.transport_generation;
+        issued
+            .used_control_nonces
+            .insert(prepared.request.control_nonce);
+        Ok(prepared.acknowledgment)
+    }
+
+    fn validate_membership(
+        &self,
+        origin: &str,
+        bearer: &str,
+        request: &AsyncReferenceMembershipRequest,
+        now: UnixMillis,
+    ) -> Result<Value, &'static str> {
         self.validate_common(origin, &request.session, &request.principal, &request.scope)?;
         let scenario = AsyncReferenceScenario::lifecycle();
         if (request.operation != "subscribe" && request.operation != "unsubscribe")
@@ -439,7 +492,7 @@ impl AsyncReferenceAuthority {
         {
             return Err("membership_facts_invalid");
         }
-        let issued = self.issued.as_mut().ok_or("authority_missing")?;
+        let issued = self.issued.as_ref().ok_or("authority_missing")?;
         if bearer != issued.credential
             || request.descriptor != issued.descriptor
             || request.descriptor_binding != issued.binding
@@ -462,12 +515,6 @@ impl AsyncReferenceAuthority {
         self.codec
             .verify(&descriptor, now)
             .map_err(|_| "descriptor_invalid")?;
-        issued.membership_open = request.operation == "subscribe";
-        issued.ever_opened = true;
-        issued.transport_generation = request.transport_generation;
-        issued
-            .used_control_nonces
-            .insert(request.control_nonce.clone());
         Ok(json!({
             "controlNonce": request.control_nonce,
             "descriptorBinding": issued.binding,

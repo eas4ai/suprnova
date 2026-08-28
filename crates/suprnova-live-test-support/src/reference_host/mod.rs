@@ -29,7 +29,7 @@ use suprnova_live::protocol::{
     parse_versioned_update_request,
 };
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -61,6 +61,8 @@ pub const TRANSPORT_MEMBERSHIP: &str =
 pub const SSE: &str = "/__live/async/sse/:transport";
 /// One physical document WebSocket route.
 pub const WEBSOCKET: &str = "/__live/async/ws";
+/// Physical-browser fresh-render conformance scenario.
+pub const FRESH_RENDER_SCENARIO: &str = "/scenario/referenceFreshRender";
 
 /// Static bearer used only by the closed reference host.
 pub const REFERENCE_AUTHORIZATION: &str = "Bearer task1-reference-session";
@@ -255,6 +257,7 @@ pub struct ReferenceHost {
     origin: String,
     state: Arc<HostState>,
     shutdown: Option<oneshot::Sender<()>>,
+    request_shutdown: watch::Sender<bool>,
     server: Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>,
 }
 
@@ -266,9 +269,11 @@ impl ReferenceHost {
             .await
             .map_err(|error| format!("quarantine root: {error}"))?;
         let inspection = InspectionState::default();
+        let (request_shutdown, request_shutdown_receiver) = watch::channel(false);
         let uploads = UploadRuntime::open(
             &config.quarantine_root,
             config.fault_schedule,
+            request_shutdown_receiver,
             Arc::clone(&inspection.resources.active_uploads),
         )
         .await?;
@@ -315,6 +320,7 @@ impl ReferenceHost {
             origin,
             state,
             shutdown: Some(shutdown),
+            request_shutdown,
             server: Mutex::new(Some(server)),
         })
     }
@@ -345,19 +351,45 @@ impl ReferenceHost {
         }
     }
 
+    /// Builds one exact request for the reference host's current engine-owned island.
+    pub async fn fresh_render_request(
+        &self,
+        correlation: &str,
+        seed: u8,
+    ) -> Result<String, String> {
+        self.state
+            .async_runtime
+            .fresh_render_request(correlation, seed)
+            .await
+            .map_err(str::to_owned)
+    }
+
     /// Retires owned services and waits for the listening socket to close.
     pub async fn shutdown(mut self) -> Result<(), String> {
         self.state.inspection.resources.retire();
-        self.state.uploads.retire().await;
-        self.state.async_runtime.retire().await;
+        let _ = self.request_shutdown.send(true);
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(server) = self.server.lock().await.take() {
-            server
-                .await
-                .map_err(|error| format!("reference host task: {error}"))?
-                .map_err(|error| format!("reference host server: {error}"))?;
+        self.state.uploads.retire().await;
+        self.state.async_runtime.retire().await;
+        if let Some(mut server) = self.server.lock().await.take() {
+            match tokio::time::timeout(Duration::from_secs(1), &mut server).await {
+                Ok(result) => result
+                    .map_err(|error| format!("reference host task: {error}"))?
+                    .map_err(|error| format!("reference host server: {error}"))?,
+                Err(_) => {
+                    server.abort();
+                    match server.await {
+                        Err(error) if error.is_cancelled() => {}
+                        Err(error) => return Err(format!("reference host task: {error}")),
+                        Ok(Err(error)) => {
+                            return Err(format!("reference host server: {error}"));
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -377,6 +409,7 @@ fn router(state: Arc<HostState>) -> Router {
         .route(TRANSPORT_MEMBERSHIP, post(transport_membership))
         .route(SSE, get(sse))
         .route(WEBSOCKET, get(websocket))
+        .route(FRESH_RENDER_SCENARIO, get(fresh_render_scenario))
         .fallback(get(static_asset).head(static_asset))
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -573,20 +606,27 @@ async fn poll(
     debug_assert!(parsed.operations()[0].is_recovery_without_replay());
     match state
         .async_runtime
-        .poll(PollRequest {
-            subscription: subscription.to_owned(),
-            authority: authority.to_owned(),
-        })
+        .poll(
+            PollRequest {
+                subscription: subscription.to_owned(),
+                authority: authority.to_owned(),
+            },
+            body,
+        )
         .await
     {
-        Ok(value) => {
-            let mut response = (StatusCode::OK, Json(value)).into_response();
-            response
-                .headers_mut()
-                .insert("x-live-operation", HeaderValue::from_static("fresh-render"));
-            response
-                .headers_mut()
-                .insert("x-live-action-executed", HeaderValue::from_static("false"));
+        Ok(live) => {
+            let mut response = Response::new(Body::from(live.body));
+            *response.status_mut() = live.status;
+            *response.headers_mut() = live.headers;
+            if response.status() == StatusCode::OK {
+                response
+                    .headers_mut()
+                    .insert("x-live-operation", HeaderValue::from_static("fresh-render"));
+                response
+                    .headers_mut()
+                    .insert("x-live-action-executed", HeaderValue::from_static("false"));
+            }
             response
         }
         Err(code) => error(StatusCode::UNAUTHORIZED, code),
@@ -757,6 +797,59 @@ async fn static_asset(State(state): State<Arc<HostState>>, uri: Uri) -> Response
         &asset.content_type,
         &asset.cache_control,
     )
+}
+
+async fn fresh_render_scenario(State(state): State<Arc<HostState>>) -> Response {
+    let island = state.async_runtime.fresh_render_document().await;
+    let body = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Reference fresh render</title></head>
+<body>
+<script id="suprnova-live-config" type="application/json">{{"asset_identity":"reference-host","credentials":"same-origin","endpoint":"/__live/async/poll","max_parallel_per_island":1,"max_queued_per_island":8,"max_response_bytes":65536,"protocol":{{"maximum":2,"minimum":2}},"request_timeout_ms":5000,"runtime_contract_version":1}}</script>
+{island}
+<script type="module">
+import {{ configureAsync }} from "/suprnova-live.async.esm.js";
+import {{ boot }} from "/suprnova-live.esm.js";
+const issued = await fetch("/__live/async/transports", {{
+  body: JSON.stringify({{ kind: "sse", subscription: "orders" }}),
+  headers: {{ "Authorization": "{REFERENCE_AUTHORIZATION}", "Content-Type": "application/json" }},
+  method: "POST"
+}}).then((response) => response.json());
+const membership = issued.memberships[0];
+const evidence = {{ acceptedRevision: null, requests: 0 }};
+Object.defineProperty(window, "__suprnovaFreshRender", {{ value: evidence }});
+configureAsync({{
+  clock: {{ now: () => Date.now() }},
+  randomness: {{ number: () => 0.5 }},
+  timers: {{
+    clearTimeout: (handle) => window.clearTimeout(handle),
+    timeout: (callback, milliseconds) => window.setTimeout(callback, milliseconds)
+  }}
+}});
+boot({{
+  diagnostics: "verbose",
+  transport: {{
+    async fetch(input, init) {{
+      const headers = new Headers(init?.headers);
+      headers.set("Authorization", "{REFERENCE_AUTHORIZATION}");
+      headers.set("X-Live-Subscription", membership.subscription);
+      headers.set("X-Live-Subscription-Authority", membership.authority);
+      evidence.requests += 1;
+      const response = await window.fetch(input, {{ ...init, headers }});
+      if (response.ok) {{
+        const value = await response.clone().json();
+        evidence.acceptedRevision = value.accepted_revision;
+      }}
+      return response;
+    }}
+  }}
+}});
+</script>
+</body>
+</html>"#
+    );
+    exact_bytes(body.into_bytes(), "text/html; charset=utf-8", "no-store")
 }
 
 fn exact_bytes(bytes: Vec<u8>, content_type: &str, cache_control: &str) -> Response {

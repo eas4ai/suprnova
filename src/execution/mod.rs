@@ -9,7 +9,7 @@ pub use recovery::RetryLegality;
 pub use service::{
     AcceptedExecution, AcceptedExecutionReport, AcceptedOutcomeReporter, ActionExecutionRequest,
     ExecutionRefreshReason, ExecutionResult, ExecutionService, InstancedActionRequest,
-    PromotedActionRequest, RefreshRequiredExecution,
+    InstancedFreshRenderRequest, PromotedActionRequest, RefreshRequiredExecution,
 };
 pub(crate) use trace::record;
 pub use trace::{ExecutionPhase, ExecutionTracePort, NoopExecutionTrace};

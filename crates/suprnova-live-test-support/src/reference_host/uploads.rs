@@ -35,7 +35,7 @@ use suprnova_live::upload::{
     UploadTransitionRequest, VerifyTransfer, WriteChunk,
 };
 use suprnova_live::validation::ValidationSelection;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::{
     ControlledUploadAuthorization, DirectProviderConformanceAdapter, MemoryUploadLedger,
@@ -94,6 +94,8 @@ pub(super) struct UploadRuntime {
     service_calls: AtomicUsize,
     fault: ReferenceFaultSchedule,
     fault_applied: AtomicBool,
+    retired: AtomicBool,
+    shutdown: watch::Receiver<bool>,
     active_uploads: Arc<ResourceCounter>,
 }
 
@@ -101,6 +103,7 @@ impl UploadRuntime {
     pub(super) async fn open(
         root: &std::path::Path,
         fault: ReferenceFaultSchedule,
+        shutdown: watch::Receiver<bool>,
         active_uploads: Arc<ResourceCounter>,
     ) -> Result<Self, String> {
         let limits = UploadLimits::new(UploadLimitConfig::reference())
@@ -145,6 +148,8 @@ impl UploadRuntime {
             service_calls: AtomicUsize::new(0),
             fault,
             fault_applied: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
+            shutdown,
             active_uploads,
         })
     }
@@ -230,7 +235,11 @@ impl UploadRuntime {
                     "reference": instruction.reference().as_str(),
                 })
             });
-        self.uploads.lock().await.insert(
+        let mut uploads = self.uploads.lock().await;
+        if self.retired.load(Ordering::Acquire) {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        uploads.insert(
             encoded.clone(),
             StoredUpload {
                 handle,
@@ -268,10 +277,24 @@ impl UploadRuntime {
         body: Body,
     ) -> Result<Value, UploadError> {
         self.record_call();
-        let mut uploads = self.uploads.lock().await;
-        let upload = uploads
-            .get_mut(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let mut upload = self.take_upload(handle).await?;
+        let result = self
+            .write_chunk_inner(&mut upload, part, grant, checksum, content_length, body)
+            .await;
+        let response = result.map(|()| status_json(&upload));
+        self.restore_upload(handle, upload).await;
+        response
+    }
+
+    async fn write_chunk_inner(
+        &self,
+        upload: &mut StoredUpload,
+        part: u32,
+        grant: &str,
+        checksum: &str,
+        content_length: Option<u64>,
+        body: Body,
+    ) -> Result<(), UploadError> {
         require_grant(upload, grant)?;
         if upload.mode != TransferMode::File
             || upload.state.is_terminal()
@@ -296,8 +319,12 @@ impl UploadRuntime {
         let checksum = UploadChecksum::parse(checksum)?;
         let interrupt_after_first = self.fault == ReferenceFaultSchedule::UploadBodyInterruptedOnce
             && !self.fault_applied.swap(true, Ordering::SeqCst);
-        let mut chunks =
-            AxumChunkBody::new(body, upload.whole_hasher.clone(), interrupt_after_first);
+        let mut chunks = AxumChunkBody::new(
+            body,
+            upload.whole_hasher.clone(),
+            interrupt_after_first,
+            self.shutdown.clone(),
+        );
         let receipt = self
             .file
             .write_chunk(
@@ -321,16 +348,14 @@ impl UploadRuntime {
             &format!("put-{part}"),
         )
         .await?;
-        Ok(status_json(upload))
+        Ok(())
     }
 
     pub(super) async fn status(&self, handle: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let uploads = self.uploads.lock().await;
-        let upload = uploads
-            .get(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
-        self.service
+        let upload = self.take_upload(handle).await?;
+        let result = self
+            .service
             .status(
                 &self.context,
                 upload.grant.clone(),
@@ -338,8 +363,10 @@ impl UploadRuntime {
                 upload.handle.clone(),
                 CREATED_AT,
             )
-            .await?;
-        Ok(status_json(upload))
+            .await
+            .map(|_| status_json(&upload));
+        self.restore_upload(handle, upload).await;
+        result
     }
 
     pub(super) async fn complete(
@@ -348,11 +375,19 @@ impl UploadRuntime {
         request: CompleteUploadRequest,
     ) -> Result<Value, UploadError> {
         self.record_call();
-        let mut uploads = self.uploads.lock().await;
-        let upload = uploads
-            .get_mut(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
-        require_grant(upload, &request.grant)?;
+        let mut upload = self.take_upload(handle).await?;
+        let result = self.complete_inner(&mut upload, &request.grant).await;
+        let response = result.map(|()| status_json(&upload));
+        self.restore_upload(handle, upload).await;
+        response
+    }
+
+    async fn complete_inner(
+        &self,
+        upload: &mut StoredUpload,
+        grant: &str,
+    ) -> Result<(), UploadError> {
+        require_grant(upload, grant)?;
         if upload.mode != TransferMode::File
             || upload.received_bytes != upload.expected_bytes
             || upload.state != UploadState::Transferring
@@ -368,15 +403,19 @@ impl UploadRuntime {
         self.transition(upload, UploadTransition::Accept, "accept")
             .await?;
         drop(upload.active_lease.take());
-        Ok(status_json(upload))
+        Ok(())
     }
 
     pub(super) async fn cancel(&self, handle: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let mut uploads = self.uploads.lock().await;
-        let upload = uploads
-            .get_mut(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let mut upload = self.take_upload(handle).await?;
+        let result = self.cancel_inner(&mut upload).await;
+        let response = result.map(|()| status_json(&upload));
+        self.restore_upload(handle, upload).await;
+        response
+    }
+
+    async fn cancel_inner(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
         match upload.mode {
             TransferMode::File => self.file.cancel(&upload.handle).await?,
             TransferMode::Direct => self.direct.cancel(&upload.handle).await?,
@@ -384,15 +423,18 @@ impl UploadRuntime {
         self.transition(upload, UploadTransition::Cancel, "cancel")
             .await?;
         drop(upload.active_lease.take());
-        Ok(status_json(upload))
+        Ok(())
     }
 
     pub(super) async fn reacquire(&self, handle: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let mut uploads = self.uploads.lock().await;
-        let upload = uploads
-            .get_mut(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let mut upload = self.take_upload(handle).await?;
+        let result = self.reacquire_inner(&mut upload).await;
+        self.restore_upload(handle, upload).await;
+        result
+    }
+
+    async fn reacquire_inner(&self, upload: &mut StoredUpload) -> Result<Value, UploadError> {
         let current = self
             .service
             .status(
@@ -431,12 +473,30 @@ impl UploadRuntime {
     }
 
     pub(super) async fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
         self.file.retire();
         self.uploads.lock().await.clear();
     }
 
     fn record_call(&self) {
         self.service_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn take_upload(&self, handle: &str) -> Result<StoredUpload, UploadError> {
+        let mut uploads = self.uploads.lock().await;
+        if self.retired.load(Ordering::Acquire) {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        uploads
+            .remove(handle)
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))
+    }
+
+    async fn restore_upload(&self, handle: &str, upload: StoredUpload) {
+        let mut uploads = self.uploads.lock().await;
+        if !self.retired.load(Ordering::Acquire) {
+            uploads.insert(handle.to_owned(), upload);
+        }
     }
 
     async fn transition(
@@ -632,15 +692,22 @@ struct AxumChunkBody {
     hasher: Sha256,
     interrupt_after_first: bool,
     yielded_chunks: usize,
+    shutdown: watch::Receiver<bool>,
 }
 
 impl AxumChunkBody {
-    fn new(body: Body, hasher: Sha256, interrupt_after_first: bool) -> Self {
+    fn new(
+        body: Body,
+        hasher: Sha256,
+        interrupt_after_first: bool,
+        shutdown: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             body,
             hasher,
             interrupt_after_first,
             yielded_chunks: 0,
+            shutdown,
         }
     }
 
@@ -658,7 +725,21 @@ impl ChunkBody for AxumChunkBody {
             if self.interrupt_after_first && self.yielded_chunks > 0 {
                 return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
             }
-            while let Some(frame) = self.body.frame().await {
+            if *self.shutdown.borrow() {
+                return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
+            }
+            loop {
+                let frame = tokio::select! {
+                    biased;
+                    changed = self.shutdown.changed() => {
+                        let _ = changed;
+                        return Err(UploadError::new(UploadErrorKind::BodyInterrupted));
+                    }
+                    frame = self.body.frame() => frame,
+                };
+                let Some(frame) = frame else {
+                    return Ok(None);
+                };
                 let frame =
                     frame.map_err(|_| UploadError::new(UploadErrorKind::BodyInterrupted))?;
                 if let Ok(data) = frame.into_data() {
@@ -673,7 +754,6 @@ impl ChunkBody for AxumChunkBody {
                     return Ok(Some(QuarantineBytes::copy_from_slice(&data)));
                 }
             }
-            Ok(None)
         })
     }
 }

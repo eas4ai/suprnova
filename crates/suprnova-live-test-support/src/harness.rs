@@ -10,6 +10,7 @@ use suprnova_live::clock::Clock as _;
 use suprnova_live::crypto::{SnapshotKeyRing, SnapshotPurpose};
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionResult, ExecutionService, InstancedActionRequest,
+    InstancedFreshRenderRequest,
 };
 use suprnova_live::host::TrustedLiveRequestContext;
 use suprnova_live::identity::{
@@ -397,6 +398,53 @@ impl ComponentHarness {
                 idempotency,
                 digest,
                 request,
+            ))
+            .await;
+        if let ExecutionResult::Accepted(accepted) = &result {
+            let now = self
+                .services
+                .clock()
+                .now()
+                .map_err(|_| HarnessError::new(HarnessErrorKind::ClockUnavailable))?;
+            let encoded = accepted.signed_snapshot().to_vec();
+            let verified = verify_instance(
+                &encoded,
+                &self.expected_instance,
+                &self.keys,
+                now,
+                &self.snapshot_limits,
+            )
+            .map_err(|_| HarnessError::new(HarnessErrorKind::SnapshotRejected))?;
+            self.current = Some(verified);
+            self.current_encoded = Some(encoded);
+        }
+        Ok(result)
+    }
+
+    /// Executes one recovery render against the harness's current verified island authority.
+    pub async fn execute_fresh_render(
+        &mut self,
+        idempotency: IdempotencyKey,
+        digest: ContentDigest,
+    ) -> Result<ExecutionResult, HarnessError> {
+        let snapshot = self
+            .current
+            .as_ref()
+            .ok_or_else(|| HarnessError::new(HarnessErrorKind::NotMounted))?;
+        let document_key = DocumentMountKey::parse("harness-root")
+            .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
+        let browser = BrowserRenderContext::checked("harness-root", &document_key)
+            .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
+        let result = self
+            .execution_service
+            .execute_fresh_render(InstancedFreshRenderRequest::new(
+                &self.descriptor,
+                &self.context,
+                browser,
+                snapshot,
+                idempotency,
+                digest,
+                self.services.trace(),
             ))
             .await;
         if let ExecutionResult::Accepted(accepted) = &result {

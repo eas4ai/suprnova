@@ -107,6 +107,17 @@ pub struct InstancedActionRequest<'a> {
     action: ActionExecutionRequest<'a>,
 }
 
+/// Fully verified authority and semantic request for one instanced recovery render.
+pub struct InstancedFreshRenderRequest<'a> {
+    descriptor: &'a ComponentDescriptor,
+    context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
+    snapshot: &'a VerifiedInstanceV1,
+    idempotency_key: IdempotencyKey,
+    request_digest: ContentDigest,
+    trace: &'a dyn ExecutionTracePort,
+}
+
 /// Promoted public-seed authority and first semantic operation.
 pub struct PromotedActionRequest<'a> {
     descriptor: &'a ComponentDescriptor,
@@ -162,6 +173,30 @@ impl<'a> InstancedActionRequest<'a> {
             idempotency_key,
             request_digest,
             action,
+        }
+    }
+}
+
+impl<'a> InstancedFreshRenderRequest<'a> {
+    /// Binds verified snapshot authority to one recovery render without action replay.
+    #[must_use]
+    pub fn new(
+        descriptor: &'a ComponentDescriptor,
+        context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
+        snapshot: &'a VerifiedInstanceV1,
+        idempotency_key: IdempotencyKey,
+        request_digest: ContentDigest,
+        trace: &'a dyn ExecutionTracePort,
+    ) -> Self {
+        Self {
+            descriptor,
+            context,
+            browser,
+            snapshot,
+            idempotency_key,
+            request_digest,
+            trace,
         }
     }
 }
@@ -453,6 +488,69 @@ impl ExecutionService {
             request.context.mount().expected_seed().schemas(),
             output,
             None,
+        )
+        .await
+    }
+
+    /// Reconstructs and renders one existing island under exact Tier 0 revision ordering.
+    pub async fn execute_fresh_render(
+        &self,
+        request: InstancedFreshRenderRequest<'_>,
+    ) -> ExecutionResult {
+        let body = request.snapshot.body();
+        let claimed = match self
+            .claim(
+                body.scope(),
+                body.instance_id(),
+                body.revision(),
+                request.idempotency_key,
+                request.request_digest,
+                request.trace,
+            )
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(result) => return result,
+        };
+        let render_context = RenderContext::new(
+            request.context,
+            body.instance_id(),
+            claimed.successor_revision,
+            body.expires_at(),
+        )
+        .with_browser_context(&request.browser);
+        let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
+        let output = match ComponentExecutor::new()
+            .reconstruct(request.descriptor, &hydration)
+            .await
+        {
+            Ok(output) => ActionExecutionOutput::fresh_render(output),
+            Err(_) => {
+                self.consume_failed_claim(claimed.token).await;
+                return refresh(ExecutionRefreshReason::ExecutionFailed);
+            }
+        };
+        self.accept_output(
+            request.descriptor,
+            request.trace,
+            claimed,
+            SnapshotAuthority {
+                component: body.component().clone(),
+                build_id: body.build_id().clone(),
+                route: body.route().clone(),
+                slot: body.slot().clone(),
+                scope: body.scope().clone(),
+                instance_id: body.instance_id().clone(),
+                expires_at: body.expires_at(),
+                extensions: body.extensions().clone(),
+            },
+            SuccessorPresentation {
+                document_key: request.browser.document_key().as_str().to_owned(),
+                protocol_minimum: request.context.mount().minimum_protocol(),
+            },
+            request.context.mount().expected_seed().schemas(),
+            output,
+            Some(AcceptedOutcomeKind::Recovery),
         )
         .await
     }

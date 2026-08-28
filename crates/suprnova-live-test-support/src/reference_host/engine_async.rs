@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use axum::body::Bytes;
+use axum::http::Method;
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use suprnova_live::async_updates::{
     AsyncEnvelope, AsyncEventSession, AsyncEventSource, AsyncMembershipRegistryPort,
     AsyncMembershipRequest, AsyncMembershipValidation, AsyncTransportAuthorityPort,
@@ -33,6 +36,13 @@ use suprnova_live::component::{
     LiveFuture, MountContext, RenderContext,
 };
 use suprnova_live::crypto::{KeyRecord, RootKey, SnapshotKeyRing};
+use suprnova_live::endpoint::{
+    EndpointDispatch, EndpointFuture, EndpointKernel, EndpointKernelError, EndpointOutcomeKind,
+    LIVE_MEDIA_TYPE_V2, LiveEndpointConfig, LiveEndpointRequest, LiveEndpointResponse,
+    LiveEndpointService, ParsedLiveMediaType, RequestCachePolicy, VerifiedEndpointRequest,
+    VerifiedEndpointSnapshot,
+};
+use suprnova_live::execution::ExecutionResult;
 use suprnova_live::host::{
     CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts, HostScopeFacts,
     LiveRequestContextCandidate, LiveRequestContextValidator, MountCatalogBuilder,
@@ -47,12 +57,17 @@ use suprnova_live::limits::InputLimits;
 use suprnova_live::metadata::{
     ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
 };
+use suprnova_live::protocol::{
+    OperationV2, ProtocolLimitConfig, ProtocolLimits, SemanticIdempotencyInputV1, SnapshotInput,
+    VersionedUpdateRequest, semantic_idempotency_digest_v1,
+};
 use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
 use suprnova_live::snapshot::state::{SnapshotSchemaSet, StateSchema};
 use suprnova_live::snapshot::{
     ComponentContract, ExpectedInstanceV1, ExpectedSeedV1, SnapshotLimits,
 };
 use suprnova_live::view::{AssetSet, IslandRender};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{ComponentHarness, ComponentHarnessConfig, HarnessServices};
 
@@ -69,37 +84,25 @@ impl EventPayloadMetadata for OrdersUpdated {
     const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
 }
 
-struct FreshRenderFactory {
-    generation: u64,
-}
+struct FreshRenderFactory;
 
 impl ComponentFactory for FreshRenderFactory {
     fn mount<'a>(
         &'a self,
         _context: &'a MountContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async move {
-            Ok(Box::new(FreshRenderComponent {
-                generation: self.generation,
-            }) as Box<dyn ComponentInstance>)
-        })
+        Box::pin(async move { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
     }
 
     fn hydrate<'a>(
         &'a self,
         _context: &'a HydrationContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async move {
-            Ok(Box::new(FreshRenderComponent {
-                generation: self.generation,
-            }) as Box<dyn ComponentInstance>)
-        })
+        Box::pin(async move { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
     }
 }
 
-struct FreshRenderComponent {
-    generation: u64,
-}
+struct FreshRenderComponent;
 
 impl ComponentInstance for FreshRenderComponent {
     fn metadata(&self) -> &'static ComponentMetadata {
@@ -108,13 +111,13 @@ impl ComponentInstance for FreshRenderComponent {
 
     fn render<'a>(
         &'a self,
-        _context: &'a RenderContext<'a>,
+        context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<IslandRender, ComponentError>> {
         Box::pin(async move {
             Ok(IslandRender {
                 body: Bytes::from(format!(
                     "<section data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></section>",
-                    self.generation
+                    context.revision().get()
                 )),
                 assets: AssetSet::empty(),
                 children: Vec::new(),
@@ -206,6 +209,221 @@ struct EngineMembershipRegistry {
     modes: SubscriptionModes,
     authorization_memo: suprnova_live::async_updates::AuthorizationMemo,
     document_scope: DocumentAuthorizationScope,
+}
+
+struct FreshRenderKernel {
+    harness: Arc<AsyncMutex<ComponentHarness>>,
+}
+
+impl EndpointKernel for FreshRenderKernel {
+    fn dispatch<'request>(
+        &'request self,
+        request: VerifiedEndpointRequest<'request>,
+    ) -> EndpointFuture<'request> {
+        Box::pin(async move {
+            let VersionedUpdateRequest::V2(parsed) = request.request() else {
+                return Ok(EndpointDispatch::new(
+                    EndpointOutcomeKind::Concealed,
+                    Bytes::new(),
+                ));
+            };
+            if parsed.operations() != [OperationV2::FreshRender] {
+                return Ok(EndpointDispatch::new(
+                    EndpointOutcomeKind::Concealed,
+                    Bytes::new(),
+                ));
+            }
+            let (
+                VerifiedEndpointSnapshot::Instance(verified),
+                SnapshotInput::Instance { envelope },
+            ) = (request.snapshot(), parsed.snapshot())
+            else {
+                return Ok(EndpointDispatch::new(
+                    EndpointOutcomeKind::Concealed,
+                    Bytes::new(),
+                ));
+            };
+            let mut harness = self.harness.lock().await;
+            if harness.current_encoded_snapshot() != Some(envelope.as_slice()) {
+                return Ok(EndpointDispatch::new(
+                    EndpointOutcomeKind::Concealed,
+                    Bytes::new(),
+                ));
+            }
+            let authority = ContentDigest::from_bytes(&Sha256::digest(envelope))
+                .map_err(|_| EndpointKernelError::unavailable())?;
+            let digest = semantic_idempotency_digest_v1(&SemanticIdempotencyInputV1::new(
+                request.context().scope().clone(),
+                verified.body().instance_id().clone(),
+                request.context().mount().contract_digest().clone(),
+                authority,
+                request.request(),
+            ))
+            .map_err(|_| EndpointKernelError::unavailable())?;
+            let result = harness
+                .execute_fresh_render(parsed.idempotency_key().clone(), digest)
+                .await
+                .map_err(|_| EndpointKernelError::unavailable())?;
+            let ExecutionResult::Accepted(accepted) = result else {
+                return Ok(EndpointDispatch::new(
+                    EndpointOutcomeKind::Concealed,
+                    Bytes::new(),
+                ));
+            };
+            let snapshot: Value = serde_json::from_slice(accepted.signed_snapshot())
+                .map_err(|_| EndpointKernelError::unavailable())?;
+            let render = accepted
+                .render()
+                .ok_or_else(EndpointKernelError::unavailable)?;
+            let html = String::from_utf8(render.body.to_vec())
+                .map_err(|_| EndpointKernelError::unavailable())?;
+            let response = serde_json::to_vec(&json!({
+                "accepted_revision": accepted.revision().get().to_string(),
+                "child_deliveries": [],
+                "correlation_id": parsed.correlation_id().to_base64url(),
+                "effects": [],
+                "events": [],
+                "extensions": {},
+                "outcome": "accepted",
+                "protocol_version": 2,
+                "render": { "html": html, "kind": "html" },
+                "snapshot": snapshot,
+                "url_intent": null,
+                "validation": {},
+            }))
+            .map_err(|_| EndpointKernelError::unavailable())?;
+            Ok(EndpointDispatch::new(
+                EndpointOutcomeKind::Accepted,
+                Bytes::from(response),
+            ))
+        })
+    }
+}
+
+pub(super) struct ReferenceFreshRender {
+    endpoint: LiveEndpointService,
+    harness: Arc<AsyncMutex<ComponentHarness>>,
+    initial_html: String,
+    ports: Arc<EngineSubscriptionPorts>,
+}
+
+impl ReferenceFreshRender {
+    async fn new(ports: Arc<EngineSubscriptionPorts>) -> Result<Self, String> {
+        let metadata = engine_metadata().clone();
+        let (context, _) = engine_context(metadata.clone(), ports.clone())?;
+        let descriptor = ComponentDescriptor::with_hooks(
+            metadata.clone(),
+            ComponentHooks::new(Arc::new(FreshRenderFactory)),
+        );
+        let expected = ExpectedInstanceV1::new(
+            ComponentContract::new(
+                metadata.identity().clone(),
+                descriptor.contract_digest().clone(),
+                1,
+                1,
+                1,
+            )
+            .map_err(|_| "fresh render contract")?,
+            BuildId::parse("build-reference-host").map_err(|_| "fresh render build")?,
+            RouteIdentity::from_bytes(&[0x74; 32]).map_err(|_| "fresh render route")?,
+            IslandSlot::parse("reference-uploads").map_err(|_| "fresh render slot")?,
+            context.scope().clone(),
+            engine_schemas()?,
+        );
+        let snapshot_limits = reference_snapshot_limits()?;
+        let services = HarnessServices::new(ENGINE_NOW);
+        let clock = Arc::clone(services.clock());
+        let mut harness = ComponentHarness::new(ComponentHarnessConfig::new(
+            descriptor.clone(),
+            context,
+            expected,
+            reference_key_ring(),
+            snapshot_limits.clone(),
+            services,
+        ))
+        .map_err(|_| "fresh render harness")?;
+        let mounted = harness
+            .mount(CanonicalValue::Object(Default::default()))
+            .await
+            .map_err(|_| "fresh render mount")?;
+        let initial_html = String::from_utf8(mounted.body().to_vec())
+            .map_err(|_| "fresh render initial encoding")?
+            .replacen("<div ", "<div live:poll.immediate=\"\" ", 1);
+        let harness = Arc::new(AsyncMutex::new(harness));
+        let registry = Arc::new(
+            ComponentRegistryBuilder::new()
+                .register(descriptor)
+                .map_err(|_| "fresh render registry")?
+                .build(),
+        );
+        let endpoint = LiveEndpointService::new(
+            LiveEndpointConfig::new(reference_protocol_limits(), snapshot_limits)
+                .map_err(|_| "fresh render endpoint config")?,
+            registry,
+            clock,
+            Arc::new(reference_key_ring()),
+            Arc::new(FreshRenderKernel {
+                harness: Arc::clone(&harness),
+            }),
+        );
+        Ok(Self {
+            endpoint,
+            harness,
+            initial_html,
+            ports,
+        })
+    }
+
+    pub(super) async fn request(
+        &self,
+        correlation: &str,
+        seed: u8,
+    ) -> Result<String, &'static str> {
+        let harness = self.harness.lock().await;
+        let snapshot = harness
+            .current_encoded_snapshot()
+            .ok_or("fresh render snapshot")?;
+        let snapshot: Value =
+            serde_json::from_slice(snapshot).map_err(|_| "fresh render snapshot")?;
+        let current = harness.current_snapshot().ok_or("fresh render snapshot")?;
+        let mut idempotency = [seed; 16];
+        idempotency[15] = seed.wrapping_add(1).max(1);
+        let idempotency = suprnova_live::identity::IdempotencyKey::from_bytes(&idempotency)
+            .map_err(|_| "fresh render idempotency")?;
+        serde_json::to_string(&json!({
+            "base_revision": current.body().revision().get().to_string(),
+            "child_parameters": null,
+            "component": engine_metadata().identity().as_str(),
+            "correlation_id": correlation,
+            "extensions": { "x_suprnova_live_document_key_v1": "harness-root" },
+            "idempotency_key": idempotency.to_base64url(),
+            "model_proposals": {},
+            "operations": [{ "kind": "fresh_render" }],
+            "protocol_version": 2,
+            "runtime_contract_version": 2,
+            "snapshot": { "envelope": snapshot, "kind": "instance" },
+            "snapshot_schema_version": 1,
+        }))
+        .map_err(|_| "fresh render request")
+    }
+
+    pub(super) async fn handle(&self, body: Bytes) -> Result<LiveEndpointResponse, &'static str> {
+        let (context, _) = engine_context(engine_metadata().clone(), self.ports.clone())
+            .map_err(|_| "fresh render context")?;
+        let request = LiveEndpointRequest::try_new(
+            Method::POST,
+            ParsedLiveMediaType::parse(LIVE_MEDIA_TYPE_V2).map_err(|_| "fresh render media")?,
+            body,
+            Some(context),
+            RequestCachePolicy::Bypass,
+        )
+        .map_err(|_| "fresh render request")?;
+        Ok(self.endpoint.handle(request).await)
+    }
+
+    pub(super) fn initial_html(&self) -> &str {
+        &self.initial_html
+    }
 }
 
 impl EngineMembershipRegistry {
@@ -308,6 +526,7 @@ pub(super) struct EngineAsyncFixture {
     descriptor_binding: String,
     credential: String,
     expires_at: UnixMillis,
+    fresh_render: Arc<ReferenceFreshRender>,
 }
 
 impl EngineAsyncFixture {
@@ -361,6 +580,7 @@ impl EngineAsyncFixture {
             )
             .await
             .map_err(|_| "engine subscription connect")?;
+        let fresh_render = Arc::new(ReferenceFreshRender::new(ports).await?);
         let claims = authorized.verified().claims();
         let registry = Arc::new(EngineMembershipRegistry {
             subscriptions: Mutex::new(Vec::new()),
@@ -381,6 +601,7 @@ impl EngineAsyncFixture {
             authorized,
             registry,
             document_scope,
+            fresh_render,
         })
     }
 
@@ -454,56 +675,8 @@ impl EngineAsyncFixture {
         .map_err(|_| "engine envelope")
     }
 
-    pub(super) async fn fresh_render(generation: u64) -> Result<(String, Vec<u8>), &'static str> {
-        let metadata = engine_metadata().clone();
-        let ports = Arc::new(EngineSubscriptionPorts {
-            component: metadata.clone(),
-            parameters: TrustedMountParameters::new(Vec::new())
-                .map_err(|_| "fresh render parameters")?,
-        });
-        let (context, _) =
-            engine_context(metadata.clone(), ports).map_err(|_| "fresh render context")?;
-        let descriptor = ComponentDescriptor::with_hooks(
-            metadata.clone(),
-            ComponentHooks::new(Arc::new(FreshRenderFactory { generation })),
-        );
-        let expected = ExpectedInstanceV1::new(
-            ComponentContract::new(
-                metadata.identity().clone(),
-                descriptor.contract_digest().clone(),
-                1,
-                1,
-                1,
-            )
-            .map_err(|_| "fresh render contract")?,
-            BuildId::parse("build-reference-host").map_err(|_| "fresh render build")?,
-            RouteIdentity::from_bytes(&[0x74; 32]).map_err(|_| "fresh render route")?,
-            IslandSlot::parse("reference-uploads").map_err(|_| "fresh render slot")?,
-            context.scope().clone(),
-            engine_schemas()?,
-        );
-        let limits = SnapshotLimits::new(InputLimits::default(), 500, 60_000, 60_000, 8, 8)
-            .map_err(|_| "fresh render snapshot limits")?;
-        let mut harness = ComponentHarness::new(ComponentHarnessConfig::new(
-            descriptor,
-            context,
-            expected,
-            reference_key_ring(),
-            limits,
-            HarnessServices::new(ENGINE_NOW),
-        ))
-        .map_err(|_| "fresh render harness")?;
-        let mounted = harness
-            .mount(CanonicalValue::Object(Default::default()))
-            .await
-            .map_err(|_| "fresh render mount")?;
-        let html =
-            String::from_utf8(mounted.body().to_vec()).map_err(|_| "fresh render encoding")?;
-        let snapshot = harness
-            .current_encoded_snapshot()
-            .ok_or("fresh render snapshot")?
-            .to_vec();
-        Ok((html, snapshot))
+    pub(super) fn fresh_render_endpoint(&self) -> Arc<ReferenceFreshRender> {
+        Arc::clone(&self.fresh_render)
     }
 }
 
@@ -613,6 +786,28 @@ fn engine_schemas() -> Result<SnapshotSchemaSet, &'static str> {
     .map_err(|_| "engine schema set")
 }
 
+fn reference_snapshot_limits() -> Result<SnapshotLimits, &'static str> {
+    SnapshotLimits::new(InputLimits::default(), 500, 60_000, 60_000, 8, 8)
+        .map_err(|_| "fresh render snapshot limits")
+}
+
+fn reference_protocol_limits() -> ProtocolLimits {
+    ProtocolLimits::new(ProtocolLimitConfig {
+        input: InputLimits::new(64 * 1024, 12, 512, 40 * 1024)
+            .expect("reference protocol input limits"),
+        max_snapshot_bytes: 32 * 1024,
+        max_html_bytes: 32 * 1024,
+        max_model_proposals: 8,
+        max_operations: 8,
+        max_arguments: 16,
+        max_validation_entries: 16,
+        max_events: 8,
+        max_effects: 8,
+        max_extensions: 8,
+    })
+    .expect("reference protocol limits")
+}
+
 fn reference_key_ring() -> SnapshotKeyRing {
     let active = KeyRecord::new(
         KeyId::parse("task9-async-key").expect("engine key id"),
@@ -688,7 +883,7 @@ fn engine_context(
         slot.clone(),
         component.identity().clone(),
         component.contract_digest().clone(),
-        1,
+        2,
     );
     let context = LiveRequestContextValidator::new(300_000)
         .map_err(|_| "engine context validator")?

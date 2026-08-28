@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use axum::body::Bytes;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use suprnova_live::async_updates::{
@@ -11,6 +12,7 @@ use suprnova_live::async_updates::{
     SseMembershipControl, WebSocketCodec, WebSocketControlRecord, WebSocketFrame,
     WebSocketMembershipControl,
 };
+use suprnova_live::endpoint::LiveEndpointResponse;
 use suprnova_live::identity::UnixMillis;
 use tokio::sync::Mutex;
 
@@ -75,7 +77,6 @@ struct AsyncState {
     engine: EngineAsyncFixture,
     transports: BTreeMap<String, IssuedTransport>,
     next_transport: u64,
-    poll_generation: u64,
     retired: bool,
 }
 
@@ -101,7 +102,6 @@ impl AsyncRuntime {
                 engine: EngineAsyncFixture::new().await?,
                 transports: BTreeMap::new(),
                 next_transport: 1,
-                poll_generation: 0,
                 retired: false,
             }),
             fault,
@@ -238,6 +238,17 @@ impl AsyncRuntime {
         };
         let response = match exact.operation.as_str() {
             "subscribe" => {
+                let reference_origin = membership.authority.origin().to_owned();
+                let prepared_reference = membership.authority.prepare_membership(
+                    &reference_origin,
+                    &membership.credential,
+                    &exact,
+                    NOW,
+                )?;
+                let lease = self
+                    .logical_memberships
+                    .acquire()
+                    .ok_or("transport_retired")?;
                 let pending = SseMembershipControl::prepare_subscribe(
                     &transport.document,
                     transport.document.handle(),
@@ -261,22 +272,21 @@ impl AsyncRuntime {
                     .document
                     .commit_add(ready)
                     .map_err(|_| "engine_membership_rejected")?;
+                let response = membership
+                    .authority
+                    .commit_membership(prepared_reference, NOW)?;
+                membership.open = true;
+                membership.lease = Some(lease);
+                response
+            }
+            "unsubscribe" => {
                 let reference_origin = membership.authority.origin().to_owned();
-                let response = membership.authority.membership(
+                let prepared_reference = membership.authority.prepare_membership(
                     &reference_origin,
                     &membership.credential,
                     &exact,
                     NOW,
                 )?;
-                membership.open = true;
-                membership.lease = Some(
-                    self.logical_memberships
-                        .acquire()
-                        .ok_or("transport_retired")?,
-                );
-                response
-            }
-            "unsubscribe" => {
                 let pending = SseMembershipControl::prepare_unsubscribe(
                     &transport.document,
                     transport.document.handle(),
@@ -292,13 +302,9 @@ impl AsyncRuntime {
                     .document
                     .commit_remove(ready)
                     .map_err(|_| "engine_membership_rejected")?;
-                let reference_origin = membership.authority.origin().to_owned();
-                let response = membership.authority.membership(
-                    &reference_origin,
-                    &membership.credential,
-                    &exact,
-                    NOW,
-                )?;
+                let response = membership
+                    .authority
+                    .commit_membership(prepared_reference, NOW)?;
                 engine.remove(&membership.engine_authorization);
                 membership.open = false;
                 drop(membership.lease.take());
@@ -311,57 +317,63 @@ impl AsyncRuntime {
         Ok(response)
     }
 
-    pub(super) async fn poll(&self, request: PollRequest) -> Result<Value, &'static str> {
-        let mut state = self.state.lock().await;
-        let membership = state
-            .transports
-            .values()
-            .flat_map(|transport| transport.memberships.values())
-            .find(|membership| {
-                membership
-                    .engine_authorization
-                    .subscription()
-                    .to_base64url()
-                    == request.subscription
-                    && membership.credential == request.authority
-            })
-            .ok_or("poll_authority_invalid")?;
-        let current = membership.authority.current_sequence();
-        let _continuity = membership.authority.poll(
-            membership.authority.origin(),
-            &membership.credential,
-            &AsyncReferencePollRequest {
-                descriptor_binding: membership.binding.clone(),
-                position: AsyncReferencePosition {
-                    epoch: "1".to_owned(),
-                    sequence: current.to_string(),
+    pub(super) async fn poll(
+        &self,
+        request: PollRequest,
+        body: Bytes,
+    ) -> Result<LiveEndpointResponse, &'static str> {
+        let endpoint = {
+            let state = self.state.lock().await;
+            let membership = state
+                .transports
+                .values()
+                .flat_map(|transport| transport.memberships.values())
+                .find(|membership| {
+                    membership
+                        .engine_authorization
+                        .subscription()
+                        .to_base64url()
+                        == request.subscription
+                        && membership.credential == request.authority
+                })
+                .ok_or("poll_authority_invalid")?;
+            let current = membership.authority.current_sequence();
+            let _continuity = membership.authority.poll(
+                membership.authority.origin(),
+                &membership.credential,
+                &AsyncReferencePollRequest {
+                    descriptor_binding: membership.binding.clone(),
+                    position: AsyncReferencePosition {
+                        epoch: "1".to_owned(),
+                        sequence: current.to_string(),
+                    },
+                    subscription_id: request.subscription,
                 },
-                subscription_id: request.subscription,
-            },
-            NOW,
-        )?;
-        state.poll_generation = state.poll_generation.saturating_add(1);
-        let generation = state.poll_generation;
-        let (html, snapshot) = EngineAsyncFixture::fresh_render(generation).await?;
-        let snapshot: Value =
-            serde_json::from_slice(&snapshot).map_err(|_| "fresh render snapshot")?;
-        Ok(json!({
-            "accepted_revision": generation.to_string(),
-            "child_deliveries": [],
-            "correlation_id": "EBESExQVFhcYGRobHB0eHw",
-            "effects": [],
-            "events": [],
-            "extensions": {},
-            "outcome": "accepted",
-            "protocol_version": 2,
-            "render": {
-                "html": html,
-                "kind": "html"
-            },
-            "snapshot": snapshot,
-            "url_intent": null,
-            "validation": {}
-        }))
+                NOW,
+            )?;
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.handle(body).await
+    }
+
+    pub(super) async fn fresh_render_request(
+        &self,
+        correlation: &str,
+        seed: u8,
+    ) -> Result<String, &'static str> {
+        let endpoint = {
+            let state = self.state.lock().await;
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.request(correlation, seed).await
+    }
+
+    pub(super) async fn fresh_render_document(&self) -> String {
+        let endpoint = {
+            let state = self.state.lock().await;
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.initial_html().to_owned()
     }
 
     pub(super) async fn sse_batch(&self, transport_id: &str) -> Result<Vec<u8>, &'static str> {
@@ -445,6 +457,17 @@ impl AsyncRuntime {
                 subscription_id: subscription,
                 transport_generation: request.transport_generation(),
             };
+            let reference_origin = membership.authority.origin().to_owned();
+            let prepared_reference = membership.authority.prepare_membership(
+                &reference_origin,
+                &membership.credential,
+                &reference,
+                NOW,
+            )?;
+            let lease = self
+                .logical_memberships
+                .acquire()
+                .ok_or("transport_retired")?;
             let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
                 &transport.document,
                 request,
@@ -467,19 +490,11 @@ impl AsyncRuntime {
                 ready,
             )
             .map_err(|_| "websocket_control_invalid")?;
-            let reference_origin = membership.authority.origin().to_owned();
-            membership.authority.membership(
-                &reference_origin,
-                &membership.credential,
-                &reference,
-                NOW,
-            )?;
+            membership
+                .authority
+                .commit_membership(prepared_reference, NOW)?;
             membership.open = true;
-            membership.lease = Some(
-                self.logical_memberships
-                    .acquire()
-                    .ok_or("transport_retired")?,
-            );
+            membership.lease = Some(lease);
             self.maximum_memberships
                 .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
             let acknowledgment = WebSocketMembershipControl::acknowledge_committed(receipt);
@@ -508,6 +523,25 @@ impl AsyncRuntime {
             .memberships
             .get_mut(&subscription_wire)
             .ok_or("membership_authority_invalid")?;
+        let reference = AsyncReferenceMembershipRequest {
+            control_nonce: "ws-unsubscribe-1".to_owned(),
+            descriptor: membership.descriptor.clone(),
+            descriptor_binding: membership.binding.clone(),
+            operation: "unsubscribe".to_owned(),
+            principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
+            scope: ASYNC_REFERENCE_SCOPE.to_owned(),
+            session: ASYNC_REFERENCE_SESSION.to_owned(),
+            stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
+            subscription_id: subscription_wire.clone(),
+            transport_generation: membership.generation,
+        };
+        let reference_origin = membership.authority.origin().to_owned();
+        let prepared_reference = membership.authority.prepare_membership(
+            &reference_origin,
+            &membership.credential,
+            &reference,
+            NOW,
+        )?;
         let unsubscribe = WebSocketControlRecord::Unsubscribe(subscription);
         let pending = WebSocketMembershipControl::prepare_unsubscribe(
             &transport.document,
@@ -523,24 +557,9 @@ impl AsyncRuntime {
             .document
             .commit_remove(ready)
             .map_err(|_| "websocket_control_invalid")?;
-        let reference_origin = membership.authority.origin().to_owned();
-        membership.authority.membership(
-            &reference_origin,
-            &membership.credential,
-            &AsyncReferenceMembershipRequest {
-                control_nonce: "ws-unsubscribe-1".to_owned(),
-                descriptor: membership.descriptor.clone(),
-                descriptor_binding: membership.binding.clone(),
-                operation: "unsubscribe".to_owned(),
-                principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
-                scope: ASYNC_REFERENCE_SCOPE.to_owned(),
-                session: ASYNC_REFERENCE_SESSION.to_owned(),
-                stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
-                subscription_id: subscription_wire.clone(),
-                transport_generation: membership.generation,
-            },
-            NOW,
-        )?;
+        membership
+            .authority
+            .commit_membership(prepared_reference, NOW)?;
         engine.remove(&membership.engine_authorization);
         membership.open = false;
         drop(membership.lease.take());

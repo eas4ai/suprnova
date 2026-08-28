@@ -34,7 +34,8 @@ const INVALID_MANIFEST_PORT: u16 = 4_186;
 const UPLOAD_CURSOR_PORT: u16 = 4_187;
 const UPLOAD_FAULT_PORT: u16 = 4_188;
 const FORGED_MANIFEST_PORT: u16 = 4_189;
-const FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
+const POLL_PORT: u16 = 4_191;
+const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
 
@@ -569,6 +570,18 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         let subscription = membership["subscription"].as_str().expect("subscription");
         let membership_path =
             format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}");
+        let (status, _, rejected) = json_request(
+            &host,
+            Method::POST,
+            &membership_path,
+            json!({
+                "authority": membership["authority"],
+                "control_nonce": "",
+                "operation": "subscribe"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{rejected}");
         let (status, _, acknowledgment) = json_request(
             &host,
             Method::POST,
@@ -588,6 +601,30 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
         .expect("subscription");
     let authority = memberships[0]["authority"].as_str().expect("authority");
 
+    let (status, _, rejected_poll) = request(
+        &host,
+        Method::POST,
+        "/__live/async/poll",
+        &[
+            (CONTENT_TYPE.as_str(), "application/json"),
+            (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+            ("x-live-subscription", subscription),
+            ("x-live-subscription-authority", authority),
+        ],
+        WRONG_ISLAND_FRESH_RENDER_REQUEST,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "wrong island reached fresh-render execution: {}",
+        String::from_utf8_lossy(&rejected_poll)
+    );
+
+    let fresh_render_request = host
+        .fresh_render_request("EBESExQVFhcYGRobHB0eHw", 0x51)
+        .await
+        .expect("current engine-owned fresh-render request");
     let (status, headers, poll_bytes) = request(
         &host,
         Method::POST,
@@ -598,7 +635,7 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
             ("x-live-subscription", subscription),
             ("x-live-subscription-authority", authority),
         ],
-        FRESH_RENDER_REQUEST,
+        fresh_render_request.clone().into_bytes(),
     )
     .await;
     let poll: Value = serde_json::from_slice(&poll_bytes).expect("poll JSON");
@@ -626,7 +663,25 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     let parsed = parse_versioned_update_response(&poll_bytes, &protocol_limits())
         .expect("poll is one accepted Live response");
     assert!(matches!(parsed, VersionedUpdateResponse::V2(_)));
-    let forged_action = FRESH_RENDER_REQUEST.replace(
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__live/async/poll",
+        &[
+            (CONTENT_TYPE.as_str(), "application/json"),
+            (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+            ("x-live-subscription", subscription),
+            ("x-live-subscription-authority", authority),
+        ],
+        fresh_render_request.clone().into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "stale island was re-executed"
+    );
+    let forged_action = fresh_render_request.replace(
         "{\"kind\":\"fresh_render\"}",
         "{\"arguments\":{},\"kind\":\"invoke_action\",\"name\":\"forbidden\"}",
     );
@@ -659,6 +714,18 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     let removed_subscription = removed["subscription"].as_str().expect("subscription");
     let membership_path =
         format!("/__live/async/transports/{transport_id}/subscriptions/{removed_subscription}");
+    let (status, _, rejected) = json_request(
+        &host,
+        Method::POST,
+        &membership_path,
+        json!({
+            "authority": removed["authority"],
+            "control_nonce": "",
+            "operation": "unsubscribe"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{rejected}");
     let (status, _, acknowledgment) = json_request(
         &host,
         Method::POST,
@@ -710,6 +777,47 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
     host.shutdown().await.expect("clean async-host shutdown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poll_rejects_a_fresh_render_for_the_wrong_island() {
+    let root = TestRoot::new("poll-identity");
+    let host = start_host(POLL_PORT, &root, ReferenceFaultSchedule::None).await;
+    let (status, _, transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "sse", "subscription": "orders"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{transport}");
+    let membership = &transport["memberships"][0];
+    let (status, _, body) = request(
+        &host,
+        Method::POST,
+        "/__live/async/poll",
+        &[
+            (CONTENT_TYPE.as_str(), "application/json"),
+            (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+            (
+                "x-live-subscription",
+                membership["subscription"].as_str().expect("subscription"),
+            ),
+            (
+                "x-live-subscription-authority",
+                membership["authority"].as_str().expect("authority"),
+            ),
+        ],
+        WRONG_ISLAND_FRESH_RENDER_REQUEST,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "wrong island reached fresh-render execution: {}",
+        String::from_utf8_lossy(&body)
+    );
+    host.shutdown().await.expect("clean poll-host shutdown");
+}
+
 fn protocol_limits() -> ProtocolLimits {
     ProtocolLimits::new(ProtocolLimitConfig {
         input: InputLimits::new(64 * 1024, 12, 512, 40 * 1024).expect("input limits"),
@@ -747,6 +855,21 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let upload_handle = created["handle"].as_str().expect("upload handle");
     let upload_grant = created["grant"].as_str().expect("upload grant");
+    let (status, _, independent) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "independent.bin",
+            "content_type": "application/octet-stream",
+            "expected_bytes": 1,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{independent}");
+    let independent_handle = independent["handle"].as_str().expect("independent handle");
     let (status, _, transport) = json_request(
         &host,
         Method::POST,
@@ -806,24 +929,37 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     assert!(midflight.open_timers > 0, "{midflight:?}");
     assert!(midflight.active_uploads > 0, "{midflight:?}");
     assert!(midflight.logical_memberships > 0, "{midflight:?}");
-    upload_stream
-        .write_all(b"4\r\nefgh\r\n0\r\n\r\n")
-        .await
-        .expect("finish mid-flight upload body");
-    let mut upload_response = Vec::new();
-    upload_stream
-        .read_to_end(&mut upload_response)
-        .await
-        .expect("mid-flight upload response");
-    assert!(
-        String::from_utf8_lossy(&upload_response).starts_with("HTTP/1.1 200"),
-        "{}",
-        String::from_utf8_lossy(&upload_response)
-    );
+    let status_path = format!("/__live/uploads/{independent_handle}");
+    let (status, _, body) = timeout(
+        Duration::from_millis(250),
+        request(
+            &host,
+            Method::GET,
+            &status_path,
+            &[(AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION)],
+            "",
+        ),
+    )
+    .await
+    .expect("an incomplete body must not hold the upload ledger lock");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     timeout(Duration::from_secs(2), host.shutdown())
         .await
         .expect("shutdown deadline")
         .expect("shutdown result");
+    let mut upload_response = Vec::new();
+    timeout(
+        Duration::from_secs(1),
+        upload_stream.read_to_end(&mut upload_response),
+    )
+    .await
+    .expect("aborted upload body reached EOF")
+    .expect("read aborted upload response");
+    assert!(
+        !String::from_utf8_lossy(&upload_response).starts_with("HTTP/1.1 200"),
+        "incomplete request unexpectedly committed: {}",
+        String::from_utf8_lossy(&upload_response)
+    );
     let final_state = inspection.snapshot();
     assert_eq!(final_state.open_sockets, 0);
     assert_eq!(final_state.open_files, 0);
