@@ -54,6 +54,11 @@ use suprnova_live::identity::{
     BuildId, ComponentName, ContentDigest, IslandSlot, KeyId, RouteIdentity, ScopeFingerprint,
     UnixMillis, ViewName,
 };
+use suprnova_live::ledger::{
+    AcceptedOutcome, ClaimOutcome, ClaimRequest, ClaimToken, InstanceAuthority, LedgerError,
+    LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger, MountInstanceRecord, PromotionOutcome,
+    PromotionRecord,
+};
 use suprnova_live::limits::InputLimits;
 use suprnova_live::metadata::{
     ComponentMetadata, ContractVersions, EventMetadata, EventPayloadMetadata,
@@ -85,9 +90,7 @@ impl EventPayloadMetadata for OrdersUpdated {
     const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
 }
 
-struct FreshRenderFactory {
-    pause: Arc<FreshRenderPause>,
-}
+struct FreshRenderFactory;
 
 #[derive(Default)]
 struct FreshRenderPause {
@@ -101,26 +104,18 @@ impl ComponentFactory for FreshRenderFactory {
         &'a self,
         _context: &'a MountContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        let pause = Arc::clone(&self.pause);
-        Box::pin(async move {
-            Ok(Box::new(FreshRenderComponent { pause }) as Box<dyn ComponentInstance>)
-        })
+        Box::pin(async { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
     }
 
     fn hydrate<'a>(
         &'a self,
         _context: &'a HydrationContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        let pause = Arc::clone(&self.pause);
-        Box::pin(async move {
-            Ok(Box::new(FreshRenderComponent { pause }) as Box<dyn ComponentInstance>)
-        })
+        Box::pin(async { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
     }
 }
 
-struct FreshRenderComponent {
-    pause: Arc<FreshRenderPause>,
-}
+struct FreshRenderComponent;
 
 impl ComponentInstance for FreshRenderComponent {
     fn metadata(&self) -> &'static ComponentMetadata {
@@ -132,10 +127,6 @@ impl ComponentInstance for FreshRenderComponent {
         context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<IslandRender, ComponentError>> {
         Box::pin(async move {
-            if self.pause.enabled.load(Ordering::Acquire) {
-                self.pause.entered.notify_one();
-                self.pause.release.notified().await;
-            }
             Ok(IslandRender {
                 body: Bytes::from(format!(
                     "<section data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></section>",
@@ -156,6 +147,49 @@ impl ComponentInstance for FreshRenderComponent {
 
     fn dehydrate_memo(&self) -> Result<CanonicalValue, ComponentError> {
         Ok(CanonicalValue::Object(Default::default()))
+    }
+}
+
+struct PostClaimLedger {
+    inner: MemoryInstanceLedger,
+    pause: Arc<FreshRenderPause>,
+}
+
+#[async_trait::async_trait]
+impl LiveInstanceLedger for PostClaimLedger {
+    async fn mount_instance(
+        &self,
+        record: MountInstanceRecord,
+    ) -> Result<InstanceAuthority, LedgerError> {
+        self.inner.mount_instance(record).await
+    }
+
+    async fn promote(&self, request: PromotionRecord) -> Result<PromotionOutcome, LedgerError> {
+        self.inner.promote(request).await
+    }
+
+    async fn claim(&self, request: ClaimRequest) -> Result<ClaimOutcome, LedgerError> {
+        self.inner.claim(request).await
+    }
+
+    async fn commit(
+        &self,
+        claim: &ClaimToken,
+        outcome: AcceptedOutcome,
+    ) -> Result<(), LedgerError> {
+        if self.pause.enabled.load(Ordering::Acquire) {
+            self.pause.entered.notify_one();
+            self.pause.release.notified().await;
+        }
+        self.inner.commit(claim, outcome).await
+    }
+
+    async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
+        self.inner.abandon(claim).await
+    }
+
+    fn abandon_on_drop(&self, claim: ClaimToken) {
+        self.inner.abandon_on_drop(claim);
     }
 }
 
@@ -337,9 +371,7 @@ impl ReferenceFreshRender {
         let pause = Arc::new(FreshRenderPause::default());
         let descriptor = ComponentDescriptor::with_hooks(
             metadata.clone(),
-            ComponentHooks::new(Arc::new(FreshRenderFactory {
-                pause: Arc::clone(&pause),
-            })),
+            ComponentHooks::new(Arc::new(FreshRenderFactory)),
         );
         let expected = ExpectedInstanceV1::new(
             ComponentContract::new(
@@ -359,14 +391,26 @@ impl ReferenceFreshRender {
         let snapshot_limits = reference_snapshot_limits()?;
         let services = HarnessServices::new(ENGINE_NOW);
         let clock = Arc::clone(services.clock());
-        let mut harness = ComponentHarness::new(ComponentHarnessConfig::new(
-            descriptor.clone(),
-            context,
-            expected,
-            reference_key_ring(),
-            snapshot_limits.clone(),
-            services,
-        ))
+        let ledger_limits =
+            LedgerLimits::new(1_000, 60_000, 16, 256).map_err(|_| "fresh render ledger limits")?;
+        let ledger = Arc::new(PostClaimLedger {
+            inner: MemoryInstanceLedger::new(
+                Arc::clone(&clock) as Arc<dyn suprnova_live::clock::Clock>,
+                ledger_limits,
+            ),
+            pause: Arc::clone(&pause),
+        });
+        let mut harness = ComponentHarness::new(
+            ComponentHarnessConfig::new(
+                descriptor.clone(),
+                context,
+                expected,
+                reference_key_ring(),
+                snapshot_limits.clone(),
+                services,
+            )
+            .with_instance_ledger(ledger),
+        )
         .map_err(|_| "fresh render harness")?;
         let mounted = harness
             .mount(CanonicalValue::Object(Default::default()))

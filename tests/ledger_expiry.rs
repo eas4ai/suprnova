@@ -64,7 +64,7 @@ async fn abandoned_claim_consumes_authority_without_rolling_revision_back() {
 }
 
 #[tokio::test]
-async fn dropped_execution_claim_cleanup_never_leaves_the_ledger_in_progress() {
+async fn dropped_execution_claim_releases_authority_for_an_exact_retry() {
     let clock = Arc::new(ManualClock::new(1_000));
     let ledger = ledger(clock, 2);
     let scope = scope(0x35);
@@ -81,18 +81,25 @@ async fn dropped_execution_claim_cleanup_never_leaves_the_ledger_in_progress() {
 
     ledger.abandon_on_drop(grant.into_token());
 
-    assert!(matches!(
-        ledger
-            .claim(request(scope.clone(), instance.clone(), 0))
-            .await
-            .expect("cleanup classification"),
-        ClaimOutcome::RefreshRequired(RefreshReason::Consumed)
-    ));
+    let retry = match ledger
+        .claim(request(scope.clone(), instance.clone(), 0))
+        .await
+        .expect("released claim accepts an exact retry")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected retry grant, got {other:?}"),
+    };
     let inspection = ledger
         .inspect(&scope, &instance)
         .expect("inspection succeeds")
         .expect("instance retained");
-    assert_ne!(inspection.phase(), LedgerPhase::Pending);
+    assert_eq!(inspection.current_revision(), Revision::new(1));
+    assert_eq!(inspection.phase(), LedgerPhase::Pending);
+
+    ledger
+        .abandon(&retry.into_token())
+        .await
+        .expect("test cleanup consumes the retry");
 }
 
 #[tokio::test]

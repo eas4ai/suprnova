@@ -51,7 +51,10 @@ pub use provider::{
     QuarantinedFileProvider, ReadUpload, ReverseProxyUploadProvider, TransferCheckpoint,
     TransferDisposition, TransferPlan, UploadProvider, VerifyTransfer, WriteChunk,
 };
-pub use quarantine::{QuarantineBytes, QuarantineObject, QuarantineStore, RemoveDisposition};
+pub use quarantine::{
+    QuarantineBytes, QuarantineCompletion, QuarantineObject, QuarantineOperation, QuarantineStore,
+    RemoveDisposition,
+};
 pub use service::{
     UploadAuthorizationDecision, UploadAuthorizationPort, UploadAuthorizationRequest,
     UploadControlKind, UploadCreateOutcome, UploadCreationRequest, UploadService,

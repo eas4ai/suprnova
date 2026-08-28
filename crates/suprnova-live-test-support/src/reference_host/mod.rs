@@ -629,10 +629,7 @@ async fn upload_reacquire(
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    let Some(grant) = header(&headers, "x-live-upload-grant") else {
-        return error(StatusCode::UNAUTHORIZED, "upload_grant_missing");
-    };
-    match state.uploads.reacquire(&handle, grant).await {
+    match state.uploads.reacquire(&handle).await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }

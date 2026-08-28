@@ -1,12 +1,14 @@
 //! Tokio-backed file quarantine adapter for tests and the thin reference host.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use suprnova_live::resource::PermitPool;
 use suprnova_live::upload::{
-    QuarantineBytes, QuarantineObject, QuarantineStore, RemoveDisposition, UploadError,
-    UploadErrorKind, UploadFuture,
+    QuarantineBytes, QuarantineObject, QuarantineOperation, QuarantineStore, RemoveDisposition,
+    UploadError, UploadErrorKind,
 };
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -52,8 +54,8 @@ pub struct TokioFileQuarantineStore {
     fault: AtomicU8,
     write_fragment_limit: AtomicUsize,
     read_fragment_limit: AtomicUsize,
-    maximum_observed_write: AtomicUsize,
-    maximum_observed_read: AtomicUsize,
+    maximum_observed_write: Arc<AtomicUsize>,
+    maximum_observed_read: Arc<AtomicUsize>,
 }
 
 impl TokioFileQuarantineStore {
@@ -82,8 +84,8 @@ impl TokioFileQuarantineStore {
             fault: AtomicU8::new(FileStoreFault::None as u8),
             write_fragment_limit: AtomicUsize::new(0),
             read_fragment_limit: AtomicUsize::new(0),
-            maximum_observed_write: AtomicUsize::new(0),
-            maximum_observed_read: AtomicUsize::new(0),
+            maximum_observed_write: Arc::new(AtomicUsize::new(0)),
+            maximum_observed_read: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -142,17 +144,21 @@ impl TokioFileQuarantineStore {
 }
 
 impl QuarantineStore for TokioFileQuarantineStore {
-    fn create_exclusive<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<(), UploadError>> {
-        Box::pin(async move {
-            self.require_healthy(FileStoreFault::Create)?;
-            let _descriptor = self.acquire_descriptor()?;
+    fn create_exclusive(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
+        if let Err(error) = self.require_healthy(FileStoreFault::Create) {
+            return QuarantineOperation::ready(Err(error));
+        }
+        let descriptor = match self.acquire_descriptor() {
+            Ok(descriptor) => descriptor,
+            Err(error) => return QuarantineOperation::ready(Err(error)),
+        };
+        let path = self.path_for(object);
+        spawn_operation(async move {
+            let _descriptor = descriptor;
             match OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(self.path_for(object))
+                .open(path)
                 .await
             {
                 Ok(_) => Ok(()),
@@ -164,71 +170,89 @@ impl QuarantineStore for TokioFileQuarantineStore {
         })
     }
 
-    fn write_at<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
+    fn write_at(
+        &self,
+        object: &QuarantineObject,
         offset: u64,
-        bytes: &'a [u8],
-    ) -> UploadFuture<'a, Result<(), UploadError>> {
-        Box::pin(async move {
-            self.require_healthy(FileStoreFault::Write)?;
-            if bytes.is_empty() || bytes.len() > self.maximum_read_bytes {
-                return Err(UploadError::new(UploadErrorKind::InputTooLarge));
-            }
-            let _descriptor = self.acquire_descriptor()?;
+        bytes: &[u8],
+    ) -> QuarantineOperation<()> {
+        if let Err(error) = self.require_healthy(FileStoreFault::Write) {
+            return QuarantineOperation::ready(Err(error));
+        }
+        if bytes.is_empty() || bytes.len() > self.maximum_read_bytes {
+            return QuarantineOperation::ready(Err(UploadError::new(
+                UploadErrorKind::InputTooLarge,
+            )));
+        }
+        let descriptor = match self.acquire_descriptor() {
+            Ok(descriptor) => descriptor,
+            Err(error) => return QuarantineOperation::ready(Err(error)),
+        };
+        let path = self.path_for(object);
+        let bytes = QuarantineBytes::copy_from_slice(bytes);
+        let fragment_limit = self.write_fragment_limit.load(Ordering::SeqCst);
+        let maximum_observed = Arc::clone(&self.maximum_observed_write);
+        spawn_operation(async move {
+            let _descriptor = descriptor;
             let mut file = OpenOptions::new()
                 .write(true)
-                .open(self.path_for(object))
+                .open(path)
                 .await
                 .map_err(provider_error)?;
             file.seek(std::io::SeekFrom::Start(offset))
                 .await
                 .map_err(provider_error)?;
-            write_all_fragmented(
-                &mut file,
-                bytes,
-                self.write_fragment_limit.load(Ordering::SeqCst),
-                &self.maximum_observed_write,
-            )
-            .await
+            write_all_fragmented(&mut file, bytes.as_ref(), fragment_limit, &maximum_observed).await
         })
     }
 
-    fn sync<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<(), UploadError>> {
-        Box::pin(async move {
-            self.require_healthy(FileStoreFault::Sync)?;
-            let _descriptor = self.acquire_descriptor()?;
+    fn sync(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
+        if let Err(error) = self.require_healthy(FileStoreFault::Sync) {
+            return QuarantineOperation::ready(Err(error));
+        }
+        let descriptor = match self.acquire_descriptor() {
+            Ok(descriptor) => descriptor,
+            Err(error) => return QuarantineOperation::ready(Err(error)),
+        };
+        let path = self.path_for(object);
+        spawn_operation(async move {
+            let _descriptor = descriptor;
             let file = OpenOptions::new()
                 .write(true)
-                .open(self.path_for(object))
+                .open(path)
                 .await
                 .map_err(provider_error)?;
             file.sync_data().await.map_err(provider_error)
         })
     }
 
-    fn read_at<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
+    fn read_at(
+        &self,
+        object: &QuarantineObject,
         offset: u64,
         maximum_bytes: usize,
-    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
-        Box::pin(async move {
-            self.require_healthy(FileStoreFault::Read)?;
-            if maximum_bytes == 0 || maximum_bytes > self.maximum_read_bytes {
-                return Err(UploadError::new(UploadErrorKind::InputTooLarge));
-            }
-            let _descriptor = self.acquire_descriptor()?;
-            let mut file = File::open(self.path_for(object))
-                .await
-                .map_err(provider_error)?;
+    ) -> QuarantineOperation<QuarantineBytes> {
+        if let Err(error) = self.require_healthy(FileStoreFault::Read) {
+            return QuarantineOperation::ready(Err(error));
+        }
+        if maximum_bytes == 0 || maximum_bytes > self.maximum_read_bytes {
+            return QuarantineOperation::ready(Err(UploadError::new(
+                UploadErrorKind::InputTooLarge,
+            )));
+        }
+        let descriptor = match self.acquire_descriptor() {
+            Ok(descriptor) => descriptor,
+            Err(error) => return QuarantineOperation::ready(Err(error)),
+        };
+        let path = self.path_for(object);
+        let fragment = self.read_fragment_limit.load(Ordering::SeqCst);
+        let maximum_observed = Arc::clone(&self.maximum_observed_read);
+        spawn_operation(async move {
+            let _descriptor = descriptor;
+            let mut file = File::open(path).await.map_err(provider_error)?;
             file.seek(std::io::SeekFrom::Start(offset))
                 .await
                 .map_err(provider_error)?;
-            let fragment = self.read_fragment_limit.load(Ordering::SeqCst);
             let requested = if fragment == 0 {
                 maximum_bytes
             } else {
@@ -237,19 +261,23 @@ impl QuarantineStore for TokioFileQuarantineStore {
             let mut bytes = vec![0_u8; requested];
             let read = file.read(&mut bytes).await.map_err(provider_error)?;
             bytes.truncate(read);
-            self.maximum_observed_read.fetch_max(read, Ordering::SeqCst);
+            maximum_observed.fetch_max(read, Ordering::SeqCst);
             Ok(QuarantineBytes::from(bytes))
         })
     }
 
-    fn remove<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>> {
-        Box::pin(async move {
-            self.require_healthy(FileStoreFault::Remove)?;
-            let _descriptor = self.acquire_descriptor()?;
-            match tokio::fs::remove_file(self.path_for(object)).await {
+    fn remove(&self, object: &QuarantineObject) -> QuarantineOperation<RemoveDisposition> {
+        if let Err(error) = self.require_healthy(FileStoreFault::Remove) {
+            return QuarantineOperation::ready(Err(error));
+        }
+        let descriptor = match self.acquire_descriptor() {
+            Ok(descriptor) => descriptor,
+            Err(error) => return QuarantineOperation::ready(Err(error)),
+        };
+        let path = self.path_for(object);
+        spawn_operation(async move {
+            let _descriptor = descriptor;
+            match tokio::fs::remove_file(path).await {
                 Ok(()) => Ok(RemoveDisposition::Removed),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     Ok(RemoveDisposition::AlreadyAbsent)
@@ -258,6 +286,16 @@ impl QuarantineStore for TokioFileQuarantineStore {
             }
         })
     }
+}
+
+fn spawn_operation<T: Clone + Send + 'static>(
+    future: impl Future<Output = Result<T, UploadError>> + Send + 'static,
+) -> QuarantineOperation<T> {
+    let (operation, completion) = QuarantineOperation::pending();
+    tokio::spawn(async move {
+        completion.complete(future.await);
+    });
+    operation
 }
 
 async fn write_all_fragmented(

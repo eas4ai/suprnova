@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::Write as _;
 use std::future::poll_fn;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 
@@ -15,9 +16,9 @@ use crate::limits::UploadLimits;
 use crate::resource::{CancellationFlag, PermitPool, ResourceBounds, ResourceOwner, Retirement};
 
 use super::{
-    DirectTransferInstruction, QuarantineBytes, QuarantineObject, QuarantineStore,
-    ReportDirectPart, TransferInstruction, UploadChecksum, UploadError, UploadErrorKind,
-    UploadFuture, UploadHandle, UploadPart,
+    DirectTransferInstruction, QuarantineBytes, QuarantineObject, QuarantineOperation,
+    QuarantineStore, ReportDirectPart, TransferInstruction, UploadChecksum, UploadError,
+    UploadErrorKind, UploadFuture, UploadHandle, UploadPart,
 };
 
 const MAX_CLIENT_NAME_BYTES: usize = 1_024;
@@ -546,6 +547,8 @@ struct TransferEntry {
     chunks: BTreeMap<u32, ChunkShape>,
     committed_bytes: u64,
     pending: Option<ChunkShape>,
+    pending_abandoned: bool,
+    physical_operations: usize,
     cancellation: CancellationFlag,
     evidence: Option<IntegrityEvidence>,
 }
@@ -565,6 +568,8 @@ impl TransferEntry {
             chunks: BTreeMap::new(),
             committed_bytes: 0,
             pending: None,
+            pending_abandoned: false,
+            physical_operations: 0,
             cancellation: CancellationFlag::new(),
             evidence: None,
         }
@@ -659,7 +664,7 @@ impl fmt::Debug for TransferCheckpoint {
 pub struct QuarantinedFileProvider<S: QuarantineStore> {
     store: Arc<S>,
     limits: UploadLimits,
-    transfers: Mutex<HashMap<UploadHandle, TransferEntry>>,
+    transfers: Arc<Mutex<HashMap<UploadHandle, TransferEntry>>>,
     resources: ResourceOwner<UploadHandle>,
     admission: ProviderAdmission,
     cleanup_permits: PermitPool,
@@ -737,6 +742,10 @@ impl fmt::Display for ProviderRetirementError {
 impl std::error::Error for ProviderRetirementError {}
 
 struct ProviderAdmission {
+    inner: Arc<ProviderAdmissionInner>,
+}
+
+struct ProviderAdmissionInner {
     maximum_active: usize,
     state: Mutex<ProviderAdmissionState>,
 }
@@ -748,10 +757,22 @@ struct ProviderAdmissionState {
     idle_waker: Option<Waker>,
 }
 
-#[derive(Default)]
 struct ProviderOperationCancellation {
     canceled: AtomicBool,
+    logical_open: AtomicBool,
+    physical_operations: AtomicUsize,
     waker: Mutex<Option<Waker>>,
+}
+
+impl Default for ProviderOperationCancellation {
+    fn default() -> Self {
+        Self {
+            canceled: AtomicBool::new(false),
+            logical_open: AtomicBool::new(true),
+            physical_operations: AtomicUsize::new(0),
+            waker: Mutex::new(None),
+        }
+    }
 }
 
 impl ProviderOperationCancellation {
@@ -784,30 +805,43 @@ impl ProviderOperationCancellation {
 impl ProviderAdmission {
     fn new(maximum_active: usize) -> Self {
         Self {
-            maximum_active,
-            state: Mutex::new(ProviderAdmissionState::default()),
+            inner: Arc::new(ProviderAdmissionInner {
+                maximum_active,
+                state: Mutex::new(ProviderAdmissionState::default()),
+            }),
         }
     }
 
-    fn enter(&self) -> Result<ProviderAdmissionGuard<'_>, UploadError> {
-        let mut state = lock(&self.state);
+    fn enter(&self) -> Result<ProviderAdmissionGuard, UploadError> {
+        let mut state = lock(&self.inner.state);
         if state.retired {
             return Err(UploadError::new(UploadErrorKind::ServiceRetired));
         }
-        if state.active.len() >= self.maximum_active {
+        if state.active.len() >= self.inner.maximum_active {
             return Err(UploadError::new(UploadErrorKind::ResourceExhausted));
         }
         let cancellation = Arc::new(ProviderOperationCancellation::default());
         state.active.push(Arc::clone(&cancellation));
         Ok(ProviderAdmissionGuard {
-            admission: self,
+            admission: Arc::clone(&self.inner),
             cancellation,
         })
     }
 
+    fn enter_cleanup(&self) -> ProviderAdmissionGuard {
+        let cancellation = Arc::new(ProviderOperationCancellation::default());
+        lock(&self.inner.state)
+            .active
+            .push(Arc::clone(&cancellation));
+        ProviderAdmissionGuard {
+            admission: Arc::clone(&self.inner),
+            cancellation,
+        }
+    }
+
     fn retire(&self) {
         let active = {
-            let mut state = lock(&self.state);
+            let mut state = lock(&self.inner.state);
             state.retired = true;
             state.active.clone()
         };
@@ -819,7 +853,7 @@ impl ProviderAdmission {
     async fn wait_until_idle(&self, maximum_steps: usize) -> bool {
         let mut remaining = maximum_steps;
         poll_fn(move |task| {
-            let mut state = lock(&self.state);
+            let mut state = lock(&self.inner.state);
             if state.active.is_empty() {
                 return Poll::Ready(true);
             }
@@ -841,16 +875,16 @@ impl ProviderAdmission {
     }
 
     fn active(&self) -> usize {
-        lock(&self.state).active.len()
+        lock(&self.inner.state).active.len()
     }
 }
 
-struct ProviderAdmissionGuard<'a> {
-    admission: &'a ProviderAdmission,
+struct ProviderAdmissionGuard {
+    admission: Arc<ProviderAdmissionInner>,
     cancellation: Arc<ProviderOperationCancellation>,
 }
 
-impl ProviderAdmissionGuard<'_> {
+impl ProviderAdmissionGuard {
     // Before first poll cancellation can prove that no external effect began.
     // After first poll, keep driving the capability to a terminal result and
     // translate that result to cancellation. Dropping a pending filesystem or
@@ -879,30 +913,86 @@ impl ProviderAdmissionGuard<'_> {
         })
         .await
     }
+
+    async fn wait_store<T: Clone>(
+        &self,
+        mut operation: QuarantineOperation<T>,
+    ) -> Result<T, UploadError> {
+        self.cancellation
+            .physical_operations
+            .fetch_add(1, Ordering::AcqRel);
+        operation.supervise(ProviderPhysicalOperation {
+            admission: Arc::clone(&self.admission),
+            cancellation: Arc::clone(&self.cancellation),
+        });
+        poll_fn(|task| {
+            let canceled = self.cancellation.poll_canceled(task).is_ready();
+            match Pin::new(&mut operation).poll(task) {
+                Poll::Ready(_)
+                    if canceled || self.cancellation.canceled.load(Ordering::Acquire) =>
+                {
+                    Poll::Ready(Err(UploadError::new(UploadErrorKind::TransferCanceled)))
+                }
+                ready @ Poll::Ready(_) => ready,
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
 }
 
-impl Drop for ProviderAdmissionGuard<'_> {
+impl Drop for ProviderAdmissionGuard {
     fn drop(&mut self) {
-        let wake = {
-            let mut state = lock(&self.admission.state);
-            let previous = state.active.len();
-            state
-                .active
-                .retain(|active| !Arc::ptr_eq(active, &self.cancellation));
-            debug_assert_eq!(
-                state.active.len() + 1,
-                previous,
-                "provider admission accounting underflow"
-            );
-            state
-                .active
-                .is_empty()
-                .then(|| state.idle_waker.take())
-                .flatten()
-        };
-        if let Some(waker) = wake {
-            waker.wake();
+        self.cancellation
+            .logical_open
+            .store(false, Ordering::Release);
+        release_provider_operation(&self.admission, &self.cancellation);
+    }
+}
+
+struct ProviderPhysicalOperation {
+    admission: Arc<ProviderAdmissionInner>,
+    cancellation: Arc<ProviderOperationCancellation>,
+}
+
+impl Drop for ProviderPhysicalOperation {
+    fn drop(&mut self) {
+        let previous = self
+            .cancellation
+            .physical_operations
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "provider physical-operation underflow");
+        release_provider_operation(&self.admission, &self.cancellation);
+    }
+}
+
+fn release_provider_operation(
+    admission: &ProviderAdmissionInner,
+    operation: &Arc<ProviderOperationCancellation>,
+) {
+    if operation.logical_open.load(Ordering::Acquire)
+        || operation.physical_operations.load(Ordering::Acquire) != 0
+    {
+        return;
+    }
+    let wake = {
+        let mut state = lock(&admission.state);
+        if operation.logical_open.load(Ordering::Acquire)
+            || operation.physical_operations.load(Ordering::Acquire) != 0
+        {
+            return;
         }
+        state
+            .active
+            .retain(|active| !Arc::ptr_eq(active, operation));
+        state
+            .active
+            .is_empty()
+            .then(|| state.idle_waker.take())
+            .flatten()
+    };
+    if let Some(waker) = wake {
+        waker.wake();
     }
 }
 
@@ -1018,7 +1108,34 @@ impl<'a, S: QuarantineStore> PendingChunkGuard<'a, S> {
 impl<S: QuarantineStore> Drop for PendingChunkGuard<'_, S> {
     fn drop(&mut self) {
         if self.armed {
-            self.provider.clear_pending(&self.handle, &self.pending);
+            self.provider.abandon_pending(&self.handle, &self.pending);
+        }
+    }
+}
+
+struct TransferPhysicalOperation {
+    transfers: Arc<Mutex<HashMap<UploadHandle, TransferEntry>>>,
+    handle: UploadHandle,
+    object: QuarantineObject,
+}
+
+impl Drop for TransferPhysicalOperation {
+    fn drop(&mut self) {
+        let mut transfers = lock(&self.transfers);
+        let Some(entry) = transfers.get_mut(&self.handle) else {
+            return;
+        };
+        if entry.object != self.object {
+            return;
+        }
+        debug_assert!(
+            entry.physical_operations > 0,
+            "transfer physical-operation underflow"
+        );
+        entry.physical_operations = entry.physical_operations.saturating_sub(1);
+        if entry.physical_operations == 0 && entry.pending_abandoned {
+            entry.pending = None;
+            entry.pending_abandoned = false;
         }
     }
 }
@@ -1055,7 +1172,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         Ok(Self {
             store,
             limits,
-            transfers: Mutex::new(HashMap::new()),
+            transfers: Arc::new(Mutex::new(HashMap::new())),
             resources: ResourceOwner::new(resource_bounds),
             admission: ProviderAdmission::new(limits.max_concurrent_transfers()),
             cleanup_permits,
@@ -1071,7 +1188,11 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         let entry = transfers
             .get(handle)
             .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
-        if !entry.created || entry.pending.is_some() || entry.cancellation.is_canceled() {
+        if !entry.created
+            || entry.pending.is_some()
+            || entry.physical_operations != 0
+            || entry.cancellation.is_canceled()
+        {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
         Ok(TransferCheckpoint {
@@ -1115,6 +1236,8 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 chunks: checkpoint.chunks,
                 committed_bytes: checkpoint.committed_bytes,
                 pending: None,
+                pending_abandoned: false,
+                physical_operations: 0,
                 cancellation: CancellationFlag::new(),
                 evidence: checkpoint.evidence,
             },
@@ -1248,14 +1371,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn create_reserved_object(
         &self,
-        admission: &ProviderAdmissionGuard<'_>,
+        admission: &ProviderAdmissionGuard,
         reservation: &mut PreparationGuard<'_, S>,
     ) -> Result<(), UploadError> {
         for _ in 0..OBJECT_COLLISION_ATTEMPTS {
-            match admission
-                .wait(self.store.create_exclusive(reservation.object()))
-                .await
-            {
+            let operation =
+                self.supervise_store_operation(&reservation.handle, reservation.object(), || {
+                    self.store.create_exclusive(reservation.object())
+                })?;
+            match admission.wait_store(operation).await {
                 Ok(()) => return Ok(()),
                 Err(error) if error.kind() == UploadErrorKind::StorageConflict => {
                     let selected = match QuarantineObject::generate() {
@@ -1286,7 +1410,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn reclaim_abandoned_preparation(
         &self,
-        admission: &ProviderAdmissionGuard<'_>,
+        admission: &ProviderAdmissionGuard,
         handle: &UploadHandle,
     ) -> Result<(), UploadError> {
         let abandoned = lock(&self.transfers)
@@ -1316,11 +1440,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn discard_unpublished_preparation(
         &self,
-        admission: &ProviderAdmissionGuard<'_>,
+        admission: &ProviderAdmissionGuard,
         request: PrepareTransfer<'_>,
         selected: QuarantineObject,
     ) -> Result<(), UploadError> {
-        if let Err(error) = admission.wait(self.store.remove(&selected)).await {
+        let operation =
+            self.supervise_cleanup_store_operation(request.handle, &selected, || {
+                self.store.remove(&selected)
+            })?;
+        if let Err(error) = admission.wait_store(operation).await {
             let mut transfers = lock(&self.transfers);
             transfers.entry(request.handle.clone()).or_insert_with(|| {
                 let mut retained = TransferEntry::preparing(
@@ -1344,12 +1472,64 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         Ok(())
     }
 
-    fn clear_pending(&self, handle: &UploadHandle, pending: &ChunkShape) {
+    fn abandon_pending(&self, handle: &UploadHandle, pending: &ChunkShape) {
         if let Some(entry) = lock(&self.transfers).get_mut(handle)
             && entry.pending.as_ref() == Some(pending)
         {
-            entry.pending = None;
+            if entry.physical_operations == 0 {
+                entry.pending = None;
+            } else {
+                entry.pending_abandoned = true;
+            }
         }
+    }
+
+    fn supervise_store_operation<T>(
+        &self,
+        handle: &UploadHandle,
+        object: &QuarantineObject,
+        start: impl FnOnce() -> QuarantineOperation<T>,
+    ) -> Result<QuarantineOperation<T>, UploadError> {
+        self.supervise_store_operation_inner(handle, object, false, start)
+    }
+
+    fn supervise_cleanup_store_operation<T>(
+        &self,
+        handle: &UploadHandle,
+        object: &QuarantineObject,
+        start: impl FnOnce() -> QuarantineOperation<T>,
+    ) -> Result<QuarantineOperation<T>, UploadError> {
+        self.supervise_store_operation_inner(handle, object, true, start)
+    }
+
+    fn supervise_store_operation_inner<T>(
+        &self,
+        handle: &UploadHandle,
+        object: &QuarantineObject,
+        allow_canceled: bool,
+        start: impl FnOnce() -> QuarantineOperation<T>,
+    ) -> Result<QuarantineOperation<T>, UploadError> {
+        {
+            let mut transfers = lock(&self.transfers);
+            let entry = transfers
+                .get_mut(handle)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::TransferCanceled))?;
+            if entry.object != *object || (!allow_canceled && entry.cancellation.is_canceled()) {
+                return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+            }
+            entry.physical_operations = entry
+                .physical_operations
+                .checked_add(1)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+        }
+        let supervisor = TransferPhysicalOperation {
+            transfers: Arc::clone(&self.transfers),
+            handle: handle.clone(),
+            object: object.clone(),
+        };
+        let operation = start();
+        operation.supervise(supervisor);
+        Ok(operation)
     }
 
     async fn remove_entry(&self, handle: &UploadHandle) -> Result<(), UploadError> {
@@ -1359,30 +1539,44 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     async fn remove_entry_with_admission(
         &self,
         handle: &UploadHandle,
-        admission: Option<&ProviderAdmissionGuard<'_>>,
+        admission: Option<&ProviderAdmissionGuard>,
     ) -> Result<(), UploadError> {
         let selected = {
             let transfers = lock(&self.transfers);
-            transfers
-                .get(handle)
-                .map(|entry| (entry.object.clone(), entry.cancellation.clone()))
+            transfers.get(handle).map(|entry| {
+                // Closing transfer admission and observing the physical count
+                // are one critical section. A sibling cannot pass its final
+                // pre-I/O check after cleanup has decided the object is idle.
+                entry.cancellation.cancel();
+                (
+                    entry.object.clone(),
+                    entry.cancellation.clone(),
+                    entry.physical_operations,
+                )
+            })
         };
-        let Some((object, cancellation)) = selected else {
+        let Some((object, cancellation, physical_operations)) = selected else {
             return Ok(());
         };
-        cancellation.cancel();
+        debug_assert!(cancellation.is_canceled());
+        if physical_operations != 0 {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
         let _descriptor = self
             .descriptor_permits
             .try_acquire()
             .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
-        match admission {
-            Some(admission) => {
-                admission.wait(self.store.remove(&object)).await?;
-            }
+        let cleanup_admission;
+        let admission = match admission {
+            Some(admission) => admission,
             None => {
-                self.store.remove(&object).await?;
+                cleanup_admission = self.admission.enter_cleanup();
+                &cleanup_admission
             }
-        }
+        };
+        let operation =
+            self.supervise_cleanup_store_operation(handle, &object, || self.store.remove(&object))?;
+        admission.wait_store(operation).await?;
         let mut transfers = lock(&self.transfers);
         if transfers
             .get(handle)
@@ -1521,13 +1715,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                         return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                     }
                     hasher.update(&bytes);
-                    admission
-                        .wait(self.store.write_at(
-                            &object,
-                            request.offset + received as u64,
-                            bytes.as_ref(),
-                        ))
-                        .await?;
+                    let operation =
+                        self.supervise_store_operation(request.handle, &object, || {
+                            self.store.write_at(
+                                &object,
+                                request.offset + received as u64,
+                                bytes.as_ref(),
+                            )
+                        })?;
+                    admission.wait_store(operation).await?;
                     received += bytes.len();
                 }
                 if admission.wait(body.next_chunk(1)).await?.is_some() {
@@ -1599,27 +1795,29 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 let remaining =
                     usize::try_from((expected_bytes - offset).min(STREAM_BUFFER_BYTES as u64))
                         .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
-                let bytes = admission
-                    .wait(self.store.read_at(&object, offset, remaining))
-                    .await?;
+                let operation = self.supervise_store_operation(request.handle, &object, || {
+                    self.store.read_at(&object, offset, remaining)
+                })?;
+                let bytes = admission.wait_store(operation).await?;
                 if bytes.is_empty() || bytes.len() > remaining {
                     return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
                 }
                 hasher.update(&bytes);
                 offset += bytes.len() as u64;
             }
-            if !admission
-                .wait(self.store.read_at(&object, expected_bytes, 1))
-                .await?
-                .is_empty()
-            {
+            let operation = self.supervise_store_operation(request.handle, &object, || {
+                self.store.read_at(&object, expected_bytes, 1)
+            })?;
+            if !admission.wait_store(operation).await?.is_empty() {
                 return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
             }
             let actual = checksum_from_hasher(hasher)?;
             if actual != *request.checksum {
                 return Err(UploadError::new(UploadErrorKind::ChecksumMismatch));
             }
-            admission.wait(self.store.sync(&object)).await?;
+            let operation = self
+                .supervise_store_operation(request.handle, &object, || self.store.sync(&object))?;
+            admission.wait_store(operation).await?;
             if cancellation.is_canceled() || provider_cancellation.is_canceled() {
                 return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
@@ -1690,9 +1888,10 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                     .offset
                     .checked_add(output.len() as u64)
                     .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
-                let bytes = admission
-                    .wait(self.store.read_at(&object, offset, target - output.len()))
-                    .await?;
+                let operation = self.supervise_store_operation(request.handle, &object, || {
+                    self.store.read_at(&object, offset, target - output.len())
+                })?;
+                let bytes = admission.wait_store(operation).await?;
                 if bytes.is_empty() || bytes.len() > target - output.len() {
                     return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
                 }
@@ -1860,11 +2059,8 @@ mod admission_tests {
     }
 
     impl QuarantineStore for PhysicalStore {
-        fn create_exclusive<'a>(
-            &'a self,
-            object: &'a QuarantineObject,
-        ) -> UploadFuture<'a, Result<(), UploadError>> {
-            Box::pin(async move {
+        fn create_exclusive(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
+            QuarantineOperation::ready(
                 match std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -1875,17 +2071,17 @@ mod admission_tests {
                         Err(UploadError::new(UploadErrorKind::StorageConflict))
                     }
                     Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
-                }
-            })
+                },
+            )
         }
 
-        fn write_at<'a>(
-            &'a self,
-            object: &'a QuarantineObject,
+        fn write_at(
+            &self,
+            object: &QuarantineObject,
             offset: u64,
-            bytes: &'a [u8],
-        ) -> UploadFuture<'a, Result<(), UploadError>> {
-            Box::pin(async move {
+            bytes: &[u8],
+        ) -> QuarantineOperation<()> {
+            QuarantineOperation::ready((|| {
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .open(self.path_for(object))
@@ -1893,29 +2089,26 @@ mod admission_tests {
                 file.seek(std::io::SeekFrom::Start(offset))
                     .and_then(|_| file.write_all(bytes))
                     .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))
-            })
+            })())
         }
 
-        fn sync<'a>(
-            &'a self,
-            object: &'a QuarantineObject,
-        ) -> UploadFuture<'a, Result<(), UploadError>> {
-            Box::pin(async move {
+        fn sync(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
+            QuarantineOperation::ready(
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(self.path_for(object))
                     .and_then(|file| file.sync_data())
-                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))
-            })
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable)),
+            )
         }
 
-        fn read_at<'a>(
-            &'a self,
-            object: &'a QuarantineObject,
+        fn read_at(
+            &self,
+            object: &QuarantineObject,
             offset: u64,
             maximum_bytes: usize,
-        ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
-            Box::pin(async move {
+        ) -> QuarantineOperation<QuarantineBytes> {
+            QuarantineOperation::ready((|| {
                 let mut file = std::fs::File::open(self.path_for(object))
                     .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
                 file.seek(std::io::SeekFrom::Start(offset))
@@ -1926,21 +2119,16 @@ mod admission_tests {
                     .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
                 bytes.truncate(read);
                 Ok(QuarantineBytes::from(bytes))
-            })
+            })())
         }
 
-        fn remove<'a>(
-            &'a self,
-            object: &'a QuarantineObject,
-        ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>> {
-            Box::pin(async move {
-                match std::fs::remove_file(self.path_for(object)) {
-                    Ok(()) => Ok(RemoveDisposition::Removed),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Ok(RemoveDisposition::AlreadyAbsent)
-                    }
-                    Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+        fn remove(&self, object: &QuarantineObject) -> QuarantineOperation<RemoveDisposition> {
+            QuarantineOperation::ready(match std::fs::remove_file(self.path_for(object)) {
+                Ok(()) => Ok(RemoveDisposition::Removed),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(RemoveDisposition::AlreadyAbsent)
                 }
+                Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
             })
         }
     }

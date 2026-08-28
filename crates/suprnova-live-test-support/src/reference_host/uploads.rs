@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use axum::body::Body;
 use http_body_util::BodyExt as _;
@@ -190,6 +190,7 @@ pub(super) struct UploadRuntime {
     scope: HostScopeFacts,
     uploads: Arc<UploadSlots>,
     service_calls: AtomicUsize,
+    grant_sequence: AtomicU64,
     fault: ReferenceFaultSchedule,
     fault_applied: AtomicBool,
     shutdown: watch::Receiver<bool>,
@@ -246,6 +247,7 @@ impl UploadRuntime {
                 retired: AtomicBool::new(false),
             }),
             service_calls: AtomicUsize::new(0),
+            grant_sequence: AtomicU64::new(0),
             fault,
             fault_applied: AtomicBool::new(false),
             shutdown,
@@ -581,13 +583,12 @@ impl UploadRuntime {
         Ok(())
     }
 
-    pub(super) async fn reacquire(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
+    pub(super) async fn reacquire(&self, handle: &str) -> Result<Value, UploadError> {
         self.record_call();
         let mut operation = self.take_upload(handle)?;
         self.operation_pause
             .pause_if_selected(UploadPausePoint::Reacquire)
             .await;
-        self.require_current_grant(operation.upload(), grant)?;
         self.reacquire_inner(operation.upload_mut()).await
     }
 
@@ -611,10 +612,14 @@ impl UploadRuntime {
             self.scope.clone(),
             1,
         );
-        let issued = self.grants.issue(
-            TransferGrantRequest::new(scope, UnixMillis::new(61_000)),
-            CREATED_AT,
-        )?;
+        let sequence = self.grant_sequence.fetch_add(1, Ordering::SeqCst);
+        let expires_at = 61_000_u64
+            .checked_add(sequence)
+            .map(UnixMillis::new)
+            .ok_or_else(|| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+        let issued = self
+            .grants
+            .issue(TransferGrantRequest::new(scope, expires_at), CREATED_AT)?;
         upload.grant = issued.grant().clone();
         let mut response = status_json(upload);
         response["grant"] = Value::String(upload.grant.expose_bearer().to_owned());
@@ -1085,9 +1090,7 @@ mod tests {
                             .await
                     }
                     UploadPausePoint::Reacquire => {
-                        operation_runtime
-                            .reacquire(&operation_handle, &operation_grant)
-                            .await
+                        operation_runtime.reacquire(&operation_handle).await
                     }
                 }
             });

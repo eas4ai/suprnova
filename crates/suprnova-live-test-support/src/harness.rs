@@ -16,7 +16,7 @@ use suprnova_live::host::TrustedLiveRequestContext;
 use suprnova_live::identity::{
     ActionName, ContentDigest, IdempotencyKey, InstanceId, Revision, UnixMillis,
 };
-use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
+use suprnova_live::ledger::{LedgerLimits, LiveInstanceLedger, MemoryInstanceLedger};
 use suprnova_live::limits::InputLimits;
 use suprnova_live::mount::{
     DocumentMountKey, DocumentMountScope, MountFlags, MountLimits, MountProviders,
@@ -97,6 +97,7 @@ pub struct ComponentHarnessConfig {
     keys: SnapshotKeyRing,
     snapshot_limits: SnapshotLimits,
     services: HarnessServices,
+    instance_ledger: Option<Arc<dyn LiveInstanceLedger>>,
     ledger_limits: Option<LedgerLimits>,
     mount_limits: Option<MountLimits>,
     render_limits: RenderLimits,
@@ -120,6 +121,7 @@ impl ComponentHarnessConfig {
             keys,
             snapshot_limits,
             services,
+            instance_ledger: None,
             ledger_limits: None,
             mount_limits: None,
             render_limits: RenderLimits::standard(),
@@ -130,6 +132,13 @@ impl ComponentHarnessConfig {
     #[must_use]
     pub fn with_ledger_limits(mut self, limits: LedgerLimits) -> Self {
         self.ledger_limits = Some(limits);
+        self
+    }
+
+    /// Replaces the Tier 0 ledger with one deterministic conformance adapter.
+    #[must_use]
+    pub fn with_instance_ledger(mut self, ledger: Arc<dyn LiveInstanceLedger>) -> Self {
+        self.instance_ledger = Some(ledger);
         self
     }
 
@@ -268,17 +277,19 @@ impl ComponentHarness {
                 .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?
                 .build(),
         );
-        let ledger = Arc::new(MemoryInstanceLedger::new(
-            Arc::clone(config.services.clock()) as Arc<dyn suprnova_live::clock::Clock>,
-            ledger_limits,
-        ));
+        let ledger = config.instance_ledger.unwrap_or_else(|| {
+            Arc::new(MemoryInstanceLedger::new(
+                Arc::clone(config.services.clock()) as Arc<dyn suprnova_live::clock::Clock>,
+                ledger_limits,
+            )) as Arc<dyn LiveInstanceLedger>
+        });
         let keys = Arc::new(config.keys);
         let renderer = ViewRenderer::new(config.render_limits)
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidConfiguration))?;
         let mount_service = PrivateMountService::new(
             MountProviders::new(
                 registry,
-                Arc::clone(&ledger) as Arc<dyn suprnova_live::ledger::LiveInstanceLedger>,
+                Arc::clone(&ledger),
                 Arc::clone(config.services.clock()) as Arc<dyn suprnova_live::clock::Clock>,
                 Arc::clone(config.services.instance_ids())
                     as Arc<dyn suprnova_live::random::InstanceIdGenerator>,

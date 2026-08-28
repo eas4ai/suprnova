@@ -351,11 +351,51 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
     }
 
     fn abandon_on_drop(&self, claim: ClaimToken) {
-        let _ = self.abandon_claim(&claim);
+        let _ = self.release_claim(&claim);
     }
 }
 
 impl MemoryInstanceLedger {
+    fn release_claim(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
+        if !Arc::ptr_eq(&self.provider_identity, &claim.provider_identity) {
+            return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
+        }
+        let now = self.now()?;
+        let key = InstanceKey {
+            scope: claim.scope.clone(),
+            instance_id: claim.instance_id.clone(),
+        };
+        let mut state = self.lock()?;
+        if state.prune_instance(&key, now) {
+            return Err(LedgerError::new(LedgerErrorKind::InstanceExpired));
+        }
+        let record = state
+            .instances
+            .get_mut(&key)
+            .ok_or_else(|| LedgerError::new(LedgerErrorKind::ClaimMismatch))?;
+        match &record.phase {
+            InstancePhase::Pending(pending) if pending.claim_id == claim.claim_id => {
+                if pending.lease_expires_at <= now {
+                    record.phase = InstancePhase::Consumed {
+                        reason: RefreshReason::ClaimExpired,
+                        claim_id: Some(claim.claim_id),
+                    };
+                    return Err(LedgerError::new(LedgerErrorKind::ClaimExpired));
+                }
+                record.current_revision = pending.base_revision;
+                record.phase = InstancePhase::Ready;
+                Ok(())
+            }
+            InstancePhase::Consumed {
+                reason: RefreshReason::ClaimExpired,
+                claim_id: Some(expired_claim_id),
+            } if *expired_claim_id == claim.claim_id => {
+                Err(LedgerError::new(LedgerErrorKind::ClaimExpired))
+            }
+            _ => Err(LedgerError::new(LedgerErrorKind::ClaimMismatch)),
+        }
+    }
+
     fn abandon_claim(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
         if !Arc::ptr_eq(&self.provider_identity, &claim.provider_identity) {
             return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));

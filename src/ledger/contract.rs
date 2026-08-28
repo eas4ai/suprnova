@@ -554,9 +554,11 @@ pub trait LiveInstanceLedger: Send + Sync {
     /// Terminally consumes authority for exactly the matching pending token.
     async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError>;
 
-    /// Synchronously schedules or performs terminal cleanup when an accepted claim is dropped.
+    /// Synchronously releases an uncommitted claim when its owner is canceled or dropped.
     ///
     /// Implementations must not block on remote I/O. Distributed providers use their owned
-    /// coordinator to enqueue the cleanup; in-process providers may consume it immediately.
+    /// coordinator to enqueue the cleanup; in-process providers may restore the base revision
+    /// immediately so an exact request can retry. This is distinct from explicit terminal
+    /// [`LiveInstanceLedger::abandon`].
     fn abandon_on_drop(&self, claim: ClaimToken);
 }

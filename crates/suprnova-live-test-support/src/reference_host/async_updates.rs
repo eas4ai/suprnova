@@ -736,7 +736,8 @@ impl AsyncRuntime {
                 membership.lease = Some(lease);
                 self.maximum_memberships
                     .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
-                let envelope = engine.envelope(&membership.engine_authorization, 1)?;
+                let sequence = membership.authority.next_heartbeat().0;
+                let envelope = engine.envelope(&membership.engine_authorization, sequence)?;
                 (receipt, envelope)
             };
             drop(control);
@@ -998,6 +999,57 @@ fn transport_response(transport_id: &str, transport: &IssuedTransport) -> Value 
 mod tests {
     use super::*;
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn websocket_initial_and_ongoing_frames_share_one_sequence_authority() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+            .await
+            .expect("async runtime");
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "websocket".to_owned(),
+                    subscription: "orders".to_owned(),
+                },
+                "http://127.0.0.1:4197",
+            )
+            .await
+            .expect("websocket transport");
+        let transport = created["transport"].as_str().expect("transport");
+        let membership = &created["memberships"][0];
+        let subscription = membership["subscription"].as_str().expect("subscription");
+        let binding = membership["descriptor_binding"]
+            .as_str()
+            .expect("descriptor binding");
+        let control = serde_json::to_vec(&json!({
+            "control_nonce": "0000000000000001",
+            "descriptor_binding": binding,
+            "kind": "subscribe",
+            "stream": "orders",
+            "subscription": subscription,
+            "transport_generation": 1,
+        }))
+        .expect("control JSON");
+        let initial = runtime
+            .websocket_control(transport, &control)
+            .await
+            .expect("subscribe control");
+        let initial: Value =
+            serde_json::from_slice(&initial.messages[1]).expect("initial engine envelope");
+        let ongoing = runtime.websocket_batch(transport).expect("ongoing batch");
+        let ongoing: Value = serde_json::from_slice(&ongoing[0]).expect("ongoing engine envelope");
+        let sequence = |value: &Value| {
+            value["position"]["sequence"]
+                .as_str()
+                .expect("sequence")
+                .parse::<u64>()
+                .expect("decimal sequence")
+        };
+        assert!(sequence(&ongoing) > sequence(&initial));
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stalled_membership_phase_does_not_block_a_sibling_and_cancellation_is_retryable() {

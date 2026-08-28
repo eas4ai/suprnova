@@ -377,7 +377,7 @@ async fn upload_reacquire_returns_the_authoritative_partial_multipart_cursor() {
         &host,
         Method::POST,
         &format!("/example/uploads/{handle}/reacquire"),
-        Some(grant),
+        None,
         "",
     )
     .await;
@@ -392,7 +392,7 @@ async fn upload_reacquire_returns_the_authoritative_partial_multipart_cursor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current_grant() {
+async fn upload_handles_are_not_authority_and_reacquire_uses_application_session_ownership() {
     let root = TestRoot::new("upload-authority");
     let host = start_host(UPLOAD_AUTHORITY_PORT, &root, ReferenceFaultSchedule::None).await;
     let create = |filename: &'static str| {
@@ -435,10 +435,8 @@ async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current
     assert_eq!(status, StatusCode::OK);
 
     let reacquire_path = format!("/example/uploads/{first_handle}/reacquire");
-    let (status, _, _) = upload_request(&host, Method::POST, &reacquire_path, None, "").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, reacquired) =
-        upload_request(&host, Method::POST, &reacquire_path, Some(first_grant), "").await;
+        upload_request(&host, Method::POST, &reacquire_path, None, "").await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -447,6 +445,17 @@ async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current
     );
     let reacquired: Value = serde_json::from_slice(&reacquired).expect("reacquire JSON");
     let successor_grant = reacquired["grant"].as_str().expect("successor grant");
+    assert_ne!(successor_grant, first_grant);
+    let (status, _, reacquired_again) =
+        upload_request(&host, Method::POST, &reacquire_path, Some(first_grant), "").await;
+    assert_eq!(status, StatusCode::OK);
+    let reacquired_again: Value =
+        serde_json::from_slice(&reacquired_again).expect("second reacquire JSON");
+    let latest_grant = reacquired_again["grant"].as_str().expect("latest grant");
+    assert_ne!(
+        latest_grant, successor_grant,
+        "reacquire must rotate bearers"
+    );
     let (status, _, _) =
         upload_request(&host, Method::GET, &status_path, Some(first_grant), "").await;
     assert_eq!(
@@ -455,8 +464,37 @@ async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current
         "stale grant remained authority"
     );
     let (status, _, _) =
-        upload_request(&host, Method::GET, &status_path, Some(successor_grant), "").await;
+        upload_request(&host, Method::GET, &status_path, Some(latest_grant), "").await;
     assert_eq!(status, StatusCode::OK);
+
+    for authorization in ["Bearer wrong-principal", "Bearer wrong-session"] {
+        let (status, _, _) = request(
+            &host,
+            Method::POST,
+            &reacquire_path,
+            &[
+                (AUTHORIZATION.as_str(), authorization),
+                ("x-live-upload-grant", first_grant),
+            ],
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let unknown = "018f8f3a-7b2c-4d5e-8f90-abcdef012345";
+    let (status, _, _) = upload_request(
+        &host,
+        Method::POST,
+        &format!("/example/uploads/{unknown}/reacquire"),
+        None,
+        "",
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "unknown handle was treated as owned"
+    );
 
     let cancel_path = format!("/__live/uploads/{first_handle}/cancel");
     let (status, _, _) = upload_request(&host, Method::POST, &cancel_path, None, "").await;
@@ -465,7 +503,7 @@ async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current
         upload_request(&host, Method::POST, &cancel_path, Some(second_grant), "").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, _) =
-        upload_request(&host, Method::POST, &cancel_path, Some(successor_grant), "").await;
+        upload_request(&host, Method::POST, &cancel_path, Some(latest_grant), "").await;
     assert_eq!(status, StatusCode::OK);
 
     host.shutdown()
@@ -1026,6 +1064,7 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
     let memberships = transport["memberships"].as_array().expect("memberships");
     let mut socket = websocket_connect(&host, transport_id).await;
     let mut buffered = Vec::new();
+    let mut initial_sequences = std::collections::BTreeMap::new();
 
     for (index, membership) in memberships.iter().enumerate() {
         let subscription = membership["subscription"].as_str().expect("subscription");
@@ -1057,6 +1096,13 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
             }
         };
         assert!(envelope.contains(subscription), "{envelope}");
+        let envelope: Value = serde_json::from_str(&envelope).expect("initial engine envelope");
+        let sequence = envelope["position"]["sequence"]
+            .as_str()
+            .expect("initial authoritative sequence")
+            .parse::<u64>()
+            .expect("initial decimal sequence");
+        initial_sequences.insert(subscription.to_owned(), sequence);
     }
 
     let first_subscription = memberships[0]["subscription"]
@@ -1080,8 +1126,25 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
     let second_subscription = memberships[1]["subscription"]
         .as_str()
         .expect("second subscription");
-    let ongoing = read_websocket_frame(&mut socket, &mut buffered).await;
-    assert!(ongoing.contains(second_subscription), "{ongoing}");
+    let ongoing = loop {
+        let frame = read_websocket_frame(&mut socket, &mut buffered).await;
+        if frame.contains(second_subscription) {
+            break frame;
+        }
+    };
+    let ongoing: Value = serde_json::from_str(&ongoing).expect("ongoing engine envelope");
+    let ongoing_sequence = ongoing["position"]["sequence"]
+        .as_str()
+        .expect("ongoing authoritative sequence")
+        .parse::<u64>()
+        .expect("ongoing decimal sequence");
+    assert!(
+        ongoing_sequence
+            > *initial_sequences
+                .get(second_subscription)
+                .expect("initial sequence for surviving membership"),
+        "initial and ongoing frames must share one monotonic authority"
+    );
 
     timeout(Duration::from_secs(2), host.shutdown())
         .await

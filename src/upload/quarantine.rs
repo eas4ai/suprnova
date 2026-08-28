@@ -2,10 +2,14 @@
 
 use std::fmt;
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 
-use super::{UploadError, UploadErrorKind, UploadFuture};
+use super::{UploadError, UploadErrorKind};
 
 const QUARANTINE_RANDOM_BYTES: usize = 32;
 const QUARANTINE_KEY_BYTES: usize = QUARANTINE_RANDOM_BYTES * 2;
@@ -66,6 +70,120 @@ pub enum RemoveDisposition {
     AlreadyAbsent,
 }
 
+struct QuarantineOperationState<T> {
+    result: Option<Result<T, UploadError>>,
+    waiters: Vec<Waker>,
+    supervisors: Vec<Box<dyn Send + 'static>>,
+}
+
+/// Shared completion witness for one independently owned physical store operation.
+///
+/// Dropping a request future never drops the store's completion half. The host
+/// adapter owns that half until the actual physical effect has reached a
+/// terminal result, allowing the provider to fence retries and retirement.
+pub struct QuarantineOperation<T> {
+    state: Arc<Mutex<QuarantineOperationState<T>>>,
+}
+
+impl<T> QuarantineOperation<T> {
+    /// Creates a pending operation and the single-use host completion authority.
+    #[must_use]
+    pub fn pending() -> (Self, QuarantineCompletion<T>) {
+        let state = Arc::new(Mutex::new(QuarantineOperationState {
+            result: None,
+            waiters: Vec::new(),
+            supervisors: Vec::new(),
+        }));
+        (
+            Self {
+                state: Arc::clone(&state),
+            },
+            QuarantineCompletion {
+                state,
+                completed: false,
+            },
+        )
+    }
+
+    /// Creates an already completed physical-operation witness.
+    #[must_use]
+    pub fn ready(result: Result<T, UploadError>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(QuarantineOperationState {
+                result: Some(result),
+                waiters: Vec::new(),
+                supervisors: Vec::new(),
+            })),
+        }
+    }
+
+    pub(crate) fn supervise(&self, supervisor: impl Send + 'static) {
+        let mut state = lock(&self.state);
+        if state.result.is_none() {
+            state.supervisors.push(Box::new(supervisor));
+        }
+    }
+}
+
+impl<T: Clone> Future for QuarantineOperation<T> {
+    type Output = Result<T, UploadError>;
+
+    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = lock(&self.state);
+        if let Some(result) = &state.result {
+            return Poll::Ready(result.clone());
+        }
+        if !state
+            .waiters
+            .iter()
+            .any(|registered| registered.will_wake(task.waker()))
+        {
+            state.waiters.push(task.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+/// Single-use authority that publishes a physical store operation's result.
+pub struct QuarantineCompletion<T> {
+    state: Arc<Mutex<QuarantineOperationState<T>>>,
+    completed: bool,
+}
+
+impl<T> QuarantineCompletion<T> {
+    /// Completes the operation and releases all provider fences exactly once.
+    pub fn complete(mut self, result: Result<T, UploadError>) {
+        self.publish(result);
+        self.completed = true;
+    }
+
+    fn publish(&self, result: Result<T, UploadError>) {
+        let (waiters, supervisors) = {
+            let mut state = lock(&self.state);
+            if state.result.is_some() {
+                return;
+            }
+            state.result = Some(result);
+            (
+                std::mem::take(&mut state.waiters),
+                std::mem::take(&mut state.supervisors),
+            )
+        };
+        drop(supervisors);
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
+impl<T> Drop for QuarantineCompletion<T> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.publish(Err(UploadError::new(UploadErrorKind::ProviderUnavailable)));
+        }
+    }
+}
+
 /// Host-owned asynchronous raw quarantine I/O.
 ///
 /// Every byte count is caller-bounded. Implementations must write the complete
@@ -73,45 +191,42 @@ pub enum RemoveDisposition {
 /// metadata.
 pub trait QuarantineStore: Send + Sync {
     /// Atomically creates one absent opaque object.
-    fn create_exclusive<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<(), UploadError>>;
+    fn create_exclusive(&self, object: &QuarantineObject) -> QuarantineOperation<()>;
 
     /// Writes the complete supplied slice at one trusted bounded offset.
-    fn write_at<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
+    fn write_at(
+        &self,
+        object: &QuarantineObject,
         offset: u64,
-        bytes: &'a [u8],
-    ) -> UploadFuture<'a, Result<(), UploadError>>;
+        bytes: &[u8],
+    ) -> QuarantineOperation<()>;
 
     /// Synchronizes accepted bytes before readiness can be published.
-    fn sync<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<(), UploadError>>;
+    fn sync(&self, object: &QuarantineObject) -> QuarantineOperation<()>;
 
     /// Reads at most `maximum_bytes` beginning at a trusted offset.
-    fn read_at<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
+    fn read_at(
+        &self,
+        object: &QuarantineObject,
         offset: u64,
         maximum_bytes: usize,
-    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>>;
+    ) -> QuarantineOperation<QuarantineBytes>;
 
     /// Reads at most one bounded prefix for later authoritative inspection.
-    fn read_prefix<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
+    fn read_prefix(
+        &self,
+        object: &QuarantineObject,
         maximum_bytes: usize,
-    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+    ) -> QuarantineOperation<QuarantineBytes> {
         self.read_at(object, 0, maximum_bytes)
     }
 
     /// Idempotently removes one opaque quarantine object.
-    fn remove<'a>(
-        &'a self,
-        object: &'a QuarantineObject,
-    ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>>;
+    fn remove(&self, object: &QuarantineObject) -> QuarantineOperation<RemoveDisposition>;
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
