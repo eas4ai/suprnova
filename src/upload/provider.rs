@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::Write as _;
+use std::future::poll_fn;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
 
 use sha2::{Digest, Sha256};
 
@@ -656,8 +658,98 @@ pub struct QuarantinedFileProvider<S: QuarantineStore> {
     limits: UploadLimits,
     transfers: Mutex<HashMap<UploadHandle, TransferEntry>>,
     resources: ResourceOwner<UploadHandle>,
+    admission: ProviderAdmission,
+    cleanup_permits: PermitPool,
     descriptor_permits: PermitPool,
     chunk_permits: PermitPool,
+}
+
+struct ProviderAdmission {
+    maximum_active: usize,
+    state: Mutex<ProviderAdmissionState>,
+}
+
+#[derive(Default)]
+struct ProviderAdmissionState {
+    retired: bool,
+    active: usize,
+    idle_waker: Option<Waker>,
+}
+
+impl ProviderAdmission {
+    fn new(maximum_active: usize) -> Self {
+        Self {
+            maximum_active,
+            state: Mutex::new(ProviderAdmissionState::default()),
+        }
+    }
+
+    fn enter(&self) -> Result<ProviderAdmissionGuard<'_>, UploadError> {
+        let mut state = lock(&self.state);
+        if state.retired {
+            return Err(UploadError::new(UploadErrorKind::ServiceRetired));
+        }
+        if state.active >= self.maximum_active {
+            return Err(UploadError::new(UploadErrorKind::ResourceExhausted));
+        }
+        state.active += 1;
+        Ok(ProviderAdmissionGuard {
+            admission: self,
+            armed: true,
+        })
+    }
+
+    fn retire(&self) {
+        lock(&self.state).retired = true;
+    }
+
+    async fn wait_until_idle(&self) {
+        poll_fn(|task| {
+            let mut state = lock(&self.state);
+            if state.active == 0 {
+                return Poll::Ready(());
+            }
+            if state
+                .idle_waker
+                .as_ref()
+                .is_none_or(|registered| !registered.will_wake(task.waker()))
+            {
+                state.idle_waker = Some(task.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        lock(&self.state).active
+    }
+}
+
+struct ProviderAdmissionGuard<'a> {
+    admission: &'a ProviderAdmission,
+    armed: bool,
+}
+
+impl Drop for ProviderAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let wake = {
+            let mut state = lock(&self.admission.state);
+            debug_assert!(state.active > 0, "provider admission accounting underflow");
+            state.active -= 1;
+            (state.active == 0)
+                .then(|| state.idle_waker.take())
+                .flatten()
+        };
+        self.armed = false;
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
 }
 
 struct PreparationGuard<'a, S: QuarantineStore> {
@@ -789,11 +881,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
         let chunk_permits = PermitPool::new(limits.max_concurrent_transfers())
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
+        let cleanup_permits =
+            PermitPool::new(1).map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
         Ok(Self {
             store,
             limits,
             transfers: Mutex::new(HashMap::new()),
             resources: ResourceOwner::new(resource_bounds),
+            admission: ProviderAdmission::new(limits.max_concurrent_transfers()),
+            cleanup_permits,
             descriptor_permits,
             chunk_permits,
         })
@@ -821,7 +917,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     /// Restores one quiescent checkpoint without accepting client path material.
     pub fn recover(&self, checkpoint: TransferCheckpoint) -> Result<(), UploadError> {
-        self.require_active()?;
+        let _admission = self.admission.enter()?;
         if checkpoint.expected_bytes > self.limits.max_file_bytes()
             || checkpoint.committed_bytes > checkpoint.expected_bytes
             || checkpoint.chunks.len() > self.limits.max_chunks_per_file()
@@ -870,30 +966,37 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     /// Retires provider admission and cancels in-flight work observation.
     pub fn retire(&self) -> Retirement {
+        self.admission.retire();
         self.resources.retire()
     }
 
     /// Retires admission and idempotently reclaims every provider-owned object.
     pub async fn retire_and_cleanup(&self) -> Result<Retirement, UploadError> {
-        let retirement = self.resources.retire();
-        let handles = lock(&self.transfers).keys().cloned().collect::<Vec<_>>();
+        let _cleanup = self
+            .cleanup_permits
+            .try_acquire()
+            .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+        let retirement = self.retire();
+        self.admission.wait_until_idle().await;
         let mut first_error = None;
-        for handle in handles {
-            if let Err(error) = self.remove_entry(&handle).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+        for _ in 0..=self.limits.max_pending_per_scope() {
+            let handles = lock(&self.transfers).keys().cloned().collect::<Vec<_>>();
+            if handles.is_empty() {
+                return first_error.map_or(Ok(retirement), Err);
+            }
+            let previous = handles.len();
+            for handle in handles {
+                if let Err(error) = self.remove_entry(&handle).await
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if lock(&self.transfers).len() >= previous {
+                break;
             }
         }
-        first_error.map_or(Ok(retirement), Err)
-    }
-
-    fn require_active(&self) -> Result<(), UploadError> {
-        if self.resources.cancellation().is_canceled() {
-            Err(UploadError::new(UploadErrorKind::ServiceRetired))
-        } else {
-            Ok(())
-        }
+        Err(first_error.unwrap_or_else(|| UploadError::new(UploadErrorKind::ProviderUnavailable)))
     }
 
     fn reserve_preparation(
@@ -1076,7 +1179,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: PrepareTransfer<'a>,
     ) -> UploadFuture<'a, Result<TransferPlan, UploadError>> {
         Box::pin(async move {
-            self.require_active()?;
+            let _admission = self.admission.enter()?;
             if request.expected_bytes > self.limits.max_file_bytes()
                 || request.client_name.len() > MAX_CLIENT_NAME_BYTES
             {
@@ -1116,7 +1219,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         body: &'a mut dyn ChunkBody,
     ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>> {
         Box::pin(async move {
-            self.require_active()?;
+            let _admission = self.admission.enter()?;
             let size = usize::try_from(request.size)
                 .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
             if size == 0
@@ -1222,7 +1325,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
         Box::pin(async move {
-            self.require_active()?;
+            let _admission = self.admission.enter()?;
             let _chunk = self
                 .chunk_permits
                 .try_acquire()
@@ -1317,7 +1420,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: ReadUpload<'a>,
     ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
         Box::pin(async move {
-            self.require_active()?;
+            let _admission = self.admission.enter()?;
             if request.maximum_bytes == 0 || request.maximum_bytes > self.limits.max_chunk_bytes() {
                 return Err(UploadError::new(UploadErrorKind::InputTooLarge));
             }
@@ -1472,4 +1575,232 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use std::io::{Read, Seek, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+    use crate::upload::RemoveDisposition;
+
+    static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "suprnova-live-provider-admission-{}-{}",
+                std::process::id(),
+                ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).expect("create provider admission test root");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct PhysicalStore {
+        root: PathBuf,
+    }
+
+    impl PhysicalStore {
+        fn new(root: &TestRoot) -> Self {
+            Self {
+                root: root.path().to_path_buf(),
+            }
+        }
+
+        fn path_for(&self, object: &QuarantineObject) -> PathBuf {
+            self.root.join(object.storage_key())
+        }
+    }
+
+    impl QuarantineStore for PhysicalStore {
+        fn create_exclusive<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<(), UploadError>> {
+            Box::pin(async move {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(self.path_for(object))
+                {
+                    Ok(_) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        Err(UploadError::new(UploadErrorKind::StorageConflict))
+                    }
+                    Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+                }
+            })
+        }
+
+        fn write_at<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+            offset: u64,
+            bytes: &'a [u8],
+        ) -> UploadFuture<'a, Result<(), UploadError>> {
+            Box::pin(async move {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.path_for(object))
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .and_then(|_| file.write_all(bytes))
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))
+            })
+        }
+
+        fn sync<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<(), UploadError>> {
+            Box::pin(async move {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.path_for(object))
+                    .and_then(|file| file.sync_data())
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))
+            })
+        }
+
+        fn read_at<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+            offset: u64,
+            maximum_bytes: usize,
+        ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+            Box::pin(async move {
+                let mut file = std::fs::File::open(self.path_for(object))
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+                let mut bytes = vec![0; maximum_bytes];
+                let read = file
+                    .read(&mut bytes)
+                    .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+                bytes.truncate(read);
+                Ok(QuarantineBytes::from(bytes))
+            })
+        }
+
+        fn remove<'a>(
+            &'a self,
+            object: &'a QuarantineObject,
+        ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>> {
+            Box::pin(async move {
+                match std::fs::remove_file(self.path_for(object)) {
+                    Ok(()) => Ok(RemoveDisposition::Removed),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(RemoveDisposition::AlreadyAbsent)
+                    }
+                    Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+                }
+            })
+        }
+    }
+
+    async fn physical_files(root: &TestRoot) -> usize {
+        let mut entries = tokio::fs::read_dir(root.path())
+            .await
+            .expect("read provider admission test root");
+        let mut count = 0;
+        while entries
+            .next_entry()
+            .await
+            .expect("read provider admission test entry")
+            .is_some()
+        {
+            count += 1;
+        }
+        count
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retirement_drains_a_recovery_admitted_before_the_barrier_closed() {
+        let root = TestRoot::new();
+        let store = Arc::new(PhysicalStore::new(&root));
+        let limits = UploadLimits::new(crate::limits::UploadLimitConfig::reference())
+            .expect("reference upload limits");
+        let first = QuarantinedFileProvider::new(store.clone(), limits).expect("first provider");
+        let handle = UploadHandle::parse("018f47c1-2af0-7cc4-a001-000000000001")
+            .expect("fixture upload handle");
+        first
+            .prepare(PrepareTransfer::new(
+                &handle,
+                4,
+                "recovery-race.bin",
+                UnixMillis::new(1_000),
+            ))
+            .await
+            .expect("prepare physical recovery object");
+        let checkpoint = first.checkpoint(&handle).expect("quiescent checkpoint");
+        assert_eq!(physical_files(&root).await, 1);
+
+        let recovered =
+            Arc::new(QuarantinedFileProvider::new(store, limits).expect("recovered provider"));
+        let transfers = lock(&recovered.transfers);
+        let recovery = tokio::task::spawn_blocking({
+            let recovered = recovered.clone();
+            let checkpoint = checkpoint.clone();
+            move || recovered.recover(checkpoint)
+        });
+        for _ in 0..10_000 {
+            if recovered.admission.active() == 1 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(recovered.admission.active(), 1);
+
+        let retirement_started = recovered.retire();
+        assert!(retirement_started.canceled);
+        let retirement = tokio::spawn({
+            let recovered = recovered.clone();
+            async move { recovered.retire_and_cleanup().await }
+        });
+        for _ in 0..128 {
+            if retirement.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            !retirement.is_finished(),
+            "retirement completed before admitted recovery inserted"
+        );
+
+        drop(transfers);
+        recovery
+            .await
+            .expect("recovery task joins")
+            .expect("pre-retirement recovery remains admitted");
+        retirement
+            .await
+            .expect("retirement task joins")
+            .expect("retirement cleanup succeeds");
+        assert_eq!(recovered.admission.active(), 0);
+        assert_eq!(recovered.descriptor_permits().active(), 0);
+        assert_eq!(recovered.chunk_permits().active(), 0);
+        assert_eq!(physical_files(&root).await, 0);
+
+        let error = recovered
+            .recover(checkpoint)
+            .expect_err("closed recovery admission cannot revive the object");
+        assert_eq!(error.kind(), UploadErrorKind::ServiceRetired);
+    }
 }

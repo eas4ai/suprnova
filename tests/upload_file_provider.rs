@@ -654,6 +654,111 @@ async fn provider_retirement_reclaims_an_aborted_unpublished_creation() {
 }
 
 #[tokio::test]
+async fn retirement_waits_for_a_previously_admitted_prepare_before_its_final_sweep() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+
+    store.pause_once(StorePausePoint::Create);
+    let abandoned = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            provider
+                .prepare(PrepareTransfer::new(
+                    &upload,
+                    4,
+                    "abandoned-before-retirement.bin",
+                    UnixMillis::new(1_000),
+                ))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("initial preparation task aborted")
+            .is_cancelled()
+    );
+    assert_eq!(root_file_count(&root).await, 1);
+
+    store.pause_once(StorePausePoint::Remove);
+    let retry = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            provider
+                .prepare(PrepareTransfer::new(
+                    &upload,
+                    4,
+                    "admitted-retry.bin",
+                    UnixMillis::new(1_001),
+                ))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    assert_eq!(root_file_count(&root).await, 0);
+
+    let retirement_started = provider.retire();
+    assert!(retirement_started.canceled);
+    let retirement = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.retire_and_cleanup().await }
+    });
+    let other = handle(OTHER_HANDLE);
+    let error = provider
+        .prepare(PrepareTransfer::new(
+            &other,
+            4,
+            "closed-admission.bin",
+            UnixMillis::new(1_002),
+        ))
+        .await
+        .expect_err("retirement closes admission before cleanup");
+    assert_eq!(error.kind(), UploadErrorKind::ServiceRetired);
+    for _ in 0..128 {
+        if retirement.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let retired_before_admitted_prepare_settled = retirement.is_finished();
+
+    store.pause_once(StorePausePoint::Create);
+    store.release.notify_one();
+    store.wait_until_paused().await;
+    assert_eq!(root_file_count(&root).await, 1);
+    retry.abort();
+    assert!(
+        retry
+            .await
+            .expect_err("admitted retry task aborted")
+            .is_cancelled()
+    );
+    retirement
+        .await
+        .expect("retirement task joins")
+        .expect("retirement cleanup succeeds");
+
+    if root_file_count(&root).await != 0 {
+        provider
+            .retire_and_cleanup()
+            .await
+            .expect("test cleanup after detected race");
+    }
+    assert!(
+        !retired_before_admitted_prepare_settled,
+        "retirement completed before the admitted preparation settled"
+    );
+    assert_eq!(root_file_count(&root).await, 0);
+    assert_eq!(provider.descriptor_permits().active(), 0);
+    assert_eq!(provider.chunk_permits().active(), 0);
+}
+
+#[tokio::test]
 async fn canceled_verification_and_removal_awaits_remain_exactly_retryable() {
     let root = TempRoot::new();
     let (store, provider) = controlled_provider(&root).await;
