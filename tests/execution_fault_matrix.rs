@@ -272,11 +272,14 @@ impl LiveInstanceLedger for ControlledLedger {
 
 #[derive(Default)]
 struct LifecycleTransactionControl {
-    pause_next: AtomicBool,
+    pause_begin_next: AtomicBool,
+    pause_after_domain_commit_next: AtomicBool,
     domain_commits: AtomicUsize,
     rollbacks: AtomicUsize,
-    entered: Notify,
-    release: Notify,
+    begin_entered: Notify,
+    begin_release: Notify,
+    commit_effect_entered: Notify,
+    commit_effect_release: Notify,
 }
 
 struct LifecycleTransaction(Arc<LifecycleTransactionControl>);
@@ -287,11 +290,14 @@ impl HostTransaction for LifecycleTransaction {
     ) -> suprnova_live::component::LiveFuture<'static, Result<(), HostError>> {
         let control = Arc::clone(&self.0);
         Box::pin(async move {
-            if control.pause_next.swap(false, Ordering::SeqCst) {
-                control.entered.notify_one();
-                control.release.notified().await;
-            }
             control.domain_commits.fetch_add(1, Ordering::SeqCst);
+            if control
+                .pause_after_domain_commit_next
+                .swap(false, Ordering::SeqCst)
+            {
+                control.commit_effect_entered.notify_one();
+                control.commit_effect_release.notified().await;
+            }
             Ok(())
         })
     }
@@ -314,9 +320,13 @@ impl TransactionPort for LifecycleTransactionPort {
         &self,
     ) -> suprnova_live::component::LiveFuture<'_, Result<Box<dyn HostTransaction>, HostError>> {
         let control = Arc::clone(&self.0);
-        Box::pin(
-            async move { Ok(Box::new(LifecycleTransaction(control)) as Box<dyn HostTransaction>) },
-        )
+        Box::pin(async move {
+            if control.pause_begin_next.swap(false, Ordering::SeqCst) {
+                control.begin_entered.notify_one();
+                control.begin_release.notified().await;
+            }
+            Ok(Box::new(LifecycleTransaction(control)) as Box<dyn HostTransaction>)
+        })
     }
 }
 
@@ -580,16 +590,19 @@ fn assert_consumed_refresh(result: ExecutionResult) {
 }
 
 #[tokio::test]
-async fn cancellation_before_host_commit_releases_rollbackable_claim_for_retry() {
+async fn cancellation_before_host_commit_attempt_releases_rollbackable_claim_for_retry() {
     let fixture = ClaimLifecycleFixture::new().await;
-    fixture.transaction.pause_next.store(true, Ordering::SeqCst);
+    fixture
+        .transaction
+        .pause_begin_next
+        .store(true, Ordering::SeqCst);
 
     {
         let execution = fixture.execute();
         tokio::pin!(execution);
         tokio::select! {
-            () = fixture.transaction.entered.notified() => {}
-            result = &mut execution => panic!("host commit unexpectedly completed: {result:?}"),
+            () = fixture.transaction.begin_entered.notified() => {}
+            result = &mut execution => panic!("host transaction begin unexpectedly completed: {result:?}"),
         }
         assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 0);
     }
@@ -601,6 +614,30 @@ async fn cancellation_before_host_commit_releases_rollbackable_claim_for_retry()
     assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.inspection().phase(), LedgerPhase::Ready);
     assert_eq!(fixture.inspection().accepted_outcome_count(), 1);
+}
+
+#[tokio::test]
+async fn cancellation_after_physical_host_commit_before_ack_fences_base_revision() {
+    let fixture = ClaimLifecycleFixture::new().await;
+    fixture
+        .transaction
+        .pause_after_domain_commit_next
+        .store(true, Ordering::SeqCst);
+
+    {
+        let execution = fixture.execute();
+        tokio::pin!(execution);
+        tokio::select! {
+            () = fixture.transaction.commit_effect_entered.notified() => {}
+            result = &mut execution => panic!("indeterminate host commit unexpectedly completed: {result:?}"),
+        }
+        assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
+    }
+
+    assert_consumed_refresh(fixture.execute().await);
+    assert_eq!(fixture.transaction.domain_commits.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.inspection().phase(), LedgerPhase::Consumed);
+    assert_eq!(fixture.inspection().accepted_outcome_count(), 0);
 }
 
 #[tokio::test]

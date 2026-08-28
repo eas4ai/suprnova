@@ -887,6 +887,7 @@ impl ExecutionService {
         };
         if let Some(transaction) = transaction.take() {
             record(trace, ExecutionPhase::HostCommit);
+            claim.begin_finalizing();
             if run_host_future(|| transaction.commit(), HostErrorKind::Commit)
                 .await
                 .is_err()
@@ -894,7 +895,6 @@ impl ExecutionService {
                 self.consume_failed_claim(claim).await;
                 return refresh(ExecutionRefreshReason::HostCommitFailed);
             }
-            claim.begin_finalizing();
         }
 
         let kind = kind_override.unwrap_or_else(|| outcome_kind(&result, &validation));

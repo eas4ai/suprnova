@@ -62,7 +62,12 @@ impl Error for HostError {}
 
 /// One host transaction whose ownership proves it has not yet completed.
 pub trait HostTransaction: Send {
-    /// Commits durable host effects exactly once.
+    /// Attempts to commit durable host effects exactly once.
+    ///
+    /// Once this future is polled, cancellation or an error does not prove that the effects were
+    /// rolled back. The execution coordinator therefore terminally fences the claimed base
+    /// revision before polling it. The generic [`HostError`] cannot reopen that revision for
+    /// retry.
     fn commit(self: Box<Self>) -> LiveFuture<'static, Result<(), HostError>>;
 
     /// Rolls back the uncommitted attempt exactly once.
