@@ -43,6 +43,29 @@ describe("typed local signal values", () => {
     });
   });
 
+  it("uses the canonical lowercase-first 64-byte dotted signal-name grammar", () => {
+    for (const valid of ["a", `a${"z".repeat(63)}`, "upload.progress"]) {
+      expect(parseDirective("live:signal", `${valid}:false`)).toMatchObject({ ok: true });
+      expect(parseSignalDeclarations(`${valid}:false`)).toEqual([{ name: valid, initial: false }]);
+    }
+    for (const invalid of [
+      `a${"z".repeat(64)}`,
+      "Progress",
+      "1progress",
+      "_progress",
+      "prøgress",
+    ]) {
+      expect(parseDirective("live:signal", `${invalid}:false`)).toMatchObject({
+        code: "invalid_value",
+        ok: false,
+      });
+      expect(() => parseSignalDeclarations(`${invalid}:false`)).toThrow(
+        "signal_declaration_invalid",
+      );
+    }
+    expect(parseDirective("live:class", "UploadProgress:open")).toMatchObject({ ok: true });
+  });
+
   it("accepts the mixed declarations emitted by an island root", () => {
     const declarations = "open:false,label:hello,count:1,none:null";
 

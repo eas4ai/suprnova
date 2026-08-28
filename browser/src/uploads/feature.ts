@@ -9,6 +9,7 @@ import {
 import { parseFeatureDirective } from "../features/directive-parser.js";
 import { UploadManager } from "./manager.js";
 import { captureUploadMorph, reconcileUploadMorph, type UploadMorphContinuity } from "./morph.js";
+import { validateUploadTransportRequest } from "./protocol.js";
 import {
   createUploadProgressView,
   UploadProgressPresenter,
@@ -159,6 +160,7 @@ export class FetchUploadTransport implements UploadTransport {
   }
 
   async send(request: UploadTransportRequest): Promise<UploadTransportResponse> {
+    validateUploadTransportRequest(request);
     const headers = new Headers({ Accept: "application/json", "X-Suprnova-Live": "upload-v1" });
     let body: BodyInit;
     if (request.operation === "put_chunk") {

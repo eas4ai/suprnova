@@ -192,13 +192,16 @@ fn iteration_004_upload_model_conflicts_are_island_wide() {
         r#"<section live:upload.remove="avatar"><input live:model.change="avatar"></section>"#,
     ] {
         let report = check(source);
-        assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
-            "missing island-wide upload/model conflict for {source}: {:?}",
-            report.diagnostics()
+        let conflicts = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier)
+            .count();
+        assert_eq!(
+            conflicts,
+            1,
+            "island-wide upload/model conflict multiplicity for {source}: {:?}",
+            report.diagnostics(),
         );
     }
 }
@@ -292,25 +295,34 @@ fn iteration_004_upload_shape_metadata_ownership_and_accessibility_fail_closed()
 
 #[test]
 fn iteration_004_stream_event_signal_and_capability_metadata_fail_closed() {
+    let sixty_five_bytes = format!("a{}", "z".repeat(64));
     for (source, expected) in [
         (
-            r#"<section live:stream="missing"></section>"#,
+            r#"<section live:stream="missing"></section>"#.to_owned(),
             DiagnosticCode::InvalidModifier,
         ),
         (
-            r#"<span live:on="orders.missing"></span>"#,
+            r#"<span live:on="orders.missing"></span>"#.to_owned(),
             DiagnosticCode::UnknownEvent,
         ),
         (
-            r#"<section live:signal="1invalid:true"></section>"#,
+            r#"<section live:signal="1invalid:true"></section>"#.to_owned(),
             DiagnosticCode::InvalidModifier,
         ),
         (
-            r#"<section live:signal="Progress:true"></section>"#,
+            r#"<section live:signal="Progress:true"></section>"#.to_owned(),
+            DiagnosticCode::InvalidModifier,
+        ),
+        (
+            r#"<section live:signal="prøgress:true"></section>"#.to_owned(),
+            DiagnosticCode::InvalidModifier,
+        ),
+        (
+            format!(r#"<section live:signal="{sixty_five_bytes}:true"></section>"#),
             DiagnosticCode::InvalidModifier,
         ),
     ] {
-        let report = check(source);
+        let report = check(source.clone());
         assert!(
             report
                 .diagnostics()
@@ -454,13 +466,13 @@ fn morph_controls_require_stable_identity_safe_modes_and_owned_structure() {
     }
 }
 
-fn check(source: &'static str) -> suprnova_live::checker::CheckReport {
+fn check(source: impl Into<String>) -> suprnova_live::checker::CheckReport {
     let registry = registry();
     let catalog = TemplateCatalog::new(vec![
-        (view(ROOT_VIEW), source),
+        (view(ROOT_VIEW), source.into()),
         (
             view(CHILD_VIEW),
-            include_str!("fixtures/checker/pass/child.html"),
+            include_str!("fixtures/checker/pass/child.html").to_owned(),
         ),
     ])
     .expect("template catalog");

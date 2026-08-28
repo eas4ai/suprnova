@@ -1,3 +1,5 @@
+import { isSignalName } from "./name.js";
+
 export type SignalValue = boolean | string | number | null;
 
 export interface SignalDeclaration {
@@ -5,8 +7,8 @@ export interface SignalDeclaration {
   readonly initial: SignalValue;
 }
 
-const SIGNAL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/u;
 const INTEGER = /^-?(?:0|[1-9][0-9]{0,15})$/u;
+const SIGNAL_LITERAL = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/u;
 const MAX_SIGNAL_DECLARATIONS = 32;
 const MAX_SIGNAL_LITERAL_UNITS = 128;
 
@@ -22,7 +24,7 @@ export function parseSignalLiteral(value: string): SignalValue {
     if (Number.isSafeInteger(integer)) return integer;
     throw new Error("signal_literal_invalid");
   }
-  if (SIGNAL_NAME.test(value)) return value;
+  if (SIGNAL_LITERAL.test(value)) return value;
   throw new Error("signal_literal_invalid");
 }
 
@@ -39,7 +41,7 @@ export function parseSignalDeclarations(value: string): readonly SignalDeclarati
       throw new Error("signal_declaration_invalid");
     }
     const name = entry.slice(0, separator);
-    if (!SIGNAL_NAME.test(name)) throw new Error("signal_declaration_invalid");
+    if (!isSignalName(name)) throw new Error("signal_declaration_invalid");
     if (seen.has(name)) throw new Error("signal_declaration_duplicate");
     seen.add(name);
     declarations.push(

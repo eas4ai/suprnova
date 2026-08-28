@@ -45,8 +45,8 @@
     "dist"
   ],
   "scripts": {
-    "generate": "node ../scripts/generate-browser-contracts.mjs",
-    "generate:check": "node ../scripts/generate-browser-contracts.mjs --check",
+    "generate": "node ../scripts/generate-browser-contracts.mjs && node scripts/generate-iteration-004-conformance.mjs",
+    "generate:check": "node ../scripts/generate-browser-contracts.mjs --check && node scripts/generate-iteration-004-conformance.mjs --check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",

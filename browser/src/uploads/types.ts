@@ -1,4 +1,5 @@
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
+import { parseUploadProtocolState } from "./state.js";
 
 export const DEFAULT_UPLOAD_CHUNK_BYTES = 256 * 1024;
 export const MAX_UPLOAD_FILES_PER_DOCUMENT = 64;
@@ -326,6 +327,7 @@ export function validateTransportResponse(
     throw new Error("upload_transport_response_invalid");
   }
   validateUploadRevision(response.revision);
+  if (response.state !== "interrupted") parseUploadProtocolState(response.state);
   const allowed: readonly UploadPresentationState[] = RESPONSE_STATES[operation];
   if (!allowed.includes(response.state)) {
     throw new Error("upload_transport_response_invalid");

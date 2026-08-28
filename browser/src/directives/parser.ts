@@ -3,6 +3,7 @@ import {
   isReservedDirective,
   type DirectiveFallback,
 } from "../generated/directive-contract.js";
+import { isSignalName } from "../signals/name.js";
 import type {
   DirectiveDiagnostic,
   DirectiveDiagnosticCode,
@@ -14,7 +15,6 @@ export const MAX_VALUE_UNITS = 2_048;
 export const MAX_MODIFIER_SEGMENTS = 16;
 export const MAX_PRESENT_DIRECTIVES = 64;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
-const SIGNAL_NAME = /^[a-z][a-z0-9_-]{0,127}$/u;
 const TARGET_ID = /^#[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
 function diagnostic(
@@ -82,8 +82,8 @@ function validMapping(directive: string | undefined, value: string): boolean {
     if (separator <= 0 || separator !== entry.lastIndexOf(":")) return false;
     const key = entry.slice(0, separator);
     const mapped = entry.slice(separator + 1);
-    if (!(directive === "signal" ? SIGNAL_NAME : IDENTIFIER).test(key)) return false;
-    if (SIGNAL_NAME.test(mapped)) return true;
+    if (directive === "signal" ? !isSignalName(key) : !IDENTIFIER.test(key)) return false;
+    if (isSignalName(mapped)) return true;
     if (!/^-?(?:0|[1-9][0-9]{0,15})$/u.test(mapped)) return false;
     return Number.isSafeInteger(Number(mapped));
   });

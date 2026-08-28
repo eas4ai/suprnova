@@ -462,3 +462,28 @@ fn iteration_003_signal_safe_integer_boundary_is_statically_proved() {
 
     assert!(report.is_proved(), "{:?}", report.diagnostics());
 }
+
+#[test]
+fn signal_names_use_the_canonical_byte_grammar_without_narrowing_class_keys() {
+    let sixty_four_bytes = format!("a{}", "z".repeat(63));
+    for source in [
+        r#"<section live:signal="a:false"></section>"#.to_owned(),
+        format!(r#"<section live:signal="{sixty_four_bytes}:false"></section>"#),
+        r#"<section live:signal="upload.progress:false"></section>"#.to_owned(),
+        r#"<section live:signal="open:false" live:class="UploadProgress:open"></section>"#
+            .to_owned(),
+    ] {
+        let registry = registry();
+        let catalog = TemplateCatalog::new(vec![
+            (view(ROOT_VIEW), source),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html").to_owned(),
+            ),
+        ])
+        .expect("template catalog");
+        let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&root_name());
+        assert!(report.is_proved(), "{:?}", report.diagnostics());
+    }
+}

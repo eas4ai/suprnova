@@ -1,6 +1,6 @@
 //! Closed server-visible Live directive grammar.
 
-use crate::identity::{ComponentName, ModelField};
+use crate::identity::{ComponentName, ModelField, SignalName};
 use crate::metadata::ComponentMetadata;
 use crate::registry::ComponentRegistry;
 use crate::snapshot::state::FieldCategory;
@@ -618,6 +618,10 @@ fn valid_mapping(directive: &str, value: &str) -> bool {
 }
 
 fn signal_name(value: &str) -> bool {
+    SignalName::parse(value).is_ok()
+}
+
+fn safe_attribute_token(value: &str) -> bool {
     let mut bytes = value.bytes();
     value.len() <= 128
         && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
@@ -642,7 +646,7 @@ fn safe_attribute_name(value: &str) -> bool {
                 Some("class" | "outlet" | "target" | "value")
             )
         });
-    signal_name(value)
+    safe_attribute_token(value)
         && !normalized.starts_with("on")
         && !normalized.starts_with("data-suprnova-live-")
         && !module_data_attribute

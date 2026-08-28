@@ -7,8 +7,10 @@
   "signal_name_cases": [
     {"value":"a","expected":"accepted"},
     {"value":"azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","expected":"accepted"},
+    {"value":"upload.progress","expected":"accepted"},
     {"value":"Progress","expected":"rejected"},
     {"value":"1progress","expected":"rejected"},
+    {"value":"_progress","expected":"rejected"},
     {"value":"progress/value","expected":"rejected"},
     {"value":"azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","expected":"rejected"},
     {"value":"prøgress","expected":"rejected"}

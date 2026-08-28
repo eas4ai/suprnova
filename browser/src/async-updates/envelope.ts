@@ -6,6 +6,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../canonical.js";
+import { isSignalName } from "../signals/name.js";
 import type {
   AsyncPayload,
   AsyncPayloadSchema,
@@ -18,7 +19,6 @@ import type {
 const MAX_U64 = (1n << 64n) - 1n;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
-const SIGNAL_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
 const ASYNC_LIMITS: CanonicalLimits = Object.freeze({
@@ -189,7 +189,7 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
       const signalValue = fields["value"] ?? null;
       if (
         contract === undefined ||
-        !SIGNAL_NAME.test(name) ||
+        !isSignalName(name) ||
         !SIGNAL_SCOPE.test(scope) ||
         !presentationSignalSchemaMatches(contract.schema, signalValue)
       ) {

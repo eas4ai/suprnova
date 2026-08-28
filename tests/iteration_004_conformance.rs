@@ -36,6 +36,60 @@ use async_transport::TransportFixture;
 const HANDLE: &str = "018f47c1-2af0-7cc4-a001-000000000001";
 const CHECKSUM: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+fn actual_matches_fixture_oracle(actual: &Value, expected: &Value) -> Result<(), String> {
+    match expected {
+        Value::Object(expected) => {
+            let actual = actual
+                .as_object()
+                .ok_or_else(|| format!("expected object oracle, received {actual}"))?;
+            for (field, expected) in expected {
+                let actual = actual
+                    .get(field)
+                    .ok_or_else(|| format!("missing oracle field {field}"))?;
+                actual_matches_fixture_oracle(actual, expected)
+                    .map_err(|error| format!("{field}: {error}"))?;
+            }
+            Ok(())
+        }
+        Value::Array(expected) => {
+            let actual = actual
+                .as_array()
+                .ok_or_else(|| format!("expected array oracle, received {actual}"))?;
+            if actual.len() != expected.len() {
+                return Err(format!(
+                    "oracle array length {} != actual {}",
+                    expected.len(),
+                    actual.len()
+                ));
+            }
+            for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                actual_matches_fixture_oracle(actual, expected)
+                    .map_err(|error| format!("[{index}]: {error}"))?;
+            }
+            Ok(())
+        }
+        _ if actual == expected => Ok(()),
+        _ => Err(format!("fixture oracle {expected} != actual {actual}")),
+    }
+}
+
+#[test]
+fn wrong_fixture_expected_fails_even_when_rust_and_typescript_agree() {
+    let agreed_actual = json!({
+        "code": null,
+        "disposition": "applied",
+        "position": "2",
+        "state": "queued",
+    });
+    let mutated_fixture_oracle = json!({
+        "disposition": "rejected",
+        "position": "2",
+        "state": "queued",
+    });
+
+    assert!(actual_matches_fixture_oracle(&agreed_actual, &mutated_fixture_oracle).is_err());
+}
+
 #[derive(Deserialize)]
 struct UploadFixture {
     operations: Vec<String>,
@@ -53,6 +107,7 @@ struct AsyncFixture {
 #[derive(Deserialize)]
 struct SignalNameCase {
     value: String,
+    expected: String,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +122,7 @@ struct CompatibilityCase {
     present: bool,
     capability_version: Option<u16>,
     core_version: String,
+    expected: String,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +152,7 @@ struct DiagnosticFixture {
 struct RedactionCase {
     id: String,
     sample: Value,
+    expected: String,
 }
 
 #[derive(Deserialize)]
@@ -120,18 +177,32 @@ struct ResourceCase {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum ResourceOperation {
-    Enqueue { bytes: usize },
-    Acquire,
-    Release,
-    Retire,
-    Resume,
-    Suspend,
+    Enqueue { bytes: usize, expected: Value },
+    Acquire { expected: Value },
+    Release { expected: Value },
+    Retire { expected: Value },
+    Resume { expected: Value },
+    Suspend { expected: Value },
+}
+
+impl ResourceOperation {
+    fn expected(&self) -> &Value {
+        match self {
+            Self::Enqueue { expected, .. }
+            | Self::Acquire { expected }
+            | Self::Release { expected }
+            | Self::Retire { expected }
+            | Self::Resume { expected }
+            | Self::Suspend { expected } => expected,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 struct CodecCase {
     id: String,
     encoded: String,
+    expected: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -160,6 +231,9 @@ struct TransitionCase {
     expected_revision: String,
     current_revision: Option<String>,
     retry: Option<Value>,
+    to: String,
+    next_revision: String,
+    expected: String,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +243,8 @@ struct ContinuityCase {
     observed: Option<FixturePosition>,
     observed_gap: Option<FixturePosition>,
     recovery: Option<Recovery>,
+    expected: String,
+    state: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -433,6 +509,25 @@ async fn every_v4_case_has_identical_rust_and_typescript_canonical_outcomes() {
     });
     let typescript = typescript_report();
 
+    assert_v4_fixture_oracles(
+        "Rust",
+        &rust,
+        &upload,
+        &asynchronous,
+        &compatibility,
+        &diagnostics,
+        &resources,
+    );
+    assert_v4_fixture_oracles(
+        "TypeScript",
+        &typescript,
+        &upload,
+        &asynchronous,
+        &compatibility,
+        &diagnostics,
+        &resources,
+    );
+
     let report_collections = typescript
         .as_object()
         .expect("TypeScript report object")
@@ -458,6 +553,174 @@ async fn every_v4_case_has_identical_rust_and_typescript_canonical_outcomes() {
     );
 
     assert_eq!(rust, typescript);
+}
+
+fn assert_collection_oracles(
+    implementation: &str,
+    report: &Value,
+    collection: &str,
+    expected: Vec<Value>,
+) {
+    let actual = report
+        .get(collection)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{implementation} report omits {collection}"));
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{implementation} {collection} case count differs from fixture oracle"
+    );
+    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+        actual_matches_fixture_oracle(actual, expected).unwrap_or_else(|error| {
+            panic!("{implementation} {collection}[{index}] violates fixture oracle: {error}")
+        });
+    }
+}
+
+fn assert_v4_fixture_oracles(
+    implementation: &str,
+    report: &Value,
+    upload: &UploadFixture,
+    asynchronous: &AsyncFixture,
+    compatibility: &CompatibilityFixture,
+    diagnostics: &DiagnosticFixture,
+    resources: &ResourceFixture,
+) {
+    assert_collection_oracles(
+        implementation,
+        report,
+        "upload_codecs",
+        upload
+            .codec_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": (case.expected != "accepted").then_some(case.expected.as_str()),
+                    "disposition": if case.expected == "accepted" { "accepted" } else { "rejected" },
+                    "id": case.id,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "upload_transitions",
+        upload
+            .transition_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": (case.expected == "conflict").then_some("upload_conflict"),
+                    "disposition": case.expected,
+                    "id": case.id,
+                    "position": case.next_revision,
+                    "state": case.to,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "async_envelopes",
+        asynchronous
+            .envelope_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": (case.expected != "accepted").then_some(case.expected.as_str()),
+                    "disposition": if case.expected == "accepted" { "accepted" } else { "rejected" },
+                    "id": case.id,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "async_signals",
+        asynchronous
+            .signal_name_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": (case.expected != "accepted").then_some("invalid_signal_name"),
+                    "disposition": case.expected,
+                    "id": case.value,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "async_continuity",
+        asynchronous
+            .continuity_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "disposition": case.expected,
+                    "id": case.id,
+                    "state": case.state,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "compatibility",
+        compatibility
+            .cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": (case.expected == "feature_unavailable").then_some("feature_unavailable"),
+                    "disposition": case.expected,
+                    "id": case.id,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "diagnostics",
+        diagnostics
+            .redaction_cases
+            .iter()
+            .map(|case| {
+                json!({
+                    "code": null,
+                    "disposition": "redacted",
+                    "id": case.id,
+                    "state": case.expected,
+                })
+            })
+            .collect(),
+    );
+    assert_collection_oracles(
+        implementation,
+        report,
+        "resource_lifecycle",
+        resources
+            .cases
+            .iter()
+            .flat_map(|case| {
+                case.operations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, operation)| {
+                        json!({
+                            "id": format!("{}:{index}", case.id),
+                            "outcome": operation.expected(),
+                        })
+                    })
+            })
+            .collect(),
+    );
 }
 
 fn rust_upload_codec_case(case: &CodecCase) -> Value {
@@ -714,11 +977,11 @@ fn rust_resource_case(case: &ResourceCase, bounds: ResourceFixtureBounds) -> Vec
         .enumerate()
         .map(|(index, operation)| {
             let outcome = match operation {
-                ResourceOperation::Enqueue { bytes } => owner
+                ResourceOperation::Enqueue { bytes, .. } => owner
                     .queue()
                     .try_push(*bytes, format!("item-{index}"))
                     .map_or_else(|error| json!(error.as_str()), |()| json!("accepted")),
-                ResourceOperation::Acquire => match state {
+                ResourceOperation::Acquire { .. } => match state {
                     ResourceLifecycleState::Suspended => json!("suspended"),
                     ResourceLifecycleState::Retired => json!("retired"),
                     ResourceLifecycleState::Active => match pool.try_acquire() {
@@ -729,11 +992,11 @@ fn rust_resource_case(case: &ResourceCase, bounds: ResourceFixtureBounds) -> Vec
                         Err(error) => json!(error.as_str()),
                     },
                 },
-                ResourceOperation::Release => {
+                ResourceOperation::Release { .. } => {
                     permit.take().expect("fixture permit").release();
                     json!("released")
                 }
-                ResourceOperation::Retire => {
+                ResourceOperation::Retire { .. } => {
                     let released_permits = pool.active();
                     drop(permit.take());
                     let retirement = owner.retire();
@@ -745,13 +1008,13 @@ fn rust_resource_case(case: &ResourceCase, bounds: ResourceFixtureBounds) -> Vec
                         "released_permits": released_permits,
                     })
                 }
-                ResourceOperation::Resume => {
+                ResourceOperation::Resume { .. } => {
                     if matches!(state, ResourceLifecycleState::Suspended) {
                         state = ResourceLifecycleState::Active;
                     }
                     json!(state.as_str())
                 }
-                ResourceOperation::Suspend => {
+                ResourceOperation::Suspend { .. } => {
                     if matches!(state, ResourceLifecycleState::Active) {
                         state = ResourceLifecycleState::Suspended;
                     }
@@ -837,18 +1100,33 @@ fn upload_handle() -> UploadHandle {
     UploadHandle::parse(HANDLE).expect("fixture upload handle")
 }
 
-fn typescript_report() -> Value {
+#[test]
+fn typescript_conformance_runner_is_a_plain_supported_node_bundle() {
+    let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("browser/generated/iteration-004-conformance.mjs");
+    let source = fs::read_to_string(&runner).expect("generated plain-Node conformance runner");
+    assert!(!source.contains("experimental-transform-types"));
+    assert!(!source.contains("typescript-loader"));
+
     let output = Command::new("node")
-        .args([
-            "--no-warnings=ExperimentalWarning",
-            "--experimental-transform-types",
-            "--loader",
-            "./tests/support/typescript-loader.mjs",
-            "./browser/tests/support/iteration-004-conformance.ts",
-        ])
+        .arg(&runner)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .expect("run TypeScript conformance parser");
+        .expect("run plain-Node conformance parser");
+    assert!(
+        output.status.success(),
+        "plain-Node conformance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _: Value = serde_json::from_slice(&output.stdout).expect("plain-Node conformance JSON");
+}
+
+fn typescript_report() -> Value {
+    let output = Command::new("node")
+        .arg("./browser/generated/iteration-004-conformance.mjs")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run generated TypeScript conformance parser");
     assert!(
         output.status.success(),
         "TypeScript conformance failed: {}",

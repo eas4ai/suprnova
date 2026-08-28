@@ -5,7 +5,6 @@ import type {
   StreamPosition,
 } from "../../src/async-updates/types.js";
 import {
-  CanonicalError,
   canonicalize,
   parseCanonicalJson,
   type JsonObject,
@@ -21,6 +20,19 @@ import {
   type RuntimeFeature,
 } from "../../src/features/contract.js";
 import { RuntimeDiagnostics } from "../../src/runtime/diagnostics.js";
+import {
+  decodeUploadProtocolOperation,
+  UploadProtocolError,
+  type UploadWireOperation,
+} from "../../src/uploads/protocol.js";
+import {
+  parseUploadProtocolState,
+  parseUploadProtocolTransition,
+  UploadProtocolStateError,
+  UploadProtocolStateMachine,
+  type UploadProtocolState,
+  type UploadProtocolTransition,
+} from "../../src/uploads/state.js";
 
 const SUBSCRIPTION = "c3Vic2NyaXB0aW9uLTAwMQ";
 const UPLOAD_LIMITS = Object.freeze({
@@ -30,48 +42,24 @@ const UPLOAD_LIMITS = Object.freeze({
   maxStringBytes: 4_096,
 });
 
-type UploadWireOperation = "cancel" | "complete" | "create" | "put_chunk" | "reacquire" | "status";
-
-type InternalUploadTransition =
-  | "accept"
-  | "begin_finalize"
-  | "begin_transfer"
-  | "cancel"
-  | "commit_finalize"
-  | "complete"
-  | "expire"
-  | "fail"
-  | "put_chunk"
-  | "queue"
-  | "reject";
-
 interface CodecCase {
   readonly encoded: string;
+  readonly expected: string;
   readonly id: string;
 }
 
 interface TransitionCase {
   readonly currentRevision: bigint | null;
   readonly expectedRevision: bigint;
+  readonly expectedDisposition: "applied" | "conflict" | "existing_outcome";
   readonly id: string;
   readonly idempotencyKey: string;
-  readonly operation: InternalUploadTransition;
+  readonly nextRevision: bigint;
+  readonly operation: UploadProtocolTransition;
   readonly retry: boolean;
-  readonly state: UploadState;
+  readonly state: UploadProtocolState;
+  readonly to: UploadProtocolState;
 }
-
-type UploadState =
-  | "canceled"
-  | "created"
-  | "expired"
-  | "failed"
-  | "finalized"
-  | "finalizing"
-  | "queued"
-  | "ready"
-  | "rejected"
-  | "transferring"
-  | "verifying";
 
 interface SignalNameCase {
   readonly expected: "accepted" | "rejected";
@@ -81,6 +69,7 @@ interface SignalNameCase {
 interface CompatibilityCase {
   readonly capability_version: number | null;
   readonly core_version: string;
+  readonly expected: "compatible" | "feature_unavailable" | "ordinary_live_available";
   readonly feature: string;
   readonly id: string;
   readonly present: boolean;
@@ -95,6 +84,7 @@ interface RuntimeFeatureContract {
 interface RedactionCase {
   readonly class: string;
   readonly id: string;
+  readonly expected: "[redacted]";
   readonly sample: JsonValue;
 }
 
@@ -113,6 +103,7 @@ interface ContinuityCase {
   readonly baseline: Readonly<{ epoch: string; sequence: string }>;
   readonly expected: "adopt_baseline" | "apply" | "degrade" | "ignore_duplicate";
   readonly id: string;
+  readonly state: "current" | "degraded";
   readonly observed?: Readonly<{ epoch: string; sequence: string }>;
   readonly observed_gap?: Readonly<{ epoch: string; sequence: string }>;
   readonly recovery?:
@@ -133,116 +124,44 @@ function asObject(value: JsonValue): JsonObject {
   return value as JsonObject;
 }
 
-function uploadKeys(operation: UploadWireOperation): readonly string[] {
-  switch (operation) {
-    case "create":
-      return ["expected_revision", "field", "idempotency_key", "operation", "protocol_version"];
-    case "put_chunk":
-      return [
-        "checksum",
-        "chunk_index",
-        "expected_revision",
-        "handle",
-        "idempotency_key",
-        "operation",
-        "protocol_version",
-        "size",
-      ];
-    case "status":
-    case "reacquire":
-      return ["handle", "operation", "protocol_version"];
-    case "complete":
-      return [
-        "expected_revision",
-        "handle",
-        "idempotency_key",
-        "operation",
-        "protocol_version",
-        "whole_checksum",
-      ];
-    case "cancel":
-      return ["expected_revision", "handle", "idempotency_key", "operation", "protocol_version"];
+function assertFixtureOracle(actual: unknown, expected: unknown, path: string): void {
+  if (expected !== null && typeof expected === "object") {
+    if (Array.isArray(expected)) {
+      if (!Array.isArray(actual) || actual.length !== expected.length) {
+        throw new Error(`fixture_oracle_array_mismatch:${path}`);
+      }
+      for (let index = 0; index < expected.length; index += 1) {
+        assertFixtureOracle(actual[index], expected[index], `${path}[${String(index)}]`);
+      }
+      return;
+    }
+    if (actual === null || typeof actual !== "object" || Array.isArray(actual)) {
+      throw new Error(`fixture_oracle_object_mismatch:${path}`);
+    }
+    for (const [field, value] of Object.entries(expected)) {
+      if (!Object.prototype.hasOwnProperty.call(actual, field)) {
+        throw new Error(`fixture_oracle_field_missing:${path}.${field}`);
+      }
+      assertFixtureOracle((actual as Record<string, unknown>)[field], value, `${path}.${field}`);
+    }
+    return;
+  }
+  if (!Object.is(actual, expected)) {
+    throw new Error(`fixture_oracle_value_mismatch:${path}`);
   }
 }
 
 function parseUploadOperation(
   encoded: string,
 ): Readonly<{ code: string | null; disposition: string }> {
-  let parsed: JsonValue;
   try {
-    parsed = parseCanonicalJson(encoded, UPLOAD_LIMITS);
+    decodeUploadProtocolOperation(encoded);
+    return { code: null, disposition: "accepted" };
   } catch (error: unknown) {
     return {
-      code:
-        error instanceof CanonicalError && error.code === "duplicate_key"
-          ? "duplicate_field"
-          : "invalid_field",
+      code: error instanceof UploadProtocolError ? error.code : "invalid_field",
       disposition: "rejected",
     };
-  }
-  if (canonicalize(parsed) !== encoded) return { code: "noncanonical", disposition: "rejected" };
-  const fields = asObject(parsed);
-  if (fields["protocol_version"] !== 1) {
-    return { code: "unsupported_protocol", disposition: "rejected" };
-  }
-  const operation = fields["operation"];
-  if (
-    operation !== "cancel" &&
-    operation !== "complete" &&
-    operation !== "create" &&
-    operation !== "put_chunk" &&
-    operation !== "reacquire" &&
-    operation !== "status"
-  ) {
-    return { code: "unsupported_operation", disposition: "rejected" };
-  }
-  const expected = uploadKeys(operation);
-  const present = Object.keys(fields);
-  if (present.length !== expected.length || expected.some((key) => !(key in fields))) {
-    return { code: "unknown_field", disposition: "rejected" };
-  }
-  return { code: null, disposition: "accepted" };
-}
-
-function assertNever(value: never): never {
-  throw new Error(`unmapped_closed_value:${String(value)}`);
-}
-
-function internalUploadTransition(value: unknown): InternalUploadTransition {
-  switch (value) {
-    case "accept":
-    case "begin_finalize":
-    case "begin_transfer":
-    case "cancel":
-    case "commit_finalize":
-    case "complete":
-    case "expire":
-    case "fail":
-    case "put_chunk":
-    case "queue":
-    case "reject":
-      return value;
-    default:
-      throw new Error("unknown_internal_upload_transition");
-  }
-}
-
-function uploadState(value: unknown): UploadState {
-  switch (value) {
-    case "canceled":
-    case "created":
-    case "expired":
-    case "failed":
-    case "finalized":
-    case "finalizing":
-    case "queued":
-    case "ready":
-    case "rejected":
-    case "transferring":
-    case "verifying":
-      return value;
-    default:
-      throw new Error("unknown_upload_state");
   }
 }
 
@@ -254,6 +173,10 @@ function transitionCase(value: unknown): TransitionCase {
   if (
     typeof fields["id"] !== "string" ||
     typeof fields["expected_revision"] !== "string" ||
+    typeof fields["next_revision"] !== "string" ||
+    (fields["expected"] !== "applied" &&
+      fields["expected"] !== "conflict" &&
+      fields["expected"] !== "existing_outcome") ||
     (fields["current_revision"] !== undefined && typeof fields["current_revision"] !== "string") ||
     (fields["idempotency_key"] !== undefined && typeof fields["idempotency_key"] !== "string")
   ) {
@@ -262,128 +185,52 @@ function transitionCase(value: unknown): TransitionCase {
   return Object.freeze({
     currentRevision:
       typeof fields["current_revision"] === "string" ? BigInt(fields["current_revision"]) : null,
+    expectedDisposition: fields["expected"],
     expectedRevision: BigInt(fields["expected_revision"]),
     id: fields["id"],
     idempotencyKey:
       typeof fields["idempotency_key"] === "string" ? fields["idempotency_key"] : fields["id"],
-    operation: internalUploadTransition(fields["operation"]),
+    nextRevision: BigInt(fields["next_revision"]),
+    operation: parseUploadProtocolTransition(fields["operation"]),
     retry: fields["retry"] !== undefined,
-    state: uploadState(fields["from"]),
+    state: parseUploadProtocolState(fields["from"]),
+    to: parseUploadProtocolState(fields["to"]),
   });
 }
 
-function terminalUploadState(state: UploadState): boolean {
-  return (
-    state === "canceled" ||
-    state === "expired" ||
-    state === "failed" ||
-    state === "finalized" ||
-    state === "rejected"
-  );
-}
-
-function nextUploadState(state: UploadState, operation: InternalUploadTransition): UploadState {
-  if (terminalUploadState(state)) throw new Error("invalid_upload_transition");
-  switch (operation) {
-    case "queue":
-      if (state === "created") return "queued";
-      break;
-    case "begin_transfer":
-      if (state === "queued") return "transferring";
-      break;
-    case "put_chunk":
-      if (state === "transferring") return "transferring";
-      break;
-    case "complete":
-      if (state === "transferring") return "verifying";
-      break;
-    case "accept":
-      if (state === "verifying") return "ready";
-      break;
-    case "begin_finalize":
-      if (state === "ready") return "finalizing";
-      break;
-    case "commit_finalize":
-      if (state === "finalizing") return "finalized";
-      break;
-    case "cancel":
-      if (
-        state === "created" ||
-        state === "queued" ||
-        state === "ready" ||
-        state === "transferring" ||
-        state === "verifying"
-      ) {
-        return "canceled";
-      }
-      break;
-    case "reject":
-      if (state === "verifying") return "rejected";
-      break;
-    case "expire":
-      if (
-        state === "created" ||
-        state === "queued" ||
-        state === "ready" ||
-        state === "transferring" ||
-        state === "verifying"
-      ) {
-        return "expired";
-      }
-      break;
-    case "fail":
-      return "failed";
-    default:
-      return assertNever(operation);
-  }
-  throw new Error("invalid_upload_transition");
-}
-
 function runUploadTransition(fixture: TransitionCase): Readonly<Record<string, JsonValue>> {
-  let state = fixture.state;
-  let revision = fixture.currentRevision ?? fixture.expectedRevision;
-  const outcomes = new Map<
-    string,
-    Readonly<{ operation: InternalUploadTransition; revision: bigint; state: UploadState }>
-  >();
-
-  const apply = (): Readonly<{
-    code: string | null;
-    disposition: "applied" | "conflict" | "existing_outcome" | "rejected";
-  }> => {
-    const existing = outcomes.get(fixture.idempotencyKey);
-    if (existing !== undefined) {
-      if (existing.operation !== fixture.operation) {
-        return { code: "idempotency_conflict", disposition: "rejected" };
-      }
-      state = existing.state;
-      revision = existing.revision;
-      return { code: null, disposition: "existing_outcome" };
+  const request = Object.freeze({
+    expectedRevision: fixture.expectedRevision,
+    idempotencyKey: fixture.idempotencyKey,
+    transition: fixture.operation,
+  });
+  let machine = new UploadProtocolStateMachine(
+    fixture.state,
+    fixture.currentRevision ?? fixture.expectedRevision,
+  );
+  let outcome:
+    | Readonly<{ code: string | null; disposition: string }>
+    | ReturnType<UploadProtocolStateMachine["apply"]>;
+  try {
+    if (fixture.retry) {
+      machine = new UploadProtocolStateMachine(fixture.state, fixture.expectedRevision);
+      machine.apply(request);
     }
-    if (fixture.expectedRevision !== revision) {
-      return { code: "upload_conflict", disposition: "conflict" };
-    }
-    try {
-      state = nextUploadState(state, fixture.operation);
-    } catch {
-      return { code: "invalid_upload_transition", disposition: "rejected" };
-    }
-    revision += 1n;
-    outcomes.set(
-      fixture.idempotencyKey,
-      Object.freeze({ operation: fixture.operation, revision, state }),
-    );
-    return { code: null, disposition: "applied" };
-  };
-
-  const first = apply();
-  const outcome = fixture.retry && first.disposition === "applied" ? apply() : first;
+    outcome = machine.apply(request);
+  } catch (error: unknown) {
+    const code =
+      error instanceof UploadProtocolStateError ? error.code : "invalid_upload_transition";
+    outcome = {
+      code,
+      disposition: code === "upload_conflict" ? "conflict" : "rejected",
+    };
+  }
   return {
-    code: outcome.code,
+    code: "code" in outcome ? outcome.code : null,
     disposition: outcome.disposition,
     id: fixture.id,
-    position: String(revision),
-    state,
+    position: String(machine.revision),
+    state: machine.state,
   };
 }
 
@@ -769,12 +616,15 @@ const transitionCases = fixtureArray(upload, "transition_cases").map(transitionC
 const envelopeCases = fixtureArray(asynchronous, "envelope_cases") as readonly CodecCase[];
 const continuityCases = fixtureArray(asynchronous, "continuity_cases") as readonly ContinuityCase[];
 const signalCases = fixtureArray(asynchronous, "signal_name_cases") as readonly SignalNameCase[];
+const compatibilityCases = fixtureArray(compatibility, "cases") as readonly CompatibilityCase[];
+const redactionCases = fixtureArray(diagnostics, "redaction_cases") as readonly RedactionCase[];
+const resourceCases = fixtureArray(resources, "cases") as readonly ResourceCase[];
 const presentationTemplate = envelopeCases.find((fixture) => fixture.id === "presentation-signal");
 if (presentationTemplate === undefined) throw new Error("missing_presentation_signal_template");
 
 let rejectedUnknownTransition = false;
 try {
-  internalUploadTransition("future_internal_transition");
+  parseUploadProtocolTransition("future_internal_transition");
 } catch {
   rejectedUnknownTransition = true;
 }
@@ -808,19 +658,16 @@ const report = {
     }
   }),
   async_signals: signalCases.map((fixture) => runSignalNameCase(fixture, presentationTemplate)),
-  compatibility: (fixtureArray(compatibility, "cases") as readonly CompatibilityCase[]).map(
-    (fixture) =>
-      runCompatibilityCase(
-        fixture,
-        fixtureArray(runtimeFeatures, "features") as readonly RuntimeFeatureContract[],
-      ),
+  compatibility: compatibilityCases.map((fixture) =>
+    runCompatibilityCase(
+      fixture,
+      fixtureArray(runtimeFeatures, "features") as readonly RuntimeFeatureContract[],
+    ),
   ),
-  diagnostics: (fixtureArray(diagnostics, "redaction_cases") as readonly RedactionCase[]).map(
-    runRedactionCase,
-  ),
+  diagnostics: redactionCases.map(runRedactionCase),
   inventory,
-  resource_lifecycle: (fixtureArray(resources, "cases") as readonly ResourceCase[]).flatMap(
-    (fixture) => runResourceCase(fixture, resources["bounds"] as ResourceBounds),
+  resource_lifecycle: resourceCases.flatMap((fixture) =>
+    runResourceCase(fixture, resources["bounds"] as ResourceBounds),
   ),
   upload_codecs: codecCases.map((fixture) => ({
     id: fixture.id,
@@ -828,5 +675,92 @@ const report = {
   })),
   upload_transitions: transitionCases.map(runUploadTransition),
 };
+
+for (const [index, fixture] of codecCases.entries()) {
+  assertFixtureOracle(
+    report.upload_codecs[index],
+    {
+      code: fixture.expected === "accepted" ? null : fixture.expected,
+      disposition: fixture.expected === "accepted" ? "accepted" : "rejected",
+      id: fixture.id,
+    },
+    `upload_codecs.${fixture.id}`,
+  );
+}
+for (const [index, fixture] of transitionCases.entries()) {
+  assertFixtureOracle(
+    report.upload_transitions[index],
+    {
+      code: fixture.expectedDisposition === "conflict" ? "upload_conflict" : null,
+      disposition: fixture.expectedDisposition,
+      id: fixture.id,
+      position: String(fixture.nextRevision),
+      state: fixture.to,
+    },
+    `upload_transitions.${fixture.id}`,
+  );
+}
+for (const [index, fixture] of envelopeCases.entries()) {
+  assertFixtureOracle(
+    report.async_envelopes[index],
+    {
+      code: fixture.expected === "accepted" ? null : fixture.expected,
+      disposition: fixture.expected === "accepted" ? "accepted" : "rejected",
+      id: fixture.id,
+    },
+    `async_envelopes.${fixture.id}`,
+  );
+}
+for (const [index, fixture] of signalCases.entries()) {
+  assertFixtureOracle(
+    report.async_signals[index],
+    {
+      code: fixture.expected === "accepted" ? null : "invalid_signal_name",
+      disposition: fixture.expected,
+      id: fixture.value,
+    },
+    `async_signals.${fixture.value}`,
+  );
+}
+for (const [index, fixture] of continuityCases.entries()) {
+  assertFixtureOracle(
+    report.async_continuity[index],
+    { disposition: fixture.expected, id: fixture.id, state: fixture.state },
+    `async_continuity.${fixture.id}`,
+  );
+}
+for (const [index, fixture] of compatibilityCases.entries()) {
+  assertFixtureOracle(
+    report.compatibility[index],
+    {
+      code: fixture.expected === "feature_unavailable" ? "feature_unavailable" : null,
+      disposition: fixture.expected,
+      id: fixture.id,
+    },
+    `compatibility.${fixture.id}`,
+  );
+}
+for (const [index, fixture] of redactionCases.entries()) {
+  assertFixtureOracle(
+    report.diagnostics[index],
+    { code: null, disposition: "redacted", id: fixture.id, state: fixture.expected },
+    `diagnostics.${fixture.id}`,
+  );
+}
+let resourceIndex = 0;
+for (const fixture of resourceCases) {
+  for (const [operationIndex, value] of fixture.operations.entries()) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("invalid_resource_operation_oracle");
+    }
+    const expected = (value as Record<string, unknown>)["expected"];
+    assertFixtureOracle(
+      report.resource_lifecycle[resourceIndex],
+      { id: `${fixture.id}:${String(operationIndex)}`, outcome: expected },
+      `resource_lifecycle.${fixture.id}.${String(operationIndex)}`,
+    );
+    resourceIndex += 1;
+  }
+}
 
 process.stdout.write(`${JSON.stringify(report)}\n`);
