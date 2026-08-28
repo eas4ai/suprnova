@@ -1,8 +1,8 @@
 //! Deterministic HTTP, SSE, and WebSocket adapters over production async authority.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use serde::Deserialize;
@@ -14,7 +14,7 @@ use suprnova_live::async_updates::{
 };
 use suprnova_live::endpoint::LiveEndpointResponse;
 use suprnova_live::identity::UnixMillis;
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
 use crate::{
     ASYNC_REFERENCE_PRINCIPAL, ASYNC_REFERENCE_SCOPE, ASYNC_REFERENCE_SESSION,
@@ -28,8 +28,9 @@ use super::{ResourceCounter, ResourceLease};
 
 const NOW: UnixMillis = UnixMillis::new(1_000);
 const MEMBERSHIP_IDS: [&str; 2] = ["c3Vic2NyaXB0aW9uLTAwMQ", "c3Vic2NyaXB0aW9uLTAwMg"];
+const MAX_DOCUMENT_TRANSPORTS: usize = 2;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum TransportKind {
     Sse,
     WebSocket,
@@ -64,20 +65,65 @@ struct IssuedMembership {
     generation: u64,
     engine_authorization: AuthorizedTransportSubscription,
     open: bool,
+    control_in_flight: bool,
     lease: Option<ResourceLease>,
 }
 
 struct IssuedTransport {
     kind: TransportKind,
+    generation: u64,
+    reader_active: bool,
     document: DocumentTransportSession,
     memberships: BTreeMap<String, IssuedMembership>,
 }
 
 struct AsyncState {
-    engine: EngineAsyncFixture,
+    engine: Arc<EngineAsyncFixture>,
     transports: BTreeMap<String, IssuedTransport>,
+    by_kind: BTreeMap<TransportKind, String>,
     next_transport: u64,
     retired: bool,
+}
+
+#[derive(Default)]
+struct AsyncPhasePause {
+    subscription: Mutex<Option<String>>,
+    entered: Notify,
+    release: Notify,
+}
+
+impl AsyncPhasePause {
+    async fn pause_if_selected(&self, subscription: &str) {
+        if self
+            .subscription
+            .lock()
+            .expect("async phase pause lock")
+            .as_deref()
+            == Some(subscription)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn select(&self, subscription: &str) {
+        *self.subscription.lock().expect("async phase pause lock") = Some(subscription.to_owned());
+    }
+
+    #[cfg(test)]
+    async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    #[cfg(test)]
+    fn resume(&self) {
+        self.subscription
+            .lock()
+            .expect("async phase pause lock")
+            .take();
+        self.release.notify_waiters();
+    }
 }
 
 pub(super) struct WebSocketControlOutcome {
@@ -85,11 +131,48 @@ pub(super) struct WebSocketControlOutcome {
 }
 
 pub(super) struct AsyncRuntime {
-    state: Mutex<AsyncState>,
+    state: Arc<Mutex<AsyncState>>,
     fault: ReferenceFaultSchedule,
     fault_applied: AtomicBool,
     maximum_memberships: AtomicUsize,
     logical_memberships: Arc<ResourceCounter>,
+    phase_pause: Arc<AsyncPhasePause>,
+}
+
+pub(super) struct TransportReaderLease {
+    state: Arc<Mutex<AsyncState>>,
+    transport: String,
+    generation: u64,
+}
+
+impl Drop for TransportReaderLease {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().expect("async runtime lock");
+        if let Some(transport) = state.transports.get_mut(&self.transport)
+            && transport.generation == self.generation
+        {
+            transport.reader_active = false;
+        }
+    }
+}
+
+struct MembershipControlLease {
+    state: Arc<Mutex<AsyncState>>,
+    transport: String,
+    subscription: String,
+    generation: u64,
+}
+
+impl Drop for MembershipControlLease {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().expect("async runtime lock");
+        if let Some(transport) = state.transports.get_mut(&self.transport)
+            && transport.generation == self.generation
+            && let Some(membership) = transport.memberships.get_mut(&self.subscription)
+        {
+            membership.control_in_flight = false;
+        }
+    }
 }
 
 impl AsyncRuntime {
@@ -98,16 +181,18 @@ impl AsyncRuntime {
         logical_memberships: Arc<ResourceCounter>,
     ) -> Result<Self, String> {
         Ok(Self {
-            state: Mutex::new(AsyncState {
-                engine: EngineAsyncFixture::new().await?,
+            state: Arc::new(Mutex::new(AsyncState {
+                engine: Arc::new(EngineAsyncFixture::new().await?),
                 transports: BTreeMap::new(),
+                by_kind: BTreeMap::new(),
                 next_transport: 1,
                 retired: false,
-            }),
+            })),
             fault,
             fault_applied: AtomicBool::new(false),
             maximum_memberships: AtomicUsize::new(0),
             logical_memberships,
+            phase_pause: Arc::new(AsyncPhasePause::default()),
         })
     }
 
@@ -124,9 +209,19 @@ impl AsyncRuntime {
         if request.subscription != AsyncReferenceScenario::lifecycle().stream {
             return Err("transport_facts_invalid");
         }
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().expect("async runtime lock");
         if state.retired {
             return Err("transport_retired");
+        }
+        if let Some(transport_id) = state.by_kind.get(&kind).cloned() {
+            let transport = state
+                .transports
+                .get(&transport_id)
+                .ok_or("transport_authority_invalid")?;
+            return Ok(transport_response(&transport_id, transport));
+        }
+        if state.transports.len() >= MAX_DOCUMENT_TRANSPORTS {
+            return Err("transport_capacity_exceeded");
         }
         let sequence = state.next_transport;
         state.next_transport = state.next_transport.saturating_add(1);
@@ -138,7 +233,6 @@ impl AsyncRuntime {
         let marker = u8::try_from(sequence).unwrap_or(u8::MAX).max(1);
         let document = state.engine.document(origin, document_kind, marker)?;
         let mut memberships = BTreeMap::new();
-        let mut response_memberships = Vec::new();
         for subscription_id in MEMBERSHIP_IDS {
             let engine_authorization = state.engine.authorization(subscription_id, origin)?;
             let mut authority = AsyncReferenceAuthority::new_with_origin_subscription(
@@ -157,12 +251,6 @@ impl AsyncRuntime {
             let credential = state.engine.credential().to_owned();
             let descriptor = state.engine.descriptor().to_owned();
             let binding = state.engine.descriptor_binding().to_owned();
-            response_memberships.push(json!({
-                "authority": credential,
-                "descriptor": descriptor,
-                "descriptor_binding": binding,
-                "subscription": subscription_id,
-            }));
             memberships.insert(
                 subscription_id.to_owned(),
                 IssuedMembership {
@@ -174,31 +262,27 @@ impl AsyncRuntime {
                     generation: 1,
                     engine_authorization,
                     open: false,
+                    control_in_flight: false,
                     lease: None,
                 },
             );
         }
-        let first = response_memberships
-            .first()
-            .ok_or("authority_issue_failed")?;
-        let response = json!({
-            "transport": transport_id,
-            "subscription": first["subscription"],
-            "authority": first["authority"],
-            "descriptor": first["descriptor"],
-            "descriptor_binding": first["descriptor_binding"],
-            "memberships": response_memberships,
-            "kind": request.kind,
-        });
         state.transports.insert(
-            transport_id,
+            transport_id.clone(),
             IssuedTransport {
                 kind,
+                generation: 1,
+                reader_active: false,
                 document,
                 memberships,
             },
         );
-        Ok(response)
+        state.by_kind.insert(kind, transport_id.clone());
+        let transport = state
+            .transports
+            .get(&transport_id)
+            .ok_or("transport_authority_invalid")?;
+        Ok(transport_response(&transport_id, transport))
     }
 
     pub(super) async fn membership(
@@ -207,114 +291,202 @@ impl AsyncRuntime {
         subscription: &str,
         request: MembershipRequest,
     ) -> Result<Value, &'static str> {
-        let mut state = self.state.lock().await;
-        let AsyncState {
-            engine, transports, ..
-        } = &mut *state;
-        let transport = transports
-            .get_mut(transport_id)
-            .ok_or("authority_missing")?;
-        if transport.kind != TransportKind::Sse {
-            return Err("membership_transport_invalid");
-        }
-        let membership = transport
-            .memberships
-            .get_mut(subscription)
-            .ok_or("authority_missing")?;
-        if request.authority != membership.credential {
-            return Err("membership_authority_invalid");
-        }
-        let exact = AsyncReferenceMembershipRequest {
-            control_nonce: request.control_nonce,
-            descriptor: membership.descriptor.clone(),
-            descriptor_binding: membership.binding.clone(),
-            operation: request.operation,
-            principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
-            scope: ASYNC_REFERENCE_SCOPE.to_owned(),
-            session: ASYNC_REFERENCE_SESSION.to_owned(),
-            stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
-            subscription_id: subscription.to_owned(),
-            transport_generation: membership.generation,
+        let operation = request.operation.clone();
+        let (exact, authorization, generation) = {
+            let state = self.state.lock().expect("async runtime lock");
+            let transport = state
+                .transports
+                .get(transport_id)
+                .ok_or("authority_missing")?;
+            if transport.kind != TransportKind::Sse {
+                return Err("membership_transport_invalid");
+            }
+            let membership = transport
+                .memberships
+                .get(subscription)
+                .ok_or("authority_missing")?;
+            if request.authority != membership.credential {
+                return Err("membership_authority_invalid");
+            }
+            (
+                AsyncReferenceMembershipRequest {
+                    control_nonce: request.control_nonce,
+                    descriptor: membership.descriptor.clone(),
+                    descriptor_binding: membership.binding.clone(),
+                    operation: request.operation,
+                    principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
+                    scope: ASYNC_REFERENCE_SCOPE.to_owned(),
+                    session: ASYNC_REFERENCE_SESSION.to_owned(),
+                    stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
+                    subscription_id: subscription.to_owned(),
+                    transport_generation: membership.generation,
+                },
+                membership.engine_authorization.clone(),
+                transport.generation,
+            )
         };
-        let response = match exact.operation.as_str() {
+        match operation.as_str() {
             "subscribe" => {
-                let reference_origin = membership.authority.origin().to_owned();
-                let prepared_reference = membership.authority.prepare_membership(
-                    &reference_origin,
-                    &membership.credential,
-                    &exact,
-                    NOW,
-                )?;
+                let (prepared_reference, pending, control) = {
+                    let mut state = self.state.lock().expect("async runtime lock");
+                    let transport = state
+                        .transports
+                        .get_mut(transport_id)
+                        .filter(|transport| transport.generation == generation)
+                        .ok_or("transport_authority_invalid")?;
+                    let membership = transport
+                        .memberships
+                        .get_mut(subscription)
+                        .ok_or("authority_missing")?;
+                    let reference_origin = membership.authority.origin().to_owned();
+                    let prepared_reference = membership.authority.prepare_membership(
+                        &reference_origin,
+                        &membership.credential,
+                        &exact,
+                        NOW,
+                    )?;
+                    if membership.control_in_flight {
+                        return Err("membership_control_in_flight");
+                    }
+                    let pending = SseMembershipControl::prepare_subscribe(
+                        &transport.document,
+                        transport.document.handle(),
+                        transport.document.origin(),
+                        authorization,
+                    )
+                    .map_err(|_| "engine_membership_rejected")?;
+                    membership.control_in_flight = true;
+                    let control = MembershipControlLease {
+                        state: Arc::clone(&self.state),
+                        transport: transport_id.to_owned(),
+                        subscription: subscription.to_owned(),
+                        generation,
+                    };
+                    (prepared_reference, pending, control)
+                };
                 let lease = self
                     .logical_memberships
                     .acquire()
                     .ok_or("transport_retired")?;
-                let pending = SseMembershipControl::prepare_subscribe(
-                    &transport.document,
-                    transport.document.handle(),
-                    transport.document.origin(),
-                    membership.engine_authorization.clone(),
-                )
-                .map_err(|_| "engine_membership_rejected")?;
+                self.phase_pause.pause_if_selected(subscription).await;
                 let authorized = pending
                     .authorize()
                     .await
                     .map_err(|_| "engine_membership_rejected")?;
-                let establishing = transport
-                    .document
-                    .prepare_establish(authorized)
-                    .map_err(|_| "engine_membership_rejected")?;
+                let establishing = {
+                    let mut state = self.state.lock().expect("async runtime lock");
+                    let transport = state
+                        .transports
+                        .get_mut(transport_id)
+                        .filter(|transport| transport.generation == generation)
+                        .ok_or("transport_authority_invalid")?;
+                    transport
+                        .document
+                        .prepare_establish(authorized)
+                        .map_err(|_| "engine_membership_rejected")?
+                };
                 let ready = establishing
                     .establish(&EngineSource)
                     .await
                     .map_err(|_| "engine_membership_rejected")?;
-                transport
-                    .document
-                    .commit_add(ready)
-                    .map_err(|_| "engine_membership_rejected")?;
-                let response = membership
-                    .authority
-                    .commit_membership(prepared_reference, NOW)?;
-                membership.open = true;
-                membership.lease = Some(lease);
-                response
+                let response = {
+                    let mut state = self.state.lock().expect("async runtime lock");
+                    let transport = state
+                        .transports
+                        .get_mut(transport_id)
+                        .filter(|transport| transport.generation == generation)
+                        .ok_or("transport_authority_invalid")?;
+                    transport
+                        .document
+                        .commit_add(ready)
+                        .map_err(|_| "engine_membership_rejected")?;
+                    let membership = transport
+                        .memberships
+                        .get_mut(subscription)
+                        .ok_or("authority_missing")?;
+                    let response = membership
+                        .authority
+                        .commit_membership(prepared_reference, NOW)?;
+                    membership.open = true;
+                    membership.lease = Some(lease);
+                    self.maximum_memberships
+                        .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
+                    response
+                };
+                drop(control);
+                Ok(response)
             }
             "unsubscribe" => {
-                let reference_origin = membership.authority.origin().to_owned();
-                let prepared_reference = membership.authority.prepare_membership(
-                    &reference_origin,
-                    &membership.credential,
-                    &exact,
-                    NOW,
-                )?;
-                let pending = SseMembershipControl::prepare_unsubscribe(
-                    &transport.document,
-                    transport.document.handle(),
-                    transport.document.origin(),
-                    &membership.engine_authorization,
-                )
-                .map_err(|_| "engine_membership_rejected")?;
+                let (prepared_reference, pending, control) = {
+                    let mut state = self.state.lock().expect("async runtime lock");
+                    let transport = state
+                        .transports
+                        .get_mut(transport_id)
+                        .filter(|transport| transport.generation == generation)
+                        .ok_or("transport_authority_invalid")?;
+                    let membership = transport
+                        .memberships
+                        .get_mut(subscription)
+                        .ok_or("authority_missing")?;
+                    let reference_origin = membership.authority.origin().to_owned();
+                    let prepared_reference = membership.authority.prepare_membership(
+                        &reference_origin,
+                        &membership.credential,
+                        &exact,
+                        NOW,
+                    )?;
+                    if membership.control_in_flight {
+                        return Err("membership_control_in_flight");
+                    }
+                    let pending = SseMembershipControl::prepare_unsubscribe(
+                        &transport.document,
+                        transport.document.handle(),
+                        transport.document.origin(),
+                        &authorization,
+                    )
+                    .map_err(|_| "engine_membership_rejected")?;
+                    membership.control_in_flight = true;
+                    let control = MembershipControlLease {
+                        state: Arc::clone(&self.state),
+                        transport: transport_id.to_owned(),
+                        subscription: subscription.to_owned(),
+                        generation,
+                    };
+                    (prepared_reference, pending, control)
+                };
                 let ready = pending
                     .authorize()
                     .await
                     .map_err(|_| "engine_membership_rejected")?;
-                transport
-                    .document
-                    .commit_remove(ready)
-                    .map_err(|_| "engine_membership_rejected")?;
-                let response = membership
-                    .authority
-                    .commit_membership(prepared_reference, NOW)?;
-                engine.remove(&membership.engine_authorization);
-                membership.open = false;
-                drop(membership.lease.take());
-                response
+                let response = {
+                    let mut state = self.state.lock().expect("async runtime lock");
+                    let engine = Arc::clone(&state.engine);
+                    let transport = state
+                        .transports
+                        .get_mut(transport_id)
+                        .filter(|transport| transport.generation == generation)
+                        .ok_or("transport_authority_invalid")?;
+                    transport
+                        .document
+                        .commit_remove(ready)
+                        .map_err(|_| "engine_membership_rejected")?;
+                    let membership = transport
+                        .memberships
+                        .get_mut(subscription)
+                        .ok_or("authority_missing")?;
+                    let response = membership
+                        .authority
+                        .commit_membership(prepared_reference, NOW)?;
+                    engine.remove(&membership.engine_authorization);
+                    membership.open = false;
+                    drop(membership.lease.take());
+                    response
+                };
+                drop(control);
+                Ok(response)
             }
-            _ => return Err("membership_facts_invalid"),
-        };
-        self.maximum_memberships
-            .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
-        Ok(response)
+            _ => Err("membership_facts_invalid"),
+        }
     }
 
     pub(super) async fn poll(
@@ -323,7 +495,7 @@ impl AsyncRuntime {
         body: Bytes,
     ) -> Result<LiveEndpointResponse, &'static str> {
         let endpoint = {
-            let state = self.state.lock().await;
+            let state = self.state.lock().expect("async runtime lock");
             let membership = state
                 .transports
                 .values()
@@ -362,7 +534,7 @@ impl AsyncRuntime {
         seed: u8,
     ) -> Result<String, &'static str> {
         let endpoint = {
-            let state = self.state.lock().await;
+            let state = self.state.lock().expect("async runtime lock");
             state.engine.fresh_render_endpoint()
         };
         endpoint.request(correlation, seed).await
@@ -370,14 +542,49 @@ impl AsyncRuntime {
 
     pub(super) async fn fresh_render_document(&self) -> String {
         let endpoint = {
-            let state = self.state.lock().await;
+            let state = self.state.lock().expect("async runtime lock");
             state.engine.fresh_render_endpoint()
         };
         endpoint.initial_html().to_owned()
     }
 
+    pub(super) fn pause_fresh_render(&self) {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.pause_render();
+    }
+
+    pub(super) async fn wait_until_fresh_render_paused(&self) {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.wait_until_render_paused().await;
+    }
+
+    pub(super) fn resume_fresh_render(&self) {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.resume_render();
+    }
+
+    pub(super) async fn execute_fresh_render_direct(
+        &self,
+        body: Bytes,
+    ) -> Result<LiveEndpointResponse, &'static str> {
+        let endpoint = {
+            let state = self.state.lock().expect("async runtime lock");
+            state.engine.fresh_render_endpoint()
+        };
+        endpoint.handle(body).await
+    }
+
     pub(super) async fn sse_batch(&self, transport_id: &str) -> Result<Vec<u8>, &'static str> {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock().expect("async runtime lock");
         if state.retired {
             return Err("transport_retired");
         }
@@ -426,82 +633,117 @@ impl AsyncRuntime {
         payload: &[u8],
     ) -> Result<WebSocketControlOutcome, &'static str> {
         let codec = WebSocketCodec::v1();
-        let mut state = self.state.lock().await;
-        let AsyncState {
-            engine, transports, ..
-        } = &mut *state;
-        let transport = transports
-            .get_mut(transport_id)
-            .ok_or("transport_authority_invalid")?;
-        if transport.kind != TransportKind::WebSocket {
-            return Err("transport_authority_invalid");
-        }
         if let Ok(request) = codec.decode_membership_request(WebSocketFrame::Text {
             payload,
             final_fragment: true,
         }) {
             let subscription = request.subscription().to_base64url();
-            let membership = transport
-                .memberships
-                .get_mut(&subscription)
-                .ok_or("membership_authority_invalid")?;
-            let reference = AsyncReferenceMembershipRequest {
-                control_nonce: request.control_nonce().to_owned(),
-                descriptor: membership.descriptor.clone(),
-                descriptor_binding: membership.binding.clone(),
-                operation: "subscribe".to_owned(),
-                principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
-                scope: ASYNC_REFERENCE_SCOPE.to_owned(),
-                session: ASYNC_REFERENCE_SESSION.to_owned(),
-                stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
-                subscription_id: subscription,
-                transport_generation: request.transport_generation(),
+            let (prepared_reference, pending, generation, control) = {
+                let mut state = self.state.lock().expect("async runtime lock");
+                let transport = state
+                    .transports
+                    .get_mut(transport_id)
+                    .ok_or("transport_authority_invalid")?;
+                if transport.kind != TransportKind::WebSocket {
+                    return Err("transport_authority_invalid");
+                }
+                let membership = transport
+                    .memberships
+                    .get_mut(&subscription)
+                    .ok_or("membership_authority_invalid")?;
+                let reference = AsyncReferenceMembershipRequest {
+                    control_nonce: request.control_nonce().to_owned(),
+                    descriptor: membership.descriptor.clone(),
+                    descriptor_binding: membership.binding.clone(),
+                    operation: "subscribe".to_owned(),
+                    principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
+                    scope: ASYNC_REFERENCE_SCOPE.to_owned(),
+                    session: ASYNC_REFERENCE_SESSION.to_owned(),
+                    stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
+                    subscription_id: subscription.clone(),
+                    transport_generation: request.transport_generation(),
+                };
+                let reference_origin = membership.authority.origin().to_owned();
+                let prepared_reference = membership.authority.prepare_membership(
+                    &reference_origin,
+                    &membership.credential,
+                    &reference,
+                    NOW,
+                )?;
+                if membership.control_in_flight {
+                    return Err("membership_control_in_flight");
+                }
+                let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
+                    &transport.document,
+                    request,
+                    membership.engine_authorization.clone(),
+                )
+                .map_err(|_| "websocket_control_invalid")?;
+                membership.control_in_flight = true;
+                let generation = transport.generation;
+                let control = MembershipControlLease {
+                    state: Arc::clone(&self.state),
+                    transport: transport_id.to_owned(),
+                    subscription: subscription.clone(),
+                    generation,
+                };
+                (prepared_reference, pending, generation, control)
             };
-            let reference_origin = membership.authority.origin().to_owned();
-            let prepared_reference = membership.authority.prepare_membership(
-                &reference_origin,
-                &membership.credential,
-                &reference,
-                NOW,
-            )?;
             let lease = self
                 .logical_memberships
                 .acquire()
                 .ok_or("transport_retired")?;
-            let pending = WebSocketMembershipControl::prepare_authenticated_subscribe(
-                &transport.document,
-                request,
-                membership.engine_authorization.clone(),
-            )
-            .map_err(|_| "websocket_control_invalid")?;
             let authorized = pending
                 .authorize()
                 .await
                 .map_err(|_| "websocket_control_invalid")?;
-            let establishing = authorized
-                .prepare_establish(&transport.document)
-                .map_err(|_| "websocket_control_invalid")?;
+            let establishing = {
+                let state = self.state.lock().expect("async runtime lock");
+                let transport = state
+                    .transports
+                    .get(transport_id)
+                    .filter(|transport| transport.generation == generation)
+                    .ok_or("transport_authority_invalid")?;
+                authorized
+                    .prepare_establish(&transport.document)
+                    .map_err(|_| "websocket_control_invalid")?
+            };
             let ready = establishing
                 .establish(&EngineSource)
                 .await
                 .map_err(|_| "websocket_control_invalid")?;
-            let receipt = WebSocketMembershipControl::commit_authenticated_subscribe(
-                &mut transport.document,
-                ready,
-            )
-            .map_err(|_| "websocket_control_invalid")?;
-            membership
-                .authority
-                .commit_membership(prepared_reference, NOW)?;
-            membership.open = true;
-            membership.lease = Some(lease);
-            self.maximum_memberships
-                .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
+            let (receipt, envelope) = {
+                let mut state = self.state.lock().expect("async runtime lock");
+                let engine = Arc::clone(&state.engine);
+                let transport = state
+                    .transports
+                    .get_mut(transport_id)
+                    .filter(|transport| transport.generation == generation)
+                    .ok_or("transport_authority_invalid")?;
+                let receipt = WebSocketMembershipControl::commit_authenticated_subscribe(
+                    &mut transport.document,
+                    ready,
+                )
+                .map_err(|_| "websocket_control_invalid")?;
+                let membership = transport
+                    .memberships
+                    .get_mut(&subscription)
+                    .ok_or("membership_authority_invalid")?;
+                membership
+                    .authority
+                    .commit_membership(prepared_reference, NOW)?;
+                membership.open = true;
+                membership.lease = Some(lease);
+                self.maximum_memberships
+                    .fetch_max(transport.document.membership_count(), Ordering::SeqCst);
+                let envelope = engine.envelope(&membership.engine_authorization, 1)?;
+                (receipt, envelope)
+            };
+            drop(control);
             let acknowledgment = WebSocketMembershipControl::acknowledge_committed(receipt);
             let ack = codec
                 .encode_membership_acknowledgment(&acknowledgment)
                 .map_err(|_| "websocket_control_invalid")?;
-            let envelope = engine.envelope(&membership.engine_authorization, 1)?;
             let envelope = codec
                 .encode_envelope(&envelope)
                 .map_err(|_| "websocket_control_invalid")?;
@@ -519,50 +761,102 @@ impl AsyncRuntime {
             return Err("websocket_control_invalid");
         };
         let subscription_wire = subscription.to_base64url();
-        let membership = transport
-            .memberships
-            .get_mut(&subscription_wire)
-            .ok_or("membership_authority_invalid")?;
-        let reference = AsyncReferenceMembershipRequest {
-            control_nonce: "ws-unsubscribe-1".to_owned(),
-            descriptor: membership.descriptor.clone(),
-            descriptor_binding: membership.binding.clone(),
-            operation: "unsubscribe".to_owned(),
-            principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
-            scope: ASYNC_REFERENCE_SCOPE.to_owned(),
-            session: ASYNC_REFERENCE_SESSION.to_owned(),
-            stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
-            subscription_id: subscription_wire.clone(),
-            transport_generation: membership.generation,
-        };
-        let reference_origin = membership.authority.origin().to_owned();
-        let prepared_reference = membership.authority.prepare_membership(
-            &reference_origin,
-            &membership.credential,
-            &reference,
-            NOW,
-        )?;
         let unsubscribe = WebSocketControlRecord::Unsubscribe(subscription);
-        let pending = WebSocketMembershipControl::prepare_unsubscribe(
-            &transport.document,
-            &unsubscribe,
-            &membership.engine_authorization,
-        )
-        .map_err(|_| "websocket_control_invalid")?;
+        let (prepared_reference, authorization, generation, control) = {
+            let mut state = self.state.lock().expect("async runtime lock");
+            let transport = state
+                .transports
+                .get_mut(transport_id)
+                .ok_or("transport_authority_invalid")?;
+            if transport.kind != TransportKind::WebSocket {
+                return Err("transport_authority_invalid");
+            }
+            let membership = transport
+                .memberships
+                .get_mut(&subscription_wire)
+                .ok_or("membership_authority_invalid")?;
+            let reference = AsyncReferenceMembershipRequest {
+                control_nonce: format!(
+                    "ws-unsubscribe-{}",
+                    membership.authority.current_sequence()
+                ),
+                descriptor: membership.descriptor.clone(),
+                descriptor_binding: membership.binding.clone(),
+                operation: "unsubscribe".to_owned(),
+                principal: ASYNC_REFERENCE_PRINCIPAL.to_owned(),
+                scope: ASYNC_REFERENCE_SCOPE.to_owned(),
+                session: ASYNC_REFERENCE_SESSION.to_owned(),
+                stream: AsyncReferenceScenario::lifecycle().stream.to_owned(),
+                subscription_id: subscription_wire.clone(),
+                transport_generation: membership.generation,
+            };
+            let reference_origin = membership.authority.origin().to_owned();
+            let prepared_reference = membership.authority.prepare_membership(
+                &reference_origin,
+                &membership.credential,
+                &reference,
+                NOW,
+            )?;
+            if membership.control_in_flight {
+                return Err("membership_control_in_flight");
+            }
+            membership.control_in_flight = true;
+            let generation = transport.generation;
+            let control = MembershipControlLease {
+                state: Arc::clone(&self.state),
+                transport: transport_id.to_owned(),
+                subscription: subscription_wire.clone(),
+                generation,
+            };
+            (
+                prepared_reference,
+                membership.engine_authorization.clone(),
+                generation,
+                control,
+            )
+        };
+        let pending = {
+            let state = self.state.lock().expect("async runtime lock");
+            let transport = state
+                .transports
+                .get(transport_id)
+                .filter(|transport| transport.generation == generation)
+                .ok_or("transport_authority_invalid")?;
+            WebSocketMembershipControl::prepare_unsubscribe(
+                &transport.document,
+                &unsubscribe,
+                &authorization,
+            )
+            .map_err(|_| "websocket_control_invalid")?
+        };
         let ready = pending
             .authorize()
             .await
             .map_err(|_| "websocket_control_invalid")?;
-        transport
-            .document
-            .commit_remove(ready)
-            .map_err(|_| "websocket_control_invalid")?;
-        membership
-            .authority
-            .commit_membership(prepared_reference, NOW)?;
-        engine.remove(&membership.engine_authorization);
-        membership.open = false;
-        drop(membership.lease.take());
+        {
+            let mut state = self.state.lock().expect("async runtime lock");
+            let engine = Arc::clone(&state.engine);
+            let transport = state
+                .transports
+                .get_mut(transport_id)
+                .filter(|transport| transport.generation == generation)
+                .ok_or("transport_authority_invalid")?;
+            transport
+                .document
+                .commit_remove(ready)
+                .map_err(|_| "websocket_control_invalid")?;
+            let membership = transport
+                .memberships
+                .get_mut(&subscription_wire)
+                .ok_or("membership_authority_invalid")?;
+            membership
+                .authority
+                .commit_membership(prepared_reference, NOW)?;
+            engine.remove(&membership.engine_authorization);
+            membership.open = false;
+            drop(membership.lease.take());
+        }
+        drop(control);
         Ok(WebSocketControlOutcome {
             messages: vec![
                 serde_json::to_vec(&json!({
@@ -574,6 +868,68 @@ impl AsyncRuntime {
         })
     }
 
+    pub(super) fn acquire_reader(
+        &self,
+        transport_id: &str,
+        kind: DocumentTransportKind,
+    ) -> Result<TransportReaderLease, &'static str> {
+        let mut state = self.state.lock().expect("async runtime lock");
+        if state.retired {
+            return Err("transport_retired");
+        }
+        let transport = state
+            .transports
+            .get_mut(transport_id)
+            .ok_or("transport_authority_invalid")?;
+        let expected = match transport.kind {
+            TransportKind::Sse => DocumentTransportKind::ServerSentEvents,
+            TransportKind::WebSocket => DocumentTransportKind::WebSocket,
+        };
+        if expected != kind {
+            return Err("transport_authority_invalid");
+        }
+        if transport.reader_active {
+            return Err("transport_reader_exists");
+        }
+        transport.reader_active = true;
+        Ok(TransportReaderLease {
+            state: Arc::clone(&self.state),
+            transport: transport_id.to_owned(),
+            generation: transport.generation,
+        })
+    }
+
+    pub(super) fn websocket_batch(&self, transport_id: &str) -> Result<Vec<Vec<u8>>, &'static str> {
+        let codec = WebSocketCodec::v1();
+        let mut state = self.state.lock().expect("async runtime lock");
+        if state.retired {
+            return Err("transport_retired");
+        }
+        let engine = Arc::clone(&state.engine);
+        let transport = state
+            .transports
+            .get_mut(transport_id)
+            .ok_or("transport_authority_invalid")?;
+        if transport.kind != TransportKind::WebSocket {
+            return Err("transport_authority_invalid");
+        }
+        let mut messages = Vec::new();
+        for membership in transport
+            .memberships
+            .values_mut()
+            .filter(|membership| membership.open)
+        {
+            let sequence = membership.authority.next_heartbeat().0;
+            let envelope = engine.envelope(&membership.engine_authorization, sequence)?;
+            messages.push(
+                codec
+                    .encode_envelope(&envelope)
+                    .map_err(|_| "engine_envelope_invalid")?,
+            );
+        }
+        Ok(messages)
+    }
+
     pub(super) fn fault_count(&self) -> usize {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
@@ -582,10 +938,15 @@ impl AsyncRuntime {
         self.maximum_memberships.load(Ordering::SeqCst)
     }
 
-    pub(super) async fn retire(&self) {
-        let mut state = self.state.lock().await;
-        state.retired = true;
-        for transport in state.transports.values_mut() {
+    pub(super) async fn retire(&self) -> Result<(), String> {
+        let mut transports = {
+            let mut state = self.state.lock().expect("async runtime lock");
+            state.retired = true;
+            state.by_kind.clear();
+            std::mem::take(&mut state.transports)
+        };
+        let mut first_error = None;
+        for transport in transports.values_mut() {
             for membership in transport.memberships.values_mut() {
                 membership
                     .authority
@@ -593,8 +954,151 @@ impl AsyncRuntime {
                 membership.open = false;
                 drop(membership.lease.take());
             }
-            let _ = transport.document.close().await;
+            if let Err(error) = transport.document.close().await
+                && first_error.is_none()
+            {
+                first_error = Some(format!("async document retirement: {error:?}"));
+            }
         }
-        state.transports.clear();
+        transports.clear();
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+fn transport_response(transport_id: &str, transport: &IssuedTransport) -> Value {
+    let memberships = transport
+        .memberships
+        .iter()
+        .map(|(subscription, membership)| {
+            json!({
+                "authority": membership.credential,
+                "descriptor": membership.descriptor,
+                "descriptor_binding": membership.binding,
+                "subscription": subscription,
+            })
+        })
+        .collect::<Vec<_>>();
+    let first = memberships.first().expect("reference memberships");
+    json!({
+        "transport": transport_id,
+        "subscription": first["subscription"],
+        "authority": first["authority"],
+        "descriptor": first["descriptor"],
+        "descriptor_binding": first["descriptor_binding"],
+        "memberships": memberships,
+        "kind": match transport.kind {
+            TransportKind::Sse => "sse",
+            TransportKind::WebSocket => "websocket",
+        },
+        "transport_generation": transport.generation,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_membership_phase_does_not_block_a_sibling_and_cancellation_is_retryable() {
+        let resources = Arc::new(ResourceCounter::default());
+        let runtime = Arc::new(
+            AsyncRuntime::new(ReferenceFaultSchedule::None, Arc::clone(&resources))
+                .await
+                .expect("async runtime"),
+        );
+        let origin = "http://127.0.0.1:4197";
+        let created = runtime
+            .create(
+                TransportCreateRequest {
+                    kind: "sse".to_owned(),
+                    subscription: "orders".to_owned(),
+                },
+                origin,
+            )
+            .await
+            .expect("transport");
+        let transport = created["transport"].as_str().expect("transport").to_owned();
+        let memberships = created["memberships"].as_array().expect("memberships");
+        let first = memberships[0]["subscription"]
+            .as_str()
+            .expect("first subscription")
+            .to_owned();
+        let first_authority = memberships[0]["authority"]
+            .as_str()
+            .expect("first authority")
+            .to_owned();
+        let second = memberships[1]["subscription"]
+            .as_str()
+            .expect("second subscription")
+            .to_owned();
+        let second_authority = memberships[1]["authority"]
+            .as_str()
+            .expect("second authority")
+            .to_owned();
+
+        runtime.phase_pause.select(&first);
+        let stalled_runtime = Arc::clone(&runtime);
+        let stalled_transport = transport.clone();
+        let stalled_first = first.clone();
+        let stalled_authority = first_authority.clone();
+        let stalled = tokio::spawn(async move {
+            stalled_runtime
+                .membership(
+                    &stalled_transport,
+                    &stalled_first,
+                    MembershipRequest {
+                        authority: stalled_authority,
+                        control_nonce: "paused-subscribe".to_owned(),
+                        operation: "subscribe".to_owned(),
+                    },
+                )
+                .await
+        });
+        timeout(
+            Duration::from_secs(1),
+            runtime.phase_pause.wait_until_entered(),
+        )
+        .await
+        .expect("first membership stalled");
+        timeout(
+            Duration::from_millis(250),
+            runtime.membership(
+                &transport,
+                &second,
+                MembershipRequest {
+                    authority: second_authority,
+                    control_nonce: "sibling-subscribe".to_owned(),
+                    operation: "subscribe".to_owned(),
+                },
+            ),
+        )
+        .await
+        .expect("sibling is not blocked")
+        .expect("sibling subscribes");
+
+        stalled.abort();
+        assert!(
+            stalled
+                .await
+                .expect_err("stalled phase aborted")
+                .is_cancelled()
+        );
+        runtime.phase_pause.resume();
+        runtime
+            .membership(
+                &transport,
+                &first,
+                MembershipRequest {
+                    authority: first_authority,
+                    control_nonce: "paused-subscribe".to_owned(),
+                    operation: "subscribe".to_owned(),
+                },
+            )
+            .await
+            .expect("canceled external authority remains retryable");
+        assert_eq!(resources.current(), 2);
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(resources.current(), 0);
     }
 }

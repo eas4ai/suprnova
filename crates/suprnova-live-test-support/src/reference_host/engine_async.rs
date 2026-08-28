@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::num::NonZeroU8;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
@@ -67,7 +68,7 @@ use suprnova_live::snapshot::{
     ComponentContract, ExpectedInstanceV1, ExpectedSeedV1, SnapshotLimits,
 };
 use suprnova_live::view::{AssetSet, IslandRender};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::{ComponentHarness, ComponentHarnessConfig, HarnessServices};
 
@@ -84,25 +85,42 @@ impl EventPayloadMetadata for OrdersUpdated {
     const SCHEMA: BrowserPayloadSchema = BrowserPayloadSchema::Json;
 }
 
-struct FreshRenderFactory;
+struct FreshRenderFactory {
+    pause: Arc<FreshRenderPause>,
+}
+
+#[derive(Default)]
+struct FreshRenderPause {
+    enabled: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
 
 impl ComponentFactory for FreshRenderFactory {
     fn mount<'a>(
         &'a self,
         _context: &'a MountContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async move { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
+        let pause = Arc::clone(&self.pause);
+        Box::pin(async move {
+            Ok(Box::new(FreshRenderComponent { pause }) as Box<dyn ComponentInstance>)
+        })
     }
 
     fn hydrate<'a>(
         &'a self,
         _context: &'a HydrationContext<'a>,
     ) -> LiveFuture<'a, Result<Box<dyn ComponentInstance>, ComponentError>> {
-        Box::pin(async move { Ok(Box::new(FreshRenderComponent) as Box<dyn ComponentInstance>) })
+        let pause = Arc::clone(&self.pause);
+        Box::pin(async move {
+            Ok(Box::new(FreshRenderComponent { pause }) as Box<dyn ComponentInstance>)
+        })
     }
 }
 
-struct FreshRenderComponent;
+struct FreshRenderComponent {
+    pause: Arc<FreshRenderPause>,
+}
 
 impl ComponentInstance for FreshRenderComponent {
     fn metadata(&self) -> &'static ComponentMetadata {
@@ -114,6 +132,10 @@ impl ComponentInstance for FreshRenderComponent {
         context: &'a RenderContext<'a>,
     ) -> LiveFuture<'a, Result<IslandRender, ComponentError>> {
         Box::pin(async move {
+            if self.pause.enabled.load(Ordering::Acquire) {
+                self.pause.entered.notify_one();
+                self.pause.release.notified().await;
+            }
             Ok(IslandRender {
                 body: Bytes::from(format!(
                     "<section data-live-poll-generation=\"{}\" data-live-render-source=\"component-harness\"></section>",
@@ -305,15 +327,19 @@ pub(super) struct ReferenceFreshRender {
     harness: Arc<AsyncMutex<ComponentHarness>>,
     initial_html: String,
     ports: Arc<EngineSubscriptionPorts>,
+    pause: Arc<FreshRenderPause>,
 }
 
 impl ReferenceFreshRender {
     async fn new(ports: Arc<EngineSubscriptionPorts>) -> Result<Self, String> {
         let metadata = engine_metadata().clone();
         let (context, _) = engine_context(metadata.clone(), ports.clone())?;
+        let pause = Arc::new(FreshRenderPause::default());
         let descriptor = ComponentDescriptor::with_hooks(
             metadata.clone(),
-            ComponentHooks::new(Arc::new(FreshRenderFactory)),
+            ComponentHooks::new(Arc::new(FreshRenderFactory {
+                pause: Arc::clone(&pause),
+            })),
         );
         let expected = ExpectedInstanceV1::new(
             ComponentContract::new(
@@ -371,6 +397,7 @@ impl ReferenceFreshRender {
             harness,
             initial_html,
             ports,
+            pause,
         })
     }
 
@@ -423,6 +450,19 @@ impl ReferenceFreshRender {
 
     pub(super) fn initial_html(&self) -> &str {
         &self.initial_html
+    }
+
+    pub(super) fn pause_render(&self) {
+        self.pause.enabled.store(true, Ordering::Release);
+    }
+
+    pub(super) async fn wait_until_render_paused(&self) {
+        self.pause.entered.notified().await;
+    }
+
+    pub(super) fn resume_render(&self) {
+        self.pause.enabled.store(false, Ordering::Release);
+        self.pause.release.notify_waiters();
     }
 }
 

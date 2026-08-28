@@ -28,8 +28,9 @@ use suprnova_live::protocol::{
     OperationV2, ProtocolLimitConfig, ProtocolLimits, VersionedUpdateRequest,
     parse_versioned_update_request,
 };
+use suprnova_live::upload::{UploadError, UploadErrorKind};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot, watch};
+use tokio::sync::{Mutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -132,6 +133,7 @@ const RESOURCE_RETIRED: usize = 1 << (usize::BITS - 1);
 #[derive(Default)]
 pub(super) struct ResourceCounter {
     state: AtomicUsize,
+    drained: Notify,
 }
 
 impl ResourceCounter {
@@ -159,6 +161,16 @@ impl ResourceCounter {
     fn retire(&self) {
         self.state.fetch_or(RESOURCE_RETIRED, Ordering::AcqRel);
     }
+
+    async fn wait_until_drained(&self) {
+        loop {
+            let drained = self.drained.notified();
+            if self.current() == 0 {
+                return;
+            }
+            drained.await;
+        }
+    }
 }
 
 pub(super) struct ResourceLease {
@@ -169,6 +181,9 @@ impl Drop for ResourceLease {
     fn drop(&mut self) {
         let previous = self.counter.state.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous & !RESOURCE_RETIRED > 0);
+        if previous & !RESOURCE_RETIRED == 1 {
+            self.counter.drained.notify_one();
+        }
     }
 }
 
@@ -188,6 +203,29 @@ impl ResourceCounters {
         self.open_timers.retire();
         self.active_uploads.retire();
         self.logical_memberships.retire();
+    }
+
+    async fn wait_until_drained(&self) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                self.open_sockets.wait_until_drained(),
+                self.open_files.wait_until_drained(),
+                self.open_timers.wait_until_drained(),
+                self.active_uploads.wait_until_drained(),
+                self.logical_memberships.wait_until_drained(),
+            );
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "reference host resource drain timed out: sockets={}, files={}, timers={}, uploads={}, memberships={}",
+                self.open_sockets.current(),
+                self.open_files.current(),
+                self.open_timers.current(),
+                self.active_uploads.current(),
+                self.logical_memberships.current(),
+            )
+        })
     }
 }
 
@@ -218,6 +256,7 @@ struct HostState {
     artifacts: ValidatedArtifacts,
     uploads: UploadRuntime,
     async_runtime: AsyncRuntime,
+    request_shutdown: watch::Receiver<bool>,
     inspection: InspectionState,
 }
 
@@ -273,7 +312,7 @@ impl ReferenceHost {
         let uploads = UploadRuntime::open(
             &config.quarantine_root,
             config.fault_schedule,
-            request_shutdown_receiver,
+            request_shutdown_receiver.clone(),
             Arc::clone(&inspection.resources.active_uploads),
         )
         .await?;
@@ -297,6 +336,7 @@ impl ReferenceHost {
             artifacts,
             uploads,
             async_runtime,
+            request_shutdown: request_shutdown_receiver,
             inspection,
         });
         let router = router(state.clone());
@@ -364,6 +404,36 @@ impl ReferenceHost {
             .map_err(str::to_owned)
     }
 
+    /// Pauses the production component renderer for cancellation conformance.
+    pub fn pause_fresh_render(&self) {
+        self.state.async_runtime.pause_fresh_render();
+    }
+
+    /// Waits until a paused production component render has started.
+    pub async fn wait_until_fresh_render_paused(&self) {
+        self.state
+            .async_runtime
+            .wait_until_fresh_render_paused()
+            .await;
+    }
+
+    /// Releases a renderer paused for cancellation conformance.
+    pub fn resume_fresh_render(&self) {
+        self.state.async_runtime.resume_fresh_render();
+    }
+
+    /// Executes one exact fresh-render body without involving socket cancellation semantics.
+    pub async fn execute_fresh_render_direct(
+        &self,
+        body: axum::body::Bytes,
+    ) -> Result<suprnova_live::endpoint::LiveEndpointResponse, String> {
+        self.state
+            .async_runtime
+            .execute_fresh_render_direct(body)
+            .await
+            .map_err(str::to_owned)
+    }
+
     /// Retires owned services and waits for the listening socket to close.
     pub async fn shutdown(mut self) -> Result<(), String> {
         self.state.inspection.resources.retire();
@@ -371,27 +441,38 @@ impl ReferenceHost {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        self.state.uploads.retire().await;
-        self.state.async_runtime.retire().await;
+        let upload_retirement = self.state.uploads.retire().await;
+        let async_retirement = self.state.async_runtime.retire().await;
+        let mut server_retirement = Ok(());
         if let Some(mut server) = self.server.lock().await.take() {
             match tokio::time::timeout(Duration::from_secs(1), &mut server).await {
-                Ok(result) => result
-                    .map_err(|error| format!("reference host task: {error}"))?
-                    .map_err(|error| format!("reference host server: {error}"))?,
+                Ok(result) => {
+                    server_retirement = result
+                        .map_err(|error| format!("reference host task: {error}"))
+                        .and_then(|result| {
+                            result.map_err(|error| format!("reference host server: {error}"))
+                        });
+                }
                 Err(_) => {
                     server.abort();
                     match server.await {
                         Err(error) if error.is_cancelled() => {}
-                        Err(error) => return Err(format!("reference host task: {error}")),
+                        Err(error) => {
+                            server_retirement = Err(format!("reference host task: {error}"));
+                        }
                         Ok(Err(error)) => {
-                            return Err(format!("reference host server: {error}"));
+                            server_retirement = Err(format!("reference host server: {error}"));
                         }
                         Ok(Ok(())) => {}
                     }
                 }
             }
         }
-        Ok(())
+        let resource_retirement = self.state.inspection.resources.wait_until_drained().await;
+        upload_retirement?;
+        async_retirement?;
+        server_retirement?;
+        resource_retirement
     }
 }
 
@@ -499,7 +580,10 @@ async fn upload_status(
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    match state.uploads.status(&handle).await {
+    let Some(grant) = header(&headers, "x-live-upload-grant") else {
+        return error(StatusCode::UNAUTHORIZED, "upload_grant_missing");
+    };
+    match state.uploads.status(&handle, grant).await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
@@ -528,7 +612,10 @@ async fn upload_cancel(
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    match state.uploads.cancel(&handle).await {
+    let Some(grant) = header(&headers, "x-live-upload-grant") else {
+        return error(StatusCode::UNAUTHORIZED, "upload_grant_missing");
+    };
+    match state.uploads.cancel(&handle, grant).await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
@@ -542,7 +629,10 @@ async fn upload_reacquire(
     if let Some(response) = session_error(&headers) {
         return response;
     }
-    match state.uploads.reacquire(&handle).await {
+    let Some(grant) = header(&headers, "x-live-upload-grant") else {
+        return error(StatusCode::UNAUTHORIZED, "upload_grant_missing");
+    };
+    match state.uploads.reacquire(&handle, grant).await {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
         Err(error) => upload_error(error),
     }
@@ -658,6 +748,13 @@ async fn sse(
     if let Some(response) = session_error(&headers) {
         return response;
     }
+    let reader = match state.async_runtime.acquire_reader(
+        &transport,
+        suprnova_live::async_updates::DocumentTransportKind::ServerSentEvents,
+    ) {
+        Ok(reader) => reader,
+        Err(code) => return error(StatusCode::CONFLICT, code),
+    };
     match state.async_runtime.sse_batch(&transport).await {
         Ok(first_event) => {
             let Some(socket_lease) = state.inspection.resources.open_sockets.acquire() else {
@@ -673,8 +770,8 @@ async fn sse(
             let stream_state = state.clone();
             let stream_transport = transport.clone();
             let stream = futures_util::stream::unfold(
-                (Some(first_event), socket_lease, timer_lease),
-                move |(first, socket_lease, timer_lease)| {
+                (Some(first_event), socket_lease, timer_lease, reader),
+                move |(first, socket_lease, timer_lease, reader)| {
                     let state = stream_state.clone();
                     let transport = stream_transport.clone();
                     async move {
@@ -690,7 +787,7 @@ async fn sse(
                         };
                         Some((
                             Ok::<_, Infallible>(axum::body::Bytes::from(event)),
-                            (None, socket_lease, timer_lease),
+                            (None, socket_lease, timer_lease, reader),
                         ))
                     }
                 },
@@ -724,6 +821,16 @@ async fn websocket(
     let Some(transport) = header(&headers, "x-live-transport").map(ToOwned::to_owned) else {
         return error(StatusCode::UNAUTHORIZED, "transport_authority_missing");
     };
+    let reader = match state.async_runtime.acquire_reader(
+        &transport,
+        suprnova_live::async_updates::DocumentTransportKind::WebSocket,
+    ) {
+        Ok(reader) => reader,
+        Err(code) => return error(StatusCode::CONFLICT, code),
+    };
+    let Some(timer_lease) = state.inspection.resources.open_timers.acquire() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
+    };
     state
         .inspection
         .physical_websocket_connections
@@ -732,7 +839,9 @@ async fn websocket(
         return error(StatusCode::SERVICE_UNAVAILABLE, "host_retired");
     };
     upgrade
-        .on_upgrade(move |socket| websocket_session(state, transport, socket, socket_lease))
+        .on_upgrade(move |socket| {
+            websocket_session(state, transport, socket, socket_lease, timer_lease, reader)
+        })
         .into_response()
 }
 
@@ -741,38 +850,55 @@ async fn websocket_session(
     transport: String,
     mut socket: WebSocket,
     _socket_lease: ResourceLease,
+    _timer_lease: ResourceLease,
+    _reader: async_updates::TransportReaderLease,
 ) {
+    const MAX_CONTROLS_PER_CONNECTION: usize = 64;
     let mut accepted = 0_usize;
-    while let Some(Ok(message)) = socket.next().await {
-        let Message::Text(text) = message else {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
-            continue;
-        };
-        if text.len() > 512 || accepted >= 2 {
-            let _ = socket.close().await;
-            break;
-        }
-        accepted += 1;
-        match state
-            .async_runtime
-            .websocket_control(&transport, text.as_bytes())
-            .await
-        {
-            Ok(outcome) => {
-                for response in outcome.messages {
-                    let Ok(response) = String::from_utf8(response) else {
-                        return;
-                    };
-                    if socket.send(Message::Text(response)).await.is_err() {
-                        return;
-                    }
+    let mut shutdown = state.request_shutdown.clone();
+    let mut events = tokio::time::interval(Duration::from_millis(25));
+    events.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    events.tick().await;
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    let _ = socket.close().await;
+                    break;
                 }
             }
-            Err(_) => {
-                let _ = socket.close().await;
-                break;
+            _ = events.tick() => {
+                let Ok(messages) = state.async_runtime.websocket_batch(&transport) else {
+                    break;
+                };
+                for response in messages {
+                    let Ok(response) = String::from_utf8(response) else { return; };
+                    if socket.send(Message::Text(response)).await.is_err() { return; }
+                }
+            }
+            message = socket.next() => {
+                let Some(Ok(message)) = message else { break; };
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) { break; }
+                    continue;
+                };
+                if text.len() > 512 || accepted >= MAX_CONTROLS_PER_CONNECTION {
+                    let _ = socket.close().await;
+                    break;
+                }
+                accepted += 1;
+                match state.async_runtime.websocket_control(&transport, text.as_bytes()).await {
+                    Ok(outcome) => {
+                        for response in outcome.messages {
+                            let Ok(response) = String::from_utf8(response) else { return; };
+                            if socket.send(Message::Text(response)).await.is_err() { return; }
+                        }
+                    }
+                    Err(_) => {
+                        let _ = socket.close().await;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -888,9 +1014,50 @@ fn async_result(result: Result<Value, &'static str>, status: StatusCode) -> Resp
     }
 }
 
-fn upload_error(upload: suprnova_live::upload::UploadError) -> Response {
-    let code = format!("upload_{:?}", upload.kind()).to_ascii_lowercase();
-    error(StatusCode::CONFLICT, &code)
+fn upload_error(upload: UploadError) -> Response {
+    let status = match upload.kind() {
+        UploadErrorKind::InvalidGrantEncoding
+        | UploadErrorKind::InvalidGrant
+        | UploadErrorKind::GrantExpired
+        | UploadErrorKind::ScopeMismatch
+        | UploadErrorKind::RequestAuthorityExpired => StatusCode::UNAUTHORIZED,
+        UploadErrorKind::AuthorizationDenied => StatusCode::FORBIDDEN,
+        UploadErrorKind::InvalidHandle => StatusCode::NOT_FOUND,
+        UploadErrorKind::InputTooLarge | UploadErrorKind::FileCountExceeded => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
+        UploadErrorKind::CreationRateExceeded
+        | UploadErrorKind::PendingLimitExceeded
+        | UploadErrorKind::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        UploadErrorKind::UploadConflict
+        | UploadErrorKind::InvalidTransition
+        | UploadErrorKind::RevisionExhausted
+        | UploadErrorKind::IdempotencyHistoryFull
+        | UploadErrorKind::StorageConflict
+        | UploadErrorKind::ChecksumMismatch
+        | UploadErrorKind::IncompleteTransfer
+        | UploadErrorKind::ValidationEvidenceUnavailable
+        | UploadErrorKind::UploadExpired
+        | UploadErrorKind::ReconciliationRequired => StatusCode::CONFLICT,
+        UploadErrorKind::BodyInterrupted | UploadErrorKind::TransferCanceled => {
+            StatusCode::REQUEST_TIMEOUT
+        }
+        UploadErrorKind::UnsupportedProtocol
+        | UploadErrorKind::DuplicateField
+        | UploadErrorKind::UnsupportedOperation
+        | UploadErrorKind::UnknownField
+        | UploadErrorKind::MissingField
+        | UploadErrorKind::InvalidField
+        | UploadErrorKind::MediaHeaderUnproved => StatusCode::BAD_REQUEST,
+        UploadErrorKind::AuthorizationUnavailable
+        | UploadErrorKind::LedgerUnavailable
+        | UploadErrorKind::ServiceRetired
+        | UploadErrorKind::RandomUnavailable
+        | UploadErrorKind::ProviderUnavailable
+        | UploadErrorKind::FinalizationFailed
+        | UploadErrorKind::CompensationFailed => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    error(status, upload.kind().as_str())
 }
 
 fn error(status: StatusCode, code: &str) -> Response {

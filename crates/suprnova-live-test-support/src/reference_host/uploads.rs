@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::body::Body;
 use http_body_util::BodyExt as _;
@@ -35,7 +36,8 @@ use suprnova_live::upload::{
     UploadTransitionRequest, VerifyTransfer, WriteChunk,
 };
 use suprnova_live::validation::ValidationSelection;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Notify, watch};
+use tokio::time::{Duration, timeout};
 
 use crate::{
     ControlledUploadAuthorization, DirectProviderConformanceAdapter, MemoryUploadLedger,
@@ -67,6 +69,103 @@ struct StoredUpload {
     active_lease: Option<ResourceLease>,
 }
 
+enum UploadSlot {
+    Ready(StoredUpload),
+    Busy {
+        handle: UploadHandle,
+        mode: TransferMode,
+    },
+}
+
+struct UploadSlots {
+    records: SyncMutex<HashMap<String, UploadSlot>>,
+    retired: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UploadPausePoint {
+    Chunk,
+    Status,
+    Complete,
+    Cancel,
+    Reacquire,
+}
+
+#[derive(Default)]
+struct UploadOperationPause {
+    target: SyncMutex<Option<UploadPausePoint>>,
+    entered: Notify,
+    release: Notify,
+}
+
+impl UploadOperationPause {
+    async fn pause_if_selected(&self, point: UploadPausePoint) {
+        if *self
+            .target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            == Some(point)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn select(&self, point: UploadPausePoint) {
+        *self
+            .target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(point);
+    }
+
+    #[cfg(test)]
+    async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    #[cfg(test)]
+    fn resume(&self) {
+        *self
+            .target
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        self.release.notify_waiters();
+    }
+}
+
+struct UploadOperation {
+    slots: Arc<UploadSlots>,
+    key: String,
+    upload: Option<StoredUpload>,
+}
+
+impl UploadOperation {
+    fn upload(&self) -> &StoredUpload {
+        self.upload.as_ref().expect("active upload operation")
+    }
+
+    fn upload_mut(&mut self) -> &mut StoredUpload {
+        self.upload.as_mut().expect("active upload operation")
+    }
+}
+
+impl Drop for UploadOperation {
+    fn drop(&mut self) {
+        let Some(upload) = self.upload.take() else {
+            return;
+        };
+        let mut records = self
+            .slots
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self.slots.retired.load(Ordering::Acquire) {
+            records.insert(self.key.clone(), UploadSlot::Ready(upload));
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct CreateUploadRequest {
     field: String,
@@ -89,14 +188,13 @@ pub(super) struct UploadRuntime {
     grants: TransferGrantCodec,
     context: TrustedLiveRequestContext,
     scope: HostScopeFacts,
-    uploads: Mutex<HashMap<String, StoredUpload>>,
-    next_handle: AtomicU64,
+    uploads: Arc<UploadSlots>,
     service_calls: AtomicUsize,
     fault: ReferenceFaultSchedule,
     fault_applied: AtomicBool,
-    retired: AtomicBool,
     shutdown: watch::Receiver<bool>,
     active_uploads: Arc<ResourceCounter>,
+    operation_pause: Arc<UploadOperationPause>,
 }
 
 impl UploadRuntime {
@@ -143,14 +241,16 @@ impl UploadRuntime {
             grants: grant_codec(),
             context,
             scope,
-            uploads: Mutex::new(HashMap::new()),
-            next_handle: AtomicU64::new(1),
+            uploads: Arc::new(UploadSlots {
+                records: SyncMutex::new(HashMap::new()),
+                retired: AtomicBool::new(false),
+            }),
             service_calls: AtomicUsize::new(0),
             fault,
             fault_applied: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             shutdown,
             active_uploads,
+            operation_pause: Arc::new(UploadOperationPause::default()),
         })
     }
 
@@ -175,8 +275,30 @@ impl UploadRuntime {
             .active_uploads
             .acquire()
             .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
-        let sequence = self.next_handle.fetch_add(1, Ordering::SeqCst);
-        let encoded = format!("018f47c1-2af0-7cc4-a001-{sequence:012x}");
+        let mut handle_bytes = [0_u8; 16];
+        getrandom::fill(&mut handle_bytes)
+            .map_err(|_| UploadError::new(UploadErrorKind::RandomUnavailable))?;
+        handle_bytes[6] = (handle_bytes[6] & 0x0f) | 0x40;
+        handle_bytes[8] = (handle_bytes[8] & 0x3f) | 0x80;
+        let encoded = format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            handle_bytes[0],
+            handle_bytes[1],
+            handle_bytes[2],
+            handle_bytes[3],
+            handle_bytes[4],
+            handle_bytes[5],
+            handle_bytes[6],
+            handle_bytes[7],
+            handle_bytes[8],
+            handle_bytes[9],
+            handle_bytes[10],
+            handle_bytes[11],
+            handle_bytes[12],
+            handle_bytes[13],
+            handle_bytes[14],
+            handle_bytes[15],
+        );
         let handle = UploadHandle::parse(&encoded)?;
         let field = ModelField::parse(&request.field)
             .map_err(|_| UploadError::new(UploadErrorKind::InvalidField))?;
@@ -187,7 +309,7 @@ impl UploadRuntime {
                 UploadCreationRequest::new(
                     handle.clone(),
                     field.clone(),
-                    idempotency(&format!("create-{sequence}"))?,
+                    idempotency(&format!("create-{}", &encoded[..12]))?,
                     UnixMillis::new(60_000),
                 ),
                 CREATED_AT,
@@ -235,26 +357,39 @@ impl UploadRuntime {
                     "reference": instruction.reference().as_str(),
                 })
             });
-        let mut uploads = self.uploads.lock().await;
-        if self.retired.load(Ordering::Acquire) {
+        let stored = StoredUpload {
+            handle: handle.clone(),
+            field,
+            expected_bytes: request.expected_bytes,
+            received_bytes: 0,
+            next_part: 0,
+            state,
+            mode,
+            grant: grant.clone(),
+            revision,
+            whole_hasher: Sha256::new(),
+            active_lease: Some(active_lease),
+        };
+        let insert_conflict = {
+            let mut uploads = self
+                .uploads
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.uploads.retired.load(Ordering::Acquire) || uploads.contains_key(&encoded) {
+                true
+            } else {
+                uploads.insert(encoded.clone(), UploadSlot::Ready(stored));
+                false
+            }
+        };
+        if insert_conflict {
+            match mode {
+                TransferMode::File => self.file.cancel(&handle).await?,
+                TransferMode::Direct => self.direct.cancel(&handle).await?,
+            }
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
-        uploads.insert(
-            encoded.clone(),
-            StoredUpload {
-                handle,
-                field,
-                expected_bytes: request.expected_bytes,
-                received_bytes: 0,
-                next_part: 0,
-                state,
-                mode,
-                grant: grant.clone(),
-                revision,
-                whole_hasher: Sha256::new(),
-                active_lease: Some(active_lease),
-            },
-        );
         let mut response = json!({
             "handle": encoded,
             "grant": grant.expose_bearer(),
@@ -277,13 +412,21 @@ impl UploadRuntime {
         body: Body,
     ) -> Result<Value, UploadError> {
         self.record_call();
-        let mut upload = self.take_upload(handle).await?;
-        let result = self
-            .write_chunk_inner(&mut upload, part, grant, checksum, content_length, body)
+        let mut operation = self.take_upload(handle)?;
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Chunk)
             .await;
-        let response = result.map(|()| status_json(&upload));
-        self.restore_upload(handle, upload).await;
-        response
+        let result = self
+            .write_chunk_inner(
+                operation.upload_mut(),
+                part,
+                grant,
+                checksum,
+                content_length,
+                body,
+            )
+            .await;
+        result.map(|()| status_json(operation.upload()))
     }
 
     async fn write_chunk_inner(
@@ -295,7 +438,7 @@ impl UploadRuntime {
         content_length: Option<u64>,
         body: Body,
     ) -> Result<(), UploadError> {
-        require_grant(upload, grant)?;
+        self.require_current_grant(upload, grant)?;
         if upload.mode != TransferMode::File
             || upload.state.is_terminal()
             || part != upload.next_part
@@ -351,22 +494,23 @@ impl UploadRuntime {
         Ok(())
     }
 
-    pub(super) async fn status(&self, handle: &str) -> Result<Value, UploadError> {
+    pub(super) async fn status(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let upload = self.take_upload(handle).await?;
-        let result = self
-            .service
+        let operation = self.take_upload(handle)?;
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Status)
+            .await;
+        let presented = self.require_current_grant(operation.upload(), grant)?;
+        self.service
             .status(
                 &self.context,
-                upload.grant.clone(),
-                upload.field.clone(),
-                upload.handle.clone(),
+                presented,
+                operation.upload().field.clone(),
+                operation.upload().handle.clone(),
                 CREATED_AT,
             )
             .await
-            .map(|_| status_json(&upload));
-        self.restore_upload(handle, upload).await;
-        result
+            .map(|_| status_json(operation.upload()))
     }
 
     pub(super) async fn complete(
@@ -375,11 +519,14 @@ impl UploadRuntime {
         request: CompleteUploadRequest,
     ) -> Result<Value, UploadError> {
         self.record_call();
-        let mut upload = self.take_upload(handle).await?;
-        let result = self.complete_inner(&mut upload, &request.grant).await;
-        let response = result.map(|()| status_json(&upload));
-        self.restore_upload(handle, upload).await;
-        response
+        let mut operation = self.take_upload(handle)?;
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Complete)
+            .await;
+        let result = self
+            .complete_inner(operation.upload_mut(), &request.grant)
+            .await;
+        result.map(|()| status_json(operation.upload()))
     }
 
     async fn complete_inner(
@@ -387,16 +534,22 @@ impl UploadRuntime {
         upload: &mut StoredUpload,
         grant: &str,
     ) -> Result<(), UploadError> {
-        require_grant(upload, grant)?;
-        if upload.mode != TransferMode::File
-            || upload.received_bytes != upload.expected_bytes
-            || upload.state != UploadState::Transferring
-        {
+        self.require_current_grant(upload, grant)?;
+        if upload.mode != TransferMode::File || upload.received_bytes != upload.expected_bytes {
+            return Err(UploadError::new(UploadErrorKind::UploadConflict));
+        }
+        if upload.state == UploadState::Ready {
+            drop(upload.active_lease.take());
+            return Ok(());
+        }
+        if upload.state != UploadState::Transferring && upload.state != UploadState::Verifying {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
         let checksum = UploadChecksum::parse(&hex_digest(upload.whole_hasher.clone().finalize()))?;
-        self.transition(upload, UploadTransition::Complete, "complete")
-            .await?;
+        if upload.state == UploadState::Transferring {
+            self.transition(upload, UploadTransition::Complete, "complete")
+                .await?;
+        }
         self.file
             .verify(VerifyTransfer::new(&upload.handle, &checksum))
             .await?;
@@ -406,13 +559,15 @@ impl UploadRuntime {
         Ok(())
     }
 
-    pub(super) async fn cancel(&self, handle: &str) -> Result<Value, UploadError> {
+    pub(super) async fn cancel(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let mut upload = self.take_upload(handle).await?;
-        let result = self.cancel_inner(&mut upload).await;
-        let response = result.map(|()| status_json(&upload));
-        self.restore_upload(handle, upload).await;
-        response
+        let mut operation = self.take_upload(handle)?;
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Cancel)
+            .await;
+        self.require_current_grant(operation.upload(), grant)?;
+        let result = self.cancel_inner(operation.upload_mut()).await;
+        result.map(|()| status_json(operation.upload()))
     }
 
     async fn cancel_inner(&self, upload: &mut StoredUpload) -> Result<(), UploadError> {
@@ -426,12 +581,14 @@ impl UploadRuntime {
         Ok(())
     }
 
-    pub(super) async fn reacquire(&self, handle: &str) -> Result<Value, UploadError> {
+    pub(super) async fn reacquire(&self, handle: &str, grant: &str) -> Result<Value, UploadError> {
         self.record_call();
-        let mut upload = self.take_upload(handle).await?;
-        let result = self.reacquire_inner(&mut upload).await;
-        self.restore_upload(handle, upload).await;
-        result
+        let mut operation = self.take_upload(handle)?;
+        self.operation_pause
+            .pause_if_selected(UploadPausePoint::Reacquire)
+            .await;
+        self.require_current_grant(operation.upload(), grant)?;
+        self.reacquire_inner(operation.upload_mut()).await
     }
 
     async fn reacquire_inner(&self, upload: &mut StoredUpload) -> Result<Value, UploadError> {
@@ -472,31 +629,100 @@ impl UploadRuntime {
         usize::from(self.fault_applied.load(Ordering::SeqCst))
     }
 
-    pub(super) async fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
+    pub(super) async fn retire(&self) -> Result<(), String> {
+        self.uploads.retired.store(true, Ordering::Release);
+        let pending = {
+            let mut uploads = self
+                .uploads
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            uploads
+                .drain()
+                .map(|(_, slot)| match slot {
+                    UploadSlot::Ready(upload) => (upload.handle, upload.mode),
+                    UploadSlot::Busy { handle, mode } => (handle, mode),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut first_error = None;
+        for (handle, mode) in pending {
+            let cleanup = async {
+                match mode {
+                    TransferMode::File => self.file.cancel(&handle).await,
+                    TransferMode::Direct => self.direct.cancel(&handle).await,
+                }
+            };
+            match timeout(Duration::from_millis(500), cleanup).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if first_error.is_none() => {
+                    first_error = Some(format!("upload quarantine cleanup: {error:?}"));
+                }
+                Err(_) if first_error.is_none() => {
+                    first_error = Some("upload quarantine cleanup timed out".to_owned());
+                }
+                Ok(Err(_)) | Err(_) => {}
+            }
+        }
         self.file.retire();
-        self.uploads.lock().await.clear();
+        first_error.map_or(Ok(()), Err)
     }
 
     fn record_call(&self) {
         self.service_calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn take_upload(&self, handle: &str) -> Result<StoredUpload, UploadError> {
-        let mut uploads = self.uploads.lock().await;
-        if self.retired.load(Ordering::Acquire) {
+    fn take_upload(&self, handle: &str) -> Result<UploadOperation, UploadError> {
+        let mut uploads = self
+            .uploads
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.uploads.retired.load(Ordering::Acquire) {
             return Err(UploadError::new(UploadErrorKind::UploadConflict));
         }
-        uploads
+        let upload = uploads
             .remove(handle)
-            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))
+            .and_then(|slot| match slot {
+                UploadSlot::Ready(upload) => Some(upload),
+                busy @ UploadSlot::Busy { .. } => {
+                    uploads.insert(handle.to_owned(), busy);
+                    None
+                }
+            })
+            .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        uploads.insert(
+            handle.to_owned(),
+            UploadSlot::Busy {
+                handle: upload.handle.clone(),
+                mode: upload.mode,
+            },
+        );
+        Ok(UploadOperation {
+            slots: Arc::clone(&self.uploads),
+            key: handle.to_owned(),
+            upload: Some(upload),
+        })
     }
 
-    async fn restore_upload(&self, handle: &str, upload: StoredUpload) {
-        let mut uploads = self.uploads.lock().await;
-        if !self.retired.load(Ordering::Acquire) {
-            uploads.insert(handle.to_owned(), upload);
+    fn require_current_grant(
+        &self,
+        upload: &StoredUpload,
+        bearer: &str,
+    ) -> Result<TransferGrant, UploadError> {
+        let presented = TransferGrant::parse(bearer)?;
+        if upload.grant.expose_bearer() != presented.expose_bearer() {
+            return Err(UploadError::new(UploadErrorKind::InvalidGrant));
         }
+        let expected = TransferGrantScope::new(
+            upload.handle.clone(),
+            self.context.mount().component().clone(),
+            upload.field.clone(),
+            self.scope.clone(),
+            1,
+        );
+        self.grants.verify(&presented, &expected, CREATED_AT)?;
+        Ok(presented)
     }
 
     async fn transition(
@@ -538,14 +764,6 @@ fn status_json(upload: &StoredUpload) -> Value {
         "next_part": upload.next_part,
         "revision": upload.revision.get(),
     })
-}
-
-fn require_grant(upload: &StoredUpload, grant: &str) -> Result<(), UploadError> {
-    if upload.grant.expose_bearer() == grant {
-        Ok(())
-    } else {
-        Err(UploadError::new(UploadErrorKind::InvalidGrant))
-    }
 }
 
 fn idempotency(value: &str) -> Result<UploadIdempotencyKey, UploadError> {
@@ -764,4 +982,129 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_detached_upload_operation_restores_state_when_its_future_is_aborted() {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).expect("test root entropy");
+        let root = std::env::temp_dir().join(format!(
+            "suprnova-live-upload-abort-{}",
+            u64::from_le_bytes(random)
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("test root");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let active = Arc::new(ResourceCounter::default());
+        let runtime = Arc::new(
+            UploadRuntime::open(
+                &root,
+                ReferenceFaultSchedule::None,
+                shutdown,
+                Arc::clone(&active),
+            )
+            .await
+            .expect("upload runtime"),
+        );
+
+        for point in [
+            UploadPausePoint::Chunk,
+            UploadPausePoint::Status,
+            UploadPausePoint::Complete,
+            UploadPausePoint::Cancel,
+            UploadPausePoint::Reacquire,
+        ] {
+            let created = runtime
+                .create(CreateUploadRequest {
+                    field: "serial".to_owned(),
+                    filename: format!("{point:?}.bin"),
+                    content_type: "application/octet-stream".to_owned(),
+                    expected_bytes: 8,
+                    mode: "file".to_owned(),
+                })
+                .await
+                .expect("created upload");
+            let handle = created["handle"].as_str().expect("handle").to_owned();
+            let grant = created["grant"].as_str().expect("grant").to_owned();
+            runtime.operation_pause.select(point);
+            let operation_runtime = Arc::clone(&runtime);
+            let operation_handle = handle.clone();
+            let operation_grant = grant.clone();
+            let task = tokio::spawn(async move {
+                match point {
+                    UploadPausePoint::Chunk => {
+                        let checksum = hex_digest(Sha256::digest(b"abcdefgh"));
+                        operation_runtime
+                            .write_chunk(
+                                &operation_handle,
+                                0,
+                                &operation_grant,
+                                &checksum,
+                                Some(8),
+                                Body::from("abcdefgh"),
+                            )
+                            .await
+                    }
+                    UploadPausePoint::Status => {
+                        operation_runtime
+                            .status(&operation_handle, &operation_grant)
+                            .await
+                    }
+                    UploadPausePoint::Complete => {
+                        operation_runtime
+                            .complete(
+                                &operation_handle,
+                                CompleteUploadRequest {
+                                    grant: operation_grant,
+                                },
+                            )
+                            .await
+                    }
+                    UploadPausePoint::Cancel => {
+                        operation_runtime
+                            .cancel(&operation_handle, &operation_grant)
+                            .await
+                    }
+                    UploadPausePoint::Reacquire => {
+                        operation_runtime
+                            .reacquire(&operation_handle, &operation_grant)
+                            .await
+                    }
+                }
+            });
+            timeout(
+                Duration::from_secs(1),
+                runtime.operation_pause.wait_until_entered(),
+            )
+            .await
+            .expect("operation reached cancellation point");
+            task.abort();
+            assert!(task.await.expect_err("operation aborted").is_cancelled());
+            runtime.operation_pause.resume();
+
+            let coherent = runtime
+                .status(&handle, &grant)
+                .await
+                .expect("successor request sees restored upload");
+            assert_eq!(coherent["handle"], handle);
+            assert_eq!(coherent["state"], "created");
+        }
+
+        runtime.retire().await.expect("runtime retires");
+        assert_eq!(active.current(), 0);
+        let mut entries = tokio::fs::read_dir(&root).await.expect("quarantine root");
+        assert!(
+            entries
+                .next_entry()
+                .await
+                .expect("quarantine entry")
+                .is_none()
+        );
+        tokio::fs::remove_dir(&root)
+            .await
+            .expect("remove empty test root");
+    }
 }

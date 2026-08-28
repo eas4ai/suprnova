@@ -289,14 +289,18 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
         )))
     }
 
-    async fn commit(&self, claim: ClaimToken, outcome: AcceptedOutcome) -> Result<(), LedgerError> {
+    async fn commit(
+        &self,
+        claim: &ClaimToken,
+        outcome: AcceptedOutcome,
+    ) -> Result<(), LedgerError> {
         if !Arc::ptr_eq(&self.provider_identity, &claim.provider_identity) {
             return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
         }
         let now = self.now()?;
         let key = InstanceKey {
-            scope: claim.scope,
-            instance_id: claim.instance_id,
+            scope: claim.scope.clone(),
+            instance_id: claim.instance_id.clone(),
         };
         let mut state = self.lock()?;
         if state.prune_instance(&key, now) {
@@ -342,14 +346,24 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
         Ok(())
     }
 
-    async fn abandon(&self, claim: ClaimToken) -> Result<(), LedgerError> {
+    async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
+        self.abandon_claim(claim)
+    }
+
+    fn abandon_on_drop(&self, claim: ClaimToken) {
+        let _ = self.abandon_claim(&claim);
+    }
+}
+
+impl MemoryInstanceLedger {
+    fn abandon_claim(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
         if !Arc::ptr_eq(&self.provider_identity, &claim.provider_identity) {
             return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
         }
         let now = self.now()?;
         let key = InstanceKey {
-            scope: claim.scope,
-            instance_id: claim.instance_id,
+            scope: claim.scope.clone(),
+            instance_id: claim.instance_id.clone(),
         };
         let mut state = self.lock()?;
         if state.prune_instance(&key, now) {

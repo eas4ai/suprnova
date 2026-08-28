@@ -43,7 +43,7 @@ async fn claim_advances_monotonically_and_exact_duplicates_observe_one_outcome()
 
     let accepted = AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x80));
     ledger
-        .commit(grant.into_token(), accepted.clone())
+        .commit(&grant.into_token(), accepted.clone())
         .await
         .expect("matching claim commits");
 
@@ -122,7 +122,7 @@ async fn stale_bases_and_mismatched_idempotency_never_join_pending_or_accepted_w
 
     ledger
         .commit(
-            grant.into_token(),
+            &grant.into_token(),
             AcceptedOutcome::new(AcceptedOutcomeKind::NoRender, digest(0x83)),
         )
         .await
@@ -181,7 +181,7 @@ async fn accepted_history_and_provider_inspection_are_bounded_metadata_only() {
         };
         ledger
             .commit(
-                grant.into_token(),
+                &grant.into_token(),
                 AcceptedOutcome::new(AcceptedOutcomeKind::Validation, digest(0x90 + base as u8)),
             )
             .await
@@ -277,7 +277,7 @@ async fn opaque_claim_tokens_are_bound_to_the_provider_that_issued_them() {
     assert_eq!(
         second
             .commit(
-                first_grant.into_token(),
+                &first_grant.into_token(),
                 AcceptedOutcome::new(AcceptedOutcomeKind::NoRender, digest(0x86)),
             )
             .await

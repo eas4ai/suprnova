@@ -202,7 +202,7 @@ pub(crate) async fn accepted_parent() -> AcceptedParentFixture {
     let revision = grant.successor_revision();
     ledger
         .commit(
-            grant.into_token(),
+            &grant.into_token(),
             AcceptedOutcome::new(AcceptedOutcomeKind::Rendered, digest(0x70)),
         )
         .await

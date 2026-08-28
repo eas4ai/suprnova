@@ -35,6 +35,11 @@ const UPLOAD_CURSOR_PORT: u16 = 4_187;
 const UPLOAD_FAULT_PORT: u16 = 4_188;
 const FORGED_MANIFEST_PORT: u16 = 4_189;
 const POLL_PORT: u16 = 4_191;
+const UPLOAD_AUTHORITY_PORT: u16 = 4_192;
+const UPLOAD_ABORT_PORT: u16 = 4_193;
+const TRANSPORT_BOUND_PORT: u16 = 4_194;
+const WEBSOCKET_STREAM_PORT: u16 = 4_195;
+const FRESH_CANCEL_PORT: u16 = 4_196;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -129,6 +134,20 @@ async fn json_request(
     .await;
     let value = serde_json::from_slice(&body).expect("JSON response");
     (status, headers, value)
+}
+
+async fn upload_request(
+    host: &ReferenceHost,
+    method: Method,
+    path: &str,
+    grant: Option<&str>,
+    body: impl Into<Bytes>,
+) -> (StatusCode, hyper::HeaderMap, Bytes) {
+    let mut headers = vec![(AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION)];
+    if let Some(grant) = grant {
+        headers.push(("x-live-upload-grant", grant));
+    }
+    request(host, method, path, &headers, body).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -354,13 +373,15 @@ async fn upload_reacquire_returns_the_authoritative_partial_multipart_cursor() {
     let response = chunked_upload(&host, handle, grant, 0, &[b"abc", b"de"]).await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
-    let (status, _, reacquired) = json_request(
+    let (status, _, reacquired) = upload_request(
         &host,
         Method::POST,
         &format!("/example/uploads/{handle}/reacquire"),
-        json!({}),
+        Some(grant),
+        "",
     )
     .await;
+    let reacquired: Value = serde_json::from_slice(&reacquired).expect("reacquire JSON");
     assert_eq!(status, StatusCode::OK, "{reacquired}");
     assert_eq!(reacquired["received_bytes"], 5);
     assert_eq!(reacquired["next_part"], 1);
@@ -368,6 +389,156 @@ async fn upload_reacquire_returns_the_authoritative_partial_multipart_cursor() {
     assert_ne!(reacquired["grant"], grant);
 
     host.shutdown().await.expect("clean upload cursor shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_handles_are_not_authority_and_every_control_rechecks_the_current_grant() {
+    let root = TestRoot::new("upload-authority");
+    let host = start_host(UPLOAD_AUTHORITY_PORT, &root, ReferenceFaultSchedule::None).await;
+    let create = |filename: &'static str| {
+        json_request(
+            &host,
+            Method::POST,
+            "/__live/uploads",
+            json!({
+                "field": "avatar",
+                "filename": filename,
+                "content_type": "application/octet-stream",
+                "expected_bytes": 1,
+                "mode": "file"
+            }),
+        )
+    };
+    let (first_status, _, first) = create("first.bin").await;
+    let (second_status, _, second) = create("second.bin").await;
+    assert_eq!(first_status, StatusCode::CREATED, "{first}");
+    assert_eq!(second_status, StatusCode::CREATED, "{second}");
+    let first_handle = first["handle"].as_str().expect("first handle");
+    let first_grant = first["grant"].as_str().expect("first grant");
+    let second_grant = second["grant"].as_str().expect("second grant");
+    assert_ne!(
+        first_handle, "018f47c1-2af0-7cc4-a001-000000000001",
+        "the closed host must not expose an enumerable handle sequence"
+    );
+
+    let status_path = format!("/__live/uploads/{first_handle}");
+    for grant in [None, Some(second_grant)] {
+        let (status, _, _) = upload_request(&host, Method::GET, &status_path, grant, "").await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "status accepted {grant:?}"
+        );
+    }
+    let (status, _, _) =
+        upload_request(&host, Method::GET, &status_path, Some(first_grant), "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let reacquire_path = format!("/example/uploads/{first_handle}/reacquire");
+    let (status, _, _) = upload_request(&host, Method::POST, &reacquire_path, None, "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, reacquired) =
+        upload_request(&host, Method::POST, &reacquire_path, Some(first_grant), "").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&reacquired)
+    );
+    let reacquired: Value = serde_json::from_slice(&reacquired).expect("reacquire JSON");
+    let successor_grant = reacquired["grant"].as_str().expect("successor grant");
+    let (status, _, _) =
+        upload_request(&host, Method::GET, &status_path, Some(first_grant), "").await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "stale grant remained authority"
+    );
+    let (status, _, _) =
+        upload_request(&host, Method::GET, &status_path, Some(successor_grant), "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let cancel_path = format!("/__live/uploads/{first_handle}/cancel");
+    let (status, _, _) = upload_request(&host, Method::POST, &cancel_path, None, "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        upload_request(&host, Method::POST, &cancel_path, Some(second_grant), "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        upload_request(&host, Method::POST, &cancel_path, Some(successor_grant), "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    host.shutdown()
+        .await
+        .expect("clean upload authority shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborted_chunk_restores_coherent_upload_state_and_shutdown_removes_quarantine_bytes() {
+    let root = TestRoot::new("upload-abort");
+    let host = start_host(UPLOAD_ABORT_PORT, &root, ReferenceFaultSchedule::None).await;
+    let inspection = host.inspection_handle();
+    let (status, _, created) = json_request(
+        &host,
+        Method::POST,
+        "/__live/uploads",
+        json!({
+            "field": "avatar",
+            "filename": "aborted.bin",
+            "content_type": "application/octet-stream",
+            "expected_bytes": 8,
+            "mode": "file"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let handle = created["handle"].as_str().expect("handle");
+    let grant = created["grant"].as_str().expect("grant");
+    let checksum = Sha256::digest(b"abcdefgh")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut stream = TcpStream::connect(host.address())
+        .await
+        .expect("connect upload");
+    stream
+        .write_all(
+            format!(
+                "POST /__live/uploads/{handle}/chunks/0 HTTP/1.1\r\nHost: {}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Upload-Grant: {grant}\r\nX-Live-Chunk-SHA256: {checksum}\r\nX-Live-Chunk-Bytes: 8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n",
+                host.address()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("start partial body");
+    timeout(Duration::from_secs(1), async {
+        while inspection.snapshot().open_files == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("chunk entered provider I/O");
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let (status, _, body) = upload_request(
+        &host,
+        Method::GET,
+        &format!("/__live/uploads/{handle}"),
+        Some(grant),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let status_body: Value = serde_json::from_slice(&body).expect("status JSON");
+    assert_eq!(status_body["received_bytes"], 0);
+    assert_eq!(status_body["next_part"], 0);
+    assert_eq!(inspection.snapshot().active_uploads, 1);
+
+    host.shutdown().await.expect("bounded abort cleanup");
+    assert_eq!(inspection.snapshot().active_uploads, 0);
+    let mut entries = std::fs::read_dir(root.path()).expect("read quarantine root");
+    assert!(entries.next().is_none(), "shutdown left quarantine files");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -435,9 +606,9 @@ async fn trusted_compiled_upload_interrupt_is_consumed_once_by_the_physical_body
     let handle = created["handle"].as_str().expect("upload handle");
     let grant = created["grant"].as_str().expect("upload grant");
     let interrupted = chunked_upload(&host, handle, grant, 0, &[b"abc", b"def"]).await;
-    assert!(interrupted.starts_with("HTTP/1.1 409"), "{interrupted}");
+    assert!(interrupted.starts_with("HTTP/1.1 408"), "{interrupted}");
     assert!(
-        interrupted.contains("upload_bodyinterrupted"),
+        interrupted.contains("upload_body_interrupted"),
         "{interrupted}"
     );
     let retried = chunked_upload(&host, handle, grant, 0, &[b"abc", b"def"]).await;
@@ -473,13 +644,15 @@ async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructio
     let response = chunked_upload(&host, handle, grant, 0, &[b"hello ", b"world"]).await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
-    let (status, _, upload) = json_request(
+    let (status, _, upload) = upload_request(
         &host,
         Method::GET,
         &format!("/__live/uploads/{handle}"),
-        Value::Null,
+        Some(grant),
+        Bytes::new(),
     )
     .await;
+    let upload: Value = serde_json::from_slice(&upload).expect("upload status");
     assert_eq!(status, StatusCode::OK);
     assert_eq!(upload["received_bytes"], 11);
     assert_eq!(upload["state"], "transferring");
@@ -494,13 +667,15 @@ async fn upload_routes_use_real_chunked_bodies_and_constrained_direct_instructio
     assert_eq!(status, StatusCode::OK, "{completed}");
     assert_eq!(completed["state"], "ready");
 
-    let (status, _, reacquired) = json_request(
+    let (status, _, reacquired) = upload_request(
         &host,
         Method::POST,
         &format!("/example/uploads/{handle}/reacquire"),
-        json!({}),
+        Some(grant),
+        Bytes::new(),
     )
     .await;
+    let reacquired: Value = serde_json::from_slice(&reacquired).expect("reacquired upload");
     assert_eq!(status, StatusCode::OK, "{reacquired}");
     assert_ne!(reacquired["grant"], grant);
 
@@ -778,6 +953,184 @@ async fn async_routes_authorize_poll_sse_and_one_bounded_websocket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn document_transports_are_deduplicated_bounded_and_allow_one_physical_reader() {
+    let root = TestRoot::new("transport-bounds");
+    let host = start_host(TRANSPORT_BOUND_PORT, &root, ReferenceFaultSchedule::None).await;
+    let mut issued = Vec::new();
+    for kind in ["sse", "sse", "sse", "websocket", "websocket"] {
+        let (status, _, transport) = json_request(
+            &host,
+            Method::POST,
+            "/__live/async/transports",
+            json!({"kind": kind, "subscription": "orders"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{transport}");
+        issued.push(transport);
+    }
+    assert_eq!(issued[0]["transport"], issued[1]["transport"]);
+    assert_eq!(issued[1]["transport"], issued[2]["transport"]);
+    assert_eq!(issued[3]["transport"], issued[4]["transport"]);
+    assert_ne!(issued[0]["transport"], issued[3]["transport"]);
+
+    let sse = &issued[0];
+    let transport_id = sse["transport"].as_str().expect("transport");
+    for (index, membership) in sse["memberships"]
+        .as_array()
+        .expect("memberships")
+        .iter()
+        .enumerate()
+    {
+        let subscription = membership["subscription"].as_str().expect("subscription");
+        let (status, _, body) = json_request(
+            &host,
+            Method::POST,
+            &format!("/__live/async/transports/{transport_id}/subscriptions/{subscription}"),
+            json!({
+                "authority": membership["authority"],
+                "control_nonce": format!("reader-subscribe-{index}"),
+                "operation": "subscribe"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (first_reader, first) = read_sse_event(&host, transport_id).await;
+    assert!(first.contains("HTTP/1.1 200"), "{first}");
+    let (second_reader, second) = read_sse_event(&host, transport_id).await;
+    assert!(
+        second.contains("HTTP/1.1 409") || second.contains("HTTP/1.1 401"),
+        "a second physical reader advanced the same document stream: {second}"
+    );
+    drop(second_reader);
+    drop(first_reader);
+    host.shutdown()
+        .await
+        .expect("clean bounded-transport shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_socket() {
+    let root = TestRoot::new("websocket-stream");
+    let host = start_host(WEBSOCKET_STREAM_PORT, &root, ReferenceFaultSchedule::None).await;
+    let inspection = host.inspection_handle();
+    let (status, _, transport) = json_request(
+        &host,
+        Method::POST,
+        "/__live/async/transports",
+        json!({"kind": "websocket", "subscription": "orders"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{transport}");
+    let transport_id = transport["transport"].as_str().expect("transport");
+    let memberships = transport["memberships"].as_array().expect("memberships");
+    let mut socket = websocket_connect(&host, transport_id).await;
+    let mut buffered = Vec::new();
+
+    for (index, membership) in memberships.iter().enumerate() {
+        let subscription = membership["subscription"].as_str().expect("subscription");
+        let binding = membership["descriptor_binding"].as_str().expect("binding");
+        let nonce = format!("000000000000000{}", index + 1);
+        write_websocket_frame(
+            &mut socket,
+            &format!(
+                r#"{{"control_nonce":"{nonce}","descriptor_binding":"{binding}","kind":"subscribe","stream":"orders","subscription":"{subscription}","transport_generation":1}}"#
+            ),
+        )
+        .await;
+        let ack = loop {
+            let frame = read_websocket_frame(&mut socket, &mut buffered).await;
+            let value: Value = serde_json::from_str(&frame).expect("canonical acknowledgment");
+            if value["control_nonce"] == nonce {
+                break value;
+            }
+        };
+        assert_eq!(ack["control_nonce"], nonce);
+        assert_eq!(ack["subscription"], subscription);
+        assert_eq!(ack["stream"], "orders");
+        assert_eq!(ack["descriptor_binding"], binding);
+        assert_eq!(ack["transport_generation"], 1);
+        let envelope = loop {
+            let frame = read_websocket_frame(&mut socket, &mut buffered).await;
+            if frame.contains(subscription) {
+                break frame;
+            }
+        };
+        assert!(envelope.contains(subscription), "{envelope}");
+    }
+
+    let first_subscription = memberships[0]["subscription"]
+        .as_str()
+        .expect("first subscription");
+    write_websocket_frame(
+        &mut socket,
+        &format!(r#"{{"kind":"unsubscribe","subscription":"{first_subscription}"}}"#),
+    )
+    .await;
+    let unsubscribed = loop {
+        let frame = read_websocket_frame(&mut socket, &mut buffered).await;
+        let value: Value = serde_json::from_str(&frame).expect("unsubscribe ack");
+        if value["kind"] == "unsubscribed" {
+            break value;
+        }
+    };
+    assert_eq!(unsubscribed["kind"], "unsubscribed");
+    assert_eq!(unsubscribed["subscription"], first_subscription);
+
+    let second_subscription = memberships[1]["subscription"]
+        .as_str()
+        .expect("second subscription");
+    let ongoing = read_websocket_frame(&mut socket, &mut buffered).await;
+    assert!(ongoing.contains(second_subscription), "{ongoing}");
+
+    timeout(Duration::from_secs(2), host.shutdown())
+        .await
+        .expect("open WebSocket shutdown deadline")
+        .expect("open WebSocket shutdown");
+    let mut trailing = Vec::new();
+    timeout(Duration::from_secs(1), socket.read_to_end(&mut trailing))
+        .await
+        .expect("WebSocket reached EOF after shutdown")
+        .expect("WebSocket shutdown read");
+    let final_state = inspection.snapshot();
+    assert_eq!(final_state.open_sockets, 0);
+    assert_eq!(final_state.logical_memberships, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canceled_fresh_render_does_not_wedge_the_instance_claim() {
+    let root = TestRoot::new("fresh-render-cancel");
+    let host = start_host(FRESH_CANCEL_PORT, &root, ReferenceFaultSchedule::None).await;
+    let request = host
+        .fresh_render_request("ZnJlc2gtY2FuY2VsLTAwMQ", 0xd1)
+        .await
+        .expect("fresh-render request");
+    host.pause_fresh_render();
+    {
+        let execution = host.execute_fresh_render_direct(axum::body::Bytes::from(request.clone()));
+        tokio::pin!(execution);
+        tokio::select! {
+            () = host.wait_until_fresh_render_paused() => {}
+            result = &mut execution => panic!("paused render unexpectedly completed: {result:?}"),
+        }
+    }
+    host.resume_fresh_render();
+
+    let response = timeout(
+        Duration::from_secs(1),
+        host.execute_fresh_render_direct(axum::body::Bytes::from(request)),
+    )
+    .await
+    .expect("immediate retry deadline")
+    .expect("immediate retry response");
+    assert_eq!(response.status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&response.body).expect("accepted retry body");
+    assert_eq!(body["outcome"], "accepted");
+    assert_eq!(body["accepted_revision"], "1");
+    host.shutdown().await.expect("clean cancellation shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poll_rejects_a_fresh_render_for_the_wrong_island() {
     let root = TestRoot::new("poll-identity");
     let host = start_host(POLL_PORT, &root, ReferenceFaultSchedule::None).await;
@@ -870,6 +1223,7 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{independent}");
     let independent_handle = independent["handle"].as_str().expect("independent handle");
+    let independent_grant = independent["grant"].as_str().expect("independent grant");
     let (status, _, transport) = json_request(
         &host,
         Method::POST,
@@ -936,7 +1290,10 @@ async fn shutdown_closes_owned_sockets_files_and_timers() {
             &host,
             Method::GET,
             &status_path,
-            &[(AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION)],
+            &[
+                (AUTHORIZATION.as_str(), REFERENCE_AUTHORIZATION),
+                ("x-live-upload-grant", independent_grant),
+            ],
             "",
         ),
     )
@@ -1051,6 +1408,26 @@ async fn websocket_upgrade(host: &ReferenceHost, origin: &str, transport: &str) 
     String::from_utf8_lossy(&response[..size]).into_owned()
 }
 
+async fn websocket_connect(host: &ReferenceHost, transport: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(host.address())
+        .await
+        .expect("connect WebSocket");
+    let origin = host.origin();
+    let request = format!(
+        "GET /__live/async/ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: {origin}\r\nAuthorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Transport: {transport}\r\n\r\n",
+        host.address()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut headers = vec![0_u8; 4_096];
+    let size = timeout(Duration::from_secs(1), stream.read(&mut headers))
+        .await
+        .expect("upgrade deadline")
+        .expect("upgrade response");
+    let response = String::from_utf8_lossy(&headers[..size]);
+    assert!(response.starts_with("HTTP/1.1 101"), "{response}");
+    stream
+}
+
 async fn websocket_subscribe(host: &ReferenceHost, transport: &str, membership: &Value) -> String {
     let mut stream = TcpStream::connect(host.address())
         .await
@@ -1080,7 +1457,12 @@ async fn websocket_subscribe(host: &ReferenceHost, transport: &str, membership: 
     let envelope = read_websocket_frame(&mut stream, &mut buffered).await;
     let unsubscribe = format!(r#"{{"kind":"unsubscribe","subscription":"{subscription}"}}"#);
     write_websocket_frame(&mut stream, &unsubscribe).await;
-    let unsubscribed = read_websocket_frame(&mut stream, &mut buffered).await;
+    let unsubscribed = loop {
+        let frame = read_websocket_frame(&mut stream, &mut buffered).await;
+        if frame.contains("\"kind\":\"unsubscribed\"") {
+            break frame;
+        }
+    };
     format!("{headers}{authenticated}{envelope}{unsubscribed}")
 }
 

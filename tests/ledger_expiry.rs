@@ -42,7 +42,7 @@ async fn abandoned_claim_consumes_authority_without_rolling_revision_back() {
     };
 
     ledger
-        .abandon(grant.into_token())
+        .abandon(&grant.into_token())
         .await
         .expect("matching claim abandons");
 
@@ -61,6 +61,38 @@ async fn abandoned_claim_consumes_authority_without_rolling_revision_back() {
         .expect("record remains until instance expiry");
     assert_eq!(inspection.current_revision(), Revision::new(1));
     assert_eq!(inspection.phase(), LedgerPhase::Consumed);
+}
+
+#[tokio::test]
+async fn dropped_execution_claim_cleanup_never_leaves_the_ledger_in_progress() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = ledger(clock, 2);
+    let scope = scope(0x35);
+    let instance = instance(0x45);
+    promote_default(&ledger, scope.clone(), instance.clone()).await;
+    let grant = match ledger
+        .claim(request(scope.clone(), instance.clone(), 0))
+        .await
+        .expect("claim succeeds")
+    {
+        ClaimOutcome::Granted(grant) => grant,
+        other => panic!("expected grant, got {other:?}"),
+    };
+
+    ledger.abandon_on_drop(grant.into_token());
+
+    assert!(matches!(
+        ledger
+            .claim(request(scope.clone(), instance.clone(), 0))
+            .await
+            .expect("cleanup classification"),
+        ClaimOutcome::RefreshRequired(RefreshReason::Consumed)
+    ));
+    let inspection = ledger
+        .inspect(&scope, &instance)
+        .expect("inspection succeeds")
+        .expect("instance retained");
+    assert_ne!(inspection.phase(), LedgerPhase::Pending);
 }
 
 #[tokio::test]
@@ -90,7 +122,7 @@ async fn expired_claim_lease_becomes_terminal_and_cannot_be_reclaimed() {
     assert_eq!(
         ledger
             .commit(
-                grant.into_token(),
+                &grant.into_token(),
                 suprnova_live::ledger::AcceptedOutcome::new(
                     suprnova_live::ledger::AcceptedOutcomeKind::NoRender,
                     digest(0xc0),

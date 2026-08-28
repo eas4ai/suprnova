@@ -548,8 +548,15 @@ pub trait LiveInstanceLedger: Send + Sync {
     /// A provider accepts at most one committed outcome for an instance base
     /// revision. It does not promise exactly-once Rust method invocation or
     /// exactly-once effects outside the coordinated host transaction.
-    async fn commit(&self, claim: ClaimToken, outcome: AcceptedOutcome) -> Result<(), LedgerError>;
+    async fn commit(&self, claim: &ClaimToken, outcome: AcceptedOutcome)
+    -> Result<(), LedgerError>;
 
     /// Terminally consumes authority for exactly the matching pending token.
-    async fn abandon(&self, claim: ClaimToken) -> Result<(), LedgerError>;
+    async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError>;
+
+    /// Synchronously schedules or performs terminal cleanup when an accepted claim is dropped.
+    ///
+    /// Implementations must not block on remote I/O. Distributed providers use their owned
+    /// coordinator to enqueue the cleanup; in-process providers may consume it immediately.
+    fn abandon_on_drop(&self, claim: ClaimToken);
 }

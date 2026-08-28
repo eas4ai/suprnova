@@ -385,7 +385,37 @@ pub struct ExecutionService {
 
 struct ClaimedOutcome {
     successor_revision: Revision,
-    token: ClaimToken,
+    claim: ClaimGuard,
+}
+
+struct ClaimGuard {
+    ledger: Arc<dyn LiveInstanceLedger>,
+    token: Option<ClaimToken>,
+}
+
+impl ClaimGuard {
+    fn new(ledger: Arc<dyn LiveInstanceLedger>, token: ClaimToken) -> Self {
+        Self {
+            ledger,
+            token: Some(token),
+        }
+    }
+
+    fn token(&self) -> &ClaimToken {
+        self.token.as_ref().expect("armed execution claim")
+    }
+
+    fn disarm(&mut self) {
+        self.token.take();
+    }
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.ledger.abandon_on_drop(token);
+        }
+    }
 }
 
 struct SnapshotAuthority {
@@ -463,7 +493,7 @@ impl ExecutionService {
         let output = match output {
             Ok(output) => output,
             Err(_) => {
-                self.consume_failed_claim(claimed.token).await;
+                self.consume_failed_claim(claimed.claim).await;
                 return refresh(ExecutionRefreshReason::ExecutionFailed);
             }
         };
@@ -498,6 +528,25 @@ impl ExecutionService {
         request: InstancedFreshRenderRequest<'_>,
     ) -> ExecutionResult {
         let body = request.snapshot.body();
+        let successor_revision = match body.revision().checked_next() {
+            Ok(revision) => revision,
+            Err(_) => return refresh(ExecutionRefreshReason::ExecutionFailed),
+        };
+        let render_context = RenderContext::new(
+            request.context,
+            body.instance_id(),
+            successor_revision,
+            body.expires_at(),
+        )
+        .with_browser_context(&request.browser);
+        let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
+        let output = match ComponentExecutor::new()
+            .reconstruct(request.descriptor, &hydration)
+            .await
+        {
+            Ok(output) => ActionExecutionOutput::fresh_render(output),
+            Err(_) => return refresh(ExecutionRefreshReason::ExecutionFailed),
+        };
         let claimed = match self
             .claim(
                 body.scope(),
@@ -509,26 +558,12 @@ impl ExecutionService {
             )
             .await
         {
-            Ok(claimed) => claimed,
-            Err(result) => return result,
-        };
-        let render_context = RenderContext::new(
-            request.context,
-            body.instance_id(),
-            claimed.successor_revision,
-            body.expires_at(),
-        )
-        .with_browser_context(&request.browser);
-        let hydration = HydrationContext::new(render_context, body.state()).with_memo(body.memo());
-        let output = match ComponentExecutor::new()
-            .reconstruct(request.descriptor, &hydration)
-            .await
-        {
-            Ok(output) => ActionExecutionOutput::fresh_render(output),
-            Err(_) => {
-                self.consume_failed_claim(claimed.token).await;
+            Ok(claimed) if claimed.successor_revision == successor_revision => claimed,
+            Ok(claimed) => {
+                self.consume_failed_claim(claimed.claim).await;
                 return refresh(ExecutionRefreshReason::ExecutionFailed);
             }
+            Err(result) => return result,
         };
         self.accept_output(
             request.descriptor,
@@ -594,7 +629,7 @@ impl ExecutionService {
         {
             Ok(output) => output,
             Err(reason) => {
-                self.consume_failed_claim(claimed.token).await;
+                self.consume_failed_claim(claimed.claim).await;
                 return refresh(reason);
             }
         };
@@ -709,7 +744,7 @@ impl ExecutionService {
         {
             Ok(ClaimOutcome::Granted(grant)) => Ok(ClaimedOutcome {
                 successor_revision: grant.successor_revision(),
-                token: grant.into_token(),
+                claim: ClaimGuard::new(Arc::clone(&self.ledger), grant.into_token()),
             }),
             Ok(ClaimOutcome::InProgress { successor_revision }) => {
                 Err(ExecutionResult::InProgress { successor_revision })
@@ -746,7 +781,7 @@ impl ExecutionService {
         kind_override: Option<AcceptedOutcomeKind>,
     ) -> ExecutionResult {
         let successor_revision = claimed.successor_revision;
-        let claim = claimed.token;
+        let mut claim = claimed.claim;
         let ActionExecutionParts {
             result,
             render,
@@ -851,12 +886,13 @@ impl ExecutionService {
         record(trace, ExecutionPhase::LedgerAcceptance);
         if self
             .ledger
-            .commit(claim, AcceptedOutcome::new(kind, digest))
+            .commit(claim.token(), AcceptedOutcome::new(kind, digest))
             .await
             .is_err()
         {
             return refresh(ExecutionRefreshReason::LedgerAcceptanceFailed);
         }
+        claim.disarm();
 
         record(trace, ExecutionPhase::Reporting);
         let reporting_failed = if let Some(reporter) = &self.reporter {
@@ -907,8 +943,10 @@ impl ExecutionService {
             })
     }
 
-    async fn consume_failed_claim(&self, claim: ClaimToken) {
-        let _ = self.ledger.abandon(claim).await;
+    async fn consume_failed_claim(&self, mut claim: ClaimGuard) {
+        if self.ledger.abandon(claim.token()).await.is_ok() {
+            claim.disarm();
+        }
     }
 }
 

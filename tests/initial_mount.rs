@@ -195,12 +195,20 @@ impl LiveInstanceLedger for BlockingLedger {
         self.inner.claim(request).await
     }
 
-    async fn commit(&self, claim: ClaimToken, outcome: AcceptedOutcome) -> Result<(), LedgerError> {
+    async fn commit(
+        &self,
+        claim: &ClaimToken,
+        outcome: AcceptedOutcome,
+    ) -> Result<(), LedgerError> {
         self.inner.commit(claim, outcome).await
     }
 
-    async fn abandon(&self, claim: ClaimToken) -> Result<(), LedgerError> {
+    async fn abandon(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
         self.inner.abandon(claim).await
+    }
+
+    fn abandon_on_drop(&self, claim: ClaimToken) {
+        self.inner.abandon_on_drop(claim);
     }
 }
 
