@@ -660,6 +660,123 @@ pub struct QuarantinedFileProvider<S: QuarantineStore> {
     chunk_permits: PermitPool,
 }
 
+struct PreparationGuard<'a, S: QuarantineStore> {
+    provider: &'a QuarantinedFileProvider<S>,
+    handle: UploadHandle,
+    object: QuarantineObject,
+    armed: bool,
+}
+
+impl<'a, S: QuarantineStore> PreparationGuard<'a, S> {
+    fn new(
+        provider: &'a QuarantinedFileProvider<S>,
+        handle: UploadHandle,
+        object: QuarantineObject,
+    ) -> Self {
+        Self {
+            provider,
+            handle,
+            object,
+            armed: true,
+        }
+    }
+
+    const fn object(&self) -> &QuarantineObject {
+        &self.object
+    }
+
+    fn replace_object(&mut self, object: QuarantineObject) {
+        self.object = object;
+    }
+
+    fn remove_reservation(&mut self) {
+        let mut transfers = lock(&self.provider.transfers);
+        if transfers
+            .get(&self.handle)
+            .is_some_and(|entry| entry.object == self.object && !entry.created)
+        {
+            transfers.remove(&self.handle);
+        }
+        self.armed = false;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S: QuarantineStore> Drop for PreparationGuard<'_, S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut transfers = lock(&self.provider.transfers);
+        if let Some(entry) = transfers.get_mut(&self.handle)
+            && entry.object == self.object
+            && !entry.created
+        {
+            entry.cancellation.cancel();
+        }
+    }
+}
+
+struct PendingChunkGuard<'a, S: QuarantineStore> {
+    provider: &'a QuarantinedFileProvider<S>,
+    handle: UploadHandle,
+    pending: ChunkShape,
+    armed: bool,
+}
+
+impl<'a, S: QuarantineStore> PendingChunkGuard<'a, S> {
+    fn new(
+        provider: &'a QuarantinedFileProvider<S>,
+        handle: UploadHandle,
+        pending: ChunkShape,
+    ) -> Self {
+        Self {
+            provider,
+            handle,
+            pending,
+            armed: true,
+        }
+    }
+
+    fn commit(mut self) -> Result<ChunkReceipt, UploadError> {
+        let receipt = {
+            let mut transfers = lock(&self.provider.transfers);
+            let entry = transfers
+                .get_mut(&self.handle)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::TransferCanceled))?;
+            if entry.pending.as_ref() != Some(&self.pending)
+                || entry.cancellation.is_canceled()
+                || self.provider.resources.cancellation().is_canceled()
+            {
+                return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+            }
+            let committed_bytes = entry
+                .committed_bytes
+                .checked_add(self.pending.size)
+                .ok_or_else(|| UploadError::new(UploadErrorKind::InputTooLarge))?;
+            entry.pending = None;
+            entry.committed_bytes = committed_bytes;
+            entry
+                .chunks
+                .insert(self.pending.index, self.pending.clone());
+            self.pending.receipt(ChunkDisposition::Stored)
+        };
+        self.armed = false;
+        Ok(receipt)
+    }
+}
+
+impl<S: QuarantineStore> Drop for PendingChunkGuard<'_, S> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.provider.clear_pending(&self.handle, &self.pending);
+        }
+    }
+}
+
 impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     /// Creates one bounded provider without an executor or filesystem dependency.
     pub fn new(store: Arc<S>, limits: UploadLimits) -> Result<Self, UploadError> {
@@ -756,6 +873,21 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         self.resources.retire()
     }
 
+    /// Retires admission and idempotently reclaims every provider-owned object.
+    pub async fn retire_and_cleanup(&self) -> Result<Retirement, UploadError> {
+        let retirement = self.resources.retire();
+        let handles = lock(&self.transfers).keys().cloned().collect::<Vec<_>>();
+        let mut first_error = None;
+        for handle in handles {
+            if let Err(error) = self.remove_entry(&handle).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(retirement), Err)
+    }
+
     fn require_active(&self) -> Result<(), UploadError> {
         if self.resources.cancellation().is_canceled() {
             Err(UploadError::new(UploadErrorKind::ServiceRetired))
@@ -816,34 +948,47 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn create_reserved_object(
         &self,
-        handle: &UploadHandle,
-        mut selected: QuarantineObject,
-    ) -> Result<QuarantineObject, UploadError> {
+        reservation: &mut PreparationGuard<'_, S>,
+    ) -> Result<(), UploadError> {
         for _ in 0..OBJECT_COLLISION_ATTEMPTS {
-            match self.store.create_exclusive(&selected).await {
-                Ok(()) => return Ok(selected),
+            match self.store.create_exclusive(reservation.object()).await {
+                Ok(()) => return Ok(()),
                 Err(error) if error.kind() == UploadErrorKind::StorageConflict => {
-                    selected = match QuarantineObject::generate() {
+                    let selected = match QuarantineObject::generate() {
                         Ok(object) => object,
                         Err(error) => {
-                            lock(&self.transfers).remove(handle);
+                            reservation.remove_reservation();
                             return Err(error);
                         }
                     };
-                    if let Some(entry) = lock(&self.transfers).get_mut(handle) {
+                    if let Some(entry) = lock(&self.transfers).get_mut(&reservation.handle) {
                         entry.object = selected.clone();
                     } else {
                         return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                     }
+                    reservation.replace_object(selected);
                 }
                 Err(error) => {
-                    lock(&self.transfers).remove(handle);
+                    reservation.remove_reservation();
                     return Err(error);
                 }
             }
         }
-        lock(&self.transfers).remove(handle);
+        reservation.remove_reservation();
         Err(UploadError::new(UploadErrorKind::StorageConflict))
+    }
+
+    async fn reclaim_abandoned_preparation(
+        &self,
+        handle: &UploadHandle,
+    ) -> Result<(), UploadError> {
+        let abandoned = lock(&self.transfers)
+            .get(handle)
+            .is_some_and(|entry| !entry.created && entry.cancellation.is_canceled());
+        if abandoned {
+            self.remove_entry(handle).await?;
+        }
+        Ok(())
     }
 
     fn publish_preparation(&self, handle: &UploadHandle, selected: &QuarantineObject) -> bool {
@@ -883,7 +1028,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         let mut transfers = lock(&self.transfers);
         if transfers
             .get(request.handle)
-            .is_some_and(|entry| entry.object == selected && entry.cancellation.is_canceled())
+            .is_some_and(|entry| entry.object == selected && !entry.created)
         {
             transfers.remove(request.handle);
         }
@@ -937,20 +1082,25 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             {
                 return Err(UploadError::new(UploadErrorKind::InputTooLarge));
             }
+            self.reclaim_abandoned_preparation(request.handle).await?;
             let _descriptor = self
                 .descriptor_permits
                 .try_acquire()
                 .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
-            let selected = match self.reserve_preparation(request)? {
+            match self.reserve_preparation(request)? {
                 PreparationReservation::Existing(plan) => return Ok(plan),
                 PreparationReservation::Reserved(object) => {
-                    self.create_reserved_object(request.handle, object).await?
+                    let mut reservation =
+                        PreparationGuard::new(self, request.handle.clone(), object);
+                    self.create_reserved_object(&mut reservation).await?;
+                    let selected = reservation.object().clone();
+                    if !self.publish_preparation(request.handle, &selected) {
+                        self.discard_unpublished_preparation(request, selected)
+                            .await?;
+                        return Err(UploadError::new(UploadErrorKind::TransferCanceled));
+                    }
+                    reservation.disarm();
                 }
-            };
-            if !self.publish_preparation(request.handle, &selected) {
-                self.discard_unpublished_preparation(request, selected)
-                    .await?;
-                return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
             Ok(TransferPlan::reverse_proxy(
                 request.handle.clone(),
@@ -1022,8 +1172,10 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 entry.pending = Some(pending.clone());
                 (entry.object.clone(), entry.cancellation.clone())
             };
+            let pending_guard =
+                PendingChunkGuard::new(self, request.handle.clone(), pending.clone());
 
-            let result = async {
+            async {
                 let provider_cancellation = self.resources.cancellation();
                 let mut received = 0_usize;
                 let mut hasher = Sha256::new();
@@ -1060,30 +1212,8 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 }
                 Ok(())
             }
-            .await;
-            if let Err(error) = result {
-                self.clear_pending(request.handle, &pending);
-                return Err(error);
-            }
-
-            let mut transfers = lock(&self.transfers);
-            let entry = transfers
-                .get_mut(request.handle)
-                .ok_or_else(|| UploadError::new(UploadErrorKind::TransferCanceled))?;
-            if entry.pending.as_ref() != Some(&pending)
-                || entry.cancellation.is_canceled()
-                || self.resources.cancellation().is_canceled()
-            {
-                entry.pending = None;
-                return Err(UploadError::new(UploadErrorKind::TransferCanceled));
-            }
-            entry.pending = None;
-            entry.committed_bytes = entry
-                .committed_bytes
-                .checked_add(request.size)
-                .ok_or_else(|| UploadError::new(UploadErrorKind::InputTooLarge))?;
-            entry.chunks.insert(request.index, pending.clone());
-            Ok(pending.receipt(ChunkDisposition::Stored))
+            .await?;
+            pending_guard.commit()
         })
     }
 

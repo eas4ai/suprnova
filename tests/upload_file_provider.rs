@@ -3,19 +3,20 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use suprnova_live::identity::UnixMillis;
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::upload::{
     ChunkBody, ChunkDisposition, PrepareTransfer, QuarantineBytes, QuarantineObject,
-    QuarantinedFileProvider, ReverseProxyUploadProvider, TransferCheckpoint, TransferDisposition,
-    UploadChecksum, UploadError, UploadErrorKind, UploadHandle, UploadProvider, VerifyTransfer,
-    WriteChunk,
+    QuarantineStore, QuarantinedFileProvider, RemoveDisposition, ReverseProxyUploadProvider,
+    TransferCheckpoint, TransferDisposition, UploadChecksum, UploadError, UploadErrorKind,
+    UploadFuture, UploadHandle, UploadProvider, VerifyTransfer, WriteChunk,
 };
 use suprnova_live_test_support::{FileStoreFault, TokioFileQuarantineStore};
+use tokio::sync::Notify;
 
 const HANDLE: &str = "018f47c1-2af0-7cc4-a001-000000000001";
 const OTHER_HANDLE: &str = "018f8f3a-7b2c-4d5e-8f90-abcdef012345";
@@ -91,6 +92,113 @@ impl ChunkBody for TestBody {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorePausePoint {
+    Create,
+    Remove,
+    Sync,
+    Write,
+}
+
+struct ControlledStore {
+    inner: Arc<TokioFileQuarantineStore>,
+    pause: Mutex<Option<StorePausePoint>>,
+    entered: Notify,
+    release: Notify,
+}
+
+impl ControlledStore {
+    fn new(inner: Arc<TokioFileQuarantineStore>) -> Self {
+        Self {
+            inner,
+            pause: Mutex::new(None),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    fn pause_once(&self, point: StorePausePoint) {
+        *self.pause.lock().expect("controlled-store pause lock") = Some(point);
+    }
+
+    async fn wait_until_paused(&self) {
+        self.entered.notified().await;
+    }
+
+    async fn pause_after_success(&self, point: StorePausePoint) {
+        let selected = {
+            let mut selected = self.pause.lock().expect("controlled-store pause lock");
+            if *selected == Some(point) {
+                selected.take();
+                true
+            } else {
+                false
+            }
+        };
+        if selected {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
+impl QuarantineStore for ControlledStore {
+    fn create_exclusive<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            self.inner.create_exclusive(object).await?;
+            self.pause_after_success(StorePausePoint::Create).await;
+            Ok(())
+        })
+    }
+
+    fn write_at<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+        offset: u64,
+        bytes: &'a [u8],
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            self.inner.write_at(object, offset, bytes).await?;
+            self.pause_after_success(StorePausePoint::Write).await;
+            Ok(())
+        })
+    }
+
+    fn sync<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            self.inner.sync(object).await?;
+            self.pause_after_success(StorePausePoint::Sync).await;
+            Ok(())
+        })
+    }
+
+    fn read_at<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        self.inner.read_at(object, offset, maximum_bytes)
+    }
+
+    fn remove<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>> {
+        Box::pin(async move {
+            let disposition = self.inner.remove(object).await?;
+            self.pause_after_success(StorePausePoint::Remove).await;
+            Ok(disposition)
+        })
+    }
+}
+
 struct RetiringBody {
     provider: Arc<QuarantinedFileProvider<TokioFileQuarantineStore>>,
     bytes: Option<QuarantineBytes>,
@@ -153,6 +261,36 @@ async fn prepared(
         .await
         .expect("prepare transfer");
     (store, provider)
+}
+
+async fn controlled_provider(
+    root: &TempRoot,
+) -> (
+    Arc<ControlledStore>,
+    Arc<QuarantinedFileProvider<ControlledStore>>,
+) {
+    let inner = store(root).await;
+    let store = Arc::new(ControlledStore::new(inner));
+    let provider = Arc::new(
+        QuarantinedFileProvider::new(store.clone(), limits()).expect("controlled provider"),
+    );
+    (store, provider)
+}
+
+async fn root_file_count(root: &TempRoot) -> usize {
+    let mut entries = tokio::fs::read_dir(root.path())
+        .await
+        .expect("read quarantine root");
+    let mut count = 0;
+    while entries
+        .next_entry()
+        .await
+        .expect("read quarantine entry")
+        .is_some()
+    {
+        count += 1;
+    }
+    count
 }
 
 #[tokio::test]
@@ -358,6 +496,232 @@ async fn provider_failures_do_not_commit_chunks_and_retries_remain_available() {
         .verify(VerifyTransfer::new(&upload, &expected))
         .await
         .expect("verification retry after sync recovery");
+}
+
+#[tokio::test]
+async fn canceled_store_write_clears_pending_and_exact_retry_commits_once() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "canceled-write.bin",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .expect("prepare controlled transfer");
+    store.pause_once(StorePausePoint::Write);
+    let task = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            let expected = checksum(b"safe");
+            let mut body = TestBody::bytes(&[b"safe"]);
+            provider
+                .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    task.abort();
+    assert!(task.await.expect_err("write task aborted").is_cancelled());
+
+    let expected = checksum(b"safe");
+    let mut retry = TestBody::bytes(&[b"safe"]);
+    let receipt = provider
+        .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut retry)
+        .await
+        .expect("exact retry after canceled store write");
+    assert_eq!(receipt.disposition(), ChunkDisposition::Stored);
+    assert_eq!(
+        provider
+            .checkpoint(&upload)
+            .expect("committed checkpoint")
+            .committed_bytes(),
+        4
+    );
+    provider
+        .verify(VerifyTransfer::new(&upload, &expected))
+        .await
+        .expect("retry bytes verify");
+    let mut duplicate_body = TestBody::bytes(&[]);
+    let duplicate = provider
+        .write_chunk(
+            WriteChunk::new(&upload, 0, 0, 4, &expected),
+            &mut duplicate_body,
+        )
+        .await
+        .expect("accepted retry is idempotent");
+    assert_eq!(duplicate.disposition(), ChunkDisposition::ExistingOutcome);
+    assert_eq!(duplicate_body.calls, 0);
+    provider
+        .cancel(&upload)
+        .await
+        .expect("cleanup retried object");
+    assert_eq!(root_file_count(&root).await, 0);
+}
+
+#[tokio::test]
+async fn canceled_store_create_is_reclaimed_before_exact_prepare_retry() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    store.pause_once(StorePausePoint::Create);
+    let task = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            provider
+                .prepare(PrepareTransfer::new(
+                    &upload,
+                    4,
+                    "canceled-create.bin",
+                    UnixMillis::new(1_000),
+                ))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    assert_eq!(root_file_count(&root).await, 1);
+    task.abort();
+    assert!(task.await.expect_err("create task aborted").is_cancelled());
+
+    let plan = provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "retry-create.bin",
+            UnixMillis::new(1_001),
+        ))
+        .await
+        .expect("exact prepare retry reclaims canceled reservation");
+    assert_eq!(plan.disposition(), TransferDisposition::Prepared);
+    assert_eq!(root_file_count(&root).await, 1);
+    provider
+        .cancel(&upload)
+        .await
+        .expect("cleanup retry object");
+    assert_eq!(root_file_count(&root).await, 0);
+}
+
+#[tokio::test]
+async fn provider_retirement_reclaims_an_aborted_unpublished_creation() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    store.pause_once(StorePausePoint::Create);
+    let task = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            provider
+                .prepare(PrepareTransfer::new(
+                    &upload,
+                    4,
+                    "retired-create.bin",
+                    UnixMillis::new(1_000),
+                ))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    assert_eq!(root_file_count(&root).await, 1);
+    task.abort();
+    assert!(task.await.expect_err("create task aborted").is_cancelled());
+
+    let retirement = provider
+        .retire_and_cleanup()
+        .await
+        .expect("retirement reclaims unpublished creation");
+    assert!(retirement.canceled);
+    assert_eq!(root_file_count(&root).await, 0);
+    assert_eq!(provider.descriptor_permits().active(), 0);
+    assert_eq!(provider.chunk_permits().active(), 0);
+    let error = provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "cannot-revive.bin",
+            UnixMillis::new(1_001),
+        ))
+        .await
+        .expect_err("retired provider cannot revive creation");
+    assert_eq!(error.kind(), UploadErrorKind::ServiceRetired);
+    tokio::task::yield_now().await;
+    assert_eq!(root_file_count(&root).await, 0);
+}
+
+#[tokio::test]
+async fn canceled_verification_and_removal_awaits_remain_exactly_retryable() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    let expected = checksum(b"safe");
+    provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "verify-cancel.bin",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .expect("prepare controlled transfer");
+    let mut body = TestBody::bytes(&[b"safe"]);
+    provider
+        .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+        .await
+        .expect("write complete transfer");
+
+    store.pause_once(StorePausePoint::Sync);
+    let verify = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        let expected = expected.clone();
+        async move {
+            provider
+                .verify(VerifyTransfer::new(&upload, &expected))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+    verify.abort();
+    assert!(
+        verify
+            .await
+            .expect_err("verification task aborted")
+            .is_cancelled()
+    );
+    provider
+        .verify(VerifyTransfer::new(&upload, &expected))
+        .await
+        .expect("exact verification retry");
+
+    store.pause_once(StorePausePoint::Remove);
+    let cancel = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move { provider.cancel(&upload).await }
+    });
+    store.wait_until_paused().await;
+    assert_eq!(root_file_count(&root).await, 0);
+    cancel.abort();
+    assert!(
+        cancel
+            .await
+            .expect_err("remove task aborted")
+            .is_cancelled()
+    );
+    provider
+        .cleanup(&upload)
+        .await
+        .expect("idempotent removal retry clears retained state");
+    provider
+        .cleanup(&upload)
+        .await
+        .expect("duplicate removal remains idempotent");
+    assert_eq!(root_file_count(&root).await, 0);
 }
 
 #[tokio::test]

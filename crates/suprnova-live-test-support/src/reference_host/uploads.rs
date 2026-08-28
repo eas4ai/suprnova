@@ -664,7 +664,13 @@ impl UploadRuntime {
                 Ok(Err(_)) | Err(_) => {}
             }
         }
-        self.file.retire();
+        match self.file.retire_and_cleanup().await {
+            Ok(_) => {}
+            Err(error) if first_error.is_none() => {
+                first_error = Some(format!("upload provider retirement: {error:?}"));
+            }
+            Err(_) => {}
+        }
         first_error.map_or(Ok(()), Err)
     }
 
