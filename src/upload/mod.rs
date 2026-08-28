@@ -47,9 +47,9 @@ pub use protocol::{
 };
 pub use provider::{
     CheckpointChunk, ChunkBody, ChunkDisposition, ChunkReceipt, DirectUploadProvider,
-    IntegrityEvidence, PrepareTransfer, QuarantinedFileProvider, ReadUpload,
-    ReverseProxyUploadProvider, TransferCheckpoint, TransferDisposition, TransferPlan,
-    UploadProvider, VerifyTransfer, WriteChunk,
+    IntegrityEvidence, PrepareTransfer, ProviderRetirementError, ProviderRetirementStatus,
+    QuarantinedFileProvider, ReadUpload, ReverseProxyUploadProvider, TransferCheckpoint,
+    TransferDisposition, TransferPlan, UploadProvider, VerifyTransfer, WriteChunk,
 };
 pub use quarantine::{QuarantineBytes, QuarantineObject, QuarantineStore, RemoveDisposition};
 pub use service::{

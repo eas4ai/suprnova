@@ -91,6 +91,8 @@ pub enum UploadErrorKind {
     RandomUnavailable,
     /// The host quarantine provider could not complete bounded I/O.
     ProviderUnavailable,
+    /// Provider retirement reached its bounded wait budget with owned work still active.
+    CleanupTimedOut,
     /// A generated quarantine object already existed.
     StorageConflict,
     /// The streaming request body ended with a transport failure.
@@ -147,6 +149,7 @@ impl UploadErrorKind {
             Self::ServiceRetired => "upload_service_retired",
             Self::RandomUnavailable => "upload_random_unavailable",
             Self::ProviderUnavailable => "upload_provider_unavailable",
+            Self::CleanupTimedOut => "upload_cleanup_timed_out",
             Self::StorageConflict => "upload_storage_conflict",
             Self::BodyInterrupted => "upload_body_interrupted",
             Self::ChecksumMismatch => "upload_checksum_mismatch",

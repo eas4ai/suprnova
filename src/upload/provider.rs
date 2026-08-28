@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fmt::Write as _;
 use std::future::poll_fn;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 
@@ -22,6 +23,8 @@ use super::{
 const MAX_CLIENT_NAME_BYTES: usize = 1_024;
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const OBJECT_COLLISION_ATTEMPTS: usize = 4;
+const DEFAULT_RETIREMENT_WAIT_STEPS: usize = 256;
+const MAX_RETIREMENT_WAIT_STEPS: usize = 65_536;
 
 /// Asynchronous bounded source of request-body byte segments.
 pub trait ChunkBody: Send {
@@ -662,7 +665,76 @@ pub struct QuarantinedFileProvider<S: QuarantineStore> {
     cleanup_permits: PermitPool,
     descriptor_permits: PermitPool,
     chunk_permits: PermitPool,
+    retirement_wait_steps: usize,
 }
+
+/// Exact bounded-resource evidence captured when provider retirement fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderRetirementStatus {
+    active_operations: usize,
+    owned_transfers: usize,
+    active_descriptors: usize,
+    active_chunks: usize,
+}
+
+impl ProviderRetirementStatus {
+    /// Returns operations that still own an admission token.
+    #[must_use]
+    pub const fn active_operations(self) -> usize {
+        self.active_operations
+    }
+
+    /// Returns quarantine transfers still fenced by the retired provider.
+    #[must_use]
+    pub const fn owned_transfers(self) -> usize {
+        self.owned_transfers
+    }
+
+    /// Returns descriptor permits still held by unfinished operations.
+    #[must_use]
+    pub const fn active_descriptors(self) -> usize {
+        self.active_descriptors
+    }
+
+    /// Returns chunk permits still held by unfinished operations.
+    #[must_use]
+    pub const fn active_chunks(self) -> usize {
+        self.active_chunks
+    }
+}
+
+/// Typed, redacted provider-retirement failure with exact resource counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderRetirementError {
+    kind: UploadErrorKind,
+    status: ProviderRetirementStatus,
+}
+
+impl ProviderRetirementError {
+    const fn new(kind: UploadErrorKind, status: ProviderRetirementStatus) -> Self {
+        Self { kind, status }
+    }
+
+    /// Returns the closed failure category.
+    #[must_use]
+    pub const fn kind(self) -> UploadErrorKind {
+        self.kind
+    }
+
+    /// Returns exact bounded-resource evidence at failure.
+    #[must_use]
+    pub const fn status(self) -> ProviderRetirementStatus {
+        self.status
+    }
+}
+
+impl fmt::Display for ProviderRetirementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.kind.as_str())
+    }
+}
+
+impl std::error::Error for ProviderRetirementError {}
 
 struct ProviderAdmission {
     maximum_active: usize,
@@ -672,8 +744,41 @@ struct ProviderAdmission {
 #[derive(Default)]
 struct ProviderAdmissionState {
     retired: bool,
-    active: usize,
+    active: Vec<Arc<ProviderOperationCancellation>>,
     idle_waker: Option<Waker>,
+}
+
+#[derive(Default)]
+struct ProviderOperationCancellation {
+    canceled: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl ProviderOperationCancellation {
+    fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+        let wake = lock(&self.waker).take();
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+
+    fn poll_canceled(&self, task: &mut std::task::Context<'_>) -> Poll<()> {
+        if self.canceled.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        let mut registered = lock(&self.waker);
+        if self.canceled.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        if registered
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task.waker()))
+        {
+            *registered = Some(task.waker().clone());
+        }
+        Poll::Pending
+    }
 }
 
 impl ProviderAdmission {
@@ -689,25 +794,37 @@ impl ProviderAdmission {
         if state.retired {
             return Err(UploadError::new(UploadErrorKind::ServiceRetired));
         }
-        if state.active >= self.maximum_active {
+        if state.active.len() >= self.maximum_active {
             return Err(UploadError::new(UploadErrorKind::ResourceExhausted));
         }
-        state.active += 1;
+        let cancellation = Arc::new(ProviderOperationCancellation::default());
+        state.active.push(Arc::clone(&cancellation));
         Ok(ProviderAdmissionGuard {
             admission: self,
-            armed: true,
+            cancellation,
         })
     }
 
     fn retire(&self) {
-        lock(&self.state).retired = true;
+        let active = {
+            let mut state = lock(&self.state);
+            state.retired = true;
+            state.active.clone()
+        };
+        for cancellation in active {
+            cancellation.cancel();
+        }
     }
 
-    async fn wait_until_idle(&self) {
-        poll_fn(|task| {
+    async fn wait_until_idle(&self, maximum_steps: usize) -> bool {
+        let mut remaining = maximum_steps;
+        poll_fn(move |task| {
             let mut state = lock(&self.state);
-            if state.active == 0 {
-                return Poll::Ready(());
+            if state.active.is_empty() {
+                return Poll::Ready(true);
+            }
+            if remaining == 0 {
+                return Poll::Ready(false);
             }
             if state
                 .idle_waker
@@ -716,36 +833,73 @@ impl ProviderAdmission {
             {
                 state.idle_waker = Some(task.waker().clone());
             }
+            remaining -= 1;
+            task.waker().wake_by_ref();
             Poll::Pending
         })
-        .await;
+        .await
     }
 
-    #[cfg(test)]
     fn active(&self) -> usize {
-        lock(&self.state).active
+        lock(&self.state).active.len()
     }
 }
 
 struct ProviderAdmissionGuard<'a> {
     admission: &'a ProviderAdmission,
-    armed: bool,
+    cancellation: Arc<ProviderOperationCancellation>,
+}
+
+impl ProviderAdmissionGuard<'_> {
+    // Before first poll cancellation can prove that no external effect began.
+    // After first poll, keep driving the capability to a terminal result and
+    // translate that result to cancellation. Dropping a pending filesystem or
+    // object-store future here could let its detached I/O publish after the
+    // provider swept and forgot the opaque object.
+    async fn wait<T>(
+        &self,
+        mut operation: UploadFuture<'_, Result<T, UploadError>>,
+    ) -> Result<T, UploadError> {
+        let mut started = false;
+        poll_fn(|task| {
+            let canceled = self.cancellation.poll_canceled(task).is_ready();
+            if canceled && !started {
+                return Poll::Ready(Err(UploadError::new(UploadErrorKind::TransferCanceled)));
+            }
+            started = true;
+            match operation.as_mut().poll(task) {
+                Poll::Ready(_)
+                    if canceled || self.cancellation.canceled.load(Ordering::Acquire) =>
+                {
+                    Poll::Ready(Err(UploadError::new(UploadErrorKind::TransferCanceled)))
+                }
+                ready @ Poll::Ready(_) => ready,
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
 }
 
 impl Drop for ProviderAdmissionGuard<'_> {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
         let wake = {
             let mut state = lock(&self.admission.state);
-            debug_assert!(state.active > 0, "provider admission accounting underflow");
-            state.active -= 1;
-            (state.active == 0)
+            let previous = state.active.len();
+            state
+                .active
+                .retain(|active| !Arc::ptr_eq(active, &self.cancellation));
+            debug_assert_eq!(
+                state.active.len() + 1,
+                previous,
+                "provider admission accounting underflow"
+            );
+            state
+                .active
+                .is_empty()
                 .then(|| state.idle_waker.take())
                 .flatten()
         };
-        self.armed = false;
         if let Some(waker) = wake {
             waker.wake();
         }
@@ -872,6 +1026,21 @@ impl<S: QuarantineStore> Drop for PendingChunkGuard<'_, S> {
 impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     /// Creates one bounded provider without an executor or filesystem dependency.
     pub fn new(store: Arc<S>, limits: UploadLimits) -> Result<Self, UploadError> {
+        Self::new_with_retirement_wait_steps(store, limits, DEFAULT_RETIREMENT_WAIT_STEPS)
+    }
+
+    /// Creates a provider with an injected scheduler-step retirement budget.
+    ///
+    /// The budget is executor-neutral: each pending idle observation consumes
+    /// one step, so shutdown always reaches a terminal result without a timer.
+    pub fn new_with_retirement_wait_steps(
+        store: Arc<S>,
+        limits: UploadLimits,
+        retirement_wait_steps: usize,
+    ) -> Result<Self, UploadError> {
+        if retirement_wait_steps == 0 || retirement_wait_steps > MAX_RETIREMENT_WAIT_STEPS {
+            return Err(UploadError::new(UploadErrorKind::InvalidField));
+        }
         let resource_bounds = ResourceBounds::new(
             limits.max_concurrent_transfers(),
             limits.max_in_flight_bytes(),
@@ -892,6 +1061,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             cleanup_permits,
             descriptor_permits,
             chunk_permits,
+            retirement_wait_steps,
         })
     }
 
@@ -971,32 +1141,59 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     }
 
     /// Retires admission and idempotently reclaims every provider-owned object.
-    pub async fn retire_and_cleanup(&self) -> Result<Retirement, UploadError> {
-        let _cleanup = self
-            .cleanup_permits
-            .try_acquire()
-            .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
+    pub async fn retire_and_cleanup(&self) -> Result<Retirement, ProviderRetirementError> {
+        let _cleanup = self.cleanup_permits.try_acquire().map_err(|_| {
+            ProviderRetirementError::new(
+                UploadErrorKind::ResourceExhausted,
+                self.retirement_status(),
+            )
+        })?;
         let retirement = self.retire();
-        self.admission.wait_until_idle().await;
-        let mut first_error = None;
+        if !self
+            .admission
+            .wait_until_idle(self.retirement_wait_steps)
+            .await
+        {
+            return Err(ProviderRetirementError::new(
+                UploadErrorKind::CleanupTimedOut,
+                self.retirement_status(),
+            ));
+        }
+        let mut first_error: Option<UploadErrorKind> = None;
         for _ in 0..=self.limits.max_pending_per_scope() {
             let handles = lock(&self.transfers).keys().cloned().collect::<Vec<_>>();
             if handles.is_empty() {
-                return first_error.map_or(Ok(retirement), Err);
+                return first_error.map_or(Ok(retirement), |kind| {
+                    Err(ProviderRetirementError::new(kind, self.retirement_status()))
+                });
             }
             let previous = handles.len();
             for handle in handles {
                 if let Err(error) = self.remove_entry(&handle).await
                     && first_error.is_none()
                 {
-                    first_error = Some(error);
+                    first_error = Some(error.kind());
                 }
             }
             if lock(&self.transfers).len() >= previous {
                 break;
             }
         }
-        Err(first_error.unwrap_or_else(|| UploadError::new(UploadErrorKind::ProviderUnavailable)))
+        Err(ProviderRetirementError::new(
+            first_error.unwrap_or(UploadErrorKind::ProviderUnavailable),
+            self.retirement_status(),
+        ))
+    }
+
+    /// Returns exact resource counts without exposing handles or paths.
+    #[must_use]
+    pub fn retirement_status(&self) -> ProviderRetirementStatus {
+        ProviderRetirementStatus {
+            active_operations: self.admission.active(),
+            owned_transfers: lock(&self.transfers).len(),
+            active_descriptors: self.descriptor_permits.active(),
+            active_chunks: self.chunk_permits.active(),
+        }
     }
 
     fn reserve_preparation(
@@ -1051,10 +1248,14 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn create_reserved_object(
         &self,
+        admission: &ProviderAdmissionGuard<'_>,
         reservation: &mut PreparationGuard<'_, S>,
     ) -> Result<(), UploadError> {
         for _ in 0..OBJECT_COLLISION_ATTEMPTS {
-            match self.store.create_exclusive(reservation.object()).await {
+            match admission
+                .wait(self.store.create_exclusive(reservation.object()))
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(error) if error.kind() == UploadErrorKind::StorageConflict => {
                     let selected = match QuarantineObject::generate() {
@@ -1072,7 +1273,9 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                     reservation.replace_object(selected);
                 }
                 Err(error) => {
-                    reservation.remove_reservation();
+                    // The store may have created bytes before reporting or
+                    // observing failure. Keep the opaque object reserved and
+                    // canceled so retirement/retry owns its exact cleanup.
                     return Err(error);
                 }
             }
@@ -1083,13 +1286,15 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn reclaim_abandoned_preparation(
         &self,
+        admission: &ProviderAdmissionGuard<'_>,
         handle: &UploadHandle,
     ) -> Result<(), UploadError> {
         let abandoned = lock(&self.transfers)
             .get(handle)
             .is_some_and(|entry| !entry.created && entry.cancellation.is_canceled());
         if abandoned {
-            self.remove_entry(handle).await?;
+            self.remove_entry_with_admission(handle, Some(admission))
+                .await?;
         }
         Ok(())
     }
@@ -1111,10 +1316,11 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
 
     async fn discard_unpublished_preparation(
         &self,
+        admission: &ProviderAdmissionGuard<'_>,
         request: PrepareTransfer<'_>,
         selected: QuarantineObject,
     ) -> Result<(), UploadError> {
-        if let Err(error) = self.store.remove(&selected).await {
+        if let Err(error) = admission.wait(self.store.remove(&selected)).await {
             let mut transfers = lock(&self.transfers);
             transfers.entry(request.handle.clone()).or_insert_with(|| {
                 let mut retained = TransferEntry::preparing(
@@ -1147,6 +1353,14 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
     }
 
     async fn remove_entry(&self, handle: &UploadHandle) -> Result<(), UploadError> {
+        self.remove_entry_with_admission(handle, None).await
+    }
+
+    async fn remove_entry_with_admission(
+        &self,
+        handle: &UploadHandle,
+        admission: Option<&ProviderAdmissionGuard<'_>>,
+    ) -> Result<(), UploadError> {
         let selected = {
             let transfers = lock(&self.transfers);
             transfers
@@ -1161,7 +1375,14 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             .descriptor_permits
             .try_acquire()
             .map_err(|_| UploadError::new(UploadErrorKind::ResourceExhausted))?;
-        self.store.remove(&object).await?;
+        match admission {
+            Some(admission) => {
+                admission.wait(self.store.remove(&object)).await?;
+            }
+            None => {
+                self.store.remove(&object).await?;
+            }
+        }
         let mut transfers = lock(&self.transfers);
         if transfers
             .get(handle)
@@ -1179,13 +1400,14 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: PrepareTransfer<'a>,
     ) -> UploadFuture<'a, Result<TransferPlan, UploadError>> {
         Box::pin(async move {
-            let _admission = self.admission.enter()?;
+            let admission = self.admission.enter()?;
             if request.expected_bytes > self.limits.max_file_bytes()
                 || request.client_name.len() > MAX_CLIENT_NAME_BYTES
             {
                 return Err(UploadError::new(UploadErrorKind::InputTooLarge));
             }
-            self.reclaim_abandoned_preparation(request.handle).await?;
+            self.reclaim_abandoned_preparation(&admission, request.handle)
+                .await?;
             let _descriptor = self
                 .descriptor_permits
                 .try_acquire()
@@ -1195,10 +1417,11 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 PreparationReservation::Reserved(object) => {
                     let mut reservation =
                         PreparationGuard::new(self, request.handle.clone(), object);
-                    self.create_reserved_object(&mut reservation).await?;
+                    self.create_reserved_object(&admission, &mut reservation)
+                        .await?;
                     let selected = reservation.object().clone();
                     if !self.publish_preparation(request.handle, &selected) {
-                        self.discard_unpublished_preparation(request, selected)
+                        self.discard_unpublished_preparation(&admission, request, selected)
                             .await?;
                         return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                     }
@@ -1219,7 +1442,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         body: &'a mut dyn ChunkBody,
     ) -> UploadFuture<'a, Result<ChunkReceipt, UploadError>> {
         Box::pin(async move {
-            let _admission = self.admission.enter()?;
+            let admission = self.admission.enter()?;
             let size = usize::try_from(request.size)
                 .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
             if size == 0
@@ -1287,8 +1510,8 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                         return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                     }
                     let maximum = (size - received).min(STREAM_BUFFER_BYTES);
-                    let bytes = body
-                        .next_chunk(maximum)
+                    let bytes = admission
+                        .wait(body.next_chunk(maximum))
                         .await?
                         .ok_or_else(|| UploadError::new(UploadErrorKind::IncompleteTransfer))?;
                     if bytes.is_empty() || bytes.len() > maximum {
@@ -1298,12 +1521,16 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                         return Err(UploadError::new(UploadErrorKind::TransferCanceled));
                     }
                     hasher.update(&bytes);
-                    self.store
-                        .write_at(&object, request.offset + received as u64, bytes.as_ref())
+                    admission
+                        .wait(self.store.write_at(
+                            &object,
+                            request.offset + received as u64,
+                            bytes.as_ref(),
+                        ))
                         .await?;
                     received += bytes.len();
                 }
-                if body.next_chunk(1).await?.is_some() {
+                if admission.wait(body.next_chunk(1)).await?.is_some() {
                     return Err(UploadError::new(UploadErrorKind::InputTooLarge));
                 }
                 let actual = checksum_from_hasher(hasher)?;
@@ -1325,7 +1552,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: VerifyTransfer<'a>,
     ) -> UploadFuture<'a, Result<IntegrityEvidence, UploadError>> {
         Box::pin(async move {
-            let _admission = self.admission.enter()?;
+            let admission = self.admission.enter()?;
             let _chunk = self
                 .chunk_permits
                 .try_acquire()
@@ -1372,16 +1599,17 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                 let remaining =
                     usize::try_from((expected_bytes - offset).min(STREAM_BUFFER_BYTES as u64))
                         .map_err(|_| UploadError::new(UploadErrorKind::InputTooLarge))?;
-                let bytes = self.store.read_at(&object, offset, remaining).await?;
+                let bytes = admission
+                    .wait(self.store.read_at(&object, offset, remaining))
+                    .await?;
                 if bytes.is_empty() || bytes.len() > remaining {
                     return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
                 }
                 hasher.update(&bytes);
                 offset += bytes.len() as u64;
             }
-            if !self
-                .store
-                .read_at(&object, expected_bytes, 1)
+            if !admission
+                .wait(self.store.read_at(&object, expected_bytes, 1))
                 .await?
                 .is_empty()
             {
@@ -1391,7 +1619,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             if actual != *request.checksum {
                 return Err(UploadError::new(UploadErrorKind::ChecksumMismatch));
             }
-            self.store.sync(&object).await?;
+            admission.wait(self.store.sync(&object)).await?;
             if cancellation.is_canceled() || provider_cancellation.is_canceled() {
                 return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
@@ -1406,6 +1634,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
             if entry.object != object
                 || entry.pending.is_some()
                 || entry.cancellation.is_canceled()
+                || self.resources.cancellation().is_canceled()
                 || entry.committed_bytes != expected_bytes
             {
                 return Err(UploadError::new(UploadErrorKind::TransferCanceled));
@@ -1420,7 +1649,7 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
         request: ReadUpload<'a>,
     ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
         Box::pin(async move {
-            let _admission = self.admission.enter()?;
+            let admission = self.admission.enter()?;
             if request.maximum_bytes == 0 || request.maximum_bytes > self.limits.max_chunk_bytes() {
                 return Err(UploadError::new(UploadErrorKind::InputTooLarge));
             }
@@ -1461,14 +1690,16 @@ impl<S: QuarantineStore> QuarantinedFileProvider<S> {
                     .offset
                     .checked_add(output.len() as u64)
                     .ok_or_else(|| UploadError::new(UploadErrorKind::InvalidField))?;
-                let bytes = self
-                    .store
-                    .read_at(&object, offset, target - output.len())
+                let bytes = admission
+                    .wait(self.store.read_at(&object, offset, target - output.len()))
                     .await?;
                 if bytes.is_empty() || bytes.len() > target - output.len() {
                     return Err(UploadError::new(UploadErrorKind::IncompleteTransfer));
                 }
                 output.extend_from_slice(&bytes);
+            }
+            if cancellation.is_canceled() || self.resources.cancellation().is_canceled() {
+                return Err(UploadError::new(UploadErrorKind::TransferCanceled));
             }
             Ok(QuarantineBytes::from(output))
         })

@@ -664,12 +664,22 @@ impl UploadRuntime {
                 Ok(Err(_)) | Err(_) => {}
             }
         }
-        match self.file.retire_and_cleanup().await {
-            Ok(_) => {}
-            Err(error) if first_error.is_none() => {
+        match timeout(Duration::from_millis(500), self.file.retire_and_cleanup()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) if first_error.is_none() => {
                 first_error = Some(format!("upload provider retirement: {error:?}"));
             }
-            Err(_) => {}
+            Err(_) if first_error.is_none() => {
+                let status = self.file.retirement_status();
+                first_error = Some(format!(
+                    "upload provider retirement timed out: active_operations={}, owned_transfers={}, active_descriptors={}, active_chunks={}",
+                    status.active_operations(),
+                    status.owned_transfers(),
+                    status.active_descriptors(),
+                    status.active_chunks(),
+                ));
+            }
+            Ok(Err(_)) | Err(_) => {}
         }
         first_error.map_or(Ok(()), Err)
     }

@@ -2,18 +2,21 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::io::{Read, Seek, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 
 use sha2::{Digest, Sha256};
 use suprnova_live::identity::UnixMillis;
 use suprnova_live::limits::{UploadLimitConfig, UploadLimits};
 use suprnova_live::upload::{
     ChunkBody, ChunkDisposition, PrepareTransfer, QuarantineBytes, QuarantineObject,
-    QuarantineStore, QuarantinedFileProvider, RemoveDisposition, ReverseProxyUploadProvider,
-    TransferCheckpoint, TransferDisposition, UploadChecksum, UploadError, UploadErrorKind,
-    UploadFuture, UploadHandle, UploadProvider, VerifyTransfer, WriteChunk,
+    QuarantineStore, QuarantinedFileProvider, ReadUpload, RemoveDisposition,
+    ReverseProxyUploadProvider, TransferCheckpoint, TransferDisposition, UploadChecksum,
+    UploadError, UploadErrorKind, UploadFuture, UploadHandle, UploadProvider, VerifyTransfer,
+    WriteChunk,
 };
 use suprnova_live_test_support::{FileStoreFault, TokioFileQuarantineStore};
 use tokio::sync::Notify;
@@ -95,6 +98,7 @@ impl ChunkBody for TestBody {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StorePausePoint {
     Create,
+    Read,
     Remove,
     Sync,
     Write,
@@ -105,6 +109,148 @@ struct ControlledStore {
     pause: Mutex<Option<StorePausePoint>>,
     entered: Notify,
     release: Notify,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NeverResolvingPoint {
+    Create,
+    Read,
+    Sync,
+    Write,
+}
+
+struct NeverResolvingStore {
+    root: PathBuf,
+    point: Mutex<Option<NeverResolvingPoint>>,
+}
+
+impl NeverResolvingStore {
+    fn new(root: &TempRoot, point: NeverResolvingPoint) -> Self {
+        Self {
+            root: root.path().to_path_buf(),
+            point: Mutex::new(Some(point)),
+        }
+    }
+
+    fn ready(root: &TempRoot) -> Self {
+        Self {
+            root: root.path().to_path_buf(),
+            point: Mutex::new(None),
+        }
+    }
+
+    fn pause_once(&self, point: NeverResolvingPoint) {
+        *self.point.lock().expect("never-resolving point lock") = Some(point);
+    }
+
+    fn path_for(&self, object: &QuarantineObject) -> PathBuf {
+        self.root.join(object.storage_key())
+    }
+
+    async fn stop_after_effect(&self, point: NeverResolvingPoint) {
+        let selected = self
+            .point
+            .lock()
+            .expect("never-resolving point lock")
+            .take_if(|selected| *selected == point)
+            .is_some();
+        if selected {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl QuarantineStore for NeverResolvingStore {
+    fn create_exclusive<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.path_for(object))
+            {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(UploadError::new(UploadErrorKind::StorageConflict));
+                }
+                Err(_) => return Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+            }
+            self.stop_after_effect(NeverResolvingPoint::Create).await;
+            Ok(())
+        })
+    }
+
+    fn write_at<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+        offset: u64,
+        bytes: &'a [u8],
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.path_for(object))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(bytes))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            self.stop_after_effect(NeverResolvingPoint::Write).await;
+            Ok(())
+        })
+    }
+
+    fn sync<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<(), UploadError>> {
+        Box::pin(async move {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.path_for(object))
+                .and_then(|file| file.sync_data())
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            self.stop_after_effect(NeverResolvingPoint::Sync).await;
+            Ok(())
+        })
+    }
+
+    fn read_at<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+        offset: u64,
+        maximum_bytes: usize,
+    ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
+        Box::pin(async move {
+            let mut file = std::fs::File::open(self.path_for(object))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            let mut bytes = vec![0; maximum_bytes];
+            let read = file
+                .read(&mut bytes)
+                .map_err(|_| UploadError::new(UploadErrorKind::ProviderUnavailable))?;
+            bytes.truncate(read);
+            self.stop_after_effect(NeverResolvingPoint::Read).await;
+            Ok(QuarantineBytes::from(bytes))
+        })
+    }
+
+    fn remove<'a>(
+        &'a self,
+        object: &'a QuarantineObject,
+    ) -> UploadFuture<'a, Result<RemoveDisposition, UploadError>> {
+        Box::pin(async move {
+            match std::fs::remove_file(self.path_for(object)) {
+                Ok(()) => Ok(RemoveDisposition::Removed),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(RemoveDisposition::AlreadyAbsent)
+                }
+                Err(_) => Err(UploadError::new(UploadErrorKind::ProviderUnavailable)),
+            }
+        })
+    }
 }
 
 impl ControlledStore {
@@ -184,7 +330,11 @@ impl QuarantineStore for ControlledStore {
         offset: u64,
         maximum_bytes: usize,
     ) -> UploadFuture<'a, Result<QuarantineBytes, UploadError>> {
-        self.inner.read_at(object, offset, maximum_bytes)
+        Box::pin(async move {
+            let bytes = self.inner.read_at(object, offset, maximum_bytes).await?;
+            self.pause_after_success(StorePausePoint::Read).await;
+            Ok(bytes)
+        })
     }
 
     fn remove<'a>(
@@ -653,8 +803,304 @@ async fn provider_retirement_reclaims_an_aborted_unpublished_creation() {
     assert_eq!(root_file_count(&root).await, 0);
 }
 
+async fn assert_noncooperative_retirement_is_bounded<T>(
+    root: &TempRoot,
+    provider: &Arc<QuarantinedFileProvider<NeverResolvingStore>>,
+    mut operation: UploadFuture<'_, Result<T, UploadError>>,
+    active_descriptors: usize,
+    active_chunks: usize,
+) {
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(operation.as_mut().poll(&mut task).is_pending());
+    assert_eq!(root_file_count(root).await, 1);
+
+    let retirement = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.retire_and_cleanup().await }
+    });
+    for _ in 0..64 {
+        if retirement.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        retirement.is_finished(),
+        "retirement wait had no terminal budget"
+    );
+    let timeout = retirement
+        .await
+        .expect("bounded retirement task joins")
+        .expect_err("non-polled operation remains fenced");
+    assert_eq!(timeout.kind(), UploadErrorKind::CleanupTimedOut);
+    assert_eq!(timeout.status().active_operations(), 1);
+    assert_eq!(timeout.status().owned_transfers(), 1);
+    assert_eq!(timeout.status().active_descriptors(), active_descriptors);
+    assert_eq!(timeout.status().active_chunks(), active_chunks);
+    assert_eq!(root_file_count(root).await, 1);
+
+    drop(operation);
+    provider
+        .retire_and_cleanup()
+        .await
+        .expect("retry cleans after unfinished operation is dropped");
+    assert_eq!(root_file_count(root).await, 0);
+    let status = provider.retirement_status();
+    assert_eq!(status.active_operations(), 0);
+    assert_eq!(status.owned_transfers(), 0);
+    assert_eq!(status.active_descriptors(), 0);
+    assert_eq!(status.active_chunks(), 0);
+}
+
 #[tokio::test]
-async fn retirement_waits_for_a_previously_admitted_prepare_before_its_final_sweep() {
+async fn retirement_has_a_terminal_budget_for_non_polled_create_write_read_and_sync() {
+    {
+        let root = TempRoot::new();
+        let store = Arc::new(NeverResolvingStore::new(&root, NeverResolvingPoint::Create));
+        let provider = Arc::new(
+            QuarantinedFileProvider::new_with_retirement_wait_steps(store, limits(), 8)
+                .expect("never-resolving create provider"),
+        );
+        let upload = handle(HANDLE);
+        let operation = provider.prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "never-polled-create.bin",
+            UnixMillis::new(1_000),
+        ));
+        assert_noncooperative_retirement_is_bounded(&root, &provider, operation, 1, 0).await;
+    }
+
+    {
+        let root = TempRoot::new();
+        let store = Arc::new(NeverResolvingStore::ready(&root));
+        let provider = Arc::new(
+            QuarantinedFileProvider::new_with_retirement_wait_steps(store.clone(), limits(), 8)
+                .expect("never-resolving write provider"),
+        );
+        let upload = handle(HANDLE);
+        let expected = checksum(b"safe");
+        provider
+            .prepare(PrepareTransfer::new(
+                &upload,
+                4,
+                "never-polled-write.bin",
+                UnixMillis::new(1_000),
+            ))
+            .await
+            .expect("prepare before never-resolving write");
+        store.pause_once(NeverResolvingPoint::Write);
+        let mut body = TestBody::bytes(&[b"safe"]);
+        let operation =
+            provider.write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body);
+        assert_noncooperative_retirement_is_bounded(&root, &provider, operation, 1, 1).await;
+    }
+
+    for point in [NeverResolvingPoint::Sync, NeverResolvingPoint::Read] {
+        let root = TempRoot::new();
+        let store = Arc::new(NeverResolvingStore::ready(&root));
+        let provider = Arc::new(
+            QuarantinedFileProvider::new_with_retirement_wait_steps(store.clone(), limits(), 8)
+                .expect("never-resolving verify/read provider"),
+        );
+        let upload = handle(HANDLE);
+        let expected = checksum(b"safe");
+        provider
+            .prepare(PrepareTransfer::new(
+                &upload,
+                4,
+                "never-polled-read-sync.bin",
+                UnixMillis::new(1_000),
+            ))
+            .await
+            .expect("prepare before never-resolving verify/read");
+        let mut body = TestBody::bytes(&[b"safe"]);
+        provider
+            .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+            .await
+            .expect("write before never-resolving verify/read");
+        if point == NeverResolvingPoint::Read {
+            provider
+                .verify(VerifyTransfer::new(&upload, &expected))
+                .await
+                .expect("verify before never-resolving read");
+        }
+        store.pause_once(point);
+        if point == NeverResolvingPoint::Sync {
+            let operation = provider.verify(VerifyTransfer::new(&upload, &expected));
+            assert_noncooperative_retirement_is_bounded(&root, &provider, operation, 1, 1).await;
+        } else {
+            let operation = provider.read(ReadUpload::new(&upload, 0, 4));
+            assert_noncooperative_retirement_is_bounded(&root, &provider, operation, 1, 0).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn retirement_wakes_and_cancels_a_store_create_wait() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    store.pause_once(StorePausePoint::Create);
+    let preparation = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        async move {
+            provider
+                .prepare(PrepareTransfer::new(
+                    &upload,
+                    4,
+                    "cancel-create.bin",
+                    UnixMillis::new(1_000),
+                ))
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+
+    provider.retire();
+    store.release.notify_one();
+    let retirement = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.retire_and_cleanup().await }
+    });
+    let error = preparation
+        .await
+        .expect("create task joins after retirement wake")
+        .expect_err("retirement cancels create wait");
+    assert_eq!(error.kind(), UploadErrorKind::TransferCanceled);
+    retirement
+        .await
+        .expect("retirement task joins")
+        .expect("cooperative create cancellation cleans quarantine");
+    assert_eq!(root_file_count(&root).await, 0);
+    assert_eq!(provider.retirement_status().active_operations(), 0);
+    assert_eq!(provider.descriptor_permits().active(), 0);
+}
+
+#[tokio::test]
+async fn retirement_wakes_and_cancels_a_store_write_wait() {
+    let root = TempRoot::new();
+    let (store, provider) = controlled_provider(&root).await;
+    let upload = handle(HANDLE);
+    let expected = checksum(b"safe");
+    provider
+        .prepare(PrepareTransfer::new(
+            &upload,
+            4,
+            "cancel-write.bin",
+            UnixMillis::new(1_000),
+        ))
+        .await
+        .expect("prepare controlled transfer");
+    store.pause_once(StorePausePoint::Write);
+    let write = tokio::spawn({
+        let provider = provider.clone();
+        let upload = upload.clone();
+        let expected = expected.clone();
+        async move {
+            let mut body = TestBody::bytes(&[b"safe"]);
+            provider
+                .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+                .await
+        }
+    });
+    store.wait_until_paused().await;
+
+    provider.retire();
+    store.release.notify_one();
+    let retirement = tokio::spawn({
+        let provider = provider.clone();
+        async move { provider.retire_and_cleanup().await }
+    });
+    let error = write
+        .await
+        .expect("write task joins after retirement wake")
+        .expect_err("retirement cancels write wait");
+    assert_eq!(error.kind(), UploadErrorKind::TransferCanceled);
+    retirement
+        .await
+        .expect("retirement task joins")
+        .expect("cooperative write cancellation cleans quarantine");
+    assert_eq!(root_file_count(&root).await, 0);
+    assert_eq!(provider.retirement_status().active_operations(), 0);
+    assert_eq!(provider.descriptor_permits().active(), 0);
+    assert_eq!(provider.chunk_permits().active(), 0);
+}
+
+#[tokio::test]
+async fn retirement_wakes_and_cancels_store_sync_and_read_waits() {
+    for pause in [StorePausePoint::Sync, StorePausePoint::Read] {
+        let root = TempRoot::new();
+        let (store, provider) = controlled_provider(&root).await;
+        let upload = handle(HANDLE);
+        let expected = checksum(b"safe");
+        provider
+            .prepare(PrepareTransfer::new(
+                &upload,
+                4,
+                "cancel-verify-read.bin",
+                UnixMillis::new(1_000),
+            ))
+            .await
+            .expect("prepare controlled transfer");
+        let mut body = TestBody::bytes(&[b"safe"]);
+        provider
+            .write_chunk(WriteChunk::new(&upload, 0, 0, 4, &expected), &mut body)
+            .await
+            .expect("write controlled transfer");
+        if pause == StorePausePoint::Read {
+            provider
+                .verify(VerifyTransfer::new(&upload, &expected))
+                .await
+                .expect("verify before controlled read");
+        }
+        store.pause_once(pause);
+        let operation = tokio::spawn({
+            let provider = provider.clone();
+            let upload = upload.clone();
+            let expected = expected.clone();
+            async move {
+                if pause == StorePausePoint::Sync {
+                    provider
+                        .verify(VerifyTransfer::new(&upload, &expected))
+                        .await
+                        .map(|_| ())
+                } else {
+                    provider
+                        .read(ReadUpload::new(&upload, 0, 4))
+                        .await
+                        .map(|_| ())
+                }
+            }
+        });
+        store.wait_until_paused().await;
+
+        provider.retire();
+        store.release.notify_one();
+        let retirement = tokio::spawn({
+            let provider = provider.clone();
+            async move { provider.retire_and_cleanup().await }
+        });
+        let error = operation
+            .await
+            .expect("store operation joins after retirement wake")
+            .expect_err("retirement cancels store wait");
+        assert_eq!(error.kind(), UploadErrorKind::TransferCanceled);
+        retirement
+            .await
+            .expect("retirement task joins")
+            .expect("cooperative store cancellation cleans quarantine");
+        assert_eq!(root_file_count(&root).await, 0);
+        let status = provider.retirement_status();
+        assert_eq!(status.active_operations(), 0);
+        assert_eq!(status.active_descriptors(), 0);
+        assert_eq!(status.active_chunks(), 0);
+    }
+}
+
+#[tokio::test]
+async fn retirement_cancels_a_previously_admitted_prepare_before_its_final_sweep() {
     let root = TempRoot::new();
     let (store, provider) = controlled_provider(&root).await;
     let upload = handle(HANDLE);
@@ -719,40 +1165,16 @@ async fn retirement_waits_for_a_previously_admitted_prepare_before_its_final_swe
         .await
         .expect_err("retirement closes admission before cleanup");
     assert_eq!(error.kind(), UploadErrorKind::ServiceRetired);
-    for _ in 0..128 {
-        if retirement.is_finished() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let retired_before_admitted_prepare_settled = retirement.is_finished();
-
-    store.pause_once(StorePausePoint::Create);
     store.release.notify_one();
-    store.wait_until_paused().await;
-    assert_eq!(root_file_count(&root).await, 1);
-    retry.abort();
-    assert!(
-        retry
-            .await
-            .expect_err("admitted retry task aborted")
-            .is_cancelled()
-    );
+    let retry_error = retry
+        .await
+        .expect("retirement wakes admitted preparation")
+        .expect_err("retirement cancels admitted preparation");
+    assert_eq!(retry_error.kind(), UploadErrorKind::TransferCanceled);
     retirement
         .await
         .expect("retirement task joins")
         .expect("retirement cleanup succeeds");
-
-    if root_file_count(&root).await != 0 {
-        provider
-            .retire_and_cleanup()
-            .await
-            .expect("test cleanup after detected race");
-    }
-    assert!(
-        !retired_before_admitted_prepare_settled,
-        "retirement completed before the admitted preparation settled"
-    );
     assert_eq!(root_file_count(&root).await, 0);
     assert_eq!(provider.descriptor_permits().active(), 0);
     assert_eq!(provider.chunk_permits().active(), 0);

@@ -1054,6 +1054,7 @@ fn upload_error(upload: UploadError) -> Response {
         | UploadErrorKind::ServiceRetired
         | UploadErrorKind::RandomUnavailable
         | UploadErrorKind::ProviderUnavailable
+        | UploadErrorKind::CleanupTimedOut
         | UploadErrorKind::FinalizationFailed
         | UploadErrorKind::CompensationFailed => StatusCode::SERVICE_UNAVAILABLE,
     };
