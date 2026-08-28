@@ -1161,7 +1161,7 @@ async fn websocket_multiplexes_two_memberships_streams_and_shuts_down_an_open_so
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn canceled_fresh_render_does_not_wedge_the_instance_claim() {
+async fn canceled_fresh_render_without_host_commit_releases_rollbackable_claim() {
     let root = TestRoot::new("fresh-render-cancel");
     let host = start_host(FRESH_CANCEL_PORT, &root, ReferenceFaultSchedule::None).await;
     let request = host

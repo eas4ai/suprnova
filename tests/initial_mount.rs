@@ -210,6 +210,10 @@ impl LiveInstanceLedger for BlockingLedger {
     fn abandon_on_drop(&self, claim: ClaimToken) {
         self.inner.abandon_on_drop(claim);
     }
+
+    fn fence_on_drop(&self, claim: ClaimToken) {
+        self.inner.fence_on_drop(claim);
+    }
 }
 
 #[tokio::test]

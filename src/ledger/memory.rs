@@ -353,6 +353,10 @@ impl LiveInstanceLedger for MemoryInstanceLedger {
     fn abandon_on_drop(&self, claim: ClaimToken) {
         let _ = self.release_claim(&claim);
     }
+
+    fn fence_on_drop(&self, claim: ClaimToken) {
+        let _ = self.fence_claim(&claim);
+    }
 }
 
 impl MemoryInstanceLedger {
@@ -434,6 +438,43 @@ impl MemoryInstanceLedger {
                 claim_id: Some(expired_claim_id),
             } if *expired_claim_id == claim.claim_id => {
                 Err(LedgerError::new(LedgerErrorKind::ClaimExpired))
+            }
+            _ => Err(LedgerError::new(LedgerErrorKind::ClaimMismatch)),
+        }
+    }
+
+    fn fence_claim(&self, claim: &ClaimToken) -> Result<(), LedgerError> {
+        if !Arc::ptr_eq(&self.provider_identity, &claim.provider_identity) {
+            return Err(LedgerError::new(LedgerErrorKind::ClaimMismatch));
+        }
+        let key = InstanceKey {
+            scope: claim.scope.clone(),
+            instance_id: claim.instance_id.clone(),
+        };
+        let mut state = self.lock()?;
+        let record = state
+            .instances
+            .get_mut(&key)
+            .ok_or_else(|| LedgerError::new(LedgerErrorKind::ClaimMismatch))?;
+        match &record.phase {
+            InstancePhase::Pending(pending) if pending.claim_id == claim.claim_id => {
+                record.phase = InstancePhase::Consumed {
+                    reason: RefreshReason::Consumed,
+                    claim_id: Some(claim.claim_id),
+                };
+                Ok(())
+            }
+            InstancePhase::Ready
+                if record.accepted.back().is_some_and(|accepted| {
+                    accepted.successor_revision == record.current_revision
+                }) =>
+            {
+                Ok(())
+            }
+            InstancePhase::Consumed { claim_id, .. }
+                if claim_id.is_none_or(|claim_id| claim_id == claim.claim_id) =>
+            {
+                Ok(())
             }
             _ => Err(LedgerError::new(LedgerErrorKind::ClaimMismatch)),
         }

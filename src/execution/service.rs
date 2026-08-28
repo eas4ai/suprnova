@@ -391,6 +391,13 @@ struct ClaimedOutcome {
 struct ClaimGuard {
     ledger: Arc<dyn LiveInstanceLedger>,
     token: Option<ClaimToken>,
+    phase: ClaimGuardPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimGuardPhase {
+    Rollbackable,
+    Finalizing,
 }
 
 impl ClaimGuard {
@@ -398,6 +405,7 @@ impl ClaimGuard {
         Self {
             ledger,
             token: Some(token),
+            phase: ClaimGuardPhase::Rollbackable,
         }
     }
 
@@ -408,12 +416,19 @@ impl ClaimGuard {
     fn disarm(&mut self) {
         self.token.take();
     }
+
+    fn begin_finalizing(&mut self) {
+        self.phase = ClaimGuardPhase::Finalizing;
+    }
 }
 
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            self.ledger.abandon_on_drop(token);
+            match self.phase {
+                ClaimGuardPhase::Rollbackable => self.ledger.abandon_on_drop(token),
+                ClaimGuardPhase::Finalizing => self.ledger.fence_on_drop(token),
+            }
         }
     }
 }
@@ -879,6 +894,7 @@ impl ExecutionService {
                 self.consume_failed_claim(claim).await;
                 return refresh(ExecutionRefreshReason::HostCommitFailed);
             }
+            claim.begin_finalizing();
         }
 
         let kind = kind_override.unwrap_or_else(|| outcome_kind(&result, &validation));
@@ -944,6 +960,7 @@ impl ExecutionService {
     }
 
     async fn consume_failed_claim(&self, mut claim: ClaimGuard) {
+        claim.begin_finalizing();
         if self.ledger.abandon(claim.token()).await.is_ok() {
             claim.disarm();
         }

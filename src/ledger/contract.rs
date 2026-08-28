@@ -561,4 +561,12 @@ pub trait LiveInstanceLedger: Send + Sync {
     /// immediately so an exact request can retry. This is distinct from explicit terminal
     /// [`LiveInstanceLedger::abandon`].
     fn abandon_on_drop(&self, claim: ClaimToken);
+
+    /// Synchronously fences a claim whose coordinated host effects may have committed.
+    ///
+    /// Implementations must never restore the base revision to retryable authority. If the
+    /// matching outcome already committed, this operation is an idempotent no-op. Otherwise it
+    /// terminally consumes the claim, or hands it to provider-owned finalization that cannot
+    /// recreate base-revision authority after its lease expires.
+    fn fence_on_drop(&self, claim: ClaimToken);
 }

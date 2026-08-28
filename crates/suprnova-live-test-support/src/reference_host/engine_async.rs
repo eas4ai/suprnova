@@ -150,13 +150,13 @@ impl ComponentInstance for FreshRenderComponent {
     }
 }
 
-struct PostClaimLedger {
+struct RollbackableFreshRenderLedger {
     inner: MemoryInstanceLedger,
     pause: Arc<FreshRenderPause>,
 }
 
 #[async_trait::async_trait]
-impl LiveInstanceLedger for PostClaimLedger {
+impl LiveInstanceLedger for RollbackableFreshRenderLedger {
     async fn mount_instance(
         &self,
         record: MountInstanceRecord,
@@ -190,6 +190,10 @@ impl LiveInstanceLedger for PostClaimLedger {
 
     fn abandon_on_drop(&self, claim: ClaimToken) {
         self.inner.abandon_on_drop(claim);
+    }
+
+    fn fence_on_drop(&self, claim: ClaimToken) {
+        self.inner.fence_on_drop(claim);
     }
 }
 
@@ -393,7 +397,7 @@ impl ReferenceFreshRender {
         let clock = Arc::clone(services.clock());
         let ledger_limits =
             LedgerLimits::new(1_000, 60_000, 16, 256).map_err(|_| "fresh render ledger limits")?;
-        let ledger = Arc::new(PostClaimLedger {
+        let ledger = Arc::new(RollbackableFreshRenderLedger {
             inner: MemoryInstanceLedger::new(
                 Arc::clone(&clock) as Arc<dyn suprnova_live::clock::Clock>,
                 ledger_limits,
