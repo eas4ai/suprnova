@@ -100,7 +100,7 @@ export function parseFeatureDirective(
   const validScalarValue = validDirectiveScalarValue(valueKind, value);
   if (validScalarValue === false) return diagnostic("invalid_value", fallback);
   if (validScalarValue === undefined) {
-    const invalidValue = valueDiagnostic(valueKind, fallback, value);
+    const invalidValue = valueDiagnostic(valueKind, fallback, value, name);
     if (invalidValue !== null) return invalidValue;
   }
 

@@ -6,6 +6,7 @@ use crate::registry::ComponentRegistry;
 use crate::snapshot::state::FieldCategory;
 use crate::state::{BindingTiming, UrlBindingMode};
 
+use super::DIRECTIVE_GRAMMAR_VERSION;
 use super::branch::DYNAMIC_MARKER;
 use super::diagnostic::{DiagnosticCode, DiagnosticCollector, DiagnosticSeverity};
 use super::generated_directive_contract::{
@@ -76,10 +77,11 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         push_error(context, DiagnosticCode::UnknownDirective);
         return;
     };
-    let raw_modifiers = if suffix_parts
+    let role = suffix_parts
         .first()
         .is_some_and(|candidate| contract.roles.contains(candidate))
-    {
+        .then(|| suffix_parts[0]);
+    let raw_modifiers = if role.is_some() {
         &suffix_parts[1..]
     } else {
         &suffix_parts[..]
@@ -114,6 +116,12 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         );
         return;
     }
+    if contract.capability.is_some()
+        && context.owner.versions().checker_contract() < DIRECTIVE_GRAMMAR_VERSION
+    {
+        push_error(context, DiagnosticCode::InvalidModifier);
+        return;
+    }
     if has_conflict(contract, context.attributes) || !valid_contract_value(contract, value) {
         push_error(context, DiagnosticCode::InvalidModifier);
         return;
@@ -134,12 +142,109 @@ pub(crate) fn validate_directive(name: &str, value: &str, context: &mut Directiv
         "url" => validate_url(value, &modifiers, context),
         "effect" => validate_effect(value, context),
         "on" => validate_event(value, context),
+        "upload" => validate_upload(value, role, context),
+        "progress" => validate_progress(value, context),
+        "stream" => validate_subscription(value, context),
         "preserve" | "ignore" | "replace" | "persist" | "teleport" => {
             validate_morph_control(directive, value, &modifiers, context);
         }
         "navigate" | "prefetch" => validate_navigation(context),
         _ => {}
     }
+}
+
+fn validate_upload(value: &str, role: Option<&str>, context: &mut DirectiveContext<'_, '_>) {
+    validate_upload_field(value, context);
+    if role.is_none()
+        && (context.tag != "input"
+            || !has_attribute_case_insensitive(context.attributes, "type", "file"))
+    {
+        push_error(context, DiagnosticCode::AccessibilityViolation);
+    }
+}
+
+fn validate_progress(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    if value.parse::<i64>().is_err() {
+        validate_upload_field(value, context);
+    }
+    let has_progress_semantics =
+        context.tag == "progress" || has_attribute(context.attributes, "role", "progressbar");
+    let has_accessible_name = has_nonempty_attribute(context.attributes, "aria-label")
+        || has_nonempty_attribute(context.attributes, "aria-labelledby");
+    if !has_progress_semantics || !has_accessible_name {
+        push_error(context, DiagnosticCode::AccessibilityViolation);
+    }
+}
+
+fn validate_upload_field(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    let Ok(field_name) = ModelField::parse(value) else {
+        push_error(context, DiagnosticCode::UnknownModel);
+        return;
+    };
+    if let Some(field) = context
+        .owner
+        .fields()
+        .iter()
+        .find(|field| field.name() == &field_name)
+    {
+        if field.upload_policy().is_none() {
+            push_error(context, DiagnosticCode::ForbiddenModel);
+        }
+        return;
+    }
+    let belongs_to_ancestor = context.ancestors.iter().rev().any(|ancestor| {
+        context
+            .registry
+            .resolve(ancestor)
+            .ok()
+            .is_some_and(|descriptor| {
+                descriptor
+                    .metadata()
+                    .fields()
+                    .iter()
+                    .any(|field| field.name() == &field_name && field.upload_policy().is_some())
+            })
+    });
+    push_error(
+        context,
+        if belongs_to_ancestor {
+            DiagnosticCode::OwnershipViolation
+        } else {
+            DiagnosticCode::UnknownModel
+        },
+    );
+}
+
+fn validate_subscription(value: &str, context: &mut DirectiveContext<'_, '_>) {
+    if context
+        .owner
+        .subscriptions()
+        .iter()
+        .any(|subscription| subscription.stream().as_str() == value)
+    {
+        return;
+    }
+    let belongs_to_ancestor = context.ancestors.iter().rev().any(|ancestor| {
+        context
+            .registry
+            .resolve(ancestor)
+            .ok()
+            .is_some_and(|descriptor| {
+                descriptor
+                    .metadata()
+                    .subscriptions()
+                    .iter()
+                    .any(|subscription| subscription.stream().as_str() == value)
+            })
+    });
+    push_error(
+        context,
+        if belongs_to_ancestor {
+            DiagnosticCode::OwnershipViolation
+        } else {
+            DiagnosticCode::InvalidModifier
+        },
+    );
 }
 
 pub(crate) fn valid_freshness_combination(poll: bool, stream: &str) -> bool {
@@ -457,6 +562,22 @@ fn has_attribute(attributes: &[(String, String)], name: &str, value: &str) -> bo
         .any(|(attribute, actual)| attribute == name && actual == value)
 }
 
+fn has_attribute_case_insensitive(
+    attributes: &[(String, String)],
+    name: &str,
+    value: &str,
+) -> bool {
+    attributes
+        .iter()
+        .any(|(attribute, actual)| attribute == name && actual.eq_ignore_ascii_case(value))
+}
+
+fn has_nonempty_attribute(attributes: &[(String, String)], name: &str) -> bool {
+    attributes
+        .iter()
+        .any(|(attribute, value)| attribute == name && !value.trim().is_empty())
+}
+
 fn safe_navigation_target(value: &str) -> bool {
     value.starts_with('/')
         && !value.starts_with("//")
@@ -499,12 +620,17 @@ fn valid_mapping(directive: &str, value: &str) -> bool {
 fn signal_name(value: &str) -> bool {
     let mut bytes = value.bytes();
     value.len() <= 128
-        && bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 fn safe_class_name(value: &str) -> bool {
-    signal_name(value)
+    let mut bytes = value.bytes();
+    value.len() <= 128
+        && bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn safe_attribute_name(value: &str) -> bool {

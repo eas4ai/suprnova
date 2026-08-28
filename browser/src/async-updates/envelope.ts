@@ -1,4 +1,5 @@
 import {
+  CanonicalError,
   canonicalize,
   parseCanonicalJson,
   type CanonicalLimits,
@@ -241,7 +242,10 @@ export function decodeAsyncEnvelope(
   let parsed: JsonValue;
   try {
     parsed = parseCanonicalJson(encoded, ASYNC_LIMITS);
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof CanonicalError && error.code === "duplicate_key") {
+      fail("duplicate_async_envelope_field");
+    }
     fail("async_envelope_invalid");
   }
   if (canonicalize(parsed) !== encoded) fail("async_envelope_noncanonical");

@@ -8,7 +8,9 @@ use suprnova_live::checker::{
 };
 use suprnova_live::conformance::{FixtureVersion, fixture_directory};
 
-use checker_support::{CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
+use checker_support::{
+    CHILD_VIEW, ROOT_VIEW, registry, registry_with_checker_contract, root_name, view,
+};
 
 #[test]
 fn directive_metadata_and_nested_ownership_fail_closed() {
@@ -210,6 +212,119 @@ fn iteration_004_modifier_groups_fail_closed() {
                 .iter()
                 .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
             "missing modifier conflict for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
+fn iteration_004_upload_shape_metadata_ownership_and_accessibility_fail_closed() {
+    let cases = [
+        (
+            r#"<input type="text" live:upload="avatar">"#,
+            DiagnosticCode::AccessibilityViolation,
+        ),
+        (
+            r#"<div live:upload="avatar"></div>"#,
+            DiagnosticCode::AccessibilityViolation,
+        ),
+        (
+            r#"<input type="file" live:upload="missing_upload">"#,
+            DiagnosticCode::UnknownModel,
+        ),
+        (
+            r#"<input type="file" live:upload="query">"#,
+            DiagnosticCode::ForbiddenModel,
+        ),
+        (
+            r#"<section live:component="tests.child" live:key="child"><button live:upload.cancel="avatar">Cancel</button></section>"#,
+            DiagnosticCode::OwnershipViolation,
+        ),
+        (
+            r#"<section live:component="tests.child" live:key="child"><output live:progress="avatar" role="progressbar" aria-label="Upload progress"></output></section>"#,
+            DiagnosticCode::OwnershipViolation,
+        ),
+        (
+            r#"<output live:progress="avatar"></output>"#,
+            DiagnosticCode::AccessibilityViolation,
+        ),
+        (
+            r#"<output live:progress="avatar" role="progressbar"></output>"#,
+            DiagnosticCode::AccessibilityViolation,
+        ),
+        (
+            r#"<output live:progress="avatar" aria-label="Upload progress"></output>"#,
+            DiagnosticCode::AccessibilityViolation,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == expected),
+            "missing {expected:?} for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
+fn iteration_004_stream_event_signal_and_capability_metadata_fail_closed() {
+    for (source, expected) in [
+        (
+            r#"<section live:stream="missing"></section>"#,
+            DiagnosticCode::InvalidModifier,
+        ),
+        (
+            r#"<span live:on="orders.missing"></span>"#,
+            DiagnosticCode::UnknownEvent,
+        ),
+        (
+            r#"<section live:signal="1invalid:true"></section>"#,
+            DiagnosticCode::InvalidModifier,
+        ),
+        (
+            r#"<section live:signal="Progress:true"></section>"#,
+            DiagnosticCode::InvalidModifier,
+        ),
+    ] {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == expected),
+            "missing {expected:?} for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+
+    let registry = registry_with_checker_contract(1);
+    for source in [
+        r#"<input type="file" live:upload="avatar">"#,
+        r#"<output live:progress="avatar" role="progressbar" aria-label="Upload progress"></output>"#,
+        r#"<section live:poll.visible.30s></section>"#,
+        r#"<section live:stream.hybrid="orders"></section>"#,
+    ] {
+        let catalog = TemplateCatalog::new(vec![
+            (view(ROOT_VIEW), source),
+            (
+                view(CHILD_VIEW),
+                include_str!("fixtures/checker/pass/child.html"),
+            ),
+        ])
+        .expect("template catalog");
+        let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&root_name());
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+            "checker-contract v1 accepted {source}: {:?}",
             report.diagnostics()
         );
     }

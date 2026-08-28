@@ -37,6 +37,10 @@ describe("typed local signal values", () => {
       ok: false,
       code: "invalid_value",
     });
+    expect(parseDirective("live:signal", "Progress:true")).toMatchObject({
+      ok: false,
+      code: "invalid_value",
+    });
   });
 
   it("accepts the mixed declarations emitted by an island root", () => {

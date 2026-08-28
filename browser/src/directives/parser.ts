@@ -14,6 +14,7 @@ export const MAX_VALUE_UNITS = 2_048;
 export const MAX_MODIFIER_SEGMENTS = 16;
 export const MAX_PRESENT_DIRECTIVES = 64;
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
+const SIGNAL_NAME = /^[a-z][a-z0-9_-]{0,127}$/u;
 const TARGET_ID = /^#[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
 function diagnostic(
@@ -72,7 +73,7 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
-function validMapping(value: string): boolean {
+function validMapping(directive: string | undefined, value: string): boolean {
   if (value.length === 0) return false;
   const entries = value.split(",");
   if (entries.length > 16) return false;
@@ -81,8 +82,8 @@ function validMapping(value: string): boolean {
     if (separator <= 0 || separator !== entry.lastIndexOf(":")) return false;
     const key = entry.slice(0, separator);
     const mapped = entry.slice(separator + 1);
-    if (!IDENTIFIER.test(key)) return false;
-    if (IDENTIFIER.test(mapped)) return true;
+    if (!(directive === "signal" ? SIGNAL_NAME : IDENTIFIER).test(key)) return false;
+    if (SIGNAL_NAME.test(mapped)) return true;
     if (!/^-?(?:0|[1-9][0-9]{0,15})$/u.test(mapped)) return false;
     return Number.isSafeInteger(Number(mapped));
   });
@@ -92,6 +93,7 @@ export function valueDiagnostic(
   valueKind: 0 | 1 | 2 | 3 | 4 | 5 | 6,
   fallback: DirectiveFallback,
   value: string,
+  directive?: string,
 ): DirectiveDiagnostic | null {
   if (containsDynamicStructure(value)) {
     return diagnostic("dynamic_structure_unproved", fallback);
@@ -106,7 +108,7 @@ export function valueDiagnostic(
     case 5:
       return safeTarget(value) ? null : diagnostic("unsafe_target", fallback);
     case 6:
-      return validMapping(value) ? null : diagnostic("invalid_value", fallback);
+      return validMapping(directive, value) ? null : diagnostic("invalid_value", fallback);
     case 2:
       return /^(?:true|false|null|-?[0-9]+|[A-Za-z][A-Za-z0-9_-]{0,127})$/u.test(value)
         ? null
@@ -151,7 +153,7 @@ export function parseDirective(
   if (presentDirectiveNames.some((candidate) => conflicts.includes(directiveName(candidate)))) {
     return diagnostic("directive_conflict", fallback);
   }
-  const invalidValue = valueDiagnostic(valueKind, fallback, value);
+  const invalidValue = valueDiagnostic(valueKind, fallback, value, name);
   if (invalidValue !== null) return invalidValue;
 
   return { ok: true, name, value, modifiers };

@@ -3,7 +3,9 @@
 mod checker_support;
 
 use proptest::prelude::*;
-use suprnova_live::checker::{CheckerLimits, DiagnosticCode, TemplateCatalog, TemplateChecker};
+use suprnova_live::checker::{
+    CheckerLimits, DiagnosticCode, DiagnosticSeverity, TemplateCatalog, TemplateChecker,
+};
 
 use checker_support::{CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
 
@@ -164,6 +166,37 @@ fn expanded_includes_and_inherited_blocks_remain_bounded_and_structural() {
         .check_component(&root_name()),
         DiagnosticCode::SourceLimit,
     );
+}
+
+#[test]
+fn dynamic_upload_attribute_structure_is_explicitly_unproved_never_statically_proved() {
+    let report = check(r#"<input {{ attrs }}>"#, CheckerLimits::default());
+
+    assert!(!report.is_proved());
+    assert!(report.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+            && diagnostic.severity() == DiagnosticSeverity::Unproved
+    }));
+}
+
+#[test]
+fn dynamic_iteration_004_directive_values_are_explicitly_unproved() {
+    for source in [
+        r#"<input type="file" live:upload="{{ field }}">"#,
+        r#"<output live:progress="{{ field }}" role="progressbar" aria-label="Upload progress"></output>"#,
+        r#"<section live:stream="{{ subscription }}"></section>"#,
+    ] {
+        let report = check(source, CheckerLimits::default());
+        assert!(!report.is_proved(), "dynamic source was proved: {source}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code() == DiagnosticCode::DynamicStructureUnproved
+                    && diagnostic.severity() == DiagnosticSeverity::Unproved
+            }),
+            "missing explicit unproved diagnostic for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
 }
 
 proptest! {

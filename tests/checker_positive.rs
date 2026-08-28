@@ -178,13 +178,60 @@ fn iteration_four_directive_roles_and_modifiers_are_statically_proved() {
     let catalog = TemplateCatalog::new(vec![
         (
             view(ROOT_VIEW),
-            r#"<section live:stream.hybrid="orders" live:poll.visible.30s>
-                <input type="file" live:upload="avatar">
+            r#"<section live:signal="completion_percent:0" live:stream.hybrid="orders" live:poll.visible.30s>
+                <input type="file" live:upload="avatar" multiple>
                 <button live:upload.cancel="avatar">Cancel</button>
                 <button live:upload.retry="avatar">Retry</button>
                 <button live:upload.remove="avatar">Remove</button>
-                <output live:progress="avatar"></output>
+                <output live:progress="avatar" role="progressbar" aria-label="Avatar upload progress"></output>
+                <span live:on="orders.updated"></span>
             </section>"#,
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+}
+
+#[test]
+fn every_iteration_four_modifier_and_role_has_a_static_positive_case() {
+    for modifier in ["immediate", "visible", "always", "5s", "15s", "30s", "60s"] {
+        assert_proved(&format!("<section live:poll.{modifier}></section>"));
+    }
+    for modifier in ["push-only", "hybrid"] {
+        assert_proved(&format!(
+            "<section live:stream.{modifier}=\"orders\"></section>"
+        ));
+    }
+    for role in ["cancel", "retry", "remove"] {
+        assert_proved(&format!(
+            "<button live:upload.{role}=\"avatar\">{role}</button>"
+        ));
+    }
+}
+
+#[test]
+fn checked_upload_and_stream_markup_is_proved_on_every_static_askama_branch() {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"{% if active %}
+                <section live:stream="orders" live:poll.visible.30s>
+                    <input type="file" live:upload="avatar">
+                    <output live:progress="avatar" role="progressbar" aria-label="Avatar upload progress"></output>
+                </section>
+            {% else %}
+                <section live:stream.push-only="orders">
+                    <button live:upload.remove="avatar">Remove avatar</button>
+                </section>
+            {% endif %}"#,
         ),
         (
             view(CHILD_VIEW),
@@ -267,6 +314,21 @@ fn freshness_source(combination: &Value) -> String {
     };
     let poll_attribute = if poll { " live:poll" } else { "" };
     format!("<section{stream_attribute}{poll_attribute}></section>")
+}
+
+fn assert_proved(source: &str) {
+    let registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (view(ROOT_VIEW), source),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(report.is_proved(), "{source}: {:?}", report.diagnostics());
 }
 
 fn fixture_strings(value: &Value) -> Vec<&str> {
