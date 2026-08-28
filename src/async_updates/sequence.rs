@@ -379,26 +379,36 @@ impl SequenceMachine {
         }
         let envelope = delivery.envelope();
         let observed = envelope.position();
+        let disposition = self.observe_position(observed);
+        if disposition != SequenceDisposition::Apply {
+            return Ok(disposition);
+        }
+        dispatcher
+            .dispatch(delivery)
+            .map_err(|error| SequenceError::new(dispatch_error_kind(error)))?;
+        self.current = observed;
+        Ok(SequenceDisposition::Apply)
+    }
+
+    fn observe_position(&mut self, observed: StreamPosition) -> SequenceDisposition {
         if observed.epoch() < self.current.epoch() {
-            return Ok(SequenceDisposition::IgnoreStaleEpoch);
+            return SequenceDisposition::IgnoreStaleEpoch;
         }
         if observed.epoch() == self.current.epoch()
             && observed.sequence() <= self.current.sequence()
         {
-            return Ok(SequenceDisposition::IgnoreDuplicate);
+            return SequenceDisposition::IgnoreDuplicate;
         }
         if self.state == SequenceState::Degraded {
             self.record_high_water(observed);
             if observed.epoch() > self.current.epoch() {
                 self.degradation = Some(SequenceDegradation::EpochChanged);
             }
-            return Ok(SequenceDisposition::AwaitingRecovery);
+            return SequenceDisposition::AwaitingRecovery;
         }
         if observed.epoch() > self.current.epoch() {
             self.degrade(SequenceDegradation::EpochChanged, observed);
-            return Ok(SequenceDisposition::Degraded(
-                SequenceDegradation::EpochChanged,
-            ));
+            return SequenceDisposition::Degraded(SequenceDegradation::EpochChanged);
         }
         // When the current sequence is `u64::MAX`, every same-epoch value was
         // classified as duplicate above. Only a newer epoch can advance, and
@@ -407,13 +417,9 @@ impl SequenceMachine {
         let expected = self.current.sequence().get() + 1;
         if observed.sequence().get() != expected {
             self.degrade(SequenceDegradation::Gap, observed);
-            return Ok(SequenceDisposition::Degraded(SequenceDegradation::Gap));
+            return SequenceDisposition::Degraded(SequenceDegradation::Gap);
         }
-        dispatcher
-            .dispatch(delivery)
-            .map_err(|error| SequenceError::new(dispatch_error_kind(error)))?;
-        self.current = observed;
-        Ok(SequenceDisposition::Apply)
+        SequenceDisposition::Apply
     }
 
     /// Replays one fully prevalidated transcript and commits only dispatched prefixes.
@@ -438,6 +444,27 @@ impl SequenceMachine {
     pub(crate) fn prepare_replay(
         &self,
         transcript: &[&AsyncEnvelope],
+        pressure_high_water: Option<StreamPosition>,
+    ) -> Result<ReplayRecovery, ReplayDispatchError> {
+        if transcript.is_empty() || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES {
+            return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
+        }
+        if transcript
+            .iter()
+            .any(|envelope| !self.matches_scope(envelope))
+        {
+            return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, 0));
+        }
+        let positions = transcript
+            .iter()
+            .map(|envelope| envelope.position())
+            .collect::<Vec<_>>();
+        self.prepare_replay_positions(&positions, pressure_high_water)
+    }
+
+    fn prepare_replay_positions(
+        &self,
+        transcript: &[StreamPosition],
         pressure_high_water: Option<StreamPosition>,
     ) -> Result<ReplayRecovery, ReplayDispatchError> {
         if transcript.is_empty() || transcript.len() > MAX_REPLAY_TRANSCRIPT_ENVELOPES {
@@ -474,11 +501,7 @@ impl SequenceMachine {
             .checked_add(1)
             .ok_or_else(|| self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0))?;
         let mut through = self.current;
-        for (index, envelope) in transcript.iter().enumerate() {
-            if !self.matches_scope(envelope) {
-                return Err(self.replay_error(SequenceErrorKind::ScopeMismatch, 0));
-            }
-            let position = envelope.position();
+        for (index, position) in transcript.iter().copied().enumerate() {
             if position.epoch() != self.current.epoch() || position.sequence().get() != expected {
                 return Err(self.replay_error(SequenceErrorKind::InvalidReplayTranscript, 0));
             }
@@ -518,9 +541,13 @@ impl SequenceMachine {
         if let Err(error) = dispatcher.dispatch(delivery) {
             return Err(self.recovery_error(recovery, dispatch_error_kind(error)));
         }
+        self.commit_replay_position(recovery, position);
+        Ok(())
+    }
+
+    fn commit_replay_position(&mut self, recovery: &mut ReplayRecovery, position: StreamPosition) {
         self.current = position;
         recovery.applied += 1;
-        Ok(())
     }
 
     pub(crate) fn finish_replay(
@@ -657,6 +684,73 @@ impl SequenceMachine {
             state: self.state,
             high_water: Some(high_water),
         }
+    }
+}
+
+/// Narrow adapter exposing the production sequence authority to cross-language conformance.
+///
+/// This adapter accepts only already-typed positions. It grants no delivery,
+/// authorization, dispatch, or browser-input authority and delegates every
+/// state transition to the same [`SequenceMachine`] methods used in production.
+#[doc(hidden)]
+#[derive(Debug, Eq, PartialEq)]
+pub struct SequenceConformanceMachine {
+    machine: SequenceMachine,
+}
+
+#[doc(hidden)]
+impl SequenceConformanceMachine {
+    /// Starts from a sealed context and installs the fixture's trusted baseline.
+    pub fn new(
+        context: &AsyncEnvelopeContext,
+        baseline: StreamPosition,
+    ) -> Result<Self, SequenceError> {
+        let mut machine = SequenceMachine::new(context);
+        machine.install_authoritative_baseline_covering(baseline, None)?;
+        Ok(Self { machine })
+    }
+
+    /// Observes one typed position through the production continuity classifier.
+    pub fn observe(&mut self, observed: StreamPosition) -> SequenceDisposition {
+        let disposition = self.machine.observe_position(observed);
+        if disposition == SequenceDisposition::Apply {
+            self.machine.current = observed;
+        }
+        disposition
+    }
+
+    /// Applies one fully validated position transcript through production replay authority.
+    pub fn recover_from_replay(
+        &mut self,
+        transcript: &[StreamPosition],
+    ) -> Result<ReplayDispatchOutcome, ReplayDispatchError> {
+        let mut recovery = self.machine.prepare_replay_positions(transcript, None)?;
+        for position in transcript {
+            self.machine
+                .commit_replay_position(&mut recovery, *position);
+        }
+        self.machine.finish_replay(recovery)
+    }
+
+    /// Installs one trusted authoritative baseline through production recovery rules.
+    pub fn install_authoritative_baseline(
+        &mut self,
+        baseline: StreamPosition,
+    ) -> Result<BaselineDisposition, SequenceError> {
+        self.machine
+            .install_authoritative_baseline_covering(baseline, None)
+    }
+
+    /// Returns the production authority's current position.
+    #[must_use]
+    pub const fn current(&self) -> StreamPosition {
+        self.machine.current()
+    }
+
+    /// Returns the production authority's current continuity state.
+    #[must_use]
+    pub const fn state(&self) -> SequenceState {
+        self.machine.state()
     }
 }
 

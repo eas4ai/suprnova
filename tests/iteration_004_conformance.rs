@@ -7,15 +7,24 @@
 #[path = "support/async_transport.rs"]
 mod async_transport;
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
+use std::fs;
 use std::process::Command;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use suprnova_live::async_updates::{
     AsyncCodecLimits, AsyncEnvelopeErrorKind, PresentationSignalContract, PresentationSignalSchema,
-    StreamEpoch, StreamPosition, StreamSequence, SubscriptionId, decode_async_envelope,
+    SequenceConformanceMachine, SequenceDisposition, SequenceState, StreamEpoch, StreamPosition,
+    StreamSequence, SubscriptionId, decode_async_envelope,
 };
+use suprnova_live::conformance::{FIXTURE_FILES_V4, FixtureVersion, fixture_directory};
+use suprnova_live::error::{ErrorCategory, LiveError, RecoveryInstruction, SafeDiagnosticCode};
 use suprnova_live::identity::{SignalName, SignalScopeIdentity};
+use suprnova_live::resource::{Permit, PermitPool, ResourceBounds, ResourceOwner};
 use suprnova_live::upload::{
     AcceptedChunk, TransitionDisposition, UploadChecksum, UploadHandle, UploadIdempotencyKey,
     UploadOperation, UploadProtocolCodec, UploadRevision, UploadState, UploadStateMachine,
@@ -38,6 +47,85 @@ struct UploadFixture {
 struct AsyncFixture {
     envelope_cases: Vec<CodecCase>,
     continuity_cases: Vec<ContinuityCase>,
+    signal_name_cases: Vec<SignalNameCase>,
+}
+
+#[derive(Deserialize)]
+struct SignalNameCase {
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityFixture {
+    cases: Vec<CompatibilityCase>,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityCase {
+    id: String,
+    feature: String,
+    present: bool,
+    capability_version: Option<u16>,
+    core_version: String,
+}
+
+#[derive(Deserialize)]
+struct RuntimeFeatureFixture {
+    features: Vec<RuntimeFeatureContract>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeFeatureContract {
+    name: String,
+    capability_version: u16,
+    compatible_core: CoreCompatibility,
+}
+
+#[derive(Deserialize)]
+struct CoreCompatibility {
+    minimum: String,
+    maximum_exclusive: String,
+}
+
+#[derive(Deserialize)]
+struct DiagnosticFixture {
+    redaction_cases: Vec<RedactionCase>,
+}
+
+#[derive(Deserialize)]
+struct RedactionCase {
+    id: String,
+    sample: Value,
+}
+
+#[derive(Deserialize)]
+struct ResourceFixture {
+    bounds: ResourceFixtureBounds,
+    cases: Vec<ResourceCase>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct ResourceFixtureBounds {
+    max_items: usize,
+    max_bytes: usize,
+    max_active: usize,
+}
+
+#[derive(Deserialize)]
+struct ResourceCase {
+    id: String,
+    operations: Vec<ResourceOperation>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum ResourceOperation {
+    Enqueue { bytes: usize },
+    Acquire,
+    Release,
+    Retire,
+    Resume,
+    Suspend,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +147,7 @@ enum InternalUploadTransition {
     Cancel,
     Reject,
     Expire,
+    Fail,
 }
 
 #[derive(Deserialize)]
@@ -69,9 +158,8 @@ struct TransitionCase {
     chunk_index: Option<u32>,
     idempotency_key: Option<String>,
     expected_revision: String,
-    to: String,
-    next_revision: String,
-    expected: String,
+    current_revision: Option<String>,
+    retry: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -106,14 +194,169 @@ where
     encoded.parse().map_err(serde::de::Error::custom)
 }
 
+fn load_v4_fixture<T: DeserializeOwned>(name: &str) -> T {
+    serde_json::from_slice(
+        &fs::read(fixture_directory(FixtureVersion::V4).join(name))
+            .unwrap_or_else(|error| panic!("read v4 fixture {name}: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse v4 fixture {name}: {error}"))
+}
+
+fn v4_inventory() -> Value {
+    let directory = fixture_directory(FixtureVersion::V4);
+    let actual_files = fs::read_dir(&directory)
+        .expect("read v4 fixture directory")
+        .map(|entry| entry.expect("v4 fixture entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            path.file_name()
+                .expect("v4 fixture file name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_files,
+        FIXTURE_FILES_V4
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        "new v4 fixture files must be explicitly added to cross-language parity"
+    );
+
+    let mut actual = BTreeMap::new();
+    for name in FIXTURE_FILES_V4 {
+        let fixture: Value = load_v4_fixture(name);
+        let mut keys = fixture
+            .as_object()
+            .unwrap_or_else(|| panic!("v4 fixture {name} is an object"))
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        actual.insert((*name).to_owned(), keys);
+    }
+    let expected = BTreeMap::from([
+        (
+            "async-envelope.json".to_owned(),
+            vec![
+                "codec_limits",
+                "continuity_cases",
+                "envelope_cases",
+                "live_protocol_versions",
+                "payload_kinds",
+                "protocol_versions",
+                "schema_version",
+                "signal_name_cases",
+                "subscription_states",
+            ],
+        ),
+        (
+            "compatibility.json".to_owned(),
+            vec![
+                "cases",
+                "compatible_core",
+                "live_protocol_versions",
+                "schema_version",
+                "snapshot_versions",
+            ],
+        ),
+        (
+            "diagnostics.json".to_owned(),
+            vec![
+                "allowed_dimensions",
+                "codes",
+                "phases",
+                "redacted_classes",
+                "redaction_cases",
+                "retention",
+                "schema_version",
+                "severities",
+            ],
+        ),
+        (
+            "directive-grammar.json".to_owned(),
+            vec![
+                "contract_version",
+                "directives",
+                "event_modifiers",
+                "feedback_modifiers",
+                "freshness_combinations",
+                "model_modifiers",
+                "morph_modifiers",
+                "navigation_modifiers",
+                "reserved",
+                "schema_version",
+                "syntax",
+                "transition_modifiers",
+            ],
+        ),
+        (
+            "resource-lifecycle.json".to_owned(),
+            vec![
+                "bounds",
+                "cases",
+                "resource_kinds",
+                "schema_version",
+                "states",
+            ],
+        ),
+        (
+            "runtime-features.json".to_owned(),
+            vec![
+                "allowed_island_operations",
+                "features",
+                "forbidden_island_operations",
+                "registration_outcomes",
+                "registry",
+                "retirement",
+                "schema_version",
+            ],
+        ),
+        (
+            "upload-protocol.json".to_owned(),
+            vec![
+                "codec_cases",
+                "codec_limits",
+                "live_protocol_versions",
+                "operations",
+                "presentation_states",
+                "protocol_versions",
+                "schema_version",
+                "states",
+                "terminal_states",
+                "transition_cases",
+            ],
+        ),
+    ])
+    .into_iter()
+    .map(|(name, keys)| {
+        (
+            name,
+            keys.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        actual, expected,
+        "new v4 fixture collections must be explicitly added to parity"
+    );
+    json!(actual)
+}
+
 #[tokio::test]
 async fn every_v4_case_has_identical_rust_and_typescript_canonical_outcomes() {
-    let upload: UploadFixture =
-        serde_json::from_str(include_str!("../fixtures/v4/upload-protocol.json"))
-            .expect("upload fixture");
-    let asynchronous: AsyncFixture =
-        serde_json::from_str(include_str!("../fixtures/v4/async-envelope.json"))
-            .expect("async fixture");
+    let upload: UploadFixture = load_v4_fixture("upload-protocol.json");
+    let asynchronous: AsyncFixture = load_v4_fixture("async-envelope.json");
+    let compatibility: CompatibilityFixture = load_v4_fixture("compatibility.json");
+    let diagnostics: DiagnosticFixture = load_v4_fixture("diagnostics.json");
+    let resources: ResourceFixture = load_v4_fixture("resource-lifecycle.json");
+    let runtime_features: RuntimeFeatureFixture = load_v4_fixture("runtime-features.json");
+    let _: Value = load_v4_fixture("directive-grammar.json");
+    let inventory = v4_inventory();
 
     assert_eq!(
         upload.operations,
@@ -149,12 +392,33 @@ async fn every_v4_case_has_identical_rust_and_typescript_canonical_outcomes() {
         "async_continuity": asynchronous
             .continuity_cases
             .iter()
-            .map(rust_continuity_case)
+            .map(|case| rust_continuity_case(case, authorization.context()))
             .collect::<Vec<_>>(),
         "async_envelopes": asynchronous
             .envelope_cases
             .iter()
             .map(|case| rust_async_case(case, authorization.context()))
+            .collect::<Vec<_>>(),
+        "async_signals": asynchronous
+            .signal_name_cases
+            .iter()
+            .map(rust_signal_name_case)
+            .collect::<Vec<_>>(),
+        "compatibility": compatibility
+            .cases
+            .iter()
+            .map(|case| rust_compatibility_case(case, &runtime_features.features))
+            .collect::<Vec<_>>(),
+        "diagnostics": diagnostics
+            .redaction_cases
+            .iter()
+            .map(rust_redaction_case)
+            .collect::<Vec<_>>(),
+        "inventory": inventory,
+        "resource_lifecycle": resources
+            .cases
+            .iter()
+            .flat_map(|case| rust_resource_case(case, resources.bounds))
             .collect::<Vec<_>>(),
         "upload_codecs": upload
             .codec_cases
@@ -168,6 +432,30 @@ async fn every_v4_case_has_identical_rust_and_typescript_canonical_outcomes() {
             .collect::<Vec<_>>(),
     });
     let typescript = typescript_report();
+
+    let report_collections = typescript
+        .as_object()
+        .expect("TypeScript report object")
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        report_collections,
+        [
+            "async_continuity",
+            "async_envelopes",
+            "async_signals",
+            "compatibility",
+            "diagnostics",
+            "inventory",
+            "resource_lifecycle",
+            "upload_codecs",
+            "upload_transitions",
+        ]
+        .into_iter()
+        .collect(),
+        "every case-bearing v4 collection must participate in the one cross-language report"
+    );
 
     assert_eq!(rust, typescript);
 }
@@ -195,52 +483,45 @@ fn rust_upload_codec_case(case: &CodecCase) -> Value {
 
 fn rust_transition_case(case: &TransitionCase) -> Value {
     let expected_revision = UploadRevision::parse(&case.expected_revision).expect("revision");
-    let next_revision = UploadRevision::parse(&case.next_revision).expect("next revision");
     let from = UploadState::parse(&case.from).expect("from state");
     let request = transition_request(case);
-    let (code, disposition, state, position) = match case.expected.as_str() {
-        "applied" => {
-            let mut machine = UploadStateMachine::new(upload_handle(), from, expected_revision);
-            let outcome = machine.apply(request).expect("applied fixture transition");
-            assert_eq!(outcome.disposition(), TransitionDisposition::Applied);
-            (
-                None,
-                "applied",
-                outcome.state().as_str(),
-                outcome.revision().get().to_string(),
-            )
-        }
-        "existing_outcome" => {
-            let mut machine = UploadStateMachine::new(upload_handle(), from, expected_revision);
-            machine
-                .apply(request.clone())
-                .expect("initial fixture transition");
-            let outcome = machine.apply(request).expect("idempotent fixture replay");
-            assert_eq!(
-                outcome.disposition(),
-                TransitionDisposition::ExistingOutcome
-            );
-            (
-                None,
-                "existing_outcome",
-                outcome.state().as_str(),
-                outcome.revision().get().to_string(),
-            )
-        }
-        "conflict" => {
-            let mut machine = UploadStateMachine::new(upload_handle(), from, next_revision);
-            let error = machine.apply(request).expect_err("fixture conflict");
-            (
-                Some(error.kind().as_str()),
-                "conflict",
-                machine.state().as_str(),
-                machine.revision().get().to_string(),
-            )
-        }
-        other => panic!("unknown transition disposition {other}"),
+    let current_revision = case
+        .current_revision
+        .as_deref()
+        .map_or(expected_revision, |value| {
+            UploadRevision::parse(value).expect("current revision")
+        });
+    let mut machine = UploadStateMachine::new(upload_handle(), from, current_revision);
+    let result = if case.retry.is_some() {
+        machine = UploadStateMachine::new(upload_handle(), from, expected_revision);
+        machine
+            .apply(request.clone())
+            .expect("initial fixture transition");
+        machine.apply(request)
+    } else {
+        machine.apply(request)
     };
-    assert_eq!(state, case.to);
-    assert_eq!(position, case.next_revision);
+    let (code, disposition, state, position) = match result {
+        Ok(outcome) => (
+            None,
+            match outcome.disposition() {
+                TransitionDisposition::Applied => "applied",
+                TransitionDisposition::ExistingOutcome => "existing_outcome",
+            },
+            outcome.state().as_str(),
+            outcome.revision().get().to_string(),
+        ),
+        Err(error) => (
+            Some(error.kind().as_str()),
+            if error.kind().as_str() == "upload_conflict" {
+                "conflict"
+            } else {
+                "rejected"
+            },
+            machine.state().as_str(),
+            machine.revision().get().to_string(),
+        ),
+    };
     json!({
         "code": code,
         "disposition": disposition,
@@ -269,6 +550,7 @@ fn transition_request(case: &TransitionCase) -> UploadTransitionRequest {
         InternalUploadTransition::Cancel => UploadTransition::Cancel,
         InternalUploadTransition::Reject => UploadTransition::Reject,
         InternalUploadTransition::Expire => UploadTransition::Expire,
+        InternalUploadTransition::Fail => UploadTransition::Fail,
     };
     UploadTransitionRequest::new(
         upload_handle(),
@@ -308,45 +590,232 @@ const fn canonical_async_code(kind: AsyncEnvelopeErrorKind) -> &'static str {
     }
 }
 
-fn rust_continuity_case(case: &ContinuityCase) -> Value {
-    let baseline = stream_position(case.baseline);
-    let (disposition, state, position) = if let Some(observed) = case.observed {
-        let observed = stream_position(observed);
-        if observed == baseline {
-            ("ignore_duplicate", "current", baseline)
-        } else if observed.epoch() == baseline.epoch()
-            && observed.sequence().get() == baseline.sequence().get() + 1
-        {
-            ("apply", "current", observed)
-        } else {
-            ("degrade", "degraded", baseline)
+fn rust_signal_name_case(case: &SignalNameCase) -> Value {
+    match SignalName::parse(&case.value) {
+        Ok(_) => json!({"code": null, "disposition": "accepted", "id": case.value}),
+        Err(_) => json!({
+            "code": "invalid_signal_name",
+            "disposition": "rejected",
+            "id": case.value,
+        }),
+    }
+}
+
+fn rust_compatibility_case(
+    case: &CompatibilityCase,
+    contracts: &[RuntimeFeatureContract],
+) -> Value {
+    if !case.present {
+        return json!({
+            "code": null,
+            "disposition": "ordinary_live_available",
+            "id": case.id,
+        });
+    }
+    let Some(contract) = contracts
+        .iter()
+        .find(|contract| contract.name == case.feature)
+    else {
+        return json!({
+            "code": "feature_unavailable",
+            "disposition": "feature_unavailable",
+            "id": case.id,
+        });
+    };
+    let core_compatible = compare_version(&case.core_version, &contract.compatible_core.minimum)
+        .is_ge()
+        && compare_version(
+            &case.core_version,
+            &contract.compatible_core.maximum_exclusive,
+        )
+        .is_lt();
+    let compatible =
+        core_compatible && case.capability_version == Some(contract.capability_version);
+    json!({
+        "code": if compatible { None } else { Some("feature_unavailable") },
+        "disposition": if compatible { "compatible" } else { "feature_unavailable" },
+        "id": case.id,
+    })
+}
+
+fn compare_version(left: &str, right: &str) -> std::cmp::Ordering {
+    version(left).cmp(&version(right))
+}
+
+fn version(value: &str) -> [u64; 3] {
+    let mut segments = value.split('.');
+    let parsed = [
+        segments.next().and_then(|value| value.parse().ok()),
+        segments.next().and_then(|value| value.parse().ok()),
+        segments.next().and_then(|value| value.parse().ok()),
+    ];
+    assert!(segments.next().is_none(), "invalid fixture semver {value}");
+    parsed.map(|segment| segment.unwrap_or_else(|| panic!("invalid fixture semver {value}")))
+}
+
+#[derive(Debug)]
+struct UnsafeDiagnosticSource(String);
+
+impl fmt::Display for UnsafeDiagnosticSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for UnsafeDiagnosticSource {}
+
+fn rust_redaction_case(case: &RedactionCase) -> Value {
+    let unsafe_value = case.sample.as_str().map_or_else(
+        || serde_json::to_string(&case.sample).expect("diagnostic sample JSON"),
+        str::to_owned,
+    );
+    let error = LiveError::new(
+        ErrorCategory::Security,
+        RecoveryInstruction::Stop,
+        SafeDiagnosticCode::InvalidIdentifier,
+    )
+    .with_source(UnsafeDiagnosticSource(unsafe_value.clone()));
+    let rendered = format!("{error:?}");
+    let redacted = !rendered.contains(&unsafe_value);
+    json!({
+        "code": if redacted { None } else { Some("diagnostic_value_leaked") },
+        "disposition": if redacted { "redacted" } else { "rejected" },
+        "id": case.id,
+        "state": if redacted { Some("[redacted]") } else { None },
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ResourceLifecycleState {
+    Active,
+    Suspended,
+    Retired,
+}
+
+impl ResourceLifecycleState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Retired => "retired",
+        }
+    }
+}
+
+fn rust_resource_case(case: &ResourceCase, bounds: ResourceFixtureBounds) -> Vec<Value> {
+    let owner = ResourceOwner::new(
+        ResourceBounds::new(bounds.max_items, bounds.max_bytes).expect("resource bounds"),
+    );
+    let pool = PermitPool::new(bounds.max_active).expect("permit bounds");
+    let mut permit: Option<Permit> = None;
+    let mut state = ResourceLifecycleState::Active;
+    case.operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| {
+            let outcome = match operation {
+                ResourceOperation::Enqueue { bytes } => owner
+                    .queue()
+                    .try_push(*bytes, format!("item-{index}"))
+                    .map_or_else(|error| json!(error.as_str()), |()| json!("accepted")),
+                ResourceOperation::Acquire => match state {
+                    ResourceLifecycleState::Suspended => json!("suspended"),
+                    ResourceLifecycleState::Retired => json!("retired"),
+                    ResourceLifecycleState::Active => match pool.try_acquire() {
+                        Ok(acquired) => {
+                            permit = Some(acquired);
+                            json!("acquired")
+                        }
+                        Err(error) => json!(error.as_str()),
+                    },
+                },
+                ResourceOperation::Release => {
+                    permit.take().expect("fixture permit").release();
+                    json!("released")
+                }
+                ResourceOperation::Retire => {
+                    let released_permits = pool.active();
+                    drop(permit.take());
+                    let retirement = owner.retire();
+                    state = ResourceLifecycleState::Retired;
+                    json!({
+                        "canceled": retirement.canceled,
+                        "drained_bytes": retirement.drained_bytes,
+                        "drained_items": retirement.drained_items,
+                        "released_permits": released_permits,
+                    })
+                }
+                ResourceOperation::Resume => {
+                    if matches!(state, ResourceLifecycleState::Suspended) {
+                        state = ResourceLifecycleState::Active;
+                    }
+                    json!(state.as_str())
+                }
+                ResourceOperation::Suspend => {
+                    if matches!(state, ResourceLifecycleState::Active) {
+                        state = ResourceLifecycleState::Suspended;
+                    }
+                    json!(state.as_str())
+                }
+            };
+            json!({
+                "code": null,
+                "disposition": outcome.as_str().unwrap_or("retired"),
+                "id": format!("{}:{index}", case.id),
+                "outcome": outcome,
+                "position": index.to_string(),
+                "state": state.as_str(),
+            })
+        })
+        .collect()
+}
+
+fn rust_continuity_case(
+    case: &ContinuityCase,
+    context: &suprnova_live::async_updates::AsyncEnvelopeContext,
+) -> Value {
+    let mut machine = SequenceConformanceMachine::new(context, stream_position(case.baseline))
+        .expect("fixture continuity baseline");
+    let disposition = if let Some(observed) = case.observed {
+        match machine.observe(stream_position(observed)) {
+            SequenceDisposition::Apply => "apply",
+            SequenceDisposition::IgnoreDuplicate => "ignore_duplicate",
+            SequenceDisposition::Degraded(_) => "degrade",
+            other => panic!("unexpected fixture observation {other:?}"),
         }
     } else {
         let observed = stream_position(case.observed_gap.expect("observed gap"));
-        assert!(
-            observed.epoch() > baseline.epoch()
-                || observed.sequence().get() > baseline.sequence().get() + 1
-        );
-        let recovered = match case.recovery.as_ref().expect("recovery") {
+        assert!(matches!(
+            machine.observe(observed),
+            SequenceDisposition::Degraded(_)
+        ));
+        match case.recovery.as_ref().expect("recovery") {
             Recovery::Replay { transcript } => {
-                let mut prior = baseline;
-                for position in transcript {
-                    let current = stream_position(*position);
-                    assert_eq!(current.epoch(), prior.epoch());
-                    assert_eq!(current.sequence().get(), prior.sequence().get() + 1);
-                    prior = current;
-                }
-                prior
+                let transcript = transcript
+                    .iter()
+                    .copied()
+                    .map(stream_position)
+                    .collect::<Vec<_>>();
+                machine
+                    .recover_from_replay(&transcript)
+                    .expect("fixture replay recovery");
             }
-            Recovery::AuthoritativeRefresh { baseline } => stream_position(*baseline),
-        };
-        ("adopt_baseline", "current", recovered)
+            Recovery::AuthoritativeRefresh { baseline } => {
+                machine
+                    .install_authoritative_baseline(stream_position(*baseline))
+                    .expect("fixture authoritative recovery");
+            }
+        }
+        "adopt_baseline"
     };
     json!({
         "disposition": disposition,
         "id": case.id,
-        "position": encoded_position(position),
-        "state": state,
+        "position": encoded_position(machine.current()),
+        "state": match machine.state() {
+            SequenceState::Current => "current",
+            SequenceState::Degraded => "degraded",
+        },
     })
 }
 

@@ -28,9 +28,10 @@
     {"id":"verification-ready","from":"verifying","operation":"accept","expected_revision":"5","to":"ready","next_revision":"6","expected":"applied"},
     {"id":"finalize-ready","from":"ready","operation":"begin_finalize","expected_revision":"6","to":"finalizing","next_revision":"7","expected":"applied"},
     {"id":"commit-finalize","from":"finalizing","operation":"commit_finalize","expected_revision":"7","to":"finalized","next_revision":"8","expected":"applied"},
-    {"id":"stale-complete","from":"verifying","operation":"complete","expected_revision":"4","to":"verifying","next_revision":"5","expected":"conflict"},
+    {"id":"stale-complete","from":"verifying","operation":"complete","expected_revision":"4","current_revision":"5","to":"verifying","next_revision":"5","expected":"conflict"},
     {"id":"cancel-transfer","from":"transferring","operation":"cancel","expected_revision":"3","to":"canceled","next_revision":"4","expected":"applied"},
     {"id":"reject-verification","from":"verifying","operation":"reject","expected_revision":"5","to":"rejected","next_revision":"6","expected":"applied"},
-    {"id":"expire-ready","from":"ready","operation":"expire","expected_revision":"6","to":"expired","next_revision":"7","expected":"applied"}
+    {"id":"expire-ready","from":"ready","operation":"expire","expected_revision":"6","to":"expired","next_revision":"7","expected":"applied"},
+    {"id":"fail-transfer","from":"transferring","operation":"fail","expected_revision":"4","to":"failed","next_revision":"5","expected":"applied"}
   ]
 }

@@ -56,8 +56,8 @@ pub use sequence::{
     AsyncContinuityAuthorityPort, AsyncContinuityRequest, AsyncDispatchError,
     AsyncDispatchErrorKind, AsyncEnvelopeDispatchPort, BaselineDisposition,
     MAX_REPLAY_TRANSCRIPT_ENVELOPES, ReplayDispatchError, ReplayDispatchOutcome,
-    ResolvedAsyncDelivery, SequenceDegradation, SequenceDisposition, SequenceError,
-    SequenceErrorKind, SequenceState,
+    ResolvedAsyncDelivery, SequenceConformanceMachine, SequenceDegradation, SequenceDisposition,
+    SequenceError, SequenceErrorKind, SequenceState,
 };
 pub use sse::{SseEncoder, SseEvent, SseMembershipControl, SseResponseContract};
 pub use subscription::{

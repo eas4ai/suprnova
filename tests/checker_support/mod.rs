@@ -24,6 +24,7 @@ use suprnova_live::validation::ValidationSelection;
 
 pub(crate) const ROOT_VIEW: &str = "tests/root.html";
 pub(crate) const CHILD_VIEW: &str = "tests/child.html";
+pub(crate) const MODEL_CHILD_VIEW: &str = "tests/model-child.html";
 
 struct ProfileSaved;
 
@@ -54,6 +55,10 @@ pub(crate) fn child_name() -> ComponentName {
     ComponentName::parse("tests.child").expect("child component identity")
 }
 
+fn model_child_name() -> ComponentName {
+    ComponentName::parse("tests.model-child").expect("model child component identity")
+}
+
 pub(crate) fn view(name: &str) -> ViewName {
     ViewName::parse(name).expect("view identity")
 }
@@ -66,6 +71,8 @@ pub(crate) fn registry_with_checker_contract(checker_contract: u16) -> Component
         .expect("register root")
         .register(ComponentDescriptor::new(child_metadata().clone()))
         .expect("register child")
+        .register(ComponentDescriptor::new(model_child_metadata().clone()))
+        .expect("register model child")
         .build()
 }
 
@@ -154,6 +161,28 @@ pub(crate) fn child_metadata() -> &'static ComponentMetadata {
             false,
         )
         .expect("child metadata")
+    })
+}
+
+fn model_child_metadata() -> &'static ComponentMetadata {
+    static METADATA: OnceLock<ComponentMetadata> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let avatar = FieldMetadata::new(
+            ModelField::parse("avatar").expect("model child avatar field"),
+            FieldCategory::Model,
+            StateCodec::Json,
+            true,
+        )
+        .with_model_binding(ModelCodec::String, BindingTiming::Change)
+        .expect("model child avatar binding");
+        ComponentMetadata::new(
+            model_child_name(),
+            view(MODEL_CHILD_VIEW),
+            ContractVersions::new(1, 1, 1, 2, 1).expect("model child versions"),
+            vec![avatar],
+            vec![],
+        )
+        .expect("model child metadata")
     })
 }
 

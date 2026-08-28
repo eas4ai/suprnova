@@ -8,7 +8,7 @@ use html5ever::tendril::SliceExt as _;
 use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
 
-use crate::identity::ComponentName;
+use crate::identity::{ComponentName, ModelField};
 use crate::metadata::ComponentMetadata;
 use crate::registry::ComponentRegistry;
 
@@ -70,6 +70,12 @@ struct IslandFreshness {
     stream: &'static str,
 }
 
+#[derive(Default)]
+struct IslandFieldDeclarations {
+    uploads: BTreeSet<ModelField>,
+    models: BTreeSet<ModelField>,
+}
+
 struct HtmlState<'checker, 'diagnostics> {
     registry: &'checker ComponentRegistry,
     catalog: &'checker TemplateCatalog,
@@ -82,6 +88,7 @@ struct HtmlState<'checker, 'diagnostics> {
     ids: BTreeMap<String, Vec<ComponentName>>,
     teleports: Vec<TeleportIntent>,
     freshness: Vec<(ComponentName, IslandFreshness)>,
+    field_declarations: Vec<IslandFieldDeclarations>,
     tokens: usize,
     attributes: usize,
     loop_depth: usize,
@@ -117,6 +124,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
             ids: BTreeMap::new(),
             teleports: Vec::new(),
             freshness,
+            field_declarations: vec![IslandFieldDeclarations::default()],
             tokens: 0,
             attributes: 0,
             loop_depth: 0,
@@ -194,6 +202,8 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                             stream: "absent",
                         },
                     ));
+                    self.field_declarations
+                        .push(IslandFieldDeclarations::default());
                 }
                 if let Some((_, id)) = attributes.iter().find(|(name, _)| name == "id") {
                     self.ids.entry(id.clone()).or_default().push(owner.clone());
@@ -210,6 +220,7 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
                     });
                 }
                 self.observe_freshness(island_index, &attributes, line);
+                self.observe_upload_model_exclusivity(island_index, &attributes, line, &owner);
                 self.validate_keys(&attributes, line, &owner);
                 let ancestors: Vec<ComponentName> = std::iter::once(self.root.identity().clone())
                     .chain(self.stack.iter().map(|frame| frame.owner.clone()))
@@ -311,6 +322,51 @@ impl<'checker, 'diagnostics> HtmlState<'checker, 'diagnostics> {
 
     fn current_island_index(&self) -> usize {
         self.stack.last().map_or(0, |frame| frame.island_index)
+    }
+
+    fn observe_upload_model_exclusivity(
+        &mut self,
+        island_index: usize,
+        attributes: &[(String, String)],
+        line: u64,
+        owner: &ComponentName,
+    ) {
+        let fields = |directive: &str| {
+            attributes
+                .iter()
+                .filter_map(|(name, value)| {
+                    (name
+                        .strip_prefix("live:")
+                        .and_then(|suffix| suffix.split('.').next())
+                        == Some(directive)
+                        && !value.contains(DYNAMIC_MARKER))
+                    .then(|| ModelField::parse(value).ok())
+                    .flatten()
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let uploads = fields("upload");
+        let models = fields("model");
+        let declarations = self
+            .field_declarations
+            .get_mut(island_index)
+            .expect("island declaration state follows island creation");
+        let conflicts = uploads
+            .iter()
+            .any(|field| declarations.models.contains(field))
+            || models
+                .iter()
+                .any(|field| declarations.uploads.contains(field));
+        declarations.uploads.extend(uploads);
+        declarations.models.extend(models);
+        if conflicts {
+            self.push(
+                DiagnosticCode::InvalidModifier,
+                DiagnosticSeverity::Error,
+                line,
+                owner,
+            );
+        }
     }
 
     fn resolve_component(

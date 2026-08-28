@@ -67,6 +67,7 @@ fn transition(case: &TransitionCase) -> UploadTransition {
         "cancel" => UploadTransition::Cancel,
         "reject" => UploadTransition::Reject,
         "expire" => UploadTransition::Expire,
+        "fail" => UploadTransition::Fail,
         other => panic!("unmapped fixture transition {other}"),
     }
 }
@@ -142,6 +143,35 @@ fn locked_v4_transition_cases_have_exact_typed_outcomes() {
             }
             other => panic!("unknown expected disposition {other}"),
         }
+    }
+}
+
+#[test]
+fn locked_v4_transition_cases_cover_every_production_transition_variant() {
+    let fixture = fixture();
+    let covered = fixture
+        .transition_cases
+        .iter()
+        .map(|case| case.operation.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for operation in [
+        "queue",
+        "begin_transfer",
+        "put_chunk",
+        "complete",
+        "accept",
+        "begin_finalize",
+        "commit_finalize",
+        "cancel",
+        "reject",
+        "expire",
+        "fail",
+    ] {
+        assert!(
+            covered.contains(operation),
+            "v4 transition fixture omits production variant {operation}"
+        );
     }
 }
 

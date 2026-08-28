@@ -13,7 +13,7 @@ use suprnova_live::conformance::{
     FixtureVersion, expected_fixture_manifest_sha256_version, fixture_directory,
 };
 
-use checker_support::{CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
+use checker_support::{CHILD_VIEW, MODEL_CHILD_VIEW, ROOT_VIEW, registry, root_name, view};
 
 #[test]
 fn registered_directives_nested_ownership_and_compatible_branches_are_proved() {
@@ -242,6 +242,51 @@ fn checked_upload_and_stream_markup_is_proved_on_every_static_askama_branch() {
     let report = TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
         .check_component(&root_name());
 
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+}
+
+#[test]
+fn iteration_004_upload_model_exclusivity_respects_fields_islands_and_static_branches() {
+    assert_proved(r#"<input type="file" live:upload="avatar"><input live:model.blur="query">"#);
+
+    let branch_registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"{% if active %}
+                <input type="file" live:upload="avatar">
+            {% else %}
+                <input live:model.change="avatar">
+            {% endif %}"#,
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+    ])
+    .expect("template catalog");
+    let report = TemplateChecker::new(&branch_registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
+    assert!(report.is_proved(), "{:?}", report.diagnostics());
+
+    let nested_registry = registry();
+    let catalog = TemplateCatalog::new(vec![
+        (
+            view(ROOT_VIEW),
+            r#"<input type="file" live:upload="avatar">
+               <section live:component="tests.model-child" live:key="model-child">
+                   <input live:model.change="avatar">
+               </section>"#,
+        ),
+        (
+            view(CHILD_VIEW),
+            include_str!("fixtures/checker/pass/child.html"),
+        ),
+        (view(MODEL_CHILD_VIEW), "<div></div>"),
+    ])
+    .expect("nested island template catalog");
+    let report = TemplateChecker::new(&nested_registry, &catalog, CheckerLimits::default())
+        .check_component(&root_name());
     assert!(report.is_proved(), "{:?}", report.diagnostics());
 }
 

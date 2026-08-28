@@ -185,6 +185,25 @@ fn iteration_004_roles_modifiers_and_conflicts_fail_closed() {
 }
 
 #[test]
+fn iteration_004_upload_model_conflicts_are_island_wide() {
+    for source in [
+        r#"<input type="file" live:upload="avatar"><input live:model.change="avatar">"#,
+        r#"<input live:model.change="avatar"><button live:upload.remove="avatar">Remove</button>"#,
+        r#"<section live:upload.remove="avatar"><input live:model.change="avatar"></section>"#,
+    ] {
+        let report = check(source);
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == DiagnosticCode::InvalidModifier),
+            "missing island-wide upload/model conflict for {source}: {:?}",
+            report.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn iteration_004_progress_rejects_endpoint_values() {
     let report = check(r#"<output live:progress="/uploads/chunk"></output>"#);
     assert!(
