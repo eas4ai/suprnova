@@ -552,17 +552,13 @@ impl ReferenceFreshRender {
 
     pub(super) async fn execute_ordinary_action(&self) -> Result<Value, &'static str> {
         let sequence = self.action_sequence.fetch_add(1, Ordering::SeqCst);
-        let seed = u8::try_from(sequence)
-            .ok()
-            .and_then(|value| value.checked_add(0xa0))
-            .ok_or("ordinary action capacity")?;
         let mut harness = self.harness.lock().await;
         let result = harness
             .execute_action(
                 &ActionName::parse("increment").map_err(|_| "ordinary action identity")?,
                 RawActionArguments::empty(),
                 None,
-                HarnessRequestIdentity::from_seed(seed),
+                HarnessRequestIdentity::from_counter(sequence),
             )
             .await
             .map_err(|_| "ordinary action execution")?;

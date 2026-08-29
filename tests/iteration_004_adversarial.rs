@@ -1,6 +1,7 @@
 //! Iteration 004 cross-feature adversarial regression matrix.
 
 use std::cell::Cell;
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 
 use suprnova_live::async_updates::{
     AsyncTransportErrorKind, WebSocketAuthentication, WebSocketCodec, WebSocketFrame,
@@ -11,6 +12,7 @@ use suprnova_live::host::{
     HostScopeFacts, PrincipalFingerprint, SessionFingerprint, TenantFingerprint,
 };
 use suprnova_live::identity::{ComponentName, KeyId, ModelField, ScopeFingerprint, UnixMillis};
+use suprnova_live::resource::{ResourceBounds, ResourceOwner};
 use suprnova_live::upload::{
     MediaHeaderProbe, TransferGrant, TransferGrantCodec, TransferGrantRequest, TransferGrantScope,
     TransitionDisposition, UploadErrorKind, UploadHandle, UploadIdempotencyKey, UploadRevision,
@@ -202,6 +204,119 @@ fn duplicate_completion_cancel_finalize_and_expire_finalize_are_monotonic() {
         assert_eq!(machine.state(), terminal_state, "{name}");
         assert!(machine.state().is_terminal(), "{name}");
         assert_eq!(machine.revision(), UploadRevision::new(9), "{name}");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RaceWinner {
+    Finalize,
+    Terminal,
+}
+
+#[test]
+fn cancel_and_expire_race_finalize_under_deterministic_barriers() {
+    for (name, terminal, terminal_state) in [
+        ("cancel", UploadTransition::Cancel, UploadState::Canceled),
+        ("expire", UploadTransition::Expire, UploadState::Expired),
+    ] {
+        for winner in [RaceWinner::Terminal, RaceWinner::Finalize] {
+            let machine = Arc::new(Mutex::new(UploadStateMachine::new(
+                UploadHandle::parse(HANDLE).expect("handle"),
+                UploadState::Ready,
+                UploadRevision::new(8),
+            )));
+            let start = Arc::new(Barrier::new(3));
+            let (terminal_done_tx, terminal_done_rx) = mpsc::sync_channel::<()>(0);
+            let (finalize_done_tx, finalize_done_rx) = mpsc::sync_channel::<()>(0);
+            let resources = Arc::new(ResourceOwner::new(
+                ResourceBounds::new(1, 8).expect("race resource bound"),
+            ));
+            resources
+                .queue()
+                .try_push(8, "one-race-operation")
+                .expect("one bounded race operation");
+
+            let terminal_machine = Arc::clone(&machine);
+            let terminal_start = Arc::clone(&start);
+            let terminal_transition = terminal.clone();
+            let terminal_thread =
+                std::thread::spawn(move || {
+                    terminal_start.wait();
+                    if matches!(winner, RaceWinner::Finalize) {
+                        finalize_done_rx.recv().expect("finalize winner signal");
+                    }
+                    let outcome = terminal_machine.lock().expect("terminal race lock").apply(
+                        transition_request(8, &format!("{name}-terminal"), terminal_transition),
+                    );
+                    if matches!(winner, RaceWinner::Terminal) {
+                        terminal_done_tx.send(()).expect("terminal winner signal");
+                    }
+                    outcome
+                });
+
+            let finalize_machine = Arc::clone(&machine);
+            let finalize_start = Arc::clone(&start);
+            let finalize_thread = std::thread::spawn(move || {
+                finalize_start.wait();
+                if matches!(winner, RaceWinner::Terminal) {
+                    terminal_done_rx
+                        .recv()
+                        .expect("terminal winner signal reaches finalize");
+                }
+                let mut machine = finalize_machine.lock().expect("finalize race lock");
+                let begun = machine.apply(transition_request(
+                    8,
+                    &format!("{name}-begin-finalize"),
+                    UploadTransition::BeginFinalize,
+                ));
+                let outcome = match begun {
+                    Ok(_) => machine.apply(transition_request(
+                        9,
+                        &format!("{name}-finish-finalize"),
+                        UploadTransition::CommitFinalize,
+                    )),
+                    Err(error) => Err(error),
+                };
+                if matches!(winner, RaceWinner::Finalize) {
+                    finalize_done_tx
+                        .send(())
+                        .expect("finalize winner signal reaches terminal");
+                }
+                outcome
+            });
+
+            start.wait();
+            let terminal_outcome = terminal_thread.join().expect("terminal thread");
+            let finalize_outcome = finalize_thread.join().expect("finalize thread");
+            let machine = machine.lock().expect("final race state");
+
+            match winner {
+                RaceWinner::Terminal => {
+                    assert!(terminal_outcome.is_ok(), "{name} terminal winner");
+                    assert_eq!(
+                        finalize_outcome.expect_err("stale finalize loser").kind(),
+                        UploadErrorKind::UploadConflict
+                    );
+                    assert_eq!(machine.state(), terminal_state);
+                    assert_eq!(machine.revision(), UploadRevision::new(9));
+                }
+                RaceWinner::Finalize => {
+                    assert!(finalize_outcome.is_ok(), "{name} finalize winner");
+                    assert_eq!(
+                        terminal_outcome.expect_err("stale terminal loser").kind(),
+                        UploadErrorKind::UploadConflict
+                    );
+                    assert_eq!(machine.state(), UploadState::Finalized);
+                    assert_eq!(machine.revision(), UploadRevision::new(10));
+                }
+            }
+            drop(machine);
+            let retirement = resources.retire();
+            assert_eq!(retirement.drained_items, 1);
+            assert_eq!(retirement.drained_bytes, 8);
+            assert!(resources.queue().is_empty());
+            assert_eq!(resources.queue().retained_bytes(), 0);
+        }
     }
 }
 

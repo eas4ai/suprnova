@@ -187,6 +187,20 @@ impl HarnessRequestIdentity {
         }
     }
 
+    /// Derives unique deterministic identity bytes from a host-local request counter.
+    #[must_use]
+    pub fn from_counter(counter: u64) -> Self {
+        let encoded = counter.to_be_bytes();
+        let mut idempotency = [0xa4; 16];
+        idempotency[8..].copy_from_slice(&encoded);
+        let mut digest = [0xd4; 32];
+        digest[24..].copy_from_slice(&encoded);
+        Self {
+            idempotency,
+            digest,
+        }
+    }
+
     fn materialize(self) -> Result<(IdempotencyKey, ContentDigest), HarnessError> {
         let idempotency = IdempotencyKey::from_bytes(&self.idempotency)
             .map_err(|_| HarnessError::new(HarnessErrorKind::InvalidRequestIdentity))?;

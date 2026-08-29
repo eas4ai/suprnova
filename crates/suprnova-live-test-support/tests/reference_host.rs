@@ -45,6 +45,7 @@ const DIRECT_FLOW_PORT: u16 = 4_198;
 const ORDINARY_ACTION_PORT: u16 = 4_199;
 const UPLOAD_WINDOW_PORT: u16 = 4_200;
 const ADVERSARIAL_ORIGIN_PORT: u16 = 4_201;
+const ADVERSARIAL_MATRIX_PORT: u16 = 4_202;
 const WRONG_ISLAND_FRESH_RENDER_REQUEST: &str = r#"{"base_revision":"7","child_parameters":null,"component":"catalog.search","correlation_id":"EBESExQVFhcYGRobHB0eHw","extensions":{"x_suprnova_live_document_key_v1":"primary"},"idempotency_key":"MDEyMzQ1Njc4OTo7PD0-Pw","model_proposals":{},"operations":[{"kind":"fresh_render"}],"protocol_version":2,"runtime_contract_version":2,"snapshot":{"envelope":{"body":{},"signature":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"kind":"instance"},"snapshot_schema_version":1}"#;
 
 struct TestRoot(PathBuf);
@@ -1450,7 +1451,14 @@ async fn websocket_upgrade_rejects_every_hostile_origin_shape_before_transport_l
     ];
 
     for (name, origins) in cases {
-        let response = websocket_upgrade_with_origins(&host, &origins, "unknown-transport").await;
+        let response = websocket_upgrade_with_authority(
+            &host,
+            &origins,
+            "unknown-transport",
+            Some("Bearer deliberately-invalid-session"),
+            Some("suprnova_live_reference_session=deliberately-invalid-session"),
+        )
+        .await;
         assert!(
             response.starts_with("HTTP/1.1 403"),
             "{name} origin was not rejected before transport lookup: {response}"
@@ -1465,6 +1473,23 @@ async fn websocket_upgrade_rejects_every_hostile_origin_shape_before_transport_l
         );
     }
 
+    let (status, _, inspection) = request(
+        &host,
+        Method::GET,
+        "/__test/iteration-004/inspection",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let inspection: Value = serde_json::from_slice(&inspection).expect("inspection JSON");
+    assert_eq!(
+        inspection["websocket_authentication_attempts"], 0,
+        "hostile Origins must reject before cookie or bearer authentication"
+    );
+    assert_eq!(inspection["physical_websocket_connections"], 0);
+    assert_eq!(inspection["active_physical_transports"], 0);
+
     let (status, _, bytes) = request(
         &host,
         Method::GET,
@@ -1478,6 +1503,112 @@ async fn websocket_upgrade_rejects_every_hostile_origin_shape_before_transport_l
     host.shutdown()
         .await
         .expect("clean adversarial-host shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adversarial_control_executes_the_closed_engine_matrix_and_preserves_ordinary_work() {
+    let root = TestRoot::new("adversarial-matrix");
+    let host = start_host(ADVERSARIAL_MATRIX_PORT, &root, ReferenceFaultSchedule::None).await;
+    let cases = [
+        ("hostile-media-header", "media_header_unproved", "replace"),
+        ("scan-timeout", "scan_retry", "retry"),
+        (
+            "provider-partial-failure",
+            "reconciliation_required",
+            "reconcile",
+        ),
+        ("replay-overflow", "invalid_envelope", "fresh_render"),
+        ("revoked-authorization", "authorization_lost", "reauthorize"),
+        ("fanout-pressure", "fanout_exceeded", "reconnect"),
+        ("oversized-message", "frame_too_large", "close_transport"),
+        ("truncated-message", "invalid_envelope", "close_transport"),
+        ("reordered-message", "sequence_gap", "fresh_render"),
+        ("duplicate-completion", "existing_outcome", "none"),
+        (
+            "cancel-finalize-cancel-wins",
+            "upload_conflict",
+            "terminal_canceled",
+        ),
+        (
+            "cancel-finalize-finalize-wins",
+            "upload_conflict",
+            "terminal_finalized",
+        ),
+        (
+            "expire-finalize-expire-wins",
+            "upload_conflict",
+            "terminal_expired",
+        ),
+        (
+            "expire-finalize-finalize-wins",
+            "upload_conflict",
+            "terminal_finalized",
+        ),
+        ("late-event", "retired_delivery_ignored", "none"),
+        ("retirement", "retired", "none"),
+        ("unknown-feature-failure", "feature_unavailable", "none"),
+        ("scoped-exhaustion", "creation_rate_exceeded", "new_scope"),
+    ];
+    let mut expected_action_revision = 0_u64;
+
+    for (case, disposition, recovery) in cases {
+        let (status, _, body) = request(
+            &host,
+            Method::POST,
+            &format!("/__test/iteration-004/adversarial/{case}"),
+            &[],
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{case}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(body.len() <= 4_096, "{case} response exceeded its bound");
+        let outcome: Value = serde_json::from_slice(&body).expect("adversarial outcome JSON");
+        assert_eq!(outcome["case"], case, "{case}");
+        assert_eq!(outcome["disposition"], disposition, "{case}");
+        assert_eq!(outcome["recovery"], recovery, "{case}");
+        assert_eq!(outcome["retained_items"], 0, "{case}");
+        assert_eq!(outcome["retained_bytes"], 0, "{case}");
+        assert_eq!(outcome["dependent_feature_closed"], true, "{case}");
+        assert_eq!(outcome["unrelated_scope_usable"], true, "{case}");
+        assert!(
+            outcome["high_water_items"]
+                .as_u64()
+                .expect("item high water")
+                <= outcome["ceiling_items"].as_u64().expect("item ceiling"),
+            "{case} item ceiling"
+        );
+        assert!(
+            outcome["high_water_bytes"]
+                .as_u64()
+                .expect("byte high water")
+                <= outcome["ceiling_bytes"].as_u64().expect("byte ceiling"),
+            "{case} byte ceiling"
+        );
+        let diagnostic = outcome["diagnostic"].as_str().expect("safe diagnostic");
+        assert!(diagnostic.len() <= 128, "{case} diagnostic bound");
+        assert!(!diagnostic.contains("secret"), "{case} diagnostic leak");
+
+        let (status, _, action) = json_request(
+            &host,
+            Method::POST,
+            "/scenario/iteration004/action",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{case} poisoned ordinary action");
+        expected_action_revision += 1;
+        assert_eq!(action["revision"], expected_action_revision, "{case}");
+        assert_eq!(action["domain_count"], expected_action_revision, "{case}");
+    }
+
+    host.shutdown()
+        .await
+        .expect("clean adversarial-matrix shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1997,6 +2128,23 @@ async fn websocket_upgrade_with_origins(
     origins: &[&str],
     transport: &str,
 ) -> String {
+    websocket_upgrade_with_authority(
+        host,
+        origins,
+        transport,
+        Some(REFERENCE_AUTHORIZATION),
+        None,
+    )
+    .await
+}
+
+async fn websocket_upgrade_with_authority(
+    host: &ReferenceHost,
+    origins: &[&str],
+    transport: &str,
+    authorization: Option<&str>,
+    cookie: Option<&str>,
+) -> String {
     let mut stream = TcpStream::connect(host.address())
         .await
         .expect("connect WebSocket");
@@ -2004,8 +2152,14 @@ async fn websocket_upgrade_with_origins(
         .iter()
         .map(|origin| format!("Origin: {origin}\r\n"))
         .collect::<String>();
+    let authorization_header = authorization
+        .map(|value| format!("Authorization: {value}\r\n"))
+        .unwrap_or_default();
+    let cookie_header = cookie
+        .map(|value| format!("Cookie: {value}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "GET /__live/async/ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin_headers}Authorization: {REFERENCE_AUTHORIZATION}\r\nX-Live-Transport: {transport}\r\n\r\n",
+        "GET /__live/async/ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin_headers}{authorization_header}{cookie_header}X-Live-Transport: {transport}\r\n\r\n",
         host.address(),
     );
     stream.write_all(request.as_bytes()).await.unwrap();

@@ -1,5 +1,6 @@
 //! Browser-facing production-artifact host for Iteration 004 conformance.
 
+mod adversarial;
 mod artifacts;
 mod async_updates;
 mod engine_async;
@@ -86,6 +87,7 @@ const ITERATION_004_STYLES: &str = "/scenario/iteration004.css";
 const ITERATION_004_FINALIZE_UPLOAD: &str = "/scenario/iteration004/finalize-upload";
 const ITERATION_004_ACTION: &str = "/scenario/iteration004/action";
 const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
+const ITERATION_004_ADVERSARIAL: &str = "/__test/iteration-004/adversarial/:case";
 const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
 const ITERATION_004_PAUSE_FINALIZE: &str = "/__test/iteration-004/control/upload/pause-finalize";
 const ITERATION_004_ADVANCE_UPLOAD_PAUSE_CLOCK: &str =
@@ -160,6 +162,8 @@ pub struct ReferenceHostInspection {
     pub physical_sse_connections: usize,
     /// Total physical WebSocket connections opened.
     pub physical_websocket_connections: usize,
+    /// WebSocket cookie or bearer authentication checks attempted.
+    pub websocket_authentication_attempts: usize,
     /// Largest bounded logical-membership count observed.
     pub maximum_logical_memberships: usize,
     /// Compiled fault steps applied.
@@ -291,6 +295,7 @@ impl ResourceCounters {
 struct InspectionState {
     physical_sse_connections: AtomicUsize,
     physical_websocket_connections: AtomicUsize,
+    websocket_authentication_attempts: AtomicUsize,
     rejected_arbitrary_fault_selectors: AtomicUsize,
     resources: ResourceCounters,
 }
@@ -330,6 +335,10 @@ impl HostState {
             physical_websocket_connections: self
                 .inspection
                 .physical_websocket_connections
+                .load(Ordering::SeqCst),
+            websocket_authentication_attempts: self
+                .inspection
+                .websocket_authentication_attempts
                 .load(Ordering::SeqCst),
             maximum_logical_memberships: self.async_runtime.maximum_memberships(),
             compiled_faults_applied: self
@@ -601,6 +610,7 @@ fn router(state: Arc<HostState>) -> Router {
         )
         .route(ITERATION_004_ACTION, post(iteration_004_action))
         .route(ITERATION_004_INSPECTION, get(iteration_004_inspection))
+        .route(ITERATION_004_ADVERSARIAL, post(iteration_004_adversarial))
         .route(ITERATION_004_PAUSE_UPLOAD, post(iteration_004_pause_upload))
         .route(
             ITERATION_004_PAUSE_FINALIZE,
@@ -980,11 +990,15 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if let Some(response) = websocket_session_error(&headers) {
-        return response;
-    }
     if single_header(&headers, ORIGIN.as_str()) != Some(state.origin.as_str()) {
         return error(StatusCode::FORBIDDEN, "websocket_origin_rejected");
+    }
+    state
+        .inspection
+        .websocket_authentication_attempts
+        .fetch_add(1, Ordering::SeqCst);
+    if let Some(response) = websocket_session_error(&headers) {
+        return response;
     }
     let protocol = header(&headers, SEC_WEBSOCKET_PROTOCOL.as_str()).and_then(|value| {
         value
@@ -1236,9 +1250,17 @@ async fn iteration_004_inspection(State(state): State<Arc<HostState>>) -> Respon
         "open_timers": snapshot.open_timers,
         "physical_sse_connections": snapshot.physical_sse_connections,
         "physical_websocket_connections": snapshot.physical_websocket_connections,
+        "websocket_authentication_attempts": snapshot.websocket_authentication_attempts,
         "upload_service_calls": snapshot.upload_service_calls,
     }))
     .into_response()
+}
+
+async fn iteration_004_adversarial(Path(case): Path<String>) -> Response {
+    match adversarial::execute(&case) {
+        Some(outcome) => Json(outcome).into_response(),
+        None => error(StatusCode::NOT_FOUND, "adversarial_case_unknown"),
+    }
 }
 
 #[derive(Deserialize)]
