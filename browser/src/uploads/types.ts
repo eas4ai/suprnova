@@ -172,6 +172,7 @@ export interface UploadSecretSnapshot {
 }
 
 export interface UploadManagerSnapshot {
+  readonly cleanupObligations: number;
   readonly uploads: readonly UploadTransferSnapshot[];
 }
 

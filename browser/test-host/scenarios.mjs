@@ -1049,7 +1049,7 @@ export const scenarios = Object.freeze({
     headers: {
       "cache-control": "private, max-age=60",
       "content-security-policy":
-        "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; form-action 'self'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; connect-src 'self' https://uploads.example.test; img-src 'self' data:; style-src 'self'; form-action 'self'; base-uri 'none'",
     },
     html: iteration004Scenario,
   },

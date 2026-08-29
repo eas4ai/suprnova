@@ -58,7 +58,7 @@ use super::faults::ReferenceFaultSchedule;
 use super::{ResourceCounter, ResourceLease};
 
 const CREATED_AT: UnixMillis = UnixMillis::new(1_000);
-const UPLOAD_PAUSE_DEADLINE: Duration = Duration::from_secs(2);
+const UPLOAD_PAUSE_DEADLINE_STEPS: u64 = 1;
 const MAX_BROWSER_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +135,7 @@ struct UploadOperationPause {
 struct UploadPauseState {
     selected: Option<UploadPauseSelection>,
     active: Option<UploadPauseSelection>,
+    clock_step: u64,
     next_generation: u64,
     last_retired_generation: u64,
     retired: bool,
@@ -145,6 +146,7 @@ struct UploadPauseSelection {
     handle: String,
     operation_generation: u64,
     control_generation: u64,
+    deadline_step: u64,
     _timer_lease: ResourceLease,
 }
 
@@ -167,6 +169,7 @@ impl UploadOperationPause {
             state: SyncMutex::new(UploadPauseState {
                 selected: None,
                 active: None,
+                clock_step: 0,
                 next_generation: 0,
                 last_retired_generation: 0,
                 retired: false,
@@ -200,24 +203,63 @@ impl UploadOperationPause {
                 .checked_add(1)
                 .filter(|generation| *generation <= MAX_BROWSER_SAFE_INTEGER)
                 .ok_or("upload_pause_capacity_exceeded")?;
+            let deadline_step = state
+                .clock_step
+                .checked_add(UPLOAD_PAUSE_DEADLINE_STEPS)
+                .filter(|deadline| *deadline <= MAX_BROWSER_SAFE_INTEGER)
+                .ok_or("upload_pause_capacity_exceeded")?;
             state.next_generation = generation;
             state.selected = Some(UploadPauseSelection {
                 point,
                 handle: handle.to_owned(),
                 operation_generation,
                 control_generation: generation,
+                deadline_step,
                 _timer_lease: timer_lease,
             });
             generation
         };
-        let weak = Arc::downgrade(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(UPLOAD_PAUSE_DEADLINE).await;
-            if let Some(pause) = weak.upgrade() {
-                pause.expire(generation);
-            }
-        });
         Ok(generation)
+    }
+
+    fn advance_clock(&self) -> Result<(), &'static str> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.retired {
+            return Err("upload_pause_retired");
+        }
+        if state.selected.is_none() && state.active.is_none() {
+            return Err("upload_pause_clock_idle");
+        }
+        state.clock_step = state
+            .clock_step
+            .checked_add(UPLOAD_PAUSE_DEADLINE_STEPS)
+            .filter(|step| *step <= MAX_BROWSER_SAFE_INTEGER)
+            .ok_or("upload_pause_capacity_exceeded")?;
+        let current_step = state.clock_step;
+        let selected = state
+            .selected
+            .as_ref()
+            .is_some_and(|selection| selection.deadline_step <= current_step);
+        let active = state
+            .active
+            .as_ref()
+            .is_some_and(|selection| selection.deadline_step <= current_step);
+        let retired_generation = state
+            .selected
+            .as_ref()
+            .filter(|_| selected)
+            .or_else(|| state.active.as_ref().filter(|_| active))
+            .map_or(0, |selection| selection.control_generation);
+        if selected {
+            drop(state.selected.take());
+        }
+        if active {
+            drop(state.active.take());
+        }
+        state.last_retired_generation = state.last_retired_generation.max(retired_generation);
+        drop(state);
+        self.changed.notify_waiters();
+        Ok(())
     }
 
     async fn pause_if_selected(
@@ -904,6 +946,60 @@ impl UploadRuntime {
         Ok(())
     }
 
+    pub(super) fn store_direct_capability(
+        &self,
+        endpoint: &str,
+        part: u32,
+        reference: &str,
+        required_part_header: &str,
+        bytes: &[u8],
+    ) -> Result<(), UploadError> {
+        self.record_call();
+        let handle = {
+            let records = self
+                .uploads
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            records.iter().find_map(|(handle, slot)| match slot {
+                UploadSlot::Ready(upload)
+                    if upload
+                        .direct_instruction
+                        .as_ref()
+                        .is_some_and(|instruction| instruction.endpoint().as_str() == endpoint) =>
+                {
+                    Some(handle.clone())
+                }
+                UploadSlot::Ready(_) | UploadSlot::Busy { .. } => None,
+            })
+        }
+        .ok_or_else(|| UploadError::new(UploadErrorKind::UploadConflict))?;
+        let mut operation = self.take_upload(&handle)?;
+        let upload = operation.upload_mut();
+        let instruction = upload
+            .direct_instruction
+            .as_ref()
+            .filter(|instruction| {
+                upload.mode == TransferMode::Direct
+                    && !upload.state.is_terminal()
+                    && instruction.part().index() == part
+                    && instruction.reference().as_str() == reference
+                    && instruction.required_headers().iter().any(|(name, value)| {
+                        name.as_str() == "x-suprnova-part" && value == required_part_header
+                    })
+            })
+            .ok_or_else(|| UploadError::new(UploadErrorKind::ScopeMismatch))?;
+        let disposition = self
+            .direct
+            .store_part_for_test(instruction, bytes, CREATED_AT)?;
+        if disposition == ChunkDisposition::Stored {
+            upload.whole_hasher.update(bytes);
+            upload.direct_checksum =
+                Some(UploadChecksum::parse(&hex_digest(Sha256::digest(bytes)))?);
+        }
+        Ok(())
+    }
+
     pub(super) async fn report_direct_part(
         &self,
         handle: &str,
@@ -1371,6 +1467,10 @@ impl UploadRuntime {
         self.operation_pause.active_count()
     }
 
+    pub(super) fn advance_pause_clock(&self) -> Result<(), &'static str> {
+        self.operation_pause.advance_clock()
+    }
+
     pub(super) async fn reset_creation_window(&self) -> Result<(), &'static str> {
         let _creation_window_guard = self.creation_window_gate.lock().await;
         let uploads = self
@@ -1826,6 +1926,54 @@ fn hex_digest(digest: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn one_axum_frame_is_split_at_the_provider_pull_boundary_without_retained_excess() {
+        const PROVIDER_PULL_BYTES: usize = 256 * 1024;
+        let expected = (0..=PROVIDER_PULL_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let expected_digest = Sha256::digest(&expected);
+        let (_shutdown, shutdown) = watch::channel(false);
+        let mut body = AxumChunkBody::new(
+            Body::from(expected.clone()),
+            Sha256::new(),
+            false,
+            expected.len(),
+            shutdown,
+        );
+
+        let first = body
+            .next_chunk(PROVIDER_PULL_BYTES)
+            .await
+            .expect("first provider pull")
+            .expect("first bounded body fragment");
+        assert_eq!(first.len(), PROVIDER_PULL_BYTES);
+        let second = body
+            .next_chunk(PROVIDER_PULL_BYTES)
+            .await
+            .expect("second provider pull")
+            .expect("one-byte body remainder");
+        assert_eq!(second.len(), 1);
+        assert!(
+            body.next_chunk(1)
+                .await
+                .expect("excess-body probe")
+                .is_none(),
+            "provider observed bytes beyond the declared frame"
+        );
+        assert!(body.pending.is_none(), "Axum frame remainder was retained");
+        assert_eq!(body.yielded_chunks, 2);
+
+        let mut delivered = Vec::with_capacity(expected.len());
+        delivered.extend_from_slice(first.as_ref());
+        delivered.extend_from_slice(second.as_ref());
+        assert_eq!(delivered, expected);
+        assert_eq!(
+            body.into_hasher().finalize().as_slice(),
+            expected_digest.as_slice()
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_detached_upload_operation_restores_state_when_its_future_is_aborted() {
         let mut random = [0_u8; 8];
@@ -2010,7 +2158,7 @@ mod tests {
             .expect("remove empty test root");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn upload_pause_is_exact_generation_bounded_and_auto_retires() {
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).expect("test root entropy");
@@ -2058,9 +2206,9 @@ mod tests {
             runtime.pause_chunk("wrong-handle", revision).await,
             Err("upload_pause_scope_invalid")
         );
-        tokio::task::yield_now().await;
-        tokio::time::advance(UPLOAD_PAUSE_DEADLINE + Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        runtime
+            .advance_pause_clock()
+            .expect("controlled deadline retires selected pause");
         assert_eq!(
             runtime.resume_chunk(generation),
             Err("upload_pause_generation_stale")
@@ -2091,8 +2239,9 @@ mod tests {
         runtime.operation_pause.wait_until_entered(generation).await;
         assert_eq!(runtime.paused_operations(), 1);
         assert_eq!(timers.current(), 1);
-        tokio::time::advance(UPLOAD_PAUSE_DEADLINE + Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        runtime
+            .advance_pause_clock()
+            .expect("controlled deadline retires active pause");
         let result = operation
             .await
             .expect("timed operation")
@@ -2104,7 +2253,32 @@ mod tests {
             runtime.resume_chunk(generation),
             Err("upload_pause_generation_stale")
         );
+
+        let current_revision = result["revision"]
+            .as_u64()
+            .expect("current upload revision");
+        for _ in 0..32 {
+            let generation = runtime
+                .pause_chunk(&handle, current_revision)
+                .await
+                .expect("repeated scoped pause");
+            assert_eq!(timers.current(), 1);
+            runtime
+                .resume_chunk(generation)
+                .expect("repeated pause resumes");
+            assert_eq!(runtime.paused_operations(), 0);
+            assert!(!runtime.operation_pause.has_authority());
+            assert_eq!(timers.current(), 0);
+        }
+        runtime
+            .pause_chunk(&handle, current_revision)
+            .await
+            .expect("shutdown-owned pause");
+        assert!(runtime.operation_pause.has_authority());
+        assert_eq!(timers.current(), 1);
         runtime.retire().await.expect("runtime retires");
+        assert!(!runtime.operation_pause.has_authority());
+        assert_eq!(timers.current(), 0);
         assert_eq!(active.current(), 0);
         tokio::fs::remove_dir_all(&root)
             .await

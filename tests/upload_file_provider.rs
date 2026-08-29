@@ -463,16 +463,18 @@ impl QuarantineStore for DetachedLateStore {
         let pause = self.take_pause(StorePausePoint::Create);
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
-        let settled = Arc::clone(&self.settled);
-        spawn_test_operation(async move {
-            if pause {
-                entered.notify_one();
-                release.notified().await;
-            }
-            let result = inner.create_exclusive(&object).await;
-            settled.notify_one();
-            result
-        })
+        if pause {
+            spawn_notifying_test_operation(
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    inner.create_exclusive(&object).await
+                },
+                Arc::clone(&self.settled),
+            )
+        } else {
+            spawn_test_operation(async move { inner.create_exclusive(&object).await })
+        }
     }
 
     fn write_at(
@@ -487,16 +489,18 @@ impl QuarantineStore for DetachedLateStore {
         let pause = self.take_pause(StorePausePoint::Write);
         let entered = Arc::clone(&self.entered);
         let release = Arc::clone(&self.release);
-        let settled = Arc::clone(&self.settled);
-        spawn_test_operation(async move {
-            if pause {
-                entered.notify_one();
-                release.notified().await;
-            }
-            let result = inner.write_at(&object, offset, &bytes).await;
-            settled.notify_one();
-            result
-        })
+        if pause {
+            spawn_notifying_test_operation(
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    inner.write_at(&object, offset, &bytes).await
+                },
+                Arc::clone(&self.settled),
+            )
+        } else {
+            spawn_test_operation(async move { inner.write_at(&object, offset, &bytes).await })
+        }
     }
 
     fn sync(&self, object: &QuarantineObject) -> QuarantineOperation<()> {
@@ -602,6 +606,18 @@ fn spawn_test_operation<T: Clone + Send + 'static>(
     let (operation, completion) = QuarantineOperation::pending();
     tokio::spawn(async move {
         completion.complete(future.await);
+    });
+    operation
+}
+
+fn spawn_notifying_test_operation<T: Clone + Send + 'static>(
+    future: impl Future<Output = Result<T, UploadError>> + Send + 'static,
+    settled: Arc<Notify>,
+) -> QuarantineOperation<T> {
+    let (operation, completion) = QuarantineOperation::pending();
+    tokio::spawn(async move {
+        completion.complete(future.await);
+        settled.notify_one();
     });
     operation
 }
@@ -1071,12 +1087,6 @@ async fn retirement_fences_a_detached_late_create_until_physical_completion() {
 
     store.release();
     store.wait_until_settled().await;
-    for _ in 0..32 {
-        if provider.retirement_status().active_operations() == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
     provider
         .retire_and_cleanup()
         .await
@@ -1134,12 +1144,6 @@ async fn exact_retry_cannot_overtake_a_detached_late_write() {
 
     store.release();
     store.wait_until_settled().await;
-    for _ in 0..32 {
-        if provider.retirement_status().active_operations() == 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
     assert_eq!(provider.retirement_status().active_operations(), 0);
     let mut retry = TestBody::bytes(&[b"safe"]);
     provider

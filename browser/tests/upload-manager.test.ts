@@ -126,6 +126,14 @@ class MemoryTransport implements UploadTransport {
   }
 }
 
+class NeverSettlingCancellationTransport extends MemoryTransport {
+  override send(request: UploadTransportRequest): Promise<UploadTransportResponse> {
+    if (request.operation !== "cancel") return super.send(request);
+    this.requests.push(request);
+    return new Promise(() => undefined);
+  }
+}
+
 function manager(transport = new MemoryTransport(), maxActive = 4) {
   return {
     manager: new UploadManager({
@@ -224,6 +232,37 @@ describe("current-document upload manager", () => {
     ).toHaveLength(1);
     expect(native.writes).toEqual([{ property: "value", value: "" }]);
     expect(fixture.manager.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+  });
+
+  it("bounds never-settling cancellation cleanup and reports it honestly after shutdown", async () => {
+    const transport = new NeverSettlingCancellationTransport();
+    const fixture = new UploadManager({
+      chunkBytes: 256 * KIB,
+      connectivity: new Online(),
+      maxActive: 1,
+      maxItems: 2,
+      maxQueueBytes: 256 * KIB,
+      randomness: new Sequence(),
+      transport,
+    });
+    const owner = island("never-settling-cancel");
+    for (let index = 0; index < 8; index += 1) {
+      await fixture.select({ field: "attachment", input: input(), island: owner.port }, [
+        file(`cleanup-${String(index)}.bin`, 1),
+      ]);
+      await fixture.remove(owner.port, "attachment");
+    }
+
+    const cancellations = transport.requests.filter(({ operation }) => operation === "cancel");
+    expect(cancellations).toHaveLength(8);
+    expect(fixture.snapshot().cleanupObligations).toBe(2);
+    expect(fixture.snapshot().uploads).toEqual([]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
+
+    fixture.dispose();
+    expect(fixture.snapshot().cleanupObligations).toBe(2);
+    expect(fixture.snapshot().uploads).toEqual([]);
+    expect(fixture.inspectSecrets()).toEqual({ chunks: 0, files: 0, grants: 0 });
   });
 
   it("suspends for bfcache as interrupted without losing the file, then clears on navigation", async () => {

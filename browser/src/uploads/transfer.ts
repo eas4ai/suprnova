@@ -13,6 +13,7 @@ import {
   type UploadSecretSnapshot,
   type UploadTransferSnapshot,
   type UploadTransport,
+  type UploadTransportRequest,
   type UploadTransportResponse,
 } from "./types.js";
 
@@ -47,7 +48,32 @@ export interface UploadTransferOptions {
   readonly onHandle?: ((handle: UploadHandle | null) => void) | undefined;
   readonly randomness: UploadRandomness;
   readonly reacquired?: ReacquiredTransfer | undefined;
+  readonly scheduleCleanup?: UploadCleanupScheduler | undefined;
   readonly transport: UploadTransport;
+}
+
+export interface UploadCancellationCleanup {
+  readonly request: Extract<UploadTransportRequest, { readonly operation: "cancel" }>;
+  readonly transport: UploadTransport;
+}
+
+export type UploadCleanupScheduler = (cleanup: UploadCancellationCleanup) => void;
+
+export async function settleUploadCancellation(cleanup: UploadCancellationCleanup): Promise<void> {
+  try {
+    const response = await cleanup.transport.send(cleanup.request);
+    validateTransportResponse("cancel", response, cleanup.request.expectedRevision);
+  } catch {
+    // Server cleanup owns uncertain cancellation after local authority is released.
+  }
+}
+
+export function detachUploadCancellation(cleanup: UploadCancellationCleanup): void {
+  try {
+    void cleanup.transport.send(cleanup.request);
+  } catch {
+    // Dispatch is best-effort after local authority is released.
+  }
 }
 
 function rotateRight(value: number, count: number): number {
@@ -177,13 +203,13 @@ export class UploadTransfer {
   readonly #onChange: (() => void) | undefined;
   readonly #onHandle: ((handle: UploadHandle | null) => void) | undefined;
   readonly #randomness: UploadRandomness;
+  readonly #scheduleCleanup: UploadCleanupScheduler;
   readonly #transport: UploadTransport;
   readonly #whole = new IncrementalSha256();
   #abort = new AbortController();
   #completeKey: string | null = null;
   #completionUncertain = false;
   #createKey: string;
-  readonly #controlAborts = new Set<AbortController>();
   #file: File | null;
   #grant: SecretTransferGrant | null = null;
   #handle: UploadHandle | null = null;
@@ -211,6 +237,7 @@ export class UploadTransfer {
     this.#onChange = options.onChange;
     this.#onHandle = options.onHandle;
     this.#randomness = options.randomness;
+    this.#scheduleCleanup = options.scheduleCleanup ?? detachUploadCancellation;
     this.#transport = options.transport;
     this.#createKey = this.#nextKey();
     if (options.reacquired !== undefined) {
@@ -280,8 +307,6 @@ export class UploadTransfer {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#abort.abort();
-    for (const abort of this.#controlAborts) abort.abort();
-    this.#controlAborts.clear();
     if (this.#state !== "expired") this.#state = "canceled";
     this.#releaseAuthority();
     this.#changed();
@@ -564,26 +589,19 @@ export class UploadTransfer {
     revision: string,
     idempotencyKey: string,
   ): void {
-    const abort = new AbortController();
-    this.#controlAborts.add(abort);
-    void this.#transport
-      .send({
-        expectedRevision: revision,
-        grant,
-        handle,
-        idempotencyKey,
-        operation: "cancel",
-        signal: abort.signal,
-      })
-      .then((response) => {
-        validateTransportResponse("cancel", response, revision);
-      })
-      .catch(() => {
-        // Server cleanup owns uncertain cancellation after local authority is released.
-      })
-      .finally(() => {
-        this.#controlAborts.delete(abort);
-      });
+    this.#scheduleCleanup(
+      Object.freeze({
+        request: Object.freeze({
+          expectedRevision: revision,
+          grant,
+          handle,
+          idempotencyKey,
+          operation: "cancel",
+          signal: new AbortController().signal,
+        }),
+        transport: this.#transport,
+      }),
+    );
   }
 
   #setState(state: UploadPresentationState): void {

@@ -442,24 +442,97 @@ test("the real direct provider stores, reports, verifies, completes, and finaliz
   const created = (await createdResponse.json()) as {
     grant: string;
     handle: string;
-    instruction: { method: string; maximum_bytes: number };
+    instruction: {
+      expires_at: number;
+      headers: Record<string, string>;
+      maximum_bytes: number;
+      method: string;
+      offset: number;
+      part: number;
+      reference: string;
+      url: string;
+    };
   };
-  expect(created.instruction).toEqual({
-    ...created.instruction,
+  expect(created.instruction).toMatchObject({
+    expires_at: 901_000,
+    headers: { "x-suprnova-part": created.instruction.reference },
     maximum_bytes: bytes.length,
     method: "PUT",
+    offset: 0,
+    part: 0,
   });
-  const stored = await page.request.put(
-    `${REFERENCE_ORIGIN}/__test/iteration-004/direct/${created.handle}/store`,
-    {
-      data: bytes,
-      headers: {
-        Authorization: "Bearer task1-reference-session",
-        "Content-Type": "application/octet-stream",
-      },
-    },
+  expect(new URL(created.instruction.url).searchParams.get("credential")).toBe(
+    created.instruction.reference,
   );
-  expect(stored.status()).toBe(204);
+  expect(Object.entries(created.instruction.headers)).toEqual([
+    ["x-suprnova-part", created.instruction.reference],
+  ]);
+  await page.route(/^https:\/\/uploads\.example\.test\//u, async (route) => {
+    const providerRequest = route.request();
+    if (providerRequest.method() === "OPTIONS") {
+      await route.fulfill({
+        headers: {
+          "Access-Control-Allow-Headers": "content-type,x-suprnova-part",
+          "Access-Control-Allow-Methods": "PUT",
+          "Access-Control-Allow-Origin": REFERENCE_ORIGIN,
+        },
+        status: 204,
+      });
+      return;
+    }
+    const providerUrl = new URL(providerRequest.url());
+    const response = await page.request.fetch(
+      `${REFERENCE_ORIGIN}/__test/iteration-004/provider${providerUrl.pathname}${providerUrl.search}`,
+      {
+        data: providerRequest.postDataBuffer() ?? Buffer.alloc(0),
+        headers: {
+          ...providerRequest.headers(),
+        },
+        method: providerRequest.method(),
+      },
+    );
+    await route.fulfill({
+      body: await response.body(),
+      headers: {
+        ...response.headers(),
+        "Access-Control-Allow-Origin": REFERENCE_ORIGIN,
+      },
+      status: response.status(),
+    });
+  });
+  const transfer = async (url: string, headers: Record<string, string>) =>
+    page.evaluate(
+      async ({ body, requestHeaders, requestMethod, requestUrl }) => {
+        const response = await fetch(requestUrl, {
+          body: new Uint8Array(body),
+          headers: requestHeaders,
+          method: requestMethod,
+        });
+        return response.status;
+      },
+      {
+        body: [...bytes],
+        requestHeaders: headers,
+        requestMethod: created.instruction.method,
+        requestUrl: url,
+      },
+    );
+  expect(await transfer(created.instruction.url, {})).toBe(409);
+  expect(
+    await transfer(created.instruction.url, {
+      "x-suprnova-part": `${created.instruction.reference.slice(0, -1)}0`,
+    }),
+  ).toBe(401);
+  const forgedUrl = new URL(created.instruction.url);
+  forgedUrl.searchParams.set("credential", `${created.instruction.reference.slice(0, -1)}0`);
+  expect(await transfer(forgedUrl.href, created.instruction.headers)).toBe(409);
+  const forgedPath = new URL(created.instruction.url);
+  const providerSegments = forgedPath.pathname.split("/");
+  const providerObject = providerSegments[2] ?? "";
+  providerSegments[2] = `${providerObject.slice(0, -1)}${providerObject.endsWith("0") ? "1" : "0"}`;
+  forgedPath.pathname = providerSegments.join("/");
+  expect(await transfer(forgedPath.href, created.instruction.headers)).toBe(409);
+  expect(await transfer(created.instruction.url, created.instruction.headers)).toBe(204);
   const reported = await page.request.post(
     `${REFERENCE_ORIGIN}/__test/iteration-004/direct/${created.handle}/report`,
     {

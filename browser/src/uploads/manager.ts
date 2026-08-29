@@ -4,7 +4,12 @@ import {
   type BoundedLease,
   type PermitRequest,
 } from "../features/bounded.js";
-import { UploadTransfer } from "./transfer.js";
+import {
+  detachUploadCancellation,
+  settleUploadCancellation,
+  UploadTransfer,
+  type UploadCancellationCleanup,
+} from "./transfer.js";
 import { reacquireUpload } from "./resume.js";
 import {
   MAX_UPLOAD_ACTIVE_TRANSFERS,
@@ -43,6 +48,36 @@ interface Entry {
 
 type UploadManagerObserver = (snapshot: UploadManagerSnapshot) => void;
 
+class UploadCleanupOwner {
+  readonly #active = new Set<object>();
+  readonly #maxItems: number;
+  #retired = false;
+
+  constructor(maxItems: number) {
+    this.#maxItems = maxItems;
+  }
+
+  schedule(cleanup: UploadCancellationCleanup): void {
+    if (this.#retired || this.#active.size >= this.#maxItems) {
+      detachUploadCancellation(cleanup);
+      return;
+    }
+    const obligation = Object.freeze({});
+    this.#active.add(obligation);
+    void settleUploadCancellation(cleanup).finally(() => {
+      this.#active.delete(obligation);
+    });
+  }
+
+  retire(): void {
+    this.#retired = true;
+  }
+
+  size(): number {
+    return this.#active.size;
+  }
+}
+
 function validLimit(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1;
 }
@@ -56,6 +91,7 @@ export class UploadManager {
   readonly #owner: BoundedOwner<UploadTransfer>;
   readonly #entries = new Map<UploadTransfer, Entry>();
   readonly #bindings = new Map<UploadIslandPort, Map<string, Binding>>();
+  readonly #cleanupOwner: UploadCleanupOwner;
   readonly #generations = new Map<UploadIslandPort, Map<string, object>>();
   readonly #observers = new Map<UploadIslandPort, Set<UploadManagerObserver>>();
   readonly #queueItemBytes: number;
@@ -78,6 +114,7 @@ export class UploadManager {
       throw new RangeError("upload_manager_limits_invalid");
     }
     this.#options = Object.freeze({ ...options });
+    this.#cleanupOwner = new UploadCleanupOwner(options.maxItems);
     this.#owner = new BoundedOwner<UploadTransfer>({
       maxActive: options.maxActive,
       maxBytes: options.maxQueueBytes,
@@ -230,6 +267,7 @@ export class UploadManager {
     if (field !== undefined) validateUploadField(field);
     const binding = this.#bindingsFor(island);
     return Object.freeze({
+      cleanupObligations: this.#cleanupOwner.size(),
       uploads: Object.freeze(
         [...(binding?.values() ?? [])]
           .filter((candidate) => field === undefined || candidate.field === field)
@@ -294,6 +332,7 @@ export class UploadManager {
       for (const binding of [...bindings.values()]) this.#dropBinding(binding, true);
     }
     this.#owner.retire();
+    this.#cleanupOwner.retire();
     this.#entries.clear();
     this.#bindings.clear();
     this.#generations.clear();
@@ -303,6 +342,7 @@ export class UploadManager {
 
   snapshot(): UploadManagerSnapshot {
     return Object.freeze({
+      cleanupObligations: this.#cleanupOwner.size(),
       uploads: Object.freeze(
         [...this.#entries.values()].map(({ transfer }) => transfer.snapshot()),
       ),
@@ -341,6 +381,9 @@ export class UploadManager {
       },
       randomness: this.#options.randomness,
       reacquired,
+      scheduleCleanup: (cleanup) => {
+        this.#cleanupOwner.schedule(cleanup);
+      },
       transport: this.#options.transport,
     });
     const resource = this.#owner.track(transfer);

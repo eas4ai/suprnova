@@ -88,6 +88,8 @@ const ITERATION_004_ACTION: &str = "/scenario/iteration004/action";
 const ITERATION_004_INSPECTION: &str = "/__test/iteration-004/inspection";
 const ITERATION_004_PAUSE_UPLOAD: &str = "/__test/iteration-004/control/upload/pause-chunk";
 const ITERATION_004_PAUSE_FINALIZE: &str = "/__test/iteration-004/control/upload/pause-finalize";
+const ITERATION_004_ADVANCE_UPLOAD_PAUSE_CLOCK: &str =
+    "/__test/iteration-004/control/upload/advance-pause-clock";
 const ITERATION_004_RESUME_UPLOAD: &str = "/__test/iteration-004/control/upload/resume-chunk";
 const ITERATION_004_REJECT_UPLOAD: &str = "/__test/iteration-004/control/upload/reject-chunk";
 const ITERATION_004_RESET_UPLOAD_WINDOW: &str =
@@ -98,6 +100,9 @@ const ITERATION_004_RESET_SEQUENCE_GAP: &str =
 const ITERATION_004_EMIT_ASYNC: &str = "/__test/iteration-004/control/async/emit";
 const ITERATION_004_DIRECT_STORE: &str = "/__test/iteration-004/direct/:handle/store";
 const ITERATION_004_DIRECT_REPORT: &str = "/__test/iteration-004/direct/:handle/report";
+const ITERATION_004_DIRECT_PROVIDER: &str =
+    "/__test/iteration-004/provider/temporary/:object/part/:part";
+const REFERENCE_DIRECT_PROVIDER_ORIGIN: &str = "https://uploads.example.test";
 const MAX_STATIC_SCENARIO_BYTES: usize = 2 * 1024 * 1024;
 const REFERENCE_WEBSOCKET_COOKIE: &str = "suprnova_live_reference_session=task1-reference-session";
 
@@ -602,6 +607,10 @@ fn router(state: Arc<HostState>) -> Router {
             post(iteration_004_pause_finalize),
         )
         .route(
+            ITERATION_004_ADVANCE_UPLOAD_PAUSE_CLOCK,
+            post(iteration_004_advance_upload_pause_clock),
+        )
+        .route(
             ITERATION_004_RESUME_UPLOAD,
             post(iteration_004_resume_upload),
         )
@@ -623,6 +632,10 @@ fn router(state: Arc<HostState>) -> Router {
         )
         .route(ITERATION_004_EMIT_ASYNC, post(iteration_004_emit_async))
         .route(ITERATION_004_DIRECT_STORE, put(iteration_004_direct_store))
+        .route(
+            ITERATION_004_DIRECT_PROVIDER,
+            put(iteration_004_direct_provider),
+        )
         .route(
             ITERATION_004_DIRECT_REPORT,
             post(iteration_004_direct_report),
@@ -1279,6 +1292,13 @@ async fn iteration_004_resume_upload(
     }
 }
 
+async fn iteration_004_advance_upload_pause_clock(State(state): State<Arc<HostState>>) -> Response {
+    match state.uploads.advance_pause_clock() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(code) => error(StatusCode::CONFLICT, code),
+    }
+}
+
 async fn iteration_004_reject_upload(
     State(state): State<Arc<HostState>>,
     Json(request): Json<PauseUploadRequest>,
@@ -1374,6 +1394,41 @@ async fn iteration_004_direct_store(
         return response;
     }
     match state.uploads.store_direct_part(&handle, &body) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => upload_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectProviderQuery {
+    credential: String,
+}
+
+async fn iteration_004_direct_provider(
+    State(state): State<Arc<HostState>>,
+    Path((object, part)): Path<(String, u32)>,
+    Query(query): Query<DirectProviderQuery>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(required_part_header) = headers
+        .get("x-suprnova-part")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return error(StatusCode::CONFLICT, "direct_capability_invalid");
+    };
+    let endpoint = format!(
+        "{REFERENCE_DIRECT_PROVIDER_ORIGIN}/temporary/{object}/part/{part}?credential={}",
+        query.credential
+    );
+    match state.uploads.store_direct_capability(
+        &endpoint,
+        part,
+        &query.credential,
+        required_part_header,
+        &body,
+    ) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => upload_error(error),
     }

@@ -965,6 +965,41 @@ async fn upload_creation_window_reset_requires_a_quiescent_test_host() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
+    let (status, _, selected) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/pause-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        pause_request(revision),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let selected: Value = serde_json::from_slice(&selected).expect("clocked pause response");
+    let clocked_generation = selected["pause_generation"]
+        .as_u64()
+        .expect("clocked pause generation");
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/advance-pause-clock",
+        &[],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(host.inspection_handle().snapshot().open_timers, 0);
+    let stale_resume = serde_json::to_vec(&json!({"pause_generation": clocked_generation}))
+        .expect("stale clocked resume");
+    let (status, _, _) = request(
+        &host,
+        Method::POST,
+        "/__test/iteration-004/control/upload/resume-chunk",
+        &[(CONTENT_TYPE.as_str(), "application/json")],
+        stale_resume,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
     let (status, _, active) = request(
         &host,
         Method::POST,
