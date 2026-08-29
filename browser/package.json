@@ -60,6 +60,7 @@
     "build": "node scripts/build.mjs",
     "build:check": "node scripts/check-build.mjs",
     "budget": "node scripts/check-budget.mjs",
+    "budget:async": "node scripts/run-async-budget.mjs",
     "budget:browser": "node scripts/run-browser-budget.mjs",
     "budget:upload": "node scripts/run-upload-budget.mjs",
     "compatibility:run": "node scripts/run-compatibility.mjs",

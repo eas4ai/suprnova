@@ -102,6 +102,13 @@ else
     rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-upload-budget.sh
 fi
 
+phase "E100/1K and R100 async continuity budgets"
+if [[ ${SUPRNOVA_LIVE_RELEASE:-0} == 1 ]]; then
+    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=qualified scripts/run-async-budget.sh
+else
+    rtk env SUPRNOVA_LIVE_BUDGET_PROFILE=reduced scripts/run-async-budget.sh
+fi
+
 phase "macro expansion and isolated compile budget"
 rtk node scripts/check-expansion-budget.mjs
 

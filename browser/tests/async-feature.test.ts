@@ -5,6 +5,7 @@ import type { JsonValue } from "../src/canonical.js";
 import {
   AsyncDocumentOwner,
   type AsyncAuthorizationRequest,
+  type AsyncQueuePressureObservation,
 } from "../src/async-updates/feature.js";
 import {
   BrowserAsyncTransportPorts,
@@ -216,6 +217,67 @@ async function flushMicrotasks(turns = 8): Promise<void> {
 }
 
 describe("async feature lifecycle", () => {
+  it("exposes only closed queue counts to the pressure observer", async () => {
+    const sources: FakeSource[] = [];
+    const observations: AsyncQueuePressureObservation[] = [];
+    const timers = new FakeTimers();
+    const root = Object.freeze({}) as Element;
+    const owner = new AsyncDocumentOwner(
+      { diagnose: vi.fn(), onDispose: vi.fn() },
+      {
+        authority: { authorize: () => authorization(0n) },
+        clock: { now: () => 100 },
+        observeQueuePressure: (observation) => observations.push(observation),
+        randomness: { number: () => 0.5 },
+        timers: timers.port,
+        transports: {
+          eventSource(request) {
+            const source = new FakeSource(request);
+            sources.push(source);
+            return source;
+          },
+          webSocket() {
+            throw new Error("unexpected_websocket");
+          },
+        },
+      },
+    );
+    owner.connectIsland({
+      consumeRegisteredEventCapability: eventCapability,
+      dispatchRegisteredEvent: () => "dispatched",
+      element: root,
+      enqueueFreshRender: () => "queued",
+      identity: Object.freeze({
+        component: "fixture.orders",
+        documentKey: "document-queue-owner",
+        slot: "orders-slot",
+      }),
+      onDispose: vi.fn(),
+      queryDirectiveOwnership: () => [ownership(root)],
+      writePresentationSignal: (_element, _name, value) => value,
+    });
+    await flushMicrotasks();
+    sources[0]?.open();
+    await flushMicrotasks();
+    sources[0]?.emit(envelope(1n, { kind: "refresh", name: "refresh" }));
+
+    expect(observations).toContainEqual({
+      documentQueuedBytes: 0,
+      documentQueuedEvents: 0,
+      islandInFlightRefreshes: 1,
+      islandQueuedRefreshes: 0,
+    });
+    const lastObservation = observations[observations.length - 1];
+    if (lastObservation === undefined) throw new Error("queue_observation_missing");
+    expect(Object.keys(lastObservation).sort()).toEqual([
+      "documentQueuedBytes",
+      "documentQueuedEvents",
+      "islandInFlightRefreshes",
+      "islandQueuedRefreshes",
+    ]);
+    owner.dispose();
+  });
+
   it("proves exact no-tail continuity before an immediate hybrid timer can refresh", async () => {
     const sources: FakeSource[] = [];
     const timers = new FakeTimers();

@@ -16,6 +16,7 @@ interface PackageManifest {
 
 const EXPECTED_SCRIPTS = [
   "budget",
+  "budget:async",
   "budget:browser",
   "budget:upload",
   "build",
@@ -83,6 +84,7 @@ describe("production browser package contract", () => {
     expect(Object.keys(manifest.scripts).sort()).toEqual(EXPECTED_SCRIPTS);
     expect(manifest.scripts["test"]).toBe("npm run test:unit");
     expect(manifest.scripts["test:unit"]).toBe("node scripts/run-unit-tests.mjs");
+    expect(manifest.scripts["budget:async"]).toBe("node scripts/run-async-budget.mjs");
     expect(manifest.scripts["budget:browser"]).toBe("node scripts/run-browser-budget.mjs");
     expect(manifest.scripts["budget:upload"]).toBe("node scripts/run-upload-budget.mjs");
     expect(manifest.scripts["host:iteration-004"]).toContain("--bin suprnova-live-reference-host");

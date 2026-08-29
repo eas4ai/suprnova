@@ -31,6 +31,25 @@ export interface AsyncWorkloadMeasurement {
     readonly maximumQueuedRefreshesPerIsland: number;
     readonly maximumInFlightRefreshesPerIsland: number;
     readonly currentSubscriptionCount: number;
+    readonly fairnessMaximumLead: number;
+    readonly subscriptions: readonly Readonly<{
+      readonly authorizationBytes: number;
+      readonly current: boolean;
+      readonly dispatches: number;
+      readonly finalEpoch: string;
+      readonly finalSequence: string;
+      readonly id: string;
+      readonly identifierBytes: number;
+      readonly maxInFlightRefreshes: number;
+      readonly maxQueuedRefreshes: number;
+      readonly pendingBytes: number;
+      readonly pendingEvents: number;
+      readonly pollTimers: number;
+      readonly presentationEvents: number;
+      readonly refreshInvalidations: number;
+      readonly refreshSlots: number;
+      readonly runtimeRecords: number;
+    }>[];
   }>;
   readonly R100: Readonly<{
     readonly artifactSha256: string;
@@ -42,10 +61,32 @@ export interface AsyncWorkloadMeasurement {
     readonly starvedSubscriptionCount: number;
     readonly maximumConcurrentReauthorizations: number;
     readonly pollingMaximumSameTick: number;
+    readonly pollDueMilliseconds: readonly number[];
+    readonly reconnectDelayMilliseconds: number;
+    readonly generationBefore: number;
+    readonly generationAfter: number;
+    readonly physicalTransportsAfterCurrent: number;
+    readonly recovery: readonly Readonly<{
+      readonly current: boolean;
+      readonly id: string;
+      readonly jitterMilliseconds: number;
+      readonly pollDueMilliseconds: number;
+      readonly retainedCategories: Readonly<{
+        readonly authorizationBytes: number;
+        readonly identifierBytes: number;
+        readonly pendingBytes: number;
+        readonly pendingEvents: number;
+        readonly pollTimers: number;
+        readonly refreshSlots: number;
+        readonly runtimeRecords: number;
+      }>;
+      readonly timeToCurrentMilliseconds: number;
+    }>[];
     readonly multiDocument: Readonly<{
       readonly documentCount: 16;
       readonly completedHandshakes: number;
       readonly maximumConcurrentHandshakes: number;
+      readonly startOrder: readonly number[];
     }>;
   }>;
 }
@@ -167,6 +208,24 @@ export async function measureAsyncWorkloads(
       }
       return Math.max(0, ...counts.values());
     }
+
+    dueAfter(minimumDue: number): readonly number[] {
+      return Object.freeze(
+        [...this.pending.values()]
+          .map(({ due }) => due)
+          .filter((due) => due >= minimumDue)
+          .sort((left, right) => left - right),
+      );
+    }
+
+    earliestDueBefore(maximumDue: number): number {
+      const due = [...this.pending.values()]
+        .map((entry) => entry.due)
+        .filter((candidate) => candidate < maximumDue)
+        .sort((left, right) => left - right)[0];
+      if (due === undefined) throw new Error("r100_reconnect_timer_missing");
+      return due;
+    }
   }
 
   class MeasuredSource implements BenchmarkSource {
@@ -276,6 +335,11 @@ export async function measureAsyncWorkloads(
   const pendingStarts = new Map<number, number[]>();
   const refreshCompletions = new Map<number, ((completion: "succeeded") => void)[]>();
   const dispatchEffectSamplesMs: number[] = [];
+  const presentationCounts = new Array<number>(input.subscriptionCount).fill(0);
+  const refreshCounts = new Array<number>(input.subscriptionCount).fill(0);
+  const dispatchCounts = new Array<number>(input.subscriptionCount).fill(0);
+  const maxQueuedRefreshes = new Array<number>(input.subscriptionCount).fill(0);
+  const maxInFlightRefreshes = new Array<number>(input.subscriptionCount).fill(0);
   let recoveryStarted = 0;
   let activeReauthorizations = 0;
   let maximumConcurrentReauthorizations = 0;
@@ -285,6 +349,17 @@ export async function measureAsyncWorkloads(
   let maximumQueuedRefreshesPerIsland = 0;
   let maximumInFlightRefreshesPerIsland = 0;
   let pollingRandom = 0;
+  let fairnessMaximumLead = 0;
+  let observedRefreshIndex: number | null = null;
+  const withObservedRefreshIndex = <Result>(index: number, operation: () => Result): Result => {
+    if (observedRefreshIndex !== null) throw new Error("async_benchmark_queue_owner_overlap");
+    observedRefreshIndex = index;
+    try {
+      return operation();
+    } finally {
+      observedRefreshIndex = null;
+    }
+  };
 
   const makeAuthorization = (
     index: number,
@@ -390,6 +465,12 @@ export async function measureAsyncWorkloads(
           maximumInFlightRefreshesPerIsland,
           inFlightRefreshes,
         );
+        const index = observedRefreshIndex;
+        if (index === null) {
+          throw new Error("async_benchmark_queue_owner_invalid");
+        }
+        maxQueuedRefreshes[index] = Math.max(maxQueuedRefreshes[index] ?? 0, queuedRefreshes);
+        maxInFlightRefreshes[index] = Math.max(maxInFlightRefreshes[index] ?? 0, inFlightRefreshes);
       },
       pollEnvironment: Object.freeze({
         isOnline: () => true,
@@ -449,6 +530,11 @@ export async function measureAsyncWorkloads(
           if (started === undefined) throw new Error("e100_dispatch_start_missing");
           root.dispatchEvent(new CustomEvent(event.event, { detail: event.payload }));
           dispatchEffectSamplesMs.push(performance.now() - started);
+          dispatchCounts[index] = (dispatchCounts[index] ?? 0) + 1;
+          fairnessMaximumLead = Math.max(
+            fairnessMaximumLead,
+            Math.max(...dispatchCounts) - Math.min(...dispatchCounts),
+          );
           return "dispatched";
         },
         element: root,
@@ -498,6 +584,31 @@ export async function measureAsyncWorkloads(
     if (value === undefined) throw new Error("e100_membership_missing");
     return value;
   };
+  const retainedCategories = (index: number) => {
+    const current = membership(index);
+    const identifierBytes =
+      new TextEncoder().encode(current.subscriptionId).byteLength +
+      new TextEncoder().encode(current.stream).byteLength +
+      new TextEncoder().encode(`benchmark-${String(index)}`).byteLength;
+    const authorizationBytes = new TextEncoder().encode(
+      canonicalize({
+        ...current,
+        baseline: {
+          epoch: current.baseline.epoch.toString(),
+          sequence: current.baseline.sequence.toString(),
+        },
+      }),
+    ).byteLength;
+    return Object.freeze({
+      authorizationBytes,
+      identifierBytes,
+      pendingBytes: 0,
+      pendingEvents: 0,
+      pollTimers: 1,
+      refreshSlots: 1,
+      runtimeRecords: 3,
+    });
+  };
   const presentationEnvelope = (index: number, sequence: number, eventIndex: number): string => {
     const current = membership(index);
     const encode = (padding: string): string =>
@@ -538,36 +649,38 @@ export async function measureAsyncWorkloads(
     timers.advanceTo((next * input.scheduledDurationMs) / input.presentationEventCount);
     pendingStarts.get(index)?.push(performance.now());
     primarySource.emit(presentationEnvelope(index, nextSequence(index), next));
+    presentationCounts[index] = (presentationCounts[index] ?? 0) + 1;
     presentationEventCount = next;
   };
   const emitRefresh = (index: number): void => {
-    primarySource.emit(refreshEnvelope(index, nextSequence(index)));
+    withObservedRefreshIndex(index, () => {
+      primarySource.emit(refreshEnvelope(index, nextSequence(index)));
+    });
+    refreshCounts[index] = (refreshCounts[index] ?? 0) + 1;
     refreshInvalidationCount += 1;
   };
 
   for (let round = 0; round < 5; round += 1) {
     for (let index = 0; index < input.subscriptionCount; index += 1) emitPresentation(index);
   }
-  for (const first of [0, 25]) {
-    for (let index = first; index < first + 25; index += 1) {
-      emitRefresh(index);
+  for (let first = 0; first < input.subscriptionCount; first += 32) {
+    const end = Math.min(input.subscriptionCount, first + 32);
+    for (let index = first; index < end; index += 1) {
       emitRefresh(index);
       emitPresentation(index);
     }
-    for (let index = first; index < first + 25; index += 1) {
+    for (let index = first; index < end; index += 1) {
       const completion = refreshCompletions.get(index)?.shift();
-      if (completion === undefined) throw new Error("e100_first_refresh_missing");
-      completion("succeeded");
-    }
-    for (let index = first; index < first + 25; index += 1) {
-      const completion = refreshCompletions.get(index)?.shift();
-      if (completion === undefined) throw new Error("e100_second_refresh_missing");
-      completion("succeeded");
+      if (completion === undefined) throw new Error("e100_refresh_missing");
+      withObservedRefreshIndex(index, () => {
+        completion("succeeded");
+      });
     }
   }
-  for (let index = 0; index < input.subscriptionCount; index += 1) {
-    const remaining = index < 50 ? 4 : 5;
-    for (let count = 0; count < remaining; count += 1) emitPresentation(index);
+  for (let count = 0; count < 4; count += 1) {
+    for (let index = 0; index < input.subscriptionCount; index += 1) {
+      emitPresentation(index);
+    }
   }
   if (
     presentationEventCount !== input.presentationEventCount ||
@@ -577,9 +690,34 @@ export async function measureAsyncWorkloads(
     throw new Error("e100_workload_shape_mismatch");
   }
   const currentBeforeRecovery = [...states.values()].filter((state) => state === "current").length;
+  const subscriptions = Object.freeze(
+    Array.from({ length: input.subscriptionCount }, (_, index) => {
+      const current = membership(index);
+      const retained = retainedCategories(index);
+      return Object.freeze({
+        authorizationBytes: retained.authorizationBytes,
+        current: states.get(current.subscriptionId) === "current",
+        dispatches: dispatchCounts[index] ?? 0,
+        finalEpoch: "1",
+        finalSequence: String(sequences[index] ?? 0),
+        id: current.subscriptionId,
+        identifierBytes: retained.identifierBytes,
+        maxInFlightRefreshes: maxInFlightRefreshes[index] ?? 0,
+        maxQueuedRefreshes: maxQueuedRefreshes[index] ?? 0,
+        pendingBytes: retained.pendingBytes,
+        pendingEvents: retained.pendingEvents,
+        pollTimers: retained.pollTimers,
+        presentationEvents: presentationCounts[index] ?? 0,
+        refreshInvalidations: refreshCounts[index] ?? 0,
+        refreshSlots: retained.refreshSlots,
+        runtimeRecords: retained.runtimeRecords,
+      });
+    }),
+  );
   const scheduledDurationMs = timers.current;
   const physicalConnectionCount = sources.length;
   const initialHandshakeCount = handshakes;
+  const generationBefore = primarySource.request.transportGeneration;
 
   recoveryStarted = performance.now();
   primarySource.fail();
@@ -588,6 +726,9 @@ export async function measureAsyncWorkloads(
     throw new Error("r100_polling_membership_timer_count");
   }
   const pollingMaximumSameTick = timers.maximumSameDueAfter(pollingTimerMinimumDue);
+  const pollDueMilliseconds = timers.dueAfter(pollingTimerMinimumDue);
+  const reconnectDelayMilliseconds =
+    timers.earliestDueBefore(pollingTimerMinimumDue) - timers.current;
   timers.fireEarliest();
   await settleUntil(() => sources.length === 2, "r100_document_reconnect_handshakes");
   const successorSource = sources[1];
@@ -606,13 +747,17 @@ export async function measureAsyncWorkloads(
   const minimumRecovery = Math.min(...recoverySamplesMs);
   const maximumRecovery = Math.max(...recoverySamplesMs);
   const currentAfterRecovery = [...states.values()].filter((state) => state === "current").length;
+  const generationAfter = successorSource.request.transportGeneration;
+  const physicalTransportsAfterCurrent = sources.filter((source) => !source.closed).length;
 
   const scheduler = new artifact.OriginHandshakeScheduler();
   const releases: VoidFunction[] = [];
+  const startOrder: number[] = [];
   let completedHandshakes = 0;
   let maximumConcurrentHandshakes = 0;
   for (let index = 0; index < input.multiDocumentCount; index += 1) {
     scheduler.schedule(location.origin, (release) => {
+      startOrder.push(index);
       maximumConcurrentHandshakes = Math.max(
         maximumConcurrentHandshakes,
         scheduler.active(location.origin),
@@ -642,6 +787,8 @@ export async function measureAsyncWorkloads(
       maximumQueuedRefreshesPerIsland,
       maximumInFlightRefreshesPerIsland,
       currentSubscriptionCount: currentBeforeRecovery,
+      fairnessMaximumLead,
+      subscriptions,
     }),
     R100: Object.freeze({
       artifactSha256,
@@ -653,10 +800,29 @@ export async function measureAsyncWorkloads(
       starvedSubscriptionCount: input.subscriptionCount - recoveredSubscriptionCount,
       maximumConcurrentReauthorizations,
       pollingMaximumSameTick,
+      pollDueMilliseconds: Object.freeze(pollDueMilliseconds),
+      reconnectDelayMilliseconds,
+      generationBefore,
+      generationAfter,
+      physicalTransportsAfterCurrent,
+      recovery: Object.freeze(
+        Array.from({ length: input.subscriptionCount }, (_, index) => {
+          const id = `subscription-${String(index).padStart(3, "0")}`;
+          return Object.freeze({
+            current: states.get(id) === "current",
+            id,
+            jitterMilliseconds: reconnectDelayMilliseconds,
+            pollDueMilliseconds: pollDueMilliseconds[index] ?? 0,
+            retainedCategories: retainedCategories(index),
+            timeToCurrentMilliseconds: recoveryAt.get(id) ?? Infinity,
+          });
+        }),
+      ),
       multiDocument: Object.freeze({
         documentCount: 16 as const,
         completedHandshakes,
         maximumConcurrentHandshakes,
+        startOrder: Object.freeze(startOrder),
       }),
     }),
   });

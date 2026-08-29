@@ -225,7 +225,7 @@ async function playwrightVersion() {
   return typeof packageValue.version === "string" ? packageValue.version : "unavailable";
 }
 
-async function browserEnvironment(browser, dedicated) {
+export async function browserEnvironment(browser, dedicated) {
   const cpuCount = await selectedCpuCount();
   const memoryBytes = totalmem();
   const operatingSystem = platform();

@@ -903,12 +903,22 @@ impl EngineAsyncFixture {
         kind: DocumentTransportKind,
         marker: u8,
     ) -> Result<DocumentTransportSession, &'static str> {
+        self.document_with_limit(origin, kind, marker, 8)
+    }
+
+    pub(super) fn document_with_limit(
+        &self,
+        origin: &str,
+        kind: DocumentTransportKind,
+        marker: u8,
+        max_memberships: usize,
+    ) -> Result<DocumentTransportSession, &'static str> {
         Ok(DocumentTransportSession::new(
             VerifiedOrigin::parse(origin).map_err(|_| "engine origin")?,
             kind,
             DocumentTransportHandle::from_bytes(&[marker; 16])
                 .map_err(|_| "engine document handle")?,
-            DocumentTransportLimits::new(8).map_err(|_| "engine document limits")?,
+            DocumentTransportLimits::new(max_memberships).map_err(|_| "engine document limits")?,
             self.document_scope.clone(),
         ))
     }
@@ -974,6 +984,66 @@ impl EngineAsyncFixture {
             authorization.context(),
             StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(sequence)),
             suprnova_live::async_updates::AsyncPayload::BrowserEvent(event),
+        )
+        .map_err(|_| "engine envelope")
+    }
+
+    pub(super) fn padded_browser_event_envelope(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+        sequence: u64,
+        encoded_bytes: usize,
+    ) -> Result<AsyncEnvelope, &'static str> {
+        let build = |padding_bytes: usize| -> Result<AsyncEnvelope, &'static str> {
+            let event = RegisteredBrowserEvent::new(
+                authorization.context(),
+                BrowserOperationName::parse("orders.updated").map_err(|_| "engine event")?,
+                1,
+                EventTarget::Document,
+                CanonicalValue::String("x".repeat(padding_bytes)),
+            )
+            .map_err(|_| "engine event")?;
+            let envelope = AsyncEnvelope::new(
+                authorization.context(),
+                StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(sequence)),
+                suprnova_live::async_updates::AsyncPayload::BrowserEvent(event),
+            )
+            .map_err(|_| "engine envelope")?;
+            Ok(envelope)
+        };
+        let empty = build(0)?;
+        let empty_bytes = suprnova_live::async_updates::encode_async_envelope(
+            &empty,
+            &suprnova_live::async_updates::AsyncCodecLimits::v1(),
+        )
+        .map_err(|_| "engine envelope")?
+        .len();
+        let padding_bytes = encoded_bytes
+            .checked_sub(empty_bytes)
+            .ok_or("engine envelope size")?;
+        let envelope = build(padding_bytes)?;
+        let actual = suprnova_live::async_updates::encode_async_envelope(
+            &envelope,
+            &suprnova_live::async_updates::AsyncCodecLimits::v1(),
+        )
+        .map_err(|_| "engine envelope")?
+        .len();
+        (actual == encoded_bytes)
+            .then_some(envelope)
+            .ok_or("engine envelope size")
+    }
+
+    pub(super) fn refresh_envelope(
+        &self,
+        authorization: &AuthorizedTransportSubscription,
+        sequence: u64,
+    ) -> Result<AsyncEnvelope, &'static str> {
+        AsyncEnvelope::new(
+            authorization.context(),
+            StreamPosition::new(StreamEpoch::new(1), StreamSequence::new(sequence)),
+            suprnova_live::async_updates::AsyncPayload::Refresh(
+                suprnova_live::async_updates::RegisteredRefresh,
+            ),
         )
         .map_err(|_| "engine envelope")
     }

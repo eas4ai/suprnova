@@ -1,6 +1,7 @@
 //! Browser-facing production-artifact host for Iteration 004 conformance.
 
 mod artifacts;
+mod async_budget;
 mod async_updates;
 mod engine_async;
 mod faults;
@@ -43,6 +44,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use artifacts::ValidatedArtifacts;
+pub use async_budget::{AsyncBudgetOwnerEvidence, measure_async_budget_owner};
 use async_updates::{AsyncRuntime, MembershipRequest, PollRequest, TransportCreateRequest};
 pub use faults::ReferenceFaultSchedule;
 use uploads::{

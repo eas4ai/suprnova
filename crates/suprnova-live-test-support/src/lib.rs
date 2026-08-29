@@ -33,10 +33,10 @@ pub use host::{
     ControlledTransactions, ControlledValidation, HarnessServices, TransactionFault,
 };
 pub use reference_host::{
-    CREATE_UPLOAD, EXAMPLE_REACQUIRE, POLL, REFERENCE_AUTHORIZATION, ReferenceFaultSchedule,
-    ReferenceHost, ReferenceHostConfig, ReferenceHostInspection, ReferenceHostInspectionHandle,
-    SSE, TRANSPORT_CREATE, TRANSPORT_MEMBERSHIP, UPLOAD_CANCEL, UPLOAD_CHUNK, UPLOAD_COMPLETE,
-    UPLOAD_STATUS, WEBSOCKET,
+    AsyncBudgetOwnerEvidence, CREATE_UPLOAD, EXAMPLE_REACQUIRE, POLL, REFERENCE_AUTHORIZATION,
+    ReferenceFaultSchedule, ReferenceHost, ReferenceHostConfig, ReferenceHostInspection,
+    ReferenceHostInspectionHandle, SSE, TRANSPORT_CREATE, TRANSPORT_MEMBERSHIP, UPLOAD_CANCEL,
+    UPLOAD_CHUNK, UPLOAD_COMPLETE, UPLOAD_STATUS, WEBSOCKET, measure_async_budget_owner,
 };
 pub use trace::{HarnessTrace, HarnessTraceEvent};
 pub use upload::{ControlledUploadAuthorization, MemoryCleanupObservation, MemoryUploadLedger};

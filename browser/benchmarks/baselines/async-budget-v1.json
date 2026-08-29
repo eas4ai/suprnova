@@ -1,0 +1,4423 @@
+{
+  "exploratoryReference": {
+    "artifact": {
+      "brotliBytes": 21633,
+      "file": "suprnova-live.async.esm.js",
+      "manifestSha256": "24d51434f181e23a3d38b403b3db00d2204aed08f7d4b3fede9111b0a6fb8ea4",
+      "role": "async-esm",
+      "sha256": "45ef7d5331f4ef76a7c2ce1dc554a8639bbdaf4c74e2869a849f1b9a937e15d9",
+      "sourceInputsSha256": "21be98078bc3136ac33d916b1564aafb52dd6b7af8eb72423bfa525b0f03cbb2"
+    },
+    "e100": {
+      "bounds": {
+        "maxDispatchP95Milliseconds": 8,
+        "maxDocumentBytes": 262144,
+        "maxDocumentEvents": 64,
+        "maxInFlightRefreshesPerIsland": 1,
+        "maxQueuedRefreshesPerIsland": 1,
+        "maxRetainedBytesPerSubscription": 8192
+      },
+      "measurements": {
+        "dispatch": {
+          "durationsMilliseconds": [
+            6.7, 1.3, 0.4, 0.8, 0.4, 0.1, 0.8, 0.5, 0.5, 0.1, 0.1, 0.1, 0.9, 0.1, 1, 1, 0.8, 1.3, 1,
+            0.9, 0.9, 0.6, 1.4, 0.9, 0.9, 0.7, 0.4, 0.5, 0.1, 0.6, 0.6, 0.4, 0, 0.1, 0.9, 0.4, 0.2,
+            0.4, 0.5, 0.4, 0.1, 0.7, 0.1, 0.6, 0.4, 0.1, 0.4, 0.6, 0.2, 1.9, 0.1, 0.1, 0.7, 0.7,
+            0.1, 0.4, 0, 0.2, 0.6, 0.1, 0, 0.7, 0, 0.1, 0.7, 0, 0.5, 0.4, 0.1, 0, 0.8, 0.4, 0.1,
+            0.5, 0.4, 0, 0.1, 0.7, 0.3, 0.1, 0.1, 0.8, 0.2, 0, 0.8, 0.3, 0.3, 0.1, 0.1, 0.8, 0, 0.1,
+            0.9, 2.1, 0.7, 0.1, 0.5, 0.3, 0.2, 0, 0.7, 0, 0.5, 0.4, 0.1, 0, 0.7, 0, 0.6, 0.4, 0,
+            0.5, 0, 0.5, 0.4, 0, 0, 0.1, 0.9, 0, 0.1, 0.7, 0.1, 0.4, 0, 0.6, 0, 0.1, 0.2, 0.8, 0.1,
+            0.6, 0, 0.1, 0.7, 0.1, 0.4, 0.1, 2.7, 0.3, 0.4, 0.1, 0.4, 0.3, 0.1, 0.4, 0, 0.5, 0.2,
+            0.1, 0.5, 0, 0.4, 0.5, 0, 0.1, 0.5, 0.1, 0.1, 0, 0.9, 0, 0.1, 0.7, 0.3, 0.3, 0.3, 0.1,
+            0, 0.5, 0.5, 0, 0.1, 0.6, 0.1, 0.1, 0, 0.5, 0, 0.5, 0, 0.4, 0.1, 2.3, 0.4, 0, 0.1, 0.6,
+            0, 0.1, 0.7, 0.1, 0.4, 0, 0.1, 0.6, 0.2, 0.4, 0.1, 0.3, 0.1, 0.5, 0, 0.1, 0.7, 0, 0.5,
+            0.2, 0, 0.7, 0.1, 0, 0.7, 0, 0.6, 0, 0.1, 0.1, 0.7, 0.4, 0, 0.1, 0.7, 0.2, 0.2, 0.1,
+            0.4, 0.2, 0.5, 0.3, 0.1, 0.1, 0.6, 0, 0.6, 0.2, 0, 0.8, 0, 0.1, 0, 0.9, 0.1, 0.1, 0.8,
+            0.1, 0.6, 0.2, 0.4, 0.1, 0.5, 0.3, 0.3, 0.1, 0.3, 0.2, 0.2, 0, 0.8, 0.3, 0.3, 0.3, 0.1,
+            0.6, 0.1, 0.1, 0.8, 0.1, 0.1, 0.6, 0, 0.2, 0.7, 0.3, 0.2, 0.3, 0.1, 0.1, 0.6, 0.1, 0.6,
+            3.8, 0, 0.6, 0.1, 0, 0.1, 0.7, 0.1, 0, 0.3, 0.1, 0.1, 1.1, 0.9, 0.7, 0.8, 0.7, 0.1, 0.1,
+            0.8, 1, 0.5, 0.7, 0.8, 0.7, 1.1, 0.6, 0.7, 1.3, 0.5, 0.4, 1.2, 0.8, 0.7, 0.7, 0.8, 0.8,
+            0.5, 0.8, 0.7, 0.7, 0.8, 0.8, 0.8, 0.9, 0.1, 0.7, 0, 0.6, 0.1, 0.1, 0.7, 0.3, 0.5, 0.3,
+            0, 0.2, 0, 0.9, 0, 0.7, 0, 0.2, 0.6, 0.1, 0.6, 0, 0.1, 0.8, 0.1, 0, 0.9, 0, 0.1, 0.2, 0,
+            0.6, 0.2, 0, 0.9, 0.1, 0.4, 0.1, 0.7, 0.3, 0.1, 0.1, 0.8, 0.4, 5, 0.8, 0, 0.6, 0.2, 0.3,
+            0.1, 0.1, 0.6, 0, 0, 0.1, 0.8, 0.2, 0.6, 0.2, 0.2, 0, 0.4, 0, 0.1, 0.6, 0, 0.5, 0.4, 0,
+            0.1, 0.9, 0, 0.5, 0.1, 0.4, 0, 0.4, 0.2, 0.1, 0.1, 0.6, 0.1, 0, 0.7, 0.1, 0.6, 0, 0.1,
+            0.5, 0.1, 0.1, 0.7, 0.1, 0.3, 0.1, 0.1, 0.6, 0, 0.1, 0.7, 0.4, 0, 0.1, 0.7, 0.1, 0.5, 0,
+            0.3, 0.1, 0.1, 0, 0.9, 0, 0.1, 0.7, 0.2, 0, 0.6, 0.1, 0, 0.2, 0.7, 0.3, 0.1, 0.1, 0.5,
+            0, 0.5, 0, 0.5, 0, 0.4, 0.1, 4.7, 0.5, 0, 0.4, 0.4, 0.1, 0, 0.7, 0, 0.5, 0.3, 0.1, 0,
+            0.1, 0.1, 0.8, 0.2, 0, 0, 0.6, 0.1, 0.1, 0.7, 0.1, 0.1, 0.1, 0.7, 0.2, 0, 0.1, 0.8, 0.1,
+            0, 0.1, 0.8, 0.1, 0, 1.1, 0.3, 0.3, 17.2, 15.6, 15.4, 14.6, 14.4, 13.9, 12.8, 12.2, 12,
+            11.4, 11.3, 10.9, 9.9, 9.8, 9.1, 9, 8.3, 8.3, 7.8, 7.8, 6.9, 6.7, 5.8, 5.8, 5.1, 5, 4.2,
+            3.8, 3.7, 3.1, 3, 2.4, 25.5, 25.1, 24.9, 20.3, 18.4, 17.8, 17.6, 17, 16.4, 16.3, 16.7,
+            15.8, 15.7, 14.9, 14.4, 13.8, 13.7, 13.1, 12.6, 12.5, 11.8, 11.8, 10.9, 10.4, 9.9, 9.6,
+            3.8, 2.9, 2.7, 2.6, 1.8, 1.7, 14.2, 13.5, 12.9, 12.6, 12.4, 11.8, 11.7, 11.1, 11.1,
+            10.3, 9.5, 9.5, 8.7, 8.5, 8, 7.6, 7.4, 6.7, 6.3, 5.7, 5.4, 5.3, 4.2, 4.4, 4.3, 3.4, 2.9,
+            2.8, 2, 2, 1.4, 1.2, 1.4, 1.2, 0.7, 0.7, 0.4, 0, 0.1, 0, 0.8, 0.4, 0, 0.1, 0.8, 0.1,
+            0.4, 0.4, 0, 0.1, 0.1, 0.6, 0.1, 0.4, 0.1, 0, 0.7, 0, 0.1, 0.7, 0, 0.4, 0.1, 0, 0.1,
+            0.7, 0.4, 0, 0.1, 0, 0.8, 0.1, 0.4, 0, 0.6, 0.2, 0, 0, 0.7, 0.1, 0, 0.7, 0, 0.4, 0.7,
+            0.1, 0.1, 0.5, 0.2, 0.4, 0, 0.1, 0.6, 0, 0.1, 0.8, 0.3, 0.1, 0.1, 0.7, 0.4, 0, 0.1, 0.6,
+            0.1, 0.1, 0.5, 0.1, 0.1, 0.6, 0, 0.1, 0.1, 0.7, 0.3, 0.4, 0.1, 0, 0.1, 0.1, 0.7, 0, 0.7,
+            0.1, 0.5, 0.6, 0.1, 0.1, 0.6, 0, 0.6, 0.1, 0.1, 0.7, 0.4, 0.1, 0, 0.8, 0, 0.3, 0.1, 0.5,
+            0.4, 0.2, 0.4, 0, 0.5, 0.4, 0, 0.1, 0.7, 0.6, 0.2, 0, 0.9, 0.1, 0, 0.1, 0.7, 0.1, 0.1,
+            0.8, 0.1, 0, 1, 0, 0.1, 0, 1, 0, 0.3, 0.1, 0.2, 0.7, 0.1, 0, 0.1, 0.8, 0, 0.1, 0.8, 0.1,
+            0.1, 0.8, 0.2, 0, 0.4, 0.1, 5.3, 0.9, 0, 0.1, 0.6, 0, 0, 0.2, 0.8, 0, 0.1, 0, 0.8, 0,
+            0.1, 0.1, 0.8, 0.1, 0.1, 0.8, 0.2, 0.1, 0.4, 0, 0.5, 0, 0.4, 0.1, 0, 0.8, 0, 0.3, 0,
+            0.2, 0, 0.7, 0.3, 0.2, 0.3, 0.2, 0, 0, 0.2, 0, 0.1, 0.8, 0.2, 0.2, 0, 0.5, 0.2, 0.1,
+            0.6, 0.1, 0.1, 0.6, 0.1, 0.5, 0.2, 0, 0.4, 0.1, 0.4, 0, 0.2, 0.6, 0.1, 0.4, 0.6, 0.3,
+            0.1, 1.3, 0, 0.7, 0, 0.1, 0.7, 0.3, 0.1, 0, 0.7, 0.1, 0.4, 0, 0.6, 0.2, 0, 0.6, 0.1,
+            0.6, 0.3, 0.2, 0.4, 0.1, 0.4, 0, 1.4, 0.1, 1.2, 0.1, 0, 0.7, 0, 0.1, 0.7, 0, 0.5, 0.4,
+            0, 0.1, 0.8, 0.2, 0.2, 0.1, 0.5, 0.1, 0.1, 0, 0.8, 0, 0.4, 0.4, 0, 0.2, 0.7, 0.6, 0.8,
+            0, 0.1, 0.8, 0, 0.3, 0.1, 0.1, 0.7, 0.4, 0.9, 0.3, 0, 0.2, 0, 1, 0, 0.3, 0.1, 0.1, 0.7,
+            0.2, 0.1, 0.5, 0.2, 0.3, 1.2, 0.1, 0.4, 0, 0.6, 0, 0.2, 0.6, 0.1, 0.4, 0.1, 0.6, 0.1, 0,
+            0.7, 0.1, 0, 0.7, 0, 0.5, 0, 0.1, 0.5, 7.7, 1, 0.4, 0.1, 1.3, 0, 0.4, 0, 0.1, 0.6, 0,
+            0.1, 0.1, 0, 0.7, 0.3, 0.3, 0.1, 0.1, 0, 0.7, 0.4, 0, 0.2, 0.4, 0, 0.1, 0.1, 0.6, 0.1,
+            0, 1.5, 0, 0.3, 0.1, 0.1, 0, 0.8, 0.1, 0.1, 0, 1.5, 0.2, 0.1, 0.5, 0.1, 0.1, 0.5, 0, 0,
+            0.6, 0, 0.1, 0.6, 0, 0.1, 0.1, 1, 0.2, 0.1, 0.1, 0, 0.8, 0.1, 0, 0.1, 0, 0.9, 0, 0.1,
+            0.1, 0.7, 0.1
+          ],
+          "p50Milliseconds": 0.3,
+          "p95Milliseconds": 9.5,
+          "sampleCount": 1000
+        },
+        "document": {
+          "fairnessMaximumLead": 1,
+          "handshakes": 1,
+          "maxQueuedBytes": 32768,
+          "maxQueuedEvents": 32,
+          "physicalTransports": 1,
+          "starvedSubscriptions": 0
+        },
+        "rustOwner": {
+          "dispatches": 1100,
+          "finalCurrentSubscriptions": 100,
+          "fairnessMaximumLead": 1,
+          "logicalMemberships": 100,
+          "maxQueuedBytes": 32768,
+          "maxQueuedEvents": 32,
+          "physicalDocumentTransports": 1,
+          "providerPath": "BoundedDocumentTransportSession",
+          "sequenceMismatches": 0
+        },
+        "subscriptions": [
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-000",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-001",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-002",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-003",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-004",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-005",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-006",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-007",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-008",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-009",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2014,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-010",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-011",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-012",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-013",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-014",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-015",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-016",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-017",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-018",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-019",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-020",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-021",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-022",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-023",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-024",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-025",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-026",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-027",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-028",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-029",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-030",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-031",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-032",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-033",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-034",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-035",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-036",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-037",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-038",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-039",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-040",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-041",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-042",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-043",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-044",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-045",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-046",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-047",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-048",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-049",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-050",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-051",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-052",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-053",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-054",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-055",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-056",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-057",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-058",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-059",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-060",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-061",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-062",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-063",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-064",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-065",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-066",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-067",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-068",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-069",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-070",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-071",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-072",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-073",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-074",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-075",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-076",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-077",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-078",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-079",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-080",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-081",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-082",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-083",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-084",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-085",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-086",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-087",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-088",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-089",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-090",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-091",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-092",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-093",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-094",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-095",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-096",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-097",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-098",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          },
+          {
+            "current": true,
+            "dispatches": 10,
+            "finalEpoch": "1",
+            "finalSequence": "11",
+            "id": "subscription-099",
+            "maxInFlightRefreshes": 1,
+            "maxQueuedRefreshes": 0,
+            "presentationEvents": 10,
+            "refreshInvalidations": 1,
+            "retainedBytes": 2015,
+            "retainedCategories": {
+              "authorizationBytes": 822,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            }
+          }
+        ]
+      },
+      "workload": {
+        "documentTransports": 1,
+        "durationMs": 10000,
+        "payloadBytes": 1024,
+        "presentationEvents": 1000,
+        "refreshInvalidations": 100,
+        "subscriptions": 100
+      }
+    },
+    "environment": {
+      "architecture": "x86_64",
+      "browser": "chromium",
+      "browserRevision": "149.0.7827.55 @ /home/shawn/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+      "classification": "unqualified",
+      "cpuModel": "13th Gen Intel(R) Core(TM) i9-13900K",
+      "cpuThrottleRate": 4,
+      "dedicatedVcpusAttested": false,
+      "extensions": false,
+      "kernel": "Linux 7.0.0-30-generic",
+      "memoryBytes": 100993044480,
+      "operatingSystem": "linux",
+      "playwrightVersion": "1.62.1",
+      "profile": "B1",
+      "qualificationRequirementsMet": false,
+      "selectedCpuCount": 32,
+      "viewport": {
+        "height": 720,
+        "width": 1280
+      },
+      "warmHttpCache": true
+    },
+    "methodology": {
+      "controlledTimeline": true,
+      "independentRuns": 1,
+      "measuredSamples": 1000,
+      "monotonicClock": "performance.now",
+      "regressionReference": "median_run_p95_v1",
+      "warmupIterations": 1,
+      "watchdogOutsideSamples": true
+    },
+    "multiDocument": {
+      "attemptedHandshakes": 16,
+      "completedHandshakes": 16,
+      "documentCount": 16,
+      "label": "separate_multi_document_scheduler",
+      "maximumConcurrentHandshakes": 8,
+      "origin": "single_origin_controlled_scheduler",
+      "startOrder": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    },
+    "r100": {
+      "bounds": {
+        "maxConcurrentHandshakesPerOrigin": 8,
+        "maxRetainedBytesAfterCurrent": 12288,
+        "reconnectHandshakes": 1
+      },
+      "measurements": {
+        "document": {
+          "generationAfter": 2,
+          "generationBefore": 1,
+          "maximumConcurrentReauthorizations": 8,
+          "physicalTransportsAfterCurrent": 1,
+          "reconnectHandshakes": 1,
+          "recoveredSubscriptions": 100,
+          "starvedSubscriptions": 0
+        },
+        "polling": {
+          "buckets": [
+            {
+              "count": 1,
+              "dueMilliseconds": 40030
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40090
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40150
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40210
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40270
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40330
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40390
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40450
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40510
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40570
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40630
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40690
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40750
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40810
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40869
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40930
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 40990
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41050
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41110
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41170
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41230
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41290
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41350
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41410
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41470
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41530
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41590
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41650
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41709
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41770
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41830
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41890
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 41950
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42010
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42070
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42130
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42190
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42250
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42310
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42370
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42430
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42490
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42550
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42610
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42670
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42730
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42790
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42850
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42910
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 42970
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43030
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43090
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43150
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43210
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43270
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43330
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43389
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43449
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43510
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43570
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43630
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43690
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43750
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43810
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43870
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43930
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 43990
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44050
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44110
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44170
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44230
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44290
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44350
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44410
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44470
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44530
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44590
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44650
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44710
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44770
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44830
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44890
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 44950
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45010
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45070
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45130
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45190
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45250
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45310
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45370
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45430
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45490
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45550
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45610
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45670
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45730
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45790
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45850
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45910
+            },
+            {
+              "count": 1,
+              "dueMilliseconds": 45970
+            }
+          ],
+          "maximumSameTick": 1
+        },
+        "reconnectJitter": {
+          "buckets": [
+            {
+              "count": 1,
+              "delayMilliseconds": 1
+            }
+          ],
+          "handshakes": 1
+        },
+        "recovery": [
+          {
+            "current": true,
+            "id": "subscription-000",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40030,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-001",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40090,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-002",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40150,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-003",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40210,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-004",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40270,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-005",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40330,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-006",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40390,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-007",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40450,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.299999997019768,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-008",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40510,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 7.5,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-009",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40570,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 40,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.099999994039536,
+            "retainedBytes": 2027
+          },
+          {
+            "current": true,
+            "id": "subscription-010",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40630,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-011",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40690,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-012",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40750,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-013",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40810,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-014",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40869,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-015",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40930,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 8.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-016",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 40990,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-017",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41050,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-018",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41110,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-019",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41170,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-020",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41230,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-021",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41290,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-022",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41350,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 9.900000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-023",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41410,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-024",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41470,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-025",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41530,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-026",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41590,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-027",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41650,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-028",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41709,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-029",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41770,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-030",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41830,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-031",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41890,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-032",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 41950,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-033",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42010,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-034",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42070,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-035",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42130,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 10.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-036",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42190,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-037",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42250,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-038",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42310,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-039",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42370,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.099999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-040",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42430,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-041",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42490,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-042",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42550,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-043",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42610,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-044",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42670,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-045",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42730,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-046",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42790,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-047",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42850,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-048",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42910,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-049",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 42970,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-050",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43030,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-051",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43090,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-052",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43150,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-053",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43210,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-054",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43270,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-055",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43330,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 11.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-056",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43389,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-057",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43449,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-058",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43510,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-059",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43570,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-060",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43630,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-061",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43690,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-062",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43750,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-063",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43810,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-064",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43870,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.799999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-065",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43930,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.799999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-066",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 43990,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.799999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-067",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44050,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 12.799999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-068",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44110,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-069",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44170,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-070",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44230,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-071",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44290,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-072",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44350,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-073",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44410,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-074",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44470,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-075",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44530,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-076",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44590,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-077",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44650,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-078",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44710,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 13.5,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-079",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44770,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.099999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-080",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44830,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-081",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44890,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.200000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-082",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 44950,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-083",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45010,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-084",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45070,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-085",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45130,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.599999994039536,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-086",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45190,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-087",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45250,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-088",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45310,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-089",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45370,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.700000002980232,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-090",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45430,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 14.799999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-091",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45490,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-092",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45550,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-093",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45610,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-094",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45670,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-095",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45730,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.299999997019768,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-096",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45790,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-097",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45850,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-098",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45910,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.400000005960464,
+            "retainedBytes": 2028
+          },
+          {
+            "current": true,
+            "id": "subscription-099",
+            "jitterMilliseconds": 1,
+            "pollDueMilliseconds": 45970,
+            "retainedCategories": {
+              "authorizationBytes": 835,
+              "identifierBytes": 41,
+              "pendingBytes": 0,
+              "pendingEvents": 0,
+              "pollTimers": 1,
+              "refreshSlots": 1,
+              "runtimeRecords": 3
+            },
+            "timeToCurrentMilliseconds": 15.5,
+            "retainedBytes": 2028
+          }
+        ],
+        "timeToCurrent": {
+          "durationsMilliseconds": [
+            7.3, 7.3, 7.3, 7.3, 7.3, 7.3, 7.3, 7.3, 7.5, 8.1, 8.2, 8.2, 8.2, 8.2, 8.2, 8.2, 9.2,
+            9.2, 9.2, 9.2, 9.2, 9.2, 9.9, 10, 10, 10.3, 10.3, 10.3, 10.4, 10.4, 10.4, 10.4, 10.5,
+            10.5, 10.5, 10.6, 11, 11, 11, 11.1, 11.2, 11.2, 11.2, 11.5, 11.5, 11.6, 11.6, 11.6,
+            11.6, 11.6, 11.7, 11.7, 11.7, 11.7, 11.7, 11.7, 12.5, 12.5, 12.6, 12.6, 12.7, 12.7,
+            12.7, 12.7, 12.8, 12.8, 12.8, 12.8, 13.4, 13.4, 13.4, 13.4, 13.4, 13.4, 13.4, 13.4,
+            13.4, 13.5, 13.5, 14.1, 14.2, 14.2, 14.3, 14.3, 14.6, 14.6, 14.7, 14.7, 14.7, 14.7,
+            14.8, 15.3, 15.3, 15.3, 15.3, 15.3, 15.4, 15.4, 15.4, 15.5
+          ],
+          "p50Milliseconds": 11.6,
+          "p95Milliseconds": 15.3,
+          "sampleCount": 100
+        }
+      },
+      "workload": {
+        "reconnectHandshakes": 1,
+        "simultaneousContinuityLosses": 100,
+        "subscriptions": 100
+      }
+    },
+    "recordedAt": "2026-08-29T16:48:17.001Z",
+    "runs": [
+      {
+        "artifactSha256": "45ef7d5331f4ef76a7c2ce1dc554a8639bbdaf4c74e2869a849f1b9a937e15d9",
+        "dispatchP95Milliseconds": 9.5,
+        "evidenceSha256": "896d0daa6f2ef6c184bdc8b5a744a6299672ee29fdc9994d14ddf019c946a39f",
+        "processId": 1466683,
+        "recoveryP95Milliseconds": 15.3,
+        "runIndex": 1
+      }
+    ],
+    "schemaVersion": 1,
+    "suite": "E100/1K+R100"
+  },
+  "qualifiedBaseline": null,
+  "schemaVersion": 1,
+  "suite": "E100/1K+R100"
+}
