@@ -99,10 +99,45 @@ describe("E100/1K and R100 hard-budget wiring", () => {
     ["nine active handshakes", (value) => (value.multiDocument.maximumConcurrentHandshakes = 9)],
     ["duplicate refresh", (value) => (firstSubscription(value).refreshInvalidations = 2)],
     [
-      "hidden retained skew",
-      (value) => (firstSubscription(value).retainedCategories.pendingBytes = 1),
+      "forged E100 heap delta",
+      (value) => (firstAfter(firstSubscription(value).retention).usedSize += 1),
     ],
-    ["R100 retained skew", (value) => (firstRecovery(value).retainedCategories.pendingBytes = 1)],
+    [
+      "forged R100 heap delta",
+      (value) => (firstAfter(firstRecovery(value).retention).usedSize += 1),
+    ],
+    [
+      "predecessor transport retained",
+      (value) => (value.r100.measurements.document.predecessorTransportOwners = 1),
+    ],
+    [
+      "predecessor continuity retained",
+      (value) => (value.r100.measurements.document.predecessorContinuityOwners = 1),
+    ],
+    [
+      "stale current payload retained",
+      (value) => (value.r100.measurements.document.currentPayloadOwners = 1),
+    ],
+    [
+      "stale queued payload retained",
+      (value) => (value.r100.measurements.document.queuedPayloadOwners = 1),
+    ],
+    [
+      "large-island retention mutation not detected",
+      (value) => (value.mutationProofs.largeIslandBuffer.retention = heapRetention(8_192)),
+    ],
+    [
+      "predecessor transport mutation not detected",
+      (value) => (value.mutationProofs.predecessorTransport.predecessorTransportOwners = 0),
+    ],
+    [
+      "stale current-payload mutation not detected",
+      (value) => (value.mutationProofs.staleCurrentPayload.currentPayloadOwners = 0),
+    ],
+    [
+      "stale queued-payload mutation not detected",
+      (value) => (value.mutationProofs.staleQueuedPayload.queuedPayloadOwners = 0),
+    ],
   ];
 
   it("rejects every required topology and resource mutation", () => {
@@ -163,6 +198,42 @@ describe("E100/1K and R100 hard-budget wiring", () => {
     });
   });
 
+  it("fails one measured island over the cap even when the document average remains small", () => {
+    const exploratory = validEvidence();
+    const first = firstSubscription(exploratory);
+    firstAfter(first.retention).usedSize += 9_000;
+    first.retention.retainedBytes += 9_000;
+    const baseline = {
+      exploratoryReference: validEvidence(),
+      qualifiedBaseline: null,
+      schemaVersion: 1,
+      suite: "E100/1K+R100",
+    };
+    expect(evaluateAsyncBudget(exploratory, baseline, { release: false }).observations).toContain(
+      "e100_retained_heap_unqualified",
+    );
+    const recovered = firstRecovery(exploratory);
+    firstAfter(recovered.retention).usedSize += 13_000;
+    recovered.retention.retainedBytes += 13_000;
+    expect(evaluateAsyncBudget(exploratory, baseline, { release: false }).observations).toContain(
+      "r100_retained_heap_unqualified",
+    );
+
+    const qualified = qualifiedEvidence([1, 1, 1]);
+    const qualifiedFirst = firstSubscription(qualified);
+    firstAfter(qualifiedFirst.retention).usedSize += 9_000;
+    qualifiedFirst.retention.retainedBytes += 9_000;
+    expect(evaluateAsyncBudget(qualified, baseline, { release: true }).issues).toContain(
+      "e100_retained_heap_exceeded",
+    );
+    const qualifiedRecovered = firstRecovery(qualified);
+    firstAfter(qualifiedRecovered.retention).usedSize += 13_000;
+    qualifiedRecovered.retention.retainedBytes += 13_000;
+    expect(evaluateAsyncBudget(qualified, baseline, { release: true }).issues).toContain(
+      "r100_retained_heap_exceeded",
+    );
+  });
+
   it("reports an unqualified cap observation but never weakens the qualified release cap", () => {
     const exploratory = validEvidence();
     setDispatchP95(exploratory, 8.3);
@@ -195,6 +266,20 @@ describe("E100/1K and R100 hard-budget wiring", () => {
   });
 });
 
+function heapRetention(retainedBytes: number) {
+  const before = Array.from({ length: 5 }, () => ({
+    backingStorageSize: 20_000,
+    embedderHeapUsedSize: 30_000,
+    usedSize: 1_000_000,
+  }));
+  const after = Array.from({ length: 5 }, () => ({
+    backingStorageSize: 20_000,
+    embedderHeapUsedSize: 30_000,
+    usedSize: 1_000_000 + retainedBytes,
+  }));
+  return { after, before, retainedBytes };
+}
+
 function validEvidence() {
   const dispatchDurations: number[] = Array.from({ length: 1_000 }, (_, index) =>
     index < 500 ? 0.5 : index < 949 ? 0.75 : 1,
@@ -209,16 +294,7 @@ function validEvidence() {
     maxQueuedRefreshes: 1,
     presentationEvents: 10,
     refreshInvalidations: 1,
-    retainedBytes: 2_176 + index,
-    retainedCategories: {
-      authorizationBytes: 512,
-      identifierBytes: 128 + index,
-      pendingBytes: 0,
-      pendingEvents: 0,
-      pollTimers: 0,
-      refreshSlots: 0,
-      runtimeRecords: 7,
-    },
+    retention: heapRetention(2_176 + index),
   }));
   const recovery = Array.from({ length: 100 }, (_, index) => {
     const subscription = subscriptions[index];
@@ -228,8 +304,7 @@ function validEvidence() {
       id: `subscription-${String(index).padStart(3, "0")}`,
       jitterMilliseconds: index + 1,
       pollDueMilliseconds: 30_001 + index,
-      retainedBytes: 2_176 + index,
-      retainedCategories: structuredClone(subscription.retainedCategories),
+      retention: heapRetention(2_176 + index),
       timeToCurrentMilliseconds: 1 + index / 100,
     };
   });
@@ -259,11 +334,14 @@ function validEvidence() {
           sampleCount: 1_000,
         },
         document: {
+          activeTransportOwners: 1,
+          currentPayloadOwners: 0,
           fairnessMaximumLead: 1,
           handshakes: 1,
           maxQueuedBytes: 32_768,
           maxQueuedEvents: 32,
           physicalTransports: 1,
+          queuedPayloadOwners: 0,
           starvedSubscriptions: 0,
         },
         rustOwner: {
@@ -312,6 +390,20 @@ function validEvidence() {
       independentRuns: 1,
       measuredSamples: 1_000,
       monotonicClock: "performance.now",
+      retainedHeap: {
+        api: "Chromium CDP Runtime.getHeapUsage",
+        beforeState:
+          "same page, DOM, benchmark harness, and native document transport with target island disconnected",
+        derivation: "max_after_total_minus_min_before_total",
+        exclusions: ["native_transport", "DOM", "current_payload"],
+        garbageCollection: "HeapProfiler.collectGarbage",
+        harnessTreatment:
+          "control harness is retained in both states; connected controller and port are conservatively included",
+        phaseSamples: 5,
+        product: "Chrome/fixture",
+        protocolVersion: "1.3",
+        unavailable: "fail_closed",
+      },
       regressionReference: "median_run_p95_v1",
       warmupIterations: 1,
       watchdogOutsideSamples: true,
@@ -325,6 +417,37 @@ function validEvidence() {
       origin: "http://127.0.0.1:4173",
       startOrder: Array.from({ length: 16 }, (_, index) => index),
     },
+    mutationProofs: {
+      largeIslandBuffer: {
+        artifactSha256: "a".repeat(64),
+        documentTransports: 1,
+        phase: "E100",
+        retention: heapRetention(65_536),
+        subscriptionId: "subscription-000",
+      },
+      predecessorTransport: {
+        activeTransportOwners: 2,
+        artifactSha256: "a".repeat(64),
+        physicalTransportsAfterCurrent: 2,
+        predecessorContinuityOwners: 100,
+        predecessorTransportOwners: 1,
+        reconnectHandshakes: 1,
+      },
+      staleCurrentPayload: {
+        artifactSha256: "a".repeat(64),
+        currentPayloadOwners: 1,
+        phase: "R100",
+        retention: heapRetention(65_536),
+        subscriptionId: "subscription-000",
+      },
+      staleQueuedPayload: {
+        artifactSha256: "a".repeat(64),
+        phase: "R100",
+        queuedPayloadOwners: 1,
+        retention: heapRetention(65_536),
+        subscriptionId: "subscription-000",
+      },
+    },
     recordedAt: "2026-08-29T00:00:00.000Z",
     r100: {
       bounds: {
@@ -334,10 +457,14 @@ function validEvidence() {
       },
       measurements: {
         document: {
+          currentPayloadOwners: 0,
           generationAfter: 2,
           generationBefore: 1,
           maximumConcurrentReauthorizations: 8,
           physicalTransportsAfterCurrent: 1,
+          predecessorContinuityOwners: 0,
+          predecessorTransportOwners: 0,
+          queuedPayloadOwners: 0,
           reconnectHandshakes: 1,
           recoveredSubscriptions: 100,
           starvedSubscriptions: 0,
@@ -396,6 +523,12 @@ function firstSubscription(value: MutableEvidence) {
 function firstRecovery(value: MutableEvidence) {
   const first = value.r100.measurements.recovery[0];
   if (first === undefined) throw new Error("fixture_recovery_missing");
+  return first;
+}
+
+function firstAfter(retention: ReturnType<typeof heapRetention>) {
+  const first = retention.after[0];
+  if (first === undefined) throw new Error("fixture_heap_sample_missing");
   return first;
 }
 

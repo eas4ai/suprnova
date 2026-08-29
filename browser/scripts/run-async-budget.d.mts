@@ -5,7 +5,14 @@ export interface AsyncBudgetArguments {
   readonly output: string;
   readonly profile: "qualified" | "reduced";
   readonly recordExploratory: boolean;
+  readonly retentionMutation:
+    | "large_island_buffer"
+    | "none"
+    | "predecessor_transport"
+    | "stale_current_payload"
+    | "stale_queued_payload";
   readonly serverOutput: string;
+  readonly verifyRetentionMutations: boolean;
 }
 
 export class AsyncBudgetRunnerError extends Error {

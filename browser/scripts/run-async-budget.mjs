@@ -19,7 +19,15 @@ const DEFAULT_OUTPUT = resolve(browserRoot, "benchmarks/local/async-budget-v1.js
 const DEFAULT_SERVER_OUTPUT = resolve(repositoryRoot, "benchmarks/local/async-server-v1.json");
 const DRIVER_MARKER = "SUPRNOVA_ASYNC_BUDGET_DRIVER_V1";
 const MAX_JSON_BYTES = 4 * 1_024 * 1_024;
-const CHILD_TIMEOUT_MILLISECONDS = 120_000;
+const CHILD_TIMEOUT_MILLISECONDS = 240_000;
+const HEAP_SAMPLES_PER_STATE = 5;
+const RETENTION_MUTATIONS = new Set([
+  "none",
+  "large_island_buffer",
+  "predecessor_transport",
+  "stale_current_payload",
+  "stale_queued_payload",
+]);
 
 export class AsyncBudgetRunnerError extends Error {
   constructor(code) {
@@ -40,14 +48,25 @@ export function argumentsFrom(argv) {
     output: DEFAULT_OUTPUT,
     profile: "reduced",
     recordExploratory: false,
+    retentionMutation: "none",
     serverOutput: DEFAULT_SERVER_OUTPUT,
+    verifyRetentionMutations: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--child") options.child = true;
     else if (argument === "--record-exploratory") options.recordExploratory = true;
-    else if (
-      ["--artifact", "--baseline", "--output", "--profile", "--server-output"].includes(argument)
+    else if (argument === "--verify-retention-mutations") {
+      options.verifyRetentionMutations = true;
+    } else if (
+      [
+        "--artifact",
+        "--baseline",
+        "--output",
+        "--profile",
+        "--retention-mutation",
+        "--server-output",
+      ].includes(argument)
     ) {
       const value = argv[index + 1];
       if (value === undefined) fail("usage");
@@ -55,11 +74,13 @@ export function argumentsFrom(argv) {
       if (argument === "--artifact") options.artifact = resolve(value);
       else if (argument === "--baseline") options.baseline = resolve(value);
       else if (argument === "--output") options.output = resolve(value);
+      else if (argument === "--retention-mutation") options.retentionMutation = value;
       else if (argument === "--server-output") options.serverOutput = resolve(value);
       else options.profile = value;
     } else fail("usage");
   }
   if (options.profile !== "reduced" && options.profile !== "qualified") fail("profile_invalid");
+  if (!RETENTION_MUTATIONS.has(options.retentionMutation)) fail("retention_mutation_invalid");
   if (options.child && options.artifact === null) fail("usage");
   if (!options.child && options.artifact !== null) fail("usage");
   if (options.output === options.baseline) fail("baseline_overwrite_forbidden");
@@ -163,11 +184,80 @@ async function closeServer(server) {
   });
 }
 
-async function measurePage(context, baseUrl, artifactSha256, workloadSource) {
+async function heapSamples(session) {
+  const samples = [];
+  for (let index = 0; index < HEAP_SAMPLES_PER_STATE; index += 1) {
+    await session.send("HeapProfiler.collectGarbage");
+    const sample = await session.send("Runtime.getHeapUsage");
+    const values = [sample.usedSize, sample.embedderHeapUsedSize, sample.backingStorageSize];
+    if (values.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      fail("async_heap_measurement_invalid");
+    }
+    samples.push({
+      backingStorageSize: sample.backingStorageSize,
+      embedderHeapUsedSize: sample.embedderHeapUsedSize,
+      usedSize: sample.usedSize,
+    });
+  }
+  return samples;
+}
+
+async function retentionSession(page) {
+  return page.evaluate(() => {
+    const value = Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention");
+    if (typeof value !== "object" || value === null) {
+      throw new Error("async_retention_session_missing");
+    }
+    return true;
+  });
+}
+
+async function measureRetention(page, session, phase, subscriptionIndices) {
+  await retentionSession(page);
+  const initialResources = await page.evaluate(() =>
+    Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").resources(),
+  );
+  const subscriptions = [];
+  for (const index of subscriptionIndices) {
+    await page.evaluate(
+      (subscriptionIndex) =>
+        Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").disconnect(subscriptionIndex),
+      index,
+    );
+    const before = await heapSamples(session);
+    await page.evaluate(
+      (subscriptionIndex) =>
+        Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").connect(subscriptionIndex),
+      index,
+    );
+    const after = await heapSamples(session);
+    subscriptions.push({
+      after,
+      before,
+      id: `subscription-${String(index).padStart(3, "0")}`,
+    });
+  }
+  const finalResources = await page.evaluate(() =>
+    Reflect.get(globalThis, "__suprnovaBudgetAsyncRetention").resources(),
+  );
+  return Object.freeze({ finalResources, initialResources, phase, subscriptions });
+}
+
+async function measurePage(
+  context,
+  baseUrl,
+  artifactSha256,
+  workloadSource,
+  options = { checkpoint: null, retentionIndices: null, retentionMutation: "none" },
+) {
   const page = await context.newPage();
   const session = await context.newCDPSession(page);
   try {
     await session.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+    const version = await session.send("Browser.getVersion");
+    if (typeof version.protocolVersion !== "string" || typeof version.product !== "string") {
+      fail("async_cdp_version_unavailable");
+    }
     await page.goto(`${baseUrl}/health`);
     await page.setContent(
       `<!doctype html><html lang="en"><body>${Array.from(
@@ -177,8 +267,8 @@ async function measurePage(context, baseUrl, artifactSha256, workloadSource) {
       { waitUntil: "domcontentloaded" },
     );
     await page.addScriptTag({ content: workloadSource });
-    return await page.evaluate(
-      async ({ artifactUrl, expectedArtifactSha256 }) => {
+    const measurement = await page.evaluate(
+      async ({ artifactUrl, checkpoint, expectedArtifactSha256, retentionMutation }) => {
         const benchmark = globalThis.SuprnovaAsyncBudgetDriver;
         if (benchmark?.ASYNC_BUDGET_DRIVER_MARKER !== "SUPRNOVA_ASYNC_BUDGET_DRIVER_V1") {
           throw new Error("async_budget_driver_missing");
@@ -194,20 +284,129 @@ async function measurePage(context, baseUrl, artifactSha256, workloadSource) {
           subscriptionCount: 100,
         };
         await benchmark.measureAsyncWorkloads({ ...input, prepare: true });
-        return benchmark.measureAsyncWorkloads(input);
+        return benchmark.measureAsyncWorkloads({
+          ...input,
+          ...(checkpoint === null ? {} : { retentionCheckpoint: checkpoint }),
+          retentionMutation,
+        });
       },
       {
         artifactUrl: `${baseUrl}/suprnova-live.async.esm.js`,
+        checkpoint: options.checkpoint,
         expectedArtifactSha256: artifactSha256,
+        retentionMutation: options.retentionMutation,
       },
     );
+    const retention =
+      options.checkpoint === null
+        ? null
+        : await measureRetention(
+            page,
+            session,
+            options.checkpoint,
+            options.retentionIndices ?? Array.from({ length: 100 }, (_, index) => index),
+          );
+    return Object.freeze({
+      measurement,
+      protocol: Object.freeze({
+        method: "Runtime.getHeapUsage",
+        product: version.product,
+        protocolVersion: version.protocolVersion,
+      }),
+      retention,
+    });
   } finally {
     await session.detach();
     await page.close();
   }
 }
 
-async function childMeasurement(artifactPath) {
+function singleRetentionProbe(result, phase) {
+  const retention = result.retention;
+  if (retention?.phase !== phase || retention.subscriptions.length !== 1) {
+    fail("async_retention_mutation_probe_invalid");
+  }
+  const probe = retention.subscriptions[0];
+  if (probe?.id !== "subscription-000") fail("async_retention_mutation_probe_invalid");
+  return probe;
+}
+
+async function measureMutationProofs(context, baseUrl, artifactSha256, workloadSource, protocol) {
+  const largeIslandBuffer = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
+    checkpoint: "e100",
+    retentionIndices: [0],
+    retentionMutation: "large_island_buffer",
+  });
+  const predecessorTransport = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
+    checkpoint: "r100",
+    retentionIndices: [],
+    retentionMutation: "predecessor_transport",
+  });
+  const staleCurrentPayload = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
+    checkpoint: "r100",
+    retentionIndices: [0],
+    retentionMutation: "stale_current_payload",
+  });
+  const staleQueuedPayload = await measurePage(context, baseUrl, artifactSha256, workloadSource, {
+    checkpoint: "r100",
+    retentionIndices: [0],
+    retentionMutation: "stale_queued_payload",
+  });
+  const mutationRuns = [
+    largeIslandBuffer,
+    predecessorTransport,
+    staleCurrentPayload,
+    staleQueuedPayload,
+  ];
+  if (mutationRuns.some((run) => JSON.stringify(run.protocol) !== JSON.stringify(protocol))) {
+    fail("async_cdp_version_changed");
+  }
+  const predecessorMeasurement = predecessorTransport.measurement.R100;
+  if (predecessorMeasurement === null) fail("async_retention_mutation_probe_invalid");
+  const predecessorResources = predecessorTransport.retention?.finalResources;
+  const currentResources = staleCurrentPayload.retention?.finalResources;
+  const queuedResources = staleQueuedPayload.retention?.finalResources;
+  if (
+    predecessorResources === undefined ||
+    currentResources === undefined ||
+    queuedResources === undefined
+  ) {
+    fail("async_retention_mutation_probe_invalid");
+  }
+  return Object.freeze({
+    largeIslandBuffer: Object.freeze({
+      artifactSha256,
+      documentTransports: largeIslandBuffer.measurement.E100.physicalConnectionCount,
+      phase: "E100",
+      retention: singleRetentionProbe(largeIslandBuffer, "e100"),
+      subscriptionId: "subscription-000",
+    }),
+    predecessorTransport: Object.freeze({
+      activeTransportOwners: predecessorResources.activeTransportOwners,
+      artifactSha256,
+      physicalTransportsAfterCurrent: predecessorMeasurement.physicalTransportsAfterCurrent,
+      predecessorContinuityOwners: predecessorResources.predecessorContinuityOwners,
+      predecessorTransportOwners: predecessorResources.predecessorTransportOwners,
+      reconnectHandshakes: predecessorMeasurement.documentReconnectHandshakes,
+    }),
+    staleCurrentPayload: Object.freeze({
+      artifactSha256,
+      currentPayloadOwners: currentResources.currentPayloadOwners,
+      phase: "R100",
+      retention: singleRetentionProbe(staleCurrentPayload, "r100"),
+      subscriptionId: "subscription-000",
+    }),
+    staleQueuedPayload: Object.freeze({
+      artifactSha256,
+      phase: "R100",
+      queuedPayloadOwners: queuedResources.queuedPayloadOwners,
+      retention: singleRetentionProbe(staleQueuedPayload, "r100"),
+      subscriptionId: "subscription-000",
+    }),
+  });
+}
+
+async function childMeasurement(artifactPath, retentionMutation, verifyRetentionMutations) {
   const artifact = await readFile(artifactPath);
   const artifactSha256 = sha256(artifact);
   const workload = await bundledModule(
@@ -251,12 +450,40 @@ async function childMeasurement(artifactPath) {
     const context = await browser.newContext({ viewport: { height: 720, width: 1_280 } });
     try {
       await measurePage(context, baseUrl, artifactSha256, workload.source);
-      const measurement = await measurePage(context, baseUrl, artifactSha256, workload.source);
+      const e100 = await measurePage(context, baseUrl, artifactSha256, workload.source, {
+        checkpoint: "e100",
+        retentionMutation,
+      });
+      const r100 = await measurePage(context, baseUrl, artifactSha256, workload.source, {
+        checkpoint: "r100",
+        retentionMutation,
+      });
+      if (e100.measurement.R100 !== null || r100.measurement.R100 === null) {
+        fail("async_retention_checkpoint_invalid");
+      }
+      if (JSON.stringify(e100.protocol) !== JSON.stringify(r100.protocol)) {
+        fail("async_cdp_version_changed");
+      }
+      const mutationProofs = verifyRetentionMutations
+        ? await measureMutationProofs(
+            context,
+            baseUrl,
+            artifactSha256,
+            workload.source,
+            e100.protocol,
+          )
+        : null;
       return Object.freeze({
         artifactSha256,
         environment,
-        measurement,
+        measurement: Object.freeze({
+          E100: e100.measurement.E100,
+          R100: r100.measurement.R100,
+        }),
+        mutationProofs,
         processId: process.pid,
+        protocol: e100.protocol,
+        retention: Object.freeze({ E100: e100.retention, R100: r100.retention }),
       });
     } finally {
       await context.close();
@@ -267,18 +494,23 @@ async function childMeasurement(artifactPath) {
   }
 }
 
-function runChild(artifactPath) {
-  const execution = spawnSync(
-    process.execPath,
-    [fileURLToPath(import.meta.url), "--child", "--artifact", artifactPath],
-    {
-      cwd: browserRoot,
-      encoding: "utf8",
-      env: process.env,
-      maxBuffer: MAX_JSON_BYTES,
-      timeout: CHILD_TIMEOUT_MILLISECONDS,
-    },
-  );
+function runChild(artifactPath, retentionMutation, verifyRetentionMutations) {
+  const childArguments = [
+    fileURLToPath(import.meta.url),
+    "--child",
+    "--artifact",
+    artifactPath,
+    "--retention-mutation",
+    retentionMutation,
+  ];
+  if (verifyRetentionMutations) childArguments.push("--verify-retention-mutations");
+  const execution = spawnSync(process.execPath, childArguments, {
+    cwd: browserRoot,
+    encoding: "utf8",
+    env: process.env,
+    maxBuffer: MAX_JSON_BYTES,
+    timeout: CHILD_TIMEOUT_MILLISECONDS,
+  });
   const failure = childExecutionFailure(
     execution,
     "async_budget_watchdog",
@@ -315,6 +547,50 @@ function maximum(runs, select) {
 
 function selectedRun(runs, select) {
   return runs.reduce((selected, run) => (select(run) > select(selected) ? run : selected));
+}
+
+function sameProtocol(runs) {
+  const encoded = JSON.stringify(runs[0]?.protocol);
+  if (encoded === undefined || runs.some((run) => JSON.stringify(run.protocol) !== encoded)) {
+    fail("async_cdp_version_changed");
+  }
+  return runs[0].protocol;
+}
+
+function retainedMeasurement(runs, phase, id, helpers) {
+  const candidates = runs.map((run) => {
+    const entry = run.retention?.[phase]?.subscriptions?.find((value) => value.id === id);
+    if (entry === undefined) fail("async_retention_subscription_missing");
+    return helpers.deriveRetainedHeapMeasurement(entry);
+  });
+  return candidates.reduce((selected, candidate) =>
+    candidate.retainedBytes > selected.retainedBytes ? candidate : selected,
+  );
+}
+
+function mutationProofEvidence(runs, artifactSha256, helpers) {
+  const proofRuns = runs.filter((run) => run.mutationProofs !== null);
+  if (proofRuns.length !== 1) fail("async_retention_mutation_proof_count");
+  const proof = proofRuns[0]?.mutationProofs;
+  if (proof === undefined) fail("async_retention_mutation_proof_missing");
+  for (const entry of Object.values(proof)) {
+    if (entry?.artifactSha256 !== artifactSha256) fail("async_retention_mutation_artifact");
+  }
+  return Object.freeze({
+    largeIslandBuffer: Object.freeze({
+      ...proof.largeIslandBuffer,
+      retention: helpers.deriveRetainedHeapMeasurement(proof.largeIslandBuffer.retention),
+    }),
+    predecessorTransport: proof.predecessorTransport,
+    staleCurrentPayload: Object.freeze({
+      ...proof.staleCurrentPayload,
+      retention: helpers.deriveRetainedHeapMeasurement(proof.staleCurrentPayload.retention),
+    }),
+    staleQueuedPayload: Object.freeze({
+      ...proof.staleQueuedPayload,
+      retention: helpers.deriveRetainedHeapMeasurement(proof.staleQueuedPayload.retention),
+    }),
+  });
 }
 
 export function exactServerEvidence(value, artifactSha256) {
@@ -359,6 +635,7 @@ async function runServerProof(artifactSha256, output) {
 
 function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
   const environment = sameEnvironment(runs);
+  const protocol = sameProtocol(runs);
   const dispatchRun = selectedRun(
     runs,
     (run) =>
@@ -374,33 +651,13 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
   const timeToCurrent = helpers.summarizeAsyncSamples(
     recoveryRun.measurement.R100.recoverySamplesMs,
   );
-  const subscriptions = dispatchRun.measurement.E100.subscriptions.map((subscription) => {
-    const retainedCategories = {
-      authorizationBytes: subscription.authorizationBytes,
-      identifierBytes: subscription.identifierBytes,
-      pendingBytes: subscription.pendingBytes,
-      pendingEvents: subscription.pendingEvents,
-      pollTimers: subscription.pollTimers,
-      refreshSlots: subscription.refreshSlots,
-      runtimeRecords: subscription.runtimeRecords,
-    };
-    return {
-      current: subscription.current,
-      dispatches: subscription.dispatches,
-      finalEpoch: subscription.finalEpoch,
-      finalSequence: subscription.finalSequence,
-      id: subscription.id,
-      maxInFlightRefreshes: subscription.maxInFlightRefreshes,
-      maxQueuedRefreshes: subscription.maxQueuedRefreshes,
-      presentationEvents: subscription.presentationEvents,
-      refreshInvalidations: subscription.refreshInvalidations,
-      retainedBytes: helpers.estimateAsyncRetainedBytes(retainedCategories),
-      retainedCategories,
-    };
-  });
+  const subscriptions = dispatchRun.measurement.E100.subscriptions.map((subscription) => ({
+    ...subscription,
+    retention: retainedMeasurement(runs, "E100", subscription.id, helpers),
+  }));
   const recovery = recoveryRun.measurement.R100.recovery.map((entry) => ({
     ...entry,
-    retainedBytes: helpers.estimateAsyncRetainedBytes(entry.retainedCategories),
+    retention: retainedMeasurement(runs, "R100", entry.id, helpers),
   }));
   const pollCounts = new Map();
   for (const due of recoveryRun.measurement.R100.pollDueMilliseconds) {
@@ -424,11 +681,23 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       measurements: {
         dispatch,
         document: {
+          activeTransportOwners: maximum(
+            runs,
+            (run) => run.retention.E100.finalResources.activeTransportOwners,
+          ),
+          currentPayloadOwners: maximum(
+            runs,
+            (run) => run.retention.E100.finalResources.currentPayloadOwners,
+          ),
           fairnessMaximumLead: maximum(runs, (run) => run.measurement.E100.fairnessMaximumLead),
           handshakes: maximum(runs, (run) => run.measurement.E100.handshakeCount),
           maxQueuedBytes: maximum(runs, (run) => run.measurement.E100.queuedBytePeak),
           maxQueuedEvents: maximum(runs, (run) => run.measurement.E100.queuedEventPeak),
           physicalTransports: maximum(runs, (run) => run.measurement.E100.physicalConnectionCount),
+          queuedPayloadOwners: maximum(
+            runs,
+            (run) => run.retention.E100.finalResources.queuedPayloadOwners,
+          ),
           starvedSubscriptions:
             100 - Math.min(...runs.map((run) => run.measurement.E100.currentSubscriptionCount)),
         },
@@ -447,6 +716,20 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
     environment,
     methodology: {
       controlledTimeline: true,
+      retainedHeap: {
+        api: "Chromium CDP Runtime.getHeapUsage",
+        beforeState:
+          "same page, DOM, benchmark harness, and native document transport with target island disconnected",
+        derivation: "max_after_total_minus_min_before_total",
+        exclusions: ["native_transport", "DOM", "current_payload"],
+        garbageCollection: "HeapProfiler.collectGarbage",
+        harnessTreatment:
+          "control harness is retained in both states; connected controller and port are conservatively included",
+        phaseSamples: HEAP_SAMPLES_PER_STATE,
+        product: protocol.product,
+        protocolVersion: protocol.protocolVersion,
+        unavailable: "fail_closed",
+      },
       independentRuns: runs.length,
       measuredSamples: 1_000,
       monotonicClock: "performance.now",
@@ -464,6 +747,7 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       origin: "single_origin_controlled_scheduler",
       startOrder: multiRun.measurement.R100.multiDocument.startOrder,
     },
+    mutationProofs: mutationProofEvidence(runs, artifactEvidence.sha256, helpers),
     r100: {
       bounds: {
         maxConcurrentHandshakesPerOrigin: 8,
@@ -472,6 +756,10 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       },
       measurements: {
         document: {
+          currentPayloadOwners: maximum(
+            runs,
+            (run) => run.retention.R100.finalResources.currentPayloadOwners,
+          ),
           generationAfter: recoveryRun.measurement.R100.generationAfter,
           generationBefore: recoveryRun.measurement.R100.generationBefore,
           maximumConcurrentReauthorizations: maximum(
@@ -480,6 +768,18 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
           ),
           physicalTransportsAfterCurrent:
             recoveryRun.measurement.R100.physicalTransportsAfterCurrent,
+          predecessorContinuityOwners: maximum(
+            runs,
+            (run) => run.retention.R100.finalResources.predecessorContinuityOwners,
+          ),
+          predecessorTransportOwners: maximum(
+            runs,
+            (run) => run.retention.R100.finalResources.predecessorTransportOwners,
+          ),
+          queuedPayloadOwners: maximum(
+            runs,
+            (run) => run.retention.R100.finalResources.queuedPayloadOwners,
+          ),
           reconnectHandshakes: maximum(
             runs,
             (run) => run.measurement.R100.documentReconnectHandshakes,
@@ -523,7 +823,15 @@ function mergeEvidence(runs, artifactEvidence, serverEvidence, helpers) {
       return {
         artifactSha256: artifactEvidence.sha256,
         dispatchP95Milliseconds: dispatchSummary.p95Milliseconds,
-        evidenceSha256: sha256(Buffer.from(JSON.stringify(run.measurement))),
+        evidenceSha256: sha256(
+          Buffer.from(
+            JSON.stringify({
+              measurement: run.measurement,
+              mutationProofs: run.mutationProofs,
+              retention: run.retention,
+            }),
+          ),
+        ),
         processId: run.processId,
         recoveryP95Milliseconds: recoverySummary.p95Milliseconds,
         runIndex: index + 1,
@@ -554,7 +862,9 @@ async function parentMain(options) {
   };
   const serverEvidence = await runServerProof(artifactEvidence.sha256, options.serverOutput);
   const runsRequired = options.profile === "qualified" ? 3 : 1;
-  const runs = Array.from({ length: runsRequired }, () => runChild(artifactPath));
+  const runs = Array.from({ length: runsRequired }, (_, index) =>
+    runChild(artifactPath, options.retentionMutation, index === 0),
+  );
   const helpers = await importedBundle("benchmarks/async-budget-workloads.ts");
   const schema = await importedBundle("benchmarks/async-budget-schema.ts");
   const result = schema.validateAsyncBudgetEvidence(
@@ -586,10 +896,15 @@ async function parentMain(options) {
     await atomicWriteEvidence(options.baseline, `${JSON.stringify(baseline, null, 2)}\n`, null);
   }
   const retained = Math.max(
-    ...result.e100.measurements.subscriptions.map((subscription) => subscription.retainedBytes),
+    ...result.e100.measurements.subscriptions.map(
+      (subscription) => subscription.retention.retainedBytes,
+    ),
+  );
+  const retainedAfterRecovery = Math.max(
+    ...result.r100.measurements.recovery.map((entry) => entry.retention.retainedBytes),
   );
   process.stdout.write(
-    `E100/1K+R100 async budget classification=${evaluation.classification} dispatch_p50=${String(result.e100.measurements.dispatch.p50Milliseconds)}ms dispatch_p95=${String(result.e100.measurements.dispatch.p95Milliseconds)}ms recovery_p50=${String(result.r100.measurements.timeToCurrent.p50Milliseconds)}ms recovery_p95=${String(result.r100.measurements.timeToCurrent.p95Milliseconds)}ms retained_max=${String(retained)}B transport=${String(result.e100.measurements.document.physicalTransports)} reconnect=${String(result.r100.measurements.document.reconnectHandshakes)} scheduler_max=${String(result.multiDocument.maximumConcurrentHandshakes)} artifact_brotli=${String(result.artifact.brotliBytes)}B output=${options.output}\n`,
+    `E100/1K+R100 async budget classification=${evaluation.classification} dispatch_p50=${String(result.e100.measurements.dispatch.p50Milliseconds)}ms dispatch_p95=${String(result.e100.measurements.dispatch.p95Milliseconds)}ms recovery_p50=${String(result.r100.measurements.timeToCurrent.p50Milliseconds)}ms recovery_p95=${String(result.r100.measurements.timeToCurrent.p95Milliseconds)}ms retained_max=${String(retained)}B retained_after_recovery_max=${String(retainedAfterRecovery)}B transport=${String(result.e100.measurements.document.physicalTransports)} reconnect=${String(result.r100.measurements.document.reconnectHandshakes)} scheduler_max=${String(result.multiDocument.maximumConcurrentHandshakes)} artifact_brotli=${String(result.artifact.brotliBytes)}B output=${options.output}\n`,
   );
   if (evaluation.observations.length > 0) {
     process.stdout.write(`E100/1K+R100 observations: ${evaluation.observations.join(",")}\n`);
@@ -604,7 +919,15 @@ async function main() {
   try {
     const options = argumentsFrom(process.argv.slice(2));
     if (options.child) {
-      process.stdout.write(JSON.stringify(await childMeasurement(options.artifact)));
+      process.stdout.write(
+        JSON.stringify(
+          await childMeasurement(
+            options.artifact,
+            options.retentionMutation,
+            options.verifyRetentionMutations,
+          ),
+        ),
+      );
       return;
     }
     await parentMain(options);

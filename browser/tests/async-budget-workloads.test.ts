@@ -1,34 +1,48 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  ASYNC_BUDGET_DRIVER_MARKER,
-  estimateAsyncRetainedBytes,
-  summarizeAsyncSamples,
-} from "../benchmarks/async-budget-workloads.js";
+import * as asyncBudgetWorkloads from "../benchmarks/async-budget-workloads.js";
+
+const { ASYNC_BUDGET_DRIVER_MARKER, summarizeAsyncSamples } = asyncBudgetWorkloads;
 
 describe("async budget evidence helpers", () => {
-  it("uses a closed per-subscription accounting model instead of dividing a document total", () => {
+  it("derives retained bytes only from raw forced-GC Chromium heap samples", () => {
     expect(ASYNC_BUDGET_DRIVER_MARKER).toBe("SUPRNOVA_ASYNC_BUDGET_DRIVER_V1");
-    const first = estimateAsyncRetainedBytes({
-      authorizationBytes: 512,
-      identifierBytes: 128,
-      pendingBytes: 0,
-      pendingEvents: 0,
-      pollTimers: 0,
-      refreshSlots: 0,
-      runtimeRecords: 7,
+    const helper = Reflect.get(asyncBudgetWorkloads, "deriveRetainedHeapMeasurement") as
+      ((value: unknown) => unknown) | undefined;
+    expect(helper).toBeTypeOf("function");
+    expect(
+      helper?.({
+        after: [
+          { backingStorageSize: 7, embedderHeapUsedSize: 11, usedSize: 113 },
+          { backingStorageSize: 8, embedderHeapUsedSize: 12, usedSize: 115 },
+        ],
+        before: [
+          { backingStorageSize: 5, embedderHeapUsedSize: 10, usedSize: 100 },
+          { backingStorageSize: 6, embedderHeapUsedSize: 10, usedSize: 101 },
+        ],
+      }),
+    ).toEqual({
+      after: [
+        { backingStorageSize: 7, embedderHeapUsedSize: 11, usedSize: 113 },
+        { backingStorageSize: 8, embedderHeapUsedSize: 12, usedSize: 115 },
+      ],
+      before: [
+        { backingStorageSize: 5, embedderHeapUsedSize: 10, usedSize: 100 },
+        { backingStorageSize: 6, embedderHeapUsedSize: 10, usedSize: 101 },
+      ],
+      retainedBytes: 20,
     });
-    const chatty = estimateAsyncRetainedBytes({
-      authorizationBytes: 512,
-      identifierBytes: 128,
-      pendingBytes: 4_096,
-      pendingEvents: 4,
-      pollTimers: 1,
-      refreshSlots: 1,
-      runtimeRecords: 7,
-    });
-    expect(first).toBe(2_176);
-    expect(chatty).toBe(7_168);
+    expect(() =>
+      helper?.({
+        after: [
+          { backingStorageSize: 1, embedderHeapUsedSize: 1, usedSize: Number.MAX_SAFE_INTEGER },
+        ],
+        before: [
+          { backingStorageSize: 1, embedderHeapUsedSize: 1, usedSize: Number.MAX_SAFE_INTEGER },
+        ],
+      }),
+    ).toThrow("async_heap_sample_invalid");
+    expect(Reflect.has(asyncBudgetWorkloads, "estimateAsyncRetainedBytes")).toBe(false);
   });
 
   it("computes deterministic nearest-rank p50/p95 without changing sample order", () => {

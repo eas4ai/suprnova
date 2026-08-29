@@ -7,6 +7,20 @@ export interface AsyncWorkloadInput {
   readonly refreshInvalidationCount: 100;
   readonly scheduledDurationMs: 10_000;
   readonly subscriptionCount: 100;
+  readonly retentionMutation?:
+    | "none"
+    | "large_island_buffer"
+    | "predecessor_transport"
+    | "stale_current_payload"
+    | "stale_queued_payload";
+}
+
+export interface AsyncWorkloadE100CheckpointInput extends AsyncWorkloadInput {
+  readonly retentionCheckpoint: "e100";
+}
+
+export interface AsyncWorkloadR100CheckpointInput extends AsyncWorkloadInput {
+  readonly retentionCheckpoint: "r100";
 }
 
 export interface AsyncWorkloadPreparationInput extends AsyncWorkloadInput {
@@ -33,22 +47,15 @@ export interface AsyncWorkloadMeasurement {
     readonly currentSubscriptionCount: number;
     readonly fairnessMaximumLead: number;
     readonly subscriptions: readonly Readonly<{
-      readonly authorizationBytes: number;
       readonly current: boolean;
       readonly dispatches: number;
       readonly finalEpoch: string;
       readonly finalSequence: string;
       readonly id: string;
-      readonly identifierBytes: number;
       readonly maxInFlightRefreshes: number;
       readonly maxQueuedRefreshes: number;
-      readonly pendingBytes: number;
-      readonly pendingEvents: number;
-      readonly pollTimers: number;
       readonly presentationEvents: number;
       readonly refreshInvalidations: number;
-      readonly refreshSlots: number;
-      readonly runtimeRecords: number;
     }>[];
   }>;
   readonly R100: Readonly<{
@@ -66,20 +73,15 @@ export interface AsyncWorkloadMeasurement {
     readonly generationBefore: number;
     readonly generationAfter: number;
     readonly physicalTransportsAfterCurrent: number;
+    readonly predecessorContinuityOwners: number;
+    readonly predecessorTransportOwners: number;
+    readonly queuedPayloadOwners: number;
+    readonly currentPayloadOwners: number;
     readonly recovery: readonly Readonly<{
       readonly current: boolean;
       readonly id: string;
       readonly jitterMilliseconds: number;
       readonly pollDueMilliseconds: number;
-      readonly retainedCategories: Readonly<{
-        readonly authorizationBytes: number;
-        readonly identifierBytes: number;
-        readonly pendingBytes: number;
-        readonly pendingEvents: number;
-        readonly pollTimers: number;
-        readonly refreshSlots: number;
-        readonly runtimeRecords: number;
-      }>;
       readonly timeToCurrentMilliseconds: number;
     }>[];
     readonly multiDocument: Readonly<{
@@ -89,6 +91,11 @@ export interface AsyncWorkloadMeasurement {
       readonly startOrder: readonly number[];
     }>;
   }>;
+}
+
+export interface AsyncWorkloadE100Checkpoint {
+  readonly E100: AsyncWorkloadMeasurement["E100"];
+  readonly R100: null;
 }
 
 interface BenchmarkAuthorization {
@@ -125,8 +132,21 @@ interface BenchmarkSource {
 }
 
 interface BenchmarkOwner {
-  connectIsland(port: Readonly<Record<string, unknown>>): { dispose(): void } | undefined;
+  connectIsland(port: Readonly<Record<string, unknown>>): { dispose(): void };
   dispose(): void;
+}
+
+interface BenchmarkRetentionSession {
+  readonly phase: "e100" | "r100";
+  connect(index: number): Promise<void>;
+  disconnect(index: number): Promise<void>;
+  resources(): Readonly<{
+    activeTransportOwners: number;
+    currentPayloadOwners: number;
+    predecessorContinuityOwners: number;
+    predecessorTransportOwners: number;
+    queuedPayloadOwners: number;
+  }>;
 }
 
 interface BenchmarkAsyncArtifact {
@@ -144,10 +164,19 @@ interface BenchmarkAsyncArtifact {
 export function measureAsyncWorkloads(
   input: AsyncWorkloadPreparationInput,
 ): Promise<AsyncWorkloadPreparation>;
-export function measureAsyncWorkloads(input: AsyncWorkloadInput): Promise<AsyncWorkloadMeasurement>;
+export function measureAsyncWorkloads(
+  input: AsyncWorkloadE100CheckpointInput,
+): Promise<AsyncWorkloadE100Checkpoint>;
+export function measureAsyncWorkloads(
+  input: AsyncWorkloadInput | AsyncWorkloadR100CheckpointInput,
+): Promise<AsyncWorkloadMeasurement>;
 export async function measureAsyncWorkloads(
-  input: AsyncWorkloadInput | AsyncWorkloadPreparationInput,
-): Promise<AsyncWorkloadMeasurement | AsyncWorkloadPreparation> {
+  input:
+    | AsyncWorkloadInput
+    | AsyncWorkloadE100CheckpointInput
+    | AsyncWorkloadR100CheckpointInput
+    | AsyncWorkloadPreparationInput,
+): Promise<AsyncWorkloadE100Checkpoint | AsyncWorkloadMeasurement | AsyncWorkloadPreparation> {
   function canonicalize(value: unknown): string {
     const normalize = (candidate: unknown): unknown => {
       if (Array.isArray(candidate)) return candidate.map(normalize);
@@ -231,15 +260,29 @@ export async function measureAsyncWorkloads(
   class MeasuredSource implements BenchmarkSource {
     readonly subscriptions = new Set<string>();
     closed = false;
+    private requestValue: BenchmarkConnectRequest | null;
 
-    constructor(readonly request: BenchmarkConnectRequest) {}
+    constructor(
+      request: BenchmarkConnectRequest,
+      private readonly retainAfterClose: boolean,
+    ) {
+      this.requestValue = request;
+    }
+
+    get request(): BenchmarkConnectRequest {
+      if (this.requestValue === null) throw new Error("async_benchmark_source_released");
+      return this.requestValue;
+    }
 
     get membershipCount(): number {
       return this.subscriptions.size;
     }
 
     close(): void {
+      if (this.retainAfterClose) return;
       this.closed = true;
+      this.subscriptions.clear();
+      this.requestValue = null;
     }
 
     emit(encoded: string): void {
@@ -340,12 +383,16 @@ export async function measureAsyncWorkloads(
   const dispatchCounts = new Array<number>(input.subscriptionCount).fill(0);
   const maxQueuedRefreshes = new Array<number>(input.subscriptionCount).fill(0);
   const maxInFlightRefreshes = new Array<number>(input.subscriptionCount).fill(0);
+  const currentPayloadMutationOwners = new Set<number>();
+  const queuedPayloadMutationOwners = new Set<number>();
   let recoveryStarted = 0;
   let activeReauthorizations = 0;
   let maximumConcurrentReauthorizations = 0;
   let handshakes = 0;
   let queuedEventPeak = 0;
   let queuedBytePeak = 0;
+  let currentQueuedEvents = 0;
+  let currentQueuedBytes = 0;
   let maximumQueuedRefreshesPerIsland = 0;
   let maximumInFlightRefreshesPerIsland = 0;
   let pollingRandom = 0;
@@ -457,6 +504,8 @@ export async function measureAsyncWorkloads(
         }
         queuedEventPeak = Math.max(queuedEventPeak, queuedEvents);
         queuedBytePeak = Math.max(queuedBytePeak, queuedBytes);
+        currentQueuedEvents = queuedEvents;
+        currentQueuedBytes = queuedBytes;
         maximumQueuedRefreshesPerIsland = Math.max(
           maximumQueuedRefreshesPerIsland,
           queuedRefreshes,
@@ -488,7 +537,10 @@ export async function measureAsyncWorkloads(
       transports: Object.freeze({
         eventSource(request: BenchmarkConnectRequest) {
           handshakes += 1;
-          const source = new MeasuredSource(request);
+          const source = new MeasuredSource(
+            request,
+            input.retentionMutation === "predecessor_transport",
+          );
           sources.push(source);
           return source;
         },
@@ -515,51 +567,142 @@ export async function measureAsyncWorkloads(
       }),
     ]);
 
-  for (let index = 0; index < input.subscriptionCount; index += 1) {
+  const handles: ({ dispose(): void } | null)[] = Array.from(
+    { length: input.subscriptionCount },
+    () => null,
+  );
+  const connectIsland = (index: number): void => {
+    if (handles[index] !== null) throw new Error("async_benchmark_duplicate_island");
     const root = document.querySelector(`[data-async-benchmark-index="${String(index)}"]`);
     if (!(root instanceof HTMLElement)) throw new Error("e100_island_missing");
-    pendingStarts.set(index, []);
-    refreshCompletions.set(index, []);
+    pendingStarts.set(index, pendingStarts.get(index) ?? []);
+    refreshCompletions.set(index, refreshCompletions.get(index) ?? []);
     const stream = `benchmark-${String(index).padStart(3, "0")}`;
-    owner.connectIsland(
-      Object.freeze({
-        consumeRegisteredEventCapability: () => Object.freeze({}),
-        dispatchRegisteredEvent: (_capability: unknown, candidate: unknown) => {
-          const event = candidate as Readonly<{ event: string; payload: unknown }>;
-          const started = pendingStarts.get(index)?.shift();
-          if (started === undefined) throw new Error("e100_dispatch_start_missing");
-          root.dispatchEvent(new CustomEvent(event.event, { detail: event.payload }));
-          dispatchEffectSamplesMs.push(performance.now() - started);
-          dispatchCounts[index] = (dispatchCounts[index] ?? 0) + 1;
-          fairnessMaximumLead = Math.max(
-            fairnessMaximumLead,
-            Math.max(...dispatchCounts) - Math.min(...dispatchCounts),
-          );
-          return "dispatched";
-        },
-        element: root,
-        enqueueFreshRender: (_reason: unknown, completion?: (outcome: "succeeded") => void) => {
-          if (completion === undefined) throw new Error("e100_refresh_completion_missing");
-          refreshCompletions.get(index)?.push(completion);
-          return "queued";
-        },
-        identity: Object.freeze({
-          component: "benchmark.component",
-          documentKey: "benchmark-document",
-          slot: `benchmark-${String(index)}`,
-        }),
-        onDispose: () => undefined,
-        projectAsyncStatus: (state: string) => {
-          const subscriptionId = `subscription-${String(index).padStart(3, "0")}`;
-          states.set(subscriptionId, state);
-          if (recoveryStarted > 0 && state === "current" && !recoveryAt.has(subscriptionId)) {
-            recoveryAt.set(subscriptionId, performance.now() - recoveryStarted);
-          }
-        },
-        queryDirectiveOwnership: () => streamOwnership(root, stream),
-        writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
+    const mutationBytes =
+      index === 0 &&
+      (("retentionCheckpoint" in input &&
+        input.retentionCheckpoint === "e100" &&
+        input.retentionMutation === "large_island_buffer") ||
+        ("retentionCheckpoint" in input &&
+          input.retentionCheckpoint === "r100" &&
+          (input.retentionMutation === "stale_current_payload" ||
+            input.retentionMutation === "stale_queued_payload")))
+        ? new Uint8Array(64 * 1_024)
+        : null;
+    const port = Object.freeze({
+      ...(mutationBytes === null ? {} : { __suprnovaBenchmarkRetainedMutation: mutationBytes }),
+      consumeRegisteredEventCapability: () => Object.freeze({}),
+      dispatchRegisteredEvent: (_capability: unknown, candidate: unknown) => {
+        const event = candidate as Readonly<{ event: string; payload: unknown }>;
+        const started = pendingStarts.get(index)?.shift();
+        if (started === undefined) throw new Error("e100_dispatch_start_missing");
+        root.dispatchEvent(new CustomEvent(event.event, { detail: event.payload }));
+        dispatchEffectSamplesMs.push(performance.now() - started);
+        dispatchCounts[index] = (dispatchCounts[index] ?? 0) + 1;
+        fairnessMaximumLead = Math.max(
+          fairnessMaximumLead,
+          Math.max(...dispatchCounts) - Math.min(...dispatchCounts),
+        );
+        return "dispatched";
+      },
+      element: root,
+      enqueueFreshRender: (_reason: unknown, completion?: (outcome: "succeeded") => void) => {
+        if (completion === undefined) throw new Error("e100_refresh_completion_missing");
+        refreshCompletions.get(index)?.push(completion);
+        return "queued";
+      },
+      identity: Object.freeze({
+        component: "benchmark.component",
+        documentKey: "benchmark-document",
+        slot: `benchmark-${String(index)}`,
       }),
-    );
+      onDispose: () => undefined,
+      projectAsyncStatus: (state: string) => {
+        const subscriptionId = `subscription-${String(index).padStart(3, "0")}`;
+        states.set(subscriptionId, state);
+        if (recoveryStarted > 0 && state === "current" && !recoveryAt.has(subscriptionId)) {
+          recoveryAt.set(subscriptionId, performance.now() - recoveryStarted);
+        }
+      },
+      queryDirectiveOwnership: () => streamOwnership(root, stream),
+      writePresentationSignal: (_scope: string, _name: string, value: unknown) => value,
+    });
+    handles[index] = owner.connectIsland(port);
+    if (index === 0 && input.retentionMutation === "stale_current_payload") {
+      currentPayloadMutationOwners.add(index);
+    }
+    if (index === 0 && input.retentionMutation === "stale_queued_payload") {
+      queuedPayloadMutationOwners.add(index);
+    }
+  };
+
+  const installRetentionSession = (
+    phase: "e100" | "r100",
+    activeSource: MeasuredSource,
+    predecessorSource: MeasuredSource | null,
+  ): void => {
+    if (currentQueuedEvents !== 0 || currentQueuedBytes !== 0) {
+      throw new Error("async_benchmark_retention_queue_not_drained");
+    }
+    if ([...pendingStarts.values()].some((entries) => entries.length !== 0)) {
+      throw new Error("async_benchmark_retention_payload_not_released");
+    }
+    const session: BenchmarkRetentionSession = Object.freeze({
+      phase,
+      async connect(index: number) {
+        if (!Number.isSafeInteger(index) || index < 0 || index >= input.subscriptionCount) {
+          throw new Error("async_benchmark_retention_index_invalid");
+        }
+        pendingStarts.set(index, []);
+        refreshCompletions.set(index, []);
+        connectIsland(index);
+        const id = `subscription-${String(index).padStart(3, "0")}`;
+        await settleUntil(
+          () =>
+            activeSource.membershipCount === input.subscriptionCount &&
+            states.get(id) === "current",
+          "async_benchmark_retention_reconnect_incomplete",
+        );
+      },
+      async disconnect(index: number) {
+        if (!Number.isSafeInteger(index) || index < 0 || index >= input.subscriptionCount) {
+          throw new Error("async_benchmark_retention_index_invalid");
+        }
+        const handle = handles[index] ?? null;
+        if (handle === null) throw new Error("async_benchmark_retention_island_missing");
+        handle.dispose();
+        handles[index] = null;
+        currentPayloadMutationOwners.delete(index);
+        queuedPayloadMutationOwners.delete(index);
+        const id = `subscription-${String(index).padStart(3, "0")}`;
+        authorizations.delete(id);
+        pendingStarts.delete(index);
+        refreshCompletions.delete(index);
+        states.delete(id);
+        await settleUntil(
+          () => activeSource.membershipCount === input.subscriptionCount - 1,
+          "async_benchmark_retention_disconnect_incomplete",
+        );
+      },
+      resources() {
+        const predecessorTransportOwners =
+          predecessorSource === null ? 0 : Number(!predecessorSource.closed);
+        const predecessorContinuityOwners =
+          predecessorSource === null ? 0 : predecessorSource.membershipCount;
+        return Object.freeze({
+          activeTransportOwners: sources.filter((source) => !source.closed).length,
+          currentPayloadOwners: currentPayloadMutationOwners.size,
+          predecessorContinuityOwners,
+          predecessorTransportOwners,
+          queuedPayloadOwners: currentQueuedEvents + queuedPayloadMutationOwners.size,
+        });
+      },
+    });
+    Reflect.set(globalThis, "__suprnovaBudgetAsyncRetention", session);
+  };
+
+  for (let index = 0; index < input.subscriptionCount; index += 1) {
+    connectIsland(index);
   }
 
   await settleUntil(() => sources.length === 1, "e100_physical_connection_count");
@@ -583,31 +726,6 @@ export async function measureAsyncWorkloads(
     const value = authorizations.get(`subscription-${String(index).padStart(3, "0")}`);
     if (value === undefined) throw new Error("e100_membership_missing");
     return value;
-  };
-  const retainedCategories = (index: number) => {
-    const current = membership(index);
-    const identifierBytes =
-      new TextEncoder().encode(current.subscriptionId).byteLength +
-      new TextEncoder().encode(current.stream).byteLength +
-      new TextEncoder().encode(`benchmark-${String(index)}`).byteLength;
-    const authorizationBytes = new TextEncoder().encode(
-      canonicalize({
-        ...current,
-        baseline: {
-          epoch: current.baseline.epoch.toString(),
-          sequence: current.baseline.sequence.toString(),
-        },
-      }),
-    ).byteLength;
-    return Object.freeze({
-      authorizationBytes,
-      identifierBytes,
-      pendingBytes: 0,
-      pendingEvents: 0,
-      pollTimers: 1,
-      refreshSlots: 1,
-      runtimeRecords: 3,
-    });
   };
   const presentationEnvelope = (index: number, sequence: number, eventIndex: number): string => {
     const current = membership(index);
@@ -693,24 +811,16 @@ export async function measureAsyncWorkloads(
   const subscriptions = Object.freeze(
     Array.from({ length: input.subscriptionCount }, (_, index) => {
       const current = membership(index);
-      const retained = retainedCategories(index);
       return Object.freeze({
-        authorizationBytes: retained.authorizationBytes,
         current: states.get(current.subscriptionId) === "current",
         dispatches: dispatchCounts[index] ?? 0,
         finalEpoch: "1",
         finalSequence: String(sequences[index] ?? 0),
         id: current.subscriptionId,
-        identifierBytes: retained.identifierBytes,
         maxInFlightRefreshes: maxInFlightRefreshes[index] ?? 0,
         maxQueuedRefreshes: maxQueuedRefreshes[index] ?? 0,
-        pendingBytes: retained.pendingBytes,
-        pendingEvents: retained.pendingEvents,
-        pollTimers: retained.pollTimers,
         presentationEvents: presentationCounts[index] ?? 0,
         refreshInvalidations: refreshCounts[index] ?? 0,
-        refreshSlots: retained.refreshSlots,
-        runtimeRecords: retained.runtimeRecords,
       });
     }),
   );
@@ -718,6 +828,28 @@ export async function measureAsyncWorkloads(
   const physicalConnectionCount = sources.length;
   const initialHandshakeCount = handshakes;
   const generationBefore = primarySource.request.transportGeneration;
+  const measuredDispatchEffects = Object.freeze([...dispatchEffectSamplesMs]);
+  const e100Measurement = Object.freeze({
+    artifactSha256,
+    dispatchEffectSamplesMs: measuredDispatchEffects,
+    presentationEventCount,
+    refreshInvalidationCount,
+    scheduledDurationMs,
+    physicalConnectionCount,
+    handshakeCount: initialHandshakeCount,
+    queuedEventPeak,
+    queuedBytePeak,
+    maximumQueuedRefreshesPerIsland,
+    maximumInFlightRefreshesPerIsland,
+    currentSubscriptionCount: currentBeforeRecovery,
+    fairnessMaximumLead,
+    subscriptions,
+  });
+
+  if ("retentionCheckpoint" in input && input.retentionCheckpoint === "e100") {
+    installRetentionSession("e100", primarySource, null);
+    return Object.freeze({ E100: e100Measurement, R100: null });
+  }
 
   recoveryStarted = performance.now();
   primarySource.fail();
@@ -749,6 +881,8 @@ export async function measureAsyncWorkloads(
   const currentAfterRecovery = [...states.values()].filter((state) => state === "current").length;
   const generationAfter = successorSource.request.transportGeneration;
   const physicalTransportsAfterCurrent = sources.filter((source) => !source.closed).length;
+  const predecessorTransportOwners = Number(!primarySource.closed);
+  const predecessorContinuityOwners = primarySource.membershipCount;
 
   const scheduler = new artifact.OriginHandshakeScheduler();
   const releases: VoidFunction[] = [];
@@ -772,24 +906,8 @@ export async function measureAsyncWorkloads(
 
   const recoveredSubscriptionCount = recoveryAt.size;
   const documentReconnectHandshakes = sources.length - physicalConnectionCount;
-  const measuredDispatchEffects = Object.freeze([...dispatchEffectSamplesMs]);
   const measurement = Object.freeze({
-    E100: Object.freeze({
-      artifactSha256,
-      dispatchEffectSamplesMs: measuredDispatchEffects,
-      presentationEventCount,
-      refreshInvalidationCount,
-      scheduledDurationMs,
-      physicalConnectionCount,
-      handshakeCount: initialHandshakeCount,
-      queuedEventPeak,
-      queuedBytePeak,
-      maximumQueuedRefreshesPerIsland,
-      maximumInFlightRefreshesPerIsland,
-      currentSubscriptionCount: currentBeforeRecovery,
-      fairnessMaximumLead,
-      subscriptions,
-    }),
+    E100: e100Measurement,
     R100: Object.freeze({
       artifactSha256,
       documentReconnectHandshakes,
@@ -805,6 +923,10 @@ export async function measureAsyncWorkloads(
       generationBefore,
       generationAfter,
       physicalTransportsAfterCurrent,
+      predecessorContinuityOwners,
+      predecessorTransportOwners,
+      queuedPayloadOwners: currentQueuedEvents,
+      currentPayloadOwners: 0,
       recovery: Object.freeze(
         Array.from({ length: input.subscriptionCount }, (_, index) => {
           const id = `subscription-${String(index).padStart(3, "0")}`;
@@ -813,7 +935,6 @@ export async function measureAsyncWorkloads(
             id,
             jitterMilliseconds: reconnectDelayMilliseconds,
             pollDueMilliseconds: pollDueMilliseconds[index] ?? 0,
-            retainedCategories: retainedCategories(index),
             timeToCurrentMilliseconds: recoveryAt.get(id) ?? Infinity,
           });
         }),
@@ -826,15 +947,8 @@ export async function measureAsyncWorkloads(
       }),
     }),
   });
-  // Evidence collectors are not product state and must not inflate the retained owner sample.
-  authorizations.clear();
-  dispatchEffectSamplesMs.length = 0;
-  pendingStarts.clear();
-  recoveryAt.clear();
-  refreshCompletions.clear();
-  sources.length = 0;
-  states.clear();
-  // The page closes immediately after the retained-heap read.
-  Reflect.set(globalThis, "__suprnovaBudgetAsyncRetention", owner);
+  if ("retentionCheckpoint" in input) {
+    installRetentionSession("r100", successorSource, primarySource);
+  }
   return measurement;
 }

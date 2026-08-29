@@ -45,6 +45,7 @@ export interface AsyncBudgetEvidence {
   readonly e100: Readonly<Record<string, unknown>>;
   readonly r100: Readonly<Record<string, unknown>>;
   readonly multiDocument: Readonly<Record<string, unknown>>;
+  readonly mutationProofs: Readonly<Record<string, unknown>>;
   readonly recordedAt: string;
   readonly runs: readonly Readonly<Record<string, unknown>>[];
 }
@@ -191,6 +192,7 @@ function methodology(value: unknown, classification: AsyncBudgetClassification):
     "independentRuns",
     "measuredSamples",
     "monotonicClock",
+    "retainedHeap",
     "regressionReference",
     "warmupIterations",
     "watchdogOutsideSamples",
@@ -200,10 +202,58 @@ function methodology(value: unknown, classification: AsyncBudgetClassification):
   literal(candidate["monotonicClock"], "performance.now");
   literal(candidate["regressionReference"], "median_run_p95_v1");
   literal(candidate["watchdogOutsideSamples"], true);
+  const retainedHeap = record(candidate["retainedHeap"]);
+  exact(retainedHeap, [
+    "api",
+    "beforeState",
+    "derivation",
+    "exclusions",
+    "garbageCollection",
+    "harnessTreatment",
+    "phaseSamples",
+    "product",
+    "protocolVersion",
+    "unavailable",
+  ]);
+  literal(retainedHeap["api"], "Chromium CDP Runtime.getHeapUsage");
+  literal(retainedHeap["derivation"], "max_after_total_minus_min_before_total");
+  literal(retainedHeap["garbageCollection"], "HeapProfiler.collectGarbage");
+  literal(retainedHeap["phaseSamples"], 5);
+  literal(retainedHeap["unavailable"], "fail_closed");
+  text(retainedHeap["beforeState"]);
+  text(retainedHeap["harnessTreatment"]);
+  text(retainedHeap["product"]);
+  text(retainedHeap["protocolVersion"]);
+  const exclusions = array(retainedHeap["exclusions"], 3);
+  literal(exclusions[0], "native_transport");
+  literal(exclusions[1], "DOM");
+  literal(exclusions[2], "current_payload");
   integer(candidate["warmupIterations"], 1);
   const independentRuns = integer(candidate["independentRuns"], 1, 3);
   if (classification === "qualified" && independentRuns !== 3) fail();
   return independentRuns;
+}
+
+function heapSample(value: unknown): number {
+  const candidate = record(value);
+  exact(candidate, ["backingStorageSize", "embedderHeapUsedSize", "usedSize"]);
+  const total =
+    integer(candidate["backingStorageSize"]) +
+    integer(candidate["embedderHeapUsedSize"]) +
+    integer(candidate["usedSize"]);
+  if (!Number.isSafeInteger(total)) fail();
+  return total;
+}
+
+function retainedHeap(value: unknown): number {
+  const candidate = record(value);
+  exact(candidate, ["after", "before", "retainedBytes"]);
+  const before = array(candidate["before"], 5).map(heapSample);
+  const after = array(candidate["after"], 5).map(heapSample);
+  const derived = Math.max(...after) - Math.min(...before);
+  if (!Number.isSafeInteger(derived) || derived < 0) fail();
+  literal(candidate["retainedBytes"], derived);
+  return derived;
 }
 
 function sampleSummary(value: unknown, expectedSamples: number): void {
@@ -267,19 +317,25 @@ function e100(value: unknown, artifactSha256: string): ReadonlyMap<string, numbe
   sampleSummary(measurements["dispatch"], E100_1K.presentationEvents);
   const document = record(measurements["document"]);
   exact(document, [
+    "activeTransportOwners",
+    "currentPayloadOwners",
     "fairnessMaximumLead",
     "handshakes",
     "maxQueuedBytes",
     "maxQueuedEvents",
     "physicalTransports",
+    "queuedPayloadOwners",
     "starvedSubscriptions",
   ]);
+  literal(document["activeTransportOwners"], 1);
+  literal(document["currentPayloadOwners"], 0);
   literal(document["physicalTransports"], 1);
   literal(document["handshakes"], 1);
   integer(document["fairnessMaximumLead"], 0, 1);
   integer(document["maxQueuedBytes"], 0, E100_1K.maxDocumentBytes);
   integer(document["maxQueuedEvents"], 0, E100_1K.maxDocumentEvents);
   literal(document["starvedSubscriptions"], 0);
+  literal(document["queuedPayloadOwners"], 0);
   const rustOwner = record(measurements["rustOwner"]);
   exact(rustOwner, [
     "dispatches",
@@ -318,8 +374,7 @@ function e100(value: unknown, artifactSha256: string): ReadonlyMap<string, numbe
       "maxQueuedRefreshes",
       "presentationEvents",
       "refreshInvalidations",
-      "retainedBytes",
-      "retainedCategories",
+      "retention",
     ]);
     const id = text(subscription["id"]);
     if (!SUBSCRIPTION.test(id) || seen.has(id)) fail();
@@ -332,32 +387,7 @@ function e100(value: unknown, artifactSha256: string): ReadonlyMap<string, numbe
     literal(subscription["finalSequence"], "11");
     integer(subscription["maxQueuedRefreshes"], 0, 1);
     integer(subscription["maxInFlightRefreshes"], 0, 1);
-    const retainedBytes = integer(
-      subscription["retainedBytes"],
-      0,
-      E100_1K.maxRetainedBytesPerSubscription,
-    );
-    const categories = record(subscription["retainedCategories"]);
-    exact(categories, [
-      "authorizationBytes",
-      "identifierBytes",
-      "pendingBytes",
-      "pendingEvents",
-      "pollTimers",
-      "refreshSlots",
-      "runtimeRecords",
-    ]);
-    Object.values(categories).forEach((entry) => integer(entry));
-    const accounted = estimateAsyncRetainedBytes({
-      authorizationBytes: integer(categories["authorizationBytes"]),
-      identifierBytes: integer(categories["identifierBytes"]),
-      pendingBytes: integer(categories["pendingBytes"]),
-      pendingEvents: integer(categories["pendingEvents"]),
-      pollTimers: integer(categories["pollTimers"]),
-      refreshSlots: integer(categories["refreshSlots"]),
-      runtimeRecords: integer(categories["runtimeRecords"]),
-    });
-    literal(retainedBytes, accounted);
+    const retainedBytes = retainedHeap(subscription["retention"]);
     retainedById.set(id, retainedBytes);
     presentations += integer(subscription["presentationEvents"]);
     refreshes += integer(subscription["refreshInvalidations"]);
@@ -390,10 +420,14 @@ function r100(value: unknown, retainedById: ReadonlyMap<string, number>): void {
   exact(measurements, ["document", "polling", "reconnectJitter", "recovery", "timeToCurrent"]);
   const document = record(measurements["document"]);
   exact(document, [
+    "currentPayloadOwners",
     "generationAfter",
     "generationBefore",
     "maximumConcurrentReauthorizations",
     "physicalTransportsAfterCurrent",
+    "predecessorContinuityOwners",
+    "predecessorTransportOwners",
+    "queuedPayloadOwners",
     "reconnectHandshakes",
     "recoveredSubscriptions",
     "starvedSubscriptions",
@@ -402,6 +436,10 @@ function r100(value: unknown, retainedById: ReadonlyMap<string, number>): void {
   literal(document["generationAfter"], 2);
   literal(document["reconnectHandshakes"], 1);
   literal(document["physicalTransportsAfterCurrent"], 1);
+  literal(document["predecessorContinuityOwners"], 0);
+  literal(document["predecessorTransportOwners"], 0);
+  literal(document["queuedPayloadOwners"], 0);
+  literal(document["currentPayloadOwners"], 0);
   integer(document["maximumConcurrentReauthorizations"], 1, 8);
   literal(document["recoveredSubscriptions"], 100);
   literal(document["starvedSubscriptions"], 0);
@@ -435,8 +473,7 @@ function r100(value: unknown, retainedById: ReadonlyMap<string, number>): void {
       "id",
       "jitterMilliseconds",
       "pollDueMilliseconds",
-      "retainedBytes",
-      "retainedCategories",
+      "retention",
       "timeToCurrentMilliseconds",
     ]);
     const id = text(entry["id"]);
@@ -446,28 +483,9 @@ function r100(value: unknown, retainedById: ReadonlyMap<string, number>): void {
     integer(entry["jitterMilliseconds"]);
     const pollDue = integer(entry["pollDueMilliseconds"], 1);
     if (!pollDues.has(pollDue)) fail();
-    const retainedBytes = integer(entry["retainedBytes"], 0, R100.maxRetainedBytesAfterCurrent);
+    const retainedBytes = retainedHeap(entry["retention"]);
     if (!retainedById.has(id)) fail();
-    const categories = record(entry["retainedCategories"]);
-    exact(categories, [
-      "authorizationBytes",
-      "identifierBytes",
-      "pendingBytes",
-      "pendingEvents",
-      "pollTimers",
-      "refreshSlots",
-      "runtimeRecords",
-    ]);
-    const accounted = estimateAsyncRetainedBytes({
-      authorizationBytes: integer(categories["authorizationBytes"]),
-      identifierBytes: integer(categories["identifierBytes"]),
-      pendingBytes: integer(categories["pendingBytes"]),
-      pendingEvents: integer(categories["pendingEvents"]),
-      pollTimers: integer(categories["pollTimers"]),
-      refreshSlots: integer(categories["refreshSlots"]),
-      runtimeRecords: integer(categories["runtimeRecords"]),
-    });
-    literal(retainedBytes, accounted);
+    void retainedBytes;
     finite(entry["timeToCurrentMilliseconds"]);
   }
   sampleSummary(measurements["timeToCurrent"], 100);
@@ -518,6 +536,61 @@ function runs(value: unknown, independentRuns: number, artifactSha256: string): 
   }
 }
 
+function mutationProofs(value: unknown, artifactSha256: string): void {
+  const candidate = record(value);
+  exact(candidate, [
+    "largeIslandBuffer",
+    "predecessorTransport",
+    "staleCurrentPayload",
+    "staleQueuedPayload",
+  ]);
+
+  const largeIslandBuffer = record(candidate["largeIslandBuffer"]);
+  exact(largeIslandBuffer, [
+    "artifactSha256",
+    "documentTransports",
+    "phase",
+    "retention",
+    "subscriptionId",
+  ]);
+  literal(largeIslandBuffer["artifactSha256"], artifactSha256);
+  literal(largeIslandBuffer["documentTransports"], 1);
+  literal(largeIslandBuffer["phase"], "E100");
+  literal(largeIslandBuffer["subscriptionId"], "subscription-000");
+  if (retainedHeap(largeIslandBuffer["retention"]) <= E100_1K.maxRetainedBytesPerSubscription) {
+    fail();
+  }
+
+  const predecessorTransport = record(candidate["predecessorTransport"]);
+  exact(predecessorTransport, [
+    "activeTransportOwners",
+    "artifactSha256",
+    "physicalTransportsAfterCurrent",
+    "predecessorContinuityOwners",
+    "predecessorTransportOwners",
+    "reconnectHandshakes",
+  ]);
+  literal(predecessorTransport["artifactSha256"], artifactSha256);
+  literal(predecessorTransport["activeTransportOwners"], 2);
+  literal(predecessorTransport["physicalTransportsAfterCurrent"], 2);
+  literal(predecessorTransport["predecessorContinuityOwners"], 100);
+  literal(predecessorTransport["predecessorTransportOwners"], 1);
+  literal(predecessorTransport["reconnectHandshakes"], 1);
+
+  for (const [name, owner] of [
+    ["staleCurrentPayload", "currentPayloadOwners"],
+    ["staleQueuedPayload", "queuedPayloadOwners"],
+  ] as const) {
+    const stalePayload = record(candidate[name]);
+    exact(stalePayload, ["artifactSha256", owner, "phase", "retention", "subscriptionId"]);
+    literal(stalePayload["artifactSha256"], artifactSha256);
+    literal(stalePayload[owner], 1);
+    literal(stalePayload["phase"], "R100");
+    literal(stalePayload["subscriptionId"], "subscription-000");
+    if (retainedHeap(stalePayload["retention"]) <= R100.maxRetainedBytesAfterCurrent) fail();
+  }
+}
+
 export function validateAsyncBudgetEvidence(value: unknown): AsyncBudgetEvidence {
   const candidate = record(value);
   exact(candidate, [
@@ -526,6 +599,7 @@ export function validateAsyncBudgetEvidence(value: unknown): AsyncBudgetEvidence
     "environment",
     "methodology",
     "multiDocument",
+    "mutationProofs",
     "r100",
     "recordedAt",
     "runs",
@@ -542,6 +616,7 @@ export function validateAsyncBudgetEvidence(value: unknown): AsyncBudgetEvidence
   const retainedById = e100(candidate["e100"], artifactSha256);
   r100(candidate["r100"], retainedById);
   multiDocument(candidate["multiDocument"]);
+  mutationProofs(candidate["mutationProofs"], artifactSha256);
   const recordedAt = text(candidate["recordedAt"]);
   if (!Number.isFinite(Date.parse(recordedAt))) fail();
   runs(candidate["runs"], independentRuns, artifactSha256);
@@ -573,6 +648,18 @@ function runMetric(evidence: AsyncBudgetEvidence, key: "dispatchP95Milliseconds"
   return median(evidence.runs.map((entry) => finite(entry[key])));
 }
 
+function maximumRetainedBytes(evidence: AsyncBudgetEvidence, phase: "e100" | "r100"): number {
+  const section = record(phase === "e100" ? evidence.e100 : evidence.r100);
+  const measurements = record(section["measurements"]);
+  const entries = array(
+    phase === "e100" ? measurements["subscriptions"] : measurements["recovery"],
+    100,
+  );
+  return Math.max(
+    ...entries.map((entry) => integer(record(record(entry)["retention"])["retainedBytes"])),
+  );
+}
+
 export function evaluateAsyncBudget(
   evidenceValue: unknown,
   baselineValue: unknown,
@@ -595,6 +682,16 @@ export function evaluateAsyncBudget(
   } else if (finite(dispatch["p95Milliseconds"]) > E100_1K.maxDispatchP95Milliseconds) {
     observations.push("e100_dispatch_p95_unqualified");
   }
+  const e100RetainedBytes = maximumRetainedBytes(evidence, "e100");
+  if (e100RetainedBytes > E100_1K.maxRetainedBytesPerSubscription) {
+    if (classification === "qualified") issues.push("e100_retained_heap_exceeded");
+    else observations.push("e100_retained_heap_unqualified");
+  }
+  const r100RetainedBytes = maximumRetainedBytes(evidence, "r100");
+  if (r100RetainedBytes > R100.maxRetainedBytesAfterCurrent) {
+    if (classification === "qualified") issues.push("r100_retained_heap_exceeded");
+    else observations.push("r100_retained_heap_unqualified");
+  }
   const qualifiedBaseline = baseline.qualifiedBaseline;
   if (qualifiedBaseline === null) observations.push("qualified_baseline_absent");
   if (options.release && qualifiedBaseline === null) issues.push("qualified_baseline_absent");
@@ -616,4 +713,3 @@ export function evaluateAsyncBudget(
       issues.length > 0 ? "failed" : classification === "qualified" ? "passed" : "unqualified",
   });
 }
-import { estimateAsyncRetainedBytes } from "./async-budget-workloads.js";

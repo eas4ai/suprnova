@@ -1,13 +1,15 @@
 export const ASYNC_BUDGET_DRIVER_MARKER = "SUPRNOVA_ASYNC_BUDGET_DRIVER_V1";
 
-export interface AsyncRetainedCategories {
-  readonly authorizationBytes: number;
-  readonly identifierBytes: number;
-  readonly pendingBytes: number;
-  readonly pendingEvents: number;
-  readonly pollTimers: number;
-  readonly refreshSlots: number;
-  readonly runtimeRecords: number;
+export interface AsyncHeapUsageSample {
+  readonly backingStorageSize: number;
+  readonly embedderHeapUsedSize: number;
+  readonly usedSize: number;
+}
+
+export interface AsyncRetainedHeapMeasurement {
+  readonly after: readonly AsyncHeapUsageSample[];
+  readonly before: readonly AsyncHeapUsageSample[];
+  readonly retainedBytes: number;
 }
 
 export interface AsyncSampleSummary {
@@ -21,33 +23,31 @@ function boundedInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-/**
- * Estimates framework-owned retained bytes from one closed category record.
- * Native transport buffers, DOM nodes, and the current payload are absent by construction.
- */
-export function estimateAsyncRetainedBytes(categories: AsyncRetainedCategories): number {
-  const values: readonly number[] = [
-    categories.authorizationBytes,
-    categories.identifierBytes,
-    categories.pendingBytes,
-    categories.pendingEvents,
-    categories.pollTimers,
-    categories.refreshSlots,
-    categories.runtimeRecords,
-  ];
+function heapBytes(sample: AsyncHeapUsageSample): number {
+  const values = [sample.backingStorageSize, sample.embedderHeapUsedSize, sample.usedSize];
   if (values.some((value) => !boundedInteger(value))) {
-    throw new Error("async_retained_accounting_invalid");
+    throw new Error("async_heap_sample_invalid");
   }
-  return (
-    192 +
-    categories.authorizationBytes +
-    categories.identifierBytes +
-    categories.pendingBytes +
-    categories.pendingEvents * 128 +
-    categories.pollTimers * 256 +
-    categories.refreshSlots * 128 +
-    categories.runtimeRecords * 192
-  );
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (!boundedInteger(total)) throw new Error("async_heap_sample_invalid");
+  return total;
+}
+
+/** Conservatively derives one island's retained bytes from raw forced-GC heap samples. */
+export function deriveRetainedHeapMeasurement(
+  input: Readonly<{
+    after: readonly AsyncHeapUsageSample[];
+    before: readonly AsyncHeapUsageSample[];
+  }>,
+): AsyncRetainedHeapMeasurement {
+  if (input.before.length === 0 || input.after.length !== input.before.length) {
+    throw new Error("async_heap_sample_set_invalid");
+  }
+  const before = Object.freeze(input.before.map((sample) => Object.freeze({ ...sample })));
+  const after = Object.freeze(input.after.map((sample) => Object.freeze({ ...sample })));
+  const retainedBytes = Math.max(...after.map(heapBytes)) - Math.min(...before.map(heapBytes));
+  if (!boundedInteger(retainedBytes)) throw new Error("async_heap_delta_invalid");
+  return Object.freeze({ after, before, retainedBytes });
 }
 
 function rounded(value: number): number {

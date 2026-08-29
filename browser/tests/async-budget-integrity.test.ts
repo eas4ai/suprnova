@@ -17,6 +17,13 @@ const SHA256 = "a".repeat(64);
 describe("E100/1K and R100 benchmark integrity", () => {
   it("permits exploratory recording only for the reduced profile", () => {
     expect(argumentsFrom(["--record-exploratory"]).recordExploratory).toBe(true);
+    expect(argumentsFrom(["--verify-retention-mutations"]).verifyRetentionMutations).toBe(true);
+    expect(argumentsFrom(["--retention-mutation", "stale_queued_payload"]).retentionMutation).toBe(
+      "stale_queued_payload",
+    );
+    expect(() => argumentsFrom(["--retention-mutation", "guessed_bytes"])).toThrow(
+      "retention_mutation_invalid",
+    );
     expect(() => argumentsFrom(["--profile", "qualified", "--record-exploratory"])).toThrow(
       "exploratory_record_requires_reduced_profile",
     );
@@ -134,5 +141,23 @@ describe("E100/1K and R100 benchmark integrity", () => {
     expect(source).toContain("await browser.close()");
     expect(source).toContain("await closeServer(server)");
     expect(source).not.toMatch(/setTimeout\([^)]*measureAsyncWorkloads/u);
+  });
+
+  it("measures retained runtime heap through forced-GC Chromium CDP without guessed bytes", async () => {
+    const [runner, helper] = await Promise.all([
+      readFile(new URL("../scripts/run-async-budget.mjs", import.meta.url), "utf8"),
+      readFile(new URL("../benchmarks/async-budget-workloads.ts", import.meta.url), "utf8"),
+    ]);
+    expect(runner).toContain('session.send("HeapProfiler.collectGarbage")');
+    expect(runner).toContain('session.send("Runtime.getHeapUsage")');
+    expect(runner).toContain('session.send("Browser.getVersion")');
+    expect(runner).toContain("predecessorTransportOwners");
+    expect(runner).toContain("predecessorContinuityOwners");
+    expect(runner).toContain("large_island_buffer");
+    expect(runner).toContain("stale_current_payload");
+    expect(runner).toContain("stale_queued_payload");
+    expect(runner).not.toContain("SUPRNOVA_LIVE_ASYNC_DEBUG_EVIDENCE");
+    expect(helper).not.toMatch(/pendingEvents\s*\*|pollTimers\s*\*|runtimeRecords\s*\*/u);
+    expect(helper).not.toContain("estimateAsyncRetainedBytes");
   });
 });
